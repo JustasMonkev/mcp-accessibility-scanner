@@ -5,7 +5,7 @@
   "main": "build/index.js",
   "types": "build/index.d.ts",
   "bin": {
-    "mcp-accessibility-scanner": "./build/server.js"
+    "mcp-accessibility-scanner": "build/server.js"
   },
   "files": [
     "build/**/*",
@@ -41,7 +41,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/JustasMonkev/mcp-accessibility-scanner.git"
+    "url": "git+https://github.com/JustasMonkev/mcp-accessibility-scanner.git"
   },
   "engines": {
     "node": ">=16.0.0"
