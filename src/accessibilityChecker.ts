@@ -1,6 +1,7 @@
 import {chromium} from 'playwright';
 import {AxeBuilder} from '@axe-core/playwright';
 import path from "node:path";
+import os from "node:os";
 
 export async function scanViolations(url: string, violationsTag: string[], viewport = {width: 1920, height: 1080}, shouldRunInHeadless = true) {
     const browser = await chromium.launch({
@@ -135,7 +136,7 @@ export async function scanViolations(url: string, violationsTag: string[], viewp
         }
     }
 
-    const filePath = path.join(path.join(__dirname, '..'), `a11y-report-${Date.now()}.png`);
+    const filePath = path.join(path.join(os.homedir(), 'Downloads'), `a11y-report-${Date.now()}.png`);
 
     const screenshot = await page.screenshot({
         path: filePath,
