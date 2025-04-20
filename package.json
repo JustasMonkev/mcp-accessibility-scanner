@@ -4,6 +4,9 @@
   "description": "A Model Context Protocol (MCP) server for performing automated accessibility scans of web pages using Playwright and Axe-core",
   "main": "build/index.js",
   "types": "build/index.d.ts",
+  "bin": {
+    "mcp-accessibility-scanner": "./build/server.js"
+  },
   "files": [
     "build/**/*",
     "README.md",
