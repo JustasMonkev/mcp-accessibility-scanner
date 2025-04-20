@@ -50,12 +50,21 @@ Here's the Claude Desktop configuration:
 
 The scanner exposes a single tool `scan_accessibility` that accepts:
 
-- `url`: The webpage URL to scan
-- `violationsTag`: Array of accessibility violation tags to check (optional)
+- `url`: The webpage URL to scan (required)
+- `violationsTag`: Array of accessibility violation tags to check (required)
+- `viewport`: Optional object to customize the viewport size
+  - `width`: number (default: 1920)
+  - `height`: number (default: 1080)
+- `shouldRunInHeadless`: Optional boolean to control headless mode (default: true)
 
 Example usage in Claude:
 ```
 Could you scan example.com for accessibility issues related to color contrast?
+```
+
+Advanced example with custom options:
+```
+Could you scan example.com for accessibility issues with a viewport of 1280x720 and show the browser window?
 ```
 
 ## Development
