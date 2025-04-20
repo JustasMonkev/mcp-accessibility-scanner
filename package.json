@@ -1,6 +1,6 @@
 {
   "name": "mcp-accessibility-scanner",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "A Model Context Protocol (MCP) server for performing automated accessibility scans of web pages using Playwright and Axe-core",
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -23,8 +23,9 @@
     "@modelcontextprotocol/sdk": "^1.4.1"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.1",
+    "@playwright/test": "^1.52.0",
     "@types/node": "^22.10.7",
+    "ts-node": "^10.9.2",
     "typescript": "^5.5.3"
   },
   "keywords": [
