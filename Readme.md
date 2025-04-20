@@ -17,6 +17,25 @@ Using npm:
 npm install -g mcp-accessibility-scanner
 ```
 
+### Docker Installation
+
+The project includes a Dockerfile that sets up all necessary dependencies including Node.js v22 and Python 3.13.
+
+1. Build the Docker image:
+```bash
+docker build -t mcp-server .
+```
+
+2. Run the container:
+```bash
+docker run -it -e MCP_PROXY_DEBUG=true mcp-server
+```
+
+You can also run it in the background:
+```bash
+docker run -d -p 3000:3000 mcp-server
+```
+
 ### Installation in VS Code
 
 Install the Accessibility Scanner in VS Code using the VS Code CLI:
@@ -86,6 +105,20 @@ Test the MCP server locally:
 npm run inspector
 ```
 
+### Docker Development
+
+For development using Docker:
+
+1. Build the development image:
+```bash
+docker build -t mcp-server-dev .
+```
+
+2. Run with volume mounting for live code changes:
+```bash
+docker run -it -v $(pwd):/app -p 3000:3000 -e MCP_PROXY_DEBUG=true mcp-server-dev
+```
+
 ## Project Structure
 
 ```
@@ -93,6 +126,7 @@ npm run inspector
 │   ├── index.ts     # MCP server setup and tool definitions
 │   └── scanner.ts   # Core scanning functionality
 ├── build/           # Compiled JavaScript output
+├── Dockerfile       # Docker configuration for containerized setup
 ├── package.json     # Project configuration and dependencies
 └── tsconfig.json    # TypeScript configuration
 ```
