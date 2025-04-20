@@ -17,16 +17,6 @@ Using npm:
 npm install -g mcp-accessibility-scanner
 ```
 
-Using mcp-get:
-```bash
-npx @michaellatman/mcp-get@latest install mcp-accessibility-scanner
-```
-
-Using Smithery (for Claude Desktop):
-```bash
-npx -y @smithery/cli install mcp-accessibility-scanner --client claude
-```
-
 ### Installation in VS Code
 
 Install the Accessibility Scanner in VS Code using the VS Code CLI:

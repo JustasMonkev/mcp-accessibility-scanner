@@ -1,6 +1,6 @@
-import {z} from "zod";
-import {scanViolations} from "./accessibilityChecker";
-import {McpServer} from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { scanViolations } from "./accessibilityChecker";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 
 const server = new McpServer({
@@ -12,10 +12,15 @@ server.tool(
     "scan_accessibility",
     {
         url: z.string().url(),
-        violationsTag: z.array(z.string())
+        violationsTag: z.array(z.string()),
+        viewport: z.object({
+            width: z.number().default(1920),
+            height: z.number().default(1080)
+        }).optional(),
+        shouldRunInHeadless: z.boolean().default(true)
     },
-    async ({url, violationsTag}) => {
-        const {report, base64Screenshot} = await scanViolations(url, violationsTag);
+    async ({url, violationsTag, viewport, shouldRunInHeadless}) => {
+        const {report, base64Screenshot} = await scanViolations(url, violationsTag, viewport, shouldRunInHeadless);
 
         return {
             content: [
