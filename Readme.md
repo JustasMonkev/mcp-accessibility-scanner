@@ -23,7 +23,7 @@ The project includes a Dockerfile that sets up all necessary dependencies includ
 
 1. Build the Docker image:
 ```bash
-docker build -t mcp-server .
+docker build -t mcp-server . 
 ```
 
 2. Run the container:
@@ -75,6 +75,8 @@ The scanner exposes a single tool `scan_accessibility` that accepts:
   - `width`: number (default: 1920)
   - `height`: number (default: 1080)
 - `shouldRunInHeadless`: Optional boolean to control headless mode (default: true)
+
+**Note: When running a scan, an annotated screenshot highlighting any accessibility violations will be automatically saved to your downloads folder.**
 
 Example usage in Claude:
 ```
