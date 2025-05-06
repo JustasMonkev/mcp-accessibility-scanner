@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/justasmonkev-mcp-accessibility-scanner-badge.png)](https://mseep.ai/app/justasmonkev-mcp-accessibility-scanner)
+
 # MCP Accessibility Scanner 🔍
 
 A Model Context Protocol (MCP) server that provides automated web accessibility scanning using Playwright and Axe-core. This server enables LLMs to perform WCAG compliance checks, capture annotated screenshots, and generate detailed accessibility reports.
