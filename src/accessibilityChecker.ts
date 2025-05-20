@@ -3,7 +3,11 @@ import {AxeBuilder} from '@axe-core/playwright';
 import path from "node:path";
 import os from "node:os";
 
-export async function scanViolations(url: string, violationsTag: string[], viewport = {width: 1920, height: 1080}, shouldRunInHeadless = true) {
+type Action =
+  | { type: 'click'; selector: string }
+  | { type: 'type'; selector: string; text: string };
+
+export async function scanViolations(url: string, violationsTag: string[], viewport = {width: 1920, height: 1080}, shouldRunInHeadless = true, actions?: Action[]) {
     const browser = await chromium.launch({
         headless: shouldRunInHeadless,
         args: [
@@ -21,6 +25,17 @@ export async function scanViolations(url: string, violationsTag: string[], viewp
 
     const page = await context.newPage();
     await page.goto(url);
+
+    if (actions && actions.length > 0) {
+        for (const action of actions) {
+            if (action.type === 'click') {
+                await page.click(action.selector);
+            } else if (action.type === 'type') {
+                await page.type(action.selector, action.text);
+            }
+            await page.waitForLoadState('domcontentloaded');
+        }
+    }
 
     await page.addStyleTag({
         content: `

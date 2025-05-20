@@ -17,10 +17,21 @@ server.tool(
             width: z.number().default(1920),
             height: z.number().default(1080)
         }).optional(),
-        shouldRunInHeadless: z.boolean().default(true)
+        shouldRunInHeadless: z.boolean().default(true),
+        actions: z.array(z.union([
+            z.object({
+                type: z.literal("click"),
+                selector: z.string()
+            }),
+            z.object({
+                type: z.literal("type"),
+                selector: z.string(),
+                text: z.string()
+            })
+        ])).optional()
     },
-    async ({url, violationsTag, viewport, shouldRunInHeadless}) => {
-        const {report, base64Screenshot} = await scanViolations(url, violationsTag, viewport, shouldRunInHeadless);
+    async ({url, violationsTag, viewport, shouldRunInHeadless, actions}) => {
+        const {report, base64Screenshot} = await scanViolations(url, violationsTag, viewport, shouldRunInHeadless, actions);
 
         return {
             content: [
