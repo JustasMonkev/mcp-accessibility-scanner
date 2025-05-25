@@ -3,11 +3,12 @@ import {AxeBuilder} from '@axe-core/playwright';
 import path from "node:path";
 import os from "node:os";
 
-type Action =
-  | { type: 'click'; selector: string }
-  | { type: 'type'; selector: string; text: string };
+// Action type and related logic removed
+// type Action =
+//   | { type: 'click'; selector: string }
+//   | { type: 'type'; selector: string; text: string };
 
-export async function scanViolations(url: string, violationsTag: string[], viewport = {width: 1920, height: 1080}, shouldRunInHeadless = true, actions?: Action[]) {
+export async function scanViolations(url: string, violationsTag: string[], viewport = {width: 1920, height: 1080}, shouldRunInHeadless = true) {
     const browser = await chromium.launch({
         headless: shouldRunInHeadless,
         args: [
@@ -26,16 +27,17 @@ export async function scanViolations(url: string, violationsTag: string[], viewp
     const page = await context.newPage();
     await page.goto(url);
 
-    if (actions && actions.length > 0) {
-        for (const action of actions) {
-            if (action.type === 'click') {
-                await page.click(action.selector);
-            } else if (action.type === 'type') {
-                await page.type(action.selector, action.text);
-            }
-            await page.waitForLoadState('domcontentloaded');
-        }
-    }
+    // Removed actions processing loop
+    // if (actions && actions.length > 0) {
+    //     for (const action of actions) {
+    //         if (action.type === 'click') {
+    //             await page.click(action.selector);
+    //         } else if (action.type === 'type') {
+    //             await page.type(action.selector, action.text);
+    //         }
+    //         await page.waitForLoadState('domcontentloaded');
+    //     }
+    // }
 
     await page.addStyleTag({
         content: `
@@ -171,4 +173,84 @@ type accessibilityResult = {
     impactLevel: any,
     description: string,
     wcagCriteria: string,
+}
+
+export async function executeClick(url: string, selector: string, viewport = {width: 1920, height: 1080}, shouldRunInHeadless = true) {
+    const browser = await chromium.launch({
+        headless: shouldRunInHeadless,
+        args: [
+            '--disable-blink-features=AutomationControlled',
+            '--disable-dev-shm-usage',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+        ]
+    });
+
+    const context = await browser.newContext({
+        viewport,
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    });
+
+    const page = await context.newPage();
+    await page.goto(url);
+
+    await page.click(selector);
+    await page.waitForLoadState('domcontentloaded');
+
+    const fileName = `click-screenshot-${Date.now()}.png`;
+    const filePath = path.join(os.homedir(), 'Downloads', fileName);
+
+    const screenshot = await page.screenshot({
+        path: filePath,
+        fullPage: true,
+    });
+
+    const base64Screenshot = screenshot.toString('base64');
+
+    await browser.close();
+
+    return {
+        message: `Clicked element '${selector}' on page '${url}'. Screenshot saved to ${filePath}`,
+        base64Screenshot
+    };
+}
+
+export async function executeType(url: string, selector: string, text: string, viewport = {width: 1920, height: 1080}, shouldRunInHeadless = true) {
+    const browser = await chromium.launch({
+        headless: shouldRunInHeadless,
+        args: [
+            '--disable-blink-features=AutomationControlled',
+            '--disable-dev-shm-usage',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+        ]
+    });
+
+    const context = await browser.newContext({
+        viewport,
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    });
+
+    const page = await context.newPage();
+    await page.goto(url);
+
+    await page.type(selector, text);
+    await page.waitForLoadState('domcontentloaded'); // Or page.waitForTimeout(500) if more appropriate
+
+    const fileName = `type-screenshot-${Date.now()}.png`;
+    const filePath = path.join(os.homedir(), 'Downloads', fileName);
+
+    const screenshot = await page.screenshot({
+        path: filePath,
+        fullPage: true,
+    });
+
+    const base64Screenshot = screenshot.toString('base64');
+
+    await browser.close();
+
+    return {
+        message: `Typed text into element '${selector}' on page '${url}'. Screenshot saved to ${filePath}`,
+        base64Screenshot
+    };
 }
