@@ -5,7 +5,7 @@ import os from "node:os";
 
 export async function scanViolations(
 	url: string,
-	violationsTag: string[],
+	violationsTags: Array<string>,
 	viewport = { width: 1920, height: 1080 },
 	shouldRunInHeadless = true,
 ) {
@@ -65,7 +65,7 @@ export async function scanViolations(
     `,
 	});
 
-	const axe = new AxeBuilder({ page }).withTags(violationsTag);
+	const axe = new AxeBuilder({ page }).withTags(violationsTags);
 
 	const results = await axe.analyze();
 	let violationCounter = 1;
@@ -149,7 +149,6 @@ export async function scanViolations(
 
 	const screenshot = await page.screenshot({
 		path: filePath,
-		fullPage: true,
 	});
 
 	const base64Screenshot = screenshot.toString("base64");
