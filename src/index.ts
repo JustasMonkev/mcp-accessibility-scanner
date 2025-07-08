@@ -312,6 +312,350 @@ server.registerTool(
 );
 
 server.registerTool(
+    "hover-element",
+    {
+        title: "Hover Element",
+        description: "Hovers over an element specified by a CSS selector on the current page.",
+        inputSchema: z.object({
+            url: z.string().url().describe("The public URL to navigate to"),
+            selector: z.string().describe("CSS selector for the element to hover"),
+            viewport: z
+                .object({
+                    width: z.number().default(1920),
+                    height: z.number().default(1080),
+                })
+                .optional()
+                .describe("Optional viewport dimensions"),
+            shouldRunInHeadless: z.boolean().default(true).describe("Whether to run the browser in headless mode"),
+        }).shape,
+    },
+    async (args) => {
+        const { url, selector, viewport, shouldRunInHeadless } = args as {
+            url: string;
+            selector: string;
+            viewport?: { width: number; height: number };
+            shouldRunInHeadless: boolean;
+        };
+
+        const scanner = new AccessibilityScanner();
+
+        try {
+            await scanner.initialize(shouldRunInHeadless);
+            await scanner.createContext(viewport);
+            await scanner.createPage();
+            await scanner.navigateToUrl(url);
+            await scanner.hoverElement(selector);
+
+            const base64Screenshot = await scanner.takeScreenshot();
+
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(
+                            {
+                                message: `Successfully hovered element: ${selector}`,
+                                url,
+                                selector,
+                            },
+                            null,
+                            2,
+                        ),
+                    },
+                    {
+                        type: "image",
+                        data: base64Screenshot,
+                        mimeType: "image/png",
+                    },
+                ],
+                isError: false,
+            };
+        } catch (error) {
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(
+                            {
+                                message: `Failed to hover element: ${selector}`,
+                                error: error instanceof Error ? error.message : "Unknown error",
+                                url,
+                                selector,
+                            },
+                            null,
+                            2,
+                        ),
+                    },
+                ],
+                isError: true,
+            };
+        } finally {
+            await scanner.cleanup();
+        }
+    },
+);
+
+server.registerTool(
+    "drag-and-drop",
+    {
+        title: "Drag and Drop",
+        description: "Drags an element from one selector to another on the current page.",
+        inputSchema: z.object({
+            url: z.string().url().describe("The public URL to navigate to"),
+            startSelector: z.string().describe("CSS selector for the element to drag"),
+            endSelector: z.string().describe("CSS selector for the drop target"),
+            viewport: z
+                .object({
+                    width: z.number().default(1920),
+                    height: z.number().default(1080),
+                })
+                .optional()
+                .describe("Optional viewport dimensions"),
+            shouldRunInHeadless: z.boolean().default(true).describe("Whether to run the browser in headless mode"),
+        }).shape,
+    },
+    async (args) => {
+        const { url, startSelector, endSelector, viewport, shouldRunInHeadless } = args as {
+            url: string;
+            startSelector: string;
+            endSelector: string;
+            viewport?: { width: number; height: number };
+            shouldRunInHeadless: boolean;
+        };
+
+        const scanner = new AccessibilityScanner();
+
+        try {
+            await scanner.initialize(shouldRunInHeadless);
+            await scanner.createContext(viewport);
+            await scanner.createPage();
+            await scanner.navigateToUrl(url);
+            await scanner.dragAndDrop(startSelector, endSelector);
+
+            const base64Screenshot = await scanner.takeScreenshot();
+
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(
+                            {
+                                message: `Successfully dragged ${startSelector} to ${endSelector}`,
+                                url,
+                                startSelector,
+                                endSelector,
+                            },
+                            null,
+                            2,
+                        ),
+                    },
+                    {
+                        type: "image",
+                        data: base64Screenshot,
+                        mimeType: "image/png",
+                    },
+                ],
+                isError: false,
+            };
+        } catch (error) {
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(
+                            {
+                                message: `Failed to drag ${startSelector} to ${endSelector}`,
+                                error: error instanceof Error ? error.message : "Unknown error",
+                                url,
+                                startSelector,
+                                endSelector,
+                            },
+                            null,
+                            2,
+                        ),
+                    },
+                ],
+                isError: true,
+            };
+        } finally {
+            await scanner.cleanup();
+        }
+    },
+);
+
+server.registerTool(
+    "press-key",
+    {
+        title: "Press Key",
+        description: "Presses a key on the keyboard on the current page.",
+        inputSchema: z.object({
+            url: z.string().url().describe("The public URL to navigate to"),
+            key: z.string().describe("The key to press"),
+            viewport: z
+                .object({
+                    width: z.number().default(1920),
+                    height: z.number().default(1080),
+                })
+                .optional()
+                .describe("Optional viewport dimensions"),
+            shouldRunInHeadless: z.boolean().default(true).describe("Whether to run the browser in headless mode"),
+        }).shape,
+    },
+    async (args) => {
+        const { url, key, viewport, shouldRunInHeadless } = args as {
+            url: string;
+            key: string;
+            viewport?: { width: number; height: number };
+            shouldRunInHeadless: boolean;
+        };
+
+        const scanner = new AccessibilityScanner();
+
+        try {
+            await scanner.initialize(shouldRunInHeadless);
+            await scanner.createContext(viewport);
+            await scanner.createPage();
+            await scanner.navigateToUrl(url);
+            await scanner.pressKey(key);
+
+            const base64Screenshot = await scanner.takeScreenshot();
+
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(
+                            {
+                                message: `Successfully pressed key: ${key}`,
+                                url,
+                                key,
+                            },
+                            null,
+                            2,
+                        ),
+                    },
+                    {
+                        type: "image",
+                        data: base64Screenshot,
+                        mimeType: "image/png",
+                    },
+                ],
+                isError: false,
+            };
+        } catch (error) {
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(
+                            {
+                                message: `Failed to press key: ${key}`,
+                                error: error instanceof Error ? error.message : "Unknown error",
+                                url,
+                                key,
+                            },
+                            null,
+                            2,
+                        ),
+                    },
+                ],
+                isError: true,
+            };
+        } finally {
+            await scanner.cleanup();
+        }
+    },
+);
+
+server.registerTool(
+    "select-option",
+    {
+        title: "Select Option",
+        description: "Selects options in a dropdown element on the current page.",
+        inputSchema: z.object({
+            url: z.string().url().describe("The public URL to navigate to"),
+            selector: z.string().describe("CSS selector for the select element"),
+            values: z.array(z.string()).describe("Array of values to select"),
+            viewport: z
+                .object({
+                    width: z.number().default(1920),
+                    height: z.number().default(1080),
+                })
+                .optional()
+                .describe("Optional viewport dimensions"),
+            shouldRunInHeadless: z.boolean().default(true).describe("Whether to run the browser in headless mode"),
+        }).shape,
+    },
+    async (args) => {
+        const { url, selector, values, viewport, shouldRunInHeadless } = args as {
+            url: string;
+            selector: string;
+            values: string[];
+            viewport?: { width: number; height: number };
+            shouldRunInHeadless: boolean;
+        };
+
+        const scanner = new AccessibilityScanner();
+
+        try {
+            await scanner.initialize(shouldRunInHeadless);
+            await scanner.createContext(viewport);
+            await scanner.createPage();
+            await scanner.navigateToUrl(url);
+            await scanner.selectOption(selector, values);
+
+            const base64Screenshot = await scanner.takeScreenshot();
+
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(
+                            {
+                                message: `Successfully selected options in ${selector}`,
+                                url,
+                                selector,
+                                values,
+                            },
+                            null,
+                            2,
+                        ),
+                    },
+                    {
+                        type: "image",
+                        data: base64Screenshot,
+                        mimeType: "image/png",
+                    },
+                ],
+                isError: false,
+            };
+        } catch (error) {
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(
+                            {
+                                message: `Failed to select options in ${selector}`,
+                                error: error instanceof Error ? error.message : "Unknown error",
+                                url,
+                                selector,
+                                values,
+                            },
+                            null,
+                            2,
+                        ),
+                    },
+                ],
+                isError: true,
+            };
+        } finally {
+            await scanner.cleanup();
+        }
+    },
+);
+
+server.registerTool(
     "create-session",
     {
         title: "Create Browser Session",

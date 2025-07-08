@@ -215,6 +215,42 @@ export class AccessibilityScanner {
         await this.page.waitForLoadState('load');
     }
 
+    async hoverElement(selector: string) {
+        if (!this.page) {
+            throw new Error("Page not created. Call createPage() first.");
+        }
+
+        await this.page.hover(selector);
+        await this.page.waitForLoadState('load');
+    }
+
+    async dragAndDrop(startSelector: string, endSelector: string) {
+        if (!this.page) {
+            throw new Error("Page not created. Call createPage() first.");
+        }
+
+        await this.page.dragAndDrop(startSelector, endSelector);
+        await this.page.waitForLoadState('load');
+    }
+
+    async pressKey(key: string) {
+        if (!this.page) {
+            throw new Error("Page not created. Call createPage() first.");
+        }
+
+        await this.page.keyboard.press(key);
+        await this.page.waitForLoadState('load');
+    }
+
+    async selectOption(selector: string, values: string[]) {
+        if (!this.page) {
+            throw new Error("Page not created. Call createPage() first.");
+        }
+
+        await this.page.selectOption(selector, values);
+        await this.page.waitForLoadState('load');
+    }
+
     private async addViolationStyles() {
         if (!this.page) {
             throw new Error("Page not created.");
