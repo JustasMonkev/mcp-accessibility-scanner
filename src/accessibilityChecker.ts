@@ -1,7 +1,11 @@
-import {type Browser, type BrowserContext, chromium, type Page} from "playwright";
+import {type Browser, type BrowserContext, chromium, type Page, type Locator} from "playwright";
 import {AxeBuilder} from "@axe-core/playwright";
 import path from "node:path";
 import os from "node:os";
+import { z } from 'zod';
+import { defineTool, type ToolFactory, type ToolContext } from './tool';
+import * as javascript from './javascript';
+import { generateLocator } from './utils';
 
 export interface AccessibilityResult {
     index: number;
@@ -402,3 +406,401 @@ export async function scanViolations(
         await scanner.cleanup();
     }
 }
+
+// Schemas defined from the user's provided code
+
+const elementSchema = z.object({
+  element: z.string().describe('Human-readable element description used to obtain permission to interact with the element'),
+  ref: z.string().describe('Exact target element reference from the page snapshot'),
+});
+
+const typeSchema = elementSchema.extend({
+  text: z.string().describe('Text to type into the element'),
+  submit: z.boolean().optional().describe('Whether to submit entered text (press Enter after)'),
+  slowly: z.boolean().optional().describe('Whether to type one character at a time. Useful for triggering key handlers in the page. By default entire text is filled in at once.'),
+});
+
+const selectOptionSchema = elementSchema.extend({
+  values: z.array(z.string()).describe('Array of values to select in the dropdown. This can be a single value or multiple values.'),
+});
+
+// Tool Definitions from the user's provided code
+
+const snapshot = defineTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_snapshot',
+    title: 'Page snapshot',
+    description: 'Capture accessibility snapshot of the current page, this is better than screenshot',
+    inputSchema: z.object({}),
+    type: 'readOnly',
+  },
+  handle: async (page: Page | null) => {
+    if (!page) throw new Error("Page not available for snapshot tool");
+    return {
+      code: [`// <internal code to capture accessibility snapshot>`],
+      captureSnapshot: true,
+      waitForNetwork: false,
+    };
+  },
+});
+
+const click = defineTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_click',
+    title: 'Click',
+    description: 'Perform click on a web page',
+    inputSchema: elementSchema,
+    type: 'destructive',
+  },
+  handle: async (page: Page | null, params: z.infer<typeof elementSchema>) => {
+    if (!page) throw new Error("Page not available for click tool");
+    const locator = page.locator(params.ref);
+    const code = [
+      `// Click ${params.element}`,
+      `await page.${await generateLocator(locator)}.click();`
+    ];
+    return {
+      code,
+      action: () => locator.click(),
+      captureSnapshot: true,
+      waitForNetwork: true,
+    };
+  },
+});
+
+const drag = defineTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_drag',
+    title: 'Drag mouse',
+    description: 'Perform drag and drop between two elements',
+    inputSchema: z.object({
+      startElement: z.string().describe('Human-readable source element description used to obtain the permission to interact with the element'),
+      startRef: z.string().describe('Exact source element reference from the page snapshot'),
+      endElement: z.string().describe('Human-readable target element description used to obtain the permission to interact with the element'),
+      endRef: z.string().describe('Exact target element reference from the page snapshot'),
+    }),
+    type: 'destructive',
+  },
+  handle: async (page: Page | null, params: { startRef: string, startElement: string, endRef: string, endElement: string }) => {
+    if (!page) throw new Error("Page not available for drag tool");
+    const startLocator = page.locator(params.startRef);
+    const endLocator = page.locator(params.endRef);
+    const code = [
+      `// Drag ${params.startElement} to ${params.endElement}`,
+      `await page.${await generateLocator(startLocator)}.dragTo(page.${await generateLocator(endLocator)});`
+    ];
+    return {
+      code,
+      action: () => startLocator.dragTo(endLocator),
+      captureSnapshot: true,
+      waitForNetwork: true,
+    };
+  },
+});
+
+const hover = defineTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_hover',
+    title: 'Hover mouse',
+    description: 'Hover over element on page',
+    inputSchema: elementSchema,
+    type: 'readOnly',
+  },
+  handle: async (page: Page | null, params: z.infer<typeof elementSchema>) => {
+    if (!page) throw new Error("Page not available for hover tool");
+    const locator = page.locator(params.ref);
+    const code = [
+      `// Hover over ${params.element}`,
+      `await page.${await generateLocator(locator)}.hover();`
+    ];
+    return {
+      code,
+      action: () => locator.hover(),
+      captureSnapshot: true,
+      waitForNetwork: true,
+    };
+  },
+});
+
+const type = defineTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_type',
+    title: 'Type text',
+    description: 'Type text into editable element',
+    inputSchema: typeSchema,
+    type: 'destructive',
+  },
+  handle: async (page: Page | null, params: z.infer<typeof typeSchema>) => {
+    if (!page) throw new Error("Page not available for type tool");
+    const locator = page.locator(params.ref);
+    const code: string[] = [];
+    const steps: (() => Promise<void>)[] = [];
+
+    if (params.slowly) {
+      code.push(`// Press "${params.text}" sequentially into "${params.element}"`);
+      code.push(`await page.${await generateLocator(locator)}.pressSequentially(${javascript.quote(params.text)});`);
+      steps.push(() => locator.pressSequentially(params.text));
+    } else {
+      code.push(`// Fill "${params.text}" into "${params.element}"`);
+      code.push(`await page.${await generateLocator(locator)}.fill(${javascript.quote(params.text)});`);
+      steps.push(() => locator.fill(params.text));
+    }
+
+    if (params.submit) {
+      code.push(`// Submit text`);
+      code.push(`await page.${await generateLocator(locator)}.press('Enter');`);
+      steps.push(() => locator.press('Enter'));
+    }
+
+    return {
+      code,
+      action: () => steps.reduce((acc, step) => acc.then(step), Promise.resolve()),
+      captureSnapshot: true,
+      waitForNetwork: true,
+    };
+  },
+});
+
+const selectOption = defineTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_select_option',
+    title: 'Select option',
+    description: 'Select an option in a dropdown',
+    inputSchema: selectOptionSchema,
+    type: 'destructive',
+  },
+  handle: async (page: Page | null, params: z.infer<typeof selectOptionSchema>) => {
+    if (!page) throw new Error("Page not available for selectOption tool");
+    const locator = page.locator(params.ref);
+    const code = [
+      `// Select options [${params.values.join(', ')}] in ${params.element}`,
+      `await page.${await generateLocator(locator)}.selectOption(${javascript.formatObject(params.values)});`
+    ];
+    return {
+      code,
+      action: () => locator.selectOption(params.values).then(() => {}),
+      captureSnapshot: true,
+      waitForNetwork: true,
+    };
+  },
+});
+
+const pressKeyToolFactory: ToolFactory = captureSnapshot => defineTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_press_key',
+    title: 'Press a key',
+    description: 'Press a key on the keyboard',
+    inputSchema: z.object({
+      key: z.string().describe('Name of the key to press or a character to generate, such as `ArrowLeft` or `a`'),
+    }),
+    type: 'destructive',
+  },
+  handle: async (page: Page | null, params: { key: string }) => {
+    if (!page) throw new Error("Page not available for pressKey tool");
+    const code = [
+      `// Press ${params.key}`,
+      `await page.keyboard.press('${params.key}');`,
+    ];
+    const action = () => page.keyboard.press(params.key);
+    return {
+      code,
+      action,
+      captureSnapshot,
+      waitForNetwork: true
+    };
+  },
+});
+
+const pressKey = pressKeyToolFactory(true);
+
+const screenElementSchema = z.object({
+  element: z.string().describe('Human-readable element description used to obtain permission to interact with the element'),
+});
+
+const screenshotTool = defineTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_screen_capture',
+    title: 'Take a screenshot',
+    description: 'Take a screenshot of the current page',
+    inputSchema: z.object({}),
+    type: 'readOnly',
+  },
+  handle: async (page: Page | null) => {
+    if (!page) throw new Error("Page not available for screenshotTool");
+    const options = { type: 'jpeg' as 'jpeg', quality: 50, scale: 'css' as 'css' };
+    const code = [
+      `// Take a screenshot of the current page`,
+      `await page.screenshot(${javascript.formatObject(options)});`,
+    ];
+    const action = () => page.screenshot(options).then(buffer => {
+      return {
+        content: [{ type: 'image' as 'image', data: buffer.toString('base64'), mimeType: 'image/jpeg' }],
+      };
+    });
+    return {
+      code,
+      action,
+      captureSnapshot: false,
+      waitForNetwork: false
+    };
+  },
+});
+
+const moveMouse = defineTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_screen_move_mouse',
+    title: 'Move mouse',
+    description: 'Move mouse to a given position',
+    inputSchema: screenElementSchema.extend({
+      x: z.number().describe('X coordinate'),
+      y: z.number().describe('Y coordinate'),
+    }),
+    type: 'readOnly',
+  },
+  handle: async (page: Page | null, params: { element: string, x: number, y: number }) => {
+    if (!page) throw new Error("Page not available for moveMouse tool");
+    const code = [
+      `// Move mouse to (${params.x}, ${params.y})`,
+      `await page.mouse.move(${params.x}, ${params.y});`,
+    ];
+    const action = () => page.mouse.move(params.x, params.y);
+    return {
+      code,
+      action,
+      captureSnapshot: false,
+      waitForNetwork: false
+    };
+  },
+});
+
+const screenClick = defineTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_screen_click',
+    title: 'Click',
+    description: 'Click left mouse button',
+    inputSchema: screenElementSchema.extend({
+      x: z.number().describe('X coordinate'),
+      y: z.number().describe('Y coordinate'),
+    }),
+    type: 'destructive',
+  },
+  handle: async (page: Page | null, params: {element: string, x: number, y: number }) => {
+    if (!page) throw new Error("Page not available for screenClick tool");
+    const code = [
+      `// Click mouse at coordinates (${params.x}, ${params.y})`,
+      `await page.mouse.move(${params.x}, ${params.y});`,
+      `await page.mouse.down();`,
+      `await page.mouse.up();`,
+    ];
+    const action = async () => {
+      await page.mouse.move(params.x, params.y);
+      await page.mouse.down();
+      await page.mouse.up();
+    };
+    return {
+      code,
+      action,
+      captureSnapshot: false,
+      waitForNetwork: true,
+    };
+  },
+});
+
+const screenDrag = defineTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_screen_drag',
+    title: 'Drag mouse',
+    description: 'Drag left mouse button',
+    inputSchema: screenElementSchema.extend({
+      startX: z.number().describe('Start X coordinate'),
+      startY: z.number().describe('Start Y coordinate'),
+      endX: z.number().describe('End X coordinate'),
+      endY: z.number().describe('End Y coordinate'),
+    }),
+    type: 'destructive',
+  },
+  handle: async (page: Page | null, params: {element: string, startX: number, startY: number, endX: number, endY: number}) => {
+    if (!page) throw new Error("Page not available for screenDrag tool");
+    const code = [
+      `// Drag mouse from (${params.startX}, ${params.startY}) to (${params.endX}, ${params.endY})`,
+      `await page.mouse.move(${params.startX}, ${params.startY});`,
+      `await page.mouse.down();`,
+      `await page.mouse.move(${params.endX}, ${params.endY});`,
+      `await page.mouse.up();`,
+    ];
+    const action = async () => {
+      await page.mouse.move(params.startX, params.startY);
+      await page.mouse.down();
+      await page.mouse.move(params.endX, params.endY);
+      await page.mouse.up();
+    };
+    return {
+      code,
+      action,
+      captureSnapshot: false,
+      waitForNetwork: true,
+    };
+  },
+});
+
+const screenType = defineTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_screen_type',
+    title: 'Type text',
+    description: 'Type text',
+    inputSchema: z.object({
+      text: z.string().describe('Text to type into the element'),
+      submit: z.boolean().optional().describe('Whether to submit entered text (press Enter after)'),
+    }),
+    type: 'destructive',
+  },
+  handle: async (page: Page | null, params: { text: string, submit?: boolean }) => {
+    if (!page) throw new Error("Page not available for screenType tool");
+    const code = [
+      `// Type ${params.text}`,
+      `await page.keyboard.type(${javascript.quote(params.text)});`,
+    ];
+    const action = async () => {
+      await page.keyboard.type(params.text);
+      if (params.submit)
+        await page.keyboard.press('Enter');
+    };
+    if (params.submit) {
+      code.push(`// Submit text`);
+      code.push(`await page.keyboard.press('Enter');`);
+    }
+    return {
+      code,
+      action,
+      captureSnapshot: false,
+      waitForNetwork: true,
+    };
+  },
+});
+
+export default [
+  snapshot,
+  click,
+  drag,
+  hover,
+  type,
+  selectOption,
+  pressKey,
+  screenshotTool,
+  moveMouse,
+  screenClick,
+  screenDrag,
+  screenType,
+];
