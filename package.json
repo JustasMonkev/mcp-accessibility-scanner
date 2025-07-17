@@ -1,53 +1,54 @@
 {
-  "name": "mcp-accessibility-scanner",
-  "version": "1.0.7",
-  "description": "A Model Context Protocol (MCP) server for performing automated accessibility scans of web pages using Playwright and Axe-core",
-  "main": "build/index.js",
-  "types": "build/index.d.ts",
-  "bin": {
-    "mcp-accessibility-scanner": "build/server.js"
-  },
-  "files": [
-    "build/**/*",
-    "README.md",
-    "LICENSE"
-  ],
-  "scripts": {
-    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755') && require('fs').chmodSync('build/server.js', '755')\"",
-    "prepare": "npm run build",
-    "watch": "tsc --watch",
-    "inspector": "npx @modelcontextprotocol/inspector build/index.js"
-  },
-  "dependencies": {
-    "@axe-core/playwright": "^4.10.1",
-    "@modelcontextprotocol/sdk": "^1.4.1",
-    "@playwright/test": "^1.52.0"
-  },
-  "devDependencies": {
-    "@types/node": "^22.10.7",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.5.3"
-  },
-  "keywords": [
-    "mcp",
-    "accessibility",
-    "a11y",
-    "wcag",
-    "axe-core",
-    "playwright",
-    "claude",
-    "model-context-protocol"
-  ],
-  "author": "",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/JustasMonkev/mcp-accessibility-scanner.git"
-  },
-  "engines": {
-    "node": ">=16.0.0"
-  },
-  "publishConfig": {
-    "access": "public"
-  }
+	"name": "mcp-accessibility-scanner",
+	"version": "1.0.11",
+	"description": "A Model Context Protocol (MCP) server for performing automated accessibility scans of web pages using Playwright and Axe-core",
+	"main": "build/index.js",
+	"types": "build/index.d.ts",
+	"bin": {
+		"mcp-accessibility-scanner": "build/server.js"
+	},
+	"files": [
+		"build/**/*",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755') && require('fs').chmodSync('build/server.js', '755')\"",
+		"prepare": "npm run build",
+		"watch": "tsc --watch",
+		"inspector": "npx @modelcontextprotocol/inspector build/index.js"
+	},
+	"dependencies": {
+		"@axe-core/playwright": "^4.10.2",
+		"@modelcontextprotocol/sdk": "^1.13.0",
+		"@playwright/test": "^1.53.1"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.0.4",
+		"@types/node": "^24.0.3",
+		"ts-node": "^10.9.2",
+		"typescript": "^5.8.3"
+	},
+	"keywords": [
+		"mcp",
+		"accessibility",
+		"a11y",
+		"wcag",
+		"axe-core",
+		"playwright",
+		"claude",
+		"model-context-protocol"
+	],
+	"author": "",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/JustasMonkev/mcp-accessibility-scanner.git"
+	},
+	"engines": {
+		"node": ">=16.0.0"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
 }

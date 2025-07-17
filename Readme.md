@@ -1,14 +1,30 @@
+
 # MCP Accessibility Scanner 🔍
 
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/justasmonkev-mcp-accessibility-scanner-badge.png)](https://mseep.ai/app/justasmonkev-mcp-accessibility-scanner)
 
 A Model Context Protocol (MCP) server that provides automated web accessibility scanning using Playwright and Axe-core. This server enables LLMs to perform WCAG compliance checks, capture annotated screenshots, and generate detailed accessibility reports.
+A powerful Model Context Protocol (MCP) server that provides automated web accessibility scanning and browser automation using Playwright and Axe-core. This server enables LLMs to perform WCAG compliance checks, interact with web pages, manage persistent browser sessions, and generate detailed accessibility reports with visual annotations.
 
 ## Features
 
-✅ Full WCAG 2.1/2.2 compliance checking  
+### Accessibility Scanning
+✅ Full WCAG 2.0/2.1/2.2 compliance checking (A, AA, AAA levels)  
 🖼️ Automatic screenshot capture with violation highlighting  
-📄 Detailed JSON reports with remediation guidance
+📄 Detailed JSON reports with remediation guidance  
+🎯 Support for specific violation categories (color contrast, ARIA, forms, keyboard navigation, etc.)  
+
+### Browser Automation
+🖱️ Click elements by CSS selector or visible text  
+⌨️ Type text into inputs by selector or label  
+🔍 Analyze pages to discover all interactive elements  
+📸 Capture screenshots after each interaction  
+
+### Session Management
+🔄 Create persistent browser sessions for multi-step workflows  
+⏱️ Automatic session cleanup after 3 minutes of inactivity  
+🌐 Navigate between pages while maintaining session state  
+📊 Run accessibility scans within active sessions
 
 ## Installation
 
@@ -67,28 +83,110 @@ Here's the Claude Desktop configuration:
 }
 ```
 
-## Usage
+## Available Tools
 
-The scanner exposes a single tool `scan_accessibility` that accepts:
+The MCP server exposes 18 tools for accessibility scanning and browser automation:
 
+### Accessibility Scanning
+
+#### `accessibility-scan`
+Performs a comprehensive accessibility scan on a webpage.
+
+**Parameters:**
 - `url`: The webpage URL to scan (required)
-- `violationsTag`: Array of accessibility violation tags to check (required)
-- `viewport`: Optional object to customize the viewport size
-  - `width`: number (default: 1920)
-  - `height`: number (default: 1080)
-- `shouldRunInHeadless`: Optional boolean to control headless mode (default: true)
+- `violationsTag`: Array of WCAG/violation tags to check (required)
+- `viewport`: Optional viewport size (default: 1920x1080)
+- `shouldRunInHeadless`: Optional headless mode control (default: true)
 
-**Note: When running a scan, an annotated screenshot highlighting any accessibility violations will be automatically saved to your downloads folder.**
+**Supported Violation Tags:**
+- WCAG levels: `wcag2a`, `wcag2aa`, `wcag2aaa`, `wcag21a`, `wcag21aa`, `wcag21aaa`, `wcag22a`, `wcag22aa`, `wcag22aaa`
+- Section 508: `section508`
+- Categories: `cat.color` (contrast), `cat.aria`, `cat.forms`, `cat.keyboard`, `cat.language`, `cat.structure`, etc.
 
-Example usage in Claude:
+### Browser Automation
+
+#### `click-element`
+Clicks an element by CSS selector.
+- Parameters: `url`, `selector`, `viewport`, `shouldRunInHeadless`
+
+#### `click-element-by-text`
+Clicks elements by their visible text content.
+- Parameters: `url`, `text`, `elementType` (optional), `viewport`, `shouldRunInHeadless`
+
+#### `type-text`
+Types text into an input field by CSS selector.
+- Parameters: `url`, `selector`, `text`, `viewport`, `shouldRunInHeadless`
+
+#### `type-text-by-label`
+Types text into input fields by their label text.
+- Parameters: `url`, `labelText`, `text`, `viewport`, `shouldRunInHeadless`
+
+#### `analyze-page`
+Analyzes page to identify all interactive elements.
+- Parameters: `url`, `viewport`, `shouldRunInHeadless`
+- Returns: Lists of all buttons, links, and inputs on the page
+
+### Session Management
+
+#### `create-session`
+Creates a persistent browser session for multiple operations.
+- Parameters: `sessionId`, `viewport`, `shouldRunInHeadless`
+- Sessions auto-expire after 3 minutes of inactivity
+
+#### `navigate-session`
+Navigates to a URL in an existing session.
+- Parameters: `sessionId`, `url`
+
+#### `click-session` / `click-session-by-text`
+Click elements within a session.
+
+#### `type-session` / `type-session-by-label`
+Type text within a session.
+
+#### `scan-session`
+Run accessibility scan on current page in session.
+
+#### `analyze-session`
+Analyze current page in session.
+
+#### `close-session`
+Close a browser session.
+
+#### `list-sessions`
+List all active browser sessions.
+
+## Usage Examples
+
+### Basic Accessibility Scan
 ```
-Could you scan example.com for accessibility issues related to color contrast?
+Could you scan example.com for WCAG 2.1 AA compliance issues?
 ```
 
-Advanced example with custom options:
+### Color Contrast Check
 ```
-Could you scan example.com for accessibility issues with a viewport of 1280x720 and show the browser window?
+Please check example.com for color contrast accessibility issues (cat.color).
 ```
+
+### Multi-step Workflow with Sessions
+```
+1. Create a session and navigate to example.com
+2. Click the "Sign In" button
+3. Type "user@example.com" into the email field
+4. Run an accessibility scan on the login page
+5. Close the session
+```
+
+### Page Analysis
+```
+Can you analyze example.com and tell me what interactive elements are available?
+```
+
+### Smart Element Interaction
+```
+Navigate to example.com and click the button that says "Get Started"
+```
+
+**Note:** All tools automatically save annotated screenshots to your downloads folder, with accessibility violations highlighted in red and numbered badges.
 
 ## Development
 
