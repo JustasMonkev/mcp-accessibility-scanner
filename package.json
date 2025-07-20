@@ -2,30 +2,58 @@
 	"name": "mcp-accessibility-scanner",
 	"version": "1.0.11",
 	"description": "A Model Context Protocol (MCP) server for performing automated accessibility scans of web pages using Playwright and Axe-core",
-	"main": "build/index.js",
-	"types": "build/index.d.ts",
+	"type": "module",
+	"exports": {
+		"./package.json": "./package.json",
+		".": {
+			"types": "./index.d.ts",
+			"default": "./index.js"
+		}
+	},
 	"bin": {
-		"mcp-accessibility-scanner": "build/server.js"
+		"mcp-server-playwright": "cli.js"
 	},
 	"files": [
-		"build/**/*",
+		"lib/**/*",
 		"README.md",
-		"LICENSE"
+		"LICENSE",
+		"NOTICE.md"
 	],
 	"scripts": {
-		"build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755') && require('fs').chmodSync('build/server.js', '755')\"",
-		"prepare": "npm run build",
+		"build": "tsc --project tsconfig.json",
+		"lint": "npm run update-readme && eslint . && tsc --noEmit",
+		"update-readme": "node utils/update-readme.js",
 		"watch": "tsc --watch",
-		"inspector": "npx @modelcontextprotocol/inspector build/index.js"
+		"run-server": "node lib/browserServer.js",
+		"clean": "rm -rf lib extension/lib",
+		"npm-publish": "npm run clean && npm run build && npm run test && npm publish"
 	},
 	"dependencies": {
 		"@axe-core/playwright": "^4.10.2",
-		"@modelcontextprotocol/sdk": "^1.13.0",
-		"@playwright/test": "^1.53.1"
+		"@modelcontextprotocol/sdk": "^1.16.0",
+		"commander": "^14.0.0",
+		"debug": "^4.4.1",
+		"mime": "^4.0.7",
+		"playwright": "^1.54.1",
+		"playwright-core": "^1.54.1",
+		"ws": "^8.18.3",
+		"zod-to-json-schema": "^3.24.6"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.0.4",
-		"@types/node": "^24.0.3",
+		"@eslint/eslintrc": "^3.3.1",
+		"@eslint/js": "^9.31.0",
+		"@playwright/test": "^1.54.1",
+		"@stylistic/eslint-plugin": "^5.2.0",
+		"@types/chrome": "^0.1.1",
+		"@types/debug": "^4.1.12",
+		"@types/node": "^24.0.15",
+		"@types/ws": "^8.18.1",
+		"@typescript-eslint/eslint-plugin": "^8.37.0",
+		"@typescript-eslint/parser": "^8.37.0",
+		"@typescript-eslint/utils": "^8.37.0",
+		"eslint": "^9.31.0",
+		"eslint-plugin-import": "^2.32.0",
+		"eslint-plugin-notice": "^1.0.0",
 		"ts-node": "^10.9.2",
 		"typescript": "^5.8.3"
 	},
