@@ -17,11 +17,11 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { devices } from 'playwright';
+import type {BrowserContextOptions, LaunchOptions} from 'playwright';
+import {devices} from 'playwright';
 
-import type { Config, ToolCapability } from '../config.js';
-import type { BrowserContextOptions, LaunchOptions } from 'playwright';
-import { sanitizeForFilePath } from './tools/utils.js';
+import type {Config, ToolCapability} from '../config.js';
+import {sanitizeForFilePath} from './tools/utils.js';
 
 const headlessMode = true;
 
@@ -159,7 +159,7 @@ export async function configFromCLIOptions(cliOptions: CLIOptions): Promise<Conf
     try {
       const [width, height] = cliOptions.viewportSize.split(',').map(n => +n);
       if (isNaN(width) || isNaN(height))
-        throw new Error('bad values');
+        throw new Error('Invalid viewport size format: width and height must be numbers.');
       contextOptions.viewport = { width, height };
     } catch (e) {
       throw new Error('Invalid viewport size format: use "width,height", for example --viewport-size="800,600"');
@@ -172,7 +172,7 @@ export async function configFromCLIOptions(cliOptions: CLIOptions): Promise<Conf
   if (cliOptions.blockServiceWorkers)
     contextOptions.serviceWorkers = 'block';
 
-  const result: Config = {
+  return {
     browser: {
       browserAgent: cliOptions.browserAgent ?? process.env.PW_BROWSER_AGENT,
       browserName,
@@ -196,8 +196,6 @@ export async function configFromCLIOptions(cliOptions: CLIOptions): Promise<Conf
     outputDir: cliOptions.outputDir,
     imageResponses: cliOptions.imageResponses,
   };
-
-  return result;
 }
 
 async function loadConfig(configFile: string | undefined): Promise<Config> {

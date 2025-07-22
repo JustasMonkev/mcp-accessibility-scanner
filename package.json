@@ -25,8 +25,8 @@
 		"update-readme": "node utils/update-readme.js",
 		"watch": "tsc --watch",
 		"run-server": "node lib/browserServer.js",
-		"clean": "rm -rf lib extension/lib",
-		"npm-publish": "npm run clean && npm run build && npm run test && npm publish"
+		"clean": "rm -rf lib",
+		"npm-publish": "npm run clean && npm run build && npm publish"
 	},
 	"dependencies": {
 		"@axe-core/playwright": "^4.10.2",

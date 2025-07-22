@@ -15,7 +15,7 @@
  */
 
 import { program } from 'commander';
-// @ts-ignore
+// @ts-expect-error: The 'playwright-core/lib/server' module is internal and lacks TypeScript definitions.
 import { startTraceViewerServer } from 'playwright-core/lib/server';
 
 import { startHttpServer, startHttpTransport, startStdioTransport } from './transport.js';
