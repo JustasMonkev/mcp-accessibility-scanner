@@ -15,16 +15,18 @@ A powerful Model Context Protocol (MCP) server that provides automated web acces
 🎯 Support for specific violation categories (color contrast, ARIA, forms, keyboard navigation, etc.)  
 
 ### Browser Automation
-🖱️ Click elements by CSS selector or visible text  
-⌨️ Type text into inputs by selector or label  
-🔍 Analyze pages to discover all interactive elements  
-📸 Capture screenshots after each interaction  
+🖱️ Click, hover, and drag elements using accessibility snapshots  
+⌨️ Type text and handle keyboard inputs  
+🔍 Capture page snapshots to discover all interactive elements  
+📸 Take screenshots and save PDFs  
+🎯 Support for both element-based and coordinate-based interactions  
 
-### Session Management
-🔄 Create persistent browser sessions for multi-step workflows  
-⏱️ Automatic session cleanup after 3 minutes of inactivity  
-🌐 Navigate between pages while maintaining session state  
-📊 Run accessibility scans within active sessions
+### Advanced Features
+📑 Tab management for multi-page workflows  
+🌐 Monitor console messages and network requests  
+⏱️ Wait for dynamic content to load  
+📁 Handle file uploads and browser dialogs  
+🔄 Navigate through browser history
 
 ## Installation
 
@@ -33,25 +35,6 @@ You can install the package using any of these methods:
 Using npm:
 ```bash
 npm install -g mcp-accessibility-scanner
-```
-
-### Docker Installation
-
-The project includes a Dockerfile that sets up all necessary dependencies including Node.js v22 and Python 3.13.
-
-1. Build the Docker image:
-```bash
-docker build -t mcp-server . 
-```
-
-2. Run the container:
-```bash
-docker run -it -e MCP_PROXY_DEBUG=true mcp-server
-```
-
-You can also run it in the background:
-```bash
-docker run -d -p 3000:3000 mcp-server
 ```
 
 ### Installation in VS Code
@@ -85,108 +68,189 @@ Here's the Claude Desktop configuration:
 
 ## Available Tools
 
-The MCP server exposes 18 tools for accessibility scanning and browser automation:
+The MCP server provides comprehensive browser automation and accessibility scanning tools:
 
-### Accessibility Scanning
+### Core Accessibility Tool
 
-#### `accessibility-scan`
-Performs a comprehensive accessibility scan on a webpage.
+#### `scan_page`
+Performs a comprehensive accessibility scan on the current page using Axe-core.
 
 **Parameters:**
-- `url`: The webpage URL to scan (required)
-- `violationsTag`: Array of WCAG/violation tags to check (required)
-- `viewport`: Optional viewport size (default: 1920x1080)
-- `shouldRunInHeadless`: Optional headless mode control (default: true)
+- `violationsTag`: Array of WCAG/violation tags to check
 
 **Supported Violation Tags:**
-- WCAG levels: `wcag2a`, `wcag2aa`, `wcag2aaa`, `wcag21a`, `wcag21aa`, `wcag21aaa`, `wcag22a`, `wcag22aa`, `wcag22aaa`
+- WCAG standards: `wcag2a`, `wcag2aa`, `wcag2aaa`, `wcag21a`, `wcag21aa`, `wcag21aaa`, `wcag22a`, `wcag22aa`, `wcag22aaa`
 - Section 508: `section508`
-- Categories: `cat.color` (contrast), `cat.aria`, `cat.forms`, `cat.keyboard`, `cat.language`, `cat.structure`, etc.
+- Categories: `cat.aria`, `cat.color`, `cat.forms`, `cat.keyboard`, `cat.language`, `cat.name-role-value`, `cat.parsing`, `cat.semantics`, `cat.sensory-and-visual-cues`, `cat.structure`, `cat.tables`, `cat.text-alternatives`, `cat.time-and-media`
 
-### Browser Automation
+### Navigation Tools
 
-#### `click-element`
-Clicks an element by CSS selector.
-- Parameters: `url`, `selector`, `viewport`, `shouldRunInHeadless`
+#### `browser_navigate`
+Navigate to a URL.
+- Parameters: `url` (string)
 
-#### `click-element-by-text`
-Clicks elements by their visible text content.
-- Parameters: `url`, `text`, `elementType` (optional), `viewport`, `shouldRunInHeadless`
+#### `browser_navigate_back`
+Go back to the previous page.
 
-#### `type-text`
-Types text into an input field by CSS selector.
-- Parameters: `url`, `selector`, `text`, `viewport`, `shouldRunInHeadless`
+#### `browser_navigate_forward`
+Go forward to the next page.
 
-#### `type-text-by-label`
-Types text into input fields by their label text.
-- Parameters: `url`, `labelText`, `text`, `viewport`, `shouldRunInHeadless`
+### Page Interaction Tools
 
-#### `analyze-page`
-Analyzes page to identify all interactive elements.
-- Parameters: `url`, `viewport`, `shouldRunInHeadless`
-- Returns: Lists of all buttons, links, and inputs on the page
+#### `browser_snapshot`
+Capture accessibility snapshot of the current page (better than screenshot for analysis).
 
-### Session Management
+#### `browser_click`
+Perform click on a web page element.
+- Parameters: `element` (description), `ref` (element reference), `doubleClick` (optional)
 
-#### `create-session`
-Creates a persistent browser session for multiple operations.
-- Parameters: `sessionId`, `viewport`, `shouldRunInHeadless`
-- Sessions auto-expire after 3 minutes of inactivity
+#### `browser_type`
+Type text into editable element.
+- Parameters: `element`, `ref`, `text`, `submit` (optional), `slowly` (optional)
 
-#### `navigate-session`
-Navigates to a URL in an existing session.
-- Parameters: `sessionId`, `url`
+#### `browser_hover`
+Hover over element on page.
+- Parameters: `element`, `ref`
 
-#### `click-session` / `click-session-by-text`
-Click elements within a session.
+#### `browser_drag`
+Perform drag and drop between two elements.
+- Parameters: `startElement`, `startRef`, `endElement`, `endRef`
 
-#### `type-session` / `type-session-by-label`
-Type text within a session.
+#### `browser_select_option`
+Select an option in a dropdown.
+- Parameters: `element`, `ref`, `values` (array)
 
-#### `scan-session`
-Run accessibility scan on current page in session.
+#### `browser_press_key`
+Press a key on the keyboard.
+- Parameters: `key` (e.g., 'ArrowLeft' or 'a')
 
-#### `analyze-session`
-Analyze current page in session.
+### Screenshot & Visual Tools
 
-#### `close-session`
-Close a browser session.
+#### `browser_take_screenshot`
+Take a screenshot of the current page.
+- Parameters: `raw` (optional), `filename` (optional), `element` (optional), `ref` (optional)
 
-#### `list-sessions`
-List all active browser sessions.
+#### `browser_pdf_save`
+Save page as PDF.
+- Parameters: `filename` (optional, defaults to `page-{timestamp}.pdf`)
+
+### Browser Management
+
+#### `browser_close`
+Close the page.
+
+#### `browser_resize`
+Resize the browser window.
+- Parameters: `width`, `height`
+
+### Tab Management
+
+#### `browser_tab_list`
+List all open browser tabs.
+
+#### `browser_tab_new`
+Open a new tab.
+- Parameters: `url` (optional)
+
+#### `browser_tab_select`
+Select a tab by index.
+- Parameters: `index`
+
+#### `browser_tab_close`
+Close a tab.
+- Parameters: `index` (optional, closes current tab if not provided)
+
+### Information & Monitoring Tools
+
+#### `browser_console_messages`
+Returns all console messages from the page.
+
+#### `browser_network_requests`
+Returns all network requests since loading the page.
+
+### Utility Tools
+
+#### `browser_wait_for`
+Wait for text to appear/disappear or time to pass.
+- Parameters: `time` (optional), `text` (optional), `textGone` (optional)
+
+#### `browser_handle_dialog`
+Handle browser dialogs (alerts, confirms, prompts).
+- Parameters: `accept` (boolean), `promptText` (optional)
+
+#### `browser_file_upload`
+Upload files to the page.
+- Parameters: `paths` (array of absolute file paths)
+
+### Vision Mode Tools (Coordinate-based Interaction)
+
+#### `browser_screen_capture`
+Take a screenshot for coordinate-based interaction.
+
+#### `browser_screen_move_mouse`
+Move mouse to specific coordinates.
+- Parameters: `element`, `x`, `y`
+
+#### `browser_screen_click`
+Click at specific coordinates.
+- Parameters: `element`, `x`, `y`
+
+#### `browser_screen_drag`
+Drag from one coordinate to another.
+- Parameters: `element`, `startX`, `startY`, `endX`, `endY`
+
+#### `browser_screen_type`
+Type text (coordinate-independent).
+- Parameters: `text`, `submit` (optional)
 
 ## Usage Examples
 
 ### Basic Accessibility Scan
 ```
-Could you scan example.com for WCAG 2.1 AA compliance issues?
+1. Navigate to example.com using browser_navigate
+2. Run scan_page with violationsTag: ["wcag21aa"]
 ```
 
 ### Color Contrast Check
 ```
-Please check example.com for color contrast accessibility issues (cat.color).
+1. Use browser_navigate to go to example.com
+2. Run scan_page with violationsTag: ["cat.color"]
 ```
 
-### Multi-step Workflow with Sessions
+### Multi-step Workflow
 ```
-1. Create a session and navigate to example.com
-2. Click the "Sign In" button
-3. Type "user@example.com" into the email field
-4. Run an accessibility scan on the login page
-5. Close the session
+1. Navigate to example.com with browser_navigate
+2. Take a browser_snapshot to see available elements
+3. Click the "Sign In" button using browser_click
+4. Type "user@example.com" using browser_type
+5. Run scan_page on the login page
+6. Take a browser_take_screenshot to capture the final state
 ```
 
 ### Page Analysis
 ```
-Can you analyze example.com and tell me what interactive elements are available?
+1. Navigate to example.com
+2. Use browser_snapshot to capture all interactive elements
+3. Review console messages with browser_console_messages
+4. Check network activity with browser_network_requests
 ```
 
-### Smart Element Interaction
+### Tab Management
 ```
-Navigate to example.com and click the button that says "Get Started"
+1. Open a new tab with browser_tab_new
+2. Navigate to different pages in each tab
+3. Switch between tabs using browser_tab_select
+4. List all tabs with browser_tab_list
 ```
 
-**Note:** All tools automatically save annotated screenshots to your downloads folder, with accessibility violations highlighted in red and numbered badges.
+### Waiting for Dynamic Content
+```
+1. Navigate to a page
+2. Use browser_wait_for to wait for specific text to appear
+3. Interact with the dynamically loaded content
+```
+
+**Note:** Most interaction tools require element references from browser_snapshot. Always capture a snapshot before attempting to interact with page elements.
 
 ## Development
 
@@ -195,42 +259,6 @@ Clone and set up the project:
 git clone https://github.com/JustasMonkev/mcp-accessibility-scanner.git
 cd mcp-accessibility-scanner
 npm install
-```
-
-Start the TypeScript compiler in watch mode:
-```bash
-npm run watch
-```
-
-Test the MCP server locally:
-```bash
-npm run inspector
-```
-
-### Docker Development
-
-For development using Docker:
-
-1. Build the development image:
-```bash
-docker build -t mcp-server-dev .
-```
-
-2. Run with volume mounting for live code changes:
-```bash
-docker run -it -v $(pwd):/app -p 3000:3000 -e MCP_PROXY_DEBUG=true mcp-server-dev
-```
-
-## Project Structure
-
-```
-├── src/              # Source code
-│   ├── index.ts     # MCP server setup and tool definitions
-│   └── scanner.ts   # Core scanning functionality
-├── build/           # Compiled JavaScript output
-├── Dockerfile       # Docker configuration for containerized setup
-├── package.json     # Project configuration and dependencies
-└── tsconfig.json    # TypeScript configuration
 ```
 
 ## License
