@@ -47,7 +47,7 @@ const elementSchema = z.object({
   ref: z.string().describe('Exact target element reference from the page snapshot'),
 });
 
-const tagValues = [
+export const tagValues = [
   'wcag2a', 'wcag2aa', 'wcag2aaa', 'wcag21a', 'wcag21aa', 'wcag21aaa',
   'wcag22a', 'wcag22aa', 'wcag22aaa', 'section508', 'cat.aria', 'cat.color',
   'cat.forms', 'cat.keyboard', 'cat.language', 'cat.name-role-value',
