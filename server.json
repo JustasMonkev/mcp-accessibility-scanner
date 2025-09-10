@@ -1,7 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
   "name": "io.github.JustasMonkev/mcp-accessibility-scanner",
-  "description": "A powerful Model Context Protocol (MCP) server that provides automated web accessibility scanning and browser automation using Playwright and Axe-core. This server enables LLMs to perform WCAG compliance checks, interact with web pages, manage persistent browser sessions, and generate detailed accessibility reports with visual annotations.",
+  "description": "MCP server for automated web accessibility scanning with Playwright and Axe-core.",
+  "mcpName": "io.github.JustasMonkev/mcp-accessibility-scanner",
   "status": "active",
   "repository": {
     "url": "https://github.com/JustasMonkev/mcp-accessibility-scanner",
