@@ -16,13 +16,13 @@
 
 import { fork } from 'child_process';
 import path from 'path';
-
+import { fileURLToPath } from 'url';
 import { z } from 'zod';
 import { defineTool } from './tool.js';
-import {createRequire} from "node:module";
+
 
 const install = defineTool({
-  capability: 'install',
+  capability: 'core-install',
   schema: {
     name: 'browser_install',
     title: 'Install the browser specified in the config',
@@ -31,10 +31,10 @@ const install = defineTool({
     type: 'destructive',
   },
 
-  handle: async context => {
+  handle: async (context, params, response) => {
     const channel = context.config.browser?.launchOptions?.channel ?? context.config.browser?.browserName ?? 'chrome';
-    const require = createRequire(import.meta.url);
-    const cliPath = require.resolve('playwright/cli.js');
+    const cliUrl = import.meta.resolve('playwright/package.json');
+    const cliPath = path.join(fileURLToPath(cliUrl), '..', 'cli.js');
     const child = fork(cliPath, ['install', channel], {
       stdio: 'pipe',
     });
@@ -49,11 +49,7 @@ const install = defineTool({
           reject(new Error(`Failed to install browser: ${output.join('')}`));
       });
     });
-    return {
-      code: [`// Browser ${channel} installed`],
-      captureSnapshot: false,
-      waitForNetwork: false,
-    };
+    response.setIncludeTabs();
   },
 });
 

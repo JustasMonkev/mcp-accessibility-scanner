@@ -33,6 +33,7 @@
 		"@modelcontextprotocol/sdk": "^1.18.1",
 		"commander": "^14.0.1",
 		"debug": "^4.4.3",
+		"dotenv": "^17.2.2",
 		"mime": "^4.1.0",
 		"playwright": "^1.55.0",
 		"playwright-core": "^1.55.0",

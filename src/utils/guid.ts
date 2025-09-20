@@ -13,3 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+import crypto from 'crypto';
+
+export function createGuid(): string {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+export function createHash(data: string): string {
+  return crypto.createHash('sha256').update(data).digest('hex').slice(0, 7);
+}

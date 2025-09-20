@@ -14,23 +14,29 @@
  * limitations under the License.
  */
 
-import { z } from 'zod';
-import { defineTabTool } from './tool.js';
+// Whenever the commands/events change, the version must be updated. The latest
+// extension version should be compatible with the old MCP clients.
+export const VERSION = 1;
 
-const console = defineTabTool({
-  capability: 'core',
-  schema: {
-    name: 'browser_console_messages',
-    title: 'Get console messages',
-    description: 'Returns all console messages',
-    inputSchema: z.object({}),
-    type: 'readOnly',
-  },
-  handle: async (tab, params, response) => {
-    tab.consoleMessages().map(message => response.addResult(message.toString()));
-  },
-});
+export type ExtensionCommand = {
+  'attachToTab': {
+    params: {};
+  };
+  'forwardCDPCommand': {
+    params: {
+      method: string,
+      sessionId?: string
+      params?: any,
+    };
+  };
+};
 
-export default [
-  console,
-];
+export type ExtensionEvents = {
+  'forwardCDPEvent': {
+    params: {
+      method: string,
+      sessionId?: string
+      params?: any,
+    };
+  };
+};

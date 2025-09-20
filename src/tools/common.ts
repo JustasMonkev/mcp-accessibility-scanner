@@ -15,11 +15,10 @@
  */
 
 import { z } from 'zod';
-import { defineTool, type ToolFactory } from './tool.js';
+import { defineTabTool, defineTool } from './tool.js';
 
 const close = defineTool({
   capability: 'core',
-
   schema: {
     name: 'browser_close',
     title: 'Close browser',
@@ -28,17 +27,14 @@ const close = defineTool({
     type: 'readOnly',
   },
 
-  handle: async context => {
-    await context.close();
-    return {
-      code: [`await page.close()`],
-      captureSnapshot: false,
-      waitForNetwork: false,
-    };
+  handle: async (context, params, response) => {
+    await context.closeBrowserContext();
+    response.setIncludeTabs();
+    response.addCode(`await page.close()`);
   },
 });
 
-const resize: ToolFactory = captureSnapshot => defineTool({
+const resize = defineTabTool({
   capability: 'core',
   schema: {
     name: 'browser_resize',
@@ -51,28 +47,16 @@ const resize: ToolFactory = captureSnapshot => defineTool({
     type: 'readOnly',
   },
 
-  handle: async (context, params) => {
-    const tab = context.currentTabOrDie();
+  handle: async (tab, params, response) => {
+    response.addCode(`await page.setViewportSize({ width: ${params.width}, height: ${params.height} });`);
 
-    const code = [
-      `// Resize browser window to ${params.width}x${params.height}`,
-      `await page.setViewportSize({ width: ${params.width}, height: ${params.height} });`
-    ];
-
-    const action = async () => {
+    await tab.waitForCompletion(async () => {
       await tab.page.setViewportSize({ width: params.width, height: params.height });
-    };
-
-    return {
-      code,
-      action,
-      captureSnapshot,
-      waitForNetwork: true
-    };
+    });
   },
 });
 
-export default (captureSnapshot: boolean) => [
+export default [
   close,
-  resize(captureSnapshot)
+  resize
 ];

@@ -14,23 +14,9 @@
  * limitations under the License.
  */
 
-import { z } from 'zod';
-import { defineTabTool } from './tool.js';
+import fs from 'fs';
+import path from 'path';
+import url from 'url';
 
-const console = defineTabTool({
-  capability: 'core',
-  schema: {
-    name: 'browser_console_messages',
-    title: 'Get console messages',
-    description: 'Returns all console messages',
-    inputSchema: z.object({}),
-    type: 'readOnly',
-  },
-  handle: async (tab, params, response) => {
-    tab.consoleMessages().map(message => response.addResult(message.toString()));
-  },
-});
-
-export default [
-  console,
-];
+const __filename = url.fileURLToPath(import.meta.url);
+export const packageJSON = JSON.parse(fs.readFileSync(path.join(path.dirname(__filename), '..', '..', 'package.json'), 'utf8'));

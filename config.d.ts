@@ -16,7 +16,19 @@
 
 import type * as playwright from 'playwright';
 
-export type ToolCapability = 'core' | 'tabs' | 'pdf' | 'history' | 'wait' | 'files' | 'install' | 'testing';
+export type ToolCapability =
+  | 'core'
+  | 'tabs'
+  | 'pdf'
+  | 'history'
+  | 'wait'
+  | 'files'
+  | 'install'
+  | 'testing'
+  | 'core-install'
+  | 'core-tabs'
+  | 'vision'
+  | 'verify';
 
 export type Config = {
   /**
@@ -103,6 +115,11 @@ export type Config = {
    * Whether to save the Playwright trace of the session into the output directory.
    */
   saveTrace?: boolean;
+
+  /**
+   * Whether to persist session logs for the current run.
+   */
+  saveSession?: boolean;
 
   /**
    * The directory to save output files.
