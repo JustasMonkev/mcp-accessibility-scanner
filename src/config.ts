@@ -296,8 +296,8 @@ function mergeConfig(base: FullConfig, overrides: Config): FullConfig {
             ...pickDefined(overrides.server),
         },
         timeouts: {
-            ...pickDefined(base.timeouts),
-            ...pickDefined(overrides.timeouts),
+            navigationTimeout: overrides.timeouts?.navigationTimeout ?? base.timeouts.navigationTimeout,
+            defaultTimeout: overrides.timeouts?.defaultTimeout ?? base.timeouts.defaultTimeout,
         },
     } as FullConfig;
 }

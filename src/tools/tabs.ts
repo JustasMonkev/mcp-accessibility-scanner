@@ -17,6 +17,9 @@
 import { z } from 'zod';
 import { defineTool } from './tool.js';
 
+const SECOND = 1000;
+const MINUTE = 60 * SECOND;
+
 const browserTabs = defineTool({
   capability: 'core-tabs',
   schema: {
@@ -62,15 +65,18 @@ const navigationTimeout = defineTool({
   schema: {
     name: 'browser_navigation_timeout',
     title: 'Navigation timeout',
-    description: 'Sets the timeout for navigation and page load actions.',
+    description: 'Sets the timeout for navigation and page load actions. Only affects the current tab and does not persist across browser context recreation.',
     inputSchema: z.object({
-      number: z.number().default(35000).describe('Timeout for navigation'),
+      timeout: z.number().min(SECOND * 30).max(MINUTE * 20).describe('Timeout in milliseconds for navigation (0-300000ms)'),
     }),
     type: 'destructive',
   },
   handle: async (context, params, response) => {
-    await context.ensureTab();
-    context.currentTab()?.page.setDefaultNavigationTimeout(params.number)
+    const tabs = context.tabs();
+    for (const tab of tabs) {
+      tab.page.setDefaultNavigationTimeout(params.timeout);
+    }
+    response.addResult(`Navigation timeout set to ${params.timeout}ms for all tabs.`);
     response.setIncludeTabs();
   },
 });
@@ -80,15 +86,19 @@ const defaultTimeout = defineTool({
   schema: {
     name: 'browser_default_timeout',
     title: 'Default timeout',
-    description: 'Sets the default for navigation and page load actions.',
+    description: 'Sets the default timeout for all Playwright operations (clicks, fills, etc). Only affects existing tabs and does not persist across browser context recreation.',
     inputSchema: z.object({
-      number: z.number().default(5000).describe('Timeout for default'),
+      timeout: z.number().min(SECOND * 30).max(MINUTE * 20).describe('Timeout in milliseconds for default operations (0-300000ms)'),
     }),
     type: 'destructive',
   },
   handle: async (context, params, response) => {
-    await context.ensureTab();
-    context.currentTab()?.page.setDefaultTimeout(params.number)
+    const tabs = context.tabs();
+    for (const tab of tabs) {
+      tab.page.setDefaultTimeout(params.timeout);
+    }
+
+    response.addResult(`Default timeout set to ${params.timeout}ms for all tabs.`);
     response.setIncludeTabs();
   },
 });
