@@ -142,4 +142,19 @@ export type Config = {
    * Whether to send image responses to the client. Can be "allow", "omit", or "auto". Defaults to "auto", which sends images if the client can display them.
    */
   imageResponses?: 'allow' | 'omit' | 'auto';
+
+  /**
+   * Timeout settings for Playwright operations.
+   */
+  timeouts?: {
+    /**
+     * Maximum time in milliseconds for page navigation. Defaults to 60000ms (60 seconds).
+     */
+    navigationTimeout?: number;
+
+    /**
+     * Default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).
+     */
+    defaultTimeout?: number;
+  };
 };

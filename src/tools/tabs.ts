@@ -19,7 +19,6 @@ import { defineTool } from './tool.js';
 
 const browserTabs = defineTool({
   capability: 'core-tabs',
-
   schema: {
     name: 'browser_tabs',
     title: 'Manage tabs',
@@ -30,7 +29,6 @@ const browserTabs = defineTool({
     }),
     type: 'destructive',
   },
-
   handle: async (context, params, response) => {
     switch (params.action) {
       case 'list': {
@@ -59,6 +57,44 @@ const browserTabs = defineTool({
   },
 });
 
+const navigationTimeout = defineTool({
+  capability: 'core-tabs',
+  schema: {
+    name: 'browser_navigation_timeout',
+    title: 'Navigation timeout',
+    description: 'Sets the timeout for navigation and page load actions.',
+    inputSchema: z.object({
+      number: z.number().default(35000).describe('Timeout for navigation'),
+    }),
+    type: 'destructive',
+  },
+  handle: async (context, params, response) => {
+    await context.ensureTab();
+    context.currentTab()?.page.setDefaultNavigationTimeout(params.number)
+    response.setIncludeTabs();
+  },
+});
+
+const defaultTimeout = defineTool({
+  capability: 'core-tabs',
+  schema: {
+    name: 'browser_default_timeout',
+    title: 'Default timeout',
+    description: 'Sets the default for navigation and page load actions.',
+    inputSchema: z.object({
+      number: z.number().default(5000).describe('Timeout for default'),
+    }),
+    type: 'destructive',
+  },
+  handle: async (context, params, response) => {
+    await context.ensureTab();
+    context.currentTab()?.page.setDefaultTimeout(params.number)
+    response.setIncludeTabs();
+  },
+});
+
 export default [
   browserTabs,
+  navigationTimeout,
+  defaultTimeout
 ];
