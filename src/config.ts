@@ -233,6 +233,8 @@ function configFromEnv(): Config {
     options.userAgent = envToString(process.env.PLAYWRIGHT_MCP_USER_AGENT);
     options.userDataDir = envToString(process.env.PLAYWRIGHT_MCP_USER_DATA_DIR);
     options.viewportSize = envToString(process.env.PLAYWRIGHT_MCP_VIEWPORT_SIZE);
+    options.navigationTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT);
+    options.defaultTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_DEFAULT_TIMEOUT);
     return configFromCLIOptions(options);
 }
 
