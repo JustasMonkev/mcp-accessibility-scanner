@@ -66,6 +66,55 @@ Here's the Claude Desktop configuration:
 }
 ```
 
+### Advanced Configuration
+
+You can pass a configuration file to customize Playwright behavior:
+
+```json
+{
+  "mcpServers": {
+    "accessibility-scanner": {
+      "command": "npx",
+      "args": ["-y", "mcp-accessibility-scanner", "--config", "/path/to/config.json"]
+    }
+  }
+}
+```
+
+#### Configuration Options
+
+Create a `config.json` file with the following options:
+
+```json
+{
+  "browser": {
+    "browserName": "chromium",
+    "launchOptions": {
+      "headless": true,
+      "channel": "chrome"
+    }
+  },
+  "timeouts": {
+    "navigationTimeout": 60000,
+    "defaultTimeout": 5000
+  },
+  "network": {
+    "allowedOrigins": ["example.com", "trusted-site.com"],
+    "blockedOrigins": ["ads.example.com"]
+  }
+}
+```
+
+**Available Options:**
+
+- `browser.browserName`: Browser to use (`chromium`, `firefox`, `webkit`)
+- `browser.launchOptions.headless`: Run browser in headless mode (default: `true` on Linux without display, `false` otherwise)
+- `browser.launchOptions.channel`: Browser channel (`chrome`, `chrome-beta`, `msedge`, etc.)
+- `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
+- `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
+- `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
+- `network.blockedOrigins`: List of origins to block
+
 ## Available Tools
 
 The MCP server provides comprehensive browser automation and accessibility scanning tools:
