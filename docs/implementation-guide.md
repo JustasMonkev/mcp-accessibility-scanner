@@ -86,6 +86,15 @@ npx mcp-accessibility-scanner [options]
 ```
 Key flags include `--browser`, `--caps`, `--extension`, `--vscode`, `--cdp-endpoint`, `--user-data-dir`, `--save-session`, `--save-trace`, and networking/timeouts switches exposed in the CLI.
 
+| Toggle | Location | Default | Purpose |
+| --- | --- | --- | --- |
+| `imageResponses` | `src/config.ts` (`FullConfig`) | `"auto"` | Control whether responses embed screenshots produced by tools. |
+| `saveSession` | `src/config.ts` (`FullConfig`) | `false` | Persist Markdown/YAML session artifacts to disk. |
+| `saveTrace` | `src/config.ts` (`FullConfig`) | `false` | Enable Playwright tracing during tool execution. |
+| `capabilities` | `src/config.ts` (`FullConfig`) | `['core']` | Gate optional tool families (vision, recorder, etc.). |
+| `network.allow` / `network.block` | `src/config.ts` (`NetworkRules`) | Empty lists | Enforce outbound network allow/deny lists per session. |
+| `timeouts` | `src/config.ts` (`TimeoutOverrides`) | CLI defaults | Adjust navigation, action, and wait-for selectors across tools. |
+
 ### Building for production
 ```bash
 npm run build
@@ -97,26 +106,94 @@ The build script compiles TypeScript sources to JavaScript in `lib/`, while `npm
 ### `createConnection(userConfig?: Config, contextGetter?: () => Promise<BrowserContext>): Promise<Server>`
 Resolves configuration, selects an appropriate `BrowserContextFactory`, and returns an MCP server instance configured with `BrowserServerBackend` for embedding inside custom hosts.
 
+```ts
+import { createConnection } from 'mcp-accessibility-scanner';
+
+const server = await createConnection({
+  browser: 'chromium',
+  capabilities: ['core'],
+  saveSession: true,
+});
+
+await server.connect();
+```
+
 ### `BrowserServerBackend`
 Implements the MCP backend contract: filters tools by capability, initializes `Context`/`SessionLog`, parses inputs with Zod schemas, invokes tool handlers, captures results, and serializes responses for transport adapters.
+
+```ts
+import { BrowserServerBackend } from 'mcp-accessibility-scanner/lib/browserServerBackend';
+import { contextFactory } from 'mcp-accessibility-scanner/lib/browserContextFactory';
+
+const backend = new BrowserServerBackend({
+  config,
+  contextFactory: await contextFactory(config),
+});
+
+const { response } = await backend.invokeTool('scan_page', { violationsTag: ['wcag2a'] });
+console.log(response.serialize());
+```
 
 ### `Context`
 Coordinates browser context provisioning, tab lifecycle, network interception, recorder integration, and resource cleanup. Provides helpers such as `ensureTab`, `newTab`, `closeBrowserContext`, `outputFile`, and modal state accessors for tools.
 
+```ts
+const context = new Context(config, await contextFactory(config));
+await context.ensureTab();
+const tab = context.currentTabOrDie();
+await tab.navigate('https://example.com');
+```
+
 ### `Tab`
 Encapsulates a Playwright page, collecting console messages, downloads, modal state transitions, and ARIA snapshots. Supplies `refLocator`, `refLocators`, `waitForCompletion`, `captureSnapshot`, and modal state rendering helpers.
+
+```ts
+const locator = tab.refLocator('#login-button');
+await tab.waitForCompletion(() => locator.click());
+const snapshot = await tab.captureSnapshot();
+```
 
 ### `Response`
 Aggregates result text, code blocks, tab lists, modal state notes, optional ARIA snapshots, and image attachments. `finish()` captures post-action state and `serialize()` emits MCP-compliant content.
 
+```ts
+const response = new Response();
+response.addResult('Navigation complete');
+response.addCode('await page.goto("https://example.com")');
+await response.finish(tab);
+const payload = response.serialize();
+```
+
 ### `SessionLog`
 Creates timestamped session folders, appends Markdown entries for tool runs and user actions, and writes ARIA snapshots as YAML files when session logging is enabled.
+
+```ts
+const log = new SessionLog(config, clientMetadata);
+await log.appendToolRun('scan_page', { violations: 3 });
+await log.dispose();
+```
 
 ### `BrowserContextFactory` strategies
 Persistent, isolated, CDP, and remote factories acquire browsers with tracing directories, manage user-data directories, and close contexts/browsers safely. Extension and VS Code factories adapt the same interface for external connections.
 
+```ts
+import { createPersistentFactory } from 'mcp-accessibility-scanner/lib/browserContextFactory/persistent';
+
+const factory = await createPersistentFactory(config);
+const browserContext = await factory.create();
+// ... perform work ...
+await factory.close();
+```
+
 ### MCP transport helpers
 `src/mcp/server.ts`, `proxyBackend`, and VS Code adapters provide stdio/HTTP transports, multiplexing, and extension bridges without modifying core tool logic.
+
+```ts
+import { createServer } from 'mcp-accessibility-scanner/lib/mcp/server';
+
+const server = createServer({ backend });
+await server.connect();
+```
 
 ## System Diagram
 ```mermaid
