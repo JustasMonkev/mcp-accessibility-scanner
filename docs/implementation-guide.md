@@ -1,7 +1,7 @@
 # MCP Accessibility Scanner – Implementation Guide
 
 ## Project Overview
-The MCP Accessibility Scanner packages a Model Context Protocol (MCP) server that combines Playwright-driven browsing with Axe-core auditing so automations or large language models can inspect live web content for accessibility violations and capture reproducible interaction traces. The published package exposes both a reusable programmatic factory (`createConnection`) and a CLI entry point (`mcp-server-playwright`) that boot the same backend with different transports.
+The MCP Accessibility Scanner packages a Model Context Protocol (MCP) server that combines Playwright-driven browsing with Axe-core auditing so automations or large language models can inspect live web content for accessibility violations and capture reproducible interaction traces. The published package exposes both a reusable programmatic factory (`createConnection`) and a CLI entry point (`mcp-accessibility-scanner`) that boot the same backend with different transports.
 
 ## Architecture & Design
 
