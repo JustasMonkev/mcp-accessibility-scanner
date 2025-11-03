@@ -29,7 +29,8 @@
 		"npm-publish": "npm run clean && npm run build && npm publish"
 	},
 	"dependencies": {
-		"@axe-core/playwright": "^4.10.2",
+		"@axe-core/playwright": "^4.11.0",
+		"@cfworker/json-schema": "^4.1.1",
 		"@modelcontextprotocol/sdk": "^1.18.1",
 		"commander": "^14.0.1",
 		"debug": "^4.4.3",
