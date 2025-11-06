@@ -10,7 +10,6 @@ A powerful Model Context Protocol (MCP) server that provides automated web acces
 
 ### Accessibility Scanning
 ✅ Full WCAG 2.0/2.1/2.2 compliance checking (A, AA, AAA levels)  
-🖼️ Automatic screenshot capture with violation highlighting  
 📄 Detailed JSON reports with remediation guidance  
 🎯 Support for specific violation categories (color contrast, ARIA, forms, keyboard navigation, etc.)  
 
