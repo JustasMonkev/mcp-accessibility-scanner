@@ -101,7 +101,7 @@ describe('Tabs Tools', () => {
 
     it('should throw error when selecting without index', async () => {
       await expect(
-        tabsTool.handle(mockContext, { action: 'select' }, response)
+          tabsTool.handle(mockContext, { action: 'select' }, response)
       ).rejects.toThrow('Tab index is required');
     });
 

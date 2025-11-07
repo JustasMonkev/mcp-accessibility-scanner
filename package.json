@@ -22,7 +22,7 @@
 	],
 	"scripts": {
 		"build": "tsc --project tsconfig.json",
-		"lint": "npm run eslint . && tsc --noEmit",
+		"lint": "eslint . && tsc --noEmit",
 		"watch": "tsc --watch",
 		"run-server": "node lib/browserServer.js",
 		"clean": "rm -rf lib",

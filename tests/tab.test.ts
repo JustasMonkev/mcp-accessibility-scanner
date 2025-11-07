@@ -176,7 +176,7 @@ describe('Tab', () => {
   describe('refLocator', () => {
     it('should get locator for ref', async () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      const locator = await tab.refLocator({ element: 'Submit button', ref: '1' });
+      await tab.refLocator({ element: 'Submit button', ref: '1' });
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
     });
 
@@ -185,7 +185,7 @@ describe('Tab', () => {
       mockPage._snapshotForAI = vi.fn().mockResolvedValue('button "Other"');
 
       await expect(
-        tab.refLocator({ element: 'Submit button', ref: '999' })
+          tab.refLocator({ element: 'Submit button', ref: '999' })
       ).rejects.toThrow('Ref 999 not found');
     });
   });

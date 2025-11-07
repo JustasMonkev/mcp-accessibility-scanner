@@ -28,7 +28,7 @@ describe('Tool Utils', () => {
     mockPage.url = () => 'https://example.com';
     mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
     mockPage.evaluate = vi.fn().mockResolvedValue(undefined);
-    mockPage._wrapApiCall = vi.fn().mockImplementation((cb) => cb());
+    mockPage._wrapApiCall = vi.fn().mockImplementation(cb => cb());
 
     mockTab = {
       page: mockPage,
@@ -154,8 +154,8 @@ describe('Tool Utils', () => {
       await callOnPageNoTrace(mockPage, callback);
 
       expect(mockPage._wrapApiCall).toHaveBeenCalledWith(
-        expect.any(Function),
-        { internal: true }
+          expect.any(Function),
+          { internal: true }
       );
     });
   });

@@ -36,7 +36,7 @@ describe('Common Tools', () => {
     mockTab = {
       page: mockPage,
       modalStates: vi.fn().mockReturnValue([]),
-      waitForCompletion: vi.fn().mockImplementation(async (cb) => await cb()),
+      waitForCompletion: vi.fn().mockImplementation(async cb => await cb()),
     } as any;
 
     mockContext = {
