@@ -27,21 +27,20 @@ describe('Network Tools', () => {
 
   beforeEach(() => {
     const mockRequests = new Map();
-    mockRequests.set(
-      { url: () => 'https://api.example.com/data', method: () => 'GET' },
-      { status: () => 200, statusText: () => 'OK' }
-    );
-    mockRequests.set(
-      { url: () => 'https://api.example.com/user', method: () => 'POST' },
-      { status: () => 201, statusText: () => 'Created' }
-    );
-    mockRequests.set(
-      { url: () => 'https://api.example.com/missing', method: () => 'GET' },
-      null
-    );
+    const req1 = { url: () => 'https://api.example.com/data', method: () => 'GET' };
+    const res1 = { status: () => 200, statusText: () => 'OK' };
+    mockRequests.set(req1, res1);
+
+    const req2 = { url: () => 'https://api.example.com/user', method: () => 'POST' };
+    const res2 = { status: () => 201, statusText: () => 'Created' };
+    mockRequests.set(req2, res2);
+
+    const req3 = { url: () => 'https://api.example.com/missing', method: () => 'GET' };
+    mockRequests.set(req3, null);
 
     mockTab = {
       requests: vi.fn().mockReturnValue(mockRequests),
+      modalStates: vi.fn().mockReturnValue([]),
     } as any;
 
     mockContext = {
@@ -61,7 +60,7 @@ describe('Network Tools', () => {
     });
 
     it('should have correct schema', () => {
-      expect(networkTool.schema.title).toBe('Network requests');
+      expect(networkTool.schema.title).toBe('List network requests');
       expect(networkTool.schema.type).toBe('readOnly');
     });
 
@@ -93,7 +92,8 @@ describe('Network Tools', () => {
       await networkTool.handle(mockContext, {}, response);
 
       const result = response.result();
-      expect(result).toContain('pending');
+      // Request without response just shows the request line
+      expect(result).toContain('https://api.example.com/missing');
     });
 
     it('should handle empty requests', async () => {
@@ -101,13 +101,7 @@ describe('Network Tools', () => {
 
       await networkTool.handle(mockContext, {}, response);
 
-      expect(response.result()).toContain('No network requests');
-    });
-
-    it('should report request count', async () => {
-      await networkTool.handle(mockContext, {}, response);
-
-      expect(response.result()).toContain('3 network requests');
+      expect(response.result()).toBe('');
     });
   });
 

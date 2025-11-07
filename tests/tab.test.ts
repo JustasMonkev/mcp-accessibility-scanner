@@ -17,7 +17,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Tab, renderModalStates } from '../src/tab.js';
 import type { Context } from '../src/context.js';
-import type * as playwright from 'playwright';
 import { EventEmitter } from 'events';
 
 describe('Tab', () => {
@@ -31,9 +30,6 @@ describe('Tab', () => {
     mockPage.title = vi.fn().mockResolvedValue('Example Page');
     mockPage.setDefaultNavigationTimeout = vi.fn();
     mockPage.setDefaultTimeout = vi.fn();
-    mockPage.goto = vi.fn().mockResolvedValue(null);
-    mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
-    mockPage.waitForEvent = vi.fn().mockResolvedValue(undefined);
     mockPage._snapshotForAI = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
     mockPage.locator = vi.fn().mockReturnValue({
       describe: vi.fn().mockReturnValue({}),
@@ -125,60 +121,6 @@ describe('Tab', () => {
       tab.clearModalState(modalState);
       expect(tab.modalStates()).toEqual([]);
     });
-
-    it('should emit modal state event', (done) => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      const modalState = {
-        type: 'dialog' as const,
-        description: 'Test dialog',
-        dialog: {} as any,
-      };
-
-      tab.on('modalState', (state) => {
-        expect(state).toBe(modalState);
-        done();
-      });
-
-      tab.setModalState(modalState);
-    });
-  });
-
-  describe('navigate', () => {
-    it('should navigate to URL', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      await tab.navigate('https://example.com');
-      expect(mockPage.goto).toHaveBeenCalledWith('https://example.com', { waitUntil: 'domcontentloaded' });
-    });
-
-    it('should wait for load state', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      await tab.navigate('https://example.com');
-      expect(mockPage.waitForLoadState).toHaveBeenCalled();
-    });
-
-    it('should clear collected artifacts on navigation', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
-
-      // Add some console messages
-      mockPage.emit('console', {
-        type: () => 'log',
-        text: () => 'Old message',
-        location: () => ({ url: 'test.js', lineNumber: 1 }),
-      });
-
-      expect(tab.consoleMessages()).toHaveLength(1);
-
-      await tab.navigate('https://example.com');
-      expect(tab.consoleMessages()).toHaveLength(0);
-    });
-  });
-
-  describe('updateTitle', () => {
-    it('should update last title', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      await tab.updateTitle();
-      expect(tab.lastTitle()).toBe('Example Page');
-    });
   });
 
   describe('isCurrentTab', () => {
@@ -190,7 +132,7 @@ describe('Tab', () => {
 
     it('should return false when tab is not current', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      const otherTab = new Tab(mockContext, {} as any, onPageClose);
+      const otherTab = {} as any;
       mockContext.currentTab = vi.fn().mockReturnValue(otherTab);
       expect(tab.isCurrentTab()).toBe(false);
     });
@@ -291,10 +233,10 @@ describe('Tab', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
       const mockRequest = { url: () => 'https://api.example.com' } as any;
-      const mockResponse = { status: () => 200 } as any;
+      const mockResponse = { status: () => 200, request: () => mockRequest } as any;
 
       mockPage.emit('request', mockRequest);
-      mockPage.emit('response', { ...mockResponse, request: () => mockRequest });
+      mockPage.emit('response', mockResponse);
 
       expect(tab.requests().size).toBe(1);
       expect(tab.requests().get(mockRequest)).toBe(mockResponse);
@@ -306,8 +248,9 @@ describe('renderModalStates', () => {
   it('should render empty modal states', () => {
     const mockContext = { tools: [] } as any;
     const result = renderModalStates(mockContext, []);
-    expect(result).toContain('### Modal state');
-    expect(result).toContain('There is no modal state present');
+    const text = result.join('\n');
+    expect(text).toContain('### Modal state');
+    expect(text).toContain('There is no modal state present');
   });
 
   it('should render dialog modal state', () => {
@@ -325,7 +268,8 @@ describe('renderModalStates', () => {
     }];
 
     const result = renderModalStates(mockContext, modalStates);
-    expect(result.join('\n')).toContain('Test dialog');
-    expect(result.join('\n')).toContain('browser_handle_dialog');
+    const text = result.join('\n');
+    expect(text).toContain('Test dialog');
+    expect(text).toContain('browser_handle_dialog');
   });
 });

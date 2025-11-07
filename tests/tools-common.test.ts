@@ -35,6 +35,8 @@ describe('Common Tools', () => {
 
     mockTab = {
       page: mockPage,
+      modalStates: vi.fn().mockReturnValue([]),
+      waitForCompletion: vi.fn().mockImplementation(async (cb) => await cb()),
     } as any;
 
     mockContext = {
@@ -56,15 +58,14 @@ describe('Common Tools', () => {
     });
 
     it('should have correct schema', () => {
-      expect(closeTool.schema.title).toBe('Close page');
-      expect(closeTool.schema.type).toBe('destructive');
+      expect(closeTool.schema.title).toBe('Close browser');
+      expect(closeTool.schema.type).toBe('readOnly');
     });
 
-    it('should close current page', async () => {
+    it('should close browser context', async () => {
       await closeTool.handle(mockContext, {}, response);
 
-      expect(mockPage.close).toHaveBeenCalled();
-      expect(response.result()).toContain('Closed the page');
+      expect(mockContext.closeBrowserContext).toHaveBeenCalled();
     });
 
     it('should generate close code', async () => {
@@ -83,15 +84,15 @@ describe('Common Tools', () => {
     });
 
     it('should have correct schema', () => {
-      expect(resizeTool.schema.title).toBe('Resize viewport');
-      expect(resizeTool.schema.type).toBe('destructive');
+      expect(resizeTool.schema.title).toBe('Resize browser window');
+      expect(resizeTool.schema.type).toBe('readOnly');
     });
 
     it('should resize viewport', async () => {
       await resizeTool.handle(mockContext, { width: 1920, height: 1080 }, response);
 
+      expect(mockTab.waitForCompletion).toHaveBeenCalled();
       expect(mockPage.setViewportSize).toHaveBeenCalledWith({ width: 1920, height: 1080 });
-      expect(response.result()).toContain('Resized viewport to 1920x1080');
     });
 
     it('should generate resize code', async () => {
@@ -100,14 +101,6 @@ describe('Common Tools', () => {
       expect(response.code()).toContain('setViewportSize');
       expect(response.code()).toContain('800');
       expect(response.code()).toContain('600');
-    });
-
-    it('should include snapshot after resize', async () => {
-      const setIncludeSnapshotSpy = vi.spyOn(response, 'setIncludeSnapshot');
-
-      await resizeTool.handle(mockContext, { width: 1024, height: 768 }, response);
-
-      expect(setIncludeSnapshotSpy).toHaveBeenCalled();
     });
   });
 

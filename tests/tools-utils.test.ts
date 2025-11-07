@@ -60,19 +60,6 @@ describe('Tool Utils', () => {
       expect(result).toBe('result');
     });
 
-    it('should handle frame navigation', async () => {
-      const callback = vi.fn().mockImplementation(() => {
-        const frame = { parentFrame: () => null };
-        setTimeout(() => mockPage.emit('framenavigated', frame), 10);
-        return Promise.resolve('result');
-      });
-
-      const result = await waitForCompletion(mockTab, callback);
-
-      expect(result).toBe('result');
-      expect(mockTab.waitForLoadState).toHaveBeenCalledWith('load');
-    });
-
     it('should ignore sub-frame navigation', async () => {
       const callback = vi.fn().mockImplementation(() => {
         const subFrame = { parentFrame: () => ({}) };

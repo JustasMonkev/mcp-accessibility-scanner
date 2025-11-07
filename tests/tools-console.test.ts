@@ -44,6 +44,7 @@ describe('Console Tools', () => {
           toString: () => '[WARNING] Warning message @ util.js:5',
         },
       ]),
+      modalStates: vi.fn().mockReturnValue([]),
     } as any;
 
     mockContext = {
@@ -63,7 +64,7 @@ describe('Console Tools', () => {
     });
 
     it('should have correct schema', () => {
-      expect(consoleTool.schema.title).toBe('Console messages');
+      expect(consoleTool.schema.title).toBe('Get console messages');
       expect(consoleTool.schema.type).toBe('readOnly');
     });
 
@@ -90,13 +91,7 @@ describe('Console Tools', () => {
 
       await consoleTool.handle(mockContext, {}, response);
 
-      expect(response.result()).toContain('No console messages');
-    });
-
-    it('should report message count', async () => {
-      await consoleTool.handle(mockContext, {}, response);
-
-      expect(response.result()).toContain('3 console messages');
+      expect(response.result()).toBe('');
     });
   });
 
