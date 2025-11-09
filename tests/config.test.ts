@@ -108,12 +108,12 @@ describe('Config', () => {
 
     it('should use outputDir when specified', async () => {
       const config = await resolveConfig({
-        outputDir: '/custom/output',
+        outputDir: '/tmp/custom/output',
       });
 
       const result = await outputFile(config, '/tmp', 'test.txt');
 
-      expect(result).toContain('/custom/output');
+      expect(result).toContain('/tmp/custom/output');
       expect(result).toContain('test.txt');
     });
 
