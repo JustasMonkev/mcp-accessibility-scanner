@@ -73,9 +73,9 @@ const navigationTimeout = defineTool({
   },
   handle: async (context, params, response) => {
     const tabs = context.tabs();
-    for (const tab of tabs) {
+    for (const tab of tabs)
       tab.page.setDefaultNavigationTimeout(params.timeout);
-    }
+
     response.addResult(`Navigation timeout set to ${params.timeout}ms for all tabs.`);
     response.setIncludeTabs();
   },
@@ -94,9 +94,9 @@ const defaultTimeout = defineTool({
   },
   handle: async (context, params, response) => {
     const tabs = context.tabs();
-    for (const tab of tabs) {
+    for (const tab of tabs)
       tab.page.setDefaultTimeout(params.timeout);
-    }
+
 
     response.addResult(`Default timeout set to ${params.timeout}ms for all tabs.`);
     response.setIncludeTabs();
