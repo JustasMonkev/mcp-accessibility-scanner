@@ -22,11 +22,15 @@
 	],
 	"scripts": {
 		"build": "tsc --project tsconfig.json",
-		"lint": "npm run eslint . && tsc --noEmit",
+		"lint": "eslint . && tsc --noEmit",
 		"watch": "tsc --watch",
 		"run-server": "node lib/browserServer.js",
 		"clean": "rm -rf lib",
-		"npm-publish": "npm run clean && npm run build && npm publish"
+		"npm-publish": "npm run clean && npm run build && npm publish",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"test:ui": "vitest --ui",
+		"test:coverage": "vitest run --coverage"
 	},
 	"dependencies": {
 		"@axe-core/playwright": "^4.11.0",
@@ -53,11 +57,15 @@
 		"@typescript-eslint/eslint-plugin": "^8.44.0",
 		"@typescript-eslint/parser": "^8.44.0",
 		"@typescript-eslint/utils": "^8.44.0",
+		"@vitest/coverage-v8": "^4.0.7",
+		"@vitest/ui": "^4.0.7",
 		"eslint": "^9.35.0",
 		"eslint-plugin-import": "^2.32.0",
 		"eslint-plugin-notice": "^1.0.0",
+		"happy-dom": "^20.0.10",
 		"ts-node": "^10.9.2",
-		"typescript": "^5.9.2"
+		"typescript": "^5.9.2",
+		"vitest": "^4.0.7"
 	},
 	"keywords": [
 		"mcp",
