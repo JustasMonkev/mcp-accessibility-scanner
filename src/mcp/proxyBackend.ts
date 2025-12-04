@@ -115,7 +115,7 @@ export class ProxyBackend implements ServerBackend {
     const client = new Client({ name: 'Playwright MCP Proxy', version: '0.0.0' });
     client.registerCapabilities({
       roots: {
-        listRoots: true,
+        listChanged: true,
       },
     });
     client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: this._roots }));

@@ -126,7 +126,7 @@ class VSCodeProxyBackend implements ServerBackend {
     const client = new Client(this._clientVersion!);
     client.registerCapabilities({
       roots: {
-        listRoots: true,
+        listChanged: true,
       },
     });
     client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: this._roots }));
