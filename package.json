@@ -35,7 +35,7 @@
 	"dependencies": {
 		"@axe-core/playwright": "^4.11.0",
 		"@cfworker/json-schema": "^4.1.1",
-		"@modelcontextprotocol/sdk": "^1.24.0",
+		"@modelcontextprotocol/sdk": "^1.24.3",
 		"commander": "^14.0.1",
 		"debug": "^4.4.3",
 		"dotenv": "^17.2.2",
@@ -43,7 +43,8 @@
 		"playwright": "^1.55.0",
 		"playwright-core": "^1.55.0",
 		"ws": "^8.18.3",
-		"zod-to-json-schema": "^3.24.6"
+		"zod": "^3.25.0",
+		"zod-to-json-schema": "^3.25.0"
 	},
 	"devDependencies": {
 		"@eslint/eslintrc": "^3.3.1",
@@ -84,7 +85,7 @@
 		"url": "git+https://github.com/JustasMonkev/mcp-accessibility-scanner.git"
 	},
 	"engines": {
-		"node": ">=16.0.0"
+		"node": ">=18.0.0"
 	},
 	"publishConfig": {
 		"access": "public"
