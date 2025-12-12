@@ -16,6 +16,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
+import type { JSONSchema7 } from 'json-schema';
 import { toMcpTool, defineToolSchema } from '../src/mcp/tool.js';
 
 describe('mcp/tool', () => {
@@ -38,9 +39,9 @@ describe('mcp/tool', () => {
     expect(tool.annotations?.destructiveHint).toBe(false);
     expect(tool.annotations?.openWorldHint).toBe(true);
 
-    const jsonSchema = tool.inputSchema as any;
+    const jsonSchema = tool.inputSchema as JSONSchema7;
     expect(jsonSchema.type).toBe('object');
-    expect(jsonSchema.properties.url.type).toBe('string');
+    expect((jsonSchema.properties?.url as JSONSchema7)?.type).toBe('string');
   });
 
   it('toMcpTool sets destructiveHint for destructive tools', () => {
@@ -72,4 +73,3 @@ describe('mcp/tool', () => {
     expect(schema.type).toBe('readOnly');
   });
 });
-
