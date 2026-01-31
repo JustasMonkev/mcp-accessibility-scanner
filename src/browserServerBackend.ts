@@ -66,7 +66,7 @@ export class BrowserServerBackend implements ServerBackend {
     const tool = this._tools.find(tool => tool.schema.name === name)!;
     if (!tool)
       throw new Error(`Tool "${name}" not found`);
-    const parsedArguments = tool.schema.inputSchema.parse(rawArguments || {});
+    const parsedArguments = tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, any>;
     const context = this._context!;
     const response = new Response(context, name, parsedArguments);
     context.setRunningTool(name);
