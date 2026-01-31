@@ -1,6 +1,6 @@
 {
 	"name": "mcp-accessibility-scanner",
-	"version": "2.0.4",
+	"version": "2.0.5",
 	"mcpName": "io.github.JustasMonkev/mcp-accessibility-scanner",
 	"description": "A Model Context Protocol (MCP) server for performing automated accessibility scans of web pages using Playwright and Axe-core",
 	"type": "module",
