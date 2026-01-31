@@ -16,7 +16,6 @@
 
 import debug from 'debug';
 import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { ListRootsRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -97,9 +96,9 @@ export class ProxyBackend implements ServerBackend {
         'Connect to a browser using one of the available methods:',
         ...this._mcpProviders.map(factory => `- "${factory.name}": ${factory.description}`),
       ].join('\n'),
-      inputSchema: zodToJsonSchema(z.object({
+      inputSchema: z.toJSONSchema(z.object({
         name: z.enum(this._mcpProviders.map(factory => factory.name) as [string, ...string[]]).default(this._mcpProviders[0].name).describe('The method to use to connect to the browser'),
-      }), { strictUnions: true }) as Tool['inputSchema'],
+      })) as Tool['inputSchema'],
       annotations: {
         title: 'Connect to a browser context',
         readOnlyHint: true,

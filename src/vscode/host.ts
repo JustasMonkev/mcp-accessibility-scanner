@@ -17,7 +17,6 @@
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -110,7 +109,7 @@ class VSCodeProxyBackend implements ServerBackend {
     return {
       name: 'browser_connect',
       description: 'Do not call, this tool is used in the integration with the Playwright VS Code Extension and meant for programmatic usage only.',
-      inputSchema: zodToJsonSchema(contextSwitchOptions, { strictUnions: true }) as Tool['inputSchema'],
+      inputSchema: z.toJSONSchema(contextSwitchOptions) as Tool['inputSchema'],
       annotations: {
         title: 'Connect to a browser running in VS Code.',
         readOnlyHint: true,
