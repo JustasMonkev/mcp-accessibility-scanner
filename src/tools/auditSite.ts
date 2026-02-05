@@ -95,7 +95,7 @@ const auditSiteSchema = z.object({
   maxDepth: z.number().int().min(0).max(5).default(2).describe('Maximum crawl depth for link strategy.'),
   sameOriginOnly: z.boolean().default(true).describe('Restrict crawl to the exact origin of startUrl.'),
   includeSubdomains: z.boolean().default(false).describe('When sameOriginOnly=false, include subdomains of the start host.'),
-  excludePathPatterns: z.array(z.string()).default(defaultExcludePathPatterns).describe('Regex patterns applied to pathname+query.'),
+  excludePathPatterns: z.array(z.string().max(200)).default(defaultExcludePathPatterns).describe('Regex patterns applied to pathname+query. Max 200 chars each.'),
   ignoreQueryParams: z.array(z.string()).default(defaultIgnoreQueryParams).describe('Query parameters dropped during URL normalization.'),
   violationsTag: z.array(z.enum(axeTagValues)).min(1).default([...axeTagValues]).describe('Axe tags to include in scans.'),
   maxNodesPerViolation: z.number().int().min(1).max(50).default(10).describe('Maximum nodes kept per violation in the report.'),
@@ -221,7 +221,14 @@ const auditSite = defineTabTool({
     const startUrlValue = params.startUrl ?? originalTab.page.url();
     const startUrl = new URL(startUrlValue);
     const ignoredParams = new Set(params.ignoreQueryParams.map(param => param.toLowerCase()));
-    const excludePatterns = params.excludePathPatterns.map(pattern => new RegExp(pattern, 'i'));
+    const excludePatterns: RegExp[] = [];
+    for (const pattern of params.excludePathPatterns) {
+      try {
+        excludePatterns.push(new RegExp(pattern, 'i'));
+      } catch {
+        throw new Error(`Invalid excludePathPatterns regex: ${pattern}`);
+      }
+    }
 
     const summaryByViolation = new Map<string, {
       id: string;

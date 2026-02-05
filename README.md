@@ -140,7 +140,7 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 - Always writes a JSON report (default filename: `audit-site-{timestamp}.json`)
 
 **Example flow:**
-```
+```text
 1. Navigate to your site homepage with browser_navigate
 2. Run audit_site with maxPages: 25 and maxDepth: 2
 3. Review the report path returned by the tool (written to the MCP output directory)
@@ -153,7 +153,7 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 - Always writes a JSON report (default filename: `scan-matrix-{timestamp}.json`)
 
 **Example flow:**
-```
+```text
 1. Navigate to a page state you want to validate
 2. Run scan_page_matrix with defaults (or provide custom variants)
 3. Review per-variant deltas and open the generated JSON report path
@@ -166,7 +166,7 @@ Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) wit
 - Always writes a JSON report (default filename: `audit-keyboard-{timestamp}.json`)
 
 **Example flow:**
-```
+```text
 1. Navigate to the target page and let it fully load
 2. Run audit_keyboard with maxTabs: 50
 3. Review focus findings and open the generated JSON report path
