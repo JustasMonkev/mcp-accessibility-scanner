@@ -31,6 +31,9 @@ import tabs from './tools/tabs.js';
 import screenshot from './tools/screenshot.js';
 import wait from './tools/wait.js';
 import verify from './tools/verify.js';
+import auditSite from './tools/auditSite.js';
+import scanPageMatrix from './tools/scanPageMatrix.js';
+import auditKeyboard from './tools/auditKeyboard.js';
 
 import type { Tool } from './tools/tool.js';
 import type { FullConfig } from './config.js';
@@ -53,6 +56,9 @@ export const allTools: Tool<any>[] = [
   ...tabs,
   ...wait,
   ...verify,
+  ...auditSite,
+  ...scanPageMatrix,
+  ...auditKeyboard,
 ];
 
 export function filteredTools(config: FullConfig) {
