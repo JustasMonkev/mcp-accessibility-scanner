@@ -167,9 +167,17 @@ export async function runKeyboardFocusAudit(
         const afterActivation = await callbacks.getActiveElementInfo();
         const urlAfter = callbacks.getCurrentUrl ? await callbacks.getCurrentUrl() : null;
         const navigationOccurred = urlBefore !== null && urlAfter !== null && urlBefore !== urlAfter;
+        let hashChanged = false;
+        if (urlBefore && urlAfter) {
+          try {
+            hashChanged = new URL(urlBefore).hash !== new URL(urlAfter).hash;
+          } catch {
+            // Invalid URLs - skip hash comparison
+          }
+        }
         skipLinkActivation = {
           attempted: true,
-          hashChanged: (urlBefore && urlAfter) ? new URL(urlBefore).hash !== new URL(urlAfter).hash : false,
+          hashChanged,
           focusChanged: buildFingerprint(beforeActivation) !== buildFingerprint(afterActivation),
           scrollChanged: beforeActivation.scrollY !== afterActivation.scrollY || beforeActivation.scrollX !== afterActivation.scrollX,
           navigationOccurred,
@@ -195,6 +203,7 @@ export async function runKeyboardFocusAudit(
         stops.push(stop);
         if (options.stopOnCycle)
           break;
+        continue;
       }
     }
 
@@ -254,6 +263,8 @@ const auditKeyboard = defineTabTool({
       const activeHandle = await tab.page.evaluateHandle(() => document.activeElement);
       try {
         const [accessibilityNode, elementInfo] = await Promise.all([
+          // Playwright's accessibility.snapshot() is not exposed in the public TS types
+          // but is available at runtime. Cast to `any` to access it.
           (tab.page as any).accessibility.snapshot({ root: activeHandle as any, interestingOnly: false }),
           tab.page.evaluate(element => {
             const current = element as HTMLElement | null;
