@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import fs from 'fs';
+import RE2 from 're2';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import {
@@ -123,7 +124,7 @@ function isAllowedByOrigin(candidate: URL, startUrl: URL, sameOriginOnly: boolea
   return candidate.hostname === startUrl.hostname || candidate.hostname.endsWith(`.${startUrl.hostname}`);
 }
 
-function isExcludedByPath(candidate: URL, excludePatterns: RegExp[]): boolean {
+function isExcludedByPath(candidate: URL, excludePatterns: RE2[]): boolean {
   const value = `${candidate.pathname}${candidate.search}`;
   return excludePatterns.some(pattern => pattern.test(value));
 }
@@ -221,10 +222,10 @@ const auditSite = defineTabTool({
     const startUrlValue = params.startUrl ?? originalTab.page.url();
     const startUrl = new URL(startUrlValue);
     const ignoredParams = new Set(params.ignoreQueryParams.map(param => param.toLowerCase()));
-    const excludePatterns: RegExp[] = [];
+    const excludePatterns: RE2[] = [];
     for (const pattern of params.excludePathPatterns) {
       try {
-        excludePatterns.push(new RegExp(pattern, 'i'));
+        excludePatterns.push(new RE2(pattern, 'i'));
       } catch {
         throw new Error(`Invalid excludePathPatterns regex: ${pattern}`);
       }
