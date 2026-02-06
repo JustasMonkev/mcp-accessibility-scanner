@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import fs from 'fs';
+import RE2 from 're2';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { sanitizeForFilePath } from '../utils/fileUtils.js';
@@ -126,6 +127,7 @@ function isAllowedByOrigin(candidate: URL, startUrl: URL, sameOriginOnly: boolea
   return candidate.hostname === startUrl.hostname || candidate.hostname.endsWith(`.${startUrl.hostname}`);
 }
 
+<<<<<<< HEAD
 function looksLikeUnsafeRegexPattern(pattern: string): boolean {
   const nestedQuantifierPattern = /\((?:[^()\\]|\\.)*[+*{](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+(?:,\d*)?\})/;
   const repeatedWildcardPattern = /(?:\.\*){2,}/;
@@ -165,6 +167,9 @@ function safeIsoTimestampForFileName() {
 }
 
 function isExcludedByPath(candidate: URL, excludePatterns: RegExp[]): boolean {
+=======
+function isExcludedByPath(candidate: URL, excludePatterns: RE2[]): boolean {
+>>>>>>> cd9f52e (fix: use RE2 engine for excludePathPatterns to prevent ReDoS)
   const value = `${candidate.pathname}${candidate.search}`;
   return excludePatterns.some(pattern => pattern.test(value));
 }
@@ -262,7 +267,18 @@ const auditSite = defineTabTool({
     const activeTabUrl = originalTab.page.url();
     const startUrl = parseStartUrl(params.startUrl, activeTabUrl);
     const ignoredParams = new Set(params.ignoreQueryParams.map(param => param.toLowerCase()));
+<<<<<<< HEAD
     const excludePatterns = buildExcludePathPatterns(params.excludePathPatterns);
+=======
+    const excludePatterns: RE2[] = [];
+    for (const pattern of params.excludePathPatterns) {
+      try {
+        excludePatterns.push(new RE2(pattern, 'i'));
+      } catch {
+        throw new Error(`Invalid excludePathPatterns regex: ${pattern}`);
+      }
+    }
+>>>>>>> cd9f52e (fix: use RE2 engine for excludePathPatterns to prevent ReDoS)
 
     const summaryByViolation = new Map<string, {
       id: string;
