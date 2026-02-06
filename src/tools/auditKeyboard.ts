@@ -1,5 +1,6 @@
 import fs from 'fs';
 import { z } from 'zod';
+import { safeTimestamp } from './axe.js';
 import { defineTabTool } from './tool.js';
 
 type PressableKey = 'Tab' | 'Shift+Tab' | 'Enter';
@@ -334,7 +335,7 @@ const auditKeyboard = defineTabTool({
     };
 
     const captureScreenshot = async (label: string): Promise<string> => {
-      const fileName = await tab.context.outputFile(`${label}-${new Date().toISOString()}.png`);
+      const fileName = await tab.context.outputFile(`${label}-${safeTimestamp()}.png`);
       await tab.page.screenshot({ path: fileName, fullPage: true });
       return fileName;
     };
@@ -377,7 +378,7 @@ const auditKeyboard = defineTabTool({
       ...result,
     };
 
-    const reportFileName = params.reportFile ?? `audit-keyboard-${new Date().toISOString()}.json`;
+    const reportFileName = params.reportFile ?? `audit-keyboard-${safeTimestamp()}.json`;
     const reportPath = await tab.context.outputFile(reportFileName);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
 

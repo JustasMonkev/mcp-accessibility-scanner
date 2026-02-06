@@ -194,4 +194,91 @@ describe('audit_site tool', () => {
     expect(summaryViolation.totalOccurrences).toBe(2);
     expect(summaryViolation.uniqueOccurrences).toBe(1);
   });
+
+  it('restricts to exact hostname when sameOriginOnly=false and includeSubdomains=false', async () => {
+    const { context, response } = createHarness({
+      'https://example.com/': [
+        'https://example.com/page',
+        'https://sub.example.com/page',
+        'https://other.org/page',
+      ],
+      'https://example.com/page': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 10,
+      maxDepth: 2,
+      sameOriginOnly: false,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    const crawledUrls = report.pages.map((page: any) => page.url);
+    expect(crawledUrls).toContain('https://example.com/page');
+    expect(crawledUrls).not.toContain('https://sub.example.com/page');
+    expect(crawledUrls).not.toContain('https://other.org/page');
+  });
+
+  it('includes subdomains when sameOriginOnly=false and includeSubdomains=true', async () => {
+    const { context, response } = createHarness({
+      'https://example.com/': [
+        'https://example.com/page',
+        'https://sub.example.com/page',
+        'https://other.org/page',
+      ],
+      'https://example.com/page': [],
+      'https://sub.example.com/page': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 10,
+      maxDepth: 2,
+      sameOriginOnly: false,
+      includeSubdomains: true,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    const crawledUrls = report.pages.map((page: any) => page.url);
+    expect(crawledUrls).toContain('https://example.com/page');
+    expect(crawledUrls).toContain('https://sub.example.com/page');
+    expect(crawledUrls).not.toContain('https://other.org/page');
+  });
+
+  it('throws user-friendly error for invalid start URL', async () => {
+    const { context, response } = createHarness({});
+
+    // Override the page URL to return an invalid value
+    (context as any).currentTabOrDie().page.url = vi.fn(() => 'about:blank');
+
+    await expect(tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow('Start URL must use http or https protocol');
+  });
 });

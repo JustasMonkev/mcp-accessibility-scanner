@@ -7,6 +7,7 @@ import {
   axeTagValues,
   dedupeAxeNodes,
   runAxeScan,
+  safeTimestamp,
   summarizeAxeViolations,
   trimAxeResults,
   type AxeTag,
@@ -89,13 +90,13 @@ const crawlStrategySchema = z.enum(['links', 'nav', 'sitemap', 'provided']);
 
 const auditSiteSchema = z.object({
   startUrl: z.string().optional().describe('URL to start the crawl from. Defaults to the current tab URL.'),
-  strategy: crawlStrategySchema.default('links').describe('How to discover pages to scan.'),
+  strategy: crawlStrategySchema.default('links').describe('How to discover pages to scan. "nav" only follows navigation links from the start page (depth 0).'),
   urls: z.array(z.string()).optional().describe('Explicit URL list when strategy is "provided".'),
   sitemapUrl: z.string().optional().describe('URL of the sitemap to fetch when strategy is "sitemap".'),
   maxPages: z.number().int().min(1).max(200).default(25).describe('Maximum pages to scan.'),
-  maxDepth: z.number().int().min(0).max(5).default(2).describe('Maximum crawl depth for link strategy.'),
+  maxDepth: z.number().int().min(0).max(5).default(2).describe('Maximum crawl depth (only applies to "links" strategy).'),
   sameOriginOnly: z.boolean().default(true).describe('Restrict crawl to the exact origin of startUrl.'),
-  includeSubdomains: z.boolean().default(false).describe('When sameOriginOnly=false, include subdomains of the start host.'),
+  includeSubdomains: z.boolean().default(false).describe('When sameOriginOnly=false, also include subdomains of the start host. Default restricts to exact hostname match.'),
   excludePathPatterns: z.array(z.string().max(200)).default(defaultExcludePathPatterns).describe('RE2 regex patterns matched against pathname+query. Max 200 chars each. Backreferences (\\1), lookahead (?=), and lookbehind (?<=) are not supported.'),
   ignoreQueryParams: z.array(z.string()).default(defaultIgnoreQueryParams).describe('Query parameters dropped during URL normalization.'),
   violationsTag: z.array(z.enum(axeTagValues)).min(1).default([...axeTagValues]).describe('Axe tags to include in scans.'),
@@ -119,9 +120,9 @@ function normalizeWhitespace(value: string): string {
 function isAllowedByOrigin(candidate: URL, startUrl: URL, sameOriginOnly: boolean, includeSubdomains: boolean): boolean {
   if (sameOriginOnly)
     return candidate.origin === startUrl.origin;
-  if (!includeSubdomains)
-    return true;
-  return candidate.hostname === startUrl.hostname || candidate.hostname.endsWith(`.${startUrl.hostname}`);
+  if (includeSubdomains)
+    return candidate.hostname === startUrl.hostname || candidate.hostname.endsWith(`.${startUrl.hostname}`);
+  return candidate.hostname === startUrl.hostname;
 }
 
 function isExcludedByPath(candidate: URL, excludePatterns: RE2[]): boolean {
@@ -174,13 +175,33 @@ async function extractNavLinks(page: import('playwright').Page): Promise<string[
   });
 }
 
-async function extractSitemapUrls(page: import('playwright').Page, sitemapUrl: string): Promise<string[]> {
+async function fetchSitemapXml(page: import('playwright').Page, sitemapUrl: string): Promise<string> {
   const response = await page.request.get(sitemapUrl, { timeout: 15000 });
   if (!response.ok())
     throw new Error(`Failed to fetch sitemap ${sitemapUrl}: ${response.status()} ${response.statusText()}`);
-  const xmlText = await response.text();
+  return await response.text();
+}
+
+function extractLocUrls(xmlText: string): string[] {
   const matches = [...xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)];
   return matches.map(match => match[1].replace('<![CDATA[', '').replace(']]>', '').trim()).filter(Boolean);
+}
+
+const MAX_SITEMAP_INDEX_DEPTH = 2;
+
+async function extractSitemapUrls(page: import('playwright').Page, sitemapUrl: string, depth = 0): Promise<string[]> {
+  const xmlText = await fetchSitemapXml(page, sitemapUrl);
+  const isSitemapIndex = /<sitemapindex[\s>]/i.test(xmlText);
+  if (isSitemapIndex && depth < MAX_SITEMAP_INDEX_DEPTH) {
+    const childUrls = extractLocUrls(xmlText);
+    const allPageUrls: string[] = [];
+    for (const childUrl of childUrls) {
+      const childPageUrls = await extractSitemapUrls(page, childUrl, depth + 1);
+      allPageUrls.push(...childPageUrls);
+    }
+    return allPageUrls;
+  }
+  return extractLocUrls(xmlText);
 }
 
 function summarizeTopViolations(violations: SummaryViolation[], count: number): string[] {
@@ -220,7 +241,14 @@ const auditSite = defineTabTool({
     const scanStartedAt = Date.now();
     const startedAtIso = new Date(scanStartedAt).toISOString();
     const startUrlValue = params.startUrl ?? originalTab.page.url();
-    const startUrl = new URL(startUrlValue);
+    let startUrl: URL;
+    try {
+      startUrl = new URL(startUrlValue);
+    } catch {
+      throw new Error(`Invalid start URL: "${startUrlValue}". Navigate to a valid page first or provide startUrl explicitly.`);
+    }
+    if (startUrl.protocol !== 'http:' && startUrl.protocol !== 'https:')
+      throw new Error(`Start URL must use http or https protocol, got "${startUrl.protocol}" from "${startUrlValue}".`);
     const ignoredParams = new Set(params.ignoreQueryParams.map(param => param.toLowerCase()));
     const excludePatterns: RE2[] = [];
     for (const pattern of params.excludePathPatterns) {
@@ -453,7 +481,7 @@ const auditSite = defineTabTool({
       summary,
     };
 
-    const reportFileName = params.reportFile ?? `audit-site-${new Date().toISOString()}.json`;
+    const reportFileName = params.reportFile ?? `audit-site-${safeTimestamp()}.json`;
     const reportPath = await context.outputFile(reportFileName);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
 

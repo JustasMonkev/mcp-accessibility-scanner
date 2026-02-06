@@ -68,6 +68,10 @@ export function trimAxeResults(
   });
 }
 
+export function safeTimestamp(): string {
+  return new Date().toISOString().replaceAll(':', '-');
+}
+
 export function summarizeAxeViolations(violations: TrimmedAxeViolation[]) {
   const byImpact: Record<string, number> = {};
   const byRuleId: Record<string, number> = {};

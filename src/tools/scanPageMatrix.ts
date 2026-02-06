@@ -5,6 +5,7 @@ import {
   axeTagValues,
   dedupeAxeNodes,
   runAxeScan,
+  safeTimestamp,
   summarizeAxeViolations,
   trimAxeResults,
   type AxeTag,
@@ -231,7 +232,7 @@ const scanPageMatrix = defineTabTool({
       variants: variantResults,
     };
 
-    const reportFileName = params.reportFile ?? `scan-matrix-${new Date().toISOString()}.json`;
+    const reportFileName = params.reportFile ?? `scan-matrix-${safeTimestamp()}.json`;
     const reportPath = await tab.context.outputFile(reportFileName);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
 
