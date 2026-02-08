@@ -1,6 +1,7 @@
 import fs from 'fs';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
+import { sanitizeForFilePath } from '../utils/fileUtils.js';
 
 type PressableKey = 'Tab' | 'Shift+Tab' | 'Enter';
 
@@ -98,6 +99,20 @@ function isLikelySkipLink(point: FocusPoint): boolean {
   return /\bskip\b/.test(value);
 }
 
+function didUrlHashChange(urlBefore: string | null, urlAfter: string | null): boolean {
+  if (!urlBefore || !urlAfter)
+    return false;
+  try {
+    return new URL(urlBefore).hash !== new URL(urlAfter).hash;
+  } catch {
+    return false;
+  }
+}
+
+function safeIsoTimestampForFileName() {
+  return sanitizeForFilePath(new Date().toISOString());
+}
+
 async function maybeCaptureIssueScreenshot(
   options: KeyboardAuditOptions,
   callbacks: KeyboardAuditCallbacks,
@@ -167,17 +182,9 @@ export async function runKeyboardFocusAudit(
         const afterActivation = await callbacks.getActiveElementInfo();
         const urlAfter = callbacks.getCurrentUrl ? await callbacks.getCurrentUrl() : null;
         const navigationOccurred = urlBefore !== null && urlAfter !== null && urlBefore !== urlAfter;
-        let hashChanged = false;
-        if (urlBefore && urlAfter) {
-          try {
-            hashChanged = new URL(urlBefore).hash !== new URL(urlAfter).hash;
-          } catch {
-            // Invalid URLs - skip hash comparison
-          }
-        }
         skipLinkActivation = {
           attempted: true,
-          hashChanged,
+          hashChanged: didUrlHashChange(urlBefore, urlAfter),
           focusChanged: buildFingerprint(beforeActivation) !== buildFingerprint(afterActivation),
           scrollChanged: beforeActivation.scrollY !== afterActivation.scrollY || beforeActivation.scrollX !== afterActivation.scrollX,
           navigationOccurred,
@@ -191,6 +198,7 @@ export async function runKeyboardFocusAudit(
     }
 
     if (options.checkFocusTrap) {
+      let shouldStopOnCycle = false;
       const recentStops = stops.slice(Math.max(0, stops.length - options.cycleWindow + 1));
       const foundRepeat = recentStops.some(previous => previous.fingerprint === stop.fingerprint);
       const touchedDocumentRoot = recentStops.some(previous => previous.tagName === 'HTML' || previous.tagName === 'BODY') || stop.tagName === 'HTML' || stop.tagName === 'BODY';
@@ -200,11 +208,13 @@ export async function runKeyboardFocusAudit(
         focusTrapRecentFingerprints = [...recentStops.map(previous => previous.fingerprint), stop.fingerprint];
         stop.issues.push('possible-focus-trap');
         await maybeCaptureIssueScreenshot(options, callbacks, screenshots, `focus-trap-${step}`);
-        stops.push(stop);
         if (options.stopOnCycle)
-          break;
-        continue;
+          shouldStopOnCycle = true;
       }
+      stops.push(stop);
+      if (shouldStopOnCycle)
+        break;
+      continue;
     }
 
     stops.push(stop);
@@ -263,8 +273,7 @@ const auditKeyboard = defineTabTool({
       const activeHandle = await tab.page.evaluateHandle(() => document.activeElement);
       try {
         const [accessibilityNode, elementInfo] = await Promise.all([
-          // Playwright's accessibility.snapshot() is not exposed in the public TS types
-          // but is available at runtime. Cast to `any` to access it.
+          // Playwright exposes this API at runtime, but not all typings include it on Page.
           (tab.page as any).accessibility.snapshot({ root: activeHandle as any, interestingOnly: false }),
           tab.page.evaluate(element => {
             const current = element as HTMLElement | null;
@@ -334,7 +343,7 @@ const auditKeyboard = defineTabTool({
     };
 
     const captureScreenshot = async (label: string): Promise<string> => {
-      const fileName = await tab.context.outputFile(`${label}-${new Date().toISOString()}.png`);
+      const fileName = await tab.context.outputFile(`${sanitizeForFilePath(label)}-${safeIsoTimestampForFileName()}.png`);
       await tab.page.screenshot({ path: fileName, fullPage: true });
       return fileName;
     };
@@ -377,7 +386,7 @@ const auditKeyboard = defineTabTool({
       ...result,
     };
 
-    const reportFileName = params.reportFile ?? `audit-keyboard-${new Date().toISOString()}.json`;
+    const reportFileName = sanitizeForFilePath(params.reportFile ?? `audit-keyboard-${safeIsoTimestampForFileName()}.json`);
     const reportPath = await tab.context.outputFile(reportFileName);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
 

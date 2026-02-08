@@ -1,6 +1,7 @@
 import fs from 'fs';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
+import { sanitizeForFilePath } from '../utils/fileUtils.js';
 import {
   axeTagValues,
   dedupeAxeNodes,
@@ -90,6 +91,10 @@ function normalizeMedia(variantMedia: z.output<typeof variantSchema>['media'] | 
     contrast: variantMedia?.contrast ?? null,
     reducedMotion: variantMedia?.reducedMotion ?? null,
   };
+}
+
+function safeIsoTimestampForFileName() {
+  return sanitizeForFilePath(new Date().toISOString());
 }
 
 function countNodesByRule(violations: TrimmedAxeViolation[]): Record<string, number> {
@@ -231,7 +236,7 @@ const scanPageMatrix = defineTabTool({
       variants: variantResults,
     };
 
-    const reportFileName = params.reportFile ?? `scan-matrix-${new Date().toISOString()}.json`;
+    const reportFileName = sanitizeForFilePath(params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`);
     const reportPath = await tab.context.outputFile(reportFileName);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
 

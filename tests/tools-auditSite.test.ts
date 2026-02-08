@@ -32,8 +32,8 @@ function createAxeResult(url: string, violations: any[]) {
   } as any;
 }
 
-function createHarness(linkMap: Record<string, string[]>) {
-  const startUrl = 'https://example.com/';
+function createHarness(linkMap: Record<string, string[]>, options?: { startUrl?: string }) {
+  const startUrl = options?.startUrl ?? 'https://example.com/';
   let currentUrl = 'about:blank';
 
   const crawlPage = {
@@ -193,5 +193,67 @@ describe('audit_site tool', () => {
     expect(summaryViolation.pagesAffected).toHaveLength(2);
     expect(summaryViolation.totalOccurrences).toBe(2);
     expect(summaryViolation.uniqueOccurrences).toBe(1);
+  });
+
+  it('throws a clear error when the active tab URL is not http(s)', async () => {
+    const { context, response } = createHarness({}, { startUrl: 'about:blank' });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow('Start URL must use http:// or https://');
+  });
+
+  it('rejects unsafe excludePathPatterns', async () => {
+    const { context, response } = createHarness({});
+
+    await expect(tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['(a+)+$'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow('excludePathPatterns[0] appears too complex');
+  });
+
+  it('includes subdomains when sameOriginOnly=true and includeSubdomains=true', async () => {
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://sub.example.com/page', 'https://external.example.org/path'],
+      'https://sub.example.com/page': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: true,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    const crawledUrls = report.pages.map((page: any) => page.url);
+    expect(crawledUrls).toContain('https://sub.example.com/page');
+    expect(crawledUrls).not.toContain('https://external.example.org/path');
   });
 });

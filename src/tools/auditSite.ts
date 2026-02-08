@@ -1,8 +1,8 @@
 import crypto from 'crypto';
 import fs from 'fs';
-import RE2 from 're2';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
+import { sanitizeForFilePath } from '../utils/fileUtils.js';
 import {
   axeTagValues,
   dedupeAxeNodes,
@@ -77,6 +77,8 @@ const defaultExcludePathPatterns = [
   'logout|signout',
 ];
 
+const maxExcludeRegexPatternLength = 200;
+
 const impactPriority: Record<string, number> = {
   critical: 0,
   serious: 1,
@@ -94,9 +96,9 @@ const auditSiteSchema = z.object({
   sitemapUrl: z.string().optional().describe('URL of the sitemap to fetch when strategy is "sitemap".'),
   maxPages: z.number().int().min(1).max(200).default(25).describe('Maximum pages to scan.'),
   maxDepth: z.number().int().min(0).max(5).default(2).describe('Maximum crawl depth for link strategy.'),
-  sameOriginOnly: z.boolean().default(true).describe('Restrict crawl to the exact origin of startUrl.'),
-  includeSubdomains: z.boolean().default(false).describe('When sameOriginOnly=false, include subdomains of the start host.'),
-  excludePathPatterns: z.array(z.string().max(200)).default(defaultExcludePathPatterns).describe('RE2 regex patterns matched against pathname+query. Max 200 chars each. Backreferences (\\1), lookahead (?=), and lookbehind (?<=) are not supported.'),
+  sameOriginOnly: z.boolean().default(true).describe('Restrict crawl to the start origin/host.'),
+  includeSubdomains: z.boolean().default(false).describe('When sameOriginOnly=true, allow subdomains of the start host.'),
+  excludePathPatterns: z.array(z.string()).default(defaultExcludePathPatterns).describe('Regex patterns applied to pathname+query. Avoid complex nested quantifiers to prevent performance issues.'),
   ignoreQueryParams: z.array(z.string()).default(defaultIgnoreQueryParams).describe('Query parameters dropped during URL normalization.'),
   violationsTag: z.array(z.enum(axeTagValues)).min(1).default([...axeTagValues]).describe('Axe tags to include in scans.'),
   maxNodesPerViolation: z.number().int().min(1).max(50).default(10).describe('Maximum nodes kept per violation in the report.'),
@@ -117,14 +119,52 @@ function normalizeWhitespace(value: string): string {
 }
 
 function isAllowedByOrigin(candidate: URL, startUrl: URL, sameOriginOnly: boolean, includeSubdomains: boolean): boolean {
-  if (sameOriginOnly)
-    return candidate.origin === startUrl.origin;
-  if (!includeSubdomains)
+  if (!sameOriginOnly)
     return true;
+  if (!includeSubdomains)
+    return candidate.origin === startUrl.origin;
   return candidate.hostname === startUrl.hostname || candidate.hostname.endsWith(`.${startUrl.hostname}`);
 }
 
-function isExcludedByPath(candidate: URL, excludePatterns: RE2[]): boolean {
+function looksLikeUnsafeRegexPattern(pattern: string): boolean {
+  const nestedQuantifierPattern = /\((?:[^()\\]|\\.)*[+*{](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+(?:,\d*)?\})/;
+  const repeatedWildcardPattern = /(?:\.\*){2,}/;
+  return nestedQuantifierPattern.test(pattern) || repeatedWildcardPattern.test(pattern);
+}
+
+function buildExcludePathPatterns(patterns: string[]): RegExp[] {
+  return patterns.map((pattern, index) => {
+    if (pattern.length > maxExcludeRegexPatternLength)
+      throw new Error(`excludePathPatterns[${index}] is too long (${pattern.length}). Maximum supported length is ${maxExcludeRegexPatternLength}.`);
+    if (looksLikeUnsafeRegexPattern(pattern))
+      throw new Error(`excludePathPatterns[${index}] appears too complex and may cause regex backtracking issues.`);
+    try {
+      return new RegExp(pattern, 'i');
+    } catch (error) {
+      const errorText = error instanceof Error ? error.message : String(error);
+      throw new Error(`Invalid regex in excludePathPatterns[${index}] ("${pattern}"): ${errorText}`);
+    }
+  });
+}
+
+function parseStartUrl(startUrlInput: string | undefined, activeTabUrl: string): URL {
+  const startUrlValue = startUrlInput ?? activeTabUrl;
+  let startUrl: URL;
+  try {
+    startUrl = new URL(startUrlValue);
+  } catch {
+    throw new Error(`Invalid start URL "${startUrlValue}". Provide params.startUrl with an absolute http(s) URL or navigate the active tab (currently "${activeTabUrl}") first.`);
+  }
+  if (startUrl.protocol !== 'http:' && startUrl.protocol !== 'https:')
+    throw new Error(`Start URL must use http:// or https://. Received "${startUrlValue}" (active tab: "${activeTabUrl}").`);
+  return startUrl;
+}
+
+function safeIsoTimestampForFileName() {
+  return sanitizeForFilePath(new Date().toISOString());
+}
+
+function isExcludedByPath(candidate: URL, excludePatterns: RegExp[]): boolean {
   const value = `${candidate.pathname}${candidate.search}`;
   return excludePatterns.some(pattern => pattern.test(value));
 }
@@ -219,17 +259,10 @@ const auditSite = defineTabTool({
 
     const scanStartedAt = Date.now();
     const startedAtIso = new Date(scanStartedAt).toISOString();
-    const startUrlValue = params.startUrl ?? originalTab.page.url();
-    const startUrl = new URL(startUrlValue);
+    const activeTabUrl = originalTab.page.url();
+    const startUrl = parseStartUrl(params.startUrl, activeTabUrl);
     const ignoredParams = new Set(params.ignoreQueryParams.map(param => param.toLowerCase()));
-    const excludePatterns: RE2[] = [];
-    for (const pattern of params.excludePathPatterns) {
-      try {
-        excludePatterns.push(new RE2(pattern, 'i'));
-      } catch {
-        throw new Error(`Invalid excludePathPatterns regex: ${pattern}. Patterns use RE2 syntax (backreferences and lookaround are not supported).`);
-      }
-    }
+    const excludePatterns = buildExcludePathPatterns(params.excludePathPatterns);
 
     const summaryByViolation = new Map<string, {
       id: string;
@@ -453,7 +486,7 @@ const auditSite = defineTabTool({
       summary,
     };
 
-    const reportFileName = params.reportFile ?? `audit-site-${new Date().toISOString()}.json`;
+    const reportFileName = sanitizeForFilePath(params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`);
     const reportPath = await context.outputFile(reportFileName);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
 
