@@ -124,7 +124,8 @@ function isAllowedByOrigin(candidate: URL, startUrl: URL, sameOriginOnly: boolea
     return true;
   if (!includeSubdomains)
     return candidate.origin === startUrl.origin;
-  return candidate.hostname === startUrl.hostname || candidate.hostname.endsWith(`.${startUrl.hostname}`);
+  const hostMatch = candidate.hostname === startUrl.hostname || candidate.hostname.endsWith(`.${startUrl.hostname}`);
+  return hostMatch && candidate.protocol === startUrl.protocol;
 }
 
 function buildExcludePathPatterns(patterns: string[]): RE2[] {
