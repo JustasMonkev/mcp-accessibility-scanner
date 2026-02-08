@@ -181,10 +181,12 @@ export async function runKeyboardFocusAudit(
         await callbacks.pressKey('Enter');
         const afterActivation = await callbacks.getActiveElementInfo();
         const urlAfter = callbacks.getCurrentUrl ? await callbacks.getCurrentUrl() : null;
-        const navigationOccurred = urlBefore !== null && urlAfter !== null && urlBefore !== urlAfter;
+        const hashChanged = didUrlHashChange(urlBefore, urlAfter);
+        const fullUrlChanged = urlBefore !== null && urlAfter !== null && urlBefore !== urlAfter;
+        const navigationOccurred = fullUrlChanged && !hashChanged;
         skipLinkActivation = {
           attempted: true,
-          hashChanged: didUrlHashChange(urlBefore, urlAfter),
+          hashChanged,
           focusChanged: buildFingerprint(beforeActivation) !== buildFingerprint(afterActivation),
           scrollChanged: beforeActivation.scrollY !== afterActivation.scrollY || beforeActivation.scrollX !== afterActivation.scrollX,
           navigationOccurred,
@@ -270,76 +272,65 @@ const auditKeyboard = defineTabTool({
 
   handle: async (tab, params, response) => {
     const getActiveElementInfo = async (): Promise<FocusPoint> => {
-      const activeHandle = await tab.page.evaluateHandle(() => document.activeElement);
-      try {
-        const [accessibilityNode, elementInfo] = await Promise.all([
-          // Playwright exposes this API at runtime, but not all typings include it on Page.
-          (tab.page as any).accessibility.snapshot({ root: activeHandle as any, interestingOnly: false }),
-          tab.page.evaluate(element => {
-            const current = element as HTMLElement | null;
-            const scrollX = window.scrollX;
-            const scrollY = window.scrollY;
-            if (!current) {
-              return {
-                tagName: null,
-                id: null,
-                href: null,
-                text: null,
-                boundingBox: null,
-                inViewport: false,
-                hasVisibleIndicator: false,
-                scrollX,
-                scrollY,
-              };
-            }
+      return await tab.page.evaluate(() => {
+        const current = document.activeElement as HTMLElement | null;
+        const scrollX = window.scrollX;
+        const scrollY = window.scrollY;
+        if (!current) {
+          return {
+            role: null,
+            name: null,
+            tagName: null,
+            id: null,
+            href: null,
+            text: null,
+            boundingBox: null,
+            inViewport: false,
+            hasVisibleIndicator: false,
+            scrollX,
+            scrollY,
+          };
+        }
 
-            const rect = current.getBoundingClientRect();
-            const style = window.getComputedStyle(current);
-            const outlineWidth = Number.parseFloat(style.outlineWidth || '0');
-            const hasOutline = outlineWidth > 0 && style.outlineStyle !== 'none';
-            const hasBoxShadow = style.boxShadow !== 'none';
-            const inViewport = rect.width > 0
-              && rect.height > 0
-              && rect.bottom >= 0
-              && rect.right >= 0
-              && rect.top <= window.innerHeight
-              && rect.left <= window.innerWidth;
+        const role = current.getAttribute('role') || current.tagName.toLowerCase();
+        const name = current.getAttribute('aria-label')
+          || current.getAttribute('aria-labelledby') && document.getElementById(current.getAttribute('aria-labelledby')!)?.textContent?.trim()
+          || current.getAttribute('title')
+          || (current instanceof HTMLInputElement || current instanceof HTMLTextAreaElement ? current.labels?.[0]?.textContent?.trim() : null)
+          || current.textContent?.trim().slice(0, 200)
+          || null;
 
-            return {
-              tagName: current.tagName,
-              id: current.id || null,
-              href: current instanceof HTMLAnchorElement ? current.href : null,
-              text: current.textContent?.trim().slice(0, 200) || null,
-              boundingBox: rect.width > 0 || rect.height > 0 ? {
-                x: rect.x,
-                y: rect.y,
-                width: rect.width,
-                height: rect.height,
-              } : null,
-              inViewport,
-              hasVisibleIndicator: hasOutline || hasBoxShadow,
-              scrollX,
-              scrollY,
-            };
-          }, activeHandle),
-        ]);
+        const rect = current.getBoundingClientRect();
+        const style = window.getComputedStyle(current);
+        const outlineWidth = Number.parseFloat(style.outlineWidth || '0');
+        const hasOutline = outlineWidth > 0 && style.outlineStyle !== 'none';
+        const hasBoxShadow = style.boxShadow !== 'none';
+        const inViewport = rect.width > 0
+          && rect.height > 0
+          && rect.bottom >= 0
+          && rect.right >= 0
+          && rect.top <= window.innerHeight
+          && rect.left <= window.innerWidth;
 
         return {
-          role: accessibilityNode?.role ?? null,
-          name: accessibilityNode?.name ?? null,
-          tagName: elementInfo.tagName,
-          id: elementInfo.id,
-          href: elementInfo.href,
-          text: elementInfo.text,
-          boundingBox: elementInfo.boundingBox,
-          inViewport: elementInfo.inViewport,
-          hasVisibleIndicator: elementInfo.hasVisibleIndicator,
-          scrollX: elementInfo.scrollX,
-          scrollY: elementInfo.scrollY,
+          role,
+          name: name ? name.slice(0, 200) : null,
+          tagName: current.tagName,
+          id: current.id || null,
+          href: current instanceof HTMLAnchorElement ? current.href : null,
+          text: current.textContent?.trim().slice(0, 200) || null,
+          boundingBox: rect.width > 0 || rect.height > 0 ? {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          } : null,
+          inViewport,
+          hasVisibleIndicator: hasOutline || hasBoxShadow,
+          scrollX,
+          scrollY,
         };
-      } finally {
-        await activeHandle.dispose();
-      }
+      });
     };
 
     const captureScreenshot = async (label: string): Promise<string> => {

@@ -97,7 +97,7 @@ function safeIsoTimestampForFileName() {
   return sanitizeForFilePath(new Date().toISOString());
 }
 
-function countNodesByRule(violations: TrimmedAxeViolation[]): Record<string, number> {
+function countNodesByRule(violations: { id: string; nodes: unknown[] }[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const violation of violations)
     counts[violation.id] = (counts[violation.id] ?? 0) + violation.nodes.length;
@@ -184,7 +184,7 @@ const scanPageMatrix = defineTabTool({
           nodes: dedupeAxeNodes(violation.nodes),
         }));
         const trimmedViolations = trimAxeResults({ violations: dedupedViolations }, { maxNodesPerViolation: params.maxNodesPerViolation });
-        const nodeCountByRuleId = countNodesByRule(trimmedViolations);
+        const nodeCountByRuleId = countNodesByRule(dedupedViolations);
 
         variantResults.push({
           name: variant.name,

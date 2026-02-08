@@ -212,7 +212,7 @@ describe('audit_site tool', () => {
     } as any, response)).rejects.toThrow('Start URL must use http:// or https://');
   });
 
-  it('rejects unsafe excludePathPatterns', async () => {
+  it('rejects invalid excludePathPatterns', async () => {
     const { context, response } = createHarness({});
 
     await expect(tool.handle(context as any, {
@@ -221,12 +221,29 @@ describe('audit_site tool', () => {
       maxDepth: 2,
       sameOriginOnly: true,
       includeSubdomains: false,
-      excludePathPatterns: ['(a+)+$'],
+      excludePathPatterns: ['(a)\\1'],
       ignoreQueryParams: ['utm_source'],
       violationsTag: ['wcag2aa'],
       maxNodesPerViolation: 10,
       waitAfterNavigationMs: 0,
-    } as any, response)).rejects.toThrow('excludePathPatterns[0] appears too complex');
+    } as any, response)).rejects.toThrow('Invalid regex in excludePathPatterns[0]');
+  });
+
+  it('rejects excludePathPatterns that exceed maximum length', async () => {
+    const { context, response } = createHarness({});
+
+    await expect(tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['a'.repeat(201)],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow('excludePathPatterns[0] is too long');
   });
 
   it('includes subdomains when sameOriginOnly=true and includeSubdomains=true', async () => {

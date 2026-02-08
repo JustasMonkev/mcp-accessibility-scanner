@@ -98,7 +98,7 @@ const auditSiteSchema = z.object({
   maxPages: z.number().int().min(1).max(200).default(25).describe('Maximum pages to scan.'),
   maxDepth: z.number().int().min(0).max(5).default(2).describe('Maximum crawl depth for link strategy.'),
   sameOriginOnly: z.boolean().default(true).describe('Restrict crawl to the start origin/host.'),
-  includeSubdomains: z.boolean().default(false).describe('When sameOriginOnly=true, allow subdomains of the start host.'),
+  includeSubdomains: z.boolean().default(false).describe('Only applies when sameOriginOnly=true. When enabled, also allows subdomains of the start host (e.g. blog.example.com when start host is example.com). Ignored when sameOriginOnly=false.'),
   excludePathPatterns: z.array(z.string()).default(defaultExcludePathPatterns).describe('Regex patterns applied to pathname+query. Avoid complex nested quantifiers to prevent performance issues.'),
   ignoreQueryParams: z.array(z.string()).default(defaultIgnoreQueryParams).describe('Query parameters dropped during URL normalization.'),
   violationsTag: z.array(z.enum(axeTagValues)).min(1).default([...axeTagValues]).describe('Axe tags to include in scans.'),
@@ -127,21 +127,12 @@ function isAllowedByOrigin(candidate: URL, startUrl: URL, sameOriginOnly: boolea
   return candidate.hostname === startUrl.hostname || candidate.hostname.endsWith(`.${startUrl.hostname}`);
 }
 
-<<<<<<< HEAD
-function looksLikeUnsafeRegexPattern(pattern: string): boolean {
-  const nestedQuantifierPattern = /\((?:[^()\\]|\\.)*[+*{](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+(?:,\d*)?\})/;
-  const repeatedWildcardPattern = /(?:\.\*){2,}/;
-  return nestedQuantifierPattern.test(pattern) || repeatedWildcardPattern.test(pattern);
-}
-
-function buildExcludePathPatterns(patterns: string[]): RegExp[] {
+function buildExcludePathPatterns(patterns: string[]): RE2[] {
   return patterns.map((pattern, index) => {
     if (pattern.length > maxExcludeRegexPatternLength)
       throw new Error(`excludePathPatterns[${index}] is too long (${pattern.length}). Maximum supported length is ${maxExcludeRegexPatternLength}.`);
-    if (looksLikeUnsafeRegexPattern(pattern))
-      throw new Error(`excludePathPatterns[${index}] appears too complex and may cause regex backtracking issues.`);
     try {
-      return new RegExp(pattern, 'i');
+      return new RE2(pattern, 'i');
     } catch (error) {
       const errorText = error instanceof Error ? error.message : String(error);
       throw new Error(`Invalid regex in excludePathPatterns[${index}] ("${pattern}"): ${errorText}`);
@@ -166,10 +157,7 @@ function safeIsoTimestampForFileName() {
   return sanitizeForFilePath(new Date().toISOString());
 }
 
-function isExcludedByPath(candidate: URL, excludePatterns: RegExp[]): boolean {
-=======
 function isExcludedByPath(candidate: URL, excludePatterns: RE2[]): boolean {
->>>>>>> cd9f52e (fix: use RE2 engine for excludePathPatterns to prevent ReDoS)
   const value = `${candidate.pathname}${candidate.search}`;
   return excludePatterns.some(pattern => pattern.test(value));
 }
@@ -267,18 +255,7 @@ const auditSite = defineTabTool({
     const activeTabUrl = originalTab.page.url();
     const startUrl = parseStartUrl(params.startUrl, activeTabUrl);
     const ignoredParams = new Set(params.ignoreQueryParams.map(param => param.toLowerCase()));
-<<<<<<< HEAD
     const excludePatterns = buildExcludePathPatterns(params.excludePathPatterns);
-=======
-    const excludePatterns: RE2[] = [];
-    for (const pattern of params.excludePathPatterns) {
-      try {
-        excludePatterns.push(new RE2(pattern, 'i'));
-      } catch {
-        throw new Error(`Invalid excludePathPatterns regex: ${pattern}`);
-      }
-    }
->>>>>>> cd9f52e (fix: use RE2 engine for excludePathPatterns to prevent ReDoS)
 
     const summaryByViolation = new Map<string, {
       id: string;
