@@ -131,6 +131,47 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 - Section 508: `section508`
 - Categories: `cat.aria`, `cat.color`, `cat.forms`, `cat.keyboard`, `cat.language`, `cat.name-role-value`, `cat.parsing`, `cat.semantics`, `cat.sensory-and-visual-cues`, `cat.structure`, `cat.tables`, `cat.text-alternatives`, `cat.time-and-media`
 
+### Audit Tools
+
+#### `audit_site`
+Crawls and scans multiple internal pages, then aggregates violations across the site.
+- Default strategy: link-based BFS from the current URL
+- Supports `links`, `nav`, `sitemap`, and `provided` URL strategies
+- Always writes a JSON report (default filename: `audit-site-{timestamp}.json`)
+
+**Example flow:**
+```text
+1. Navigate to your site homepage with browser_navigate
+2. Run audit_site with maxPages: 25 and maxDepth: 2
+3. Review the report path returned by the tool (written to the MCP output directory)
+```
+
+#### `scan_page_matrix`
+Runs Axe scans on the same page across viewport/media/zoom variants and compares deltas against baseline.
+- Default variants: baseline, mobile, desktop, forced-colors, reduced-motion, zoom-200
+- Supports custom variants and optional reload between variants
+- Always writes a JSON report (default filename: `scan-matrix-{timestamp}.json`)
+
+**Example flow:**
+```text
+1. Navigate to a page state you want to validate
+2. Run scan_page_matrix with defaults (or provide custom variants)
+3. Review per-variant deltas and open the generated JSON report path
+```
+
+#### `audit_keyboard`
+Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) with practical heuristics.
+- Checks skip links, focus visibility, focus jumps, and possible focus traps
+- Optional issue screenshots (`screenshotOnIssue`)
+- Always writes a JSON report (default filename: `audit-keyboard-{timestamp}.json`)
+
+**Example flow:**
+```text
+1. Navigate to the target page and let it fully load
+2. Run audit_keyboard with maxTabs: 50
+3. Review focus findings and open the generated JSON report path
+```
+
 ### Navigation Tools
 
 #### `browser_navigate`
@@ -312,4 +353,3 @@ npm install
 ## License
 
 MIT
-

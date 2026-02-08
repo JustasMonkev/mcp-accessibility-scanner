@@ -200,4 +200,19 @@ export default [
     languageOptions,
     rules: baseRules,
   },
+  {
+    files: [
+      "src/tools/axe.ts",
+      "src/tools/auditSite.ts",
+      "src/tools/scanPageMatrix.ts",
+      "src/tools/auditKeyboard.ts",
+      "tests/tools-auditSite.test.ts",
+      "tests/tools-scanPageMatrix.test.ts",
+      "tests/tools-auditKeyboard.test.ts",
+      "tests/tools-auditSite.integration.test.ts",
+    ],
+    rules: {
+      "notice/notice": 0,
+    },
+  },
 ];

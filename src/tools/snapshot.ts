@@ -18,41 +18,15 @@ import { z } from 'zod';
 import { defineTabTool, defineTool } from './tool.js';
 import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
-import AxeBuilder from '@axe-core/playwright';
-
-
-const tagValues = [
-  'wcag2a', 'wcag2aa', 'wcag2aaa', 'wcag21a', 'wcag21aa', 'wcag21aaa',
-  'wcag22a', 'wcag22aa', 'wcag22aaa', 'section508', 'cat.aria', 'cat.color',
-  'cat.forms', 'cat.keyboard', 'cat.language', 'cat.name-role-value',
-  'cat.parsing', 'cat.semantics', 'cat.sensory-and-visual-cues',
-  'cat.structure', 'cat.tables', 'cat.text-alternatives', 'cat.time-and-media',
-] as const;
-
+import { axeTagValues, dedupeAxeNodes, runAxeScan } from './axe.js';
 
 const scanPageSchema = z.object({
   violationsTag: z
-      .array(z.enum(tagValues))
+      .array(z.enum(axeTagValues))
       .min(1)
-      .default([...tagValues])
+      .default([...axeTagValues])
       .describe('Array of tags to filter violations by. If not specified, all violations are returned.')
 });
-
-type AxeScanResult = Awaited<ReturnType<InstanceType<typeof AxeBuilder>['analyze']>>;
-type AxeViolation = AxeScanResult['violations'][number];
-type AxeNode = AxeViolation['nodes'][number];
-
-const dedupeViolationNodes = (nodes: AxeNode[]): AxeNode[] => {
-  const seen = new Set<string>();
-  return nodes.filter(node => {
-    const key = JSON.stringify({ target: node.target ?? [], html: node.html ?? '' });
-    if (seen.has(key))
-      return false;
-
-    seen.add(key);
-    return true;
-  });
-};
 
 const scanPage = defineTool({
   capability: 'core',
@@ -66,9 +40,7 @@ const scanPage = defineTool({
 
   handle: async (context, params, response) => {
     const tab = context.currentTabOrDie();
-    const axe = new AxeBuilder({ page: tab.page }).withTags(params.violationsTag);
-
-    const results = await axe.analyze();
+    const results = await runAxeScan(tab.page, params.violationsTag);
 
     response.addResult([
       `URL: ${results.url}`,
@@ -78,7 +50,7 @@ const scanPage = defineTool({
 
 
     results.violations.forEach(violation => {
-      const uniqueNodes = dedupeViolationNodes(violation.nodes);
+      const uniqueNodes = dedupeAxeNodes(violation.nodes);
 
       response.addResult([
         '',
