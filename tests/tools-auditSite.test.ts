@@ -32,22 +32,61 @@ function createAxeResult(url: string, violations: any[]) {
   } as any;
 }
 
-function createHarness(linkMap: Record<string, string[]>, options?: { startUrl?: string }) {
+function createHarness(
+  linkMap: Record<string, string[]>,
+  options?: {
+    startUrl?: string;
+    navLinkMap?: Record<string, string[]>;
+    redirectMap?: Record<string, string>;
+    sitemapXmlByUrl?: Record<string, string>;
+  }
+) {
   const startUrl = options?.startUrl ?? 'https://example.com/';
   let currentUrl = 'about:blank';
+  const navLinkMap = options?.navLinkMap ?? {};
+  const redirectMap = options?.redirectMap ?? {};
 
   const crawlPage = {
     url: vi.fn(() => currentUrl),
     title: vi.fn(async () => `Title for ${currentUrl}`),
-    evaluate: vi.fn(async () => linkMap[currentUrl] ?? []),
+    evaluate: vi.fn(async (callback: () => unknown) => {
+      const callbackText = typeof callback === 'function' ? callback.toString() : '';
+      if (callbackText.includes('nav a[href], header a[href], [role="navigation"] a[href]'))
+        return navLinkMap[currentUrl] ?? [];
+      return linkMap[currentUrl] ?? [];
+    }),
   };
 
   const crawlTab: any = {
     page: crawlPage,
     navigate: vi.fn(async (url: string) => {
-      currentUrl = url;
+      currentUrl = redirectMap[url] ?? url;
     }),
     waitForTimeout: vi.fn(async () => undefined),
+  };
+
+  const temporaryTab: any = {
+    page: {
+      request: {
+        get: vi.fn(async (sitemapUrl: string) => {
+          const xmlText = options?.sitemapXmlByUrl?.[sitemapUrl];
+          if (!xmlText) {
+            return {
+              ok: () => false,
+              status: () => 404,
+              statusText: () => 'Not Found',
+              text: async () => '',
+            };
+          }
+          return {
+            ok: () => true,
+            status: () => 200,
+            statusText: () => 'OK',
+            text: async () => xmlText,
+          };
+        }),
+      },
+    },
   };
 
   const originalTab: any = {
@@ -58,10 +97,16 @@ function createHarness(linkMap: Record<string, string[]>, options?: { startUrl?:
   };
 
   const tabs: any[] = [originalTab];
+  let createdSitemapTab = false;
   const context = {
     currentTabOrDie: vi.fn(() => originalTab),
     tabs: vi.fn(() => tabs),
     newTab: vi.fn(async () => {
+      if (options?.sitemapXmlByUrl && !createdSitemapTab) {
+        createdSitemapTab = true;
+        tabs.push(temporaryTab);
+        return temporaryTab;
+      }
       tabs.push(crawlTab);
       return crawlTab;
     }),
@@ -76,6 +121,7 @@ function createHarness(linkMap: Record<string, string[]>, options?: { startUrl?:
 
   originalTab.context = context;
   crawlTab.context = context;
+  temporaryTab.context = context;
 
   const response = new Response(context as any, 'audit_site', {});
 
@@ -83,6 +129,7 @@ function createHarness(linkMap: Record<string, string[]>, options?: { startUrl?:
     context,
     response,
     crawlTab,
+    temporaryTab,
   };
 }
 
@@ -122,6 +169,7 @@ describe('audit_site tool', () => {
     const report = JSON.parse(reportJson);
     expect(report.pages).toHaveLength(2);
     expect(report.pages.some((page: any) => page.url === 'https://example.com/one/deep')).toBe(false);
+    expect(context.selectTab).toHaveBeenCalledWith(0);
   });
 
   it('normalizes and filters internal links and writes report file', async () => {
@@ -302,5 +350,281 @@ describe('audit_site tool', () => {
     const crawledUrls = report.pages.map((page: any) => page.url);
     expect(crawledUrls).toEqual(['https://example.com/start', 'https://example.com/about']);
     expect(report.summary.totals.skippedUrls).toBeGreaterThanOrEqual(1);
+  });
+
+  it('limits crawl to the start URL when maxDepth is 0', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/a', 'https://example.com/b'],
+      'https://example.com/a': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(crawlTab.navigate).toHaveBeenCalledTimes(1);
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages).toHaveLength(1);
+    expect(report.pages[0].url).toBe('https://example.com/');
+  });
+
+  it('uses nav strategy to enqueue only navigation links', async () => {
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/content-only'],
+      'https://example.com/content-only': [],
+      'https://example.com/nav-only': [],
+    }, {
+      navLinkMap: {
+        'https://example.com/': ['https://example.com/nav-only'],
+      },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'nav',
+      maxPages: 10,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    const crawledUrls = report.pages.map((page: any) => page.url);
+    expect(crawledUrls).toContain('https://example.com/nav-only');
+    expect(crawledUrls).not.toContain('https://example.com/content-only');
+  });
+
+  it('scans only provided URLs and does not crawl discovered links', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/a': ['https://example.com/discovered'],
+      'https://example.com/discovered': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/a', 'https://example.com/b'],
+      maxPages: 10,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    const crawledUrls = report.pages.map((page: any) => page.url);
+    expect(crawledUrls).toEqual(['https://example.com/a', 'https://example.com/b']);
+    expect(crawlTab.page.evaluate).not.toHaveBeenCalled();
+  });
+
+  it('supports sitemap strategy by parsing loc entries', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const { context, response, temporaryTab } = createHarness({
+      'https://example.com/one': [],
+      'https://example.com/two': [],
+    }, {
+      sitemapXmlByUrl: {
+        [sitemapUrl]: '<urlset><url><loc>https://example.com/one</loc></url><url><loc>https://example.com/two</loc></url></urlset>',
+      },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(temporaryTab.page.request.get).toHaveBeenCalledWith(sitemapUrl, { timeout: 15000 });
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => page.url)).toEqual(['https://example.com/one', 'https://example.com/two']);
+  });
+
+  it('records errored pages while continuing to scan remaining URLs', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/good': [],
+      'https://example.com/bad': [],
+    });
+    const originalNavigate = crawlTab.navigate;
+    crawlTab.navigate = vi.fn(async (url: string) => {
+      await originalNavigate(url);
+      if (url === 'https://example.com/bad')
+        throw new Error('Navigation timeout');
+    });
+
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/good', 'https://example.com/bad'],
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.summary.totals.erroredPages).toBe(1);
+    expect(report.summary.totals.scannedPages).toBe(1);
+    expect(report.pages.some((page: any) => page.status === 'error')).toBe(true);
+  });
+
+  it('uses active tab URL as startUrl when startUrl is omitted', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/custom-start': [],
+    }, {
+      startUrl: 'https://example.com/custom-start',
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(crawlTab.navigate).toHaveBeenCalledWith('https://example.com/custom-start');
+  });
+
+  it('applies waitAfterNavigationMs before each scan', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/next'],
+      'https://example.com/next': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 10,
+      maxDepth: 1,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 3000,
+    } as any, response);
+
+    expect(crawlTab.waitForTimeout).toHaveBeenCalledTimes(2);
+    expect(crawlTab.waitForTimeout).toHaveBeenNthCalledWith(1, 3000);
+    expect(crawlTab.waitForTimeout).toHaveBeenNthCalledWith(2, 3000);
+  });
+
+  it('handles redirect-like cycles without infinite loops', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/protected': ['https://example.com/login'],
+      'https://example.com/login': ['https://example.com/login', 'https://example.com/protected'],
+    }, {
+      redirectMap: {
+        'https://example.com/protected': 'https://example.com/login',
+      },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      startUrl: 'https://example.com/protected',
+      strategy: 'links',
+      maxPages: 10,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(crawlTab.navigate).toHaveBeenCalledTimes(2);
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages).toHaveLength(2);
+  });
+
+  it('handles SPA-style hash links without crashing', async () => {
+    const { context, response } = createHarness({
+      'https://example.com/app': [
+        'https://example.com/app#/dashboard',
+        'https://example.com/app#/settings',
+        'https://example.com/app?view=home',
+      ],
+      'https://example.com/app?view=home': [],
+    }, {
+      startUrl: 'https://example.com/app',
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 10,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.summary.totals.scannedPages).toBeGreaterThanOrEqual(1);
   });
 });
