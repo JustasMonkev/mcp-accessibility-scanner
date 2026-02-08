@@ -93,10 +93,21 @@ function buildFingerprint(point: FocusPoint): string {
 }
 
 function isLikelySkipLink(point: FocusPoint): boolean {
-  if (point.role !== 'link')
+  const role = (point.role ?? '').toLowerCase();
+  const isLink = role === 'link' || role === 'a' || point.tagName?.toUpperCase() === 'A';
+  if (!isLink)
     return false;
-  const value = `${point.name ?? ''} ${point.text ?? ''}`.toLowerCase();
-  return /\bskip\b/.test(value);
+  const value = `${point.name ?? ''} ${point.text ?? ''} ${point.id ?? ''}`.toLowerCase();
+  if (/\bskip\b/.test(value))
+    return true;
+  if (!point.href)
+    return false;
+  try {
+    const hash = new URL(point.href).hash.toLowerCase();
+    return hash.length > 1 && /(main|content)/.test(hash);
+  } catch {
+    return false;
+  }
 }
 
 function didUrlHashChange(urlBefore: string | null, urlAfter: string | null): boolean {

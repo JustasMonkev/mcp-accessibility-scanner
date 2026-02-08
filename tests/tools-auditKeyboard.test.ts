@@ -182,4 +182,38 @@ describe('runKeyboardFocusAudit', () => {
     expect(result.skipLink.activation?.attempted).toBe(true);
     expect(result.skipLink.activation?.hashChanged).toBe(false);
   });
+
+  it('detects skip links for anchors with implicit role metadata', async () => {
+    const sequence: FocusPoint[] = [
+      focusPoint({ role: 'document', tagName: 'BODY' }),
+      focusPoint({ role: 'a', name: 'Skip to main content', text: 'Skip to main content', tagName: 'A', href: 'https://example.com/#main-content' }),
+    ];
+
+    let index = 0;
+    const result = await runKeyboardFocusAudit({
+      maxTabs: 1,
+      includeShiftTab: false,
+      stopOnCycle: true,
+      cycleWindow: 4,
+      checkSkipLink: true,
+      skipLinkMaxTabs: 3,
+      activateSkipLink: false,
+      checkFocusTrap: false,
+      checkFocusVisibility: false,
+      checkFocusJumps: false,
+      jumpScrollThresholdPx: 800,
+      screenshotOnIssue: false,
+      maxIssueScreenshots: 3,
+    }, {
+      pressKey: vi.fn(async () => undefined),
+      getActiveElementInfo: vi.fn(async () => {
+        const point = sequence[index];
+        index++;
+        return point;
+      }),
+    });
+
+    expect(result.skipLink.found).toBe(true);
+    expect(result.skipLink.step).toBe(1);
+  });
 });

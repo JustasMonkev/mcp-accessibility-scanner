@@ -154,6 +154,19 @@ function parseStartUrl(startUrlInput: string | undefined, activeTabUrl: string):
   return startUrl;
 }
 
+function inferStartUrlFromProvidedUrls(urls: string[] | undefined): string | undefined {
+  for (const rawUrl of urls ?? []) {
+    try {
+      const candidate = new URL(rawUrl);
+      if (candidate.protocol === 'http:' || candidate.protocol === 'https:')
+        return candidate.toString();
+    } catch {
+      // Ignore invalid entries here; validation happens when enqueueing URLs.
+    }
+  }
+  return undefined;
+}
+
 function safeIsoTimestampForFileName() {
   return sanitizeForFilePath(new Date().toISOString());
 }
@@ -254,7 +267,10 @@ const auditSite = defineTabTool({
     const scanStartedAt = Date.now();
     const startedAtIso = new Date(scanStartedAt).toISOString();
     const activeTabUrl = originalTab.page.url();
-    const startUrl = parseStartUrl(params.startUrl, activeTabUrl);
+    const inferredStartUrl = !params.startUrl && params.strategy === 'provided'
+      ? inferStartUrlFromProvidedUrls(params.urls)
+      : undefined;
+    const startUrl = parseStartUrl(params.startUrl ?? inferredStartUrl, activeTabUrl);
     const ignoredParams = new Set(params.ignoreQueryParams.map(param => param.toLowerCase()));
     const excludePatterns = buildExcludePathPatterns(params.excludePathPatterns);
 

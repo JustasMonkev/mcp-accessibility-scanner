@@ -28,6 +28,8 @@ describe('Tab', () => {
     mockPage = new EventEmitter();
     mockPage.url = vi.fn().mockReturnValue('https://example.com');
     mockPage.title = vi.fn().mockResolvedValue('Example Page');
+    mockPage.waitForTimeout = vi.fn().mockResolvedValue(undefined);
+    mockPage._wrapApiCall = vi.fn(async (callback: () => Promise<unknown>) => await callback());
     mockPage.setDefaultNavigationTimeout = vi.fn();
     mockPage.setDefaultTimeout = vi.fn();
     mockPage._snapshotForAI = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
@@ -240,6 +242,14 @@ describe('Tab', () => {
 
       expect(tab.requests().size).toBe(1);
       expect(tab.requests().get(mockRequest)).toBe(mockResponse);
+    });
+  });
+
+  describe('waitForTimeout', () => {
+    it('delegates to page.waitForTimeout when JavaScript is not blocked', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      await tab.waitForTimeout(2750);
+      expect(mockPage.waitForTimeout).toHaveBeenCalledWith(2750);
     });
   });
 });

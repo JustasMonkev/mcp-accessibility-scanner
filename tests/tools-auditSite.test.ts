@@ -273,4 +273,34 @@ describe('audit_site tool', () => {
     expect(crawledUrls).toContain('https://sub.example.com/page');
     expect(crawledUrls).not.toContain('https://external.example.org/path');
   });
+
+  it('uses provided URLs to infer start origin when active tab URL is not http(s)', async () => {
+    const { context, response } = createHarness({
+      'https://example.com/start': [],
+      'https://example.com/about': [],
+      'https://other.example.org/offsite': [],
+    }, { startUrl: 'about:blank' });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/start', 'https://example.com/about', 'https://other.example.org/offsite'],
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    const crawledUrls = report.pages.map((page: any) => page.url);
+    expect(crawledUrls).toEqual(['https://example.com/start', 'https://example.com/about']);
+    expect(report.summary.totals.skippedUrls).toBeGreaterThanOrEqual(1);
+  });
 });
