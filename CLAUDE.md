@@ -1,99 +1,89 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file gives coding agents a practical map of this repository.
 
-## Project Overview
+## What This Repo Is
 
-MCP Accessibility Scanner is a Model Context Protocol (MCP) server that provides automated web accessibility scanning and browser automation. It combines Playwright (browser automation) with Axe-core (WCAG compliance checking) to enable LLMs to perform accessibility audits and interact with web pages.
+`mcp-accessibility-scanner` is a TypeScript MCP server built on Playwright + Axe.
 
-## Build & Development Commands
+- CLI entry: `src/program.ts` (compiled and launched via `cli.js`)
+- Library entry: `src/index.ts` (`createConnection`)
+- MCP backend: `src/browserServerBackend.ts`
+- Runtime browser/session orchestration: `src/context.ts`, `src/tab.ts`
+- Tool registry: `src/tools.ts`
+- Tool implementations: `src/tools/*.ts`
+- MCP transport/helpers: `src/mcp/*`
+
+## Daily Commands
 
 ```bash
-npm run build          # Compile TypeScript to lib/
-npm run lint           # Run ESLint and type check
-npm run test           # Run all tests once
-npm run test:watch     # Run tests in watch mode
-npm run test:coverage  # Run tests with coverage report
-npm run watch          # TypeScript watch mode for development
-npm run clean          # Remove compiled output
+npm run build
+npm run lint
+npm run test
+npm run test:coverage
+npx vitest run tests/<file>.test.ts
 ```
 
-## Architecture
+## Runtime Flow (Mental Model)
 
-### Core Components
+1. `src/program.ts` parses CLI options and resolves config via `resolveCLIConfig`.
+2. It builds a browser context factory from `src/browserContextFactory.ts`.
+3. `BrowserServerBackend` exposes filtered tools to MCP and routes tool calls.
+4. Each tool writes through `Response` (`src/response.ts`) for result text/code/images/snapshots.
+5. `Context` owns tabs/browser context lifecycle; `Tab` owns page-level state (snapshot refs, console, requests, modal states, downloads).
 
-**Context (`src/context.ts`)** - Central orchestrator that manages Playwright browser instance, tab lifecycle, and tool execution. All tools receive Context to access browser state.
+## Tool System (Important)
 
-**Tab (`src/tab.ts`)** - Wraps a Playwright Page. Captures accessibility snapshots using Axe-core, tracks console messages, downloads, and modal states.
+- Define tools with `defineTool` or `defineTabTool` in `src/tools/tool.ts`.
+- Register new tool modules in `src/tools.ts`.
+- `defineTabTool` enforces modal-state safety automatically.
+- Tool schemas are Zod, converted to MCP JSON schema in `src/mcp/tool.ts`.
 
-**Response (`src/response.ts`)** - Builder class that accumulates tool results, code snippets, images, and page snapshots. Formats output for MCP protocol.
+Capability gating in `filteredTools`:
+- Always enabled: capabilities starting with `core` (`core`, `core-tabs`, `core-install`)
+- Optional via config `capabilities`: `pdf`, `vision`, `verify`
 
-**BrowserServerBackend (`src/browserServerBackend.ts`)** - Implements MCP ServerBackend interface. Coordinates tool execution and manages session logging.
+Current tab tools are exposed through:
+- `browser_tabs` (`action: list | new | close | select`) in `src/tools/tabs.ts`
+- `browser_navigation_timeout`
+- `browser_default_timeout`
 
-**Config (`src/config.ts`)** - Zod-validated configuration schema covering browser launch options, timeouts, network rules, and tool capability filtering.
+## Accessibility-Specific Additions In This Fork
 
-### Tool System
+- `audit_site` (`src/tools/auditSite.ts`): crawl + aggregate Axe results, writes JSON report.
+- `scan_page_matrix` (`src/tools/scanPageMatrix.ts`): multi-variant scan (viewport/media/zoom), writes JSON report.
+- `audit_keyboard` (`src/tools/auditKeyboard.ts`): tab-order/focus heuristics, optional issue screenshots, writes JSON report.
 
-Tools are defined in `src/tools/` using the `defineTool()` or `defineTabTool()` pattern from `src/tools/tool.ts`:
+All report-producing tools write to `context.outputFile(...)` and sanitize filenames.
 
-```typescript
-interface Tool {
-  schema: { name, title, description, inputSchema: ZodSchema, type };
-  capability: 'core' | 'tabs' | 'pdf' | 'vision' | ...;
-  handle: (context, args, response) => Promise<void>;
-}
-```
+## Editing Rules That Matter Here
 
-**Tool Categories:**
-- Navigation: `navigate.ts`, `tabs.ts`, `common.ts`
-- Interaction: `mouse.ts`, `keyboard.ts`, `form.ts`
-- Information: `snapshot.ts` (accessibility), `console.ts`, `network.ts`
-- Visual: `screenshot.ts`, `pdf.ts`, `evaluate.ts`
-- Advanced: `files.ts`, `dialogs.ts`, `wait.ts`, `verify.ts`
+- Keep Apache copyright headers in source files.
+- TS is ESM/NodeNext; internal imports in `.ts` use `.js` suffixes.
+- ESLint is strict (`@typescript-eslint/no-floating-promises`, no console, import extension rules, etc.).
+- `tsconfig` is strict mode; keep type safety tight.
 
-### Accessibility Scanning (`src/tools/snapshot.ts`)
+## Testing Guidance
 
-Uses `@axe-core/playwright` AxeBuilder for WCAG compliance checking. Supports:
-- WCAG 2.0/2.1/2.2 at all levels (A/AA/AAA)
-- Section 508
-- Specific categories (color, ARIA, forms, keyboard, etc.)
+- Framework: Vitest (`tests/*.test.ts`).
+- Most tests mock Playwright/tab/context behavior. Follow existing patterns in `tests/tools-*.test.ts`.
+- Coverage thresholds are 90% across lines/functions/branches/statements (see `vitest.config.ts`).
+- If you change tool schemas or names, update tests that validate tool definitions and MCP conversion.
 
-### MCP Protocol (`src/mcp/`)
+## Common Pitfalls
 
-- `server.ts` - MCP server core implementation
-- `http.ts` - HTTP/SSE transport
-- `tool.ts` - Converts Zod schemas to MCP tool schemas
+- README may contain stale tool names; rely on `src/tools/*.ts` as source of truth.
+- `browser_wait_for` caps `time` wait to 30s internally.
+- `browser_take_screenshot` saves full-page images to disk but intentionally does not attach large full-page images to MCP response.
+- Timeout tools currently enforce minimum `30_000ms` even though schema descriptions mention `0`.
 
-### Browser Context Factory Pattern
+## When Adding/Changing A Tool
 
-`BrowserContextFactory` supports multiple browser sources:
-- Standard Playwright (auto-launched)
-- CDP endpoints (connect to existing browser)
-- Browser extension mode
-- Custom context getters for library usage
-
-## Code Standards
-
-**TypeScript**: Strict mode enabled. All code must pass `tsc --noEmit`.
-
-**ESLint Rules** (see `eslint.config.mjs`):
-- No floating promises
-- Import extensions required (`.js` suffix for compiled output)
-- 2-space indentation, semicolons, single quotes
-- No console statements (except stderr)
-
-**Test Coverage**: 90% threshold for lines, functions, branches, statements.
-
-## Testing
-
-Tests use Vitest in `tests/` directory. Most tests mock Playwright components since integration tests require real browsers.
-
-Run a single test file:
-```bash
-npx vitest run tests/response.test.ts
-```
-
-Run tests matching a pattern:
-```bash
-npx vitest run -t "response"
-```
+1. Implement in `src/tools/<topic>.ts` using `defineTool`/`defineTabTool`.
+2. Add precise Zod schema descriptions (they are surfaced directly to MCP clients).
+3. Decide whether to call:
+   - `response.setIncludeSnapshot()` (state changed / snapshot needed)
+   - `response.setIncludeTabs()` (tab list relevant)
+4. Add module export to `src/tools.ts`.
+5. Add/update focused Vitest tests under `tests/`.
+6. Run `npm run lint` and relevant tests before finishing.
