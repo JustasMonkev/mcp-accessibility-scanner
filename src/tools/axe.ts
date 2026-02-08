@@ -1,4 +1,5 @@
-import AxeBuilder from '@axe-core/playwright';
+import { AxeBuilder } from '@axe-core/playwright';
+import type { AxeResults } from 'axe-core';
 
 import type * as playwright from 'playwright';
 
@@ -11,7 +12,7 @@ export const axeTagValues = [
 ] as const;
 
 export type AxeTag = (typeof axeTagValues)[number];
-export type AxeScanResult = Awaited<ReturnType<InstanceType<typeof AxeBuilder>['analyze']>>;
+export type AxeScanResult = AxeResults;
 export type AxeViolation = AxeScanResult['violations'][number];
 export type AxeNode = AxeViolation['nodes'][number];
 

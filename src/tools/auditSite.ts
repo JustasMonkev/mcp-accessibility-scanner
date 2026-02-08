@@ -64,6 +64,19 @@ type SummaryReport = {
   violations: SummaryViolation[];
 };
 
+type ViolationSummaryAggregate = {
+  id: string;
+  impact: AxeViolation['impact'];
+  tags: string[];
+  help: string;
+  helpUrl: string;
+  description: string;
+  pagesAffected: Set<string>;
+  totalOccurrences: number;
+  fingerprints: Set<string>;
+  sampleNodes: SummaryViolation['sampleNodes'];
+};
+
 const defaultIgnoreQueryParams = [
   'utm_source',
   'utm_medium',
@@ -274,18 +287,7 @@ const auditSite = defineTabTool({
     const ignoredParams = new Set(params.ignoreQueryParams.map(param => param.toLowerCase()));
     const excludePatterns = buildExcludePathPatterns(params.excludePathPatterns);
 
-    const summaryByViolation = new Map<string, {
-      id: string;
-      impact: AxeViolation['impact'];
-      tags: string[];
-      help: string;
-      helpUrl: string;
-      description: string;
-      pagesAffected: Set<string>;
-      totalOccurrences: number;
-      fingerprints: Set<string>;
-      sampleNodes: SummaryViolation['sampleNodes'];
-    }>();
+    const summaryByViolation = new Map<string, ViolationSummaryAggregate>();
 
     const enqueueUrl = (rawUrl: string, depth: number, discoveredFrom: string | null) => {
       const normalizedUrl = normalizeUrl(rawUrl, startUrl, ignoredParams);
@@ -383,7 +385,7 @@ const auditSite = defineTabTool({
 
           for (const violation of dedupedViolations) {
             const existingSummary = summaryByViolation.get(violation.id);
-            const summary = existingSummary ?? {
+            const summary: ViolationSummaryAggregate = existingSummary ?? {
               id: violation.id,
               impact: violation.impact,
               tags: [...violation.tags],

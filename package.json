@@ -33,15 +33,15 @@
 		"test:coverage": "vitest run --coverage"
 	},
 	"dependencies": {
-		"@axe-core/playwright": "^4.11.0",
+		"@axe-core/playwright": "^4.11.1",
 		"@cfworker/json-schema": "^4.1.1",
-		"@modelcontextprotocol/sdk": "^1.25.3",
+		"@modelcontextprotocol/sdk": "^1.26.0",
 		"commander": "^14.0.3",
 		"debug": "^4.4.3",
-		"dotenv": "^17.2.3",
+		"dotenv": "^17.2.4",
 		"mime": "^4.1.0",
-		"playwright": "^1.58.1",
-		"playwright-core": "^1.58.1",
+		"playwright": "^1.58.2",
+		"playwright-core": "^1.58.2",
 		"re2": "^1.23.2",
 		"ws": "^8.19.0",
 		"zod": "^4.3.6"
@@ -49,11 +49,11 @@
 	"devDependencies": {
 		"@eslint/eslintrc": "^3.3.3",
 		"@eslint/js": "^9.39.2",
-		"@playwright/test": "^1.58.1",
+		"@playwright/test": "^1.58.2",
 		"@stylistic/eslint-plugin": "^5.7.1",
 		"@types/chrome": "^0.1.36",
 		"@types/debug": "^4.1.12",
-		"@types/node": "^25.1.0",
+		"@types/node": "^25.2.2",
 		"@types/ws": "^8.18.1",
 		"@typescript-eslint/eslint-plugin": "^8.54.0",
 		"@typescript-eslint/parser": "^8.54.0",
@@ -63,7 +63,7 @@
 		"eslint": "^9.39.2",
 		"eslint-plugin-import": "^2.32.0",
 		"eslint-plugin-notice": "^1.0.0",
-		"happy-dom": "^20.4.0",
+		"happy-dom": "^20.5.1",
 		"ts-node": "^10.9.2",
 		"typescript": "^5.9.3",
 		"vitest": "^4.0.18"
