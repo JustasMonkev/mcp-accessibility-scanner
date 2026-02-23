@@ -89,5 +89,9 @@
 	},
 	"publishConfig": {
 		"access": "public"
+	},
+	"overrides": {
+		"minimatch": "10.2.2",
+		"diff": "5.2.2"
 	}
 }
