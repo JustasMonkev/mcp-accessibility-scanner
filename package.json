@@ -92,6 +92,7 @@
 	},
 	"overrides": {
 		"minimatch": "10.2.2",
-		"diff": "5.2.2"
+		"diff": "5.2.2",
+		"rollup": "^4.59.0"
 	}
 }
