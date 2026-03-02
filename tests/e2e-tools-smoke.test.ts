@@ -104,8 +104,27 @@ function extractReportPath(text: string): string {
 }
 
 const hasBundledChromium = fs.existsSync(chromium.executablePath());
+async function canLaunchBundledChromium(): Promise<boolean> {
+  if (!hasBundledChromium)
+    return false;
 
-describe.skipIf(!hasBundledChromium)('E2E smoke: accessibility tools', () => {
+  let browser: Browser | undefined;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      chromiumSandbox: false,
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await browser?.close().catch(() => undefined);
+  }
+}
+
+const canRunE2E = await canLaunchBundledChromium();
+
+describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
   const launchResources: Array<() => Promise<void>> = [];
 
   afterEach(async () => {

@@ -28,6 +28,7 @@
 		"clean": "rm -rf lib",
 		"npm-publish": "npm run clean && npm run build && npm publish",
 		"test": "vitest run",
+		"test:docker": "bash ./tests/docker-smoke.sh",
 		"test:watch": "vitest",
 		"test:ui": "vitest --ui",
 		"test:coverage": "vitest run --coverage"

@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.claude
+node_modules
+coverage
+output
+.DS_Store
+*.log
+npm-debug.log*
+tests

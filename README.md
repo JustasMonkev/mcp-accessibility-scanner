@@ -36,6 +36,48 @@ Using npm:
 npm install -g mcp-accessibility-scanner
 ```
 
+### Installation with Docker
+
+A pre-built image is available on Docker Hub. The image includes Chromium and is pre-configured for containerized use — no extra flags needed.
+
+**Pull from Docker Hub:**
+```bash
+docker pull justasmonkev/mcp-accessibility-scanner
+```
+
+#### Claude Code
+
+```bash
+ claude mcp add mcp-accessibility-scanner -s user -- docker run -i --rm justasmonkev/mcp-accessibility-scanner
+```
+
+To persist screenshots and reports on your host, add a volume mount:
+
+```bash
+claude mcp add mcp-accessibility-scanner -s user \
+  -- docker run -i --rm -v /tmp/mcp-output:/app/output justasmonkev/mcp-accessibility-scanner
+```
+
+Without the `-v` mount, output files only exist inside the container and are lost when it exits.
+
+#### Docker Compose
+
+```bash
+docker compose up -d
+```
+
+#### Build from source
+
+```bash
+docker build -t mcp-accessibility-scanner .
+```
+
+#### Docker smoke test
+
+```bash
+npm run test:docker
+```
+
 ### Installation in VS Code
 
 Install the Accessibility Scanner in VS Code using the VS Code CLI:
