@@ -1,6 +1,6 @@
 {
 	"name": "mcp-accessibility-scanner",
-	"version": "2.0.6",
+	"version": "2.0.7",
 	"mcpName": "io.github.JustasMonkev/mcp-accessibility-scanner",
 	"description": "A Model Context Protocol (MCP) server for performing automated accessibility scans of web pages using Playwright and Axe-core",
 	"type": "module",
@@ -91,7 +91,7 @@
 		"access": "public"
 	},
 	"overrides": {
-		"minimatch": "10.2.2",
+		"minimatch": ">=10.2.3",
 		"diff": "5.2.2",
 		"rollup": "^4.59.0"
 	}
