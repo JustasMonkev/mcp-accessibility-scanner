@@ -14,113 +14,131 @@
  * limitations under the License.
  */
 
-import { program, Option } from 'commander';
+import { program } from 'commander';
 import * as mcpServer from './mcp/server.js';
-import { commaSeparatedList, resolveCLIConfig, semicolonSeparatedList } from './config.js';
+import { resolveCLIConfig } from './config.js';
 import { packageJSON } from './utils/package.js';
 import { Context } from './context.js';
 import { contextFactory } from './browserContextFactory.js';
-import { ProxyBackend } from './mcp/proxyBackend.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
+import { resolveProgramMode } from './programMode.js';
+import { addSharedServerOptions, configureProgramOptions } from './programOptions.js';
+import { callToolDirect, listToolsDirect, toolResultAsText } from './cliDirect.js';
 
 import { runVSCodeTools } from './vscode/host.js';
-import type { MCPProvider } from './mcp/proxyBackend.js';
 
-program
-    .version('Version ' + packageJSON.version)
-    .name(packageJSON.name)
-    .option('--allowed-origins <origins>', 'semicolon-separated list of origins to allow the browser to request. Default is to allow all.', semicolonSeparatedList)
-    .option('--blocked-origins <origins>', 'semicolon-separated list of origins to block the browser from requesting. Blocklist is evaluated before allowlist. If used without the allowlist, requests not matching the blocklist are still allowed.', semicolonSeparatedList)
-    .option('--block-service-workers', 'block service workers')
-    .option('--browser <browser>', 'browser or chrome channel to use, possible values: chrome, firefox, webkit, msedge.')
-    .option('--caps <caps>', 'comma-separated list of additional capabilities to enable, possible values: vision, pdf.', commaSeparatedList)
-    .option('--cdp-endpoint <endpoint>', 'CDP endpoint to connect to.')
-    .option('--config <path>', 'path to the configuration file.')
-    .option('--device <device>', 'device to emulate, for example: "iPhone 15"')
-    .option('--executable-path <path>', 'path to the browser executable.')
-    .option('--extension', 'Connect to a running browser instance (Edge/Chrome only). Requires the "Playwright MCP Bridge" browser extension to be installed.')
-    .option('--headless', 'run browser in headless mode, headed by default')
-    .option('--host <host>', 'host to bind server to. Default is localhost. Use 0.0.0.0 to bind to all interfaces.')
-    .option('--ignore-https-errors', 'ignore https errors')
-    .option('--isolated', 'keep the browser profile in memory, do not save it to disk.')
-    .option('--image-responses <mode>', 'whether to send image responses to the client. Can be "allow" or "omit", Defaults to "allow".')
-    .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
-    .option('--output-dir <path>', 'path to the directory for output files.')
-    .option('--port <port>', 'port to listen on for SSE transport.')
-    .option('--proxy-bypass <bypass>', 'comma-separated domains to bypass proxy, for example ".com,chromium.org,.domain.com"')
-    .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128" or "socks5://myproxy:8080"')
-    .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')
-    .option('--save-trace', 'Whether to save the Playwright Trace of the session into the output directory.')
-    .option('--storage-state <path>', 'path to the storage state file for isolated sessions.')
-    .option('--user-agent <ua string>', 'specify user agent string')
-    .option('--user-data-dir <path>', 'path to the user data directory. If not specified, a temporary directory will be created.')
-    .option('--viewport-size <size>', 'specify browser viewport size in pixels, for example "1280, 720"')
-    .option('--navigation-timeout <ms>', 'maximum time in milliseconds for page navigation. Defaults to 60000ms (60 seconds).', parseInt)
-    .option('--default-timeout <ms>', 'default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).', parseInt)
-    .addOption(new Option('--connect-tool', 'Allow to switch between different browser connection methods.').hideHelp())
-    .addOption(new Option('--vscode', 'VS Code tools.').hideHelp())
-    .addOption(new Option('--vision', 'Legacy option, use --caps=vision instead').hideHelp())
+configureProgramOptions(program)
+    .description('Start the MCP server (default mode).')
     .action(async options => {
       setupExitWatchdog();
-
-      if (options.vision) {
-        // eslint-disable-next-line no-console
-        console.error('The --vision option is deprecated, use --caps=vision instead');
-        options.caps = 'vision';
-      }
-
-      const config = await resolveCLIConfig(options);
-      const browserContextFactory = contextFactory(config);
-      const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath);
-
-      if (options.extension) {
-        const serverBackendFactory: mcpServer.ServerBackendFactory = {
-          name: 'Playwright w/ extension',
-          nameInConfig: 'playwright-extension',
-          version: packageJSON.version,
-          create: () => new BrowserServerBackend(config, extensionContextFactory)
-        };
-        await mcpServer.start(serverBackendFactory, config.server);
-        return;
-      }
-
-      if (options.vscode) {
-        await runVSCodeTools(config);
-        return;
-      }
-
-      if (options.connectTool) {
-        const providers: MCPProvider[] = [
-          {
-            name: 'default',
-            description: 'Starts standalone browser',
-            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, browserContextFactory)),
-          },
-          {
-            name: 'extension',
-            description: 'Connect to a browser using the Playwright MCP extension',
-            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, extensionContextFactory)),
-          },
-        ];
-        const factory: mcpServer.ServerBackendFactory = {
-          name: 'Playwright w/ switch',
-          nameInConfig: 'playwright-switch',
-          version: packageJSON.version,
-          create: () => new ProxyBackend(providers),
-        };
-        await mcpServer.start(factory, config.server);
-        return;
-      }
-
-      const factory: mcpServer.ServerBackendFactory = {
-        name: 'Playwright',
-        nameInConfig: 'playwright',
-        version: packageJSON.version,
-        create: () => new BrowserServerBackend(config, browserContextFactory)
-      };
-      await mcpServer.start(factory, config.server);
+      await runServer(options);
     });
+
+addSharedServerOptions(
+    program.command('serve')
+        .description('Start the MCP server explicitly.'),
+).action(async options => {
+  setupExitWatchdog();
+  await runServer(options);
+});
+
+addSharedServerOptions(
+    program.command('list-tools')
+        .description('List available tools using direct CLI mode (without an MCP client).')
+        .option('--json', 'Print full tool metadata as JSON instead of names only.'),
+).action(async options => {
+  await runCLICommand(async () => {
+    applyLegacyVisionOption(options);
+    const tools = await listToolsDirect(options);
+    if (options.json) {
+      printJSON({ tools });
+      return;
+    }
+    for (const tool of tools)
+      process.stdout.write(`${tool.name}\n`);
+  });
+});
+
+addSharedServerOptions(
+    program.command('call')
+        .description('Call a tool directly using CLI mode (without an MCP client).')
+        .argument('<toolName>', 'Tool name to call')
+        .option('--input <json>', 'JSON object arguments for the tool call.')
+        .option('--input-file <path>', 'Path to a JSON file with tool arguments.')
+        .option('--output <format>', 'Output format: json or text.', 'json'),
+).action(async (toolName: string, options) => {
+  await runCLICommand(async () => {
+    applyLegacyVisionOption(options);
+    const result = await callToolDirect(toolName, options);
+    const format = options.output === 'text' ? 'text' : 'json';
+    if (format === 'text')
+      process.stdout.write(`${toolResultAsText(result)}\n`);
+    else
+      printJSON(result);
+    if (result.isError)
+      process.exitCode = 1;
+  });
+});
+
+async function runServer(options: Record<string, any>) {
+  applyLegacyVisionOption(options);
+
+  const config = await resolveCLIConfig(options);
+  const browserContextFactory = contextFactory(config);
+  const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath);
+  const mode = resolveProgramMode(options);
+
+  if (mode === 'extension') {
+    const serverBackendFactory: mcpServer.ServerBackendFactory = {
+      name: 'Playwright w/ extension',
+      nameInConfig: 'playwright-extension',
+      version: packageJSON.version,
+      create: () => new BrowserServerBackend(config, extensionContextFactory)
+    };
+    await mcpServer.start(serverBackendFactory, config.server);
+    return;
+  }
+
+  if (mode === 'vscode') {
+    await runVSCodeTools(config);
+    return;
+  }
+
+  const factory: mcpServer.ServerBackendFactory = {
+    name: 'Playwright',
+    nameInConfig: 'playwright',
+    version: packageJSON.version,
+    create: () => new BrowserServerBackend(config, browserContextFactory)
+  };
+  await mcpServer.start(factory, config.server);
+}
+
+function applyLegacyVisionOption(options: Record<string, any>) {
+  if (!options.vision)
+    return;
+  // eslint-disable-next-line no-console
+  console.error('The --vision option is deprecated, use --caps=vision instead');
+  options.caps = 'vision';
+}
+
+async function runCLICommand(command: () => Promise<void>) {
+  try {
+    await command();
+  } catch (error: any) {
+    // eslint-disable-next-line no-console
+    console.error(String(error?.message || error));
+    process.exitCode = 1;
+  }
+}
+
+function printJSON(value: unknown) {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+program.showHelpAfterError('(run with --help for usage details)');
+program.configureHelp({ sortSubcommands: true });
+program.configureHelp({ sortOptions: true });
 
 function setupExitWatchdog() {
   let isExiting = false;

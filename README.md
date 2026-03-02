@@ -3,7 +3,6 @@
 
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/justasmonkev-mcp-accessibility-scanner-badge.png)](https://mseep.ai/app/justasmonkev-mcp-accessibility-scanner)
 
-A Model Context Protocol (MCP) server that provides automated web accessibility scanning using Playwright and Axe-core. This server enables LLMs to perform WCAG compliance checks, capture annotated screenshots, and generate detailed accessibility reports.
 A powerful Model Context Protocol (MCP) server that provides automated web accessibility scanning and browser automation using Playwright and Axe-core. This server enables LLMs to perform WCAG compliance checks, interact with web pages, manage persistent browser sessions, and generate detailed accessibility reports with visual annotations.
 
 ## Features
@@ -155,6 +154,75 @@ Create a `config.json` file with the following options:
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
+
+### CLI Mode (Direct Tool Calls)
+
+The same binary can now run as a direct CLI (without an MCP client), which is useful for `SKILL.md` automation.
+
+List tools:
+
+```bash
+npx mcp-accessibility-scanner list-tools
+```
+
+Call a tool with JSON input:
+
+```bash
+npx mcp-accessibility-scanner call browser_navigate --input '{"url":"https://example.com"}'
+```
+
+Call a tool with JSON from a file:
+
+```bash
+npx mcp-accessibility-scanner call scan_page --input-file ./scan-input.json
+```
+
+Output modes:
+- default: JSON (`--output json`)
+- text-only: `--output text`
+
+Explicit MCP server mode:
+
+```bash
+npx mcp-accessibility-scanner serve
+```
+
+Default behavior without subcommand is still MCP server mode.
+
+For local repo runs (without global install), replace `npx mcp-accessibility-scanner` with `node ./cli.js`.
+
+### CLI Self-Test (Local Development)
+
+Use this quick sequence to validate the direct CLI and option wiring:
+
+```bash
+npm run test -- tests/cliDirect.test.ts tests/programMode.test.ts tests/programOptions.test.ts
+npm run build
+npm run lint
+node ./cli.js --help
+node ./cli.js list-tools --help
+node ./cli.js call --help
+node ./cli.js list-tools
+```
+
+Optional runtime smoke test (requires browser launch permissions in your environment):
+
+```bash
+node ./cli.js call browser_tabs --input '{"action":"list"}' --output json
+```
+
+Expected behavior:
+- The command returns valid JSON output.
+- In restricted environments, it may return a structured `isError: true` payload instead of crashing.
+
+### SKILL.md Command Pattern
+
+Example command sequence for a skill:
+
+```bash
+npx mcp-accessibility-scanner call browser_navigate --input '{"url":"https://example.com"}'
+npx mcp-accessibility-scanner call scan_page --input '{"violationsTag":["wcag2aa","wcag21aa","wcag22aa"]}'
+```
 
 ## Available Tools
 
