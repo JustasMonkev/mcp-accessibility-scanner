@@ -43,4 +43,11 @@ describe('configureProgramOptions', () => {
     command.parse(['node', 'test', '--vscode']);
     expect(command.opts().vscode).toBe(true);
   });
+
+  it('parses timeout values with base-10 option parsers', () => {
+    const command = configureProgramOptions(new Command());
+    command.parse(['node', 'test', '--navigation-timeout', '060000', '--default-timeout', '05000']);
+    expect(command.opts().navigationTimeout).toBe(60000);
+    expect(command.opts().defaultTimeout).toBe(5000);
+  });
 });

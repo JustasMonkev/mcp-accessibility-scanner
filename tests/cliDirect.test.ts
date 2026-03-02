@@ -33,12 +33,25 @@ describe('cliDirect', () => {
     it('parses object json from --input-file', async () => {
       const filePath = path.join(os.tmpdir(), `mcp-accessibility-scanner-cli-input-${Date.now()}.json`);
       await fs.writeFile(filePath, '{"key":"value"}', 'utf8');
-      await expect(parseToolInput({ inputFile: filePath })).resolves.toEqual({ key: 'value' });
-      await fs.unlink(filePath);
+      try {
+        await expect(parseToolInput({ inputFile: filePath })).resolves.toEqual({ key: 'value' });
+      } finally {
+        await fs.unlink(filePath).catch(() => {});
+      }
     });
 
     it('rejects when both input flags are used', async () => {
       await expect(parseToolInput({ input: '{}', inputFile: '/tmp/input.json' })).rejects.toThrow('Use either --input or --input-file, not both.');
+    });
+
+    it('rejects empty --input-file content', async () => {
+      const filePath = path.join(os.tmpdir(), `mcp-accessibility-scanner-cli-input-empty-${Date.now()}.json`);
+      await fs.writeFile(filePath, '', 'utf8');
+      try {
+        await expect(parseToolInput({ inputFile: filePath })).rejects.toThrow('input file is empty');
+      } finally {
+        await fs.unlink(filePath).catch(() => {});
+      }
     });
 
     it('rejects non-object json input', async () => {
@@ -56,6 +69,15 @@ describe('cliDirect', () => {
         ],
       } as any);
       expect(text).toBe('first\nsecond');
+    });
+
+    it('falls back to json output when there is no text content', () => {
+      const result = {
+        content: [
+          { type: 'image', data: 'abc', mimeType: 'image/png' },
+        ],
+      } as any;
+      expect(toolResultAsText(result)).toBe(JSON.stringify(result, null, 2));
     });
   });
 });

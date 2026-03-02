@@ -19,6 +19,13 @@ import type { Command } from 'commander';
 import { commaSeparatedList, semicolonSeparatedList } from './config.js';
 import { packageJSON } from './utils/package.js';
 
+function parseMilliseconds(value: string): number {
+  const milliseconds = Number.parseInt(value, 10);
+  if (!Number.isFinite(milliseconds))
+    throw new Error(`Invalid milliseconds value: ${value}`);
+  return milliseconds;
+}
+
 export function addSharedServerOptions(target: Command): Command {
   return target
       .option('--allowed-origins <origins>', 'semicolon-separated list of origins to allow the browser to request. Default is to allow all.', semicolonSeparatedList)
@@ -47,8 +54,8 @@ export function addSharedServerOptions(target: Command): Command {
       .option('--user-agent <ua string>', 'specify user agent string')
       .option('--user-data-dir <path>', 'path to the user data directory. If not specified, a temporary directory will be created.')
       .option('--viewport-size <size>', 'specify browser viewport size in pixels, for example "1280, 720"')
-      .option('--navigation-timeout <ms>', 'maximum time in milliseconds for page navigation. Defaults to 60000ms (60 seconds).', parseInt)
-      .option('--default-timeout <ms>', 'default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).', parseInt)
+      .option('--navigation-timeout <ms>', 'maximum time in milliseconds for page navigation. Defaults to 60000ms (60 seconds).', parseMilliseconds)
+      .option('--default-timeout <ms>', 'default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).', parseMilliseconds)
       .addOption(new Option('--vscode', 'VS Code tools.').hideHelp())
       .addOption(new Option('--vision', 'Legacy option, use --caps=vision instead').hideHelp());
 }

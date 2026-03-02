@@ -180,6 +180,8 @@ npx mcp-accessibility-scanner call scan_page --input-file ./scan-input.json
 Output modes:
 - default: JSON (`--output json`)
 - text-only: `--output text`
+- terminal mode defaults to a persistent session; close it with `browser_close`
+- for automation/non-interactive runs, use `--one-shot` (or run without TTY)
 
 Explicit MCP server mode:
 
@@ -189,7 +191,7 @@ npx mcp-accessibility-scanner serve
 
 Default behavior without subcommand is still MCP server mode.
 
-For local repo runs (without global install), replace `npx mcp-accessibility-scanner` with `node ./cli.js`.
+For local repo runs, use `mcp-accessibility-scanner` (run `npm link` once in this repo to make the binary available globally on your machine).
 
 ### CLI Self-Test (Local Development)
 
@@ -199,21 +201,23 @@ Use this quick sequence to validate the direct CLI and option wiring:
 npm run test -- tests/cliDirect.test.ts tests/programMode.test.ts tests/programOptions.test.ts
 npm run build
 npm run lint
-node ./cli.js --help
-node ./cli.js list-tools --help
-node ./cli.js call --help
-node ./cli.js list-tools
+mcp-accessibility-scanner --help
+mcp-accessibility-scanner list-tools --help
+mcp-accessibility-scanner call --help
+mcp-accessibility-scanner list-tools
 ```
 
 Optional runtime smoke test (requires browser launch permissions in your environment):
 
 ```bash
-node ./cli.js call browser_tabs --input '{"action":"list"}' --output json
+mcp-accessibility-scanner call browser_tabs --input '{"action":"list"}' --output json
 ```
 
 Expected behavior:
 - The command returns valid JSON output.
 - In restricted environments, it may return a structured `isError: true` payload instead of crashing.
+- In terminal usage, `call` keeps the session open and waits for follow-up commands until `browser_close`.
+- In automation/non-interactive usage, `call` runs one-shot unless you explicitly keep the process attached.
 
 ### SKILL.md Command Pattern
 
@@ -344,20 +348,9 @@ Resize the browser window.
 
 ### Tab Management
 
-#### `browser_tab_list`
-List all open browser tabs.
-
-#### `browser_tab_new`
-Open a new tab.
-- Parameters: `url` (optional)
-
-#### `browser_tab_select`
-Select a tab by index.
-- Parameters: `index`
-
-#### `browser_tab_close`
-Close a tab.
-- Parameters: `index` (optional, closes current tab if not provided)
+#### `browser_tabs`
+List, create, close, or select a browser tab.
+- Parameters: `action` (`list`, `new`, `close`, `select`), `index` (optional for `close`, required for `select`)
 
 ### Information & Monitoring Tools
 
@@ -436,10 +429,10 @@ Type text (coordinate-independent).
 
 ### Tab Management
 ```
-1. Open a new tab with browser_tab_new
+1. Open a new tab with browser_tabs + action `new`
 2. Navigate to different pages in each tab
-3. Switch between tabs using browser_tab_select
-4. List all tabs with browser_tab_list
+3. Switch between tabs using browser_tabs + action `select`
+4. List all tabs with browser_tabs + action `list`
 ```
 
 ### Waiting for Dynamic Content

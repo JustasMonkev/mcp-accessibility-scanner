@@ -15,6 +15,7 @@
  */
 
 import { program } from 'commander';
+import readline from 'node:readline/promises';
 import * as mcpServer from './mcp/server.js';
 import { resolveCLIConfig } from './config.js';
 import { packageJSON } from './utils/package.js';
@@ -24,7 +25,7 @@ import { BrowserServerBackend } from './browserServerBackend.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
 import { resolveProgramMode } from './programMode.js';
 import { addSharedServerOptions, configureProgramOptions } from './programOptions.js';
-import { callToolDirect, listToolsDirect, toolResultAsText } from './cliDirect.js';
+import { callToolDirect, callToolErrorResult, listToolsDirect, parseToolInput, runWithBackend, toolResultAsText } from './cliDirect.js';
 
 import { runVSCodeTools } from './vscode/host.js';
 
@@ -66,16 +67,21 @@ addSharedServerOptions(
         .argument('<toolName>', 'Tool name to call')
         .option('--input <json>', 'JSON object arguments for the tool call.')
         .option('--input-file <path>', 'Path to a JSON file with tool arguments.')
+        .option('--one-shot', 'Run one command and close the browser session immediately.')
         .option('--output <format>', 'Output format: json or text.', 'json'),
 ).action(async (toolName: string, options) => {
   await runCLICommand(async () => {
     applyLegacyVisionOption(options);
-    const result = await callToolDirect(toolName, options);
     const format = options.output === 'text' ? 'text' : 'json';
-    if (format === 'text')
-      process.stdout.write(`${toolResultAsText(result)}\n`);
-    else
-      printJSON(result);
+    const oneShot = options.oneShot || !process.stdin.isTTY;
+
+    if (!oneShot) {
+      await runInteractiveSession(toolName, options, format);
+      return;
+    }
+
+    const result = await callToolDirect(toolName, options);
+    writeToolResult(result, format);
     if (result.isError)
       process.exitCode = 1;
   });
@@ -117,18 +123,123 @@ async function runServer(options: Record<string, any>) {
 function applyLegacyVisionOption(options: Record<string, any>) {
   if (!options.vision)
     return;
-  // eslint-disable-next-line no-console
-  console.error('The --vision option is deprecated, use --caps=vision instead');
-  options.caps = 'vision';
+  process.stderr.write('The --vision option is deprecated, use --caps=vision instead\n');
+
+  const caps = normalizeCaps(options.caps);
+  if (!caps.includes('vision'))
+    caps.push('vision');
+  options.caps = caps;
 }
 
 async function runCLICommand(command: () => Promise<void>) {
   try {
     await command();
   } catch (error: any) {
-    // eslint-disable-next-line no-console
-    console.error(String(error?.message || error));
+    process.stderr.write(`${String(error?.message || error)}\n`);
     process.exitCode = 1;
+  }
+}
+
+function writeToolResult(result: mcpServer.CallToolResult, format: 'json' | 'text') {
+  if (format === 'text')
+    process.stdout.write(`${toolResultAsText(result)}\n`);
+  else
+    printJSON(result);
+}
+
+function normalizeCaps(caps: unknown): string[] {
+  if (Array.isArray(caps))
+    return [...caps];
+  if (typeof caps === 'string')
+    return caps.split(',').map(cap => cap.trim()).filter(Boolean);
+  return [];
+}
+
+async function runInteractiveSession(
+  initialToolName: string,
+  options: Record<string, any>,
+  format: 'json' | 'text',
+) {
+  let initialResult: mcpServer.CallToolResult = { content: [] };
+  try {
+    const input = await parseToolInput(options);
+    await runWithBackend(options, async backend => {
+      initialResult = await callToolWithErrorResult(backend, initialToolName, input);
+      writeToolResult(initialResult, format);
+      if (initialResult.isError || initialToolName === 'browser_close')
+        return;
+
+      process.stderr.write('Session is open. Run `<toolName> [json]` and use `browser_close` to close.\n');
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stderr,
+        terminal: true,
+      });
+      try {
+        while (true) {
+          const line = (await rl.question('mcp> ')).trim();
+          if (!line)
+            continue;
+          if (line === 'help') {
+            process.stderr.write('Usage: <toolName> [jsonObject]\n');
+            process.stderr.write('Example: browser_navigate {"url":"https://google.com"}\n');
+            process.stderr.write('Use browser_close to close the session.\n');
+            continue;
+          }
+
+          let parsed: { toolName: string, args: Record<string, any> };
+          try {
+            parsed = parseInteractiveCommand(line);
+          } catch (error) {
+            writeToolResult(callToolErrorResult(error), format);
+            process.exitCode = 1;
+            continue;
+          }
+
+          const result = await callToolWithErrorResult(backend, parsed.toolName, parsed.args);
+          writeToolResult(result, format);
+          if (result.isError)
+            process.exitCode = 1;
+          if (parsed.toolName === 'browser_close' && !result.isError)
+            break;
+        }
+      } finally {
+        rl.close();
+      }
+    });
+  } catch (error) {
+    initialResult = callToolErrorResult(error);
+    writeToolResult(initialResult, format);
+  }
+  if (initialResult.isError)
+    process.exitCode = 1;
+}
+
+function parseInteractiveCommand(line: string): { toolName: string, args: Record<string, any> } {
+  const trimmed = line.trim();
+  const splitAt = trimmed.search(/\s/);
+  if (splitAt === -1)
+    return { toolName: trimmed, args: {} };
+
+  const toolName = trimmed.slice(0, splitAt).trim();
+  const rawJSON = trimmed.slice(splitAt + 1).trim();
+  if (!rawJSON)
+    return { toolName, args: {} };
+  const parsed = JSON.parse(rawJSON);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+    throw new Error('Tool input JSON must be an object.');
+  return { toolName, args: parsed };
+}
+
+async function callToolWithErrorResult(
+  backend: mcpServer.ServerBackend,
+  toolName: string,
+  input: Record<string, any>,
+): Promise<mcpServer.CallToolResult> {
+  try {
+    return await backend.callTool(toolName, input);
+  } catch (error) {
+    return callToolErrorResult(error);
   }
 }
 

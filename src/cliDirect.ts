@@ -43,6 +43,9 @@ export async function parseToolInput(source: ToolInputSource): Promise<Record<st
     ? await fs.readFile(source.inputFile, 'utf8')
     : source.input;
 
+  if (source.inputFile && (!raw || !raw.trim()))
+    throw new Error('Failed to parse tool input JSON: input file is empty.');
+
   if (!raw)
     return {};
 
@@ -68,18 +71,18 @@ export async function createBackendFromOptions(options: DirectCLIOptions): Promi
   return new BrowserServerBackend(config, mode === 'extension' ? extensionContext : browserContext);
 }
 
-async function withBackend<T>(options: DirectCLIOptions, callback: (backend: mcpServer.ServerBackend) => Promise<T>): Promise<T> {
+export async function runWithBackend<T>(options: DirectCLIOptions, callback: (backend: mcpServer.ServerBackend) => Promise<T>): Promise<T> {
   const backend = await createBackendFromOptions(options);
   const cwdRoot = {
     uri: pathToFileURL(process.cwd()).toString(),
     name: 'cwd',
   } as mcpServer.Root;
-  await backend.initialize?.(
-      {} as mcpServer.Server,
-      { name: `${packageJSON.name}-cli`, version: packageJSON.version },
-      [cwdRoot],
-  );
   try {
+    await backend.initialize?.(
+        {} as mcpServer.Server,
+        { name: `${packageJSON.name}-cli`, version: packageJSON.version },
+        [cwdRoot],
+    );
     return await callback(backend);
   } finally {
     backend.serverClosed?.({} as mcpServer.Server);
@@ -88,12 +91,23 @@ async function withBackend<T>(options: DirectCLIOptions, callback: (backend: mcp
 }
 
 export async function listToolsDirect(options: DirectCLIOptions): Promise<mcpServer.Tool[]> {
-  return withBackend(options, backend => backend.listTools());
+  return runWithBackend(options, backend => backend.listTools());
+}
+
+export function callToolErrorResult(error: unknown): mcpServer.CallToolResult {
+  return {
+    content: [{ type: 'text', text: `### Result\n${String((error as any)?.message || error)}` }],
+    isError: true,
+  };
 }
 
 export async function callToolDirect(toolName: string, options: DirectCLIOptions): Promise<mcpServer.CallToolResult> {
-  const input = await parseToolInput(options);
-  return withBackend(options, backend => backend.callTool(toolName, input));
+  try {
+    const input = await parseToolInput(options);
+    return await runWithBackend(options, backend => backend.callTool(toolName, input));
+  } catch (error) {
+    return callToolErrorResult(error);
+  }
 }
 
 export function toolResultAsText(result: mcpServer.CallToolResult): string {
