@@ -67,18 +67,19 @@ addSharedServerOptions(
         .argument('<toolName>', 'Tool name to call')
         .option('--input <json>', 'JSON object arguments for the tool call.')
         .option('--input-file <path>', 'Path to a JSON file with tool arguments.')
-        .option('--one-shot', 'Run one command and close the browser session immediately.')
         .option('--output <format>', 'Output format: json or text.', 'json'),
 ).action(async (toolName: string, options) => {
   await runCLICommand(async () => {
     applyLegacyVisionOption(options);
-    const format = options.output === 'text' ? 'text' : 'json';
-    const oneShot = options.oneShot || !process.stdin.isTTY;
 
-    if (!oneShot) {
-      await runInteractiveSession(toolName, options, format);
-      return;
+    const validOutputFormats = ['json', 'text'];
+
+    if (!validOutputFormats.includes(options.output)) {
+      process.stderr.write(`Invalid output format: '${options.output}'. Accepted values: ${validOutputFormats.join(', ')}.\n`);
+      process.exit(1);
     }
+
+    const format: 'json' | 'text' = options.output;
 
     const result = await callToolDirect(toolName, options);
     writeToolResult(result, format);
