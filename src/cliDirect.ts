@@ -104,7 +104,12 @@ export function callToolErrorResult(error: unknown): mcpServer.CallToolResult {
 export async function callToolDirect(toolName: string, options: DirectCLIOptions): Promise<mcpServer.CallToolResult> {
   try {
     const input = await parseToolInput(options);
-    return await runWithBackend(options, backend => backend.callTool(toolName, input));
+    return await runWithBackend(options, async backend => {
+      // CLI direct mode has no persistent session, so tab tools will fail
+      // with "No open pages available". Create a blank tab up front.
+      await backend.callTool('browser_navigate', { url: 'about:blank' });
+      return backend.callTool(toolName, input);
+    });
   } catch (error) {
     return callToolErrorResult(error);
   }

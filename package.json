@@ -12,8 +12,7 @@
 		}
 	},
 	"bin": {
-		"mcp-accessibility-scanner": "cli.js",
-		"mcp-server-playwright": "cli.js"
+		"mcp-accessibility-scanner": "cli.js"
 	},
 	"files": [
 		"lib/**/*",
