@@ -82,9 +82,6 @@ addSharedServerOptions(
 
     const result = await callToolDirect(toolName, options);
     writeToolResult(result, format);
-    if (result.isError) {
-      process.stderr.write(`erorr`);
-    }
   });
 });
 
