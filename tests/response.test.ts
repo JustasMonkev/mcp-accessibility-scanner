@@ -155,6 +155,51 @@ describe('Response', () => {
     });
   });
 
+  describe('reportProgress', () => {
+    it('should send progress notifications when request context includes a progress token', async () => {
+      const sendNotification = vi.fn().mockResolvedValue(undefined);
+      const response = new Response(mockContext, 'test_tool', {}, {
+        _meta: { progressToken: 'progress-1' },
+        sendNotification,
+        signal: new AbortController().signal,
+        requestId: 1,
+      } as any);
+
+      await response.reportProgress({
+        progress: 2,
+        total: 5,
+        message: 'Working',
+      });
+
+      expect(sendNotification).toHaveBeenCalledWith({
+        method: 'notifications/progress',
+        params: {
+          progressToken: 'progress-1',
+          progress: 2,
+          total: 5,
+          message: 'Working',
+        },
+      });
+    });
+
+    it('should no-op when request context has no progress token', async () => {
+      const sendNotification = vi.fn().mockResolvedValue(undefined);
+      const response = new Response(mockContext, 'test_tool', {}, {
+        _meta: {},
+        sendNotification,
+        signal: new AbortController().signal,
+        requestId: 1,
+      } as any);
+
+      await response.reportProgress({
+        progress: 1,
+        total: 1,
+      });
+
+      expect(sendNotification).not.toHaveBeenCalled();
+    });
+  });
+
   describe('serialize', () => {
     it('should serialize basic response', () => {
       const response = new Response(mockContext, 'test_tool', {});

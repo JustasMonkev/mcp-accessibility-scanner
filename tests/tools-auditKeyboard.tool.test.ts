@@ -37,7 +37,7 @@ function focusPoint(overrides: Partial<FocusPoint>): FocusPoint {
   };
 }
 
-function createHarness(sequence: FocusPoint[]) {
+function createHarness(sequence: FocusPoint[], requestContext?: any) {
   let index = 0;
   const page = {
     evaluate: vi.fn(async () => {
@@ -67,7 +67,7 @@ function createHarness(sequence: FocusPoint[]) {
     config: {},
   };
 
-  const response = new Response(context, 'audit_keyboard', {});
+  const response = new Response(context, 'audit_keyboard', {}, requestContext);
   return { context, tab, page, response };
 }
 
@@ -133,5 +133,56 @@ describe('audit_keyboard tool', () => {
 
     expect(page.screenshot).toHaveBeenCalledTimes(1);
     expect(response.result()).toContain('Issue screenshots:');
+  });
+
+  it('emits progress notifications for each keyboard step', async () => {
+    const sendNotification = vi.fn(async () => undefined);
+    const { context, response } = createHarness([
+      focusPoint({ role: 'document', tagName: 'BODY' }),
+      focusPoint({ role: 'button', name: 'One', tagName: 'BUTTON', id: 'one' }),
+      focusPoint({ role: 'button', name: 'One', tagName: 'BUTTON', id: 'one' }),
+      focusPoint({ role: 'button', name: 'Two', tagName: 'BUTTON', id: 'two' }),
+    ], {
+      _meta: { progressToken: 'progress-keyboard' },
+      sendNotification,
+      signal: new AbortController().signal,
+      requestId: 1,
+    });
+
+    await tool.handle(context as any, {
+      maxTabs: 2,
+      includeShiftTab: false,
+      stopOnCycle: false,
+      cycleWindow: 10,
+      checkSkipLink: false,
+      skipLinkMaxTabs: 3,
+      activateSkipLink: false,
+      checkFocusTrap: false,
+      checkFocusVisibility: false,
+      checkFocusJumps: false,
+      jumpScrollThresholdPx: 800,
+      screenshotOnIssue: false,
+      maxIssueScreenshots: 3,
+    } as any, response);
+
+    expect(sendNotification).toHaveBeenCalledTimes(2);
+    expect(sendNotification).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      method: 'notifications/progress',
+      params: expect.objectContaining({
+        progressToken: 'progress-keyboard',
+        progress: 1,
+        total: 2,
+        message: expect.stringContaining('1/2'),
+      }),
+    }));
+    expect(sendNotification).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      method: 'notifications/progress',
+      params: expect.objectContaining({
+        progressToken: 'progress-keyboard',
+        progress: 2,
+        total: 2,
+        message: expect.stringContaining('2/2'),
+      }),
+    }));
   });
 });

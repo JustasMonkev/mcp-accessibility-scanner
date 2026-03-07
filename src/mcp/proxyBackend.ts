@@ -20,7 +20,7 @@ import { z } from 'zod';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { ListRootsRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
-import type { ServerBackend, ClientVersion, Root, Server } from './server.js';
+import type { CallToolRequestContext, ServerBackend, ClientVersion, Root, Server } from './server.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
@@ -58,12 +58,13 @@ export class ProxyBackend implements ServerBackend {
     ];
   }
 
-  async callTool(name: string, args: CallToolRequest['params']['arguments']): Promise<CallToolResult> {
+  async callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: CallToolRequestContext): Promise<CallToolResult> {
     if (name === this._contextSwitchTool.name)
       return this._callContextSwitchTool(args);
     return await this._currentClient!.callTool({
       name,
       arguments: args,
+      _meta: requestContext?._meta,
     }) as CallToolResult;
   }
 

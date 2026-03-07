@@ -47,6 +47,7 @@ export type KeyboardAuditOptions = {
 type KeyboardAuditCallbacks = {
   pressKey: (key: PressableKey) => Promise<void>;
   getActiveElementInfo: () => Promise<FocusPoint>;
+  onStep?: (stop: FocusStop) => Promise<void>;
   getCurrentUrl?: () => Promise<string>;
   goBack?: () => Promise<void>;
   captureScreenshot?: (label: string) => Promise<string>;
@@ -225,12 +226,14 @@ export async function runKeyboardFocusAudit(
           shouldStopOnCycle = true;
       }
       stops.push(stop);
+      await callbacks.onStep?.(stop);
       if (shouldStopOnCycle)
         break;
       continue;
     }
 
     stops.push(stop);
+    await callbacks.onStep?.(stop);
   }
 
   return {
@@ -371,6 +374,13 @@ const auditKeyboard = defineTabTool({
         });
       },
       getActiveElementInfo,
+      onStep: async stop => {
+        await response.reportProgress({
+          progress: stop.step,
+          total: params.maxTabs,
+          message: `Processed keyboard step ${stop.step}/${params.maxTabs}: ${stop.key}`,
+        });
+      },
       getCurrentUrl: async () => tab.page.url(),
       goBack: async () => {
         await tab.page.goBack({ waitUntil: 'domcontentloaded' });

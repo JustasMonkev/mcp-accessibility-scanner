@@ -344,7 +344,14 @@ const auditSite = defineTabTool({
       enqueueUrl(startUrl.toString(), 0, null);
     }
 
+    await response.reportProgress({
+      progress: 0,
+      total: params.maxPages,
+      message: `Initialized site audit with ${queue.length} queued URL(s).`,
+    });
+
     const crawlTab = await context.newTab();
+    let processedPages = 0;
     try {
       while (queue.length && pages.length < params.maxPages) {
         const item = queue.shift()!;
@@ -434,6 +441,16 @@ const auditSite = defineTabTool({
           erroredPages++;
           pageReport.status = 'error';
           pageReport.error = error instanceof Error ? error.message : String(error);
+        } finally {
+          processedPages++;
+          const message = pageReport.status === 'scanned'
+            ? `Scanned page ${processedPages}/${params.maxPages}: ${item.url}`
+            : `Failed page ${processedPages}/${params.maxPages}: ${item.url}`;
+          await response.reportProgress({
+            progress: processedPages,
+            total: params.maxPages,
+            message,
+          });
         }
       }
     } finally {

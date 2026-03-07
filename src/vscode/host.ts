@@ -66,12 +66,13 @@ class VSCodeProxyBackend implements ServerBackend {
     ];
   }
 
-  async callTool(name: string, args: CallToolRequest['params']['arguments']): Promise<CallToolResult> {
+  async callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
     if (name === this._contextSwitchTool.name)
       return this._callContextSwitchTool(args as any);
     return await this._currentClient!.callTool({
       name,
       arguments: args,
+      _meta: requestContext?._meta,
     }) as CallToolResult;
   }
 

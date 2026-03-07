@@ -397,4 +397,76 @@ describe('scan_page_matrix tool', () => {
     expect(writeFileSpy).toHaveBeenCalledWith('/tmp/my-matrix.json', expect.any(String), 'utf-8');
     expect(response.result()).toContain('JSON report: /tmp/my-matrix.json');
   });
+
+  it('emits progress notifications as variants finish', async () => {
+    const sendNotification = vi.fn(async () => undefined);
+    const evaluateMock = vi.fn()
+        .mockResolvedValueOnce('')
+        .mockResolvedValue(undefined);
+
+    const mockPage = {
+      url: vi.fn(() => 'https://example.com/page'),
+      viewportSize: vi.fn(() => ({ width: 1024, height: 768 })),
+      setViewportSize: vi.fn(async () => undefined),
+      emulateMedia: vi.fn(async () => undefined),
+      evaluate: evaluateMock,
+      reload: vi.fn(async () => undefined),
+    };
+
+    const mockTab = {
+      page: mockPage,
+      waitForTimeout: vi.fn(async () => undefined),
+      modalStates: vi.fn(() => []),
+      context: {
+        outputFile: vi.fn(async () => '/tmp/scan-progress.json'),
+      },
+    };
+
+    const mockContext = {
+      currentTabOrDie: vi.fn(() => mockTab),
+      config: {},
+    };
+
+    const response = new Response(mockContext as any, 'scan_page_matrix', {}, {
+      _meta: { progressToken: 'progress-matrix' },
+      sendNotification,
+      signal: new AbortController().signal,
+      requestId: 1,
+    } as any);
+
+    vi.spyOn(axe, 'runAxeScan')
+        .mockResolvedValueOnce(createAxeResult('https://example.com/page', ['color-contrast']))
+        .mockResolvedValueOnce(createAxeResult('https://example.com/page', ['label']));
+
+    await tool.handle(mockContext as any, {
+      variants: [
+        { name: 'baseline' },
+        { name: 'mobile', viewport: { width: 390, height: 844 } },
+      ],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterApplyMs: 0,
+      reloadBetweenVariants: false,
+    } as any, response);
+
+    expect(sendNotification).toHaveBeenCalledTimes(2);
+    expect(sendNotification).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      method: 'notifications/progress',
+      params: expect.objectContaining({
+        progressToken: 'progress-matrix',
+        progress: 1,
+        total: 2,
+        message: expect.stringContaining('baseline'),
+      }),
+    }));
+    expect(sendNotification).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      method: 'notifications/progress',
+      params: expect.objectContaining({
+        progressToken: 'progress-matrix',
+        progress: 2,
+        total: 2,
+        message: expect.stringContaining('mobile'),
+      }),
+    }));
+  });
 });
