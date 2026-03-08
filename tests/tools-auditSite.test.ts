@@ -39,6 +39,7 @@ function createHarness(
     navLinkMap?: Record<string, string[]>;
     redirectMap?: Record<string, string>;
     sitemapXmlByUrl?: Record<string, string>;
+    requestContext?: any;
   }
 ) {
   const startUrl = options?.startUrl ?? 'https://example.com/';
@@ -123,7 +124,7 @@ function createHarness(
   crawlTab.context = context;
   temporaryTab.context = context;
 
-  const response = new Response(context as any, 'audit_site', {});
+  const response = new Response(context as any, 'audit_site', {}, options?.requestContext);
 
   return {
     context,
@@ -241,6 +242,55 @@ describe('audit_site tool', () => {
     expect(summaryViolation.pagesAffected).toHaveLength(2);
     expect(summaryViolation.totalOccurrences).toBe(2);
     expect(summaryViolation.uniqueOccurrences).toBe(1);
+  });
+
+  it('emits progress notifications during crawl execution', async () => {
+    const sendNotification = vi.fn(async () => undefined);
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/one'],
+      'https://example.com/one': [],
+    }, {
+      requestContext: {
+        _meta: { progressToken: 'progress-site' },
+        sendNotification,
+        signal: new AbortController().signal,
+        requestId: 1,
+      },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 2,
+      maxDepth: 1,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(sendNotification).toHaveBeenCalledTimes(3);
+    expect(sendNotification).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      method: 'notifications/progress',
+      params: expect.objectContaining({
+        progressToken: 'progress-site',
+        progress: 0,
+        total: 2,
+      }),
+    }));
+    expect(sendNotification).toHaveBeenLastCalledWith(expect.objectContaining({
+      method: 'notifications/progress',
+      params: expect.objectContaining({
+        progressToken: 'progress-site',
+        progress: 2,
+        total: 2,
+      }),
+    }));
   });
 
   it('throws a clear error when the active tab URL is not http(s)', async () => {

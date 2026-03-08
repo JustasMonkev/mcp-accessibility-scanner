@@ -14,11 +14,22 @@
  * limitations under the License.
  */
 
+import debug from 'debug';
+
 import { renderModalStates } from './tab.js';
 
 import type { Tab, TabSnapshot } from './tab.js';
 import type { ImageContent, TextContent } from '@modelcontextprotocol/sdk/types.js';
 import type { Context } from './context.js';
+import type { CallToolRequestContext } from './mcp/server.js';
+
+type ProgressUpdate = {
+  progress: number;
+  total?: number;
+  message?: string;
+};
+
+const errorsDebug = debug('pw:mcp:errors');
 
 export class Response {
   private _result: string[] = [];
@@ -28,15 +39,17 @@ export class Response {
   private _includeSnapshot = false;
   private _includeTabs = false;
   private _tabSnapshot: TabSnapshot | undefined;
+  private _requestContext: CallToolRequestContext | undefined;
 
   readonly toolName: string;
   readonly toolArgs: Record<string, any>;
   private _isError: boolean | undefined;
 
-  constructor(context: Context, toolName: string, toolArgs: Record<string, any>) {
+  constructor(context: Context, toolName: string, toolArgs: Record<string, any>, requestContext?: CallToolRequestContext) {
     this._context = context;
     this.toolName = toolName;
     this.toolArgs = toolArgs;
+    this._requestContext = requestContext;
   }
 
   addResult(result: string) {
@@ -78,6 +91,25 @@ export class Response {
 
   setIncludeTabs() {
     this._includeTabs = true;
+  }
+
+  async reportProgress(update: ProgressUpdate) {
+    const progressToken = this._requestContext?._meta?.progressToken;
+    if (progressToken === undefined)
+      return;
+    try {
+      await this._requestContext?.sendNotification({
+        method: 'notifications/progress',
+        params: {
+          progressToken,
+          progress: update.progress,
+          total: update.total,
+          message: update.message,
+        },
+      });
+    } catch (error) {
+      errorsDebug('Failed to send progress notification for token %o with update %o: %o', progressToken, update, error);
+    }
   }
 
   async finish() {

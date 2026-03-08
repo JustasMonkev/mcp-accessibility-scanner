@@ -18,6 +18,21 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
 import type { Tab } from '../src/tab.js';
+import type { ImageContent, TextContent } from '@modelcontextprotocol/sdk/types.js';
+
+function expectTextContent(content: TextContent | ImageContent): TextContent {
+  expect(content.type).toBe('text');
+  if (content.type !== 'text')
+    throw new Error('Expected text content');
+  return content;
+}
+
+function expectImageContent(content: TextContent | ImageContent): ImageContent {
+  expect(content.type).toBe('image');
+  if (content.type !== 'image')
+    throw new Error('Expected image content');
+  return content;
+}
 
 describe('Response', () => {
   let mockContext: Context;
@@ -136,7 +151,7 @@ describe('Response', () => {
       const response = new Response(mockContext, 'test_tool', {});
       response.setIncludeTabs();
       const serialized = response.serialize();
-      expect(serialized.content[0].text).toContain('Open tabs');
+      expect(expectTextContent(serialized.content[0]).text).toContain('Open tabs');
     });
   });
 
@@ -155,22 +170,93 @@ describe('Response', () => {
     });
   });
 
+  describe('reportProgress', () => {
+    it('should send progress notifications when request context includes a progress token', async () => {
+      const sendNotification = vi.fn().mockResolvedValue(undefined);
+      const response = new Response(mockContext, 'test_tool', {}, {
+        _meta: { progressToken: 'progress-1' },
+        sendNotification,
+        signal: new AbortController().signal,
+        requestId: 1,
+      } as any);
+
+      await response.reportProgress({
+        progress: 2,
+        total: 5,
+        message: 'Working',
+      });
+
+      expect(sendNotification).toHaveBeenCalledWith({
+        method: 'notifications/progress',
+        params: {
+          progressToken: 'progress-1',
+          progress: 2,
+          total: 5,
+          message: 'Working',
+        },
+      });
+    });
+
+    it('should no-op when request context has no progress token', async () => {
+      const sendNotification = vi.fn().mockResolvedValue(undefined);
+      const response = new Response(mockContext, 'test_tool', {}, {
+        _meta: {},
+        sendNotification,
+        signal: new AbortController().signal,
+        requestId: 1,
+      } as any);
+
+      await response.reportProgress({
+        progress: 1,
+        total: 1,
+      });
+
+      expect(sendNotification).not.toHaveBeenCalled();
+    });
+
+    it('should swallow notification send failures', async () => {
+      const sendNotification = vi.fn().mockRejectedValue(new Error('transport failed'));
+      const response = new Response(mockContext, 'test_tool', {}, {
+        _meta: { progressToken: 'progress-1' },
+        sendNotification,
+        signal: new AbortController().signal,
+        requestId: 1,
+      } as any);
+
+      await expect(response.reportProgress({
+        progress: 1,
+        total: 2,
+        message: 'Working',
+      })).resolves.toBeUndefined();
+
+      expect(sendNotification).toHaveBeenCalledWith({
+        method: 'notifications/progress',
+        params: {
+          progressToken: 'progress-1',
+          progress: 1,
+          total: 2,
+          message: 'Working',
+        },
+      });
+    });
+  });
+
   describe('serialize', () => {
     it('should serialize basic response', () => {
       const response = new Response(mockContext, 'test_tool', {});
       response.addResult('Test result');
       const serialized = response.serialize();
       expect(serialized.content).toHaveLength(1);
-      expect(serialized.content[0].type).toBe('text');
-      expect(serialized.content[0].text).toContain('Test result');
+      expect(expectTextContent(serialized.content[0]).text).toContain('Test result');
     });
 
     it('should include code section when code is added', () => {
       const response = new Response(mockContext, 'test_tool', {});
       response.addCode('await page.click("button")');
       const serialized = response.serialize();
-      expect(serialized.content[0].text).toContain('Ran Playwright code');
-      expect(serialized.content[0].text).toContain('await page.click("button")');
+      const textContent = expectTextContent(serialized.content[0]);
+      expect(textContent.text).toContain('Ran Playwright code');
+      expect(textContent.text).toContain('await page.click("button")');
     });
 
     it('should include images when present', () => {
@@ -178,8 +264,8 @@ describe('Response', () => {
       response.addImage({ contentType: 'image/png', data: Buffer.from('test') });
       const serialized = response.serialize();
       expect(serialized.content).toHaveLength(2);
-      expect(serialized.content[1].type).toBe('image');
-      expect(serialized.content[1].mimeType).toBe('image/png');
+      const imageContent = expectImageContent(serialized.content[1]);
+      expect(imageContent.mimeType).toBe('image/png');
     });
 
     it('should omit images when configured', () => {
@@ -202,8 +288,9 @@ describe('Response', () => {
       response.setIncludeSnapshot();
       await response.finish();
       const serialized = response.serialize();
-      expect(serialized.content[0].text).toContain('Page state');
-      expect(serialized.content[0].text).toContain('Example Page');
+      const textContent = expectTextContent(serialized.content[0]);
+      expect(textContent.text).toContain('Page state');
+      expect(textContent.text).toContain('Example Page');
     });
 
     it('should include console messages in snapshot', async () => {
@@ -222,8 +309,9 @@ describe('Response', () => {
       response.setIncludeSnapshot();
       await response.finish();
       const serialized = response.serialize();
-      expect(serialized.content[0].text).toContain('New console messages');
-      expect(serialized.content[0].text).toContain('Test message');
+      const textContent = expectTextContent(serialized.content[0]);
+      expect(textContent.text).toContain('New console messages');
+      expect(textContent.text).toContain('Test message');
     });
 
     it('should include downloads in snapshot', async () => {
@@ -244,8 +332,9 @@ describe('Response', () => {
       response.setIncludeSnapshot();
       await response.finish();
       const serialized = response.serialize();
-      expect(serialized.content[0].text).toContain('Downloads');
-      expect(serialized.content[0].text).toContain('file.pdf');
+      const textContent = expectTextContent(serialized.content[0]);
+      expect(textContent.text).toContain('Downloads');
+      expect(textContent.text).toContain('file.pdf');
     });
   });
 

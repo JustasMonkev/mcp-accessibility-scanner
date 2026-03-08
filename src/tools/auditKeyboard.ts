@@ -47,6 +47,7 @@ export type KeyboardAuditOptions = {
 type KeyboardAuditCallbacks = {
   pressKey: (key: PressableKey) => Promise<void>;
   getActiveElementInfo: () => Promise<FocusPoint>;
+  onStep?: (stop: FocusStop) => Promise<void>;
   getCurrentUrl?: () => Promise<string>;
   goBack?: () => Promise<void>;
   captureScreenshot?: (label: string) => Promise<string>;
@@ -210,8 +211,8 @@ export async function runKeyboardFocusAudit(
       }
     }
 
+    let shouldStopOnCycle = false;
     if (options.checkFocusTrap) {
-      let shouldStopOnCycle = false;
       const recentStops = stops.slice(Math.max(0, stops.length - options.cycleWindow + 1));
       const foundRepeat = recentStops.some(previous => previous.fingerprint === stop.fingerprint);
       const touchedDocumentRoot = recentStops.some(previous => previous.tagName === 'HTML' || previous.tagName === 'BODY') || stop.tagName === 'HTML' || stop.tagName === 'BODY';
@@ -224,13 +225,12 @@ export async function runKeyboardFocusAudit(
         if (options.stopOnCycle)
           shouldStopOnCycle = true;
       }
-      stops.push(stop);
-      if (shouldStopOnCycle)
-        break;
-      continue;
     }
 
     stops.push(stop);
+    await callbacks.onStep?.(stop);
+    if (shouldStopOnCycle)
+      break;
   }
 
   return {
@@ -371,6 +371,13 @@ const auditKeyboard = defineTabTool({
         });
       },
       getActiveElementInfo,
+      onStep: async stop => {
+        await response.reportProgress({
+          progress: stop.step,
+          total: params.maxTabs,
+          message: `Processed keyboard step ${stop.step}/${params.maxTabs}: ${stop.key}`,
+        });
+      },
       getCurrentUrl: async () => tab.page.url(),
       goBack: async () => {
         await tab.page.goBack({ waitUntil: 'domcontentloaded' });

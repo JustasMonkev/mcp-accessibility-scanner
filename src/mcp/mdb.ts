@@ -56,7 +56,7 @@ export class MDBBackend implements mcpServer.ServerBackend {
     return response.tools;
   }
 
-  async callTool(name: string, args: mcpServer.CallToolRequest['params']['arguments']): Promise<mcpServer.CallToolResult> {
+  async callTool(name: string, args: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext): Promise<mcpServer.CallToolResult> {
     if (name === pushToolsSchema.name)
       return await this._pushTools(pushToolsSchema.inputSchema.parse(args || {}));
 
@@ -80,6 +80,7 @@ export class MDBBackend implements mcpServer.ServerBackend {
     this._client().callTool({
       name,
       arguments: args,
+      _meta: requestContext?._meta,
     }).then(result => {
       resultPromise.resolve(result as mcpServer.CallToolResult);
     }).catch(e => {
@@ -224,8 +225,8 @@ class OnceTimeServerBackendWrapper implements mcpServer.ServerBackend {
     return this._backend.listTools();
   }
 
-  async callTool(name: string, args: mcpServer.CallToolRequest['params']['arguments']): Promise<mcpServer.CallToolResult> {
-    return this._backend.callTool(name, args);
+  async callTool(name: string, args: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext): Promise<mcpServer.CallToolResult> {
+    return this._backend.callTool(name, args, requestContext);
   }
 
   serverClosed(server: mcpServer.Server) {

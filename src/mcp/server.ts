@@ -19,10 +19,11 @@ import debug from 'debug';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
 import { InProcessTransport } from './inProcessTransport.js';
 
-import type { Tool, CallToolResult, CallToolRequest, Root } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool, CallToolResult, CallToolRequest, Root, ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 export type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 export type { Tool, CallToolResult, CallToolRequest, Root } from '@modelcontextprotocol/sdk/types.js';
@@ -31,11 +32,12 @@ const serverDebug = debug('pw:mcp:server');
 const errorsDebug = debug('pw:mcp:errors');
 
 export type ClientVersion = { name: string, version: string };
+export type CallToolRequestContext = Pick<RequestHandlerExtra<ServerRequest, ServerNotification>, 'signal' | 'requestId' | 'sendNotification' | '_meta'>;
 
 export interface ServerBackend {
   initialize?(server: Server, clientVersion: ClientVersion, roots: Root[]): Promise<void>;
   listTools(): Promise<Tool[]>;
-  callTool(name: string, args: CallToolRequest['params']['arguments']): Promise<CallToolResult>;
+  callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: CallToolRequestContext): Promise<CallToolResult>;
   serverClosed?(server: Server): void;
 }
 
@@ -73,7 +75,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
   });
 
   let heartbeatRunning = false;
-  server.setRequestHandler(CallToolRequestSchema, async request => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     serverDebug('callTool', request);
     await initializedPromise;
 
@@ -83,7 +85,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
     }
 
     try {
-      return await backend.callTool(request.params.name, request.params.arguments || {});
+      return await backend.callTool(request.params.name, request.params.arguments || {}, extra);
     } catch (error) {
       return {
         content: [{ type: 'text', text: '### Result\n' + String(error) }],

@@ -202,6 +202,12 @@ const scanPageMatrix = defineTabTool({
             changedCounts: {},
           },
         });
+
+        await response.reportProgress({
+          progress: variantResults.length,
+          total: variants.length,
+          message: `Scanned variant ${variantResults.length}/${variants.length}: ${variant.name}`,
+        });
       }
 
       const baselineCounts = variantResults[0]?.nodeCountByRuleId ?? {};
