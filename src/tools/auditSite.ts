@@ -518,6 +518,45 @@ const auditSite = defineTabTool({
     const reportFileName = sanitizeForFilePath(params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`);
     const reportPath = await context.outputFile(reportFileName);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
+    const reportResourceLink = response.addFileResourceLink(reportPath, {
+      name: 'audit-site-report',
+      title: 'Audit site JSON report',
+      description: 'Aggregated JSON report for the site accessibility crawl.',
+      mimeType: 'application/json',
+    });
+    response.setStructuredContent({
+      kind: 'audit_site',
+      report: {
+        path: reportPath,
+        uri: reportResourceLink.uri,
+        name: reportResourceLink.name,
+        title: reportResourceLink.title ?? null,
+        mimeType: reportResourceLink.mimeType ?? null,
+      },
+      crawl: {
+        startUrl: report.metadata.startUrl,
+        strategy: report.metadata.strategy,
+        durationMs: report.metadata.durationMs,
+      },
+      totals: summary.totals,
+      topViolations: summaryViolations.slice(0, 5).map(violation => ({
+        id: violation.id,
+        impact: violation.impact ?? null,
+        pagesAffected: violation.pagesAffected.length,
+        totalOccurrences: violation.totalOccurrences,
+        helpUrl: violation.helpUrl,
+      })),
+      topPages: pages
+          .filter(page => page.status === 'scanned')
+          .sort((first, second) => (second.summary?.totalRules ?? 0) - (first.summary?.totalRules ?? 0))
+          .slice(0, 5)
+          .map(page => ({
+            url: page.url,
+            title: page.title,
+            totalViolations: page.summary?.totalRules ?? 0,
+            totalNodes: page.summary?.totalNodes ?? 0,
+          })),
+    });
 
     const topViolations = summarizeTopViolations(summaryViolations, 10);
     const topPages = summarizeTopPages(pages, 20);

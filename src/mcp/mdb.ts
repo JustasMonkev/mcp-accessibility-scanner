@@ -43,7 +43,7 @@ export class MDBBackend implements mcpServer.ServerBackend {
     this._topLevelBackend = topLevelBackend;
   }
 
-  async initialize(server: mcpServer.Server): Promise<void> {
+  async initialize(_context: mcpServer.ServerBackendContext): Promise<void> {
     if (this._initialized)
       return;
     this._initialized = true;
@@ -217,8 +217,8 @@ class OnceTimeServerBackendWrapper implements mcpServer.ServerBackend {
     this._backend.requestSelfDestruct = () => this._selfDestructPromise.resolve();
   }
 
-  async initialize(server: mcpServer.Server, clientVersion: mcpServer.ClientVersion, roots: mcpServer.Root[]): Promise<void> {
-    await this._backend.initialize?.(server, clientVersion, roots);
+  async initialize(context: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion, roots: mcpServer.Root[]): Promise<void> {
+    await this._backend.initialize?.(context, clientVersion, roots);
   }
 
   async listTools(): Promise<mcpServer.Tool[]> {
@@ -229,8 +229,8 @@ class OnceTimeServerBackendWrapper implements mcpServer.ServerBackend {
     return this._backend.callTool(name, args, requestContext);
   }
 
-  serverClosed(server: mcpServer.Server) {
-    this._backend.serverClosed?.(server);
+  serverClosed() {
+    this._backend.serverClosed?.();
     this._selfDestructPromise.resolve();
   }
 

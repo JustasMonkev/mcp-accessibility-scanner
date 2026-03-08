@@ -18,7 +18,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
 import type { Tab } from '../src/tab.js';
-import type { ImageContent, TextContent } from '@modelcontextprotocol/sdk/types.js';
+import type { ImageContent, ResourceLink, TextContent } from '@modelcontextprotocol/sdk/types.js';
 
 function expectTextContent(content: TextContent | ImageContent): TextContent {
   expect(content.type).toBe('text');
@@ -32,6 +32,11 @@ function expectImageContent(content: TextContent | ImageContent): ImageContent {
   if (content.type !== 'image')
     throw new Error('Expected image content');
   return content;
+}
+
+function expectResourceLink(content: unknown): ResourceLink {
+  expect((content as ResourceLink).type).toBe('resource_link');
+  return content as ResourceLink;
 }
 
 describe('Response', () => {
@@ -283,6 +288,43 @@ describe('Response', () => {
       expect(serialized.isError).toBe(true);
     });
 
+    it('should include structured content when provided', () => {
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setStructuredContent({
+        kind: 'audit_site',
+        totals: {
+          scannedPages: 2,
+        },
+      });
+      const serialized = response.serialize();
+      expect(serialized.structuredContent).toEqual({
+        kind: 'audit_site',
+        totals: {
+          scannedPages: 2,
+        },
+      });
+    });
+
+    it('should include resource links before image attachments', () => {
+      const response = new Response(mockContext, 'test_tool', {});
+      response.addFileResourceLink('/tmp/report.json', {
+        name: 'audit-site-report',
+        title: 'Audit site JSON report',
+        mimeType: 'application/json',
+      });
+      response.addImage({ contentType: 'image/png', data: Buffer.from('test') });
+
+      const serialized = response.serialize();
+
+      expect(serialized.content).toHaveLength(3);
+      const resourceLink = expectResourceLink(serialized.content[1]);
+      expect(resourceLink.uri).toBe('file:///tmp/report.json');
+      expect(resourceLink.name).toBe('audit-site-report');
+      expect(resourceLink.mimeType).toBe('application/json');
+      const imageContent = expectImageContent(serialized.content[2] as ImageContent);
+      expect(imageContent.mimeType).toBe('image/png');
+    });
+
     it('should include snapshot when captured', async () => {
       const response = new Response(mockContext, 'test_tool', {});
       response.setIncludeSnapshot();
@@ -372,6 +414,17 @@ describe('Response', () => {
       await response.finish();
       expect(response.tabSnapshot()).toBeDefined();
       expect(response.tabSnapshot()?.url).toBe('https://example.com');
+    });
+  });
+
+  describe('resourceLinks', () => {
+    it('should expose added file resource links', () => {
+      const response = new Response(mockContext, 'test_tool', {});
+      const link = response.addFileResourceLink('/tmp/keyboard-report.json', {
+        title: 'Keyboard JSON report',
+      });
+      expect(link.uri).toBe('file:///tmp/keyboard-report.json');
+      expect(response.resourceLinks()).toEqual([link]);
     });
   });
 });

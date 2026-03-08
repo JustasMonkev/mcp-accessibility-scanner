@@ -47,7 +47,7 @@ program
     .option('--image-responses <mode>', 'whether to send image responses to the client. Can be "allow" or "omit", Defaults to "allow".')
     .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
     .option('--output-dir <path>', 'path to the directory for output files.')
-    .option('--port <port>', 'port to listen on for SSE transport.')
+    .option('--port <port>', 'port to listen on for MCP Streamable HTTP transport.')
     .option('--proxy-bypass <bypass>', 'comma-separated domains to bypass proxy, for example ".com,chromium.org,.domain.com"')
     .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128" or "socks5://myproxy:8080"')
     .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')
@@ -60,15 +60,8 @@ program
     .option('--default-timeout <ms>', 'default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).', parseInt)
     .addOption(new Option('--connect-tool', 'Allow to switch between different browser connection methods.').hideHelp())
     .addOption(new Option('--vscode', 'VS Code tools.').hideHelp())
-    .addOption(new Option('--vision', 'Legacy option, use --caps=vision instead').hideHelp())
     .action(async options => {
       setupExitWatchdog();
-
-      if (options.vision) {
-        // eslint-disable-next-line no-console
-        console.error('The --vision option is deprecated, use --caps=vision instead');
-        options.caps = 'vision';
-      }
 
       const config = await resolveCLIConfig(options);
       const browserContextFactory = contextFactory(config);

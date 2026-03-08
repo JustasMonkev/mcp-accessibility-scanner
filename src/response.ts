@@ -14,12 +14,14 @@
  * limitations under the License.
  */
 
+import { basename } from 'path';
+import { pathToFileURL } from 'url';
 import debug from 'debug';
 
 import { renderModalStates } from './tab.js';
 
 import type { Tab, TabSnapshot } from './tab.js';
-import type { ImageContent, TextContent } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, ResourceLink } from '@modelcontextprotocol/sdk/types.js';
 import type { Context } from './context.js';
 import type { CallToolRequestContext } from './mcp/server.js';
 
@@ -35,11 +37,13 @@ export class Response {
   private _result: string[] = [];
   private _code: string[] = [];
   private _images: { contentType: string, data: Buffer }[] = [];
+  private _resourceLinks: ResourceLink[] = [];
   private _context: Context;
   private _includeSnapshot = false;
   private _includeTabs = false;
   private _tabSnapshot: TabSnapshot | undefined;
   private _requestContext: CallToolRequestContext | undefined;
+  private _structuredContent: Record<string, unknown> | undefined;
 
   readonly toolName: string;
   readonly toolArgs: Record<string, any>;
@@ -85,6 +89,39 @@ export class Response {
     return this._images;
   }
 
+  addResourceLink(link: ResourceLink) {
+    this._resourceLinks.push(link);
+    return link;
+  }
+
+  addFileResourceLink(filePath: string, options?: {
+    name?: string;
+    title?: string;
+    description?: string;
+    mimeType?: string;
+  }) {
+    return this.addResourceLink({
+      type: 'resource_link',
+      uri: pathToFileURL(filePath).toString(),
+      name: options?.name ?? basename(filePath),
+      title: options?.title,
+      description: options?.description,
+      mimeType: options?.mimeType,
+    });
+  }
+
+  resourceLinks() {
+    return this._resourceLinks;
+  }
+
+  setStructuredContent(content: Record<string, unknown>) {
+    this._structuredContent = content;
+  }
+
+  structuredContent() {
+    return this._structuredContent;
+  }
+
   setIncludeSnapshot() {
     this._includeSnapshot = true;
   }
@@ -125,7 +162,7 @@ export class Response {
     return this._tabSnapshot;
   }
 
-  serialize(): { content: (TextContent | ImageContent)[], isError?: boolean } {
+  serialize(): Pick<CallToolResult, 'content' | 'structuredContent' | 'isError'> {
     const response: string[] = [];
 
     // Start with command result.
@@ -158,9 +195,12 @@ ${this._code.join('\n')}
     }
 
     // Main response part
-    const content: (TextContent | ImageContent)[] = [
+    const content: CallToolResult['content'] = [
       { type: 'text', text: response.join('\n') },
     ];
+
+    for (const link of this._resourceLinks)
+      content.push(link);
 
     // Image attachments.
     if (this._context.config.imageResponses !== 'omit') {
@@ -168,7 +208,11 @@ ${this._code.join('\n')}
         content.push({ type: 'image', data: image.data.toString('base64'), mimeType: image.contentType });
     }
 
-    return { content, isError: this._isError };
+    return {
+      content,
+      structuredContent: this._structuredContent,
+      isError: this._isError,
+    };
   }
 }
 

@@ -21,13 +21,13 @@ import crypto from 'crypto';
 
 import debug from 'debug';
 
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import * as mcpServer from './server.js';
 
 import type { ServerBackendFactory } from './server.js';
 
 const testDebug = debug('pw:mcp:test');
+const allowedLoopbackHostnamePattern = /^127(?:\.\d{1,3}){3}$/;
 
 export async function startHttpServer(config: { host?: string, port?: number }, abortSignal?: AbortSignal): Promise<http.Server> {
   const { host, port } = config;
@@ -59,46 +59,16 @@ export function httpAddressToString(address: string | net.AddressInfo | null): s
 }
 
 export async function installHttpTransport(httpServer: http.Server, serverBackendFactory: ServerBackendFactory) {
-  const sseSessions = new Map();
   const streamableSessions = new Map();
   httpServer.on('request', async (req, res) => {
-    const url = new URL(`http://localhost${req.url}`);
-    if (url.pathname.startsWith('/sse'))
-      await handleSSE(serverBackendFactory, req, res, url, sseSessions);
-    else
-      await handleStreamable(serverBackendFactory, req, res, streamableSessions);
+    const validationError = validateRequestHeaders(httpServer, req);
+    if (validationError) {
+      res.statusCode = validationError.statusCode;
+      res.end(validationError.message);
+      return;
+    }
+    await handleStreamable(serverBackendFactory, req, res, streamableSessions);
   });
-}
-
-async function handleSSE(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, url: URL, sessions: Map<string, SSEServerTransport>) {
-  if (req.method === 'POST') {
-    const sessionId = url.searchParams.get('sessionId');
-    if (!sessionId) {
-      res.statusCode = 400;
-      return res.end('Missing sessionId');
-    }
-
-    const transport = sessions.get(sessionId);
-    if (!transport) {
-      res.statusCode = 404;
-      return res.end('Session not found');
-    }
-
-    return await transport.handlePostMessage(req, res);
-  } else if (req.method === 'GET') {
-    const transport = new SSEServerTransport('/sse', res);
-    sessions.set(transport.sessionId, transport);
-    testDebug(`create SSE session: ${transport.sessionId}`);
-    await mcpServer.connect(serverBackendFactory, transport, false);
-    res.on('close', () => {
-      testDebug(`delete SSE session: ${transport.sessionId}`);
-      sessions.delete(transport.sessionId);
-    });
-    return;
-  }
-
-  res.statusCode = 405;
-  res.end('Method not allowed');
 }
 
 async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, StreamableHTTPServerTransport>) {
@@ -152,4 +122,78 @@ function decorateServer(server: net.Server) {
     sockets.clear();
     return close.call(server, callback);
   };
+}
+
+function validateRequestHeaders(httpServer: http.Server, req: http.IncomingMessage): { statusCode: number, message: string } | undefined {
+  const allowedHosts = allowedHostnamesForServer(httpServer);
+  const hostHeader = req.headers.host;
+  const host = typeof hostHeader === 'string' ? parseHostname(hostHeader) : undefined;
+  if (!host) {
+    testDebug('reject request with invalid host header: %o', hostHeader);
+    return { statusCode: 400, message: 'Invalid Host header' };
+  }
+  if (!allowedHosts.has(host)) {
+    testDebug('reject request for disallowed host %s; allowed hosts: %o', host, [...allowedHosts]);
+    return { statusCode: 403, message: 'Forbidden Host header' };
+  }
+
+  const originHeader = req.headers.origin;
+  if (!originHeader)
+    return;
+
+  const originHost = parseOriginHostname(originHeader);
+  if (!originHost) {
+    testDebug('reject request with invalid origin header: %o', originHeader);
+    return { statusCode: 400, message: 'Invalid Origin header' };
+  }
+  if (!allowedHosts.has(originHost)) {
+    testDebug('reject request for disallowed origin %s; allowed hosts: %o', originHost, [...allowedHosts]);
+    return { statusCode: 403, message: 'Forbidden Origin header' };
+  }
+}
+
+function allowedHostnamesForServer(httpServer: http.Server): Set<string> {
+  const allowed = new Set<string>(['localhost', '::1', '127.0.0.1']);
+  const address = httpServer.address();
+  if (!address || typeof address === 'string')
+    return allowed;
+
+  const boundAddress = normalizeHostname(address.address);
+  if (boundAddress && !isWildcardAddress(boundAddress))
+    allowed.add(boundAddress);
+  return allowed;
+}
+
+function isWildcardAddress(hostname: string): boolean {
+  return hostname === '0.0.0.0' || hostname === '::';
+}
+
+function parseHostname(authority: string): string | undefined {
+  try {
+    return normalizeHostname(new URL(`http://${authority}`).hostname);
+  } catch {
+    return;
+  }
+}
+
+function parseOriginHostname(origin: string): string | undefined {
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:')
+      return;
+    return normalizeHostname(url.hostname);
+  } catch {
+    return;
+  }
+}
+
+function normalizeHostname(hostname: string): string {
+  const lowerCase = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  if (lowerCase.startsWith('::ffff:'))
+    return lowerCase.slice('::ffff:'.length);
+  if (allowedLoopbackHostnamePattern.test(lowerCase))
+    return '127.0.0.1';
+  if (lowerCase.endsWith('.localhost'))
+    return 'localhost';
+  return lowerCase;
 }

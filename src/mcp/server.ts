@@ -33,12 +33,15 @@ const errorsDebug = debug('pw:mcp:errors');
 
 export type ClientVersion = { name: string, version: string };
 export type CallToolRequestContext = Pick<RequestHandlerExtra<ServerRequest, ServerNotification>, 'signal' | 'requestId' | 'sendNotification' | '_meta'>;
+export type ServerBackendContext = {
+  notifyToolListChanged(): Promise<void>;
+};
 
 export interface ServerBackend {
-  initialize?(server: Server, clientVersion: ClientVersion, roots: Root[]): Promise<void>;
+  initialize?(context: ServerBackendContext, clientVersion: ClientVersion, roots: Root[]): Promise<void>;
   listTools(): Promise<Tool[]>;
   callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: CallToolRequestContext): Promise<CallToolResult>;
-  serverClosed?(server: Server): void;
+  serverClosed?(): void;
 }
 
 export type ServerBackendFactory = {
@@ -63,7 +66,9 @@ export function createServer(name: string, version: string, backend: ServerBacke
   const initializedPromise = new Promise<void>(resolve => initializedPromiseResolve = resolve);
   const server = new Server({ name, version }, {
     capabilities: {
-      tools: {},
+      tools: {
+        listChanged: true,
+      },
     }
   });
 
@@ -102,13 +107,16 @@ export function createServer(name: string, version: string, backend: ServerBacke
         clientRoots = roots;
       }
       const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
-      await backend.initialize?.(server, clientVersion, clientRoots);
+      const context: ServerBackendContext = {
+        notifyToolListChanged: () => server.sendToolListChanged(),
+      };
+      await backend.initialize?.(context, clientVersion, clientRoots);
       initializedPromiseResolve();
     } catch (e) {
       errorsDebug(e);
     }
   });
-  addServerListener(server, 'close', () => backend.serverClosed?.(server));
+  addServerListener(server, 'close', () => backend.serverClosed?.());
   return server;
 }
 
@@ -153,7 +161,6 @@ export async function start(serverBackendFactory: ServerBackendFactory, options:
     `Listening on ${url}`,
     'Put this in your client config:',
     JSON.stringify(mcpConfig, undefined, 2),
-    'For legacy SSE transport support, you can use the /sse endpoint instead.',
   ].join('\n');
     // eslint-disable-next-line no-console
   console.error(message);
