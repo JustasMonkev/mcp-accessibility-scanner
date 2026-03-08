@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import debug from 'debug';
+
 import { renderModalStates } from './tab.js';
 
 import type { Tab, TabSnapshot } from './tab.js';
@@ -26,6 +28,8 @@ type ProgressUpdate = {
   total?: number;
   message?: string;
 };
+
+const errorsDebug = debug('pw:mcp:errors');
 
 export class Response {
   private _result: string[] = [];
@@ -103,8 +107,8 @@ export class Response {
           message: update.message,
         },
       });
-    } catch {
-      // Progress notifications are best-effort; swallow transport errors.
+    } catch (error) {
+      errorsDebug('Failed to send progress notification for token %o with update %o: %o', progressToken, update, error);
     }
   }
 
