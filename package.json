@@ -22,6 +22,7 @@
 	],
 	"scripts": {
 		"build": "tsc --project tsconfig.json",
+		"docker:build:multiarch": "docker buildx build --platform linux/amd64,linux/arm64 -t ${IMAGE:-ghcr.io/justasmonkev/mcp-accessibility-scanner}:latest -t ${IMAGE:-ghcr.io/justasmonkev/mcp-accessibility-scanner}:$npm_package_version --push .",
 		"lint": "eslint . && tsc --noEmit",
 		"watch": "tsc --watch",
 		"run-server": "node lib/browserServer.js",
