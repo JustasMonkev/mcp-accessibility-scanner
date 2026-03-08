@@ -61,10 +61,15 @@ export class ProxyBackend implements ServerBackend {
   async callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: CallToolRequestContext): Promise<CallToolResult> {
     if (name === this._contextSwitchTool.name)
       return this._callContextSwitchTool(args);
+    const progressToken = requestContext?._meta?.progressToken;
     return await this._currentClient!.callTool({
       name,
       arguments: args,
       _meta: requestContext?._meta,
+    }, undefined, progressToken === undefined ? undefined : {
+      onprogress: params => {
+        void this._forwardProgressNotification(requestContext, progressToken, params);
+      },
     }) as CallToolResult;
   }
 
@@ -87,6 +92,24 @@ export class ProxyBackend implements ServerBackend {
         content: [{ type: 'text', text: `### Result\nError: ${error}\n` }],
         isError: true,
       };
+    }
+  }
+
+  private async _forwardProgressNotification(
+    requestContext: CallToolRequestContext | undefined,
+    progressToken: string | number,
+    params: { progress: number; total?: number; message?: string },
+  ): Promise<void> {
+    try {
+      await requestContext?.sendNotification({
+        method: 'notifications/progress',
+        params: {
+          progressToken,
+          ...params,
+        },
+      });
+    } catch (error) {
+      errorsDebug('Failed to forward downstream progress notification: %o', error);
     }
   }
 

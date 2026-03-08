@@ -18,26 +18,50 @@ import { describe, expect, it, vi } from 'vitest';
 import { ProxyBackend } from '../src/mcp/proxyBackend.js';
 
 describe('ProxyBackend', () => {
-  it('forwards progress metadata to downstream tool calls', async () => {
+  it('forwards progress metadata and relays downstream progress notifications', async () => {
     const backend = new ProxyBackend([{
       name: 'default',
       description: 'Default provider',
       connect: vi.fn(),
     } as any]);
 
-    const callTool = vi.fn(async () => ({
-      content: [{ type: 'text', text: '### Result\nok' }],
-    }));
+    const sendNotification = vi.fn(async () => undefined);
+    const callTool = vi.fn(async (_params: any, _schema: any, options?: { onprogress?: (params: { progress: number; total?: number; message?: string }) => void }) => {
+      options?.onprogress?.({
+        progress: 1,
+        total: 2,
+        message: 'Scanning',
+      });
+      return {
+        content: [{ type: 'text', text: '### Result\nok' }],
+      };
+    });
     (backend as any)._currentClient = { callTool };
 
     await backend.callTool('audit_site', { startUrl: 'https://example.com' }, {
       _meta: { progressToken: 'progress-123' },
+      sendNotification,
     } as any);
 
-    expect(callTool).toHaveBeenCalledWith({
-      name: 'audit_site',
-      arguments: { startUrl: 'https://example.com' },
-      _meta: { progressToken: 'progress-123' },
+    expect(callTool).toHaveBeenCalledWith(
+        {
+          name: 'audit_site',
+          arguments: { startUrl: 'https://example.com' },
+          _meta: { progressToken: 'progress-123' },
+        },
+        undefined,
+        expect.objectContaining({
+          onprogress: expect.any(Function),
+        }),
+    );
+    expect(sendNotification).toHaveBeenCalledWith({
+      method: 'notifications/progress',
+      params: {
+        progressToken: 'progress-123',
+        progress: 1,
+        total: 2,
+        message: 'Scanning',
+      },
     });
   });
 });

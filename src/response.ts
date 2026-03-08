@@ -93,15 +93,19 @@ export class Response {
     const progressToken = this._requestContext?._meta?.progressToken;
     if (progressToken === undefined)
       return;
-    await this._requestContext?.sendNotification({
-      method: 'notifications/progress',
-      params: {
-        progressToken,
-        progress: update.progress,
-        total: update.total,
-        message: update.message,
-      },
-    });
+    try {
+      await this._requestContext?.sendNotification({
+        method: 'notifications/progress',
+        params: {
+          progressToken,
+          progress: update.progress,
+          total: update.total,
+          message: update.message,
+        },
+      });
+    } catch {
+      // Progress notifications are best-effort; swallow transport errors.
+    }
   }
 
   async finish() {

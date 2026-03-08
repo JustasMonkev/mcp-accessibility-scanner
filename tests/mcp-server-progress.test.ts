@@ -45,25 +45,27 @@ describe('mcp server progress plumbing', () => {
     client.setRequestHandler(PingRequestSchema, () => ({}));
     await client.connect(transport);
 
-    const onprogress = vi.fn();
-    const result = await client.callTool({
-      name: 'audit_site',
-      arguments: {},
-    }, undefined, { onprogress });
+    try {
+      const onprogress = vi.fn();
+      const result = await client.callTool({
+        name: 'audit_site',
+        arguments: {},
+      }, undefined, { onprogress });
 
-    expect(result.isError).not.toBe(true);
-    expect(backend.callTool).toHaveBeenCalledTimes(1);
-    expect(backend.callTool.mock.calls[0][2]).toMatchObject({
-      _meta: expect.objectContaining({
-        progressToken: expect.any(Number),
-      }),
-    });
-    expect(onprogress).toHaveBeenCalledWith(expect.objectContaining({
-      progress: 1,
-      total: 1,
-      message: 'Complete',
-    }));
-
-    await client.close();
+      expect(result.isError).not.toBe(true);
+      expect(backend.callTool).toHaveBeenCalledTimes(1);
+      expect(backend.callTool.mock.calls[0][2]).toMatchObject({
+        _meta: expect.objectContaining({
+          progressToken: expect.any(Number),
+        }),
+      });
+      expect(onprogress).toHaveBeenCalledWith(expect.objectContaining({
+        progress: 1,
+        total: 1,
+        message: 'Complete',
+      }));
+    } finally {
+      await client.close();
+    }
   });
 });

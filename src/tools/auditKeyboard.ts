@@ -211,8 +211,8 @@ export async function runKeyboardFocusAudit(
       }
     }
 
+    let shouldStopOnCycle = false;
     if (options.checkFocusTrap) {
-      let shouldStopOnCycle = false;
       const recentStops = stops.slice(Math.max(0, stops.length - options.cycleWindow + 1));
       const foundRepeat = recentStops.some(previous => previous.fingerprint === stop.fingerprint);
       const touchedDocumentRoot = recentStops.some(previous => previous.tagName === 'HTML' || previous.tagName === 'BODY') || stop.tagName === 'HTML' || stop.tagName === 'BODY';
@@ -225,15 +225,12 @@ export async function runKeyboardFocusAudit(
         if (options.stopOnCycle)
           shouldStopOnCycle = true;
       }
-      stops.push(stop);
-      await callbacks.onStep?.(stop);
-      if (shouldStopOnCycle)
-        break;
-      continue;
     }
 
     stops.push(stop);
     await callbacks.onStep?.(stop);
+    if (shouldStopOnCycle)
+      break;
   }
 
   return {

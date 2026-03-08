@@ -68,7 +68,7 @@ class VSCodeProxyBackend implements ServerBackend {
 
   async callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
     if (name === this._contextSwitchTool.name)
-      return this._callContextSwitchTool(args as any);
+      return this._callContextSwitchTool(args as any, requestContext);
     return await this._currentClient!.callTool({
       name,
       arguments: args,
@@ -80,7 +80,7 @@ class VSCodeProxyBackend implements ServerBackend {
     void this._currentClient?.close().catch(logUnhandledError);
   }
 
-  private async _callContextSwitchTool(params: z.infer<typeof contextSwitchOptions>): Promise<CallToolResult> {
+  private async _callContextSwitchTool(params: z.infer<typeof contextSwitchOptions>, _requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
     if (!params.connectionString || !params.lib) {
       const transport = await this._defaultTransportFactory();
       await this._setCurrentClient(transport);
