@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
 import type { Tab } from '../src/tab.js';
@@ -339,6 +339,28 @@ describe('Response', () => {
   });
 
   describe('tabSnapshot', () => {
+    it('should send progress notifications for a defined falsy progress token', async () => {
+      const sendNotification = vi.fn().mockResolvedValue(undefined);
+      const response = new Response(mockContext, 'test_tool', {}, {
+        _meta: { progressToken: 0 },
+        sendNotification,
+        signal: new AbortController().signal,
+        requestId: 1,
+      } as any);
+
+      await response.reportProgress({ progress: 1, total: 2, message: 'Working' });
+
+      expect(sendNotification).toHaveBeenCalledWith(expect.objectContaining({
+        method: 'notifications/progress',
+        params: expect.objectContaining({
+          progressToken: 0,
+          progress: 1,
+          total: 2,
+          message: 'Working',
+        }),
+      }));
+    });
+
     it('should return undefined before finish', () => {
       const response = new Response(mockContext, 'test_tool', {});
       expect(response.tabSnapshot()).toBeUndefined();
