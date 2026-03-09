@@ -23,6 +23,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { ListRootsRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import * as mcpServer from '../mcp/server.js';
+import { notifyToolListChanged } from '../mcp/toolListChanged.js';
 import { logUnhandledError } from '../utils/log.js';
 import { packageJSON } from '../utils/package.js';
 
@@ -30,7 +31,7 @@ import { FullConfig } from '../config.js';
 import { BrowserServerBackend } from '../browserServerBackend.js';
 import { contextFactory } from '../browserContextFactory.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { ClientVersion, ServerBackend } from '../mcp/server.js';
+import type { ClientVersion, ServerBackend, ServerBackendContext } from '../mcp/server.js';
 import type { Root, Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
 const contextSwitchOptions = z.object({
@@ -38,7 +39,7 @@ const contextSwitchOptions = z.object({
   lib: z.string().optional().describe('The library to use for the connection'),
 });
 
-class VSCodeProxyBackend implements ServerBackend {
+export class VSCodeProxyBackend implements ServerBackend {
   name = 'Playwright MCP Client Switcher';
   version = packageJSON.version;
 
@@ -46,16 +47,18 @@ class VSCodeProxyBackend implements ServerBackend {
   private _contextSwitchTool: Tool;
   private _roots: Root[] = [];
   private _clientVersion?: ClientVersion;
+  private _backendContext: ServerBackendContext | undefined;
 
   constructor(private readonly _config: FullConfig, private readonly _defaultTransportFactory: () => Promise<Transport>) {
     this._contextSwitchTool = this._defineContextSwitchTool();
   }
 
-  async initialize(server: mcpServer.Server, clientVersion: ClientVersion, roots: Root[]): Promise<void> {
+  async initialize(context: ServerBackendContext, clientVersion: ClientVersion, roots: Root[]): Promise<void> {
+    this._backendContext = context;
     this._clientVersion = clientVersion;
     this._roots = roots;
     const transport = await this._defaultTransportFactory();
-    await this._setCurrentClient(transport);
+    await this._setCurrentClient(transport, false);
   }
 
   async listTools(): Promise<Tool[]> {
@@ -76,14 +79,14 @@ class VSCodeProxyBackend implements ServerBackend {
     }) as CallToolResult;
   }
 
-  serverClosed?(server: mcpServer.Server): void {
+  serverClosed?(): void {
     void this._currentClient?.close().catch(logUnhandledError);
   }
 
   private async _callContextSwitchTool(params: z.infer<typeof contextSwitchOptions>, _requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
     if (!params.connectionString || !params.lib) {
       const transport = await this._defaultTransportFactory();
-      await this._setCurrentClient(transport);
+      await this._setCurrentClient(transport, true);
       return {
         content: [{ type: 'text', text: '### Result\nSuccessfully disconnected.\n' }],
       };
@@ -99,7 +102,8 @@ class VSCodeProxyBackend implements ServerBackend {
             params.connectionString,
             params.lib,
           ],
-        })
+        }),
+        true,
     );
     return {
       content: [{ type: 'text', text: '### Result\nSuccessfully connected.\n' }],
@@ -119,7 +123,8 @@ class VSCodeProxyBackend implements ServerBackend {
     };
   }
 
-  private async _setCurrentClient(transport: Transport) {
+  private async _setCurrentClient(transport: Transport, notifyOnChange: boolean) {
+    const previousTools = notifyOnChange ? await this._getExposedTools(this._currentClient).catch(() => undefined) : undefined;
     await this._currentClient?.close();
     this._currentClient = undefined;
 
@@ -134,6 +139,18 @@ class VSCodeProxyBackend implements ServerBackend {
 
     await client.connect(transport);
     this._currentClient = client;
+    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(client));
+  }
+
+  private async _getExposedTools(client: Client | undefined): Promise<Tool[]> {
+    if (!client)
+      return [];
+
+    const { tools } = await client.listTools();
+    return [
+      ...tools,
+      this._contextSwitchTool,
+    ];
   }
 }
 

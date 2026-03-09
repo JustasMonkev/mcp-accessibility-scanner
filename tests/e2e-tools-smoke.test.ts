@@ -103,6 +103,10 @@ function extractReportPath(text: string): string {
   return match[1].trim();
 }
 
+function extractResourceLinks(result: { content: Array<{ type: string, uri?: string, name?: string }> }) {
+  return result.content.filter(item => item.type === 'resource_link');
+}
+
 const hasBundledChromium = fs.existsSync(chromium.executablePath());
 async function canLaunchBundledChromium(): Promise<boolean> {
   if (!hasBundledChromium)
@@ -222,6 +226,22 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
     expect(keyboardText1).toContain('Skip link: found');
     const keyboardReportPath1 = extractReportPath(keyboardText1);
     expect(fs.existsSync(keyboardReportPath1)).toBe(true);
+    expect(keyboardResult1.structuredContent).toMatchObject({
+      kind: 'audit_keyboard',
+      report: {
+        path: keyboardReportPath1,
+      },
+      summary: expect.objectContaining({
+        skipLinkFound: true,
+      }),
+    });
+    expect(extractResourceLinks(keyboardResult1 as any)).toEqual([
+      expect.objectContaining({
+        type: 'resource_link',
+        uri: pathToFileURL(keyboardReportPath1).toString(),
+        name: 'audit-keyboard-report',
+      }),
+    ]);
 
     const matrixResult = await backend.callTool('scan_page_matrix', {
       variants: [
@@ -239,6 +259,24 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
     const matrixReport = JSON.parse(await fs.promises.readFile(matrixReportPath, 'utf-8'));
     expect(matrixReport.variants).toHaveLength(2);
     expect(matrixReport.variants[0].name).toBe('baseline');
+    expect(matrixResult.structuredContent).toMatchObject({
+      kind: 'scan_page_matrix',
+      report: {
+        path: matrixReportPath,
+      },
+      baselineVariant: 'baseline',
+      variants: [
+        expect.objectContaining({ name: 'baseline' }),
+        expect.objectContaining({ name: 'mobile' }),
+      ],
+    });
+    expect(extractResourceLinks(matrixResult as any)).toEqual([
+      expect.objectContaining({
+        type: 'resource_link',
+        uri: pathToFileURL(matrixReportPath).toString(),
+        name: 'scan-page-matrix-report',
+      }),
+    ]);
 
     const siteResult = await backend.callTool('audit_site', {
       startUrl: `${fixtureOrigin}/`,
@@ -259,6 +297,22 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
     const siteReport = JSON.parse(await fs.promises.readFile(siteReportPath, 'utf-8'));
     expect(siteReport.summary.totals.scannedPages).toBeGreaterThanOrEqual(2);
     expect(siteReport.pages.some((page: any) => page.url.endsWith('/about'))).toBe(true);
+    expect(siteResult.structuredContent).toMatchObject({
+      kind: 'audit_site',
+      report: {
+        path: siteReportPath,
+      },
+      totals: expect.objectContaining({
+        scannedPages: siteReport.summary.totals.scannedPages,
+      }),
+    });
+    expect(extractResourceLinks(siteResult as any)).toEqual([
+      expect.objectContaining({
+        type: 'resource_link',
+        uri: pathToFileURL(siteReportPath).toString(),
+        name: 'audit-site-report',
+      }),
+    ]);
 
     const keyboardResult2 = await backend.callTool('audit_keyboard', {
       maxTabs: 8,
@@ -279,5 +333,11 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
     const keyboardText2 = (keyboardResult2.content[0] as any).text as string;
     const keyboardReportPath2 = extractReportPath(keyboardText2);
     expect(fs.existsSync(keyboardReportPath2)).toBe(true);
+    expect(keyboardResult2.structuredContent).toMatchObject({
+      kind: 'audit_keyboard',
+      report: {
+        path: keyboardReportPath2,
+      },
+    });
   }, 120000);
 });

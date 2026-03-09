@@ -21,13 +21,13 @@ import crypto from 'crypto';
 
 import debug from 'debug';
 
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import * as mcpServer from './server.js';
 
 import type { ServerBackendFactory } from './server.js';
 
 const testDebug = debug('pw:mcp:test');
+const allowedLoopbackHostnamePattern = /^127(?:\.\d{1,3}){3}$/;
 
 export async function startHttpServer(config: { host?: string, port?: number }, abortSignal?: AbortSignal): Promise<http.Server> {
   const { host, port } = config;
@@ -59,49 +59,31 @@ export function httpAddressToString(address: string | net.AddressInfo | null): s
 }
 
 export async function installHttpTransport(httpServer: http.Server, serverBackendFactory: ServerBackendFactory) {
-  const sseSessions = new Map();
   const streamableSessions = new Map();
   httpServer.on('request', async (req, res) => {
-    const url = new URL(`http://localhost${req.url}`);
-    if (url.pathname.startsWith('/sse'))
-      await handleSSE(serverBackendFactory, req, res, url, sseSessions);
-    else
-      await handleStreamable(serverBackendFactory, req, res, streamableSessions);
+    const validationError = validateRequestHeaders(httpServer, req);
+    if (validationError) {
+      res.statusCode = validationError.statusCode;
+      res.end(validationError.message);
+      return;
+    }
+    const routingError = validateRequestRouting(req, !!req.headers['mcp-session-id']);
+    if (routingError) {
+      res.statusCode = routingError.statusCode;
+      res.end(routingError.message);
+      return;
+    }
+    await handleStreamable(serverBackendFactory, req, res, streamableSessions);
   });
 }
 
-async function handleSSE(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, url: URL, sessions: Map<string, SSEServerTransport>) {
-  if (req.method === 'POST') {
-    const sessionId = url.searchParams.get('sessionId');
-    if (!sessionId) {
-      res.statusCode = 400;
-      return res.end('Missing sessionId');
-    }
-
-    const transport = sessions.get(sessionId);
-    if (!transport) {
-      res.statusCode = 404;
-      return res.end('Session not found');
-    }
-
-    return await transport.handlePostMessage(req, res);
-  } else if (req.method === 'GET') {
-    const transport = new SSEServerTransport('/sse', res);
-    sessions.set(transport.sessionId, transport);
-    testDebug(`create SSE session: ${transport.sessionId}`);
-    await mcpServer.connect(serverBackendFactory, transport, false);
-    res.on('close', () => {
-      testDebug(`delete SSE session: ${transport.sessionId}`);
-      sessions.delete(transport.sessionId);
-    });
+async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, StreamableHTTPServerTransport>) {
+  const routingError = validateRequestRouting(req, !!req.headers['mcp-session-id']);
+  if (routingError) {
+    res.statusCode = routingError.statusCode;
+    res.end(routingError.message);
     return;
   }
-
-  res.statusCode = 405;
-  res.end('Method not allowed');
-}
-
-async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, StreamableHTTPServerTransport>) {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
   if (sessionId) {
     const transport = sessions.get(sessionId);
@@ -152,4 +134,123 @@ function decorateServer(server: net.Server) {
     sockets.clear();
     return close.call(server, callback);
   };
+}
+
+function validateRequestHeaders(httpServer: http.Server, req: http.IncomingMessage): { statusCode: number, message: string } | undefined {
+  const allowedHosts = allowedHostnamesForServer(httpServer);
+  const hostHeader = req.headers.host;
+  const host = typeof hostHeader === 'string' ? parseAuthority(hostHeader) : undefined;
+  if (!host) {
+    testDebug('reject request with invalid host header: %o', hostHeader);
+    return { statusCode: 400, message: 'Invalid Host header' };
+  }
+  if (!allowedHosts.has(host.hostname)) {
+    testDebug('reject request for disallowed host %s; allowed hosts: %o', host.hostname, [...allowedHosts]);
+    return { statusCode: 403, message: 'Forbidden Host header' };
+  }
+
+  const originHeader = req.headers.origin;
+  if (!originHeader)
+    return;
+
+  const origin = parseOriginAuthority(originHeader);
+  if (!origin) {
+    testDebug('reject request with invalid origin header: %o', originHeader);
+    return { statusCode: 400, message: 'Invalid Origin header' };
+  }
+  if (!allowedHosts.has(origin.hostname)) {
+    testDebug('reject request for disallowed origin %s; allowed hosts: %o', origin.hostname, [...allowedHosts]);
+    return { statusCode: 403, message: 'Forbidden Origin header' };
+  }
+  if (origin.scheme !== host.scheme) {
+    testDebug('reject request with mismatched origin scheme %s for host scheme %s', origin.scheme, host.scheme);
+    return { statusCode: 403, message: 'Forbidden Origin header' };
+  }
+  if (origin.authority !== host.authority) {
+    testDebug('reject request with mismatched origin authority %s for host authority %s', origin.authority, host.authority);
+    return { statusCode: 403, message: 'Forbidden Origin header' };
+  }
+}
+
+function allowedHostnamesForServer(httpServer: http.Server): Set<string> {
+  const allowed = new Set<string>(['localhost', '::1', '127.0.0.1']);
+  const address = httpServer.address();
+  if (!address || typeof address === 'string')
+    return allowed;
+
+  const boundAddress = normalizeHostname(address.address);
+  if (boundAddress && !isWildcardAddress(boundAddress))
+    allowed.add(boundAddress);
+  return allowed;
+}
+
+function isWildcardAddress(hostname: string): boolean {
+  return hostname === '0.0.0.0' || hostname === '::';
+}
+
+function validateRequestRouting(req: http.IncomingMessage, hasSessionId: boolean): { statusCode: number, message: string } | undefined {
+  const requestPath = parseRequestPath(req.url);
+  if (!requestPath)
+    return { statusCode: 400, message: 'Invalid request' };
+  if (requestPath !== '/mcp')
+    return { statusCode: 404, message: 'Not found' };
+  if (req.method === 'POST' || hasSessionId)
+    return;
+  return { statusCode: 400, message: 'Invalid request' };
+}
+
+function parseAuthority(authority: string): { hostname: string, authority: string, scheme: 'http' } | undefined {
+  try {
+    const url = new URL(`http://${authority}`);
+    const hostname = normalizeHostname(url.hostname);
+    return {
+      hostname,
+      authority: formatAuthority(hostname, url.port),
+      scheme: 'http',
+    };
+  } catch {
+    return;
+  }
+}
+
+function parseOriginAuthority(origin: string): { hostname: string, authority: string, scheme: 'http' | 'https' } | undefined {
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:')
+      return;
+    const hostname = normalizeHostname(url.hostname);
+    return {
+      hostname,
+      authority: formatAuthority(hostname, url.port),
+      scheme: url.protocol === 'https:' ? 'https' : 'http',
+    };
+  } catch {
+    return;
+  }
+}
+
+function parseRequestPath(requestUrl: string | undefined): string | undefined {
+  if (!requestUrl)
+    return;
+  try {
+    return new URL(requestUrl, 'http://127.0.0.1').pathname;
+  } catch {
+    return;
+  }
+}
+
+function formatAuthority(hostname: string, port: string): string {
+  const normalizedHost = hostname.includes(':') ? `[${hostname}]` : hostname;
+  return port ? `${normalizedHost}:${port}` : normalizedHost;
+}
+
+function normalizeHostname(hostname: string): string {
+  const lowerCase = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  if (lowerCase.startsWith('::ffff:'))
+    return lowerCase.slice('::ffff:'.length);
+  if (allowedLoopbackHostnamePattern.test(lowerCase))
+    return '127.0.0.1';
+  if (lowerCase.endsWith('.localhost'))
+    return 'localhost';
+  return lowerCase;
 }

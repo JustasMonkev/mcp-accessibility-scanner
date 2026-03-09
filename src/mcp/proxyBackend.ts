@@ -19,8 +19,9 @@ import { z } from 'zod';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { ListRootsRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { notifyToolListChanged } from './toolListChanged.js';
 
-import type { CallToolRequestContext, ServerBackend, ClientVersion, Root, Server } from './server.js';
+import type { CallToolRequestContext, ServerBackend, ClientVersion, Root, ServerBackendContext } from './server.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
@@ -37,15 +38,17 @@ export class ProxyBackend implements ServerBackend {
   private _currentClient: Client | undefined;
   private _contextSwitchTool: Tool;
   private _roots: Root[] = [];
+  private _backendContext: ServerBackendContext | undefined;
 
   constructor(mcpProviders: MCPProvider[]) {
     this._mcpProviders = mcpProviders;
     this._contextSwitchTool = this._defineContextSwitchTool();
   }
 
-  async initialize(server: Server, clientVersion: ClientVersion, roots: Root[]): Promise<void> {
+  async initialize(context: ServerBackendContext, clientVersion: ClientVersion, roots: Root[]): Promise<void> {
+    this._backendContext = context;
     this._roots = roots;
-    await this._setCurrentClient(this._mcpProviders[0]);
+    await this._setCurrentClient(this._mcpProviders[0], false);
   }
 
   async listTools(): Promise<Tool[]> {
@@ -83,7 +86,7 @@ export class ProxyBackend implements ServerBackend {
       if (!factory)
         throw new Error('Unknown connection method: ' + params.name);
 
-      await this._setCurrentClient(factory);
+      await this._setCurrentClient(factory, true);
       return {
         content: [{ type: 'text', text: '### Result\nSuccessfully changed connection method.\n' }],
       };
@@ -131,7 +134,8 @@ export class ProxyBackend implements ServerBackend {
     };
   }
 
-  private async _setCurrentClient(factory: MCPProvider) {
+  private async _setCurrentClient(factory: MCPProvider, notifyOnChange: boolean) {
+    const previousTools = notifyOnChange ? await this._getExposedTools(this._currentClient).catch(() => undefined) : undefined;
     await this._currentClient?.close();
     this._currentClient = undefined;
 
@@ -147,5 +151,17 @@ export class ProxyBackend implements ServerBackend {
     const transport = await factory.connect();
     await client.connect(transport);
     this._currentClient = client;
+    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(client));
+  }
+
+  private async _getExposedTools(client: Client | undefined): Promise<Tool[]> {
+    if (!client)
+      return [];
+
+    const { tools } = await client.listTools();
+    const toolDescriptors = [...tools];
+    if (this._mcpProviders.length > 1)
+      toolDescriptors.push(this._contextSwitchTool);
+    return toolDescriptors;
   }
 }

@@ -398,6 +398,53 @@ const auditKeyboard = defineTabTool({
     const reportFileName = sanitizeForFilePath(params.reportFile ?? `audit-keyboard-${safeIsoTimestampForFileName()}.json`);
     const reportPath = await tab.context.outputFile(reportFileName);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
+    const reportResourceLink = response.addFileResourceLink(reportPath, {
+      name: 'audit-keyboard-report',
+      title: 'Audit keyboard JSON report',
+      description: 'JSON report for keyboard navigation, focus, and skip-link findings.',
+      mimeType: 'application/json',
+    });
+    const screenshotResources = result.screenshots.map((screenshotPath, index) => {
+      const link = response.addFileResourceLink(screenshotPath, {
+        name: `audit-keyboard-screenshot-${index + 1}`,
+        title: `Audit keyboard issue screenshot ${index + 1}`,
+        description: `Screenshot captured for keyboard audit issue ${index + 1}.`,
+        mimeType: 'image/png',
+      });
+      return {
+        path: screenshotPath,
+        uri: link.uri,
+        name: link.name,
+        title: link.title ?? null,
+        mimeType: link.mimeType ?? null,
+      };
+    });
+    response.setStructuredContent({
+      kind: 'audit_keyboard',
+      report: {
+        path: reportPath,
+        uri: reportResourceLink.uri,
+        name: reportResourceLink.name,
+        title: reportResourceLink.title ?? null,
+        mimeType: reportResourceLink.mimeType ?? null,
+      },
+      page: {
+        url: tab.page.url(),
+      },
+      summary: {
+        uniqueFocusStops: result.uniqueFingerprints,
+        skipLinkFound: result.skipLink.found,
+        skipLinkStep: result.skipLink.step,
+        skipLinkActivated: result.skipLink.activated,
+        focusVisibilityIssueCount: result.focusVisibilityIssues.length,
+        focusJumpIssueCount: result.focusJumpIssues.length,
+        focusTrapDetected: result.focusTrap.detected,
+        focusTrapStep: result.focusTrap.step,
+        screenshotCount: result.screenshots.length,
+      },
+      screenshots: screenshotResources,
+      reportUri: reportResourceLink.uri,
+    });
 
     const focusVisibilityPreview = result.focusVisibilityIssues.slice(0, 10).map(stop => (
       `- Step ${stop.step} (${stop.key}): ${stop.role ?? 'unknown-role'} ${stop.name ?? ''}`.trim()

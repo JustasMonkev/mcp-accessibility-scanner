@@ -14,10 +14,15 @@
  * limitations under the License.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { ProxyBackend } from '../src/mcp/proxyBackend.js';
 
 describe('ProxyBackend', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('forwards progress metadata and relays downstream progress notifications', async () => {
     const backend = new ProxyBackend([{
       name: 'default',
@@ -63,5 +68,71 @@ describe('ProxyBackend', () => {
         message: 'Scanning',
       },
     });
+  });
+
+  it('notifies clients when the exposed tool list changes after switching providers', async () => {
+    const backend = new ProxyBackend([
+      {
+        name: 'default',
+        description: 'Default provider',
+        connect: vi.fn(async () => ({ id: 'default-transport' })),
+      },
+      {
+        name: 'alternate',
+        description: 'Alternate provider',
+        connect: vi.fn(async () => ({ id: 'alternate-transport' })),
+      },
+    ] as any);
+
+    const close = vi.fn(async () => undefined);
+    (backend as any)._currentClient = {
+      listTools: vi.fn(async () => ({ tools: [{ name: 'scan_page' }] })),
+      close,
+    };
+    (backend as any)._backendContext = {
+      notifyToolListChanged: vi.fn(async () => undefined),
+    };
+
+    vi.spyOn(Client.prototype, 'connect').mockResolvedValue(undefined);
+    vi.spyOn(Client.prototype, 'listTools').mockResolvedValue({
+      tools: [{ name: 'audit_site' }] as any[],
+    } as any);
+
+    await (backend as any)._setCurrentClient((backend as any)._mcpProviders[1], true);
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect((backend as any)._backendContext.notifyToolListChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips tool list change notifications when the exposed tools stay the same', async () => {
+    const backend = new ProxyBackend([
+      {
+        name: 'default',
+        description: 'Default provider',
+        connect: vi.fn(async () => ({ id: 'default-transport' })),
+      },
+      {
+        name: 'alternate',
+        description: 'Alternate provider',
+        connect: vi.fn(async () => ({ id: 'alternate-transport' })),
+      },
+    ] as any);
+
+    (backend as any)._currentClient = {
+      listTools: vi.fn(async () => ({ tools: [{ name: 'scan_page' }] })),
+      close: vi.fn(async () => undefined),
+    };
+    (backend as any)._backendContext = {
+      notifyToolListChanged: vi.fn(async () => undefined),
+    };
+
+    vi.spyOn(Client.prototype, 'connect').mockResolvedValue(undefined);
+    vi.spyOn(Client.prototype, 'listTools').mockResolvedValue({
+      tools: [{ name: 'scan_page' }] as any[],
+    } as any);
+
+    await (backend as any)._setCurrentClient((backend as any)._mcpProviders[1], true);
+
+    expect((backend as any)._backendContext.notifyToolListChanged).not.toHaveBeenCalled();
   });
 });

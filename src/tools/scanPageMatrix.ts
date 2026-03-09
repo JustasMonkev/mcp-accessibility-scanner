@@ -245,6 +245,35 @@ const scanPageMatrix = defineTabTool({
     const reportFileName = sanitizeForFilePath(params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`);
     const reportPath = await tab.context.outputFile(reportFileName);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
+    const reportResourceLink = response.addFileResourceLink(reportPath, {
+      name: 'scan-page-matrix-report',
+      title: 'Scan page matrix JSON report',
+      description: 'JSON report containing per-variant Axe results and baseline deltas.',
+      mimeType: 'application/json',
+    });
+    response.setStructuredContent({
+      kind: 'scan_page_matrix',
+      report: {
+        path: reportPath,
+        uri: reportResourceLink.uri,
+        name: reportResourceLink.name,
+        title: reportResourceLink.title ?? null,
+        mimeType: reportResourceLink.mimeType ?? null,
+      },
+      page: {
+        url: tab.page.url(),
+      },
+      baselineVariant: report.metadata.baselineVariant,
+      variants: variantResults.map(result => ({
+        name: result.name,
+        totalViolations: result.summary.totalRules,
+        totalNodes: result.summary.totalNodes,
+        newViolationIds: result.diffFromBaseline.newViolationIds,
+        resolvedViolationIds: result.diffFromBaseline.resolvedViolationIds,
+        changedRuleIds: Object.keys(result.diffFromBaseline.changedCounts),
+        reportUri: reportResourceLink.uri,
+      })),
+    });
 
     const lines = [
       'Variant | Violations | Nodes | Top new vs baseline',
