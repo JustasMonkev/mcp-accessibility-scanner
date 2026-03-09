@@ -67,11 +67,23 @@ export async function installHttpTransport(httpServer: http.Server, serverBacken
       res.end(validationError.message);
       return;
     }
+    const routingError = validateRequestRouting(req, !!req.headers['mcp-session-id']);
+    if (routingError) {
+      res.statusCode = routingError.statusCode;
+      res.end(routingError.message);
+      return;
+    }
     await handleStreamable(serverBackendFactory, req, res, streamableSessions);
   });
 }
 
 async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, StreamableHTTPServerTransport>) {
+  const routingError = validateRequestRouting(req, !!req.headers['mcp-session-id']);
+  if (routingError) {
+    res.statusCode = routingError.statusCode;
+    res.end(routingError.message);
+    return;
+  }
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
   if (sessionId) {
     const transport = sessions.get(sessionId);
@@ -150,6 +162,10 @@ function validateRequestHeaders(httpServer: http.Server, req: http.IncomingMessa
     testDebug('reject request for disallowed origin %s; allowed hosts: %o', origin.hostname, [...allowedHosts]);
     return { statusCode: 403, message: 'Forbidden Origin header' };
   }
+  if (origin.scheme !== host.scheme) {
+    testDebug('reject request with mismatched origin scheme %s for host scheme %s', origin.scheme, host.scheme);
+    return { statusCode: 403, message: 'Forbidden Origin header' };
+  }
   if (origin.authority !== host.authority) {
     testDebug('reject request with mismatched origin authority %s for host authority %s', origin.authority, host.authority);
     return { statusCode: 403, message: 'Forbidden Origin header' };
@@ -172,20 +188,32 @@ function isWildcardAddress(hostname: string): boolean {
   return hostname === '0.0.0.0' || hostname === '::';
 }
 
-function parseAuthority(authority: string): { hostname: string, authority: string } | undefined {
+function validateRequestRouting(req: http.IncomingMessage, hasSessionId: boolean): { statusCode: number, message: string } | undefined {
+  const requestPath = parseRequestPath(req.url);
+  if (!requestPath)
+    return { statusCode: 400, message: 'Invalid request' };
+  if (requestPath !== '/mcp')
+    return { statusCode: 404, message: 'Not found' };
+  if (req.method === 'POST' || hasSessionId)
+    return;
+  return { statusCode: 400, message: 'Invalid request' };
+}
+
+function parseAuthority(authority: string): { hostname: string, authority: string, scheme: 'http' } | undefined {
   try {
     const url = new URL(`http://${authority}`);
     const hostname = normalizeHostname(url.hostname);
     return {
       hostname,
       authority: formatAuthority(hostname, url.port),
+      scheme: 'http',
     };
   } catch {
     return;
   }
 }
 
-function parseOriginAuthority(origin: string): { hostname: string, authority: string } | undefined {
+function parseOriginAuthority(origin: string): { hostname: string, authority: string, scheme: 'http' | 'https' } | undefined {
   try {
     const url = new URL(origin);
     if (url.protocol !== 'http:' && url.protocol !== 'https:')
@@ -194,7 +222,18 @@ function parseOriginAuthority(origin: string): { hostname: string, authority: st
     return {
       hostname,
       authority: formatAuthority(hostname, url.port),
+      scheme: url.protocol === 'https:' ? 'https' : 'http',
     };
+  } catch {
+    return;
+  }
+}
+
+function parseRequestPath(requestUrl: string | undefined): string | undefined {
+  if (!requestUrl)
+    return;
+  try {
+    return new URL(requestUrl, 'http://127.0.0.1').pathname;
   } catch {
     return;
   }

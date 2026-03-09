@@ -52,13 +52,13 @@ describe('mcp http transport hardening', () => {
     return { server, port: address.port };
   }
 
-  async function sendRequest(port: number, options?: { path?: string, hostHeader?: string, origin?: string }) {
+  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string }) {
     const response = await new Promise<{ statusCode: number, body: string }>((resolve, reject) => {
       const req = http.request({
         host: '127.0.0.1',
         port,
         path: options?.path ?? '/mcp',
-        method: 'GET',
+        method: options?.method ?? 'GET',
         headers: {
           ...(options?.hostHeader ? { host: options.hostHeader } : {}),
           ...(options?.origin ? { origin: options.origin } : {}),
@@ -124,6 +124,18 @@ describe('mcp http transport hardening', () => {
     expect(response.body).toBe('Forbidden Origin header');
   });
 
+  it('rejects allowed origins when the scheme does not match the host transport', async () => {
+    const { port } = await startServer();
+
+    const response = await sendRequest(port, {
+      hostHeader: `127.0.0.1:${port}`,
+      origin: `https://127.0.0.1:${port}`,
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.body).toBe('Forbidden Origin header');
+  });
+
   it('allows browser requests when origin authority exactly matches the host header', async () => {
     const { port } = await startServer();
 
@@ -153,6 +165,31 @@ describe('mcp http transport hardening', () => {
     const response = await sendRequest(port, {
       path: '/sse',
       hostHeader: `localhost:${port}`,
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.body).toBe('Not found');
+  });
+
+  it('rejects session creation outside the canonical /mcp path', async () => {
+    const { port } = await startServer();
+
+    const response = await sendRequest(port, {
+      method: 'POST',
+      path: '/not-mcp',
+      hostHeader: `127.0.0.1:${port}`,
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.body).toBe('Not found');
+  });
+
+  it('accepts canonicalized /mcp paths before method validation', async () => {
+    const { port } = await startServer();
+
+    const response = await sendRequest(port, {
+      path: '/mcp?trace=1',
+      hostHeader: `127.0.0.1:${port}`,
     });
 
     expect(response.statusCode).toBe(400);
