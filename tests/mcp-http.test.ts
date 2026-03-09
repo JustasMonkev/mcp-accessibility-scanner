@@ -100,11 +100,35 @@ describe('mcp http transport hardening', () => {
     expect(response.body).toBe('Forbidden Origin header');
   });
 
-  it('allows loopback host aliases and same-host loopback origins', async () => {
+  it('rejects loopback origin aliases when the authority does not exactly match the host header', async () => {
     const { port } = await startServer();
 
     const response = await sendRequest(port, {
       hostHeader: `localhost:${port}`,
+      origin: `http://127.0.0.1:${port}`,
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.body).toBe('Forbidden Origin header');
+  });
+
+  it('rejects allowed origins when the authority does not exactly match the host header', async () => {
+    const { port } = await startServer();
+
+    const response = await sendRequest(port, {
+      hostHeader: `127.0.0.1:${port}`,
+      origin: `http://127.0.0.1:${port + 1}`,
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.body).toBe('Forbidden Origin header');
+  });
+
+  it('allows browser requests when origin authority exactly matches the host header', async () => {
+    const { port } = await startServer();
+
+    const response = await sendRequest(port, {
+      hostHeader: `127.0.0.1:${port}`,
       origin: `http://127.0.0.1:${port}`,
     });
 

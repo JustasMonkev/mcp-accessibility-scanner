@@ -16,27 +16,46 @@
 
 import debug from 'debug';
 
-import type { ServerBackendContext } from './server.js';
+import type { ServerBackendContext, Tool } from './server.js';
 
 const errorsDebug = debug('pw:mcp:errors');
 
-export function haveToolNamesChanged(previousToolNames: string[] | undefined, nextToolNames: string[]): boolean {
-  if (!previousToolNames)
+export type ToolDescriptor = Tool;
+
+export function haveToolNamesChanged(previousTools: ToolDescriptor[] | undefined, nextTools: ToolDescriptor[]): boolean {
+  if (!previousTools)
     return true;
 
-  if (previousToolNames.length !== nextToolNames.length)
+  if (previousTools.length !== nextTools.length)
     return true;
 
-  const previousSet = new Set(previousToolNames);
-  for (const toolName of nextToolNames) {
-    if (!previousSet.has(toolName))
+  for (let index = 0; index < nextTools.length; index++) {
+    if (stableSerializeTool(previousTools[index]) !== stableSerializeTool(nextTools[index]))
       return true;
   }
   return false;
 }
 
-export async function notifyToolListChanged(context: ServerBackendContext | undefined, previousToolNames: string[] | undefined, nextToolNames: string[]) {
-  if (!context || !haveToolNamesChanged(previousToolNames, nextToolNames))
+function stableSerializeTool(tool: ToolDescriptor): string {
+  return JSON.stringify(canonicalize(tool));
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value))
+    return value.map(item => canonicalize(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+        Object.entries(value)
+            .filter(([, entryValue]) => entryValue !== undefined)
+            .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+            .map(([key, entryValue]) => [key, canonicalize(entryValue)]),
+    );
+  }
+  return value;
+}
+
+export async function notifyToolListChanged(context: ServerBackendContext | undefined, previousTools: ToolDescriptor[] | undefined, nextTools: ToolDescriptor[]) {
+  if (!context || !haveToolNamesChanged(previousTools, nextTools))
     return;
 
   try {

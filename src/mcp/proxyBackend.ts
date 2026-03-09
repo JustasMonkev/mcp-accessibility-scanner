@@ -135,7 +135,7 @@ export class ProxyBackend implements ServerBackend {
   }
 
   private async _setCurrentClient(factory: MCPProvider, notifyOnChange: boolean) {
-    const previousToolNames = notifyOnChange ? await this._getExposedToolNames(this._currentClient).catch(() => undefined) : undefined;
+    const previousTools = notifyOnChange ? await this._getExposedTools(this._currentClient).catch(() => undefined) : undefined;
     await this._currentClient?.close();
     this._currentClient = undefined;
 
@@ -151,17 +151,17 @@ export class ProxyBackend implements ServerBackend {
     const transport = await factory.connect();
     await client.connect(transport);
     this._currentClient = client;
-    await notifyToolListChanged(this._backendContext, previousToolNames, await this._getExposedToolNames(client));
+    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(client));
   }
 
-  private async _getExposedToolNames(client: Client | undefined): Promise<string[]> {
+  private async _getExposedTools(client: Client | undefined): Promise<Tool[]> {
     if (!client)
       return [];
 
     const { tools } = await client.listTools();
-    const toolNames = tools.map(tool => tool.name);
+    const toolDescriptors = [...tools];
     if (this._mcpProviders.length > 1)
-      toolNames.push(this._contextSwitchTool.name);
-    return toolNames;
+      toolDescriptors.push(this._contextSwitchTool);
+    return toolDescriptors;
   }
 }

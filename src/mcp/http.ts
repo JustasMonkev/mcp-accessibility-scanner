@@ -127,13 +127,13 @@ function decorateServer(server: net.Server) {
 function validateRequestHeaders(httpServer: http.Server, req: http.IncomingMessage): { statusCode: number, message: string } | undefined {
   const allowedHosts = allowedHostnamesForServer(httpServer);
   const hostHeader = req.headers.host;
-  const host = typeof hostHeader === 'string' ? parseHostname(hostHeader) : undefined;
+  const host = typeof hostHeader === 'string' ? parseAuthority(hostHeader) : undefined;
   if (!host) {
     testDebug('reject request with invalid host header: %o', hostHeader);
     return { statusCode: 400, message: 'Invalid Host header' };
   }
-  if (!allowedHosts.has(host)) {
-    testDebug('reject request for disallowed host %s; allowed hosts: %o', host, [...allowedHosts]);
+  if (!allowedHosts.has(host.hostname)) {
+    testDebug('reject request for disallowed host %s; allowed hosts: %o', host.hostname, [...allowedHosts]);
     return { statusCode: 403, message: 'Forbidden Host header' };
   }
 
@@ -141,13 +141,17 @@ function validateRequestHeaders(httpServer: http.Server, req: http.IncomingMessa
   if (!originHeader)
     return;
 
-  const originHost = parseOriginHostname(originHeader);
-  if (!originHost) {
+  const origin = parseOriginAuthority(originHeader);
+  if (!origin) {
     testDebug('reject request with invalid origin header: %o', originHeader);
     return { statusCode: 400, message: 'Invalid Origin header' };
   }
-  if (!allowedHosts.has(originHost)) {
-    testDebug('reject request for disallowed origin %s; allowed hosts: %o', originHost, [...allowedHosts]);
+  if (!allowedHosts.has(origin.hostname)) {
+    testDebug('reject request for disallowed origin %s; allowed hosts: %o', origin.hostname, [...allowedHosts]);
+    return { statusCode: 403, message: 'Forbidden Origin header' };
+  }
+  if (origin.authority !== host.authority) {
+    testDebug('reject request with mismatched origin authority %s for host authority %s', origin.authority, host.authority);
     return { statusCode: 403, message: 'Forbidden Origin header' };
   }
 }
@@ -168,23 +172,37 @@ function isWildcardAddress(hostname: string): boolean {
   return hostname === '0.0.0.0' || hostname === '::';
 }
 
-function parseHostname(authority: string): string | undefined {
+function parseAuthority(authority: string): { hostname: string, authority: string } | undefined {
   try {
-    return normalizeHostname(new URL(`http://${authority}`).hostname);
+    const url = new URL(`http://${authority}`);
+    const hostname = normalizeHostname(url.hostname);
+    return {
+      hostname,
+      authority: formatAuthority(hostname, url.port),
+    };
   } catch {
     return;
   }
 }
 
-function parseOriginHostname(origin: string): string | undefined {
+function parseOriginAuthority(origin: string): { hostname: string, authority: string } | undefined {
   try {
     const url = new URL(origin);
     if (url.protocol !== 'http:' && url.protocol !== 'https:')
       return;
-    return normalizeHostname(url.hostname);
+    const hostname = normalizeHostname(url.hostname);
+    return {
+      hostname,
+      authority: formatAuthority(hostname, url.port),
+    };
   } catch {
     return;
   }
+}
+
+function formatAuthority(hostname: string, port: string): string {
+  const normalizedHost = hostname.includes(':') ? `[${hostname}]` : hostname;
+  return port ? `${normalizedHost}:${port}` : normalizedHost;
 }
 
 function normalizeHostname(hostname: string): string {

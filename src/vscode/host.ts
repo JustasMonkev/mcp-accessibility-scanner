@@ -124,7 +124,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   private async _setCurrentClient(transport: Transport, notifyOnChange: boolean) {
-    const previousToolNames = notifyOnChange ? await this._getExposedToolNames(this._currentClient).catch(() => undefined) : undefined;
+    const previousTools = notifyOnChange ? await this._getExposedTools(this._currentClient).catch(() => undefined) : undefined;
     await this._currentClient?.close();
     this._currentClient = undefined;
 
@@ -139,17 +139,17 @@ export class VSCodeProxyBackend implements ServerBackend {
 
     await client.connect(transport);
     this._currentClient = client;
-    await notifyToolListChanged(this._backendContext, previousToolNames, await this._getExposedToolNames(client));
+    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(client));
   }
 
-  private async _getExposedToolNames(client: Client | undefined): Promise<string[]> {
+  private async _getExposedTools(client: Client | undefined): Promise<Tool[]> {
     if (!client)
       return [];
 
     const { tools } = await client.listTools();
     return [
-      ...tools.map(tool => tool.name),
-      this._contextSwitchTool.name,
+      ...tools,
+      this._contextSwitchTool,
     ];
   }
 }
