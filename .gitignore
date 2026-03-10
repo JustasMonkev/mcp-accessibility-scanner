@@ -19,3 +19,7 @@ node_modules/
 build/
 lib/
 coverage/
+
+.DS_Store
+.idea/
+.claude/
