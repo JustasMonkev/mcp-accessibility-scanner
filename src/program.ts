@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import readline from 'node:readline';
+
 import { program, Option } from 'commander';
 import * as mcpServer from './mcp/server.js';
 import { commaSeparatedList, resolveCLIConfig, semicolonSeparatedList } from './config.js';
@@ -23,49 +25,69 @@ import { contextFactory } from './browserContextFactory.js';
 import { ProxyBackend } from './mcp/proxyBackend.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
+import { filteredTools } from './tools.js';
 
 import { runVSCodeTools } from './vscode/host.js';
 import type { MCPProvider } from './mcp/proxyBackend.js';
+import type { FullConfig } from './config.js';
+import type { BrowserContextFactory } from './browserContextFactory.js';
 
-program
-    .version('Version ' + packageJSON.version)
-    .name(packageJSON.name)
-    .option('--allowed-origins <origins>', 'semicolon-separated list of origins to allow the browser to request. Default is to allow all.', semicolonSeparatedList)
-    .option('--blocked-origins <origins>', 'semicolon-separated list of origins to block the browser from requesting. Blocklist is evaluated before allowlist. If used without the allowlist, requests not matching the blocklist are still allowed.', semicolonSeparatedList)
-    .option('--block-service-workers', 'block service workers')
-    .option('--browser <browser>', 'browser or chrome channel to use, possible values: chrome, firefox, webkit, msedge.')
-    .option('--caps <caps>', 'comma-separated list of additional capabilities to enable, possible values: vision, pdf.', commaSeparatedList)
-    .option('--cdp-endpoint <endpoint>', 'CDP endpoint to connect to.')
-    .option('--config <path>', 'path to the configuration file.')
-    .option('--device <device>', 'device to emulate, for example: "iPhone 15"')
-    .option('--executable-path <path>', 'path to the browser executable.')
-    .option('--extension', 'Connect to a running browser instance (Edge/Chrome only). Requires the "Playwright MCP Bridge" browser extension to be installed.')
-    .option('--headless', 'run browser in headless mode, headed by default')
-    .option('--host <host>', 'host to bind server to. Default is localhost. Use 0.0.0.0 to bind to all interfaces.')
-    .option('--ignore-https-errors', 'ignore https errors')
-    .option('--isolated', 'keep the browser profile in memory, do not save it to disk.')
-    .option('--image-responses <mode>', 'whether to send image responses to the client. Can be "allow" or "omit", Defaults to "allow".')
-    .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
-    .option('--output-dir <path>', 'path to the directory for output files.')
-    .option('--port <port>', 'port to listen on for MCP Streamable HTTP transport.')
-    .option('--proxy-bypass <bypass>', 'comma-separated domains to bypass proxy, for example ".com,chromium.org,.domain.com"')
-    .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128" or "socks5://myproxy:8080"')
-    .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')
-    .option('--save-trace', 'Whether to save the Playwright Trace of the session into the output directory.')
-    .option('--storage-state <path>', 'path to the storage state file for isolated sessions.')
-    .option('--user-agent <ua string>', 'specify user agent string')
-    .option('--user-data-dir <path>', 'path to the user data directory. If not specified, a temporary directory will be created.')
-    .option('--viewport-size <size>', 'specify browser viewport size in pixels, for example "1280, 720"')
-    .option('--navigation-timeout <ms>', 'maximum time in milliseconds for page navigation. Defaults to 60000ms (60 seconds).', parseInt)
-    .option('--default-timeout <ms>', 'default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).', parseInt)
-    .addOption(new Option('--connect-tool', 'Allow to switch between different browser connection methods.').hideHelp())
-    .addOption(new Option('--vscode', 'VS Code tools.').hideHelp())
+type ProgramContext = {
+  config: FullConfig;
+  browserContextFactory: BrowserContextFactory;
+  extensionContextFactory: ExtensionContextFactory;
+};
+
+async function resolveProgramContext(options: Record<string, unknown>): Promise<ProgramContext> {
+  const config = await resolveCLIConfig(options);
+  const browserContextFactory = contextFactory(config);
+  const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath);
+  return { config, browserContextFactory, extensionContextFactory };
+}
+
+function configureBaseProgram() {
+  program
+      .version('Version ' + packageJSON.version)
+      .name(packageJSON.name)
+      .option('--allowed-origins <origins>', 'semicolon-separated list of origins to allow the browser to request. Default is to allow all.', semicolonSeparatedList)
+      .option('--blocked-origins <origins>', 'semicolon-separated list of origins to block the browser from requesting. Blocklist is evaluated before allowlist. If used without the allowlist, requests not matching the blocklist are still allowed.', semicolonSeparatedList)
+      .option('--block-service-workers', 'block service workers')
+      .option('--browser <browser>', 'browser or chrome channel to use, possible values: chrome, firefox, webkit, msedge.')
+      .option('--caps <caps>', 'comma-separated list of additional capabilities to enable, possible values: vision, pdf.', commaSeparatedList)
+      .option('--cdp-endpoint <endpoint>', 'CDP endpoint to connect to.')
+      .option('--config <path>', 'path to the configuration file.')
+      .option('--device <device>', 'device to emulate, for example: "iPhone 15"')
+      .option('--executable-path <path>', 'path to the browser executable.')
+      .option('--extension', 'Connect to a running browser instance (Edge/Chrome only). Requires the "Playwright MCP Bridge" browser extension to be installed.')
+      .option('--headless', 'run browser in headless mode, headed by default')
+      .option('--host <host>', 'host to bind server to. Default is localhost. Use 0.0.0.0 to bind to all interfaces.')
+      .option('--ignore-https-errors', 'ignore https errors')
+      .option('--isolated', 'keep the browser profile in memory, do not save it to disk.')
+      .option('--image-responses <mode>', 'whether to send image responses to the client. Can be "allow" or "omit", Defaults to "allow".')
+      .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
+      .option('--output-dir <path>', 'path to the directory for output files.')
+      .option('--port <port>', 'port to listen on for MCP Streamable HTTP transport.')
+      .option('--proxy-bypass <bypass>', 'comma-separated domains to bypass proxy, for example ".com,chromium.org,.domain.com"')
+      .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128" or "socks5://myproxy:8080"')
+      .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')
+      .option('--save-trace', 'Whether to save the Playwright Trace of the session into the output directory.')
+      .option('--storage-state <path>', 'path to the storage state file for isolated sessions.')
+      .option('--user-agent <ua string>', 'specify user agent string')
+      .option('--user-data-dir <path>', 'path to the user data directory. If not specified, a temporary directory will be created.')
+      .option('--viewport-size <size>', 'specify browser viewport size in pixels, for example "1280, 720"')
+      .option('--navigation-timeout <ms>', 'maximum time in milliseconds for page navigation. Defaults to 60000ms (60 seconds).', parseInt)
+      .option('--default-timeout <ms>', 'default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).', parseInt)
+      .addOption(new Option('--connect-tool', 'Allow to switch between different browser connection methods.').hideHelp())
+      .addOption(new Option('--vscode', 'VS Code tools.').hideHelp());
+
+  return program;
+}
+
+configureBaseProgram()
     .action(async options => {
       setupExitWatchdog();
 
-      const config = await resolveCLIConfig(options);
-      const browserContextFactory = contextFactory(config);
-      const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath);
+      const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(options);
 
       if (options.extension) {
         const serverBackendFactory: mcpServer.ServerBackendFactory = {
@@ -113,6 +135,88 @@ program
         create: () => new BrowserServerBackend(config, browserContextFactory)
       };
       await mcpServer.start(factory, config.server);
+    });
+
+program
+    .command('list-tools')
+    .description('List available MCP tools')
+    .action(async () => {
+      const parentOptions = program.opts();
+      const { config } = await resolveProgramContext(parentOptions);
+      const tools = filteredTools(config);
+      for (const tool of tools) {
+        // eslint-disable-next-line no-console
+        console.log(`${tool.schema.name}  ${tool.schema.description}`);
+      }
+    });
+
+program
+    .command('interactive')
+    .description('Start an interactive REPL for manual tool execution')
+    .action(async () => {
+      const parentOptions = program.opts();
+      const { config, browserContextFactory } = await resolveProgramContext(parentOptions);
+      const backend = new BrowserServerBackend(config, browserContextFactory);
+      await backend.initialize(
+          { notifyToolListChanged: async () => {} },
+          { name: 'interactive-cli', version: packageJSON.version },
+          [],
+      );
+
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+
+      // eslint-disable-next-line no-console
+      console.log('Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.');
+
+      const prompt = () => rl.prompt();
+      rl.setPrompt('> ');
+      prompt();
+
+      rl.on('line', async (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          prompt();
+          return;
+        }
+
+        const spaceIndex = trimmed.indexOf(' ');
+        const toolName = spaceIndex === -1 ? trimmed : trimmed.substring(0, spaceIndex);
+        const jsonStr = spaceIndex === -1 ? '{}' : trimmed.substring(spaceIndex + 1).trim();
+
+        let args: Record<string, unknown>;
+        try {
+          args = JSON.parse(jsonStr) as Record<string, unknown>;
+        } catch {
+          // eslint-disable-next-line no-console
+          console.error(`Invalid JSON: ${jsonStr}`);
+          prompt();
+          return;
+        }
+
+        try {
+          const result = await backend.callTool(toolName, args);
+          if (result.content) {
+            for (const item of result.content) {
+              if (item.type === 'text')
+                // eslint-disable-next-line no-console
+                console.log(item.text);
+            }
+          }
+        } catch (error) {
+          // eslint-disable-next-line no-console
+          console.error(`Error: ${String(error)}`);
+        }
+
+        prompt();
+      });
+
+      rl.on('close', () => {
+        backend.serverClosed();
+        process.exit(0);
+      });
     });
 
 function setupExitWatchdog() {
