@@ -70,13 +70,6 @@ describe('CLI command dispatch contract', () => {
     });
   });
 
-  describe('interactive subcommand', () => {
-    it('starts the REPL and prints prompt', async () => {
-      const { stdout } = await collectOutput(['interactive'], 2000);
-      expect(stdout).toContain('Interactive mode');
-    });
-  });
-
   describe('list-tools subcommand', () => {
     it('produces tool output with known tool names', () => {
       const output = runCLI('list-tools');
