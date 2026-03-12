@@ -3,7 +3,6 @@
 
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/justasmonkev-mcp-accessibility-scanner-badge.png)](https://mseep.ai/app/justasmonkev-mcp-accessibility-scanner)
 
-A Model Context Protocol (MCP) server that provides automated web accessibility scanning using Playwright and Axe-core. This server enables LLMs to perform WCAG compliance checks, capture annotated screenshots, and generate detailed accessibility reports.
 A powerful Model Context Protocol (MCP) server that provides automated web accessibility scanning and browser automation using Playwright and Axe-core. This server enables LLMs to perform WCAG compliance checks, interact with web pages, manage persistent browser sessions, and generate detailed accessibility reports with visual annotations.
 
 ## Features
@@ -91,6 +90,45 @@ For VS Code Insiders:
 ```bash
 code-insiders --add-mcp '{"name":"accessibility-scanner","command":"npx","args":["mcp-accessibility-scanner"]}'
 ```
+
+## CLI Modes
+
+The scanner can run in two modes depending on how you use it.
+
+### MCP server (default, no subcommand)
+
+When launched without a subcommand, the process starts an MCP server that communicates over stdio. This is the mode used by MCP clients such as Claude Desktop, VS Code, and Claude Code -- you should never need to run it by hand.
+
+```bash
+npx mcp-accessibility-scanner            # starts the MCP server (stdio)
+```
+
+All of the MCP client configuration examples in this README already use this default mode.
+
+### Interactive REPL (`interactive` subcommand)
+
+For manual terminal use, the `interactive` subcommand starts a readline REPL where you can call any tool directly:
+
+```bash
+$ npx mcp-accessibility-scanner interactive
+Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.
+> browser_navigate {"url": "https://example.com"}
+> scan_page {"violationsTag": ["wcag21aa"]}
+> audit_keyboard {"maxTabs": 30}
+```
+
+Each line is `<tool-name> <json-arguments>`. Omit the JSON to pass `{}`.
+Global browser connection flags still apply here, for example `npx mcp-accessibility-scanner --extension interactive`.
+
+### Discovering available tools (`list-tools` subcommand)
+
+To print every tool name and its description:
+
+```bash
+npx mcp-accessibility-scanner list-tools
+```
+
+> **Note:** Tool names like `browser_navigate` and `scan_page` are MCP tool identifiers (and REPL commands in interactive mode). They are not shell subcommands -- you cannot run `npx mcp-accessibility-scanner browser_navigate`.
 
 ## Configuration
 
