@@ -118,6 +118,7 @@ Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.
 ```
 
 Each line is `<tool-name> <json-arguments>`. Omit the JSON to pass `{}`.
+Global browser connection flags still apply here, for example `npx mcp-accessibility-scanner --extension interactive`.
 
 ### Discovering available tools (`list-tools` subcommand)
 

@@ -26,6 +26,7 @@ import { ProxyBackend } from './mcp/proxyBackend.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
 import { filteredTools } from './tools.js';
+import { logUnhandledError } from './utils/log.js';
 
 import { runVSCodeTools } from './vscode/host.js';
 import type { MCPProvider } from './mcp/proxyBackend.js';
@@ -159,8 +160,9 @@ program
     .description('Start an interactive REPL for manual tool execution')
     .action(async () => {
       const parentOptions = program.opts();
-      const { config, browserContextFactory } = await resolveProgramContext(parentOptions);
-      const backend = new BrowserServerBackend(config, browserContextFactory);
+      const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(parentOptions);
+      const backend = new BrowserServerBackend(config, parentOptions.extension ? extensionContextFactory : browserContextFactory);
+      const handleExit = setupExitWatchdog();
       await backend.initialize(
           { notifyToolListChanged: async () => {} },
           { name: 'interactive-cli', version: packageJSON.version },
@@ -218,25 +220,36 @@ program
       });
 
       rl.on('close', () => {
-        backend.serverClosed();
-        process.exit(0);
+        void handleExit();
       });
     });
 
-function setupExitWatchdog() {
+function setupExitWatchdog(cleanup: () => Promise<void> = () => Context.disposeAll()) {
   let isExiting = false;
   const handleExit = async () => {
     if (isExiting)
       return;
     isExiting = true;
     setTimeout(() => process.exit(0), 15000);
-    await Context.disposeAll();
-    process.exit(0);
+    try {
+      await cleanup();
+    } catch (error) {
+      logUnhandledError(error);
+    } finally {
+      process.exit(0);
+    }
   };
 
-  process.stdin.on('close', handleExit);
-  process.on('SIGINT', handleExit);
-  process.on('SIGTERM', handleExit);
+  process.stdin.on('close', () => {
+    void handleExit();
+  });
+  process.on('SIGINT', () => {
+    void handleExit();
+  });
+  process.on('SIGTERM', () => {
+    void handleExit();
+  });
+  return handleExit;
 }
 
 void program.parseAsync(process.argv);

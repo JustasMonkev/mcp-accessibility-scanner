@@ -15,13 +15,13 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { execSync, spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import path from 'node:path';
 
-const cliPath = path.resolve(__dirname, '..', 'cli.js');
+const cliArgs = ['--loader', 'ts-node/esm', path.resolve(__dirname, '..', 'src', 'program.ts')];
 
 function runCLI(args: string): string {
-  return execSync(`node ${cliPath} ${args}`, {
+  return execFileSync(process.execPath, [...cliArgs, ...args.split(' ').filter(Boolean)], {
     encoding: 'utf-8',
     timeout: 15_000,
   });
@@ -29,7 +29,7 @@ function runCLI(args: string): string {
 
 function collectOutput(args: string[], timeoutMs = 3000): Promise<{ stdout: string; stderr: string }> {
   return new Promise(resolve => {
-    const child = spawn('node', [cliPath, ...args], { stdio: 'pipe' });
+    const child = spawn(process.execPath, [...cliArgs, ...args], { stdio: 'pipe' });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
