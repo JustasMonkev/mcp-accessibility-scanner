@@ -45,6 +45,16 @@ async function resolveProgramContext(options: Record<string, unknown>): Promise<
   return { config, browserContextFactory, extensionContextFactory };
 }
 
+async function startMCPServer(config: FullConfig, browserContextFactory: BrowserContextFactory) {
+  const factory: mcpServer.ServerBackendFactory = {
+    name: 'Playwright',
+    nameInConfig: 'playwright',
+    version: packageJSON.version,
+    create: () => new BrowserServerBackend(config, browserContextFactory)
+  };
+  await mcpServer.start(factory, config.server);
+}
+
 function configureBaseProgram() {
   program
       .version('Version ' + packageJSON.version)
@@ -128,13 +138,7 @@ configureBaseProgram()
         return;
       }
 
-      const factory: mcpServer.ServerBackendFactory = {
-        name: 'Playwright',
-        nameInConfig: 'playwright',
-        version: packageJSON.version,
-        create: () => new BrowserServerBackend(config, browserContextFactory)
-      };
-      await mcpServer.start(factory, config.server);
+      await startMCPServer(config, browserContextFactory);
     });
 
 program

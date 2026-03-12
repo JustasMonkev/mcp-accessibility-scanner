@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import path from 'node:path';
 
 const cliPath = path.resolve(__dirname, '..', 'cli.js');
@@ -24,6 +24,21 @@ function runCLI(args: string): string {
   return execSync(`node ${cliPath} ${args}`, {
     encoding: 'utf-8',
     timeout: 15_000,
+  });
+}
+
+function collectOutput(args: string[], timeoutMs = 3000): Promise<{ stdout: string; stderr: string }> {
+  return new Promise(resolve => {
+    const child = spawn('node', [cliPath, ...args], { stdio: 'pipe' });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+    child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+    setTimeout(() => {
+      child.kill('SIGTERM');
+      resolve({ stdout, stderr });
+    }, timeoutMs);
+    child.on('close', () => resolve({ stdout, stderr }));
   });
 }
 
@@ -38,6 +53,27 @@ describe('CLI command dispatch contract', () => {
     it('does NOT expose a serve command', () => {
       const help = runCLI('--help');
       expect(help).not.toMatch(/\bserve\b/);
+    });
+
+    it('shows global options like --browser and --config', () => {
+      const help = runCLI('--help');
+      expect(help).toContain('--browser');
+      expect(help).toContain('--config');
+      expect(help).toContain('--headless');
+    });
+  });
+
+  describe('default command (no subcommand)', () => {
+    it('routes to MCP server, not REPL', async () => {
+      const { stdout } = await collectOutput([], 2000);
+      expect(stdout).not.toContain('Interactive mode');
+    });
+  });
+
+  describe('interactive subcommand', () => {
+    it('starts the REPL and prints prompt', async () => {
+      const { stdout } = await collectOutput(['interactive'], 2000);
+      expect(stdout).toContain('Interactive mode');
     });
   });
 
