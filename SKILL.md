@@ -2,29 +2,13 @@
 
 Use the local CLI when you want direct automation without attaching an MCP client.
 
+For AI agents using this skill: always launch the interactive REPL with `npx mcp-accessibility-scanner interactive` and send tool calls there. Do not use the default MCP server mode from this skill.
+
 ## CLI Modes
-
-### MCP Server (default)
-
-Starts the MCP server over stdio. This is the primary mode used by MCP clients.
-
-```bash
-npx mcp-accessibility-scanner
-npx mcp-accessibility-scanner --headless --browser chrome
-```
-
-### List Tools
-
-Print all available tools and their descriptions.
-
-```bash
-npx mcp-accessibility-scanner list-tools
-npx mcp-accessibility-scanner --caps vision,pdf list-tools
-```
 
 ### Interactive REPL
 
-Start a readline prompt for manual tool execution. Type `<tool-name> <json>` to call tools.
+Start a readline prompt for tool execution. This is the required mode for AI agents using this skill. Type `<tool-name> <json>` to call tools.
 
 ```bash
 npx mcp-accessibility-scanner interactive
@@ -38,6 +22,24 @@ REPL example session:
 > scan_page {"violationsTag":["wcag2aa"]}
 > audit_keyboard {}
 > browser_close {}
+```
+
+### List Tools
+
+Print all available tools and their descriptions.
+
+```bash
+npx mcp-accessibility-scanner list-tools
+npx mcp-accessibility-scanner --caps vision,pdf list-tools
+```
+
+### MCP Server (do not use from this skill)
+
+Running the CLI without a subcommand starts the MCP server over stdio for MCP clients. This skill does not use that mode.
+
+```bash
+npx mcp-accessibility-scanner
+npx mcp-accessibility-scanner --headless --browser chrome
 ```
 
 ## Global CLI Options
