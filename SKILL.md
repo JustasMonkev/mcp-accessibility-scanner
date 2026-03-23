@@ -292,11 +292,8 @@ npx mcp-accessibility-scanner --headless interactive
 
 Launch the app binary directly if `open -a` does not expose the CDP port. If the app is already running, quit it first so the debug flag is applied on a clean start.
 
-```bash
-npx mcp-accessibility-scanner interactive \
-  --cdp-launch-command /Applications/YourApp.app/Contents/MacOS/YourApp \
-  --cdp-launch-args=--remote-debugging-port={port} \
-  --cdp-launch-port 9222
+```bash  
+npx mcp-accessibility-scanner interactive --cdp-launch-command /Applications/YourApp.app/Contents/MacOS/YourApp --cdp-launch-args=--remote-debugging-port={port} --cdp-launch-port 9222 --cdp-launch-startup-timeout 20000
 ```
 
 Typical REPL flow:
