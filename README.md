@@ -171,6 +171,11 @@ Create a `config.json` file with the following options:
     "launchOptions": {
       "headless": true,
       "channel": "chrome"
+    },
+    "cdpLaunch": {
+      "command": "open",
+      "args": ["-a", "Slack", "--args", "--remote-debugging-port={port}"],
+      "startupTimeoutMs": 30000
     }
   },
   "timeouts": {
@@ -189,10 +194,14 @@ Create a `config.json` file with the following options:
 - `browser.browserName`: Browser to use (`chromium`, `firefox`, `webkit`)
 - `browser.launchOptions.headless`: Run browser in headless mode (default: `true` on Linux without display, `false` otherwise)
 - `browser.launchOptions.channel`: Browser channel (`chrome`, `chrome-beta`, `msedge`, etc.)
+- `browser.cdpEndpoint`: Attach to an already-running Chromium-family app with CDP enabled
+- `browser.cdpLaunch`: Launch a Chromium-family desktop app with CDP enabled, wait for the endpoint, and manage the child process lifecycle
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
+
+CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, and `--cdp-launch-startup-timeout`.
 
 ## Available Tools
 

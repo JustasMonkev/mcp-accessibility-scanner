@@ -29,6 +29,11 @@ export type CLIOptions = {
     blockServiceWorkers?: boolean;
     browser?: string;
     caps?: string[];
+    cdpLaunchArgs?: string[];
+    cdpLaunchCommand?: string;
+    cdpLaunchCwd?: string;
+    cdpLaunchPort?: number;
+    cdpLaunchStartupTimeout?: number;
     cdpEndpoint?: string;
     config?: string;
     device?: string;
@@ -152,6 +157,9 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
   if (cliOptions.device && cliOptions.cdpEndpoint)
     throw new Error('Device emulation is not supported with cdpEndpoint.');
 
+  if (cliOptions.cdpEndpoint && cliOptions.cdpLaunchCommand)
+    throw new Error('CDP launch is not supported with cdpEndpoint.');
+
   // Context options
   const contextOptions: BrowserContextOptions = cliOptions.device ? devices[cliOptions.device] : {};
   if (cliOptions.storageState)
@@ -177,6 +185,14 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
   if (cliOptions.blockServiceWorkers)
     contextOptions.serviceWorkers = 'block';
 
+  const cdpLaunch = cliOptions.cdpLaunchCommand ? {
+    command: cliOptions.cdpLaunchCommand,
+    args: cliOptions.cdpLaunchArgs,
+    cwd: cliOptions.cdpLaunchCwd,
+    port: cliOptions.cdpLaunchPort,
+    startupTimeoutMs: cliOptions.cdpLaunchStartupTimeout,
+  } : undefined;
+
   return {
     browser: {
       browserName,
@@ -184,6 +200,7 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
       userDataDir: cliOptions.userDataDir,
       launchOptions,
       contextOptions,
+      cdpLaunch,
       cdpEndpoint: cliOptions.cdpEndpoint,
     },
     server: {
@@ -213,6 +230,11 @@ function configFromEnv(): Config {
   options.blockServiceWorkers = envToBoolean(process.env.PLAYWRIGHT_MCP_BLOCK_SERVICE_WORKERS);
   options.browser = envToString(process.env.PLAYWRIGHT_MCP_BROWSER);
   options.caps = commaSeparatedList(process.env.PLAYWRIGHT_MCP_CAPS);
+  options.cdpLaunchArgs = commaSeparatedList(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_ARGS);
+  options.cdpLaunchCommand = envToString(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND);
+  options.cdpLaunchCwd = envToString(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_CWD);
+  options.cdpLaunchPort = envToNumber(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_PORT);
+  options.cdpLaunchStartupTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT);
   options.cdpEndpoint = envToString(process.env.PLAYWRIGHT_MCP_CDP_ENDPOINT);
   options.config = envToString(process.env.PLAYWRIGHT_MCP_CONFIG);
   options.device = envToString(process.env.PLAYWRIGHT_MCP_DEVICE);

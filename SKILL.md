@@ -4,6 +4,8 @@ Use the local CLI when you want direct automation without attaching an MCP clien
 
 For AI agents using this skill: always launch the interactive REPL with `npx mcp-accessibility-scanner interactive` and send tool calls there. Do not use the default MCP server mode from this skill.
 
+For Electron apps, prefer launching them through this CLI with `--cdp-launch-command` instead of using a separate automation layer.
+
 ## CLI Modes
 
 ### Interactive REPL
@@ -58,6 +60,11 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--storage-state <path>` | Storage state file for isolated sessions |
 | `--executable-path <path>` | Custom browser executable |
 | `--cdp-endpoint <endpoint>` | Connect to existing CDP endpoint |
+| `--cdp-launch-command <command>` | Launch a Chromium-family desktop app with CDP enabled |
+| `--cdp-launch-args <args>` | Comma-separated launch arguments. Use `{port}` placeholder for the debug port |
+| `--cdp-launch-cwd <path>` | Working directory for the launched app |
+| `--cdp-launch-port <port>` | Fixed CDP port for the launched app |
+| `--cdp-launch-startup-timeout <ms>` | How long to wait for the launched app CDP endpoint |
 | `--proxy-server <proxy>` | Proxy server, e.g. `"http://myproxy:3128"` |
 | `--proxy-bypass <bypass>` | Comma-separated domains to bypass proxy |
 | `--allowed-origins <origins>` | Semicolon-separated allowed origins |
@@ -83,6 +90,8 @@ Scan the current page for accessibility violations using Axe.
 ```json
 {"violationsTag": ["wcag2aa", "wcag21aa", "wcag22aa"]}
 ```
+
+For Electron CDP targets, `scan_page` may currently fail with `Target.createTarget: Not supported`. If that happens, keep using the CLI session, select the live app tab with `browser_tabs`, and run Axe through `browser_evaluate` by injecting the local `node_modules/axe-core/axe.min.js` bundle.
 
 ### audit_site
 
@@ -277,4 +286,32 @@ npx mcp-accessibility-scanner --headless interactive
 
 ```
 > audit_site {"strategy":"provided","urls":["https://example.com/","https://example.com/about","https://example.com/contact"],"violationsTag":["wcag2aa"]}
+```
+
+### Electron app flow
+
+Launch the app binary directly if `open -a` does not expose the CDP port. If the app is already running, quit it first so the debug flag is applied on a clean start.
+
+```bash
+npx mcp-accessibility-scanner interactive \
+  --cdp-launch-command /Applications/YourApp.app/Contents/MacOS/YourApp \
+  --cdp-launch-args=--remote-debugging-port={port} \
+  --cdp-launch-port 9222
+```
+
+Typical REPL flow:
+
+```
+> browser_tabs {"action":"list"}
+> browser_tabs {"action":"select","index":1}
+> browser_evaluate {"function":"() => ({ url: location.href, text: document.body.innerText, links: Array.from(document.querySelectorAll('a,button,[role=button]')).map((el, i) => ({ i, text: (el.textContent || '').trim(), tag: el.tagName, href: el.getAttribute('href') })) })"}
+> browser_evaluate {"function":"() => document.querySelector('SELECTOR_FOR_NEXT_STEP')?.click()"}
+```
+
+If `scan_page {}` fails on the Electron target, use this Axe fallback from the same REPL session:
+
+```json
+{
+  "function": "async () => { if (!window.axe) { await new Promise((resolve, reject) => { const script = document.createElement('script'); script.src = 'file:///ABSOLUTE/PATH/TO/node_modules/axe-core/axe.min.js'; script.onload = resolve; script.onerror = () => reject(new Error('Failed to load axe')); document.head.appendChild(script); }); } const results = await window.axe.run(document); return { url: location.href, violations: results.violations.length, incomplete: results.incomplete.length, passes: results.passes.length, inapplicable: results.inapplicable.length, rules: results.violations.map(v => ({ id: v.id, impact: v.impact, help: v.help, nodes: v.nodes.length })) }; }"
+}
 ```

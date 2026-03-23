@@ -77,6 +77,18 @@ export type Config = {
     cdpEndpoint?: string;
 
     /**
+     * Launch a Chromium-based desktop app with CDP enabled and attach to it.
+     */
+    cdpLaunch?: {
+      command: string;
+      args?: string[];
+      cwd?: string;
+      env?: Record<string, string>;
+      port?: number;
+      startupTimeoutMs?: number;
+    };
+
+    /**
      * Remote endpoint to connect to an existing Playwright server.
      */
     remoteEndpoint?: string;

@@ -15,6 +15,7 @@
  */
 
 import fs from 'fs';
+import { spawn } from 'node:child_process';
 import net from 'net';
 import path from 'path';
 
@@ -32,6 +33,8 @@ import type { FullConfig } from './config.js';
 export function contextFactory(config: FullConfig): BrowserContextFactory {
   if (config.browser.remoteEndpoint)
     return new RemoteContextFactory(config);
+  if (config.browser.cdpLaunch)
+    return new CdpLaunchContextFactory(config);
   if (config.browser.cdpEndpoint)
     return new CdpContextFactory(config);
   if (config.browser.isolated)
@@ -127,6 +130,19 @@ class CdpContextFactory extends BaseContextFactory {
     super('cdp', config);
   }
 
+  override async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+    testDebug('create browser context (cdp)');
+    const browser = await this._obtainBrowser(clientInfo);
+    const browserContext = await this._doCreateContext(browser);
+    return {
+      browserContext,
+      close: async () => {
+        testDebug('disconnect browser (cdp)');
+        await browser.close().catch(logUnhandledError);
+      }
+    };
+  }
+
   protected override async _doObtainBrowser(): Promise<playwright.Browser> {
     return playwright.chromium.connectOverCDP(this.config.browser.cdpEndpoint!);
   }
@@ -151,6 +167,60 @@ class RemoteContextFactory extends BaseContextFactory {
 
   protected override async _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext> {
     return browser.newContext();
+  }
+}
+
+class CdpLaunchContextFactory implements BrowserContextFactory {
+  readonly config: FullConfig;
+
+  constructor(config: FullConfig) {
+    this.config = config;
+  }
+
+  async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+    const cdpLaunch = this.config.browser.cdpLaunch!;
+    const port = cdpLaunch.port ?? await findFreePort();
+    const endpoint = `http://127.0.0.1:${port}`;
+    const args = (cdpLaunch.args ?? []).map(arg => arg.replaceAll('{port}', String(port)));
+    const childProcess = spawn(cdpLaunch.command, args, {
+      cwd: cdpLaunch.cwd,
+      env: {
+        ...process.env,
+        ...cdpLaunch.env,
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+
+    childProcess.stderr.on('data', data => {
+      testDebug(`cdp-launch stderr: ${String(data).trimEnd()}`);
+    });
+
+    const browser = await this._waitForBrowser(endpoint, clientInfo, childProcess, cdpLaunch.startupTimeoutMs ?? 30000);
+    const browserContext = this.config.browser.isolated ? await browser.newContext() : browser.contexts()[0];
+    return {
+      browserContext,
+      close: async () => {
+        await browser.close().catch(logUnhandledError);
+        childProcess.kill('SIGTERM');
+      }
+    };
+  }
+
+  private async _waitForBrowser(endpoint: string, clientInfo: ClientInfo, childProcess: ReturnType<typeof spawn>, startupTimeoutMs: number): Promise<playwright.Browser> {
+    const deadline = Date.now() + startupTimeoutMs;
+    const connectOptions = cdpConnectOptions(clientInfo);
+    for (;;) {
+      try {
+        return await playwright.chromium.connectOverCDP(endpoint, connectOptions);
+      } catch (error) {
+        testDebug(`connect over CDP failed for ${endpoint}: ${String(error)}`);
+        if (Date.now() >= deadline) {
+          childProcess.kill('SIGTERM');
+          throw new Error(`Timed out waiting for CDP endpoint ${endpoint}.`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
   }
 }
 
@@ -222,6 +292,11 @@ class PersistentContextFactory implements BrowserContextFactory {
 async function injectCdpPort(browserConfig: FullConfig['browser']) {
   if (browserConfig.browserName === 'chromium')
     (browserConfig.launchOptions as any).cdpPort = await findFreePort();
+}
+
+function cdpConnectOptions(clientInfo: ClientInfo): playwright.ConnectOverCDPOptions | undefined {
+  const userAgent = [clientInfo.name, clientInfo.version].filter(Boolean).join('/');
+  return userAgent ? { headers: { 'User-Agent': userAgent } } : undefined;
 }
 
 async function findFreePort(): Promise<number> {
