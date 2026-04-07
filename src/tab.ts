@@ -24,7 +24,7 @@ import { ModalState } from './tools/tool.js';
 import type { Context } from './context.js';
 
 type PageEx = playwright.Page & {
-  _snapshotForAI: () => Promise<string>;
+  ariaSnapshot: (options?: { mode?: 'ai' | 'default' }) => Promise<string>;
 };
 
 export const TabEvents = {
@@ -195,7 +195,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   async captureSnapshot(): Promise<TabSnapshot> {
     let tabSnapshot: TabSnapshot | undefined;
     const modalStates = await this._raceAgainstModalStates(async () => {
-      const snapshot = await (this.page as PageEx)._snapshotForAI();
+      const snapshot = await (this.page as PageEx).ariaSnapshot({ mode: 'ai' });
       tabSnapshot = {
         url: this.page.url(),
         title: await this.page.title(),
@@ -250,7 +250,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   async refLocators(params: { element: string, ref: string }[]): Promise<playwright.Locator[]> {
-    const snapshot = await (this.page as PageEx)._snapshotForAI();
+    const snapshot = await (this.page as PageEx).ariaSnapshot({ mode: 'ai' });
     return params.map(param => {
       if (!snapshot.includes(`[ref=${param.ref}]`))
         throw new Error(`Ref ${param.ref} not found in the current page snapshot. Try capturing new snapshot.`);

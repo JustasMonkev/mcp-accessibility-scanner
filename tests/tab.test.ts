@@ -32,7 +32,7 @@ describe('Tab', () => {
     mockPage._wrapApiCall = vi.fn(async (callback: () => Promise<unknown>) => await callback());
     mockPage.setDefaultNavigationTimeout = vi.fn();
     mockPage.setDefaultTimeout = vi.fn();
-    mockPage._snapshotForAI = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+    mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
     mockPage.locator = vi.fn().mockReturnValue({
       describe: vi.fn().mockReturnValue({}),
     });
@@ -184,7 +184,7 @@ describe('Tab', () => {
 
     it('should throw error if ref not found', async () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      mockPage._snapshotForAI = vi.fn().mockResolvedValue('button "Other"');
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other"');
 
       await expect(
           tab.refLocator({ element: 'Submit button', ref: '999' })
@@ -195,7 +195,7 @@ describe('Tab', () => {
   describe('refLocators', () => {
     it('should get multiple locators', async () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      mockPage._snapshotForAI = vi.fn().mockResolvedValue('button "Submit" [ref=1] button "Cancel" [ref=2]');
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1] button "Cancel" [ref=2]');
 
       const locators = await tab.refLocators([
         { element: 'Submit', ref: '1' },
