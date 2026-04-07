@@ -52,7 +52,8 @@ function createHarness(
     title: vi.fn(async () => `Title for ${currentUrl}`),
     evaluate: vi.fn(async (callback: () => unknown) => {
       const callbackText = String(callback);
-      if (callbackText.includes('nav a[href], header a[href], [role="navigation"] a[href]'))
+      const isNavExtraction = /role=.*navigation.*a\[href\]/.test(callbackText);
+      if (isNavExtraction)
         return navLinkMap[currentUrl] ?? [];
       return linkMap[currentUrl] ?? [];
     }),
