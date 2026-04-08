@@ -147,6 +147,7 @@ describe('Tab', () => {
       expect(snapshot.url).toBe('https://example.com');
       expect(snapshot.title).toBe('Example Page');
       expect(snapshot.ariaSnapshot).toBe('button "Submit" [ref=1]');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
     });
 
     it('should include console messages in snapshot', async () => {
