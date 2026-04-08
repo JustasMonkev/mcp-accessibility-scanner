@@ -181,6 +181,7 @@ describe('Tab', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
       await tab.refLocator({ element: 'Submit button', ref: '1' });
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
     });
 
     it('should throw error if ref not found', async () => {
@@ -190,6 +191,7 @@ describe('Tab', () => {
       await expect(
           tab.refLocator({ element: 'Submit button', ref: '999' })
       ).rejects.toThrow('Ref 999 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
     });
   });
 
@@ -206,6 +208,7 @@ describe('Tab', () => {
       expect(locators).toHaveLength(2);
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=2');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
     });
   });
 
