@@ -1,6 +1,9 @@
 
 # MCP Accessibility Scanner 🔍
 
+## Star History
+https://api.star-history.com/svg?repos=justasmonkev%2Fmcp-accessibility-scanner&type=Date%29%5D%28https%3A%2F%2Fwww.star-history.com%2F#lanbaoshen/mcp-jenkins&Date
+
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/justasmonkev-mcp-accessibility-scanner-badge.png)](https://mseep.ai/app/justasmonkev-mcp-accessibility-scanner)
 
 A powerful Model Context Protocol (MCP) server that provides automated web accessibility scanning and browser automation using Playwright and Axe-core. This server enables LLMs to perform WCAG compliance checks, interact with web pages, manage persistent browser sessions, and generate detailed accessibility reports with visual annotations.
