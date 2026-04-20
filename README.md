@@ -2,7 +2,7 @@
 # MCP Accessibility Scanner 🔍
 
 ## Star History
-https://api.star-history.com/svg?repos=justasmonkev%2Fmcp-accessibility-scanner&type=Date%29%5D%28https%3A%2F%2Fwww.star-history.com%2F#lanbaoshen/mcp-jenkins&Date
+[![Star History Chart](https://api.star-history.com/svg?repos=justasmonkev%2Fmcp-accessibility-scanner&type=Date)](https://api.star-history.com/svg?repos=justasmonkev%2Fmcp-accessibility-scanner&type=Date)
 
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/justasmonkev-mcp-accessibility-scanner-badge.png)](https://mseep.ai/app/justasmonkev-mcp-accessibility-scanner)
 
