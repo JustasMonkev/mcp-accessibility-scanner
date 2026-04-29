@@ -11,6 +11,7 @@
 
     // --- Developer Experience & Interop ---
     "strict": true,
+    "skipLibCheck": true,
     "sourceMap": true, // <-- ADDED: Crucial for debugging!
     "esModuleInterop": true,
     "resolveJsonModule": true

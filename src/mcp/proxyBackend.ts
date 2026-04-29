@@ -70,7 +70,7 @@ export class ProxyBackend implements ServerBackend {
       arguments: args,
       _meta: requestContext?._meta,
     }, undefined, progressToken === undefined ? undefined : {
-      onprogress: params => {
+      onprogress: (params: { progress: number; total?: number; message?: string }) => {
         void this._forwardProgressNotification(requestContext, progressToken, params);
       },
     }) as CallToolResult;
