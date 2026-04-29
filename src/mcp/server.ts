@@ -18,6 +18,7 @@ import debug from 'debug';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { toolCallsTotal, toolCallDurationSeconds, userActivityTotal, getPodName } from '../metrics/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
@@ -51,8 +52,13 @@ export type ServerBackendFactory = {
   create: () => ServerBackend;
 };
 
-export async function connect(factory: ServerBackendFactory, transport: Transport, runHeartbeat: boolean) {
-  const server = createServer(factory.name, factory.version, factory.create(), runHeartbeat);
+export type SessionMeta = {
+  userAgent: string;
+  username: string;
+};
+
+export async function connect(factory: ServerBackendFactory, transport: Transport, runHeartbeat: boolean, sessionMeta?: SessionMeta) {
+  const server = createServer(factory.name, factory.version, factory.create(), runHeartbeat, sessionMeta);
   await server.connect(transport);
 }
 
@@ -61,7 +67,7 @@ export async function wrapInProcess(backend: ServerBackend): Promise<Transport> 
   return new InProcessTransport(server);
 }
 
-export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean): Server {
+export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean, sessionMeta?: SessionMeta): Server {
   let initializedPromiseResolve = () => {};
   const initializedPromise = new Promise<void>(resolve => initializedPromiseResolve = resolve);
   const server = new Server({ name, version }, {
@@ -89,9 +95,33 @@ export function createServer(name: string, version: string, backend: ServerBacke
       startHeartbeat(server);
     }
 
+    const toolName = request.params.name;
+    const pod = getPodName();
+    const startMs = Date.now();
+
     try {
-      return await backend.callTool(request.params.name, request.params.arguments || {}, extra);
+      const result = await backend.callTool(toolName, request.params.arguments || {}, extra);
+      const durationSecs = (Date.now() - startMs) / 1000;
+      const status = result.isError ? 'error' : 'success';
+      toolCallsTotal.inc({ tool_name: toolName, status, pod });
+      userActivityTotal.inc({
+        activity_type: toolName,
+        pod,
+        user_agent: sessionMeta?.userAgent ?? 'unknown',
+        username: sessionMeta?.username ?? 'unknown',
+      });
+      toolCallDurationSeconds.observe({ tool_name: toolName, pod }, durationSecs);
+      return result;
     } catch (error) {
+      const durationSecs = (Date.now() - startMs) / 1000;
+      toolCallsTotal.inc({ tool_name: toolName, status: 'error', pod });
+      userActivityTotal.inc({
+        activity_type: toolName,
+        pod,
+        user_agent: sessionMeta?.userAgent ?? 'unknown',
+        username: sessionMeta?.username ?? 'unknown',
+      });
+      toolCallDurationSeconds.observe({ tool_name: toolName, pod }, durationSecs);
       return {
         content: [{ type: 'text', text: '### Result\n' + String(error) }],
         isError: true,

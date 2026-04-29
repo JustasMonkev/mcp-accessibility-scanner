@@ -18,13 +18,25 @@ import assert from 'assert';
 import net from 'net';
 import http from 'http';
 import crypto from 'crypto';
+import os from 'os';
 
 import debug from 'debug';
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import * as mcpServer from './server.js';
+import {
+  httpRequestsTotal,
+  httpRequestDurationSeconds,
+  activeSessionsGauge,
+  getPodName,
+  registry,
+} from '../metrics/index.js';
 
 import type { ServerBackendFactory } from './server.js';
+
+function normalizeUserAgent(ua: string | undefined): string {
+  return ua ?? 'unknown';
+}
 
 const testDebug = debug('pw:mcp:test');
 const allowedLoopbackHostnamePattern = /^127(?:\.\d{1,3}){3}$/;
@@ -33,6 +45,10 @@ export async function startHttpServer(config: { host?: string, port?: number }, 
   const { host, port } = config;
   const httpServer = http.createServer();
   decorateServer(httpServer);
+  // Disable timeouts that would prematurely close long-lived SSE connections
+  // when the server is behind a proxy (e.g. Kubernetes ingress).
+  httpServer.requestTimeout = 0;
+  httpServer.keepAliveTimeout = 0;
   await new Promise<void>((resolve, reject) => {
     httpServer.on('error', reject);
     abortSignal?.addEventListener('abort', () => {
@@ -60,24 +76,61 @@ export function httpAddressToString(address: string | net.AddressInfo | null): s
 
 export async function installHttpTransport(httpServer: http.Server, serverBackendFactory: ServerBackendFactory) {
   const streamableSessions = new Map();
+  const pod = getPodName();
+
   httpServer.on('request', async (req, res) => {
+    const requestPath = parseRequestPath(req.url);
+    const method = req.method ?? 'GET';
+    const startMs = Date.now();
+    const userAgent = normalizeUserAgent(req.headers['user-agent']);
+    const username = (req.headers['x-username'] as string | undefined) ?? os.userInfo().username;
+
+    // Intercept infrastructure endpoints before host-header validation so that
+    // Prometheus (within the cluster) can scrape the pod by its IP address.
+    if (requestPath === '/healthz') {
+      const body = JSON.stringify({ status: 'ok', pod });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(body);
+      httpRequestsTotal.inc({ endpoint: '/healthz', method, status_code: '200', user_agent: userAgent, username, pod });
+      httpRequestDurationSeconds.observe({ endpoint: '/healthz', method, pod }, (Date.now() - startMs) / 1000);
+      return;
+    }
+
+    if (requestPath === '/metrics') {
+      const body = registry.exportMetrics();
+      res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
+      res.end(body);
+      httpRequestsTotal.inc({ endpoint: '/metrics', method, status_code: '200', user_agent: userAgent, username, pod });
+      httpRequestDurationSeconds.observe({ endpoint: '/metrics', method, pod }, (Date.now() - startMs) / 1000);
+      return;
+    }
+
+    const finishRequest = (statusCode: number, endpoint: string) => {
+      httpRequestsTotal.inc({ endpoint, method, status_code: String(statusCode), user_agent: userAgent, username, pod });
+      httpRequestDurationSeconds.observe({ endpoint, method, pod }, (Date.now() - startMs) / 1000);
+    };
+
     const validationError = validateRequestHeaders(httpServer, req);
     if (validationError) {
       res.statusCode = validationError.statusCode;
       res.end(validationError.message);
+      finishRequest(validationError.statusCode, requestPath ?? 'unknown');
       return;
     }
     const routingError = validateRequestRouting(req, !!req.headers['mcp-session-id']);
     if (routingError) {
       res.statusCode = routingError.statusCode;
       res.end(routingError.message);
+      finishRequest(routingError.statusCode, requestPath ?? 'unknown');
       return;
     }
-    await handleStreamable(serverBackendFactory, req, res, streamableSessions);
+
+    res.on('finish', () => finishRequest(res.statusCode, requestPath ?? 'unknown'));
+    await handleStreamable(serverBackendFactory, req, res, streamableSessions, pod, userAgent, username);
   });
 }
 
-async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, StreamableHTTPServerTransport>) {
+async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, StreamableHTTPServerTransport>, pod: string, userAgent: string = 'unknown', username: string = 'unknown') {
   const routingError = validateRequestRouting(req, !!req.headers['mcp-session-id']);
   if (routingError) {
     res.statusCode = routingError.statusCode;
@@ -92,16 +145,44 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
       res.end('Session not found');
       return;
     }
+
+    if (req.method === 'GET') {
+      // Disable socket timeout for long-lived SSE connections so that proxies
+      // (Kubernetes ingress, nginx, etc.) don't close the stream due to inactivity.
+      req.socket.setTimeout(0);
+
+      // Send SSE comment keepalive every 15 seconds to prevent intermediate
+      // proxies from treating the connection as idle and closing it.
+      const keepaliveTimer = setInterval(() => {
+        if (res.writableEnded) {
+          clearInterval(keepaliveTimer);
+          return;
+        }
+        try {
+          res.write(':\n\n');
+        } catch {
+          clearInterval(keepaliveTimer);
+        }
+      }, 15000);
+      res.on('finish', () => clearInterval(keepaliveTimer));
+      res.on('close', () => clearInterval(keepaliveTimer));
+
+      await transport.handleRequest(req, res);
+      clearInterval(keepaliveTimer);
+      return;
+    }
+
     return await transport.handleRequest(req, res);
   }
 
   if (req.method === 'POST') {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
-      onsessioninitialized: async sessionId => {
+      onsessioninitialized: async (sessionId: string) => {
         testDebug(`create http session: ${transport.sessionId}`);
-        await mcpServer.connect(serverBackendFactory, transport, true);
+        await mcpServer.connect(serverBackendFactory, transport, true, { userAgent, username });
         sessions.set(sessionId, transport);
+        activeSessionsGauge.inc({ pod });
       }
     });
 
@@ -109,6 +190,7 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
       if (!transport.sessionId)
         return;
       sessions.delete(transport.sessionId);
+      activeSessionsGauge.dec({ pod });
       testDebug(`delete http session: ${transport.sessionId}`);
     };
 
