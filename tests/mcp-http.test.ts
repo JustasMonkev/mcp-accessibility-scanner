@@ -16,7 +16,7 @@
 
 import http from 'http';
 import { afterEach, describe, expect, it } from 'vitest';
-import { installHttpTransport, startHttpServer } from '../src/mcp/http.js';
+import { httpAddressToString, installHttpTransport, startHttpServer } from '../src/mcp/http.js';
 
 import type { ServerBackendFactory } from '../src/mcp/server.js';
 
@@ -40,6 +40,21 @@ describe('mcp http transport hardening', () => {
   afterEach(async () => {
     await Promise.all([...servers].map(server => new Promise<void>(resolve => server.close(() => resolve()))));
     servers.clear();
+  });
+
+  it('binds to localhost by default', async () => {
+    const server = await startHttpServer({ port: 0 });
+    servers.add(server);
+    const address = server.address();
+    if (!address || typeof address === 'string')
+      throw new Error('Expected TCP server address');
+
+    expect(['127.0.0.1', '::1']).toContain(address.address);
+  });
+
+  it('reports wildcard bind addresses without rewriting them to localhost', () => {
+    expect(httpAddressToString({ address: '0.0.0.0', family: 'IPv4', port: 1234 })).toBe('http://0.0.0.0:1234');
+    expect(httpAddressToString({ address: '::', family: 'IPv6', port: 1234 })).toBe('http://[::]:1234');
   });
 
   async function startServer() {

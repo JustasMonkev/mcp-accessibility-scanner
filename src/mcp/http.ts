@@ -30,7 +30,8 @@ const testDebug = debug('pw:mcp:test');
 const allowedLoopbackHostnamePattern = /^127(?:\.\d{1,3}){3}$/;
 
 export async function startHttpServer(config: { host?: string, port?: number }, abortSignal?: AbortSignal): Promise<http.Server> {
-  const { host, port } = config;
+  const host = config.host ?? 'localhost';
+  const { port } = config;
   const httpServer = http.createServer();
   decorateServer(httpServer);
   await new Promise<void>((resolve, reject) => {
@@ -52,9 +53,7 @@ export function httpAddressToString(address: string | net.AddressInfo | null): s
   if (typeof address === 'string')
     return address;
   const resolvedPort = address.port;
-  let resolvedHost = address.family === 'IPv4' ? address.address : `[${address.address}]`;
-  if (resolvedHost === '0.0.0.0' || resolvedHost === '[::]')
-    resolvedHost = 'localhost';
+  const resolvedHost = address.family === 'IPv4' ? address.address : `[${address.address}]`;
   return `http://${resolvedHost}:${resolvedPort}`;
 }
 
