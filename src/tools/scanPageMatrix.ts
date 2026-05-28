@@ -183,7 +183,7 @@ const scanPageMatrix = defineTabTool({
           ...violation,
           nodes: dedupeAxeNodes(violation.nodes),
         }));
-        const trimmedViolations = trimAxeResults({ violations: dedupedViolations }, { maxNodesPerViolation: params.maxNodesPerViolation });
+        const trimmedViolations = trimAxeResults({ violations: dedupedViolations }, { maxNodesPerViolation: params.maxNodesPerViolation, dedupe: false });
         const nodeCountByRuleId = countNodesByRule(dedupedViolations);
 
         variantResults.push({

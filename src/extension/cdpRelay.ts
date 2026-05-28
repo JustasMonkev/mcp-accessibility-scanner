@@ -35,8 +35,9 @@ import type websocket from 'ws';
 import type { ClientInfo } from '../browserContextFactory.js';
 import type { ExtensionCommand, ExtensionEvents } from './protocol.js';
 
-// @ts-ignore
-const { registry } = await import('playwright-core/lib/server/registry/index');
+// @ts-ignore -- internal bundle entry point exposed via package exports
+const { registry: registryBundle } = await import('playwright-core/lib/coreBundle');
+const { registry } = registryBundle;
 
 const debugLogger = debug('pw:mcp:relay');
 

@@ -49,10 +49,14 @@ export function dedupeAxeNodes(nodes: AxeNode[]): AxeNode[] {
 
 export function trimAxeResults(
   results: Pick<AxeScanResult, 'violations'>,
-  options: { maxNodesPerViolation: number }
+  options: { maxNodesPerViolation: number; dedupe?: boolean }
 ): TrimmedAxeViolation[] {
+  // Callers that already deduped node lists can pass `dedupe: false` to skip a
+  // redundant second dedup pass over potentially large node sets.
+  const shouldDedupe = options.dedupe ?? true;
   return results.violations.map(violation => {
-    const nodes = dedupeAxeNodes(violation.nodes).slice(0, options.maxNodesPerViolation).map(node => ({
+    const sourceNodes = shouldDedupe ? dedupeAxeNodes(violation.nodes) : violation.nodes;
+    const nodes = sourceNodes.slice(0, options.maxNodesPerViolation).map(node => ({
       target: [...(node.target ?? [])],
       html: node.html ?? '',
       failureSummary: node.failureSummary ?? null,

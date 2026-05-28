@@ -384,7 +384,7 @@ const auditSite = defineTabTool({
             ...violation,
             nodes: dedupeAxeNodes(violation.nodes),
           }));
-          const trimmedViolations = trimAxeResults({ violations: dedupedViolations }, { maxNodesPerViolation: params.maxNodesPerViolation });
+          const trimmedViolations = trimAxeResults({ violations: dedupedViolations }, { maxNodesPerViolation: params.maxNodesPerViolation, dedupe: false });
 
           pageReport.status = 'scanned';
           pageReport.violations = trimmedViolations;

@@ -20,10 +20,11 @@ import net from 'net';
 import path from 'path';
 
 import * as playwright from 'playwright';
-// @ts-ignore
-import { registryDirectory } from 'playwright-core/lib/server/registry/index';
-// @ts-ignore
-import { startTraceViewerServer } from 'playwright-core/lib/server';
+// @ts-ignore -- internal bundle entry point exposed via package exports
+import { registry as registryBundle, server as serverBundle } from 'playwright-core/lib/coreBundle';
+
+const { registryDirectory } = registryBundle;
+const { startTraceViewerServer } = serverBundle;
 import { logUnhandledError, testDebug } from './utils/log.js';
 import { createHash } from './utils/guid.js';
 import { outputFile  } from './config.js';
