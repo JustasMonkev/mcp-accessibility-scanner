@@ -113,8 +113,10 @@ describe('Tool Utils', () => {
 
       // Mock the asLocator function (exposed via the coreBundle `iso` namespace)
       vi.mock('playwright-core/lib/coreBundle', () => ({
-        iso: {
-          asLocator: (lang: string, selector: string) => `locator('${selector}')`,
+        default: {
+          iso: {
+            asLocator: (lang: string, selector: string) => `locator('${selector}')`,
+          },
         },
       }));
 

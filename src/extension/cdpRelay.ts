@@ -36,8 +36,8 @@ import type { ClientInfo } from '../browserContextFactory.js';
 import type { ExtensionCommand, ExtensionEvents } from './protocol.js';
 
 // @ts-ignore -- internal bundle entry point exposed via package exports
-const { registry: registryBundle } = await import('playwright-core/lib/coreBundle');
-const { registry } = registryBundle;
+const coreBundle = (await import('playwright-core/lib/coreBundle')).default;
+const { registry } = coreBundle.registry;
 
 const debugLogger = debug('pw:mcp:relay');
 

@@ -15,9 +15,9 @@
  */
 
 // @ts-ignore -- internal bundle entry point exposed via package exports
-import { iso as isoBundle } from 'playwright-core/lib/coreBundle';
+import coreBundle from 'playwright-core/lib/coreBundle';
 
-const { asLocator } = isoBundle;
+const { asLocator } = coreBundle.iso;
 
 import type * as playwright from 'playwright';
 import type { Tab } from '../tab.js';
