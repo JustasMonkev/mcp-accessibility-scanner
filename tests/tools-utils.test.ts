@@ -111,9 +111,13 @@ describe('Tool Utils', () => {
         }),
       } as any;
 
-      // Mock the asLocator function
-      vi.mock('playwright-core/lib/utils', () => ({
-        asLocator: (lang: string, selector: string) => `locator('${selector}')`,
+      // Mock the asLocator function (exposed via the coreBundle `iso` namespace)
+      vi.mock('playwright-core/lib/coreBundle', () => ({
+        default: {
+          iso: {
+            asLocator: (lang: string, selector: string) => `locator('${selector}')`,
+          },
+        },
       }));
 
       const result = await generateLocator(mockLocator);

@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 
-// @ts-ignore
-import { asLocator } from 'playwright-core/lib/utils';
+// @ts-ignore -- internal bundle entry point exposed via package exports
+import coreBundle from 'playwright-core/lib/coreBundle';
+
+const { asLocator } = coreBundle.iso;
 
 import type * as playwright from 'playwright';
 import type { Tab } from '../tab.js';
