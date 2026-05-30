@@ -1,5 +1,5 @@
-import crypto from 'crypto';
-import fs from 'fs';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import RE2 from 're2';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';

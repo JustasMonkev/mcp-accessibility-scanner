@@ -1,4 +1,4 @@
-import fs from 'fs';
+import fs from 'node:fs';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { sanitizeForFilePath } from '../utils/fileUtils.js';
