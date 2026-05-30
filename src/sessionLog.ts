@@ -188,6 +188,9 @@ export class SessionLog {
       lines.push('', '');
     }
 
-    this._sessionFileQueue = this._sessionFileQueue.then(() => this._storage.appendFile(this._file, lines.join('\n')));
+    this._sessionFileQueue = this._sessionFileQueue
+        .catch(logUnhandledError)
+        .then(() => this._storage.appendFile(this._file, lines.join('\n')))
+        .catch(logUnhandledError);
   }
 }
