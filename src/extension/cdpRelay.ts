@@ -22,8 +22,8 @@
  * - /extension/guid - Extension connection for chrome.debugger forwarding
  */
 
-import { spawn } from 'child_process';
-import http from 'http';
+import { spawn } from 'node:child_process';
+import http from 'node:http';
 import debug from 'debug';
 import { WebSocket, WebSocketServer } from 'ws';
 import { httpAddressToString } from '../mcp/http.js';

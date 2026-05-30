@@ -15,11 +15,11 @@
  */
 
 import debug from 'debug';
-import * as playwright from 'playwright';
+import type * as playwright from 'playwright';
 
 import { logUnhandledError } from './utils/log.js';
 import { Tab } from './tab.js';
-import { outputFile  } from './config.js';
+import { outputFile } from './config.js';
 
 import type { FullConfig } from './config.js';
 import type { Tool } from './tools/tool.js';
@@ -28,6 +28,24 @@ import type * as actions from './actions.js';
 import type { SessionLog } from './sessionLog.js';
 
 const testDebug = debug('pw:mcp:test');
+
+class ContextRegistry {
+  private readonly _contexts = new Set<Context>();
+
+  register(context: Context): void {
+    this._contexts.add(context);
+  }
+
+  unregister(context: Context): void {
+    this._contexts.delete(context);
+  }
+
+  async disposeAll(): Promise<void> {
+    await Promise.all([...this._contexts].map(ctx => ctx.dispose()));
+  }
+}
+
+const contextRegistry = new ContextRegistry();
 
 type ContextOptions = {
   tools: Tool[];
@@ -48,7 +66,6 @@ export class Context {
   private _currentTab: Tab | undefined;
   private _clientInfo: ClientInfo;
 
-  private static _allContexts: Set<Context> = new Set();
   private _closeBrowserContextPromise: Promise<void> | undefined;
   private _runningToolName: string | undefined;
   private _abortController = new AbortController();
@@ -61,11 +78,11 @@ export class Context {
     this._browserContextFactory = options.browserContextFactory;
     this._clientInfo = options.clientInfo;
     testDebug('create context');
-    Context._allContexts.add(this);
+    contextRegistry.register(this);
   }
 
   static async disposeAll() {
-    await Promise.all([...Context._allContexts].map(context => context.dispose()));
+    await contextRegistry.disposeAll();
   }
 
   tabs(): Tab[] {
@@ -171,7 +188,7 @@ export class Context {
   async dispose() {
     this._abortController.abort('MCP context disposed');
     await this.closeBrowserContext();
-    Context._allContexts.delete(this);
+    contextRegistry.unregister(this);
   }
 
   private async _setupRequestInterception(context: playwright.BrowserContext) {

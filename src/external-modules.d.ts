@@ -13,7 +13,32 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// Minimal type declarations for optional runtime dependencies.
+// Minimal type declarations for optional runtime dependencies and internal APIs.
+
+declare module 'playwright-core/lib/coreBundle' {
+  interface ExecutableInfo {
+    executablePath(): string | undefined;
+  }
+  interface Registry {
+    findExecutable(channel: string): ExecutableInfo | undefined;
+  }
+  interface CoreBundle {
+    readonly iso: {
+      asLocator(lang: string, selector: string): string;
+    };
+    readonly registry: {
+      readonly registryDirectory: string;
+      readonly registry: Registry;
+    };
+    readonly server: {
+      startTraceViewerServer(): Promise<{
+        urlPrefix(type: string): string;
+      }>;
+    };
+  }
+  const coreBundle: CoreBundle;
+  export default coreBundle;
+}
 declare module 'dotenv' {
   export interface DotenvConfigOptions {
     path?: string;

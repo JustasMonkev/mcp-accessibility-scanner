@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import crypto from 'crypto';
+import crypto from 'node:crypto';
 
 export function createGuid(): string {
   return crypto.randomBytes(16).toString('hex');

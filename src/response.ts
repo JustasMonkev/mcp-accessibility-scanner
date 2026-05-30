@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-import { basename } from 'path';
-import { pathToFileURL } from 'url';
+import { basename } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import debug from 'debug';
 
 import { renderModalStates } from './tab.js';

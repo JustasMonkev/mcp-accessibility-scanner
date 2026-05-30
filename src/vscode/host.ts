@@ -27,7 +27,7 @@ import { notifyToolListChanged } from '../mcp/toolListChanged.js';
 import { logUnhandledError } from '../utils/log.js';
 import { packageJSON } from '../utils/package.js';
 
-import { FullConfig } from '../config.js';
+import type { FullConfig } from '../config.js';
 import { BrowserServerBackend } from '../browserServerBackend.js';
 import { contextFactory } from '../browserContextFactory.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';

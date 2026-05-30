@@ -99,5 +99,9 @@
 		"diff": "5.2.2",
 		"rollup": "^4.59.0",
 		"qs": ">=6.15.2"
+	},
+	"ts-node": {
+		"transpileOnly": true,
+		"esm": true
 	}
 }

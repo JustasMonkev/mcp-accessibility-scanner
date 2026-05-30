@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-import { EventEmitter } from 'events';
-import * as playwright from 'playwright';
+import { EventEmitter } from 'node:events';
+import type * as playwright from 'playwright';
 import { callOnPageNoTrace, waitForCompletion } from './tools/utils.js';
 import { logUnhandledError } from './utils/log.js';
 import { ManualPromise } from './mcp/manualPromise.js';
-import { ModalState } from './tools/tool.js';
+import type { ModalState } from './tools/tool.js';
 
 import type { Context } from './context.js';
 
@@ -74,11 +74,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     });
     page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? 30000);
     page.setDefaultTimeout(context.config.timeouts.defaultTimeout ?? 6000);
-    (page as any)[tabSymbol] = this;
+    _pageTabMap.set(page, this);
   }
 
   static forPage(page: playwright.Page): Tab | undefined {
-    return (page as any)[tabSymbol];
+    return _pageTabMap.get(page);
   }
 
   modalStates(): ModalState[] {
@@ -304,4 +304,4 @@ export function renderModalStates(context: Context, modalStates: ModalState[]): 
   return result;
 }
 
-const tabSymbol = Symbol('tabSymbol');
+const _pageTabMap = new WeakMap<playwright.Page, Tab>();

@@ -14,16 +14,31 @@
  * limitations under the License.
  */
 
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import { Response } from './response.js';
 import { logUnhandledError } from './utils/log.js';
-import { outputFile  } from './config.js';
+import { outputFile } from './config.js';
 
 import type { FullConfig } from './config.js';
 import type * as actions from './actions.js';
 import type { Tab, TabSnapshot } from './tab.js';
+
+export interface IFileStorage {
+  writeFile(filePath: string, content: string): Promise<void>;
+  appendFile(filePath: string, content: string): Promise<void>;
+}
+
+class NodeFileStorage implements IFileStorage {
+  async writeFile(filePath: string, content: string): Promise<void> {
+    await fs.promises.writeFile(filePath, content);
+  }
+
+  async appendFile(filePath: string, content: string): Promise<void> {
+    await fs.promises.appendFile(filePath, content);
+  }
+}
 
 type LogEntry = {
   timestamp: number;
@@ -45,10 +60,12 @@ export class SessionLog {
   private _pendingEntries: LogEntry[] = [];
   private _sessionFileQueue = Promise.resolve();
   private _flushEntriesTimeout: NodeJS.Timeout | undefined;
+  private _storage: IFileStorage;
 
-  constructor(sessionFolder: string) {
+  constructor(sessionFolder: string, storage: IFileStorage = new NodeFileStorage()) {
     this._folder = sessionFolder;
     this._file = path.join(this._folder, 'session.md');
+    this._storage = storage;
   }
 
   static async create(config: FullConfig, rootPath: string | undefined): Promise<SessionLog> {
@@ -164,13 +181,13 @@ export class SessionLog {
 
       if (entry.tabSnapshot) {
         const fileName = `${ordinal}.snapshot.yml`;
-        fs.promises.writeFile(path.join(this._folder, fileName), entry.tabSnapshot.ariaSnapshot).catch(logUnhandledError);
+        this._storage.writeFile(path.join(this._folder, fileName), entry.tabSnapshot.ariaSnapshot).catch(logUnhandledError);
         lines.push(`- Snapshot: ${fileName}`);
       }
 
       lines.push('', '');
     }
 
-    this._sessionFileQueue = this._sessionFileQueue.then(() => fs.promises.appendFile(this._file, lines.join('\n')));
+    this._sessionFileQueue = this._sessionFileQueue.then(() => this._storage.appendFile(this._file, lines.join('\n')));
   }
 }

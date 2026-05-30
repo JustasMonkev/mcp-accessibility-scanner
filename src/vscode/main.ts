@@ -17,7 +17,7 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as mcpServer from '../mcp/server.js';
 import { BrowserServerBackend } from '../browserServerBackend.js';
-import { BrowserContextFactory, ClientInfo } from '../browserContextFactory.js';
+import type { BrowserContextFactory, ClientInfo } from '../browserContextFactory.js';
 import type { FullConfig } from '../config.js';
 import type { BrowserContext } from 'playwright-core';
 
