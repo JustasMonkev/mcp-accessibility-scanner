@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-import { fork } from 'child_process';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { fork } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { defineTool } from './tool.js';
 

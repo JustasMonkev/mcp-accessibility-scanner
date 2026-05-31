@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// @ts-ignore -- internal bundle entry point exposed via package exports
+// @ts-ignore -- internal bundle entry point; type declared in external-modules.d.ts but ts-node/esm skips ambient declarations
 import coreBundle from 'playwright-core/lib/coreBundle';
 
 const { asLocator } = coreBundle.iso;

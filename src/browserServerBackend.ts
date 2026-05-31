@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-import { fileURLToPath } from 'url';
-import { FullConfig } from './config.js';
+import { fileURLToPath } from 'node:url';
+import type { FullConfig } from './config.js';
 import { Context } from './context.js';
 import { logUnhandledError } from './utils/log.js';
 import { Response } from './response.js';

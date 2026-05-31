@@ -14,13 +14,13 @@
  * limitations under the License.
  */
 
-import fs from 'fs';
+import fs from 'node:fs';
 import { spawn } from 'node:child_process';
-import net from 'net';
-import path from 'path';
+import net from 'node:net';
+import path from 'node:path';
 
 import * as playwright from 'playwright';
-// @ts-ignore -- internal bundle entry point exposed via package exports
+// @ts-ignore -- internal bundle entry point; type declared in external-modules.d.ts but ts-node/esm skips ambient declarations
 import coreBundle from 'playwright-core/lib/coreBundle';
 
 const { registryDirectory } = coreBundle.registry;
@@ -49,7 +49,7 @@ export interface BrowserContextFactory {
   createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }>;
 }
 
-class BaseContextFactory implements BrowserContextFactory {
+abstract class BaseContextFactory implements BrowserContextFactory {
   readonly config: FullConfig;
   private _logName: string;
   protected _browserPromise: Promise<playwright.Browser> | undefined;
@@ -74,9 +74,7 @@ class BaseContextFactory implements BrowserContextFactory {
     return this._browserPromise;
   }
 
-  protected async _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser> {
-    throw new Error('Not implemented');
-  }
+  protected abstract _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser>;
 
   async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     testDebug(`create browser context (${this._logName})`);
@@ -85,9 +83,7 @@ class BaseContextFactory implements BrowserContextFactory {
     return { browserContext, close: () => this._closeBrowserContext(browserContext, browser) };
   }
 
-  protected async _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext> {
-    throw new Error('Not implemented');
-  }
+  protected abstract _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext>;
 
   private async _closeBrowserContext(browserContext: playwright.BrowserContext, browser: playwright.Browser) {
     testDebug(`close browser context (${this._logName})`);

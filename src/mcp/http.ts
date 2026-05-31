@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-import assert from 'assert';
-import net from 'net';
-import http from 'http';
-import crypto from 'crypto';
+import assert from 'node:assert';
+import net from 'node:net';
+import http from 'node:http';
+import crypto from 'node:crypto';
 
 import debug from 'debug';
 

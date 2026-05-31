@@ -1,17 +1,13 @@
 {
   "compilerOptions": {
-    // --- Module & JS Target ---
     "target": "ESNext",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-
-    // --- Output ---
     "rootDir": "src",
     "outDir": "./lib",
-
-    // --- Developer Experience & Interop ---
     "strict": true,
-    "sourceMap": true, // <-- ADDED: Crucial for debugging!
+    "verbatimModuleSyntax": true,
+    "sourceMap": true,
     "esModuleInterop": true,
     "resolveJsonModule": true
   },
