@@ -1,0 +1,507 @@
+{
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/cli.js": {
+    "mtime": 1780928338.9491522,
+    "ast_hash": "638f5070c15aadb4b6346fff340b64b7",
+    "semantic_hash": "638f5070c15aadb4b6346fff340b64b7"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/config.d.ts": {
+    "mtime": 1780928338.9495702,
+    "ast_hash": "1620b91d8b4ac0a8648354a95068fb6b",
+    "semantic_hash": "1620b91d8b4ac0a8648354a95068fb6b"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/eslint.config.mjs": {
+    "mtime": 1780928338.9501352,
+    "ast_hash": "a50d7f98966b813eb622b5ec5c1ee226",
+    "semantic_hash": "a50d7f98966b813eb622b5ec5c1ee226"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/glama.json": {
+    "mtime": 1780928338.9501967,
+    "ast_hash": "a395c8e6f37c7bec0ee497784e08883b",
+    "semantic_hash": "a395c8e6f37c7bec0ee497784e08883b"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/index.d.ts": {
+    "mtime": 1780928338.9502532,
+    "ast_hash": "76b4e82bea5b6a468a3999de672245bd",
+    "semantic_hash": "76b4e82bea5b6a468a3999de672245bd"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/index.js": {
+    "mtime": 1780928338.9503071,
+    "ast_hash": "480b28803c89f3810a412d0ceff2686b",
+    "semantic_hash": "480b28803c89f3810a412d0ceff2686b"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/package.json": {
+    "mtime": 1780928338.951552,
+    "ast_hash": "a25a3092c94c2cd35697a4f9d01bbaec",
+    "semantic_hash": "a25a3092c94c2cd35697a4f9d01bbaec"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/server.json": {
+    "mtime": 1780928338.951973,
+    "ast_hash": "a379e05da30902660363ae2b9f6ce3cd",
+    "semantic_hash": "a379e05da30902660363ae2b9f6ce3cd"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/actions.d.ts": {
+    "mtime": 1780928338.9522638,
+    "ast_hash": "49b9a952f3d62c65278198421b87fa0f",
+    "semantic_hash": "49b9a952f3d62c65278198421b87fa0f"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/browserContextFactory.ts": {
+    "mtime": 1780928338.9526343,
+    "ast_hash": "34c652ad8a2f011080700f9155a712c5",
+    "semantic_hash": "34c652ad8a2f011080700f9155a712c5"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/browserServerBackend.ts": {
+    "mtime": 1780928338.9535823,
+    "ast_hash": "ea2c7ef8f3fafc055683f827872a792c",
+    "semantic_hash": "ea2c7ef8f3fafc055683f827872a792c"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/config.ts": {
+    "mtime": 1780928338.953846,
+    "ast_hash": "e3eb7da4732e8406639abcaaf22fa070",
+    "semantic_hash": "e3eb7da4732e8406639abcaaf22fa070"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/context.ts": {
+    "mtime": 1780928338.9541929,
+    "ast_hash": "11e81137c7424ed3f6d420edfa5184b7",
+    "semantic_hash": "11e81137c7424ed3f6d420edfa5184b7"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/extension/cdpRelay.ts": {
+    "mtime": 1780928338.9547627,
+    "ast_hash": "8498986223961b15ca2dba691edd45a0",
+    "semantic_hash": "8498986223961b15ca2dba691edd45a0"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/extension/extensionContextFactory.ts": {
+    "mtime": 1780928338.9549391,
+    "ast_hash": "3996a4d94a068ca555c1fd911add932b",
+    "semantic_hash": "3996a4d94a068ca555c1fd911add932b"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/extension/protocol.ts": {
+    "mtime": 1780928338.9550939,
+    "ast_hash": "996bd69ffe257b4e78a4199f1fe2208b",
+    "semantic_hash": "996bd69ffe257b4e78a4199f1fe2208b"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/external-modules.d.ts": {
+    "mtime": 1780928338.9554658,
+    "ast_hash": "7296e67146f70c31aee83d6736de7eff",
+    "semantic_hash": "7296e67146f70c31aee83d6736de7eff"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/index.ts": {
+    "mtime": 1780928338.955696,
+    "ast_hash": "8ee7e787af25584d0201795aa6036ead",
+    "semantic_hash": "8ee7e787af25584d0201795aa6036ead"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/mcp/http.ts": {
+    "mtime": 1780928338.9567742,
+    "ast_hash": "abe1ea316c51d3880569125470c0cde1",
+    "semantic_hash": "abe1ea316c51d3880569125470c0cde1"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/mcp/inProcessTransport.ts": {
+    "mtime": 1780928338.9570022,
+    "ast_hash": "a37d928e713b91c3102a9a5705f501e3",
+    "semantic_hash": "a37d928e713b91c3102a9a5705f501e3"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/mcp/manualPromise.ts": {
+    "mtime": 1780928338.957148,
+    "ast_hash": "a37ac41c1b93eea6c3f681b885ceb499",
+    "semantic_hash": "a37ac41c1b93eea6c3f681b885ceb499"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/mcp/mdb.ts": {
+    "mtime": 1780928338.957585,
+    "ast_hash": "cda55571a6ab0be217f413454e0af67a",
+    "semantic_hash": "cda55571a6ab0be217f413454e0af67a"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/mcp/proxyBackend.ts": {
+    "mtime": 1780928338.9579961,
+    "ast_hash": "b204a2c3466b68b02b459f07d9028275",
+    "semantic_hash": "b204a2c3466b68b02b459f07d9028275"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/mcp/server.ts": {
+    "mtime": 1780928338.9584885,
+    "ast_hash": "eda3823ae4ecc1799744c4e2a40e32d5",
+    "semantic_hash": "eda3823ae4ecc1799744c4e2a40e32d5"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/mcp/tool.ts": {
+    "mtime": 1780928338.9588852,
+    "ast_hash": "d23cf968ba4f50df291fcfb8a0273d21",
+    "semantic_hash": "d23cf968ba4f50df291fcfb8a0273d21"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/mcp/toolListChanged.ts": {
+    "mtime": 1780928338.9592748,
+    "ast_hash": "8d5689307c8ae8606467b1ab1557add2",
+    "semantic_hash": "8d5689307c8ae8606467b1ab1557add2"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/program.ts": {
+    "mtime": 1780928338.9595997,
+    "ast_hash": "ee08a61dd5c9fcae9677c737d547bfd0",
+    "semantic_hash": "ee08a61dd5c9fcae9677c737d547bfd0"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/response.ts": {
+    "mtime": 1780928338.9600716,
+    "ast_hash": "a800ca2874008b93292ecb48825bcfbd",
+    "semantic_hash": "a800ca2874008b93292ecb48825bcfbd"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/sessionLog.ts": {
+    "mtime": 1780928338.9604235,
+    "ast_hash": "c3013114644bedbedfe94bb43893e4a9",
+    "semantic_hash": "c3013114644bedbedfe94bb43893e4a9"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tab.ts": {
+    "mtime": 1780928338.9607246,
+    "ast_hash": "569f0dc405dc80388f830ac371ead49b",
+    "semantic_hash": "569f0dc405dc80388f830ac371ead49b"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools.ts": {
+    "mtime": 1780928338.96097,
+    "ast_hash": "54865297ee16c91f5302d058563429f1",
+    "semantic_hash": "54865297ee16c91f5302d058563429f1"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/auditKeyboard.ts": {
+    "mtime": 1780928338.961511,
+    "ast_hash": "59723d2a1df5e32cc73cfc122ce3cf6d",
+    "semantic_hash": "59723d2a1df5e32cc73cfc122ce3cf6d"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/auditSite.ts": {
+    "mtime": 1780928338.9617457,
+    "ast_hash": "ad6c24f54a7f85fb5586bd2ff74735f4",
+    "semantic_hash": "ad6c24f54a7f85fb5586bd2ff74735f4"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/axe.ts": {
+    "mtime": 1780928338.9620194,
+    "ast_hash": "be2fbd15ed454443876078d3e104aa40",
+    "semantic_hash": "be2fbd15ed454443876078d3e104aa40"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/common.ts": {
+    "mtime": 1780928338.962254,
+    "ast_hash": "190826a6429b208fd1dd09a802496dcb",
+    "semantic_hash": "190826a6429b208fd1dd09a802496dcb"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/console.ts": {
+    "mtime": 1780928338.9624815,
+    "ast_hash": "aee2cc436df3a1f4d597e3c0db20b21f",
+    "semantic_hash": "aee2cc436df3a1f4d597e3c0db20b21f"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/dialogs.ts": {
+    "mtime": 1780928338.9627678,
+    "ast_hash": "f564a72f1cd57630bb3a5db7fb29856a",
+    "semantic_hash": "f564a72f1cd57630bb3a5db7fb29856a"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/evaluate.ts": {
+    "mtime": 1780928338.9629745,
+    "ast_hash": "8213281e2b4b4298099d2e43e13b4870",
+    "semantic_hash": "8213281e2b4b4298099d2e43e13b4870"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/files.ts": {
+    "mtime": 1780928338.9632263,
+    "ast_hash": "d2ee257e353dac647793473b5bc89839",
+    "semantic_hash": "d2ee257e353dac647793473b5bc89839"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/form.ts": {
+    "mtime": 1780928338.963419,
+    "ast_hash": "c3357a97bff065da0302864286e4dfc1",
+    "semantic_hash": "c3357a97bff065da0302864286e4dfc1"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/install.ts": {
+    "mtime": 1780928338.963837,
+    "ast_hash": "0f3b436a1f8974b0391568c742f1ef6a",
+    "semantic_hash": "0f3b436a1f8974b0391568c742f1ef6a"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/keyboard.ts": {
+    "mtime": 1780928338.9640167,
+    "ast_hash": "7c49f871b669ab92cfdc8e8daf41da39",
+    "semantic_hash": "7c49f871b669ab92cfdc8e8daf41da39"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/mouse.ts": {
+    "mtime": 1780928338.9643252,
+    "ast_hash": "7fb0768afea58571392468eb28fa375c",
+    "semantic_hash": "7fb0768afea58571392468eb28fa375c"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/navigate.ts": {
+    "mtime": 1780928338.9644668,
+    "ast_hash": "55e84d613c3a86c8bcc12867e3d42f66",
+    "semantic_hash": "55e84d613c3a86c8bcc12867e3d42f66"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/network.ts": {
+    "mtime": 1780928338.9647202,
+    "ast_hash": "1f083b86e45dd5829efa0e6ce85d4d39",
+    "semantic_hash": "1f083b86e45dd5829efa0e6ce85d4d39"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/pdf.ts": {
+    "mtime": 1780928338.9648433,
+    "ast_hash": "b7f1cf895c22eb536992768971c8b0bb",
+    "semantic_hash": "b7f1cf895c22eb536992768971c8b0bb"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/scanPageMatrix.ts": {
+    "mtime": 1780928338.9652896,
+    "ast_hash": "1a14783bc767567fe46a59beea360ca9",
+    "semantic_hash": "1a14783bc767567fe46a59beea360ca9"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/screenshot.ts": {
+    "mtime": 1780928338.9655309,
+    "ast_hash": "babbfd5800a0354bda9435ae67c3ad28",
+    "semantic_hash": "babbfd5800a0354bda9435ae67c3ad28"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/snapshot.ts": {
+    "mtime": 1780928338.9657876,
+    "ast_hash": "8a2cd2259fb47c4e96a8c1afd6cc08df",
+    "semantic_hash": "8a2cd2259fb47c4e96a8c1afd6cc08df"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/tabs.ts": {
+    "mtime": 1780928338.965971,
+    "ast_hash": "6218ea4e5b1584daa1ef2773e69eafae",
+    "semantic_hash": "6218ea4e5b1584daa1ef2773e69eafae"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/tool.ts": {
+    "mtime": 1780928338.9662008,
+    "ast_hash": "8284ca113a7516241a0d732045332df2",
+    "semantic_hash": "8284ca113a7516241a0d732045332df2"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/utils.ts": {
+    "mtime": 1780928338.9664857,
+    "ast_hash": "ea1e164dbc493560be374b5b1a342358",
+    "semantic_hash": "ea1e164dbc493560be374b5b1a342358"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/verify.ts": {
+    "mtime": 1780928338.9666784,
+    "ast_hash": "3a1118d757175eeecb33479be18bce45",
+    "semantic_hash": "3a1118d757175eeecb33479be18bce45"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/tools/wait.ts": {
+    "mtime": 1780928338.9669666,
+    "ast_hash": "71ccbbb1de32c33ee05470b14bcfabec",
+    "semantic_hash": "71ccbbb1de32c33ee05470b14bcfabec"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/utils/codegen.ts": {
+    "mtime": 1780928338.967172,
+    "ast_hash": "3d28daec40df6a1a99525325a0300d3e",
+    "semantic_hash": "3d28daec40df6a1a99525325a0300d3e"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/utils/fileUtils.ts": {
+    "mtime": 1780928338.9673398,
+    "ast_hash": "86159127573cca5ee3c87e94f811a26a",
+    "semantic_hash": "86159127573cca5ee3c87e94f811a26a"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/utils/guid.ts": {
+    "mtime": 1780928338.9677029,
+    "ast_hash": "49a7fd6182253af85a767fd8c094cc78",
+    "semantic_hash": "49a7fd6182253af85a767fd8c094cc78"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/utils/log.ts": {
+    "mtime": 1780928338.9678116,
+    "ast_hash": "3548037e5ab6060c7dbfbc1188b93e51",
+    "semantic_hash": "3548037e5ab6060c7dbfbc1188b93e51"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/utils/package.ts": {
+    "mtime": 1780928338.9680011,
+    "ast_hash": "b815910bfd281bca0e61ed04df66def3",
+    "semantic_hash": "b815910bfd281bca0e61ed04df66def3"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/vscode/host.ts": {
+    "mtime": 1780928338.9684293,
+    "ast_hash": "8de07e63442f90594899434e908881ba",
+    "semantic_hash": "8de07e63442f90594899434e908881ba"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/vscode/main.ts": {
+    "mtime": 1780928338.9686377,
+    "ast_hash": "df2251bd2cb3fde4aef442e7db2f0a09",
+    "semantic_hash": "df2251bd2cb3fde4aef442e7db2f0a09"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/browserContextFactory.test.ts": {
+    "mtime": 1780928338.9689813,
+    "ast_hash": "a5713955e2cec7fe9464c6be340b41f9",
+    "semantic_hash": "a5713955e2cec7fe9464c6be340b41f9"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/config.test.ts": {
+    "mtime": 1780928338.9693232,
+    "ast_hash": "30affc72b7ca3c40994b1f4991b0ced3",
+    "semantic_hash": "30affc72b7ca3c40994b1f4991b0ced3"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/context.test.ts": {
+    "mtime": 1780928338.9695451,
+    "ast_hash": "1f4eb333707aefc9b1e37a2c0db6bbb9",
+    "semantic_hash": "1f4eb333707aefc9b1e37a2c0db6bbb9"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/docker-smoke.sh": {
+    "mtime": 1780928338.969853,
+    "ast_hash": "78a7165bba2f1f8d48b12d0706d9b286",
+    "semantic_hash": "78a7165bba2f1f8d48b12d0706d9b286"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/e2e-tools-smoke.test.ts": {
+    "mtime": 1780928338.97015,
+    "ast_hash": "3491bc875e75c1f77eac46d30a33f38e",
+    "semantic_hash": "3491bc875e75c1f77eac46d30a33f38e"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/mcp-http.test.ts": {
+    "mtime": 1780928338.970506,
+    "ast_hash": "41b3df5c606b422e96e85762ff476aa6",
+    "semantic_hash": "41b3df5c606b422e96e85762ff476aa6"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/mcp-manualPromise.test.ts": {
+    "mtime": 1780928338.9707606,
+    "ast_hash": "544c0612cb0a6e0010c49fdb34278028",
+    "semantic_hash": "544c0612cb0a6e0010c49fdb34278028"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/mcp-proxyBackend.test.ts": {
+    "mtime": 1780928338.9713714,
+    "ast_hash": "4c779d57cd58a837c07cbdbf5ec5a3f9",
+    "semantic_hash": "4c779d57cd58a837c07cbdbf5ec5a3f9"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/mcp-server-progress.test.ts": {
+    "mtime": 1780928338.971841,
+    "ast_hash": "6ad7e1045ff7b1460424fcabeb4582bb",
+    "semantic_hash": "6ad7e1045ff7b1460424fcabeb4582bb"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/mcp-tool.test.ts": {
+    "mtime": 1780928338.972046,
+    "ast_hash": "5bf84290102cb7fb50fe1e20550ad757",
+    "semantic_hash": "5bf84290102cb7fb50fe1e20550ad757"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/mcp-toolListChanged.test.ts": {
+    "mtime": 1780928338.9723978,
+    "ast_hash": "a7b77b42b6e543d399488390e0dd6331",
+    "semantic_hash": "a7b77b42b6e543d399488390e0dd6331"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/program.test.ts": {
+    "mtime": 1780928338.972718,
+    "ast_hash": "cd0eb0c897fcae46f28fad1bad447f9a",
+    "semantic_hash": "cd0eb0c897fcae46f28fad1bad447f9a"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/response.test.ts": {
+    "mtime": 1780928338.9729629,
+    "ast_hash": "643fb0e7fe03d71248622ef0013abbf0",
+    "semantic_hash": "643fb0e7fe03d71248622ef0013abbf0"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tab.test.ts": {
+    "mtime": 1780928338.9733288,
+    "ast_hash": "59495a59aefb66b9fc784cf8b73f55e0",
+    "semantic_hash": "59495a59aefb66b9fc784cf8b73f55e0"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tool-definitions.test.ts": {
+    "mtime": 1780928338.9735112,
+    "ast_hash": "e030df22872b3ed3cd062319ea3709ba",
+    "semantic_hash": "e030df22872b3ed3cd062319ea3709ba"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tools-auditKeyboard.test.ts": {
+    "mtime": 1780928338.9738379,
+    "ast_hash": "2a39185d1f5edc35f1b667686d4d0c62",
+    "semantic_hash": "2a39185d1f5edc35f1b667686d4d0c62"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tools-auditKeyboard.tool.test.ts": {
+    "mtime": 1780928338.9742408,
+    "ast_hash": "aa7b0c8973dabd0176225f9d888df6d8",
+    "semantic_hash": "aa7b0c8973dabd0176225f9d888df6d8"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tools-auditSite.integration.test.ts": {
+    "mtime": 1780928338.9745562,
+    "ast_hash": "bc858a251b2190226c4a93410cb1f636",
+    "semantic_hash": "bc858a251b2190226c4a93410cb1f636"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tools-auditSite.test.ts": {
+    "mtime": 1780928338.974887,
+    "ast_hash": "4611822ca10fe620baa0096d60a744aa",
+    "semantic_hash": "4611822ca10fe620baa0096d60a744aa"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tools-common.test.ts": {
+    "mtime": 1780928338.975045,
+    "ast_hash": "f17467d7fdbfded4bb4c995b6d8f859d",
+    "semantic_hash": "f17467d7fdbfded4bb4c995b6d8f859d"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tools-console.test.ts": {
+    "mtime": 1780928338.9751573,
+    "ast_hash": "84c0822638ca26c939a2644b71e075de",
+    "semantic_hash": "84c0822638ca26c939a2644b71e075de"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tools-navigate.test.ts": {
+    "mtime": 1780928338.975492,
+    "ast_hash": "3d78cbcffce7eed1abebf3b07c41f79a",
+    "semantic_hash": "3d78cbcffce7eed1abebf3b07c41f79a"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tools-network.test.ts": {
+    "mtime": 1780928338.9756596,
+    "ast_hash": "2ca47024ad1c0fecb57a290641492658",
+    "semantic_hash": "2ca47024ad1c0fecb57a290641492658"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tools-scanPageMatrix.test.ts": {
+    "mtime": 1780928338.976022,
+    "ast_hash": "f579b25146c963ff900b98022b9ac24b",
+    "semantic_hash": "f579b25146c963ff900b98022b9ac24b"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tools-tabs.test.ts": {
+    "mtime": 1780928338.9762204,
+    "ast_hash": "6a1252eb053e37e54b26f976effef069",
+    "semantic_hash": "6a1252eb053e37e54b26f976effef069"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/tools-utils.test.ts": {
+    "mtime": 1780928338.9764845,
+    "ast_hash": "d706e9d762f6f0004d057315d1187d2d",
+    "semantic_hash": "d706e9d762f6f0004d057315d1187d2d"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/utils.test.ts": {
+    "mtime": 1780928338.9766247,
+    "ast_hash": "14ed005c92f4f039f30fa6519d951824",
+    "semantic_hash": "14ed005c92f4f039f30fa6519d951824"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tests/vscode-host.test.ts": {
+    "mtime": 1780928338.9773393,
+    "ast_hash": "f859518dbe4e762fca33fa1036d0f93c",
+    "semantic_hash": "f859518dbe4e762fca33fa1036d0f93c"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tsconfig.all.json": {
+    "mtime": 1780928338.9777308,
+    "ast_hash": "78ae0d5c1db73c6eeafbc27c0184160b",
+    "semantic_hash": "78ae0d5c1db73c6eeafbc27c0184160b"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/tsconfig.json": {
+    "mtime": 1780928338.97881,
+    "ast_hash": "64556a8c57f19e07303a3e18ec0506a1",
+    "semantic_hash": "64556a8c57f19e07303a3e18ec0506a1"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/utils/copyright.js": {
+    "mtime": 1780928338.9790168,
+    "ast_hash": "11f534cc1be2bf183d42cb104e149674",
+    "semantic_hash": "11f534cc1be2bf183d42cb104e149674"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/vitest.config.ts": {
+    "mtime": 1780928338.979433,
+    "ast_hash": "fec0225c86547343c2d87bb84a342034",
+    "semantic_hash": "fec0225c86547343c2d87bb84a342034"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/.github/workflows/ci.yml": {
+    "mtime": 1780928338.9444568,
+    "ast_hash": "224a488c655c86425e7663249143beb7",
+    "semantic_hash": "224a488c655c86425e7663249143beb7"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/AGENTS.md": {
+    "mtime": 1780928338.9466732,
+    "ast_hash": "9a76fa92bfacdab6bb2f190136721e50",
+    "semantic_hash": "9a76fa92bfacdab6bb2f190136721e50"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/CLAUDE.md": {
+    "mtime": 1780928338.9472663,
+    "ast_hash": "34cf4dca2090fed931cdb52ba307fe41",
+    "semantic_hash": "34cf4dca2090fed931cdb52ba307fe41"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/NOTICE.md": {
+    "mtime": 1780928338.947934,
+    "ast_hash": "bfac2914fe707e9020bafcda9ef2facb",
+    "semantic_hash": "bfac2914fe707e9020bafcda9ef2facb"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/README.md": {
+    "mtime": 1780928338.948399,
+    "ast_hash": "c9ab3dfad97ab3d528a47e7dcfd17ee3",
+    "semantic_hash": "c9ab3dfad97ab3d528a47e7dcfd17ee3"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/SKILL.md": {
+    "mtime": 1780928338.9489408,
+    "ast_hash": "b43a5208d8f672814f4e4a39b78efb9b",
+    "semantic_hash": "b43a5208d8f672814f4e4a39b78efb9b"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/docker-compose.yaml": {
+    "mtime": 1780928338.9498878,
+    "ast_hash": "6484a0653eb4e2f4640fd961664b7174",
+    "semantic_hash": "6484a0653eb4e2f4640fd961664b7174"
+  },
+  "/Users/justas/.codex/worktrees/bb8e/mcp-accessibility-scanner/src/mcp/README.md": {
+    "mtime": 1780928338.956053,
+    "ast_hash": "1743613a80f9666a889a9168913651c7",
+    "semantic_hash": "1743613a80f9666a889a9168913651c7"
+  }
+}
