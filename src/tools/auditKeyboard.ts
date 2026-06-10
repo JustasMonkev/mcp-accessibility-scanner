@@ -152,12 +152,16 @@ export async function runKeyboardFocusAudit(
   let focusTrapDetectedAt: number | null = null;
   let focusTrapFingerprint: string | null = null;
   let focusTrapRecentFingerprints: string[] = [];
+  // Focus info from the end of the previous step; reused as the "before" state
+  // of the next step to avoid a second page round-trip per keypress.
+  let lastKnownPoint: FocusPoint | null = null;
 
   for (let step = 1; step <= options.maxTabs; step++) {
     const key: FocusStop['key'] = options.includeShiftTab && step % 2 === 0 ? 'Shift+Tab' : 'Tab';
-    const before = await callbacks.getActiveElementInfo();
+    const before = lastKnownPoint ?? await callbacks.getActiveElementInfo();
     await callbacks.pressKey(key);
     const after = await callbacks.getActiveElementInfo();
+    lastKnownPoint = after;
 
     const stop: FocusStop = {
       ...after,
@@ -192,6 +196,7 @@ export async function runKeyboardFocusAudit(
         const urlBefore = callbacks.getCurrentUrl ? await callbacks.getCurrentUrl() : null;
         await callbacks.pressKey('Enter');
         const afterActivation = await callbacks.getActiveElementInfo();
+        lastKnownPoint = afterActivation;
         const urlAfter = callbacks.getCurrentUrl ? await callbacks.getCurrentUrl() : null;
         const hashChanged = didUrlHashChange(urlBefore, urlAfter);
         const fullUrlChanged = urlBefore !== null && urlAfter !== null && urlBefore !== urlAfter;
@@ -205,8 +210,11 @@ export async function runKeyboardFocusAudit(
           urlBefore,
           urlAfter,
         };
-        if (navigationOccurred && callbacks.goBack)
+        if (navigationOccurred && callbacks.goBack) {
           await callbacks.goBack();
+          // Focus state is unknown after navigating back; re-query next step.
+          lastKnownPoint = null;
+        }
         skipLinkActivated = true;
       }
     }
@@ -304,12 +312,13 @@ const auditKeyboard = defineTabTool({
         }
 
         const role = current.getAttribute('role') || current.tagName.toLowerCase();
+        const labelledBy = current.getAttribute('aria-labelledby');
+        const text = current.textContent?.trim().slice(0, 200) || null;
         const name = current.getAttribute('aria-label')
-          || current.getAttribute('aria-labelledby') && document.getElementById(current.getAttribute('aria-labelledby')!)?.textContent?.trim()
+          || labelledBy && document.getElementById(labelledBy)?.textContent?.trim()
           || current.getAttribute('title')
           || (current instanceof HTMLInputElement || current instanceof HTMLTextAreaElement ? current.labels?.[0]?.textContent?.trim() : null)
-          || current.textContent?.trim().slice(0, 200)
-          || null;
+          || text;
 
         const rect = current.getBoundingClientRect();
         const style = window.getComputedStyle(current);
@@ -329,7 +338,7 @@ const auditKeyboard = defineTabTool({
           tagName: current.tagName,
           id: current.id || null,
           href: current instanceof HTMLAnchorElement ? current.href : null,
-          text: current.textContent?.trim().slice(0, 200) || null,
+          text,
           boundingBox: rect.width > 0 || rect.height > 0 ? {
             x: rect.x,
             y: rect.y,
@@ -350,21 +359,8 @@ const auditKeyboard = defineTabTool({
       return fileName;
     };
 
-    const result = await runKeyboardFocusAudit({
-      maxTabs: params.maxTabs,
-      includeShiftTab: params.includeShiftTab,
-      stopOnCycle: params.stopOnCycle,
-      cycleWindow: params.cycleWindow,
-      checkSkipLink: params.checkSkipLink,
-      skipLinkMaxTabs: params.skipLinkMaxTabs,
-      activateSkipLink: params.activateSkipLink,
-      checkFocusTrap: params.checkFocusTrap,
-      checkFocusVisibility: params.checkFocusVisibility,
-      checkFocusJumps: params.checkFocusJumps,
-      jumpScrollThresholdPx: params.jumpScrollThresholdPx,
-      screenshotOnIssue: params.screenshotOnIssue,
-      maxIssueScreenshots: params.maxIssueScreenshots,
-    }, {
+    const { reportFile, ...auditOptions } = params;
+    const result = await runKeyboardFocusAudit(auditOptions, {
       pressKey: async key => {
         await tab.waitForCompletion(async () => {
           await tab.page.keyboard.press(key);
@@ -395,7 +391,7 @@ const auditKeyboard = defineTabTool({
       ...result,
     };
 
-    const reportFileName = sanitizeForFilePath(params.reportFile ?? `audit-keyboard-${safeIsoTimestampForFileName()}.json`);
+    const reportFileName = sanitizeForFilePath(reportFile ?? `audit-keyboard-${safeIsoTimestampForFileName()}.json`);
     const reportPath = await tab.context.outputFile(reportFileName);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
     const reportResourceLink = response.addFileResourceLink(reportPath, {

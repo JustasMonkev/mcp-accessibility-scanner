@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import RE2 from 're2';
 import { z } from 'zod';
@@ -249,10 +248,14 @@ function summarizeTopViolations(violations: SummaryViolation[], count: number): 
       .map(violation => `- ${violation.id} (${violation.impact ?? 'unknown'}): ${violation.pagesAffected.length} pages, ${violation.totalOccurrences} nodes`);
 }
 
-function summarizeTopPages(pages: PageReport[], count: number): string[] {
+function sortScannedPagesByViolations(pages: PageReport[]): PageReport[] {
   return pages
       .filter(page => page.status === 'scanned')
-      .sort((first, second) => (second.summary?.totalRules ?? 0) - (first.summary?.totalRules ?? 0))
+      .sort((first, second) => (second.summary?.totalRules ?? 0) - (first.summary?.totalRules ?? 0));
+}
+
+function summarizeTopPages(sortedScannedPages: PageReport[], count: number): string[] {
+  return sortedScannedPages
       .slice(0, count)
       .map(page => `- ${page.url}: ${page.summary?.totalRules ?? 0} violations, ${page.summary?.totalNodes ?? 0} nodes`);
 }
@@ -408,8 +411,9 @@ const auditSite = defineTabTool({
             summary.totalOccurrences += violation.nodes.length;
 
             for (const node of violation.nodes) {
-              const nodeHtml = normalizeWhitespace(node.html ?? '');
-              const fingerprint = crypto.createHash('sha256').update(`${violation.id}|${nodeHtml}`).digest('hex');
+              // The fingerprint set is scoped to one violation id, so the
+              // normalized node HTML alone identifies a unique occurrence.
+              const fingerprint = normalizeWhitespace(node.html ?? '');
               if (summary.fingerprints.has(fingerprint))
                 continue;
               summary.fingerprints.add(fingerprint);
@@ -481,9 +485,10 @@ const auditSite = defineTabTool({
       return second.pagesAffected.length - first.pagesAffected.length;
     });
 
+    const scannedPagesByViolations = sortScannedPagesByViolations(pages);
     const summary: SummaryReport = {
       totals: {
-        scannedPages: pages.filter(page => page.status === 'scanned').length,
+        scannedPages: scannedPagesByViolations.length,
         erroredPages,
         skippedUrls,
         queuedUrls: visited.size,
@@ -546,9 +551,7 @@ const auditSite = defineTabTool({
         totalOccurrences: violation.totalOccurrences,
         helpUrl: violation.helpUrl,
       })),
-      topPages: pages
-          .filter(page => page.status === 'scanned')
-          .sort((first, second) => (second.summary?.totalRules ?? 0) - (first.summary?.totalRules ?? 0))
+      topPages: scannedPagesByViolations
           .slice(0, 5)
           .map(page => ({
             url: page.url,
@@ -559,7 +562,7 @@ const auditSite = defineTabTool({
     });
 
     const topViolations = summarizeTopViolations(summaryViolations, 10);
-    const topPages = summarizeTopPages(pages, 20);
+    const topPages = summarizeTopPages(scannedPagesByViolations, 20);
     response.addCode('// Crawled pages in a temporary tab and aggregated Axe violations.');
     response.addResult([
       `Scanned pages: ${summary.totals.scannedPages}`,
