@@ -131,6 +131,17 @@ function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
+// 32-bit FNV-1a hash; gives occurrence dedup a fixed-size key so the
+// per-violation fingerprint sets do not retain full HTML strings.
+function fastFingerprint(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
 function isAllowedByOrigin(candidate: URL, startUrl: URL, sameOriginOnly: boolean, includeSubdomains: boolean): boolean {
   if (!sameOriginOnly)
     return true;
@@ -413,7 +424,7 @@ const auditSite = defineTabTool({
             for (const node of violation.nodes) {
               // The fingerprint set is scoped to one violation id, so the
               // normalized node HTML alone identifies a unique occurrence.
-              const fingerprint = normalizeWhitespace(node.html ?? '');
+              const fingerprint = fastFingerprint(normalizeWhitespace(node.html ?? ''));
               if (summary.fingerprints.has(fingerprint))
                 continue;
               summary.fingerprints.add(fingerprint);
