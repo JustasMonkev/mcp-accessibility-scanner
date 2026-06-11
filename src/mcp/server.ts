@@ -17,7 +17,7 @@
 import debug from 'debug';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
@@ -44,7 +44,12 @@ export interface ServerBackend {
   serverClosed?(): void;
 }
 
-export type ServerBackendFactory = {
+export type ServerMetadata = {
+  title?: string;
+  instructions?: string;
+};
+
+export type ServerBackendFactory = ServerMetadata & {
   name: string;
   nameInConfig: string;
   version: string;
@@ -52,7 +57,7 @@ export type ServerBackendFactory = {
 };
 
 export async function connect(factory: ServerBackendFactory, transport: Transport, runHeartbeat: boolean) {
-  const server = createServer(factory.name, factory.version, factory.create(), runHeartbeat);
+  const server = createServer(factory.name, factory.version, factory.create(), runHeartbeat, factory);
   await server.connect(transport);
 }
 
@@ -61,15 +66,16 @@ export async function wrapInProcess(backend: ServerBackend): Promise<Transport> 
   return new InProcessTransport(server);
 }
 
-export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean): Server {
+export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean, metadata?: ServerMetadata): Server {
   let initializedPromiseResolve = () => {};
   const initializedPromise = new Promise<void>(resolve => initializedPromiseResolve = resolve);
-  const server = new Server({ name, version }, {
+  const server = new Server({ name, version, title: metadata?.title }, {
     capabilities: {
       tools: {
         listChanged: true,
       },
-    }
+    },
+    instructions: metadata?.instructions,
   });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -92,6 +98,10 @@ export function createServer(name: string, version: string, backend: ServerBacke
     try {
       return await backend.callTool(request.params.name, request.params.arguments || {}, extra);
     } catch (error) {
+      // Protocol-level failures (e.g. unknown tool) surface as JSON-RPC
+      // errors; only tool execution failures become isError results.
+      if (error instanceof McpError)
+        throw error;
       return {
         content: [{ type: 'text', text: '### Result\n' + String(error) }],
         isError: true,
