@@ -144,34 +144,13 @@ const scanPageMatrix = defineTabTool({
     const variantResults: VariantResult[] = [];
     try {
       for (const variant of variants) {
-        await tab.page.setViewportSize(originalViewport);
-        await tab.page.emulateMedia({
-          colorScheme: null,
-          forcedColors: null,
-          contrast: null,
-          reducedMotion: null,
-        });
+        // Apply each property once per variant: the variant value when set,
+        // otherwise the original page state (undoing the previous variant).
+        await tab.page.setViewportSize(variant.viewport ?? originalViewport);
+        await tab.page.emulateMedia(normalizeMedia(variant.media));
         await tab.page.evaluate(zoom => {
           document.documentElement.style.zoom = zoom;
-        }, originalZoom);
-
-        if (variant.viewport)
-          await tab.page.setViewportSize(variant.viewport);
-
-        if (variant.media) {
-          await tab.page.emulateMedia({
-            colorScheme: variant.media.colorScheme ?? null,
-            forcedColors: variant.media.forcedColors ?? null,
-            contrast: variant.media.contrast ?? null,
-            reducedMotion: variant.media.reducedMotion ?? null,
-          });
-        }
-
-        if (variant.zoomPercent !== undefined) {
-          await tab.page.evaluate(zoomPercent => {
-            document.documentElement.style.zoom = `${zoomPercent}%`;
-          }, variant.zoomPercent);
-        }
+        }, variant.zoomPercent !== undefined ? `${variant.zoomPercent}%` : originalZoom);
 
         if (params.reloadBetweenVariants)
           await tab.page.reload({ waitUntil: 'domcontentloaded' });

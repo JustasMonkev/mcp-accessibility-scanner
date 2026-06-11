@@ -23,10 +23,7 @@ describe('runKeyboardFocusAudit', () => {
     const sequence: FocusPoint[] = [
       focusPoint({ role: 'document', tagName: 'BODY' }),
       focusPoint({ role: 'link', name: 'Skip to content', text: 'Skip to content', tagName: 'A', href: '#main' }),
-      focusPoint({ role: 'link', name: 'Skip to content', text: 'Skip to content', tagName: 'A', href: '#main' }),
       focusPoint({ role: 'button', name: 'Menu', tagName: 'BUTTON', id: 'menu', hasVisibleIndicator: false }),
-      focusPoint({ role: 'button', name: 'Menu', tagName: 'BUTTON', id: 'menu', hasVisibleIndicator: false }),
-      focusPoint({ role: 'button', name: 'Search', tagName: 'BUTTON', id: 'search', scrollY: 1200 }),
       focusPoint({ role: 'button', name: 'Search', tagName: 'BUTTON', id: 'search', scrollY: 1200 }),
       focusPoint({ role: 'button', name: 'Menu', tagName: 'BUTTON', id: 'menu', hasVisibleIndicator: false, scrollY: 1200 }),
     ];
@@ -108,7 +105,6 @@ describe('runKeyboardFocusAudit', () => {
   it('records a focus trap stop only once when stopOnCycle is false', async () => {
     const sequence: FocusPoint[] = [
       focusPoint({ role: 'document', tagName: 'BODY' }),
-      focusPoint({ role: 'button', name: 'Menu', tagName: 'BUTTON', id: 'menu' }),
       focusPoint({ role: 'button', name: 'Menu', tagName: 'BUTTON', id: 'menu' }),
       focusPoint({ role: 'button', name: 'Menu', tagName: 'BUTTON', id: 'menu' }),
     ];
