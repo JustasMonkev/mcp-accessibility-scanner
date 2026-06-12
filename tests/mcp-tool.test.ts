@@ -33,6 +33,7 @@ describe('mcp/tool', () => {
 
     const tool = toMcpTool(schema);
     expect(tool.name).toBe('test_read');
+    expect(tool.title).toBe('Test Read');
     expect(tool.description).toBe('Read-only tool');
     expect(tool.annotations?.title).toBe('Test Read');
     expect(tool.annotations?.readOnlyHint).toBe(true);

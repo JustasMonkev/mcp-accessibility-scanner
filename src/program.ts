@@ -25,7 +25,7 @@ import { contextFactory } from './browserContextFactory.js';
 import { ProxyBackend } from './mcp/proxyBackend.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
-import { filteredTools } from './tools.js';
+import { filteredTools, serverInstructions } from './tools.js';
 import { logUnhandledError } from './utils/log.js';
 
 import { runVSCodeTools } from './vscode/host.js';
@@ -49,8 +49,10 @@ async function resolveProgramContext(options: Record<string, unknown>): Promise<
 async function startMCPServer(config: FullConfig, browserContextFactory: BrowserContextFactory) {
   const factory: mcpServer.ServerBackendFactory = {
     name: 'Playwright',
+    title: 'Accessibility Scanner',
     nameInConfig: 'playwright',
     version: packageJSON.version,
+    instructions: serverInstructions,
     create: () => new BrowserServerBackend(config, browserContextFactory)
   };
   await mcpServer.start(factory, config.server);
@@ -108,8 +110,10 @@ configureBaseProgram()
       if (options.extension) {
         const serverBackendFactory: mcpServer.ServerBackendFactory = {
           name: 'Playwright w/ extension',
+          title: 'Accessibility Scanner (browser extension)',
           nameInConfig: 'playwright-extension',
           version: packageJSON.version,
+          instructions: serverInstructions,
           create: () => new BrowserServerBackend(config, extensionContextFactory)
         };
         await mcpServer.start(serverBackendFactory, config.server);

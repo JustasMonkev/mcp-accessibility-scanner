@@ -15,6 +15,8 @@
  */
 
 import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { FullConfig } from './config.js';
 import { Context } from './context.js';
 import { logUnhandledError } from './utils/log.js';
@@ -63,10 +65,19 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   async callTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext) {
-    const tool = this._tools.find(tool => tool.schema.name === name)!;
+    const tool = this._tools.find(tool => tool.schema.name === name);
     if (!tool)
-      throw new Error(`Tool "${name}" not found`);
-    const parsedArguments = tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, any>;
+      throw new McpError(ErrorCode.InvalidParams, `Tool "${name}" not found`);
+    let parsedArguments: Record<string, any>;
+    try {
+      parsedArguments = tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, any>;
+    } catch (error) {
+      // Per the MCP spec, input validation failures are tool execution
+      // errors (isError results), not protocol errors.
+      if (error instanceof z.ZodError)
+        throw new Error(`Invalid input for tool "${name}":\n${z.prettifyError(error)}`);
+      throw error;
+    }
     const context = this._context!;
     const response = new Response(context, name, parsedArguments, requestContext);
     context.setRunningTool(name);

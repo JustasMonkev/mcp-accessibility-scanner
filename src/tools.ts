@@ -64,3 +64,12 @@ export const allTools: Tool<any>[] = [
 export function filteredTools(config: FullConfig) {
   return allTools.filter(tool => tool.capability.startsWith('core') || config.capabilities?.includes(tool.capability));
 }
+
+export const serverInstructions = [
+  'This server runs automated web accessibility audits (axe-core / WCAG) and drives a real browser via Playwright.',
+  'Use `browser_navigate` to load a page first. Then use `audit_site` to crawl and scan multiple pages of a site,',
+  '`scan_page_matrix` to scan the current page across viewports and WCAG tag sets, and `audit_keyboard` to check',
+  'keyboard navigation, focus visibility and skip links. Results are returned as markdown with axe-core rule ids,',
+  'impact levels, failure summaries and remediation links. Regular browser interaction tools (click, type, snapshot,',
+  'screenshot, tabs) are also available for navigating to the state you want to audit.',
+].join(' ');
