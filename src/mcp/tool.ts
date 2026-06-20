@@ -28,6 +28,9 @@ export type ToolSchema<Input extends z.Schema> = {
 export function toMcpTool(tool: ToolSchema<any>): mcpServer.Tool {
   return {
     name: tool.name,
+    // Top-level title takes precedence over annotations.title on spec
+    // 2025-06-18+ clients; annotations.title is kept for older clients.
+    title: tool.title,
     description: tool.description,
     inputSchema: z.toJSONSchema(tool.inputSchema) as mcpServer.Tool['inputSchema'],
     annotations: {

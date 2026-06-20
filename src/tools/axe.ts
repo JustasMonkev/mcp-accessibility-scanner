@@ -39,7 +39,9 @@ export async function runAxeScan(page: playwright.Page, tags: readonly AxeTag[])
 export function dedupeAxeNodes(nodes: AxeNode[]): AxeNode[] {
   const seen = new Set<string>();
   return nodes.filter(node => {
-    const key = JSON.stringify({ target: node.target ?? [], html: node.html ?? '' });
+    // The JSON-encoded target is self-delimiting, so appending the raw HTML
+    // keeps the key unambiguous without serializing a wrapper object.
+    const key = `${JSON.stringify(node.target ?? [])}|${node.html ?? ''}`;
     if (seen.has(key))
       return false;
     seen.add(key);
