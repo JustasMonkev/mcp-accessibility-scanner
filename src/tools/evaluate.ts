@@ -50,8 +50,13 @@ const evaluate = defineTabTool({
     }
 
     await tab.waitForCompletion(async () => {
-      const receiver = locator ?? tab.page as any;
-      const result = await receiver._evaluateFunction(params.function);
+      // playwright-core 1.59 removed the private `_evaluateFunction` helper
+      // (microsoft/playwright#39646). The public `evaluate()` serializes its
+      // argument via `Function.prototype.toString`, so hand it an empty function
+      // whose `toString()` returns the user-supplied source instead.
+      const func = new Function() as any;
+      func.toString = () => params.function;
+      const result = locator ? await locator.evaluate(func) : await tab.page.evaluate(func);
       response.addResult(JSON.stringify(result, null, 2) || 'undefined');
     });
   },

@@ -206,6 +206,12 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
     const navigateResult = await backend.callTool('browser_navigate', { url: `${fixtureOrigin}/` });
     expect(navigateResult.isError).not.toBe(true);
 
+    // Regression guard for #84: browser_evaluate must run against a real page
+    // without the removed playwright-core `_evaluateFunction` private helper.
+    const evaluateResult = await backend.callTool('browser_evaluate', { function: '() => 2 + 2' });
+    expect(evaluateResult.isError).not.toBe(true);
+    expect((evaluateResult.content[0] as any).text).toContain('4');
+
     const keyboardResult1 = await backend.callTool('audit_keyboard', {
       maxTabs: 12,
       checkSkipLink: true,

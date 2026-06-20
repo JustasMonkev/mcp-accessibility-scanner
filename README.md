@@ -305,6 +305,10 @@ Select an option in a dropdown.
 Press a key on the keyboard.
 - Parameters: `key` (e.g., 'ArrowLeft' or 'a')
 
+#### `browser_evaluate`
+Evaluate a JavaScript expression on the page, or on a specific element when a `ref` is provided. The function's return value is serialized back as the result.
+- Parameters: `function` (e.g., `() => document.title` or `(element) => element.textContent`), `element` (optional), `ref` (optional)
+
 ### Screenshot & Visual Tools
 
 #### `browser_take_screenshot`
