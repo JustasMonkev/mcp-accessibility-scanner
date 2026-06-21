@@ -126,12 +126,22 @@ describe('Tool Utils', () => {
       expect(result).toBeDefined();
     });
 
-    it('should throw error for invalid locator', async () => {
+    it('should fall back to locator string when private selector resolution is unavailable', async () => {
       const mockLocator = {
-        _resolveSelector: vi.fn().mockRejectedValue(new Error('Selector not found')),
+        toString: () => 'locator(\'button\')',
       } as any;
 
-      await expect(generateLocator(mockLocator)).rejects.toThrow('Ref not found');
+      const result = await generateLocator(mockLocator);
+
+      expect(result).toBe('locator(\'button\')');
+    });
+
+    it('should fall back to unresolved locator text when no useful string is available', async () => {
+      const mockLocator = {
+        toString: () => '[object Object]',
+      } as any;
+
+      await expect(generateLocator(mockLocator)).resolves.toBe('locator(\'<unresolved>\')');
     });
   });
 

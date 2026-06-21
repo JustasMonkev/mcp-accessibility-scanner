@@ -74,12 +74,15 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
 }
 
 export async function generateLocator(locator: playwright.Locator): Promise<string> {
-  try {
+  if (typeof (locator as any)._resolveSelector === 'function') {
     const { resolvedSelector } = await (locator as any)._resolveSelector();
     return asLocator('javascript', resolvedSelector);
-  } catch (e) {
-    throw new Error('Ref not found, likely because element was removed. Use browser_snapshot to see what elements are currently on the page.');
   }
+
+  // `generateLocator` only renders the "Ran Playwright code" snippet. It must
+  // not block the actual action when Playwright removes private helpers.
+  const locatorText = String(locator);
+  return locatorText === '[object Object]' ? `locator('<unresolved>')` : locatorText;
 }
 
 export async function callOnPageNoTrace<T>(page: playwright.Page, callback: (page: playwright.Page) => Promise<T>): Promise<T> {

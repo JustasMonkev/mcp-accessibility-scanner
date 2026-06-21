@@ -35,6 +35,8 @@
 		"npm-publish": "npm run clean && npm run build && npm publish",
 		"test": "vitest run",
 		"test:docker": "bash ./tests/docker-smoke.sh",
+		"test:mcp": "node .claude/run-mcp-direct-harness.mjs",
+		"test:mcp:install": "node .claude/run-mcp-direct-harness.mjs --include-install",
 		"test:watch": "vitest",
 		"test:ui": "vitest --ui",
 		"test:coverage": "vitest run --coverage"

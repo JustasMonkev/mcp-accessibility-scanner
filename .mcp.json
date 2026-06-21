@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "mcp-accessibility-scanner": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "/Users/justas/Desktop/mcp-accessibility-scanner/cli.js",
+        "--headless",
+        "--no-sandbox",
+        "--isolated"
+      ],
+      "env": {}
+    }
+  }
+}
