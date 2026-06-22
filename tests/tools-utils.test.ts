@@ -14,10 +14,33 @@
  * limitations under the License.
  */
 
+import fs from 'fs';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { chromium, type Browser } from 'playwright';
 import { waitForCompletion, generateLocator, callOnPageNoTrace } from '../src/tools/utils.js';
 import type { Tab } from '../src/tab.js';
 import { EventEmitter } from 'events';
+
+const hasBundledChromium = fs.existsSync(chromium.executablePath());
+async function canLaunchBundledChromium(): Promise<boolean> {
+  if (!hasBundledChromium)
+    return false;
+
+  let browser: Browser | undefined;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      chromiumSandbox: false,
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await browser?.close().catch(() => undefined);
+  }
+}
+
+const canRunLocatorIntegration = await canLaunchBundledChromium();
 
 describe('Tool Utils', () => {
   let mockTab: Tab;
@@ -104,6 +127,34 @@ describe('Tool Utils', () => {
   });
 
   describe('generateLocator', () => {
+    it('should resolve via the public normalize() API (playwright-core >= 1.61)', async () => {
+      const normalized = { toString: () => `getByRole('button', { name: 'Submit' })` };
+      const mockLocator = {
+        normalize: vi.fn().mockResolvedValue(normalized),
+        // Should be ignored when normalize() is available.
+        _resolveSelector: vi.fn().mockResolvedValue({ resolvedSelector: 'ignored' }),
+      } as any;
+
+      const result = await generateLocator(mockLocator);
+
+      expect(mockLocator.normalize).toHaveBeenCalled();
+      expect(mockLocator._resolveSelector).not.toHaveBeenCalled();
+      expect(result).toBe(`getByRole('button', { name: 'Submit' })`);
+    });
+
+    it('should fall back to _resolveSelector when normalize() throws', async () => {
+      const mockLocator = {
+        normalize: vi.fn().mockRejectedValue(new Error('ref not found')),
+        _resolveSelector: vi.fn().mockResolvedValue({ resolvedSelector: 'button[name="submit"]' }),
+      } as any;
+
+      const result = await generateLocator(mockLocator);
+
+      expect(mockLocator.normalize).toHaveBeenCalled();
+      expect(mockLocator._resolveSelector).toHaveBeenCalled();
+      expect(result).toBeDefined();
+    });
+
     it('should generate locator string', async () => {
       const mockLocator = {
         _resolveSelector: vi.fn().mockResolvedValue({
@@ -142,6 +193,33 @@ describe('Tool Utils', () => {
       } as any;
 
       await expect(generateLocator(mockLocator)).resolves.toBe('locator(\'<unresolved>\')');
+    });
+
+    it.skipIf(!canRunLocatorIntegration)('should resolve aria-ref locators to runnable locator code', async () => {
+      let browser: Browser | undefined;
+      try {
+        browser = await chromium.launch({
+          headless: true,
+          chromiumSandbox: false,
+        });
+        const page = await browser.newPage();
+        await page.setContent('<button type="button">Submit</button>');
+
+        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
+        const ref = snapshot.match(/\[ref=([^\]]+)\]/)?.[1];
+        if (!ref)
+          throw new Error(`Could not find aria ref in snapshot:\n${snapshot}`);
+
+        const locator = page.locator(`aria-ref=${ref}`).describe('Submit button');
+        const locatorSource = await generateLocator(locator);
+
+        expect(locatorSource).not.toBe('Submit button');
+        expect(locatorSource).toContain('getByRole');
+        expect(locatorSource).toContain('button');
+        expect(locatorSource).toContain('Submit');
+      } finally {
+        await browser?.close().catch(() => undefined);
+      }
     });
   });
 
