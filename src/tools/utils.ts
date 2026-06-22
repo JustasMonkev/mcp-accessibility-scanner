@@ -74,6 +74,20 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
 }
 
 export async function generateLocator(locator: playwright.Locator): Promise<string> {
+  // playwright-core 1.61 replaced the private `_resolveSelector` helper with the
+  // public `Locator.normalize()` method (microsoft/playwright). `normalize()`
+  // returns a locator whose `toString()` is the resolved JavaScript locator
+  // expression, which is exactly what the "Ran Playwright code" snippet needs.
+  if (typeof (locator as any).normalize === 'function') {
+    try {
+      const normalized = await locator.normalize();
+      return normalized.toString();
+    } catch {
+      // Fall through to the legacy/string strategies below.
+    }
+  }
+
+  // Older cores (< 1.61) still expose the private `_resolveSelector` helper.
   if (typeof (locator as any)._resolveSelector === 'function') {
     const { resolvedSelector } = await (locator as any)._resolveSelector();
     return asLocator('javascript', resolvedSelector);

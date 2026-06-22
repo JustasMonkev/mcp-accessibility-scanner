@@ -104,6 +104,34 @@ describe('Tool Utils', () => {
   });
 
   describe('generateLocator', () => {
+    it('should resolve via the public normalize() API (playwright-core >= 1.61)', async () => {
+      const normalized = { toString: () => `getByRole('button', { name: 'Submit' })` };
+      const mockLocator = {
+        normalize: vi.fn().mockResolvedValue(normalized),
+        // Should be ignored when normalize() is available.
+        _resolveSelector: vi.fn().mockResolvedValue({ resolvedSelector: 'ignored' }),
+      } as any;
+
+      const result = await generateLocator(mockLocator);
+
+      expect(mockLocator.normalize).toHaveBeenCalled();
+      expect(mockLocator._resolveSelector).not.toHaveBeenCalled();
+      expect(result).toBe(`getByRole('button', { name: 'Submit' })`);
+    });
+
+    it('should fall back to _resolveSelector when normalize() throws', async () => {
+      const mockLocator = {
+        normalize: vi.fn().mockRejectedValue(new Error('ref not found')),
+        _resolveSelector: vi.fn().mockResolvedValue({ resolvedSelector: 'button[name="submit"]' }),
+      } as any;
+
+      const result = await generateLocator(mockLocator);
+
+      expect(mockLocator.normalize).toHaveBeenCalled();
+      expect(mockLocator._resolveSelector).toHaveBeenCalled();
+      expect(result).toBeDefined();
+    });
+
     it('should generate locator string', async () => {
       const mockLocator = {
         _resolveSelector: vi.fn().mockResolvedValue({
