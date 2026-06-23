@@ -206,6 +206,10 @@ Create a `config.json` file with the following options:
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, and `--cdp-launch-startup-timeout`.
 
+#### HTTP Heartbeat
+
+When the server runs with `--port`, it sends MCP heartbeat pings for Streamable HTTP sessions. Set `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` to override the default `5000` ms timeout. Set it to `0` or any negative value to disable heartbeat pings for clients or proxies that do not answer server-initiated pings.
+
 ## Available Tools
 
 The MCP server provides comprehensive browser automation and accessibility scanning tools:
