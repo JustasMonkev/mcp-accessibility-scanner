@@ -17,7 +17,7 @@
 import debug from 'debug';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, EmptyResultSchema, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
@@ -131,10 +131,21 @@ export function createServer(name: string, version: string, backend: ServerBacke
 }
 
 const startHeartbeat = (server: Server) => {
+  const timeout = pingTimeout();
+  if (timeout <= 0)
+    return;
+
   const beat = () => {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const ping = server.request({ method: 'ping' }, EmptyResultSchema, { timeout }).finally(() => {
+      if (timeoutId)
+        clearTimeout(timeoutId);
+    });
     Promise.race([
-      server.ping(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('ping timeout')), 5000)),
+      ping,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('ping timeout')), timeout);
+      }),
     ]).then(() => {
       setTimeout(beat, 3000);
     }).catch(() => {
@@ -143,6 +154,21 @@ const startHeartbeat = (server: Server) => {
   };
 
   beat();
+};
+
+const defaultPingTimeout = 5000;
+
+const pingTimeout = (): number => {
+  const value = process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS;
+  if (value === undefined)
+    return defaultPingTimeout;
+  const trimmed = value.trim();
+  if (!trimmed)
+    return defaultPingTimeout;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed))
+    return defaultPingTimeout;
+  return parsed;
 };
 
 function addServerListener(server: Server, event: 'close' | 'initialized', listener: () => void) {
