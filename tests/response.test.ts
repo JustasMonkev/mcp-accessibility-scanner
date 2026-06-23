@@ -173,6 +173,14 @@ describe('Response', () => {
       await response.finish();
       expect(mockTab.updateTitle).toHaveBeenCalled();
     });
+
+    it('does not fail the response when a tab title update fails', async () => {
+      mockTab.updateTitle = vi.fn().mockRejectedValue(new Error('title unavailable'));
+      const response = new Response(mockContext, 'test_tool', {});
+
+      await expect(response.finish()).resolves.toBeUndefined();
+      expect(mockTab.updateTitle).toHaveBeenCalled();
+    });
   });
 
   describe('reportProgress', () => {

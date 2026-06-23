@@ -135,7 +135,14 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   async updateTitle() {
     await this._raceAgainstModalStates(async () => {
-      this._lastTitle = await callOnPageNoTrace(this.page, page => page.title());
+      try {
+        this._lastTitle = await this._withPageStateTimeout(
+            callOnPageNoTrace(this.page, page => page.title()),
+            'reading page title',
+        );
+      } catch (error) {
+        logUnhandledError(error);
+      }
     });
   }
 
@@ -191,10 +198,26 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   async captureSnapshot(): Promise<TabSnapshot> {
     let tabSnapshot: TabSnapshot | undefined;
     const modalStates = await this._raceAgainstModalStates(async () => {
-      const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
+      const [snapshot, title] = await Promise.all([
+        this._withPageStateTimeout(
+            this.page.ariaSnapshot({ mode: 'ai' }),
+            'capturing page accessibility snapshot',
+        ).catch(error => {
+          logUnhandledError(error);
+          return `# Page snapshot unavailable: ${formatPageStateError(error)}`;
+        }),
+        this._withPageStateTimeout(
+            this.page.title(),
+            'reading page title',
+        ).catch(error => {
+          logUnhandledError(error);
+          return this._lastTitle;
+        }),
+      ]);
+      this._lastTitle = title;
       tabSnapshot = {
         url: this.page.url(),
-        title: await this.page.title(),
+        title,
         ariaSnapshot: snapshot,
         modalStates: [],
         consoleMessages: [],
@@ -218,6 +241,28 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   private _javaScriptBlocked(): boolean {
     return this._modalStates.some(state => state.type === 'dialog');
+  }
+
+  private _pageStateTimeoutMs(): number {
+    const timeout = this.context.config.timeouts.defaultTimeout;
+    return typeof timeout === 'number' && timeout > 0 ? timeout : 5000;
+  }
+
+  private async _withPageStateTimeout<T>(promise: Promise<T>, description: string): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            reject(new Error(`Timed out after ${this._pageStateTimeoutMs()}ms while ${description}.`));
+          }, this._pageStateTimeoutMs());
+        }),
+      ]);
+    } finally {
+      if (timeoutId)
+        clearTimeout(timeoutId);
+    }
   }
 
   private async _raceAgainstModalStates(action: () => Promise<void>): Promise<ModalState[]> {
@@ -291,6 +336,12 @@ function pageErrorToConsoleMessage(errorOrValue: Error | any): ConsoleMessage {
     text: String(errorOrValue),
     toString: () => String(errorOrValue),
   };
+}
+
+function formatPageStateError(error: unknown): string {
+  if (error instanceof Error)
+    return error.message;
+  return String(error);
 }
 
 export function renderModalStates(context: Context, modalStates: ModalState[]): string[] {

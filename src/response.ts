@@ -154,8 +154,7 @@ export class Response {
     // Everything below should race against modal states.
     if (this._includeSnapshot && this._context.currentTab())
       this._tabSnapshot = await this._context.currentTabOrDie().captureSnapshot();
-    for (const tab of this._context.tabs())
-      await tab.updateTitle();
+    await Promise.allSettled(this._context.tabs().map(tab => tab.updateTitle()));
   }
 
   tabSnapshot(): TabSnapshot | undefined {
