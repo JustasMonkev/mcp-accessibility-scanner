@@ -157,6 +157,28 @@ describe('Tab', () => {
       await expect(updatePromise).resolves.toBeUndefined();
       expect(tab.lastTitle()).toBe('about:blank');
     });
+
+    it('uses the runtime default timeout when it changes after tab creation', async () => {
+      vi.useFakeTimers();
+      mockContext.config.timeouts.defaultTimeout = 25;
+      mockPage.title = vi.fn().mockReturnValue(new Promise(() => {}));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      let finished = false;
+
+      tab.setDefaultTimeout(75);
+      const updatePromise = tab.updateTitle().then(() => {
+        finished = true;
+      });
+      await vi.advanceTimersByTimeAsync(25);
+
+      expect(finished).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await updatePromise;
+
+      expect(finished).toBe(true);
+      expect(mockPage.setDefaultTimeout).toHaveBeenLastCalledWith(75);
+    });
   });
 
   describe('captureSnapshot', () => {

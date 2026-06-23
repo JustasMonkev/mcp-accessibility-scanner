@@ -95,8 +95,7 @@ const defaultTimeout = defineTool({
   handle: async (context, params, response) => {
     const tabs = context.tabs();
     for (const tab of tabs)
-      tab.page.setDefaultTimeout(params.timeout);
-
+      tab.setDefaultTimeout(params.timeout);
 
     response.addResult(`Default timeout set to ${params.timeout}ms for all tabs.`);
     response.setIncludeTabs();

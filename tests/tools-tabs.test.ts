@@ -33,6 +33,7 @@ describe('Tabs Tools', () => {
         setDefaultNavigationTimeout: vi.fn(),
         setDefaultTimeout: vi.fn(),
       },
+      setDefaultTimeout: vi.fn((timeout: number) => mockTab1.page.setDefaultTimeout(timeout)),
       lastTitle: () => 'Example Page',
       isCurrentTab: () => true,
     } as any;
@@ -43,6 +44,7 @@ describe('Tabs Tools', () => {
         setDefaultNavigationTimeout: vi.fn(),
         setDefaultTimeout: vi.fn(),
       },
+      setDefaultTimeout: vi.fn((timeout: number) => mockTab2.page.setDefaultTimeout(timeout)),
       lastTitle: () => 'Other Page',
       isCurrentTab: () => false,
     } as any;
@@ -146,6 +148,8 @@ describe('Tabs Tools', () => {
     it('should set default timeout for all tabs', async () => {
       await defaultTimeoutTool.handle(mockContext, { timeout: 30000 }, response);
 
+      expect(mockTab1.setDefaultTimeout).toHaveBeenCalledWith(30000);
+      expect(mockTab2.setDefaultTimeout).toHaveBeenCalledWith(30000);
       expect(mockTab1.page.setDefaultTimeout).toHaveBeenCalledWith(30000);
       expect(mockTab2.page.setDefaultTimeout).toHaveBeenCalledWith(30000);
       expect(response.result()).toContain('30000ms');

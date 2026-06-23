@@ -50,12 +50,14 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _onPageClose: (tab: Tab) => void;
   private _modalStates: ModalState[] = [];
   private _downloads: { download: playwright.Download, finished: boolean, outputFile: string }[] = [];
+  private _defaultTimeout: number;
 
   constructor(context: Context, page: playwright.Page, onPageClose: (tab: Tab) => void) {
     super();
     this.context = context;
     this.page = page;
     this._onPageClose = onPageClose;
+    this._defaultTimeout = context.config.timeouts.defaultTimeout ?? 6000;
     page.on('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
     page.on('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
     page.on('request', request => this._requests.set(request, null));
@@ -73,7 +75,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       void this._downloadStarted(download);
     });
     page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? 30000);
-    page.setDefaultTimeout(context.config.timeouts.defaultTimeout ?? 6000);
+    page.setDefaultTimeout(this._defaultTimeout);
     _pageTabMap.set(page, this);
   }
 
@@ -148,6 +150,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   lastTitle(): string {
     return this._lastTitle;
+  }
+
+  setDefaultTimeout(timeout: number) {
+    this._defaultTimeout = timeout;
+    this.page.setDefaultTimeout(timeout);
   }
 
   isCurrentTab(): boolean {
@@ -244,8 +251,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   private _pageStateTimeoutMs(): number {
-    const timeout = this.context.config.timeouts.defaultTimeout;
-    return typeof timeout === 'number' && timeout > 0 ? timeout : 5000;
+    return this._defaultTimeout > 0 ? this._defaultTimeout : 5000;
   }
 
   private async _withPageStateTimeout<T>(promise: Promise<T>, description: string): Promise<T> {
