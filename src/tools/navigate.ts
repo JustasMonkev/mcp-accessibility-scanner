@@ -50,7 +50,10 @@ const goBack = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    await tab.page.goBack();
+    // History traversal / bfcache restore can update the URL without Playwright
+    // observing the `load` lifecycle event, so wait only for the navigation to
+    // commit to avoid spurious timeouts. See microsoft/playwright#41153.
+    await tab.page.goBack({ waitUntil: 'commit' });
     response.setIncludeSnapshot();
     response.addCode(`await page.goBack();`);
   },

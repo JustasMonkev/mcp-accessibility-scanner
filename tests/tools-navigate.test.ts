@@ -102,6 +102,12 @@ describe('Navigate Tools', () => {
       expect(mockPage.goBack).toHaveBeenCalled();
     });
 
+    it('should wait for commit to avoid bfcache timeouts', async () => {
+      await backTool.handle(mockContext, {}, response);
+
+      expect(mockPage.goBack).toHaveBeenCalledWith({ waitUntil: 'commit' });
+    });
+
     it('should include snapshot after navigation', async () => {
       const setIncludeSnapshotSpy = vi.spyOn(response, 'setIncludeSnapshot');
 
