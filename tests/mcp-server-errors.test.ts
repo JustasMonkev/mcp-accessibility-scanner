@@ -33,7 +33,7 @@ async function connectHeartbeatClient(backend: unknown, pingHandler: () => objec
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   client.setRequestHandler(PingRequestSchema, pingHandler);
   await client.connect(new InProcessTransport(server));
-  return client;
+  return { client, server };
 }
 
 async function waitForAssertion(assertion: () => void) {
@@ -135,7 +135,7 @@ describe('mcp server error mapping', () => {
         serverClosed: vi.fn(),
       };
 
-      const client = await connectHeartbeatClient(backend, () => new Promise<object>(() => {}));
+      const { client } = await connectHeartbeatClient(backend, () => new Promise<object>(() => {}));
       try {
         await client.callTool({ name: 'some_tool', arguments: {} });
         await waitForAssertion(() => expect(backend.serverClosed).toHaveBeenCalledTimes(1));
@@ -154,7 +154,7 @@ describe('mcp server error mapping', () => {
         serverClosed: vi.fn(),
       };
 
-      const client = await connectHeartbeatClient(backend, () => new Promise<object>(() => {}));
+      const { client } = await connectHeartbeatClient(backend, () => new Promise<object>(() => {}));
       try {
         await client.callTool({ name: 'some_tool', arguments: {} });
         await new Promise(resolve => setTimeout(resolve, 100));
@@ -162,6 +162,54 @@ describe('mcp server error mapping', () => {
 
         expect(backend.callTool).toHaveBeenCalledTimes(2);
         expect(backend.serverClosed).not.toHaveBeenCalled();
+      } finally {
+        await client.close();
+      }
+    });
+  });
+
+  it('passes configured heartbeat timeout into the ping request', async () => {
+    await withPingTimeout('120000', async () => {
+      const backend = {
+        initialize: vi.fn(async () => undefined),
+        listTools: vi.fn(async () => []),
+        callTool: vi.fn(async () => ({ content: [] })),
+      };
+
+      const { client, server } = await connectHeartbeatClient(backend, () => ({}));
+      const requestSpy = vi.spyOn(server, 'request');
+      try {
+        await client.callTool({ name: 'some_tool', arguments: {} });
+
+        expect(requestSpy).toHaveBeenCalledWith(
+            { method: 'ping' },
+            expect.any(Object),
+            expect.objectContaining({ timeout: 120000 }),
+        );
+      } finally {
+        await client.close();
+      }
+    });
+  });
+
+  it('uses the default heartbeat timeout when env value is blank', async () => {
+    await withPingTimeout('  ', async () => {
+      const backend = {
+        initialize: vi.fn(async () => undefined),
+        listTools: vi.fn(async () => []),
+        callTool: vi.fn(async () => ({ content: [] })),
+      };
+
+      const { client, server } = await connectHeartbeatClient(backend, () => ({}));
+      const requestSpy = vi.spyOn(server, 'request');
+      try {
+        await client.callTool({ name: 'some_tool', arguments: {} });
+
+        expect(requestSpy).toHaveBeenCalledWith(
+            { method: 'ping' },
+            expect.any(Object),
+            expect.objectContaining({ timeout: 5000 }),
+        );
       } finally {
         await client.close();
       }
