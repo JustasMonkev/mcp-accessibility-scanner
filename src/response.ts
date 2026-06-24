@@ -152,9 +152,11 @@ export class Response {
   async finish() {
     // All the async snapshotting post-action is happening here.
     // Everything below should race against modal states.
-    if (this._includeSnapshot && this._context.currentTab())
-      this._tabSnapshot = await this._context.currentTabOrDie().captureSnapshot();
-    await Promise.allSettled(this._context.tabs().map(tab => tab.updateTitle()));
+    const currentTab = this._context.currentTab();
+    if (this._includeSnapshot && currentTab)
+      this._tabSnapshot = await currentTab.captureSnapshot();
+    else if (currentTab)
+      await Promise.allSettled([currentTab.updateTitle()]);
   }
 
   tabSnapshot(): TabSnapshot | undefined {

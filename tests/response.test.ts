@@ -168,10 +168,20 @@ describe('Response', () => {
       expect(mockTab.captureSnapshot).toHaveBeenCalled();
     });
 
-    it('should update all tab titles', async () => {
+    it('should update the current tab title when no snapshot is requested', async () => {
       const response = new Response(mockContext, 'test_tool', {});
       await response.finish();
       expect(mockTab.updateTitle).toHaveBeenCalled();
+    });
+
+    it('should not refresh the current tab title after capturing its snapshot', async () => {
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeSnapshot();
+
+      await response.finish();
+
+      expect(mockTab.captureSnapshot).toHaveBeenCalled();
+      expect(mockTab.updateTitle).not.toHaveBeenCalled();
     });
 
     it('does not fail the response when a tab title update fails', async () => {
