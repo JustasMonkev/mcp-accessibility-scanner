@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Tab, renderModalStates } from '../src/tab.js';
 import type { Context } from '../src/context.js';
 import { EventEmitter } from 'events';
@@ -49,6 +49,10 @@ describe('Tab', () => {
     } as any;
 
     onPageClose = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('constructor', () => {
@@ -140,6 +144,43 @@ describe('Tab', () => {
     });
   });
 
+  describe('updateTitle', () => {
+    it('stops waiting when the page title never resolves', async () => {
+      vi.useFakeTimers();
+      mockContext.config.timeouts.defaultTimeout = 25;
+      mockPage.title = vi.fn().mockReturnValue(new Promise(() => {}));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const updatePromise = tab.updateTitle();
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(updatePromise).resolves.toBeUndefined();
+      expect(tab.lastTitle()).toBe('about:blank');
+    });
+
+    it('uses the runtime default timeout when it changes after tab creation', async () => {
+      vi.useFakeTimers();
+      mockContext.config.timeouts.defaultTimeout = 25;
+      mockPage.title = vi.fn().mockReturnValue(new Promise(() => {}));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      let finished = false;
+
+      tab.setDefaultTimeout(75);
+      const updatePromise = tab.updateTitle().then(() => {
+        finished = true;
+      });
+      await vi.advanceTimersByTimeAsync(25);
+
+      expect(finished).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await updatePromise;
+
+      expect(finished).toBe(true);
+      expect(mockPage.setDefaultTimeout).toHaveBeenLastCalledWith(75);
+    });
+  });
+
   describe('captureSnapshot', () => {
     it('should capture page snapshot', async () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
@@ -173,6 +214,37 @@ describe('Tab', () => {
       await tab.captureSnapshot();
       const snapshot2 = await tab.captureSnapshot();
       expect(snapshot2.consoleMessages).toHaveLength(0);
+    });
+
+    it('returns a best-effort snapshot when the page title never resolves', async () => {
+      vi.useFakeTimers();
+      mockContext.config.timeouts.defaultTimeout = 25;
+      mockPage.title = vi.fn().mockReturnValue(new Promise(() => {}));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const snapshotPromise = tab.captureSnapshot();
+      await vi.advanceTimersByTimeAsync(25);
+      const snapshot = await snapshotPromise;
+
+      expect(snapshot.url).toBe('https://example.com');
+      expect(snapshot.title).toBe('about:blank');
+      expect(snapshot.ariaSnapshot).toBe('button "Submit" [ref=1]');
+    });
+
+    it('returns a best-effort snapshot when the accessibility snapshot never resolves', async () => {
+      vi.useFakeTimers();
+      mockContext.config.timeouts.defaultTimeout = 25;
+      mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(() => {}));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const snapshotPromise = tab.captureSnapshot();
+      await vi.advanceTimersByTimeAsync(25);
+      const snapshot = await snapshotPromise;
+
+      expect(snapshot.url).toBe('https://example.com');
+      expect(snapshot.title).toBe('Example Page');
+      expect(snapshot.ariaSnapshot).toContain('Page snapshot unavailable');
+      expect(snapshot.ariaSnapshot).toContain('capturing page accessibility snapshot');
     });
   });
 

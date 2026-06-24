@@ -50,12 +50,14 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _onPageClose: (tab: Tab) => void;
   private _modalStates: ModalState[] = [];
   private _downloads: { download: playwright.Download, finished: boolean, outputFile: string }[] = [];
+  private _defaultTimeout: number;
 
   constructor(context: Context, page: playwright.Page, onPageClose: (tab: Tab) => void) {
     super();
     this.context = context;
     this.page = page;
     this._onPageClose = onPageClose;
+    this._defaultTimeout = context.config.timeouts.defaultTimeout ?? 6000;
     page.on('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
     page.on('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
     page.on('request', request => this._requests.set(request, null));
@@ -73,7 +75,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       void this._downloadStarted(download);
     });
     page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? 30000);
-    page.setDefaultTimeout(context.config.timeouts.defaultTimeout ?? 6000);
+    page.setDefaultTimeout(this._defaultTimeout);
     _pageTabMap.set(page, this);
   }
 
@@ -135,12 +137,24 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   async updateTitle() {
     await this._raceAgainstModalStates(async () => {
-      this._lastTitle = await callOnPageNoTrace(this.page, page => page.title());
+      try {
+        this._lastTitle = await this._withPageStateTimeout(
+            callOnPageNoTrace(this.page, page => page.title()),
+            'reading page title',
+        );
+      } catch (error) {
+        logUnhandledError(error);
+      }
     });
   }
 
   lastTitle(): string {
     return this._lastTitle;
+  }
+
+  setDefaultTimeout(timeout: number) {
+    this._defaultTimeout = timeout;
+    this.page.setDefaultTimeout(timeout);
   }
 
   isCurrentTab(): boolean {
@@ -191,10 +205,26 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   async captureSnapshot(): Promise<TabSnapshot> {
     let tabSnapshot: TabSnapshot | undefined;
     const modalStates = await this._raceAgainstModalStates(async () => {
-      const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
+      const [snapshot, title] = await Promise.all([
+        this._withPageStateTimeout(
+            this.page.ariaSnapshot({ mode: 'ai' }),
+            'capturing page accessibility snapshot',
+        ).catch(error => {
+          logUnhandledError(error);
+          return `# Page snapshot unavailable: ${formatPageStateError(error)}`;
+        }),
+        this._withPageStateTimeout(
+            this.page.title(),
+            'reading page title',
+        ).catch(error => {
+          logUnhandledError(error);
+          return this._lastTitle;
+        }),
+      ]);
+      this._lastTitle = title;
       tabSnapshot = {
         url: this.page.url(),
-        title: await this.page.title(),
+        title,
         ariaSnapshot: snapshot,
         modalStates: [],
         consoleMessages: [],
@@ -218,6 +248,27 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   private _javaScriptBlocked(): boolean {
     return this._modalStates.some(state => state.type === 'dialog');
+  }
+
+  private _pageStateTimeoutMs(): number {
+    return this._defaultTimeout > 0 ? this._defaultTimeout : 5000;
+  }
+
+  private async _withPageStateTimeout<T>(promise: Promise<T>, description: string): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            reject(new Error(`Timed out after ${this._pageStateTimeoutMs()}ms while ${description}.`));
+          }, this._pageStateTimeoutMs());
+        }),
+      ]);
+    } finally {
+      if (timeoutId)
+        clearTimeout(timeoutId);
+    }
   }
 
   private async _raceAgainstModalStates(action: () => Promise<void>): Promise<ModalState[]> {
@@ -291,6 +342,12 @@ function pageErrorToConsoleMessage(errorOrValue: Error | any): ConsoleMessage {
     text: String(errorOrValue),
     toString: () => String(errorOrValue),
   };
+}
+
+function formatPageStateError(error: unknown): string {
+  if (error instanceof Error)
+    return error.message;
+  return String(error);
 }
 
 export function renderModalStates(context: Context, modalStates: ModalState[]): string[] {
