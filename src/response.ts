@@ -155,8 +155,11 @@ export class Response {
     const currentTab = this._context.currentTab();
     if (this._includeSnapshot && currentTab)
       this._tabSnapshot = await currentTab.captureSnapshot();
-    else if (currentTab)
-      await Promise.allSettled([currentTab.updateTitle()]);
+
+    const tabsToUpdate = this._includeTabs
+      ? this._context.tabs().filter(tab => !this._includeSnapshot || tab !== currentTab)
+      : currentTab && !this._includeSnapshot ? [currentTab] : [];
+    await Promise.allSettled(tabsToUpdate.map(tab => tab.updateTitle()));
   }
 
   tabSnapshot(): TabSnapshot | undefined {

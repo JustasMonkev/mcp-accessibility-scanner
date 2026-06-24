@@ -174,6 +174,23 @@ describe('Response', () => {
       expect(mockTab.updateTitle).toHaveBeenCalled();
     });
 
+    it('should update all tab titles when rendering the tab list without a snapshot', async () => {
+      const otherTab = {
+        page: { url: () => 'https://other.example.com' },
+        lastTitle: () => 'Other Page',
+        isCurrentTab: () => false,
+        updateTitle: vi.fn().mockResolvedValue(undefined),
+      } as any;
+      mockContext.tabs = () => [mockTab, otherTab];
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeTabs();
+
+      await response.finish();
+
+      expect(mockTab.updateTitle).toHaveBeenCalled();
+      expect(otherTab.updateTitle).toHaveBeenCalled();
+    });
+
     it('should not refresh the current tab title after capturing its snapshot', async () => {
       const response = new Response(mockContext, 'test_tool', {});
       response.setIncludeSnapshot();
@@ -182,6 +199,25 @@ describe('Response', () => {
 
       expect(mockTab.captureSnapshot).toHaveBeenCalled();
       expect(mockTab.updateTitle).not.toHaveBeenCalled();
+    });
+
+    it('should refresh non-current tab titles when rendering tabs after a snapshot', async () => {
+      const otherTab = {
+        page: { url: () => 'https://other.example.com' },
+        lastTitle: () => 'Other Page',
+        isCurrentTab: () => false,
+        updateTitle: vi.fn().mockResolvedValue(undefined),
+      } as any;
+      mockContext.tabs = () => [mockTab, otherTab];
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeSnapshot();
+      response.setIncludeTabs();
+
+      await response.finish();
+
+      expect(mockTab.captureSnapshot).toHaveBeenCalled();
+      expect(mockTab.updateTitle).not.toHaveBeenCalled();
+      expect(otherTab.updateTitle).toHaveBeenCalled();
     });
 
     it('does not fail the response when a tab title update fails', async () => {
