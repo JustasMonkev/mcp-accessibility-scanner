@@ -16,6 +16,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { createGuid, createHash } from '../src/utils/guid.js';
+import { truncateDataUrl, truncateDataUrls } from '../src/utils/dataUrl.js';
 
 describe('Utils', () => {
   describe('createGuid', () => {
@@ -71,6 +72,31 @@ describe('Utils', () => {
     it('should generate 7 character hashes', () => {
       const hash = createHash('test data');
       expect(hash.length).toBe(7);
+    });
+  });
+
+  describe('data URL truncation', () => {
+    it('should truncate direct data URL payloads', () => {
+      expect(truncateDataUrl('data:text/html;base64,PHAgLz4=')).toBe('data:text/html;base64,...');
+    });
+
+    it('should truncate raw SVG data URL payloads without leaking markup', () => {
+      const payload = '<svg viewBox="0 0 10 10"><text>&Hello</text></svg>';
+      const text = `- /url: data:image/svg+xml,${payload}\n- button "Next"`;
+
+      const result = truncateDataUrls(text);
+
+      expect(result).toContain('data:image/svg+xml,...\n- button "Next"');
+      expect(result).not.toContain(payload);
+      expect(result).not.toContain('<svg');
+      expect(result).not.toContain('<text>');
+    });
+
+    it('should truncate data URLs embedded in query strings', () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      const text = `https://api.example/upload?src=data:text/html;base64,${payload}&id=123`;
+
+      expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data:text/html;base64,...&id=123');
     });
   });
 });

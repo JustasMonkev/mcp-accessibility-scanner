@@ -38,11 +38,16 @@ export function truncateDataUrls(text: string): string {
 
     result += text.slice(offset, start);
 
-    let end = start;
-    while (end < text.length && !isDataUrlTerminator(text[end]))
-      end++;
+    const comma = text.indexOf(',', start);
+    if (comma === -1) {
+      result += text.slice(start, start + dataUrlPrefix.length);
+      offset = start + dataUrlPrefix.length;
+      continue;
+    }
 
-    result += truncateDataUrl(text.slice(start, end));
+    const isBase64 = text.slice(start, comma).toLowerCase().includes(';base64');
+    const end = findDataUrlEnd(text, comma + 1, isBase64);
+    result += `${text.slice(start, comma + 1)}...`;
     offset = end;
   }
 
@@ -59,6 +64,25 @@ function findDataUrlStart(text: string, offset: number): number {
   return -1;
 }
 
-function isDataUrlTerminator(char: string): boolean {
+function findDataUrlEnd(text: string, offset: number, isBase64: boolean): number {
+  let end = offset;
+  while (end < text.length) {
+    const char = text[end];
+    if (isLineBreak(char))
+      break;
+    if (isBase64 && char === '&')
+      break;
+    if (isBase64 && isBase64PayloadTerminator(char))
+      break;
+    end++;
+  }
+  return end;
+}
+
+function isLineBreak(char: string): boolean {
+  return char === '\n' || char === '\r';
+}
+
+function isBase64PayloadTerminator(char: string): boolean {
   return /\s/.test(char) || ['"', '\'', '<', '>', ')', ']', '}', '`'].includes(char);
 }

@@ -19,7 +19,7 @@ import { pathToFileURL } from 'node:url';
 import debug from 'debug';
 
 import { renderModalStates } from './tab.js';
-import { truncateDataUrl, truncateDataUrls } from './utils/dataUrl.js';
+import { truncateDataUrls } from './utils/dataUrl.js';
 
 import type { Tab, TabSnapshot } from './tab.js';
 import type { CallToolResult, ResourceLink } from '@modelcontextprotocol/sdk/types.js';
@@ -243,7 +243,7 @@ function renderTabSnapshot(tabSnapshot: TabSnapshot): string {
   }
 
   lines.push(`### Page state`);
-  lines.push(`- Page URL: ${truncateDataUrl(tabSnapshot.url)}`);
+  lines.push(`- Page URL: ${truncateDataUrls(tabSnapshot.url)}`);
   lines.push(`- Page Title: ${tabSnapshot.title}`);
   lines.push(`- Page Snapshot:`);
   lines.push('```yaml');
@@ -269,7 +269,7 @@ function renderTabsMarkdown(tabs: Tab[], force: boolean = false): string[] {
   for (let i = 0; i < tabs.length; i++) {
     const tab = tabs[i];
     const current = tab.isCurrentTab() ? ' (current)' : '';
-    lines.push(`- ${i}:${current} [${tab.lastTitle()}] (${truncateDataUrl(tab.page.url())})`);
+    lines.push(`- ${i}:${current} [${tab.lastTitle()}] (${truncateDataUrls(tab.page.url())})`);
   }
   lines.push('');
   return lines;

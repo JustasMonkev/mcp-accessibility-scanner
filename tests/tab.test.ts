@@ -248,14 +248,15 @@ describe('Tab', () => {
     });
 
     it('truncates data URL payloads in captured accessibility snapshots', async () => {
-      const payload = Buffer.from('<p>hello</p>').toString('base64');
-      mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- link "Example" [ref=e1]:\n  - /url: data:text/html;base64,${payload}`);
+      const payload = '<svg viewBox="0 0 10 10"><text>Hello</text></svg>';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- link "Example" [ref=e1]:\n  - /url: data:image/svg+xml,${payload}`);
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
       const snapshot = await tab.captureSnapshot();
 
-      expect(snapshot.ariaSnapshot).toContain('data:text/html;base64,...');
+      expect(snapshot.ariaSnapshot).toContain('data:image/svg+xml,...');
       expect(snapshot.ariaSnapshot).not.toContain(payload);
+      expect(snapshot.ariaSnapshot).not.toContain('<svg');
     });
   });
 

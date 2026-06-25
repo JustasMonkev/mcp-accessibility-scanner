@@ -392,9 +392,10 @@ describe('Response', () => {
     it('should truncate data URL payloads in rendered snapshot output', async () => {
       const payload = Buffer.from('<p>hello</p>').toString('base64');
       const dataUrl = `data:text/html;base64,${payload}`;
-      mockTab.page = { url: () => dataUrl } as any;
+      const embeddedUrl = `https://example.com/upload?src=${dataUrl}&id=123`;
+      mockTab.page = { url: () => embeddedUrl } as any;
       mockTab.captureSnapshot = vi.fn().mockResolvedValue({
-        url: dataUrl,
+        url: embeddedUrl,
         title: 'Data URL Page',
         ariaSnapshot: `- link "Example" [ref=e1]:\n  - /url: ${dataUrl}`,
         modalStates: [],
@@ -411,6 +412,7 @@ describe('Response', () => {
       const textContent = expectTextContent(serialized.content[0]);
 
       expect(textContent.text).toContain('data:text/html;base64,...');
+      expect(textContent.text).toContain('https://example.com/upload?src=data:text/html;base64,...&id=123');
       expect(textContent.text).not.toContain(payload);
     });
 
