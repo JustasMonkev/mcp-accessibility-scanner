@@ -357,7 +357,7 @@ export function renderModalStates(context: Context, modalStates: ModalState[]): 
     result.push('- There is no modal state present');
   for (const state of modalStates) {
     const tool = context.tools.filter(tool => 'clearsModalState' in tool).find(tool => tool.clearsModalState === state.type);
-    result.push(`- [${state.description}]: can be handled by the "${tool?.schema.name}" tool`);
+    result.push(`- [${truncateDataUrls(state.description)}]: can be handled by the "${tool?.schema.name}" tool`);
   }
   return result;
 }

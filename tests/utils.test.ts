@@ -111,11 +111,37 @@ describe('Utils', () => {
       expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data:image/svg+xml,...&id=123');
     });
 
+    it('should keep raw data URL payload query-like ampersands redacted', () => {
+      const text = 'https://api.example/upload?src=data:text/html,<a href="/?a=1&b=2">link</a>&id=123';
+
+      const result = truncateDataUrls(text);
+
+      expect(result).toBe('https://api.example/upload?src=data:text/html,...&id=123');
+      expect(result).not.toContain('&b=2');
+      expect(result).not.toContain('link</a>');
+    });
+
     it('should truncate percent-encoded data URLs embedded in query strings', () => {
       const payload = encodeURIComponent(Buffer.from('<p>hello</p>').toString('base64'));
       const text = `https://api.example/upload?src=data%3Atext%2Fhtml%3Bbase64%2C${payload}&id=123`;
 
       expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data%3Atext%2Fhtml%3Bbase64%2C...&id=123');
+    });
+
+    it('should preserve snapshot refs after raw data URLs in accessible names', () => {
+      const text = '- button "data:image/svg+xml,<svg></svg>" [ref=e1]';
+
+      expect(truncateDataUrls(text)).toBe('- button "data:image/svg+xml,..." [ref=e1]');
+    });
+
+    it('should redact query-like ampersands in quoted raw data URL payloads', () => {
+      const text = '- link "data:text/html,<a href="/?a=1&b=2">link</a>" [ref=e1]';
+
+      const result = truncateDataUrls(text);
+
+      expect(result).toBe('- link "data:text/html,..." [ref=e1]');
+      expect(result).not.toContain('&b=2');
+      expect(result).not.toContain('link</a>');
     });
   });
 });

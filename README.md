@@ -354,6 +354,7 @@ Close a tab.
 
 #### `browser_console_messages`
 Returns all console messages from the page.
+Large `data:` URL payloads in console messages are truncated to their media type prefix.
 
 #### `browser_network_requests`
 Returns all network requests since loading the page.

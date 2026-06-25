@@ -57,6 +57,7 @@ type DataUrlMatch = {
   payloadStart: number;
   isBase64: boolean;
   isEmbeddedQueryValue: boolean;
+  quote: '"' | '\'' | undefined;
 };
 
 function findDataUrlStart(text: string, offset: number): number {
@@ -100,6 +101,7 @@ function parseDataUrl(text: string, start: number): DataUrlMatch | undefined {
     payloadStart: delimiter.end,
     isBase64: decodedMetadata.toLowerCase().split(';').includes('base64'),
     isEmbeddedQueryValue: start > 0 && text[start - 1] === '=',
+    quote: dataUrlQuoteAt(text, start),
   };
 }
 
@@ -147,15 +149,22 @@ function findDataUrlEnd(text: string, match: DataUrlMatch): number {
     const char = text[end];
     if (isLineBreak(char))
       break;
-    if (match.isEmbeddedQueryValue && char === '&' && looksLikeQueryParam(text, end + 1))
+    if (match.isEmbeddedQueryValue && char === '&' && isQueryParamBoundary(text, match, end))
       break;
     if (match.isBase64 && char === '&')
       break;
     if (match.isBase64 && isBase64PayloadTerminator(char))
       break;
+    if (!match.isBase64 && match.quote && char === match.quote && isQuotedDataUrlEnd(text, end))
+      break;
     end++;
   }
   return end;
+}
+
+function dataUrlQuoteAt(text: string, start: number): '"' | '\'' | undefined {
+  const char = start > 0 ? text[start - 1] : undefined;
+  return char === '"' || char === '\'' ? char : undefined;
 }
 
 function isLineBreak(char: string): boolean {
@@ -164,6 +173,26 @@ function isLineBreak(char: string): boolean {
 
 function isBase64PayloadTerminator(char: string): boolean {
   return /\s/.test(char) || ['"', '\'', '<', '>', ')', ']', '}', '`', ':'].includes(char);
+}
+
+function isQueryParamBoundary(text: string, match: DataUrlMatch, ampersand: number): boolean {
+  if (!looksLikeQueryParam(text, ampersand + 1))
+    return false;
+  return match.isBase64 || isRawPayloadCompleteBefore(text, match.payloadStart, ampersand);
+}
+
+function isRawPayloadCompleteBefore(text: string, payloadStart: number, end: number): boolean {
+  let position = end - 1;
+  while (position >= payloadStart && /\s/.test(text[position]))
+    position--;
+  return text[position] === '>' || (position >= 2 && startsWithIgnoreCase(text, position - 2, '%3e'));
+}
+
+function isQuotedDataUrlEnd(text: string, quote: number): boolean {
+  let position = quote + 1;
+  while (position < text.length && /[ \t]/.test(text[position]))
+    position++;
+  return position === text.length || isLineBreak(text[position]) || text[position] === '[';
 }
 
 function looksLikeQueryParam(text: string, offset: number): boolean {

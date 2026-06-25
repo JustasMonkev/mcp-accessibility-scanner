@@ -93,6 +93,20 @@ describe('Console Tools', () => {
 
       expect(response.result()).toBe('');
     });
+
+    it('should truncate data URL payloads in console messages', async () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      mockTab.consoleMessages = vi.fn().mockReturnValue([{
+        type: 'log',
+        text: 'Data URL',
+        toString: () => `[LOG] data:text/html;base64,${payload}`,
+      }]);
+
+      await consoleTool.handle(mockContext, {}, response);
+
+      expect(response.result()).toContain('data:text/html;base64,...');
+      expect(response.result()).not.toContain(payload);
+    });
   });
 
   describe('Tool capabilities', () => {
