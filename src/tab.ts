@@ -226,7 +226,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       tabSnapshot = {
         url: this.page.url(),
         title,
-        ariaSnapshot: truncateDataUrls(snapshot),
+        ariaSnapshot: snapshot,
         modalStates: [],
         consoleMessages: [],
         downloads: this._downloads,

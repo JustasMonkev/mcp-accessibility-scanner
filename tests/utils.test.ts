@@ -85,6 +85,10 @@ describe('Utils', () => {
       expect(truncateDataUrl('data: total, average')).toBe('data: total, average');
     });
 
+    it('should not truncate direct strings without a data URL prefix', () => {
+      expect(truncateDataUrl('12345image/png,payload')).toBe('12345image/png,payload');
+    });
+
     it('should truncate raw SVG data URL payloads without leaking markup', () => {
       const payload = '<svg viewBox="0 0 10 10"><text>&Hello</text></svg>';
       const text = `- /url: data:image/svg+xml,${payload}\n- button "Next"`;
@@ -109,6 +113,13 @@ describe('Utils', () => {
       const text = `https://api.example/upload?src=data:text/html;base64%2C${payload}&id=123`;
 
       expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data:text/html;base64%2C...&id=123');
+    });
+
+    it('should truncate data URLs with literal prefixes and encoded metadata', () => {
+      const payload = encodeURIComponent(Buffer.from('<p>hello</p>').toString('base64'));
+      const text = `https://api.example/upload?src=data:text%2Fhtml%3Bbase64%2C${payload}&id=123`;
+
+      expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data:text%2Fhtml%3Bbase64%2C...&id=123');
     });
 
     it('should preserve query params after raw data URLs embedded in query strings', () => {
@@ -141,10 +152,32 @@ describe('Utils', () => {
       expect(truncateDataUrls(text)).toBe('[LOG] data:image/svg+xml,... done @ app.js:7');
     });
 
+    it('should preserve suffix text after unquoted raw text data URLs', () => {
+      const text = '[LOG] data:text/plain,hello done @ app.js:7';
+
+      expect(truncateDataUrls(text)).toBe('[LOG] data:text/plain,... done @ app.js:7');
+    });
+
+    it('should preserve suffix text after quoted raw data URLs', () => {
+      const text = '[LOG] "data:image/svg+xml,<svg></svg>" done @ app.js:7';
+
+      expect(truncateDataUrls(text)).toBe('[LOG] "data:image/svg+xml,..." done @ app.js:7');
+    });
+
     it('should preserve source locations after unquoted raw data URLs', () => {
       const text = '[LOG] Test @ data:image/svg+xml,<svg></svg>:1';
 
       expect(truncateDataUrls(text)).toBe('[LOG] Test @ data:image/svg+xml,...:1');
+    });
+
+    it('should keep source-like colons inside raw markup payloads redacted', () => {
+      const text = '[LOG] Test @ data:image/svg+xml,<svg><text>1:2</text></svg>:1';
+
+      const result = truncateDataUrls(text);
+
+      expect(result).toBe('[LOG] Test @ data:image/svg+xml,...:1');
+      expect(result).not.toContain('1:2');
+      expect(result).not.toContain('</text>');
     });
 
     it('should cap oversized data URL metadata before the ellipsis', () => {

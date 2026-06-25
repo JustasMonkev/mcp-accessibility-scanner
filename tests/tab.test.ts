@@ -247,16 +247,14 @@ describe('Tab', () => {
       expect(snapshot.ariaSnapshot).toContain('capturing page accessibility snapshot');
     });
 
-    it('truncates data URL payloads in captured accessibility snapshots', async () => {
+    it('keeps data URL payloads in captured accessibility snapshots for session logs', async () => {
       const payload = '<svg viewBox="0 0 10 10"><text>Hello</text></svg>';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- link "Example" [ref=e1]:\n  - /url: data:image/svg+xml,${payload}`);
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
       const snapshot = await tab.captureSnapshot();
 
-      expect(snapshot.ariaSnapshot).toContain('data:image/svg+xml,...');
-      expect(snapshot.ariaSnapshot).not.toContain(payload);
-      expect(snapshot.ariaSnapshot).not.toContain('<svg');
+      expect(snapshot.ariaSnapshot).toContain(`data:image/svg+xml,${payload}`);
     });
   });
 

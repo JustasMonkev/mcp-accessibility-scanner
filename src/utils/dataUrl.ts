@@ -19,6 +19,9 @@ const encodedDataUrlPrefix = 'data%3a';
 const maxDataUrlMetadataLength = 120;
 
 export function truncateDataUrl(url: string): string {
+  if (!startsWithIgnoreCase(url, 0, dataUrlPrefix) && !startsWithIgnoreCase(url, 0, encodedDataUrlPrefix))
+    return url;
+
   const match = parseDataUrl(url, 0);
   if (!match)
     return url;
@@ -28,9 +31,10 @@ export function truncateDataUrl(url: string): string {
 export function truncateDataUrls(text: string): string {
   let result = '';
   let offset = 0;
+  const lowerText = text.toLowerCase();
 
   while (offset < text.length) {
-    const start = findDataUrlStart(text, offset);
+    const start = findDataUrlStart(text, lowerText, offset);
     if (start === -1) {
       result += text.slice(offset);
       break;
@@ -62,8 +66,7 @@ type DataUrlMatch = {
   quote: '"' | '\'' | undefined;
 };
 
-function findDataUrlStart(text: string, offset: number): number {
-  const lowerText = text.toLowerCase();
+function findDataUrlStart(text: string, lowerText: string, offset: number): number {
   let start = nextDataUrlPrefix(lowerText, offset);
   while (start !== -1) {
     if (start === 0 || !/[A-Za-z0-9_-]/.test(text[start - 1]))
@@ -88,20 +91,21 @@ function dataUrlPrefixLengthAt(text: string, start: number): number {
 }
 
 function parseDataUrl(text: string, start: number): DataUrlMatch | undefined {
-  const isEncoded = startsWithIgnoreCase(text, start, encodedDataUrlPrefix);
-  const metadataStart = start + (isEncoded ? encodedDataUrlPrefix.length : dataUrlPrefix.length);
+  const isEncodedPrefix = startsWithIgnoreCase(text, start, encodedDataUrlPrefix);
+  const metadataStart = start + (isEncodedPrefix ? encodedDataUrlPrefix.length : dataUrlPrefix.length);
   const delimiter = findDataUrlDelimiter(text, metadataStart);
   if (!delimiter)
     return;
 
   const metadata = text.slice(metadataStart, delimiter.start);
-  if (!isValidDataUrlMetadata(metadata, isEncoded))
+  const isEncodedMetadata = isEncodedPrefix || containsPercentEncoding(metadata);
+  if (!isValidDataUrlMetadata(metadata, isEncodedMetadata))
     return;
 
-  const decodedMetadata = decodeDataUrlMetadata(metadata, isEncoded);
+  const decodedMetadata = decodeDataUrlMetadata(metadata, isEncodedMetadata);
   return {
     payloadStart: delimiter.end,
-    displayPrefix: dataUrlDisplayPrefix(text, start, metadata, decodedMetadata, delimiter, isEncoded),
+    displayPrefix: dataUrlDisplayPrefix(text, start, metadata, decodedMetadata, delimiter, isEncodedMetadata),
     isBase64: decodedMetadata.toLowerCase().split(';').includes('base64'),
     isEmbeddedQueryValue: start > 0 && text[start - 1] === '=',
     quote: dataUrlQuoteAt(text, start),
@@ -178,7 +182,7 @@ function findDataUrlEnd(text: string, match: DataUrlMatch): number {
       break;
     if (match.isBase64 && isBase64PayloadTerminator(char))
       break;
-    if (!match.isBase64 && match.quote && char === match.quote && isQuotedDataUrlEnd(text, end))
+    if (!match.isBase64 && match.quote && char === match.quote && isQuotedDataUrlEnd(text, match, end))
       break;
     if (!match.isBase64 && !match.quote && isRawPayloadSuffixBoundary(text, match, end))
       break;
@@ -215,14 +219,25 @@ function isRawPayloadCompleteBefore(text: string, payloadStart: number, end: num
 
 function isRawPayloadSuffixBoundary(text: string, match: DataUrlMatch, position: number): boolean {
   const char = text[position];
-  return (/\s/.test(char) || char === ':') && isRawPayloadCompleteBefore(text, match.payloadStart, position);
+  if (/\s/.test(char))
+    return !isRawMarkupPayload(text, match.payloadStart) || isRawPayloadCompleteBefore(text, match.payloadStart, position);
+  if (char !== ':')
+    return false;
+  if (isRawMarkupPayload(text, match.payloadStart) && !isRawPayloadCompleteBefore(text, match.payloadStart, position))
+    return false;
+  return looksLikeSourceLocationSuffix(text, position);
 }
 
-function isQuotedDataUrlEnd(text: string, quote: number): boolean {
-  let position = quote + 1;
-  while (position < text.length && /[ \t]/.test(text[position]))
-    position++;
-  return position === text.length || isLineBreak(text[position]) || text[position] === '[';
+function isQuotedDataUrlEnd(text: string, match: DataUrlMatch, quote: number): boolean {
+  return !isRawMarkupPayload(text, match.payloadStart) || isRawPayloadCompleteBefore(text, match.payloadStart, quote);
+}
+
+function isRawMarkupPayload(text: string, payloadStart: number): boolean {
+  return text[payloadStart] === '<' || startsWithIgnoreCase(text, payloadStart, '%3c');
+}
+
+function looksLikeSourceLocationSuffix(text: string, colon: number): boolean {
+  return /\d/.test(text[colon + 1] || '');
 }
 
 function looksLikeQueryParam(text: string, offset: number): boolean {
@@ -240,6 +255,10 @@ function looksLikeQueryParam(text: string, offset: number): boolean {
 
 function startsWithEncodedComma(text: string, position: number): boolean {
   return startsWithIgnoreCase(text, position, '%2c');
+}
+
+function containsPercentEncoding(text: string): boolean {
+  return /%[0-9a-f]{2}/i.test(text);
 }
 
 function startsWithIgnoreCase(text: string, position: number, value: string): boolean {
