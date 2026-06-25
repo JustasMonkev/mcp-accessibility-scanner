@@ -104,6 +104,13 @@ describe('Utils', () => {
       expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data:text/html;base64,...&id=123');
     });
 
+    it('should truncate data URLs with literal prefixes and encoded commas', () => {
+      const payload = encodeURIComponent(Buffer.from('<p>hello</p>').toString('base64'));
+      const text = `https://api.example/upload?src=data:text/html;base64%2C${payload}&id=123`;
+
+      expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data:text/html;base64%2C...&id=123');
+    });
+
     it('should preserve query params after raw data URLs embedded in query strings', () => {
       const payload = '<svg><text>Hello</text></svg>';
       const text = `https://api.example/upload?src=data:image/svg+xml,${payload}&id=123`;
@@ -126,6 +133,25 @@ describe('Utils', () => {
       const text = `https://api.example/upload?src=data%3Atext%2Fhtml%3Bbase64%2C${payload}&id=123`;
 
       expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data%3Atext%2Fhtml%3Bbase64%2C...&id=123');
+    });
+
+    it('should preserve suffix text after unquoted raw data URLs', () => {
+      const text = '[LOG] data:image/svg+xml,<svg></svg> done @ app.js:7';
+
+      expect(truncateDataUrls(text)).toBe('[LOG] data:image/svg+xml,... done @ app.js:7');
+    });
+
+    it('should preserve source locations after unquoted raw data URLs', () => {
+      const text = '[LOG] Test @ data:image/svg+xml,<svg></svg>:1';
+
+      expect(truncateDataUrls(text)).toBe('[LOG] Test @ data:image/svg+xml,...:1');
+    });
+
+    it('should cap oversized data URL metadata before the ellipsis', () => {
+      const largeParameter = 'a'.repeat(1024);
+
+      expect(truncateDataUrl(`data:text/html;name=${largeParameter},x`)).toBe('data:text/html,...');
+      expect(truncateDataUrl(`data:text/html;name=${largeParameter};base64,eA==`)).toBe('data:text/html;base64,...');
     });
 
     it('should preserve snapshot refs after raw data URLs in accessible names', () => {

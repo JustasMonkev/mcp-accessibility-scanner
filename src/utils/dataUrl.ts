@@ -16,12 +16,13 @@
 
 const dataUrlPrefix = 'data:';
 const encodedDataUrlPrefix = 'data%3a';
+const maxDataUrlMetadataLength = 120;
 
 export function truncateDataUrl(url: string): string {
   const match = parseDataUrl(url, 0);
   if (!match)
     return url;
-  return `${url.slice(0, match.payloadStart)}...`;
+  return `${match.displayPrefix}...`;
 }
 
 export function truncateDataUrls(text: string): string {
@@ -46,7 +47,7 @@ export function truncateDataUrls(text: string): string {
     }
 
     const end = findDataUrlEnd(text, match);
-    result += `${text.slice(start, match.payloadStart)}...`;
+    result += `${match.displayPrefix}...`;
     offset = end;
   }
 
@@ -55,6 +56,7 @@ export function truncateDataUrls(text: string): string {
 
 type DataUrlMatch = {
   payloadStart: number;
+  displayPrefix: string;
   isBase64: boolean;
   isEmbeddedQueryValue: boolean;
   quote: '"' | '\'' | undefined;
@@ -88,7 +90,7 @@ function dataUrlPrefixLengthAt(text: string, start: number): number {
 function parseDataUrl(text: string, start: number): DataUrlMatch | undefined {
   const isEncoded = startsWithIgnoreCase(text, start, encodedDataUrlPrefix);
   const metadataStart = start + (isEncoded ? encodedDataUrlPrefix.length : dataUrlPrefix.length);
-  const delimiter = findDataUrlDelimiter(text, metadataStart, isEncoded);
+  const delimiter = findDataUrlDelimiter(text, metadataStart);
   if (!delimiter)
     return;
 
@@ -99,13 +101,14 @@ function parseDataUrl(text: string, start: number): DataUrlMatch | undefined {
   const decodedMetadata = decodeDataUrlMetadata(metadata, isEncoded);
   return {
     payloadStart: delimiter.end,
+    displayPrefix: dataUrlDisplayPrefix(text, start, metadata, decodedMetadata, delimiter, isEncoded),
     isBase64: decodedMetadata.toLowerCase().split(';').includes('base64'),
     isEmbeddedQueryValue: start > 0 && text[start - 1] === '=',
     quote: dataUrlQuoteAt(text, start),
   };
 }
 
-function findDataUrlDelimiter(text: string, offset: number, isEncoded: boolean): { start: number; end: number } | undefined {
+function findDataUrlDelimiter(text: string, offset: number): { start: number; end: number } | undefined {
   let position = offset;
   while (position < text.length) {
     const char = text[position];
@@ -113,10 +116,30 @@ function findDataUrlDelimiter(text: string, offset: number, isEncoded: boolean):
       return;
     if (char === ',')
       return { start: position, end: position + 1 };
-    if (isEncoded && startsWithEncodedComma(text, position))
+    if (startsWithEncodedComma(text, position))
       return { start: position, end: position + 3 };
     position++;
   }
+}
+
+function dataUrlDisplayPrefix(text: string, start: number, metadata: string, decodedMetadata: string, delimiter: { start: number; end: number }, isEncoded: boolean): string {
+  if (metadata.length <= maxDataUrlMetadataLength)
+    return text.slice(start, delimiter.end);
+
+  const compactMetadata = compactDataUrlMetadata(decodedMetadata);
+  const delimiterText = text.slice(delimiter.start, delimiter.end);
+  return `${text.slice(start, start + dataUrlPrefixLengthAt(text, start))}${encodeDataUrlMetadata(compactMetadata, isEncoded)}${delimiterText}`;
+}
+
+function compactDataUrlMetadata(decodedMetadata: string): string {
+  const parts = decodedMetadata.split(';');
+  const mediaType = parts[0]?.includes('/') ? parts[0] : '';
+  const base64 = parts.some(part => part.toLowerCase() === 'base64') ? ';base64' : '';
+  return `${mediaType}${base64}`;
+}
+
+function encodeDataUrlMetadata(metadata: string, isEncoded: boolean): string {
+  return isEncoded ? encodeURIComponent(metadata) : metadata;
 }
 
 function isValidDataUrlMetadata(metadata: string, isEncoded: boolean): boolean {
@@ -157,6 +180,8 @@ function findDataUrlEnd(text: string, match: DataUrlMatch): number {
       break;
     if (!match.isBase64 && match.quote && char === match.quote && isQuotedDataUrlEnd(text, end))
       break;
+    if (!match.isBase64 && !match.quote && isRawPayloadSuffixBoundary(text, match, end))
+      break;
     end++;
   }
   return end;
@@ -186,6 +211,11 @@ function isRawPayloadCompleteBefore(text: string, payloadStart: number, end: num
   while (position >= payloadStart && /\s/.test(text[position]))
     position--;
   return text[position] === '>' || (position >= 2 && startsWithIgnoreCase(text, position - 2, '%3e'));
+}
+
+function isRawPayloadSuffixBoundary(text: string, match: DataUrlMatch, position: number): boolean {
+  const char = text[position];
+  return (/\s/.test(char) || char === ':') && isRawPayloadCompleteBefore(text, match.payloadStart, position);
 }
 
 function isQuotedDataUrlEnd(text: string, quote: number): boolean {
