@@ -118,6 +118,8 @@ function findDataUrlDelimiter(text: string, offset: number): { start: number; en
     const char = text[position];
     if (isLineBreak(char))
       return;
+    if (char === '&' && looksLikeQueryParam(text, position + 1))
+      return;
     if (char === ',')
       return { start: position, end: position + 1 };
     if (startsWithEncodedComma(text, position))
@@ -216,7 +218,7 @@ function isRawPayloadCompleteBefore(text: string, payloadStart: number, end: num
   let position = end - 1;
   while (position >= payloadStart && /\s/.test(text[position]))
     position--;
-  return text[position] === '>' || (position >= 3 && startsWithIgnoreCase(text, position - 3, '%3e'));
+  return text[position] === '>' || (position >= payloadStart + 2 && startsWithIgnoreCase(text, position - 2, '%3e'));
 }
 
 function isRawPayloadSuffixBoundary(text: string, match: DataUrlMatch, position: number): boolean {
@@ -226,7 +228,7 @@ function isRawPayloadSuffixBoundary(text: string, match: DataUrlMatch, position:
   if (isRawPayloadWrapperBoundary(text, match, position))
     return true;
   if (isEncodedPayloadTerminator(text, position))
-    return isRawPayloadCompleteBefore(text, match.payloadStart, position);
+    return isRawPayloadCompleteBefore(text, match.payloadStart, position) || isRawPayloadBoundarySuffix(text, position + 3);
   if (char !== ':')
     return false;
   if (isRawMarkupPayload(text, match.payloadStart) && !isRawPayloadCompleteBefore(text, match.payloadStart, position))
@@ -283,7 +285,14 @@ function isDataUrlStartBoundary(text: string, start: number): boolean {
 }
 
 function isRawPayloadWrapperBoundary(text: string, match: DataUrlMatch, position: number): boolean {
-  return [')', ']', '}'].includes(text[position]) && isRawPayloadCompleteBefore(text, match.payloadStart, position);
+  return [')', ']', '}'].includes(text[position]) && (isRawPayloadCompleteBefore(text, match.payloadStart, position) || isRawPayloadBoundarySuffix(text, position + 1));
+}
+
+function isRawPayloadBoundarySuffix(text: string, offset: number): boolean {
+  if (offset >= text.length)
+    return true;
+  const char = text[offset];
+  return isLineBreak(char) || /\s/.test(char) || ['"', '\'', ')', ']', '}', '`'].includes(char) || (char === '&' && looksLikeQueryParam(text, offset + 1));
 }
 
 function isEncodedPayloadTerminator(text: string, position: number): boolean {

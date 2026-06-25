@@ -122,6 +122,12 @@ describe('Utils', () => {
       expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data:text%2Fhtml%3Bbase64%2C...&id=123');
     });
 
+    it('should not parse data URL metadata across query boundaries', () => {
+      const text = 'https://api.example/search?type=data:text/html;base64&tags=a,b';
+
+      expect(truncateDataUrls(text)).toBe(text);
+    });
+
     it('should preserve query params after raw data URLs embedded in query strings', () => {
       const payload = '<svg><text>Hello</text></svg>';
       const text = `https://api.example/upload?src=data:image/svg+xml,${payload}&id=123`;
@@ -154,6 +160,12 @@ describe('Utils', () => {
 
       expect(result).toBe('https://api.example/upload?src=%22data%3Atext%2Fhtml%3Bbase64%2C...%22&id=123');
       expect(result).not.toContain(payload);
+    });
+
+    it('should preserve encoded wrappers around non-markup raw data URLs', () => {
+      const text = 'https://api.example/upload?src=%22data%3Atext%2Fplain%2Chello%22&id=123';
+
+      expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=%22data%3Atext%2Fplain%2C...%22&id=123');
     });
 
     it('should preserve suffix text after unquoted raw data URLs', () => {
@@ -234,6 +246,18 @@ describe('Utils', () => {
       const text = '- img "url(data:image/svg+xml,<svg></svg>)" [ref=e1]';
 
       expect(truncateDataUrls(text)).toBe('- img "url(data:image/svg+xml,...)" [ref=e1]');
+    });
+
+    it('should preserve refs after encoded raw markup data URLs', () => {
+      const text = '- button "data:image/svg+xml,%3Csvg%3E%3C%2Fsvg%3E" [ref=e1]';
+
+      expect(truncateDataUrls(text)).toBe('- button "data:image/svg+xml,..." [ref=e1]');
+    });
+
+    it('should preserve wrappers around non-markup raw data URLs', () => {
+      const text = '[LOG] url(data:text/plain,hello) done';
+
+      expect(truncateDataUrls(text)).toBe('[LOG] url(data:text/plain,...) done');
     });
   });
 });
