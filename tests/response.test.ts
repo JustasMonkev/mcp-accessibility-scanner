@@ -158,6 +158,19 @@ describe('Response', () => {
       const serialized = response.serialize();
       expect(expectTextContent(serialized.content[0]).text).toContain('Open tabs');
     });
+
+    it('should truncate data URL payloads in tab titles', () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      mockTab.lastTitle = () => `data:text/html;base64,${payload}`;
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeTabs();
+
+      const serialized = response.serialize();
+      const text = expectTextContent(serialized.content[0]).text;
+
+      expect(text).toContain('[data:text/html;base64,...]');
+      expect(text).not.toContain(payload);
+    });
   });
 
   describe('finish', () => {
@@ -396,7 +409,7 @@ describe('Response', () => {
       mockTab.page = { url: () => embeddedUrl } as any;
       mockTab.captureSnapshot = vi.fn().mockResolvedValue({
         url: embeddedUrl,
-        title: 'Data URL Page',
+        title: dataUrl,
         ariaSnapshot: `- link "Example" [ref=e1]:\n  - /url: ${dataUrl}`,
         modalStates: [],
         consoleMessages: [
@@ -412,6 +425,7 @@ describe('Response', () => {
       const textContent = expectTextContent(serialized.content[0]);
 
       expect(textContent.text).toContain('data:text/html;base64,...');
+      expect(textContent.text).toContain('- Page Title: data:text/html;base64,...');
       expect(textContent.text).toContain('https://example.com/upload?src=data:text/html;base64,...&id=123');
       expect(textContent.text).not.toContain(payload);
     });

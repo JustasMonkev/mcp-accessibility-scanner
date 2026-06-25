@@ -15,14 +15,13 @@
  */
 
 const dataUrlPrefix = 'data:';
+const encodedDataUrlPrefix = 'data%3a';
 
 export function truncateDataUrl(url: string): string {
-  if (!url.startsWith(dataUrlPrefix))
+  const match = parseDataUrl(url, 0);
+  if (!match)
     return url;
-  const comma = url.indexOf(',');
-  if (comma === -1)
-    return url;
-  return `${url.slice(0, comma + 1)}...`;
+  return `${url.slice(0, match.payloadStart)}...`;
 }
 
 export function truncateDataUrls(text: string): string {
@@ -38,41 +37,121 @@ export function truncateDataUrls(text: string): string {
 
     result += text.slice(offset, start);
 
-    const comma = text.indexOf(',', start);
-    if (comma === -1) {
-      result += text.slice(start, start + dataUrlPrefix.length);
-      offset = start + dataUrlPrefix.length;
+    const match = parseDataUrl(text, start);
+    if (!match) {
+      const prefixLength = dataUrlPrefixLengthAt(text, start);
+      result += text.slice(start, start + prefixLength);
+      offset = start + prefixLength;
       continue;
     }
 
-    const isBase64 = text.slice(start, comma).toLowerCase().includes(';base64');
-    const end = findDataUrlEnd(text, comma + 1, isBase64);
-    result += `${text.slice(start, comma + 1)}...`;
+    const end = findDataUrlEnd(text, match);
+    result += `${text.slice(start, match.payloadStart)}...`;
     offset = end;
   }
 
   return result;
 }
 
+type DataUrlMatch = {
+  payloadStart: number;
+  isBase64: boolean;
+  isEmbeddedQueryValue: boolean;
+};
+
 function findDataUrlStart(text: string, offset: number): number {
-  let start = text.indexOf(dataUrlPrefix, offset);
+  const lowerText = text.toLowerCase();
+  let start = nextDataUrlPrefix(lowerText, offset);
   while (start !== -1) {
     if (start === 0 || !/[A-Za-z0-9_-]/.test(text[start - 1]))
       return start;
-    start = text.indexOf(dataUrlPrefix, start + dataUrlPrefix.length);
+    start = nextDataUrlPrefix(lowerText, start + dataUrlPrefixLengthAt(lowerText, start));
   }
   return -1;
 }
 
-function findDataUrlEnd(text: string, offset: number, isBase64: boolean): number {
-  let end = offset;
+function nextDataUrlPrefix(lowerText: string, offset: number): number {
+  const literalStart = lowerText.indexOf(dataUrlPrefix, offset);
+  const encodedStart = lowerText.indexOf(encodedDataUrlPrefix, offset);
+  if (literalStart === -1)
+    return encodedStart;
+  if (encodedStart === -1)
+    return literalStart;
+  return Math.min(literalStart, encodedStart);
+}
+
+function dataUrlPrefixLengthAt(text: string, start: number): number {
+  return startsWithIgnoreCase(text, start, encodedDataUrlPrefix) ? encodedDataUrlPrefix.length : dataUrlPrefix.length;
+}
+
+function parseDataUrl(text: string, start: number): DataUrlMatch | undefined {
+  const isEncoded = startsWithIgnoreCase(text, start, encodedDataUrlPrefix);
+  const metadataStart = start + (isEncoded ? encodedDataUrlPrefix.length : dataUrlPrefix.length);
+  const delimiter = findDataUrlDelimiter(text, metadataStart, isEncoded);
+  if (!delimiter)
+    return;
+
+  const metadata = text.slice(metadataStart, delimiter.start);
+  if (!isValidDataUrlMetadata(metadata, isEncoded))
+    return;
+
+  const decodedMetadata = decodeDataUrlMetadata(metadata, isEncoded);
+  return {
+    payloadStart: delimiter.end,
+    isBase64: decodedMetadata.toLowerCase().split(';').includes('base64'),
+    isEmbeddedQueryValue: start > 0 && text[start - 1] === '=',
+  };
+}
+
+function findDataUrlDelimiter(text: string, offset: number, isEncoded: boolean): { start: number; end: number } | undefined {
+  let position = offset;
+  while (position < text.length) {
+    const char = text[position];
+    if (isLineBreak(char))
+      return;
+    if (char === ',')
+      return { start: position, end: position + 1 };
+    if (isEncoded && startsWithEncodedComma(text, position))
+      return { start: position, end: position + 3 };
+    position++;
+  }
+}
+
+function isValidDataUrlMetadata(metadata: string, isEncoded: boolean): boolean {
+  if (!metadata)
+    return true;
+  const decodedMetadata = decodeDataUrlMetadata(metadata, isEncoded);
+  if (!decodedMetadata || /[\s"'<>()[\]{}]/.test(decodedMetadata))
+    return false;
+  if (decodedMetadata.startsWith(';'))
+    return true;
+
+  const mediaTypeEnd = decodedMetadata.indexOf(';');
+  const mediaType = mediaTypeEnd === -1 ? decodedMetadata : decodedMetadata.slice(0, mediaTypeEnd);
+  return /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(mediaType);
+}
+
+function decodeDataUrlMetadata(metadata: string, isEncoded: boolean): string {
+  if (!isEncoded)
+    return metadata;
+  try {
+    return decodeURIComponent(metadata);
+  } catch {
+    return '';
+  }
+}
+
+function findDataUrlEnd(text: string, match: DataUrlMatch): number {
+  let end = match.payloadStart;
   while (end < text.length) {
     const char = text[end];
     if (isLineBreak(char))
       break;
-    if (isBase64 && char === '&')
+    if (match.isEmbeddedQueryValue && char === '&' && looksLikeQueryParam(text, end + 1))
       break;
-    if (isBase64 && isBase64PayloadTerminator(char))
+    if (match.isBase64 && char === '&')
+      break;
+    if (match.isBase64 && isBase64PayloadTerminator(char))
       break;
     end++;
   }
@@ -84,5 +163,26 @@ function isLineBreak(char: string): boolean {
 }
 
 function isBase64PayloadTerminator(char: string): boolean {
-  return /\s/.test(char) || ['"', '\'', '<', '>', ')', ']', '}', '`'].includes(char);
+  return /\s/.test(char) || ['"', '\'', '<', '>', ')', ']', '}', '`', ':'].includes(char);
+}
+
+function looksLikeQueryParam(text: string, offset: number): boolean {
+  if (offset >= text.length)
+    return false;
+  for (let position = offset; position < text.length; position++) {
+    const char = text[position];
+    if (char === '=')
+      return position > offset;
+    if (isLineBreak(char) || /\s/.test(char) || ['&', '#', '"', '\'', '<', '>', ')', '}', '`'].includes(char))
+      return false;
+  }
+  return false;
+}
+
+function startsWithEncodedComma(text: string, position: number): boolean {
+  return startsWithIgnoreCase(text, position, '%2c');
+}
+
+function startsWithIgnoreCase(text: string, position: number, value: string): boolean {
+  return text.slice(position, position + value.length).toLowerCase() === value;
 }

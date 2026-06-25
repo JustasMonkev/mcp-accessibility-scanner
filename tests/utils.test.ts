@@ -80,6 +80,11 @@ describe('Utils', () => {
       expect(truncateDataUrl('data:text/html;base64,PHAgLz4=')).toBe('data:text/html;base64,...');
     });
 
+    it('should not truncate ordinary prose that starts with data:', () => {
+      expect(truncateDataUrls('data: total, average')).toBe('data: total, average');
+      expect(truncateDataUrl('data: total, average')).toBe('data: total, average');
+    });
+
     it('should truncate raw SVG data URL payloads without leaking markup', () => {
       const payload = '<svg viewBox="0 0 10 10"><text>&Hello</text></svg>';
       const text = `- /url: data:image/svg+xml,${payload}\n- button "Next"`;
@@ -97,6 +102,20 @@ describe('Utils', () => {
       const text = `https://api.example/upload?src=data:text/html;base64,${payload}&id=123`;
 
       expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data:text/html;base64,...&id=123');
+    });
+
+    it('should preserve query params after raw data URLs embedded in query strings', () => {
+      const payload = '<svg><text>Hello</text></svg>';
+      const text = `https://api.example/upload?src=data:image/svg+xml,${payload}&id=123`;
+
+      expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data:image/svg+xml,...&id=123');
+    });
+
+    it('should truncate percent-encoded data URLs embedded in query strings', () => {
+      const payload = encodeURIComponent(Buffer.from('<p>hello</p>').toString('base64'));
+      const text = `https://api.example/upload?src=data%3Atext%2Fhtml%3Bbase64%2C${payload}&id=123`;
+
+      expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data%3Atext%2Fhtml%3Bbase64%2C...&id=123');
     });
   });
 });

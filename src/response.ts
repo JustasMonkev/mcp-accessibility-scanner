@@ -244,7 +244,7 @@ function renderTabSnapshot(tabSnapshot: TabSnapshot): string {
 
   lines.push(`### Page state`);
   lines.push(`- Page URL: ${truncateDataUrls(tabSnapshot.url)}`);
-  lines.push(`- Page Title: ${tabSnapshot.title}`);
+  lines.push(`- Page Title: ${truncateDataUrls(tabSnapshot.title)}`);
   lines.push(`- Page Snapshot:`);
   lines.push('```yaml');
   lines.push(truncateDataUrls(tabSnapshot.ariaSnapshot));
@@ -269,7 +269,7 @@ function renderTabsMarkdown(tabs: Tab[], force: boolean = false): string[] {
   for (let i = 0; i < tabs.length; i++) {
     const tab = tabs[i];
     const current = tab.isCurrentTab() ? ' (current)' : '';
-    lines.push(`- ${i}:${current} [${tab.lastTitle()}] (${truncateDataUrls(tab.page.url())})`);
+    lines.push(`- ${i}:${current} [${truncateDataUrls(tab.lastTitle())}] (${truncateDataUrls(tab.page.url())})`);
   }
   lines.push('');
   return lines;
