@@ -16,6 +16,7 @@
 
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
+import { truncateDataUrl } from '../utils/url.js';
 
 import type * as playwright from 'playwright';
 
@@ -38,7 +39,7 @@ const requests = defineTabTool({
 
 function renderRequest(request: playwright.Request, response: playwright.Response | null) {
   const result: string[] = [];
-  result.push(`[${request.method().toUpperCase()}] ${request.url()}`);
+  result.push(`[${request.method().toUpperCase()}] ${truncateDataUrl(request.url())}`);
   if (response)
     result.push(`=> [${response.status()}] ${response.statusText()}`);
   return result.join(' ');

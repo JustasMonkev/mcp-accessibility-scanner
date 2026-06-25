@@ -20,6 +20,7 @@ import { callOnPageNoTrace, waitForCompletion } from './tools/utils.js';
 import { logUnhandledError } from './utils/log.js';
 import { ManualPromise } from './mcp/manualPromise.js';
 import type { ModalState } from './tools/tool.js';
+import { truncateDataUrlsInText } from './utils/url.js';
 
 import type { Context } from './context.js';
 
@@ -225,7 +226,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       tabSnapshot = {
         url: this.page.url(),
         title,
-        ariaSnapshot: snapshot,
+        ariaSnapshot: truncateDataUrlsInText(snapshot),
         modalStates: [],
         consoleMessages: [],
         downloads: this._downloads,

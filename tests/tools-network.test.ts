@@ -96,6 +96,17 @@ describe('Network Tools', () => {
       expect(result).toContain('https://api.example.com/missing');
     });
 
+    it('truncates data URL payloads', async () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      const request = { url: () => `data:text/html;base64,${payload}`, method: () => 'GET' };
+      mockTab.requests = vi.fn().mockReturnValue(new Map([[request, null]]));
+
+      await networkTool.handle(mockContext, {}, response);
+
+      expect(response.result()).toContain('data:text/html;base64,\u2026');
+      expect(response.result()).not.toContain(payload);
+    });
+
     it('should handle empty requests', async () => {
       mockTab.requests = vi.fn().mockReturnValue(new Map());
 

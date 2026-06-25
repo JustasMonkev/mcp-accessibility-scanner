@@ -191,6 +191,17 @@ describe('Tab', () => {
       expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
     });
 
+    it('truncates data URL payloads in page snapshots', async () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- link "a link" [ref=e2]: /url: data:text/html;base64,${payload}`);
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const snapshot = await tab.captureSnapshot();
+
+      expect(snapshot.ariaSnapshot).toContain('data:text/html;base64,\u2026');
+      expect(snapshot.ariaSnapshot).not.toContain(payload);
+    });
+
     it('should include console messages in snapshot', async () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
       mockPage.emit('console', {
