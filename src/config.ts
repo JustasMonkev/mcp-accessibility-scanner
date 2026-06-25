@@ -50,6 +50,7 @@ export type CLIOptions = {
     proxyServer?: string;
     saveSession?: boolean;
     saveTrace?: boolean;
+    outputMaxSize?: number;
     storageState?: string;
     userAgent?: string;
     userDataDir?: string;
@@ -215,6 +216,7 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
     saveSession: cliOptions.saveSession,
     saveTrace: cliOptions.saveTrace,
     outputDir: cliOptions.outputDir,
+    outputMaxSize: cliOptions.outputMaxSize,
     imageResponses: cliOptions.imageResponses,
     timeouts: {
       navigationTimeout: cliOptions.navigationTimeout,
@@ -247,6 +249,7 @@ function configFromEnv(): Config {
     options.imageResponses = 'omit';
   options.sandbox = envToBoolean(process.env.PLAYWRIGHT_MCP_SANDBOX);
   options.outputDir = envToString(process.env.PLAYWRIGHT_MCP_OUTPUT_DIR);
+  options.outputMaxSize = envToNumber(process.env.PLAYWRIGHT_MCP_OUTPUT_MAX_SIZE);
   options.port = envToNumber(process.env.PLAYWRIGHT_MCP_PORT);
   options.proxyBypass = envToString(process.env.PLAYWRIGHT_MCP_PROXY_BYPASS);
   options.proxyServer = envToString(process.env.PLAYWRIGHT_MCP_PROXY_SERVER);
@@ -277,8 +280,32 @@ export async function outputFile(config: FullConfig, rootPath: string | undefine
         ?? path.join(os.tmpdir(), 'playwright-mcp-output', sanitizeForFilePath(new Date().toISOString()));
 
   await fs.promises.mkdir(outputDir, { recursive: true });
+  await evictOldOutputFiles(outputDir, config.outputMaxSize);
   const fileName = sanitizeForFilePath(name);
   return path.join(outputDir, fileName);
+}
+
+async function evictOldOutputFiles(outputDir: string, maxSize: number | undefined) {
+  if (maxSize === undefined || maxSize < 0 || Number.isNaN(maxSize))
+    return;
+
+  const dirents = await fs.promises.readdir(outputDir, { recursive: true, withFileTypes: true });
+  const files = await Promise.all(dirents
+      .filter(dirent => dirent.isFile() && dirent.name !== 'session.md')
+      .map(async dirent => {
+        const filePath = path.join(dirent.parentPath, dirent.name);
+        const { size, mtimeMs } = await fs.promises.stat(filePath);
+        return { filePath, size, mtimeMs };
+      }));
+
+  let totalSize = files.reduce((total, file) => total + file.size, 0);
+  files.sort((a, b) => a.mtimeMs - b.mtimeMs || a.filePath.localeCompare(b.filePath));
+  for (const file of files) {
+    if (totalSize <= maxSize)
+      return;
+    await fs.promises.rm(file.filePath, { force: true });
+    totalSize -= file.size;
+  }
 }
 
 function pickDefined<T extends object>(obj: T | undefined): Partial<T> {

@@ -138,6 +138,11 @@ export type Config = {
    */
   outputDir?: string;
 
+  /**
+   * Threshold for evicting old output files, in bytes.
+   */
+  outputMaxSize?: number;
+
   network?: {
     /**
      * List of origins to allow the browser to request. Default is to allow all. Origins matching both `allowedOrigins` and `blockedOrigins` will be blocked.

@@ -203,8 +203,10 @@ Create a `config.json` file with the following options:
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
+- `outputDir`: Directory used for generated reports, screenshots, downloads, traces, and session logs
+- `outputMaxSize`: Maximum bytes of evictable output artifacts to keep; oldest files are removed first and session logs are preserved
 
-CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, and `--cdp-launch-startup-timeout`.
+CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--output-dir`, and `--output-max-size`.
 
 #### HTTP Heartbeat
 
