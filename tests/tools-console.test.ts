@@ -93,6 +93,34 @@ describe('Console Tools', () => {
 
       expect(response.result()).toBe('');
     });
+
+    it('should truncate data URL payloads in console messages', async () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      mockTab.consoleMessages = vi.fn().mockReturnValue([{
+        type: 'log',
+        text: 'Data URL',
+        toString: () => `[LOG] data:text/html;base64,${payload}`,
+      }]);
+
+      await consoleTool.handle(mockContext, {}, response);
+
+      expect(response.result()).toContain('data:text/html;base64,...');
+      expect(response.result()).not.toContain(payload);
+    });
+
+    it('should preserve console suffix text after raw data URL payloads', async () => {
+      const payload = '<svg></svg>';
+      mockTab.consoleMessages = vi.fn().mockReturnValue([{
+        type: 'log',
+        text: 'Data URL',
+        toString: () => `[LOG] data:image/svg+xml,${payload} done @ app.js:7`,
+      }]);
+
+      await consoleTool.handle(mockContext, {}, response);
+
+      expect(response.result()).toContain('data:image/svg+xml,... done @ app.js:7');
+      expect(response.result()).not.toContain(payload);
+    });
   });
 
   describe('Tool capabilities', () => {

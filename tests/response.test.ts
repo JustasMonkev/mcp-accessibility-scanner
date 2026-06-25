@@ -158,6 +158,19 @@ describe('Response', () => {
       const serialized = response.serialize();
       expect(expectTextContent(serialized.content[0]).text).toContain('Open tabs');
     });
+
+    it('should truncate data URL payloads in tab titles', () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      mockTab.lastTitle = () => `data:text/html;base64,${payload}`;
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeTabs();
+
+      const serialized = response.serialize();
+      const text = expectTextContent(serialized.content[0]).text;
+
+      expect(text).toContain('[data:text/html;base64,...]');
+      expect(text).not.toContain(payload);
+    });
   });
 
   describe('finish', () => {
@@ -387,6 +400,64 @@ describe('Response', () => {
       const textContent = expectTextContent(serialized.content[0]);
       expect(textContent.text).toContain('Page state');
       expect(textContent.text).toContain('Example Page');
+    });
+
+    it('should truncate data URL payloads in rendered snapshot output', async () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      const dataUrl = `data:text/html;base64,${payload}`;
+      const embeddedUrl = `https://example.com/upload?src=${dataUrl}&id=123`;
+      mockTab.page = { url: () => embeddedUrl } as any;
+      mockTab.captureSnapshot = vi.fn().mockResolvedValue({
+        url: embeddedUrl,
+        title: dataUrl,
+        ariaSnapshot: `- link "Example" [ref=e1]:\n  - /url: ${dataUrl}`,
+        modalStates: [],
+        consoleMessages: [
+          { type: 'log', text: 'Test message', toString: () => `[LOG] Test @ ${dataUrl}:1` }
+        ],
+        downloads: [],
+      });
+
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeSnapshot();
+      await response.finish();
+      const serialized = response.serialize();
+      const textContent = expectTextContent(serialized.content[0]);
+
+      expect(textContent.text).toContain('data:text/html;base64,...');
+      expect(textContent.text).toContain('- Page Title: data:text/html;base64,...');
+      expect(textContent.text).toContain('https://example.com/upload?src=data:text/html;base64,...&id=123');
+      expect(textContent.text).not.toContain(payload);
+    });
+
+    it('should truncate data URL payloads in modal snapshot output', async () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      const dataUrl = `data:text/html;base64,${payload}`;
+      mockContext.tools = [{
+        schema: { name: 'browser_handle_dialog' },
+        clearsModalState: 'dialog',
+      }] as any;
+      mockTab.captureSnapshot = vi.fn().mockResolvedValue({
+        url: 'https://example.com',
+        title: 'Example Page',
+        ariaSnapshot: '',
+        modalStates: [{
+          type: 'dialog',
+          description: `Alert ${dataUrl}`,
+          dialog: {} as any,
+        }],
+        consoleMessages: [],
+        downloads: [],
+      });
+
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeSnapshot();
+      await response.finish();
+      const serialized = response.serialize();
+      const textContent = expectTextContent(serialized.content[0]);
+
+      expect(textContent.text).toContain('Alert data:text/html;base64,...');
+      expect(textContent.text).not.toContain(payload);
     });
 
     it('should include console messages in snapshot', async () => {

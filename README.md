@@ -289,6 +289,7 @@ Set default operation timeout for existing tabs.
 
 #### `browser_snapshot`
 Capture accessibility snapshot of the current page (better than screenshot for analysis).
+Large `data:` URL payloads in snapshot output are truncated to their media type prefix.
 
 #### `browser_click`
 Perform click on a web page element.
@@ -357,9 +358,11 @@ Manage browser tabs in one tool.
 
 #### `browser_console_messages`
 Returns all console messages from the page.
+Large `data:` URL payloads in console messages are truncated to their media type prefix.
 
 #### `browser_network_requests`
 Returns all network requests since loading the page.
+Large `data:` URL payloads in request URLs are truncated to their media type prefix.
 
 ### Utility Tools
 

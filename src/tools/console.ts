@@ -16,6 +16,7 @@
 
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
+import { truncateDataUrls } from '../utils/dataUrl.js';
 
 const console = defineTabTool({
   capability: 'core',
@@ -27,7 +28,8 @@ const console = defineTabTool({
     type: 'readOnly',
   },
   handle: async (tab, params, response) => {
-    tab.consoleMessages().map(message => response.addResult(message.toString()));
+    for (const message of tab.consoleMessages())
+      response.addResult(truncateDataUrls(message.toString()));
   },
 });
 

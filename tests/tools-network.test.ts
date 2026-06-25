@@ -103,6 +103,66 @@ describe('Network Tools', () => {
 
       expect(response.result()).toBe('');
     });
+
+    it('should truncate data URL payloads', async () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      const mockRequests = new Map();
+      mockRequests.set({ url: () => `data:text/html;base64,${payload}`, method: () => 'GET' }, null);
+      mockTab.requests = vi.fn().mockReturnValue(mockRequests);
+
+      await networkTool.handle(mockContext, {}, response);
+
+      expect(response.result()).toContain('data:text/html;base64,...');
+      expect(response.result()).not.toContain(payload);
+    });
+
+    it('should truncate embedded data URL payloads in request URLs', async () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      const mockRequests = new Map();
+      mockRequests.set({ url: () => `https://api.example/upload?src=data:text/html;base64,${payload}&id=123`, method: () => 'POST' }, null);
+      mockTab.requests = vi.fn().mockReturnValue(mockRequests);
+
+      await networkTool.handle(mockContext, {}, response);
+
+      expect(response.result()).toContain('https://api.example/upload?src=data:text/html;base64,...&id=123');
+      expect(response.result()).not.toContain(payload);
+    });
+
+    it('should truncate data URLs with literal prefixes and encoded commas in request URLs', async () => {
+      const payload = encodeURIComponent(Buffer.from('<p>hello</p>').toString('base64'));
+      const mockRequests = new Map();
+      mockRequests.set({ url: () => `https://api.example/upload?src=data:text/html;base64%2C${payload}&id=123`, method: () => 'POST' }, null);
+      mockTab.requests = vi.fn().mockReturnValue(mockRequests);
+
+      await networkTool.handle(mockContext, {}, response);
+
+      expect(response.result()).toContain('https://api.example/upload?src=data:text/html;base64%2C...&id=123');
+      expect(response.result()).not.toContain(payload);
+    });
+
+    it('should preserve query params after raw embedded data URL payloads', async () => {
+      const payload = '<svg><text>Hello</text></svg>';
+      const mockRequests = new Map();
+      mockRequests.set({ url: () => `https://api.example/upload?src=data:image/svg+xml,${payload}&id=123`, method: () => 'POST' }, null);
+      mockTab.requests = vi.fn().mockReturnValue(mockRequests);
+
+      await networkTool.handle(mockContext, {}, response);
+
+      expect(response.result()).toContain('https://api.example/upload?src=data:image/svg+xml,...&id=123');
+      expect(response.result()).not.toContain(payload);
+    });
+
+    it('should truncate percent-encoded data URL payloads in request URLs', async () => {
+      const payload = encodeURIComponent(Buffer.from('<p>hello</p>').toString('base64'));
+      const mockRequests = new Map();
+      mockRequests.set({ url: () => `https://api.example/upload?src=data%3Atext%2Fhtml%3Bbase64%2C${payload}&id=123`, method: () => 'POST' }, null);
+      mockTab.requests = vi.fn().mockReturnValue(mockRequests);
+
+      await networkTool.handle(mockContext, {}, response);
+
+      expect(response.result()).toContain('https://api.example/upload?src=data%3Atext%2Fhtml%3Bbase64%2C...&id=123');
+      expect(response.result()).not.toContain(payload);
+    });
   });
 
   describe('Tool capabilities', () => {
