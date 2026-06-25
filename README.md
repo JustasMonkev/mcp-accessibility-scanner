@@ -121,7 +121,7 @@ Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.
 ```
 
 Each line is `<tool-name> <json-arguments>`. Omit the JSON to pass `{}`.
-Global browser connection flags still apply here, for example `npx mcp-accessibility-scanner --extension interactive`.
+Global browser connection flags still apply here, for example `npx mcp-accessibility-scanner --headless interactive`.
 
 ### Discovering available tools (`list-tools` subcommand)
 
@@ -277,8 +277,13 @@ Navigate to a URL.
 #### `browser_navigate_back`
 Go back to the previous page.
 
-#### `browser_navigate_forward`
-Go forward to the next page.
+#### `browser_navigation_timeout`
+Set default navigation timeout for existing tabs.
+- Parameters: `timeout` (in ms; 30000-300000)
+
+#### `browser_default_timeout`
+Set default operation timeout for existing tabs.
+- Parameters: `timeout` (in ms; 30000-300000)
 
 ### Page Interaction Tools
 
@@ -305,6 +310,10 @@ Perform drag and drop between two elements.
 Select an option in a dropdown.
 - Parameters: `element`, `ref`, `values` (array)
 
+#### `browser_fill_form`
+Fill multiple fields with one call.
+- Parameters: `fields` (array of objects with `name`, `type`, `ref`, and `value`)
+
 #### `browser_press_key`
 Press a key on the keyboard.
 - Parameters: `key` (e.g., 'ArrowLeft' or 'a')
@@ -317,11 +326,17 @@ Evaluate a JavaScript expression on the page, or on a specific element when a `r
 
 #### `browser_take_screenshot`
 Take a screenshot of the current page.
-- Parameters: `raw` (optional), `filename` (optional), `element` (optional), `ref` (optional)
+- Parameters: `filename` (optional), `type` (`png` or `jpeg`), `fullPage` (optional), `element`/`ref` pair (for element screenshots)
 
 #### `browser_pdf_save`
 Save page as PDF.
 - Parameters: `filename` (optional, defaults to `page-{timestamp}.pdf`)
+
+This tool requires `--caps pdf` in the CLI.
+
+#### `browser_install`
+Install the configured browser engine (use when browser executable is missing).
+- Parameters: none
 
 ### Browser Management
 
@@ -334,20 +349,9 @@ Resize the browser window.
 
 ### Tab Management
 
-#### `browser_tab_list`
-List all open browser tabs.
-
-#### `browser_tab_new`
-Open a new tab.
-- Parameters: `url` (optional)
-
-#### `browser_tab_select`
-Select a tab by index.
-- Parameters: `index`
-
-#### `browser_tab_close`
-Close a tab.
-- Parameters: `index` (optional, closes current tab if not provided)
+#### `browser_tabs`
+Manage browser tabs in one tool.
+- Parameters: `action` (`list`, `new`, `close`, `select`) and optional `index` (for `close` and `select`).
 
 ### Information & Monitoring Tools
 
@@ -371,26 +375,42 @@ Handle browser dialogs (alerts, confirms, prompts).
 Upload files to the page.
 - Parameters: `paths` (array of absolute file paths)
 
+#### `browser_verify_element_visible`
+Verify an element by ARIA role/name.
+- Parameters: `role`, `accessibleName`
+
+#### `browser_verify_text_visible`
+Verify text visibility.
+- Parameters: `text`
+
+#### `browser_verify_list_visible`
+Verify list items at a snapshot reference.
+- Parameters: `element`, `ref`, `items` (array)
+
+#### `browser_verify_value`
+Verify an element value or checked state.
+- Parameters: `type`, `element`, `ref`, `value`
+
+These verification tools require `--caps verify`:
+
 ### Vision Mode Tools (Coordinate-based Interaction)
 
-#### `browser_screen_capture`
-Take a screenshot for coordinate-based interaction.
+These tools require `--caps vision`:
 
-#### `browser_screen_move_mouse`
+#### `browser_mouse_move_xy`
 Move mouse to specific coordinates.
 - Parameters: `element`, `x`, `y`
 
-#### `browser_screen_click`
+#### `browser_mouse_click_xy`
 Click at specific coordinates.
 - Parameters: `element`, `x`, `y`
 
-#### `browser_screen_drag`
+#### `browser_mouse_drag_xy`
 Drag from one coordinate to another.
 - Parameters: `element`, `startX`, `startY`, `endX`, `endY`
 
-#### `browser_screen_type`
-Type text (coordinate-independent).
-- Parameters: `text`, `submit` (optional)
+#### Note
+Coordinate-based tools require `element` descriptions for permission checks, but the coordinates themselves are used for action targeting.
 
 ## Usage Examples
 
@@ -426,10 +446,10 @@ Type text (coordinate-independent).
 
 ### Tab Management
 ```
-1. Open a new tab with browser_tab_new
+1. Open a new tab with `browser_tabs` and `{"action":"new"}`
 2. Navigate to different pages in each tab
-3. Switch between tabs using browser_tab_select
-4. List all tabs with browser_tab_list
+3. Switch to a tab with `browser_tabs` and `{"action":"select", "index": 1}`
+4. List all tabs with `browser_tabs` and `{"action":"list"}`
 ```
 
 ### Waiting for Dynamic Content
