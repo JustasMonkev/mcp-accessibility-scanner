@@ -20,6 +20,7 @@ import path from 'node:path';
 import { Response } from './response.js';
 import { logUnhandledError } from './utils/log.js';
 import { outputFile } from './config.js';
+import { SESSION_LOG_FILE_NAME } from './sessionLogConstants.js';
 
 import type { FullConfig } from './config.js';
 import type * as actions from './actions.js';
@@ -64,7 +65,7 @@ export class SessionLog {
 
   constructor(sessionFolder: string, storage: IFileStorage = new NodeFileStorage()) {
     this._folder = sessionFolder;
-    this._file = path.join(this._folder, 'session.md');
+    this._file = path.join(this._folder, SESSION_LOG_FILE_NAME);
     this._storage = storage;
   }
 

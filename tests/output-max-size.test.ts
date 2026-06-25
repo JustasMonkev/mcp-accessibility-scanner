@@ -17,8 +17,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { outputFile, resolveConfig } from '../src/config.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { outputFile, resolveCLIConfig, resolveConfig } from '../src/config.js';
+import { Context } from '../src/context.js';
+import { SESSION_LOG_FILE_NAME } from '../src/sessionLogConstants.js';
 
 const tempDirs: string[] = [];
 
@@ -44,17 +46,19 @@ async function sortedEntries(dir: string): Promise<string[]> {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(tempDirs.splice(0).map(dir => fs.promises.rm(dir, { recursive: true, force: true })));
 });
 
 describe('outputMaxSize', () => {
-  it('evicts the oldest evictable files and keeps session logs', async () => {
+  it('evicts the oldest evictable files and keeps session log folders', async () => {
     const outputDir = await createOutputDir();
     const baseTime = Date.now() - 10_000;
 
     for (let i = 0; i < 5; i++)
       await writeSizedFile(path.join(outputDir, `file-${i}.bin`), 1_000, baseTime + i);
-    await writeSizedFile(path.join(outputDir, 'session-1', 'session.md'), 1_000, baseTime - 1);
+    await writeSizedFile(path.join(outputDir, 'session-1', SESSION_LOG_FILE_NAME), 1_000, baseTime - 1);
+    await writeSizedFile(path.join(outputDir, 'session-1', '001.snapshot.yml'), 1_000, baseTime - 1);
 
     const config = await resolveConfig({ outputDir, outputMaxSize: 3_000 });
 
@@ -66,7 +70,8 @@ describe('outputMaxSize', () => {
       'file-4.bin',
       'session-1',
     ]);
-    await expect(fileExists(path.join(outputDir, 'session-1', 'session.md'))).resolves.toBe(true);
+    await expect(fileExists(path.join(outputDir, 'session-1', SESSION_LOG_FILE_NAME))).resolves.toBe(true);
+    await expect(fileExists(path.join(outputDir, 'session-1', '001.snapshot.yml'))).resolves.toBe(true);
   });
 
   it('evicts an oversize previous artifact before returning the next path', async () => {
@@ -80,5 +85,59 @@ describe('outputMaxSize', () => {
     await writeSizedFile(secondFile, 1_000, Date.now());
 
     await expect(sortedEntries(outputDir)).resolves.toEqual(['page-2.png']);
+  });
+
+  it('rejects invalid outputMaxSize values from config and CLI/env sources', async () => {
+    await expect(resolveConfig({ outputMaxSize: -1 })).rejects.toThrow('outputMaxSize must be a non-negative number');
+    await expect(resolveCLIConfig({ outputMaxSize: Number.NaN })).rejects.toThrow('outputMaxSize must be a non-negative number');
+
+    vi.stubEnv('PLAYWRIGHT_MCP_OUTPUT_MAX_SIZE', 'not-a-number');
+    await expect(resolveCLIConfig({})).rejects.toThrow('outputMaxSize must be a non-negative number');
+  });
+
+  it('uses the stable temp output root when evicting fallback output', async () => {
+    const tempRoot = await createOutputDir();
+    vi.stubEnv('TMPDIR', tempRoot);
+    const outputRoot = path.join(tempRoot, 'playwright-mcp-output');
+    const baseTime = Date.now() - 10_000;
+
+    await writeSizedFile(path.join(outputRoot, 'old-1', 'artifact.bin'), 1_000, baseTime);
+    await writeSizedFile(path.join(outputRoot, 'old-2', 'artifact.bin'), 1_000, baseTime + 1);
+
+    const config = await resolveConfig({ outputMaxSize: 500 });
+    const nextFile = await outputFile(config, undefined, 'next.bin');
+
+    expect(nextFile.startsWith(outputRoot + path.sep)).toBe(true);
+    await expect(fileExists(path.join(outputRoot, 'old-1', 'artifact.bin'))).resolves.toBe(false);
+    await expect(fileExists(path.join(outputRoot, 'old-2', 'artifact.bin'))).resolves.toBe(false);
+  });
+
+  it('does not evict artifacts while a tool is still producing its response', async () => {
+    const outputDir = await createOutputDir();
+    const config = await resolveConfig({ outputDir, outputMaxSize: 100 });
+    const context = new Context({
+      tools: [],
+      config,
+      browserContextFactory: {} as any,
+      sessionLog: undefined,
+      clientInfo: { name: 'test', version: '1.0.0', rootPath: undefined },
+    });
+
+    try {
+      context.setRunningTool('test_tool');
+      const firstFile = await context.outputFile('issue-screenshot.png');
+      await writeSizedFile(firstFile, 1_000, Date.now() - 1_000);
+
+      context.setRunningTool('overlapping_tool');
+      context.setRunningTool(undefined);
+      const secondFile = await context.outputFile('report.json');
+      await writeSizedFile(secondFile, 1_000, Date.now());
+
+      await expect(fileExists(firstFile)).resolves.toBe(true);
+      await expect(fileExists(secondFile)).resolves.toBe(true);
+    } finally {
+      context.setRunningTool(undefined);
+      await context.dispose();
+    }
   });
 });

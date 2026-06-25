@@ -20,6 +20,7 @@ import path from 'node:path';
 import type { BrowserContextOptions, LaunchOptions } from 'playwright';
 import { devices } from 'playwright';
 import { sanitizeForFilePath } from './utils/fileUtils.js';
+import { SESSION_LOG_FILE_NAME } from './sessionLogConstants.js';
 
 import type { Config, ToolCapability } from '../config.js';
 
@@ -274,38 +275,126 @@ async function loadConfig(configFile: string | undefined): Promise<Config> {
   }
 }
 
-export async function outputFile(config: FullConfig, rootPath: string | undefined, name: string): Promise<string> {
-  const outputDir = config.outputDir
-        ?? (rootPath ? path.join(rootPath, '.playwright-mcp') : undefined)
-        ?? path.join(os.tmpdir(), 'playwright-mcp-output', sanitizeForFilePath(new Date().toISOString()));
+type OutputFileOptions = {
+  evict?: boolean;
+};
+
+export async function outputFile(config: FullConfig, rootPath: string | undefined, name: string, options: OutputFileOptions = {}): Promise<string> {
+  const outputDir = outputDirectory(config, rootPath);
+  const evictionDir = outputEvictionDirectory(config, rootPath);
 
   await fs.promises.mkdir(outputDir, { recursive: true });
-  await evictOldOutputFiles(outputDir, config.outputMaxSize);
+  if (options.evict !== false)
+    await evictOldOutputFiles(evictionDir, config.outputMaxSize);
   const fileName = sanitizeForFilePath(name);
   return path.join(outputDir, fileName);
 }
 
+export async function evictOutputFiles(config: FullConfig, rootPath: string | undefined): Promise<void> {
+  const outputDir = outputEvictionDirectory(config, rootPath);
+  await fs.promises.mkdir(outputDir, { recursive: true });
+  await evictOldOutputFiles(outputDir, config.outputMaxSize);
+}
+
+function outputDirectory(config: FullConfig, rootPath: string | undefined): string {
+  return config.outputDir
+    ?? (rootPath ? path.join(rootPath, '.playwright-mcp') : undefined)
+    ?? path.join(defaultTempOutputDirectory(), sanitizeForFilePath(new Date().toISOString()));
+}
+
+function outputEvictionDirectory(config: FullConfig, rootPath: string | undefined): string {
+  return config.outputDir
+    ?? (rootPath ? path.join(rootPath, '.playwright-mcp') : undefined)
+    ?? defaultTempOutputDirectory();
+}
+
+function defaultTempOutputDirectory(): string {
+  return path.join(os.tmpdir(), 'playwright-mcp-output');
+}
+
 async function evictOldOutputFiles(outputDir: string, maxSize: number | undefined) {
-  if (maxSize === undefined || maxSize < 0 || Number.isNaN(maxSize))
+  const limit = validateOutputMaxSize(maxSize);
+  if (limit === undefined)
     return;
 
-  const dirents = await fs.promises.readdir(outputDir, { recursive: true, withFileTypes: true });
-  const files = await Promise.all(dirents
-      .filter(dirent => dirent.isFile() && dirent.name !== 'session.md')
-      .map(async dirent => {
-        const filePath = path.join(dirent.parentPath, dirent.name);
-        const { size, mtimeMs } = await fs.promises.stat(filePath);
-        return { filePath, size, mtimeMs };
-      }));
+  const protectedDirs = new Set<string>();
+  const files = await collectOutputFiles(outputDir, protectedDirs);
+  const evictableFiles = files.filter(file => !hasProtectedAncestor(file.filePath, protectedDirs));
 
-  let totalSize = files.reduce((total, file) => total + file.size, 0);
-  files.sort((a, b) => a.mtimeMs - b.mtimeMs || a.filePath.localeCompare(b.filePath));
-  for (const file of files) {
-    if (totalSize <= maxSize)
+  let totalSize = evictableFiles.reduce((total, file) => total + file.size, 0);
+  evictableFiles.sort((a, b) => a.mtimeMs - b.mtimeMs || a.filePath.localeCompare(b.filePath));
+  for (const file of evictableFiles) {
+    if (totalSize <= limit)
       return;
     await fs.promises.rm(file.filePath, { force: true });
     totalSize -= file.size;
   }
+}
+
+type OutputFileEntry = {
+  filePath: string;
+  size: number;
+  mtimeMs: number;
+};
+
+async function collectOutputFiles(outputDir: string, protectedDirs: Set<string>): Promise<OutputFileEntry[]> {
+  const entries: OutputFileEntry[] = [];
+  let dirents: fs.Dirent[];
+  try {
+    dirents = await fs.promises.readdir(outputDir, { withFileTypes: true });
+  } catch (error) {
+    if (isFileNotFoundError(error))
+      return entries;
+    throw error;
+  }
+
+  await Promise.all(dirents.map(async dirent => {
+    const filePath = path.join(outputDir, dirent.name);
+    if (dirent.isDirectory()) {
+      entries.push(...await collectOutputFiles(filePath, protectedDirs));
+      return;
+    }
+    if (!dirent.isFile())
+      return;
+    if (dirent.name === SESSION_LOG_FILE_NAME)
+      protectedDirs.add(outputDir);
+    let size: number;
+    let mtimeMs: number;
+    try {
+      ({ size, mtimeMs } = await fs.promises.stat(filePath));
+    } catch (error) {
+      if (isFileNotFoundError(error))
+        return;
+      throw error;
+    }
+    entries.push({ filePath, size, mtimeMs });
+  }));
+
+  return entries;
+}
+
+function isFileNotFoundError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
+}
+
+function hasProtectedAncestor(filePath: string, protectedDirs: Set<string>): boolean {
+  let directory = path.dirname(filePath);
+  while (true) {
+    if (protectedDirs.has(directory))
+      return true;
+    const parent = path.dirname(directory);
+    if (parent === directory)
+      return false;
+    directory = parent;
+  }
+}
+
+function validateOutputMaxSize(outputMaxSize: number | undefined): number | undefined {
+  if (outputMaxSize === undefined)
+    return undefined;
+  if (!Number.isFinite(outputMaxSize) || outputMaxSize < 0)
+    throw new Error('outputMaxSize must be a non-negative number');
+  return outputMaxSize;
 }
 
 function pickDefined<T extends object>(obj: T | undefined): Partial<T> {
@@ -334,9 +423,12 @@ function mergeConfig(base: FullConfig, overrides: Config): FullConfig {
   if (browser.browserName !== 'chromium' && browser.launchOptions)
     delete browser.launchOptions.channel;
 
+  const outputMaxSize = validateOutputMaxSize(overrides.outputMaxSize ?? base.outputMaxSize);
+
   return {
     ...pickDefined(base),
     ...pickDefined(overrides),
+    outputMaxSize,
     browser,
     network: {
       ...pickDefined(base.network),

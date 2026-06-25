@@ -204,7 +204,7 @@ Create a `config.json` file with the following options:
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
 - `outputDir`: Directory used for generated reports, screenshots, downloads, traces, and session logs
-- `outputMaxSize`: Maximum bytes of evictable output artifacts to keep; oldest files are removed first and session logs are preserved
+- `outputMaxSize`: Maximum bytes of old evictable output artifacts to keep; oldest files are removed before each tool run, while current tool outputs and session log folders are preserved
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--output-dir`, and `--output-max-size`.
 

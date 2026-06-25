@@ -80,8 +80,11 @@ export class BrowserServerBackend implements ServerBackend {
     }
     const context = this._context!;
     const response = new Response(context, name, parsedArguments, requestContext);
+    const shouldEvictOutputFiles = !context.isRunningTool();
     context.setRunningTool(name);
     try {
+      if (shouldEvictOutputFiles)
+        await context.evictOutputFiles();
       await tool.handle(context, parsedArguments, response);
       await response.finish();
       this._sessionLog?.logResponse(response);

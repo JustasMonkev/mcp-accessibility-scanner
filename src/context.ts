@@ -19,7 +19,7 @@ import type * as playwright from 'playwright';
 
 import { logUnhandledError } from './utils/log.js';
 import { Tab } from './tab.js';
-import { outputFile } from './config.js';
+import { evictOutputFiles, outputFile } from './config.js';
 
 import type { FullConfig } from './config.js';
 import type { Tool } from './tools/tool.js';
@@ -67,7 +67,7 @@ export class Context {
   private _clientInfo: ClientInfo;
 
   private _closeBrowserContextPromise: Promise<void> | undefined;
-  private _runningToolName: string | undefined;
+  private _runningToolNames: string[] = [];
   private _abortController = new AbortController();
 
   constructor(options: ContextOptions) {
@@ -132,7 +132,11 @@ export class Context {
   }
 
   async outputFile(name: string): Promise<string> {
-    return outputFile(this.config, this._clientInfo.rootPath, name);
+    return outputFile(this.config, this._clientInfo.rootPath, name, { evict: !this.isRunningTool() });
+  }
+
+  async evictOutputFiles(): Promise<void> {
+    await evictOutputFiles(this.config, this._clientInfo.rootPath);
   }
 
   private _onPageCreated(page: playwright.Page) {
@@ -162,11 +166,14 @@ export class Context {
   }
 
   isRunningTool() {
-    return this._runningToolName !== undefined;
+    return this._runningToolNames.length > 0;
   }
 
   setRunningTool(name: string | undefined) {
-    this._runningToolName = name;
+    if (name !== undefined)
+      this._runningToolNames.push(name);
+    else
+      this._runningToolNames.pop();
   }
 
   private async _closeBrowserContextImpl() {
@@ -219,7 +226,7 @@ export class Context {
     if (this._closeBrowserContextPromise)
       throw new Error('Another browser context is being closed.');
     // TODO: move to the browser context factory to make it based on isolation mode.
-    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningToolName);
+    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningToolNames.at(-1));
     const { browserContext } = result;
     await this._setupRequestInterception(browserContext);
     if (this.sessionLog)
