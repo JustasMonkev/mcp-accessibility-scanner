@@ -146,6 +146,16 @@ describe('Utils', () => {
       expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data%3Atext%2Fhtml%3Bbase64%2C...&id=123');
     });
 
+    it('should truncate data URLs inside encoded wrappers', () => {
+      const payload = encodeURIComponent(Buffer.from('<p>hello</p>').toString('base64'));
+      const text = `https://api.example/upload?src=%22data%3Atext%2Fhtml%3Bbase64%2C${payload}%22&id=123`;
+
+      const result = truncateDataUrls(text);
+
+      expect(result).toBe('https://api.example/upload?src=%22data%3Atext%2Fhtml%3Bbase64%2C...%22&id=123');
+      expect(result).not.toContain(payload);
+    });
+
     it('should preserve suffix text after unquoted raw data URLs', () => {
       const text = '[LOG] data:image/svg+xml,<svg></svg> done @ app.js:7';
 
@@ -180,6 +190,23 @@ describe('Utils', () => {
       expect(result).not.toContain('</text>');
     });
 
+    it('should keep source-like colons inside raw text payloads redacted', () => {
+      const text = '[LOG] data:text/plain,secret:1<large-tail> done @ app.js:7';
+
+      const result = truncateDataUrls(text);
+
+      expect(result).toBe('[LOG] data:text/plain,... done @ app.js:7');
+      expect(result).not.toContain('secret');
+      expect(result).not.toContain('large-tail');
+    });
+
+    it('should truncate data URLs with escaped spaces in metadata', () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      const text = `data:text/plain;name=hello%20world;base64,${payload}`;
+
+      expect(truncateDataUrl(text)).toBe('data:text/plain;name=hello%20world;base64,...');
+    });
+
     it('should cap oversized data URL metadata before the ellipsis', () => {
       const largeParameter = 'a'.repeat(1024);
 
@@ -201,6 +228,12 @@ describe('Utils', () => {
       expect(result).toBe('- link "data:text/html,..." [ref=e1]');
       expect(result).not.toContain('&b=2');
       expect(result).not.toContain('link</a>');
+    });
+
+    it('should preserve wrappers around raw data URLs', () => {
+      const text = '- img "url(data:image/svg+xml,<svg></svg>)" [ref=e1]';
+
+      expect(truncateDataUrls(text)).toBe('- img "url(data:image/svg+xml,...)" [ref=e1]');
     });
   });
 });

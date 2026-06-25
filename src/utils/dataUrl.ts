@@ -69,7 +69,7 @@ type DataUrlMatch = {
 function findDataUrlStart(text: string, lowerText: string, offset: number): number {
   let start = nextDataUrlPrefix(lowerText, offset);
   while (start !== -1) {
-    if (start === 0 || !/[A-Za-z0-9_-]/.test(text[start - 1]))
+    if (isDataUrlStartBoundary(text, start))
       return start;
     start = nextDataUrlPrefix(lowerText, start + dataUrlPrefixLengthAt(lowerText, start));
   }
@@ -150,7 +150,7 @@ function isValidDataUrlMetadata(metadata: string, isEncoded: boolean): boolean {
   if (!metadata)
     return true;
   const decodedMetadata = decodeDataUrlMetadata(metadata, isEncoded);
-  if (!decodedMetadata || /[\s"'<>()[\]{}]/.test(decodedMetadata))
+  if (!decodedMetadata || /[\r\n]/.test(decodedMetadata) || /[\s"'<>()[\]{}]/.test(metadata))
     return false;
   if (decodedMetadata.startsWith(';'))
     return true;
@@ -179,6 +179,8 @@ function findDataUrlEnd(text: string, match: DataUrlMatch): number {
     if (match.isEmbeddedQueryValue && char === '&' && isQueryParamBoundary(text, match, end))
       break;
     if (match.isBase64 && char === '&')
+      break;
+    if (match.isBase64 && isEncodedPayloadTerminator(text, end))
       break;
     if (match.isBase64 && isBase64PayloadTerminator(char))
       break;
@@ -214,13 +216,17 @@ function isRawPayloadCompleteBefore(text: string, payloadStart: number, end: num
   let position = end - 1;
   while (position >= payloadStart && /\s/.test(text[position]))
     position--;
-  return text[position] === '>' || (position >= 2 && startsWithIgnoreCase(text, position - 2, '%3e'));
+  return text[position] === '>' || (position >= 3 && startsWithIgnoreCase(text, position - 3, '%3e'));
 }
 
 function isRawPayloadSuffixBoundary(text: string, match: DataUrlMatch, position: number): boolean {
   const char = text[position];
   if (/\s/.test(char))
     return !isRawMarkupPayload(text, match.payloadStart) || isRawPayloadCompleteBefore(text, match.payloadStart, position);
+  if (isRawPayloadWrapperBoundary(text, match, position))
+    return true;
+  if (isEncodedPayloadTerminator(text, position))
+    return isRawPayloadCompleteBefore(text, match.payloadStart, position);
   if (char !== ':')
     return false;
   if (isRawMarkupPayload(text, match.payloadStart) && !isRawPayloadCompleteBefore(text, match.payloadStart, position))
@@ -237,7 +243,12 @@ function isRawMarkupPayload(text: string, payloadStart: number): boolean {
 }
 
 function looksLikeSourceLocationSuffix(text: string, colon: number): boolean {
-  return /\d/.test(text[colon + 1] || '');
+  let position = colon + 1;
+  if (!/\d/.test(text[position] || ''))
+    return false;
+  while (position < text.length && /\d/.test(text[position]))
+    position++;
+  return position === text.length || isLineBreak(text[position]) || /\s/.test(text[position]);
 }
 
 function looksLikeQueryParam(text: string, offset: number): boolean {
@@ -259,6 +270,35 @@ function startsWithEncodedComma(text: string, position: number): boolean {
 
 function containsPercentEncoding(text: string): boolean {
   return /%[0-9a-f]{2}/i.test(text);
+}
+
+function isDataUrlStartBoundary(text: string, start: number): boolean {
+  if (start === 0)
+    return true;
+  if (!/[A-Za-z0-9_-]/.test(text[start - 1]))
+    return true;
+
+  const encodedChar = percentEncodedCharBefore(text, start);
+  return !!encodedChar && !/[A-Za-z0-9_-]/.test(encodedChar);
+}
+
+function isRawPayloadWrapperBoundary(text: string, match: DataUrlMatch, position: number): boolean {
+  return [')', ']', '}'].includes(text[position]) && isRawPayloadCompleteBefore(text, match.payloadStart, position);
+}
+
+function isEncodedPayloadTerminator(text: string, position: number): boolean {
+  const encodedChar = percentEncodedCharAt(text, position);
+  return !!encodedChar && ['"', '\'', ')', ']', '}', '`'].includes(encodedChar);
+}
+
+function percentEncodedCharBefore(text: string, position: number): string | undefined {
+  return position >= 3 ? percentEncodedCharAt(text, position - 3) : undefined;
+}
+
+function percentEncodedCharAt(text: string, position: number): string | undefined {
+  if (position < 0 || text[position] !== '%' || !/^[0-9a-f]{2}$/i.test(text.slice(position + 1, position + 3)))
+    return;
+  return String.fromCharCode(Number.parseInt(text.slice(position + 1, position + 3), 16));
 }
 
 function startsWithIgnoreCase(text: string, position: number, value: string): boolean {
