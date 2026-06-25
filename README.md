@@ -284,6 +284,7 @@ Go forward to the next page.
 
 #### `browser_snapshot`
 Capture accessibility snapshot of the current page (better than screenshot for analysis).
+Large `data:` URL payloads in snapshot output are truncated to their media type prefix.
 
 #### `browser_click`
 Perform click on a web page element.
@@ -356,6 +357,7 @@ Returns all console messages from the page.
 
 #### `browser_network_requests`
 Returns all network requests since loading the page.
+Large `data:` URL payloads in request URLs are truncated to their media type prefix.
 
 ### Utility Tools
 

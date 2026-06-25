@@ -246,6 +246,17 @@ describe('Tab', () => {
       expect(snapshot.ariaSnapshot).toContain('Page snapshot unavailable');
       expect(snapshot.ariaSnapshot).toContain('capturing page accessibility snapshot');
     });
+
+    it('truncates data URL payloads in captured accessibility snapshots', async () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- link "Example" [ref=e1]:\n  - /url: data:text/html;base64,${payload}`);
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const snapshot = await tab.captureSnapshot();
+
+      expect(snapshot.ariaSnapshot).toContain('data:text/html;base64,...');
+      expect(snapshot.ariaSnapshot).not.toContain(payload);
+    });
   });
 
   describe('refLocator', () => {

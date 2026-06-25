@@ -389,6 +389,31 @@ describe('Response', () => {
       expect(textContent.text).toContain('Example Page');
     });
 
+    it('should truncate data URL payloads in rendered snapshot output', async () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      const dataUrl = `data:text/html;base64,${payload}`;
+      mockTab.page = { url: () => dataUrl } as any;
+      mockTab.captureSnapshot = vi.fn().mockResolvedValue({
+        url: dataUrl,
+        title: 'Data URL Page',
+        ariaSnapshot: `- link "Example" [ref=e1]:\n  - /url: ${dataUrl}`,
+        modalStates: [],
+        consoleMessages: [
+          { type: 'log', text: 'Test message', toString: () => `[LOG] Test @ ${dataUrl}:1` }
+        ],
+        downloads: [],
+      });
+
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeSnapshot();
+      await response.finish();
+      const serialized = response.serialize();
+      const textContent = expectTextContent(serialized.content[0]);
+
+      expect(textContent.text).toContain('data:text/html;base64,...');
+      expect(textContent.text).not.toContain(payload);
+    });
+
     it('should include console messages in snapshot', async () => {
       mockTab.captureSnapshot = vi.fn().mockResolvedValue({
         url: 'https://example.com',

@@ -19,6 +19,7 @@ import type * as playwright from 'playwright';
 import { callOnPageNoTrace, waitForCompletion } from './tools/utils.js';
 import { logUnhandledError } from './utils/log.js';
 import { ManualPromise } from './mcp/manualPromise.js';
+import { truncateDataUrls } from './utils/dataUrl.js';
 import type { ModalState } from './tools/tool.js';
 
 import type { Context } from './context.js';
@@ -225,7 +226,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       tabSnapshot = {
         url: this.page.url(),
         title,
-        ariaSnapshot: snapshot,
+        ariaSnapshot: truncateDataUrls(snapshot),
         modalStates: [],
         consoleMessages: [],
         downloads: this._downloads,

@@ -103,6 +103,18 @@ describe('Network Tools', () => {
 
       expect(response.result()).toBe('');
     });
+
+    it('should truncate data URL payloads', async () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      const mockRequests = new Map();
+      mockRequests.set({ url: () => `data:text/html;base64,${payload}`, method: () => 'GET' }, null);
+      mockTab.requests = vi.fn().mockReturnValue(mockRequests);
+
+      await networkTool.handle(mockContext, {}, response);
+
+      expect(response.result()).toContain('data:text/html;base64,...');
+      expect(response.result()).not.toContain(payload);
+    });
   });
 
   describe('Tool capabilities', () => {
