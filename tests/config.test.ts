@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-import { describe, it, expect } from 'vitest';
-import { resolveConfig, outputFile } from '../src/config.js';
+import { afterEach, describe, it, expect } from 'vitest';
+import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders } from '../src/config.js';
 import type { Config } from '../config.js';
 
 describe('Config', () => {
@@ -95,6 +95,105 @@ describe('Config', () => {
       expect(config.browser.browserName).toBe('webkit');
       expect(config.timeouts.navigationTimeout).toBe(60000);
       expect(config.saveTrace).toBe(false);
+    });
+  });
+
+  describe('parseCdpHeaders', () => {
+    it('parses "Name: Value" entries, keeping colons inside the value', () => {
+      expect(parseCdpHeaders(['X-Forwarded-Proto: value:with:colons'])).toEqual({
+        'X-Forwarded-Proto': 'value:with:colons',
+      });
+    });
+
+    it('parses multiple header entries', () => {
+      expect(parseCdpHeaders(['Authorization: Bearer abc', 'X-Env: prod'])).toEqual({
+        'Authorization': 'Bearer abc',
+        'X-Env': 'prod',
+      });
+    });
+
+    it('returns undefined for empty input', () => {
+      expect(parseCdpHeaders(undefined)).toBeUndefined();
+      expect(parseCdpHeaders([])).toBeUndefined();
+    });
+
+    it('throws on entries without a colon separator', () => {
+      expect(() => parseCdpHeaders(['NoColonHere'])).toThrow(/expected "Name: Value" format/);
+    });
+
+    it('throws when the header name is empty', () => {
+      expect(() => parseCdpHeaders([': value'])).toThrow(/header name is empty/);
+    });
+  });
+
+  describe('resolveCLIConfig CDP headers', () => {
+    const envKeys = ['PLAYWRIGHT_MCP_CDP_HEADERS', 'PLAYWRIGHT_MCP_CDP_TIMEOUT'];
+    const saved: Record<string, string | undefined> = {};
+    for (const key of envKeys)
+      saved[key] = process.env[key];
+
+    afterEach(() => {
+      for (const key of envKeys) {
+        if (saved[key] === undefined)
+          delete process.env[key];
+        else
+          process.env[key] = saved[key];
+      }
+    });
+
+    it('parses --cdp-header CLI options into a header map', async () => {
+      const config = await resolveCLIConfig({
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        cdpHeader: ['Authorization: Bearer token:with:colons'],
+        cdpTimeout: 4321,
+      });
+
+      expect(config.browser.cdpHeaders).toEqual({ Authorization: 'Bearer token:with:colons' });
+      expect(config.browser.cdpTimeout).toBe(4321);
+    });
+
+    it('reads CDP headers and timeout from environment variables', async () => {
+      delete process.env.PLAYWRIGHT_MCP_CDP_HEADERS;
+      delete process.env.PLAYWRIGHT_MCP_CDP_TIMEOUT;
+      process.env.PLAYWRIGHT_MCP_CDP_HEADERS = 'X-Forwarded-Proto: value:with:colons';
+      process.env.PLAYWRIGHT_MCP_CDP_TIMEOUT = '9000';
+
+      const config = await resolveCLIConfig({ cdpEndpoint: 'http://127.0.0.1:9222' });
+
+      expect(config.browser.cdpHeaders).toEqual({ 'X-Forwarded-Proto': 'value:with:colons' });
+      expect(config.browser.cdpTimeout).toBe(9000);
+    });
+
+    it('preserves commas inside an environment header value', async () => {
+      delete process.env.PLAYWRIGHT_MCP_CDP_TIMEOUT;
+      process.env.PLAYWRIGHT_MCP_CDP_HEADERS = 'X-Forwarded-For: 203.0.113.1, 10.0.0.1';
+
+      const config = await resolveCLIConfig({ cdpEndpoint: 'http://127.0.0.1:9222' });
+
+      expect(config.browser.cdpHeaders).toEqual({ 'X-Forwarded-For': '203.0.113.1, 10.0.0.1' });
+    });
+
+    it('parses newline-separated environment headers', async () => {
+      delete process.env.PLAYWRIGHT_MCP_CDP_TIMEOUT;
+      process.env.PLAYWRIGHT_MCP_CDP_HEADERS = 'Authorization: Bearer abc\nX-Env: prod\n';
+
+      const config = await resolveCLIConfig({ cdpEndpoint: 'http://127.0.0.1:9222' });
+
+      expect(config.browser.cdpHeaders).toEqual({
+        'Authorization': 'Bearer abc',
+        'X-Env': 'prod',
+      });
+    });
+
+    it('lets --cdp-header override the environment value', async () => {
+      process.env.PLAYWRIGHT_MCP_CDP_HEADERS = 'X-Env: from-env';
+
+      const config = await resolveCLIConfig({
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        cdpHeader: ['X-Cli: from-cli'],
+      });
+
+      expect(config.browser.cdpHeaders).toEqual({ 'X-Cli': 'from-cli' });
     });
   });
 

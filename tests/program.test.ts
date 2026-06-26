@@ -80,6 +80,15 @@ describe('CLI command dispatch contract', () => {
     });
   });
 
+  describe('global --cdp-header option', () => {
+    it('does not swallow a following subcommand as a header value', () => {
+      // With a variadic option this consumes "list-tools" as a second header
+      // and aborts; the repeatable single-value option leaves it as the command.
+      const output = runCLI('--cdp-header X-Test:1 list-tools');
+      expect(output).toContain('browser_navigate');
+    });
+  });
+
   describe('subcommand --help flags', () => {
     it('list-tools accepts --help', () => {
       const output = runCLI('list-tools --help');

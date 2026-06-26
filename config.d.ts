@@ -77,6 +77,18 @@ export type Config = {
     cdpEndpoint?: string;
 
     /**
+     * Additional HTTP headers to send with the CDP connect request. Useful for
+     * endpoints that require header-based authentication (for example
+     * `{ "Authorization": "Bearer <token>" }`).
+     */
+    cdpHeaders?: Record<string, string>;
+
+    /**
+     * Timeout in milliseconds for connecting to the CDP endpoint. Defaults to 30000 (30 seconds).
+     */
+    cdpTimeout?: number;
+
+    /**
      * Launch a Chromium-based desktop app with CDP enabled and attach to it.
      */
     cdpLaunch?: {
