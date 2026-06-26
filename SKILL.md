@@ -60,6 +60,8 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--storage-state <path>` | Storage state file for isolated sessions |
 | `--executable-path <path>` | Custom browser executable |
 | `--cdp-endpoint <endpoint>` | Connect to existing CDP endpoint |
+| `--cdp-header <headers...>` | CDP connect header(s), e.g. `"Authorization: Bearer <token>"`. Repeat for multiple |
+| `--cdp-timeout <ms>` | Timeout for connecting to the CDP endpoint (default 30000) |
 | `--cdp-launch-command <command>` | Launch a Chromium-family desktop app with CDP enabled |
 | `--cdp-launch-args <args>` | Comma-separated launch arguments. Use `{port}` placeholder for the debug port |
 | `--cdp-launch-cwd <path>` | Working directory for the launched app |

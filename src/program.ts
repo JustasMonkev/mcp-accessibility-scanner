@@ -73,6 +73,8 @@ function configureBaseProgram() {
       .option('--cdp-launch-port <port>', 'port to use for the launched app CDP endpoint.', parseInt)
       .option('--cdp-launch-startup-timeout <ms>', 'maximum time in milliseconds to wait for a launched app CDP endpoint.', parseInt)
       .option('--cdp-endpoint <endpoint>', 'CDP endpoint to connect to.')
+      .option('--cdp-header <headers...>', 'CDP header to send with the connect request, in "Name: Value" form (for example "Authorization: Bearer <token>"). Repeat the flag to send multiple headers.')
+      .option('--cdp-timeout <ms>', 'maximum time in milliseconds to wait when connecting to the CDP endpoint. Defaults to 30000ms (30 seconds).', parseInt)
       .option('--config <path>', 'path to the configuration file.')
       .option('--device <device>', 'device to emulate, for example: "iPhone 15"')
       .option('--executable-path <path>', 'path to the browser executable.')

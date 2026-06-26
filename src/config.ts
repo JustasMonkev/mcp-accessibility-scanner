@@ -35,6 +35,8 @@ export type CLIOptions = {
     cdpLaunchPort?: number;
     cdpLaunchStartupTimeout?: number;
     cdpEndpoint?: string;
+    cdpHeader?: string[];
+    cdpTimeout?: number;
     config?: string;
     device?: string;
     executablePath?: string;
@@ -202,6 +204,8 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
       contextOptions,
       cdpLaunch,
       cdpEndpoint: cliOptions.cdpEndpoint,
+      cdpHeaders: parseCdpHeaders(cliOptions.cdpHeader),
+      cdpTimeout: cliOptions.cdpTimeout,
     },
     server: {
       port: cliOptions.port,
@@ -236,6 +240,8 @@ function configFromEnv(): Config {
   options.cdpLaunchPort = envToNumber(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_PORT);
   options.cdpLaunchStartupTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT);
   options.cdpEndpoint = envToString(process.env.PLAYWRIGHT_MCP_CDP_ENDPOINT);
+  options.cdpHeader = commaSeparatedList(process.env.PLAYWRIGHT_MCP_CDP_HEADERS);
+  options.cdpTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_CDP_TIMEOUT);
   options.config = envToString(process.env.PLAYWRIGHT_MCP_CONFIG);
   options.device = envToString(process.env.PLAYWRIGHT_MCP_DEVICE);
   options.executablePath = envToString(process.env.PLAYWRIGHT_MCP_EXECUTABLE_PATH);
@@ -336,6 +342,25 @@ export function commaSeparatedList(value: string | undefined): string[] | undefi
   if (!value)
     return undefined;
   return value.split(',').map(v => v.trim());
+}
+
+// Parses `Name: Value` header entries (e.g. from `--cdp-header` or
+// PLAYWRIGHT_MCP_CDP_HEADERS) into a header map. Only the first colon is treated
+// as the name/value separator so colons inside the value are preserved.
+export function parseCdpHeaders(entries: string[] | undefined): Record<string, string> | undefined {
+  if (!entries || !entries.length)
+    return undefined;
+  const headers: Record<string, string> = {};
+  for (const entry of entries) {
+    const separator = entry.indexOf(':');
+    if (separator === -1)
+      throw new Error(`Invalid CDP header "${entry}", expected "Name: Value" format.`);
+    const name = entry.slice(0, separator).trim();
+    if (!name)
+      throw new Error(`Invalid CDP header "${entry}", header name is empty.`);
+    headers[name] = entry.slice(separator + 1).trim();
+  }
+  return headers;
 }
 
 function envToNumber(value: string | undefined): number | undefined {

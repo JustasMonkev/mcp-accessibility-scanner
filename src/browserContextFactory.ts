@@ -140,8 +140,11 @@ class CdpContextFactory extends BaseContextFactory {
     };
   }
 
-  protected override async _doObtainBrowser(): Promise<playwright.Browser> {
-    return playwright.chromium.connectOverCDP(this.config.browser.cdpEndpoint!);
+  protected override async _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser> {
+    return playwright.chromium.connectOverCDP(this.config.browser.cdpEndpoint!, {
+      headers: cdpConnectHeaders(clientInfo, this.config.browser),
+      timeout: this.config.browser.cdpTimeout,
+    });
   }
 
   protected override async _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext> {
@@ -205,7 +208,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
 
   private async _waitForBrowser(endpoint: string, clientInfo: ClientInfo, childProcess: ReturnType<typeof spawn>, startupTimeoutMs: number): Promise<playwright.Browser> {
     const deadline = Date.now() + startupTimeoutMs;
-    const connectOptions = cdpConnectOptions(clientInfo);
+    const connectOptions: playwright.ConnectOverCDPOptions = { headers: cdpConnectHeaders(clientInfo, this.config.browser) };
     for (;;) {
       try {
         return await playwright.chromium.connectOverCDP(endpoint, connectOptions);
@@ -291,9 +294,13 @@ async function injectCdpPort(browserConfig: FullConfig['browser']) {
     (browserConfig.launchOptions as any).cdpPort = await findFreePort();
 }
 
-function cdpConnectOptions(clientInfo: ClientInfo): playwright.ConnectOverCDPOptions | undefined {
+function cdpConnectHeaders(clientInfo: ClientInfo, browserConfig: FullConfig['browser']): Record<string, string> | undefined {
+  const headers: Record<string, string> = {};
   const userAgent = [clientInfo.name, clientInfo.version].filter(Boolean).join('/');
-  return userAgent ? { headers: { 'User-Agent': userAgent } } : undefined;
+  if (userAgent)
+    headers['User-Agent'] = userAgent;
+  Object.assign(headers, browserConfig.cdpHeaders);
+  return Object.keys(headers).length ? headers : undefined;
 }
 
 async function findFreePort(): Promise<number> {
