@@ -24,6 +24,7 @@ import type * as playwright from 'playwright';
 
 const screenshotSchema = z.object({
   type: z.enum(['png', 'jpeg']).default('png').describe('Image format for the screenshot. Default is png.'),
+  scale: z.enum(['css', 'device']).default('css').describe(`Image resolution scale. 'css' produces a screenshot sized in CSS pixels (smaller, consistent across devices). 'device' produces a high-resolution screenshot using device pixels (larger, accounts for the device pixel ratio). Default is css.`),
   filename: z.string().optional().describe('File name to save the screenshot to. Defaults to `page-{timestamp}.{png|jpeg}` if not specified.'),
   element: z.string().optional().describe('Human-readable element description used to obtain permission to screenshot the element. If not provided, the screenshot will be taken of viewport. If element is provided, ref must be provided too.'),
   ref: z.string().optional().describe('Exact target element reference from the page snapshot. If not provided, the screenshot will be taken of viewport. If ref is provided, element must be provided too.'),
@@ -56,7 +57,7 @@ const screenshot = defineTabTool({
     const options: playwright.PageScreenshotOptions = {
       type: fileType,
       quality: fileType === 'png' ? undefined : 90,
-      scale: 'css',
+      scale: params.scale,
       path: fileName,
       ...(params.fullPage !== undefined && { fullPage: params.fullPage })
     };
