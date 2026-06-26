@@ -131,6 +131,38 @@ describe('browserContextFactory', () => {
     });
   });
 
+  it('forwards the configured CDP timeout on the launch path', async () => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    const childProcess = createMockChildProcess();
+
+    spawnMock.mockReturnValue(childProcess);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpTimeout: 4321,
+        cdpHeaders: { Authorization: 'Bearer abc' },
+        cdpLaunch: {
+          command: 'open',
+          port: 9222,
+          startupTimeoutMs: 500,
+        },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(connectOverCDP).toHaveBeenLastCalledWith('http://127.0.0.1:9222', {
+      headers: {
+        'User-Agent': 'vitest/1.0.0',
+        'Authorization': 'Bearer abc',
+      },
+      timeout: 4321,
+    });
+  });
+
   it('launches a desktop app, retries CDP attach, and terminates the child on close', async () => {
     const browserContext = createMockBrowserContext();
     const browser = createMockBrowser(browserContext);

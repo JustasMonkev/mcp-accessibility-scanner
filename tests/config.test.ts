@@ -164,6 +164,27 @@ describe('Config', () => {
       expect(config.browser.cdpTimeout).toBe(9000);
     });
 
+    it('preserves commas inside an environment header value', async () => {
+      delete process.env.PLAYWRIGHT_MCP_CDP_TIMEOUT;
+      process.env.PLAYWRIGHT_MCP_CDP_HEADERS = 'X-Forwarded-For: 203.0.113.1, 10.0.0.1';
+
+      const config = await resolveCLIConfig({ cdpEndpoint: 'http://127.0.0.1:9222' });
+
+      expect(config.browser.cdpHeaders).toEqual({ 'X-Forwarded-For': '203.0.113.1, 10.0.0.1' });
+    });
+
+    it('parses newline-separated environment headers', async () => {
+      delete process.env.PLAYWRIGHT_MCP_CDP_TIMEOUT;
+      process.env.PLAYWRIGHT_MCP_CDP_HEADERS = 'Authorization: Bearer abc\nX-Env: prod\n';
+
+      const config = await resolveCLIConfig({ cdpEndpoint: 'http://127.0.0.1:9222' });
+
+      expect(config.browser.cdpHeaders).toEqual({
+        'Authorization': 'Bearer abc',
+        'X-Env': 'prod',
+      });
+    });
+
     it('lets --cdp-header override the environment value', async () => {
       process.env.PLAYWRIGHT_MCP_CDP_HEADERS = 'X-Env: from-env';
 

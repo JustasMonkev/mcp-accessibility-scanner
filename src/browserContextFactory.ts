@@ -208,7 +208,10 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
 
   private async _waitForBrowser(endpoint: string, clientInfo: ClientInfo, childProcess: ReturnType<typeof spawn>, startupTimeoutMs: number): Promise<playwright.Browser> {
     const deadline = Date.now() + startupTimeoutMs;
-    const connectOptions: playwright.ConnectOverCDPOptions = { headers: cdpConnectHeaders(clientInfo, this.config.browser) };
+    const connectOptions: playwright.ConnectOverCDPOptions = {
+      headers: cdpConnectHeaders(clientInfo, this.config.browser),
+      timeout: this.config.browser.cdpTimeout,
+    };
     for (;;) {
       try {
         return await playwright.chromium.connectOverCDP(endpoint, connectOptions);
@@ -294,6 +297,11 @@ async function injectCdpPort(browserConfig: FullConfig['browser']) {
     (browserConfig.launchOptions as any).cdpPort = await findFreePort();
 }
 
+/**
+ * Builds the HTTP headers sent with a `connectOverCDP` request: the client
+ * User-Agent plus any user-configured `browser.cdpHeaders`. Returns undefined
+ * when there is nothing to send.
+ */
 function cdpConnectHeaders(clientInfo: ClientInfo, browserConfig: FullConfig['browser']): Record<string, string> | undefined {
   const headers: Record<string, string> = {};
   const userAgent = [clientInfo.name, clientInfo.version].filter(Boolean).join('/');
