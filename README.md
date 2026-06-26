@@ -198,6 +198,8 @@ Create a `config.json` file with the following options:
 - `browser.launchOptions.headless`: Run browser in headless mode (default: `true` on Linux without display, `false` otherwise)
 - `browser.launchOptions.channel`: Browser channel (`chrome`, `chrome-beta`, `msedge`, etc.)
 - `browser.cdpEndpoint`: Attach to an already-running Chromium-family app with CDP enabled
+- `browser.cdpHeaders`: Map of HTTP headers to send with the CDP connect request, e.g. `{ "Authorization": "Bearer <token>" }`, for endpoints that require header-based authentication
+- `browser.cdpTimeout`: Maximum time in milliseconds to wait when connecting to the CDP endpoint (default: `30000`)
 - `browser.cdpLaunch`: Launch a Chromium-family desktop app with CDP enabled, wait for the endpoint, and manage the child process lifecycle
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
@@ -206,7 +208,7 @@ Create a `config.json` file with the following options:
 - `outputDir`: Directory used for generated reports, screenshots, downloads, traces, and session logs
 - `outputMaxSize`: Maximum bytes of old evictable output artifacts to keep; oldest files are removed before each tool run, while current tool outputs and session log folders are preserved
 
-CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--output-dir`, and `--output-max-size`.
+CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), `--cdp-timeout`, `--output-dir`, and `--output-max-size`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
 #### HTTP Heartbeat
 
@@ -329,7 +331,8 @@ Evaluate a JavaScript expression on the page, or on a specific element when a `r
 
 #### `browser_take_screenshot`
 Take a screenshot of the current page.
-- Parameters: `filename` (optional), `type` (`png` or `jpeg`), `fullPage` (optional), `element`/`ref` pair (for element screenshots)
+- Parameters: `filename` (optional), `type` (`png` or `jpeg`), `scale` (`css` or `device`, default `css`), `fullPage` (optional), `element`/`ref` pair (for element screenshots)
+- `scale: device` captures a high-resolution screenshot using device pixels (accounts for the device pixel ratio); `scale: css` keeps the image sized in CSS pixels.
 
 #### `browser_pdf_save`
 Save page as PDF.
