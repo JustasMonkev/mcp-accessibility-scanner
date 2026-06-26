@@ -63,7 +63,9 @@ describe('outputMaxSize', () => {
     await writeSizedFile(path.join(outputDir, 'session-1', '001.snapshot.yml'), 1_000, baseTime - 1);
     setProtectedOutputDirsProvider(() => [path.join(outputDir, 'session-1')]);
 
-    const config = await resolveConfig({ outputDir, outputMaxSize: 3_000 });
+    // Limit 5 KB with the 2 KB session folder counted: only 3 KB of the five
+    // 1 KB files may remain, so the two oldest are evicted.
+    const config = await resolveConfig({ outputDir, outputMaxSize: 5_000 });
 
     await evictOutputFiles(config, undefined);
 
@@ -103,7 +105,9 @@ describe('outputMaxSize', () => {
     await writeSizedFile(path.join(outputDir, 'screenshot-2.png'), 1_000, baseTime + 2);
     setProtectedOutputDirsProvider(() => [path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}123`)]);
 
-    const config = await resolveConfig({ outputDir, outputMaxSize: 1_000 });
+    // Limit 2 KB with the 1 KB trace folder counted leaves room for one
+    // screenshot, so only the oldest screenshot is evicted.
+    const config = await resolveConfig({ outputDir, outputMaxSize: 2_000 });
 
     await evictOutputFiles(config, undefined);
 
@@ -177,6 +181,25 @@ describe('outputMaxSize', () => {
     await expect(fileExists(path.join(outputRoot, '2025-01-01T00-00-00', 'old.png'))).resolves.toBe(false);
   });
 
+  it('counts protected bytes toward the budget and still evicts what it can', async () => {
+    const outputDir = await createOutputDir();
+    const baseTime = Date.now() - 10_000;
+
+    const sessionDir = path.join(outputDir, `${SESSION_LOG_FOLDER_PREFIX}1`);
+    await writeSizedFile(path.join(sessionDir, SESSION_LOG_FILE_NAME), 2_000, baseTime);
+    await writeSizedFile(path.join(outputDir, 'report.json'), 1_000, baseTime + 1);
+    setProtectedOutputDirsProvider(() => [sessionDir]);
+
+    const config = await resolveConfig({ outputDir, outputMaxSize: 1_000 });
+
+    await evictOutputFiles(config, undefined);
+
+    // The protected 2 KB counts toward the 1 KB cap, so the evictable report is
+    // removed even though the evictable bytes alone were within the limit.
+    await expect(fileExists(path.join(outputDir, 'report.json'))).resolves.toBe(false);
+    await expect(fileExists(path.join(sessionDir, SESSION_LOG_FILE_NAME))).resolves.toBe(true);
+  });
+
   it('does not create the output directory when no size limit is configured', async () => {
     const tempRoot = await createOutputDir();
     const outputDir = path.join(tempRoot, 'unused-output');
@@ -241,25 +264,30 @@ describe('outputMaxSize', () => {
         async () => { evictions.push('outer'); await outerEviction; },
         async () => { events.push('outer-body'); },
     );
-    await tick();
-    // The outer eviction started (it was globally idle) but its body is still
-    // waiting on that eviction to finish.
-    expect(evictions).toEqual(['outer']);
-    expect(events).toEqual([]);
+    let inner: Promise<void> | undefined;
+    try {
+      await tick();
+      // The outer eviction started (it was globally idle) but its body is still
+      // waiting on that eviction to finish.
+      expect(evictions).toEqual(['outer']);
+      expect(events).toEqual([]);
 
-    // A second tool overlaps while the outer eviction is still running.
-    const inner = outputEvictionGate.run(
-        async () => { evictions.push('inner'); },
-        async () => { events.push('inner-body'); },
-    );
-    await tick();
-    // It must not evict (not globally idle) and must not start writing until the
-    // in-flight eviction has finished.
-    expect(evictions).toEqual(['outer']);
-    expect(events).toEqual([]);
-
-    releaseOuterEviction();
-    await Promise.all([outer, inner]);
+      // A second tool overlaps while the outer eviction is still running.
+      inner = outputEvictionGate.run(
+          async () => { evictions.push('inner'); },
+          async () => { events.push('inner-body'); },
+      );
+      await tick();
+      // It must not evict (not globally idle) and must not start writing until
+      // the in-flight eviction has finished.
+      expect(evictions).toEqual(['outer']);
+      expect(events).toEqual([]);
+    } finally {
+      // Always release the shared gate so a failed assertion can't leave it
+      // stuck pending and pollute later tests.
+      releaseOuterEviction();
+      await Promise.all([outer, inner]);
+    }
 
     expect(evictions).toEqual(['outer']);
     expect(events).toEqual(['outer-body', 'inner-body']);

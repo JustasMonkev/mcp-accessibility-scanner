@@ -342,12 +342,13 @@ async function evictOldOutputFiles(outputDir: string, maxSize: number | undefine
     return;
 
   // Folders for every live session (session logs and in-progress traces across
-  // all concurrent contexts) are skipped wholesale so a tool in one session can
-  // never evict another session's active artifacts.
+  // all concurrent contexts) must never be deleted, but their bytes still count
+  // toward the budget so the cap reflects the real directory size.
   const protectedDirs = protectedOutputDirsProvider().map(dir => path.resolve(dir));
-  const evictableFiles = await collectEvictableFiles(outputDir, protectedDirs);
+  const files = await collectOutputFiles(outputDir);
+  const evictableFiles = files.filter(file => !isWithinAnyDir(file.filePath, protectedDirs));
 
-  let totalSize = evictableFiles.reduce((total, file) => total + file.size, 0);
+  let totalSize = files.reduce((total, file) => total + file.size, 0);
   evictableFiles.sort((a, b) => a.mtimeMs - b.mtimeMs || a.filePath.localeCompare(b.filePath));
   for (const file of evictableFiles) {
     if (totalSize <= limit)
@@ -363,13 +364,10 @@ type OutputFileEntry = {
   mtimeMs: number;
 };
 
-async function collectEvictableFiles(outputDir: string, protectedDirs: string[]): Promise<OutputFileEntry[]> {
+async function collectOutputFiles(outputDir: string): Promise<OutputFileEntry[]> {
   const files: OutputFileEntry[] = [];
 
   const walk = async (dir: string): Promise<void> => {
-    if (isWithinAnyDir(dir, protectedDirs))
-      return;
-
     let dirents: fs.Dirent[];
     try {
       dirents = await fs.promises.readdir(dir, { withFileTypes: true });
