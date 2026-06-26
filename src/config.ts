@@ -301,17 +301,11 @@ async function loadConfig(configFile: string | undefined): Promise<Config> {
   }
 }
 
-type OutputFileOptions = {
-  evict?: boolean;
-};
-
-export async function outputFile(config: FullConfig, rootPath: string | undefined, name: string, options: OutputFileOptions = {}): Promise<string> {
+export async function outputFile(config: FullConfig, rootPath: string | undefined, name: string): Promise<string> {
+  // Pure path allocation: eviction is driven centrally by `evictOutputFiles`
+  // (see `OutputEvictionGate`) so it never races with a tool that is writing.
   const outputDir = outputDirectory(config, rootPath);
-  const evictionDir = outputEvictionDirectory(config, rootPath);
-
   await fs.promises.mkdir(outputDir, { recursive: true });
-  if (options.evict !== false)
-    await evictOldOutputFiles(evictionDir, config.outputMaxSize);
   const fileName = sanitizeForFilePath(name);
   return path.join(outputDir, fileName);
 }

@@ -56,6 +56,35 @@ const contextRegistry = new ContextRegistry();
 // consults the registry rather than guessing which folders are still in use.
 setProtectedOutputDirsProvider(() => contextRegistry.protectedOutputDirs());
 
+/**
+ * Coordinates output eviction across every concurrent tool call (including those
+ * from different HTTP sessions, which share one output directory):
+ *
+ * - eviction only runs when no tool is currently executing anywhere, so it never
+ *   deletes in-progress artifacts that a running tool has not returned yet;
+ * - tool execution waits for any in-flight eviction to finish before it starts
+ *   writing, so an eviction walk can never race with a later tool's writes.
+ */
+class OutputEvictionGate {
+  private _runningTools = 0;
+  private _evictionPromise: Promise<void> = Promise.resolve();
+
+  async run<T>(evict: () => Promise<void>, body: () => Promise<T>): Promise<T> {
+    const shouldEvict = this._runningTools === 0;
+    this._runningTools++;
+    try {
+      if (shouldEvict)
+        this._evictionPromise = evict().catch(logUnhandledError);
+      await this._evictionPromise;
+      return await body();
+    } finally {
+      this._runningTools--;
+    }
+  }
+}
+
+export const outputEvictionGate = new OutputEvictionGate();
+
 type ContextOptions = {
   tools: Tool[];
   config: FullConfig;
@@ -142,7 +171,7 @@ export class Context {
   }
 
   async outputFile(name: string): Promise<string> {
-    return outputFile(this.config, this._clientInfo.rootPath, name, { evict: !this.isRunningTool() });
+    return outputFile(this.config, this._clientInfo.rootPath, name);
   }
 
   async evictOutputFiles(): Promise<void> {
@@ -218,13 +247,15 @@ export class Context {
 
     const promise = this._browserContextPromise;
     this._browserContextPromise = undefined;
-    this._tracesDir = undefined;
 
     await promise.then(async ({ browserContext, close }) => {
       if (this.config.saveTrace)
         await browserContext.tracing.stop();
       await close();
     });
+    // Keep the trace folder protected until tracing has fully stopped and the
+    // files are finalized; only then is it safe to let eviction reclaim it.
+    this._tracesDir = undefined;
   }
 
   async dispose() {

@@ -19,7 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OUTPUT_TRACE_FOLDER_PREFIX, evictOutputFiles, outputFile, resolveCLIConfig, resolveConfig, setProtectedOutputDirsProvider } from '../src/config.js';
-import { Context } from '../src/context.js';
+import { Context, outputEvictionGate } from '../src/context.js';
 import { SessionLog } from '../src/sessionLog.js';
 import { SESSION_LOG_FILE_NAME, SESSION_LOG_FOLDER_PREFIX } from '../src/sessionLogConstants.js';
 
@@ -65,7 +65,7 @@ describe('outputMaxSize', () => {
 
     const config = await resolveConfig({ outputDir, outputMaxSize: 3_000 });
 
-    await expect(outputFile(config, undefined, 'next.bin')).resolves.toBe(path.join(outputDir, 'next.bin'));
+    await evictOutputFiles(config, undefined);
 
     await expect(sortedEntries(outputDir)).resolves.toEqual([
       'file-2.bin',
@@ -89,7 +89,7 @@ describe('outputMaxSize', () => {
 
     const config = await resolveConfig({ outputDir, outputMaxSize: 1_500 });
 
-    await outputFile(config, undefined, 'next.json');
+    await evictOutputFiles(config, undefined);
 
     await expect(sortedEntries(outputDir)).resolves.toEqual(['report-2.json']);
   });
@@ -105,7 +105,7 @@ describe('outputMaxSize', () => {
 
     const config = await resolveConfig({ outputDir, outputMaxSize: 1_000 });
 
-    await outputFile(config, undefined, 'next.png');
+    await evictOutputFiles(config, undefined);
 
     await expect(sortedEntries(outputDir)).resolves.toEqual([
       'screenshot-2.png',
@@ -126,7 +126,7 @@ describe('outputMaxSize', () => {
 
     const config = await resolveConfig({ outputDir, outputMaxSize: 0 });
 
-    await outputFile(config, undefined, 'next.png');
+    await evictOutputFiles(config, undefined);
 
     await expect(fileExists(path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}100`, 'trace.zip'))).resolves.toBe(false);
     await expect(fileExists(path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}200`, 'trace.zip'))).resolves.toBe(true);
@@ -146,7 +146,7 @@ describe('outputMaxSize', () => {
 
     const config = await resolveConfig({ outputDir, outputMaxSize: 0 });
 
-    await outputFile(config, undefined, 'next.json');
+    await evictOutputFiles(config, undefined);
 
     // Eviction triggered by either session must not delete the other's log.
     await expect(fileExists(path.join(sessionA, SESSION_LOG_FILE_NAME))).resolves.toBe(true);
@@ -170,7 +170,7 @@ describe('outputMaxSize', () => {
 
     const config = await resolveConfig({ outputMaxSize: 0 });
 
-    await outputFile(config, undefined, 'next.png');
+    await evictOutputFiles(config, undefined);
 
     await expect(fileExists(path.join(sessionDir, SESSION_LOG_FILE_NAME))).resolves.toBe(true);
     await expect(fileExists(path.join(sessionDir, '001.snapshot.yml'))).resolves.toBe(true);
@@ -187,15 +187,14 @@ describe('outputMaxSize', () => {
     await expect(fileExists(outputDir)).resolves.toBe(false);
   });
 
-  it('evicts an oversize previous artifact before returning the next path', async () => {
+  it('evicts the oldest artifacts until the directory is back under the limit', async () => {
     const outputDir = await createOutputDir();
-    const config = await resolveConfig({ outputDir, outputMaxSize: 100 });
+    const config = await resolveConfig({ outputDir, outputMaxSize: 1_000 });
 
-    const firstFile = await outputFile(config, undefined, 'page-1.png');
-    await writeSizedFile(firstFile, 1_000, Date.now() - 1_000);
+    await writeSizedFile(path.join(outputDir, 'page-1.png'), 1_000, Date.now() - 1_000);
+    await writeSizedFile(path.join(outputDir, 'page-2.png'), 1_000, Date.now());
 
-    const secondFile = await outputFile(config, undefined, 'page-2.png');
-    await writeSizedFile(secondFile, 1_000, Date.now());
+    await evictOutputFiles(config, undefined);
 
     await expect(sortedEntries(outputDir)).resolves.toEqual(['page-2.png']);
   });
@@ -218,44 +217,52 @@ describe('outputMaxSize', () => {
     await writeSizedFile(path.join(outputRoot, 'old-2', 'artifact.bin'), 1_000, baseTime + 1);
 
     const config = await resolveConfig({ outputMaxSize: 500 });
-    const nextFile = await outputFile(config, undefined, 'next.bin');
+    await evictOutputFiles(config, undefined);
 
-    expect(nextFile.startsWith(outputRoot + path.sep)).toBe(true);
+    // Eviction sees siblings under the stable temp root, not just a fresh dir.
     await expect(fileExists(path.join(outputRoot, 'old-1', 'artifact.bin'))).resolves.toBe(false);
     await expect(fileExists(path.join(outputRoot, 'old-2', 'artifact.bin'))).resolves.toBe(false);
+
+    // New output paths are still allocated under that same stable temp root.
+    const nextFile = await outputFile(config, undefined, 'next.bin');
+    expect(nextFile.startsWith(outputRoot + path.sep)).toBe(true);
   });
 
-  it('does not evict artifacts while a tool is still producing its response', async () => {
-    const outputDir = await createOutputDir();
-    const config = await resolveConfig({ outputDir, outputMaxSize: 100 });
-    const context = new Context({
-      tools: [],
-      config,
-      browserContextFactory: {} as any,
-      sessionLog: undefined,
-      clientInfo: { name: 'test', version: '1.0.0', rootPath: undefined },
-    });
+  it('evicts only when globally idle and serializes eviction before tool bodies run', async () => {
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+    const evictions: string[] = [];
+    const events: string[] = [];
 
-    const firstToken = context.setRunningTool('test_tool');
-    try {
-      const firstFile = await context.outputFile('issue-screenshot.png');
-      await writeSizedFile(firstFile, 1_000, Date.now() - 1_000);
+    // The first (outer) tool's eviction is slow: it blocks until released.
+    let releaseOuterEviction: () => void = () => {};
+    const outerEviction = new Promise<void>(resolve => { releaseOuterEviction = resolve; });
 
-      // A second, overlapping tool starts and finishes before the first one.
-      // Clearing it by token must not end the still-running first tool.
-      const secondToken = context.setRunningTool('overlapping_tool');
-      context.clearRunningTool(secondToken);
-      expect(context.isRunningTool()).toBe(true);
+    const outer = outputEvictionGate.run(
+        async () => { evictions.push('outer'); await outerEviction; },
+        async () => { events.push('outer-body'); },
+    );
+    await tick();
+    // The outer eviction started (it was globally idle) but its body is still
+    // waiting on that eviction to finish.
+    expect(evictions).toEqual(['outer']);
+    expect(events).toEqual([]);
 
-      const secondFile = await context.outputFile('report.json');
-      await writeSizedFile(secondFile, 1_000, Date.now());
+    // A second tool overlaps while the outer eviction is still running.
+    const inner = outputEvictionGate.run(
+        async () => { evictions.push('inner'); },
+        async () => { events.push('inner-body'); },
+    );
+    await tick();
+    // It must not evict (not globally idle) and must not start writing until the
+    // in-flight eviction has finished.
+    expect(evictions).toEqual(['outer']);
+    expect(events).toEqual([]);
 
-      await expect(fileExists(firstFile)).resolves.toBe(true);
-      await expect(fileExists(secondFile)).resolves.toBe(true);
-    } finally {
-      context.clearRunningTool(firstToken);
-      await context.dispose();
-    }
+    releaseOuterEviction();
+    await Promise.all([outer, inner]);
+
+    expect(evictions).toEqual(['outer']);
+    expect(events).toEqual(['outer-body', 'inner-body']);
   });
 
   it('reports its active session log folder as a protected output dir', async () => {

@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { FullConfig } from './config.js';
-import { Context } from './context.js';
+import { Context, outputEvictionGate } from './context.js';
 import { logUnhandledError } from './utils/log.js';
 import { Response } from './response.js';
 import { SessionLog } from './sessionLog.js';
@@ -80,14 +80,19 @@ export class BrowserServerBackend implements ServerBackend {
     }
     const context = this._context!;
     const response = new Response(context, name, parsedArguments, requestContext);
-    const shouldEvictOutputFiles = !context.isRunningTool();
     const runningToolToken = context.setRunningTool(name);
     try {
-      if (shouldEvictOutputFiles)
-        await context.evictOutputFiles();
-      await tool.handle(context, parsedArguments, response);
-      await response.finish();
-      this._sessionLog?.logResponse(response);
+      // The gate evicts old output only while the whole server is idle and
+      // blocks this tool from writing until any in-flight eviction completes, so
+      // eviction (even from another HTTP session) never deletes live artifacts.
+      await outputEvictionGate.run(
+          () => context.evictOutputFiles(),
+          async () => {
+            await tool.handle(context, parsedArguments, response);
+            await response.finish();
+            this._sessionLog?.logResponse(response);
+          },
+      );
     } catch (error: any) {
       response.addError(String(error));
     } finally {
