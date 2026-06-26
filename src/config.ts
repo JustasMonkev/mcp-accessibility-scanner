@@ -310,8 +310,12 @@ export async function outputFile(config: FullConfig, rootPath: string | undefine
 }
 
 export async function evictOutputFiles(config: FullConfig, rootPath: string | undefined): Promise<void> {
+  // Skip all filesystem work (including creating the output directory) when no
+  // size cap is configured, so plain tool calls never materialize an output dir
+  // for users who never opted into eviction.
+  if (config.outputMaxSize === undefined)
+    return;
   const outputDir = outputEvictionDirectory(config, rootPath);
-  await fs.promises.mkdir(outputDir, { recursive: true });
   await evictOldOutputFiles(outputDir, config.outputMaxSize);
 }
 
@@ -336,7 +340,9 @@ async function evictOldOutputFiles(outputDir: string, maxSize: number | undefine
   if (limit === undefined)
     return;
 
-  const evictableFiles = await collectEvictableFiles(outputDir, true);
+  const { files, liveFolders } = await collectOutputTree(outputDir);
+  const protectedDirs = selectLiveFolders(liveFolders);
+  const evictableFiles = files.filter(file => !isWithinAnyDir(file.filePath, protectedDirs));
 
   let totalSize = evictableFiles.reduce((total, file) => total + file.size, 0);
   evictableFiles.sort((a, b) => a.mtimeMs - b.mtimeMs || a.filePath.localeCompare(b.filePath));
@@ -354,47 +360,88 @@ type OutputFileEntry = {
   mtimeMs: number;
 };
 
-async function collectEvictableFiles(outputDir: string, isRoot: boolean): Promise<OutputFileEntry[]> {
-  const entries: OutputFileEntry[] = [];
-  let dirents: fs.Dirent[];
-  try {
-    dirents = await fs.promises.readdir(outputDir, { withFileTypes: true });
-  } catch (error) {
-    if (isFileNotFoundError(error))
-      return entries;
-    throw error;
-  }
+type LiveFolderCandidate = {
+  prefix: string;
+  dirPath: string;
+  order: number;
+};
 
-  await Promise.all(dirents.map(async dirent => {
-    const filePath = path.join(outputDir, dirent.name);
-    if (dirent.isDirectory()) {
-      // Preserve live session-log and trace folders for the active session.
-      // These only ever live directly under the output root, so the prefix
-      // check is scoped there to avoid protecting look-alike report subfolders.
-      if (isRoot && isProtectedOutputFolder(dirent.name))
-        return;
-      entries.push(...await collectEvictableFiles(filePath, false));
-      return;
-    }
-    if (!dirent.isFile())
-      return;
-    let size: number;
-    let mtimeMs: number;
+async function collectOutputTree(outputDir: string): Promise<{ files: OutputFileEntry[]; liveFolders: LiveFolderCandidate[] }> {
+  const files: OutputFileEntry[] = [];
+  const liveFolders: LiveFolderCandidate[] = [];
+
+  const walk = async (dir: string): Promise<void> => {
+    let dirents: fs.Dirent[];
     try {
-      ({ size, mtimeMs } = await fs.promises.stat(filePath));
+      dirents = await fs.promises.readdir(dir, { withFileTypes: true });
     } catch (error) {
       if (isFileNotFoundError(error))
         return;
       throw error;
     }
-    entries.push({ filePath, size, mtimeMs });
-  }));
 
-  return entries;
+    await Promise.all(dirents.map(async dirent => {
+      const filePath = path.join(dir, dirent.name);
+      if (dirent.isDirectory()) {
+        const prefix = liveFolderPrefix(dirent.name);
+        if (prefix !== undefined)
+          liveFolders.push({ prefix, dirPath: filePath, order: liveFolderOrder(dirent.name, prefix) });
+        await walk(filePath);
+        return;
+      }
+      if (!dirent.isFile())
+        return;
+      let size: number;
+      let mtimeMs: number;
+      try {
+        ({ size, mtimeMs } = await fs.promises.stat(filePath));
+      } catch (error) {
+        if (isFileNotFoundError(error))
+          return;
+        throw error;
+      }
+      files.push({ filePath, size, mtimeMs });
+    }));
+  };
+
+  await walk(outputDir);
+  return { files, liveFolders };
 }
 
-function isProtectedOutputFolder(name: string): boolean {
-  return PROTECTED_OUTPUT_FOLDER_PREFIXES.some(prefix => name.startsWith(prefix));
+/**
+ * Returns the live-artifact folder prefix that `name` matches (e.g. a session
+ * log or trace folder), or undefined when the directory is an ordinary one.
+ */
+function liveFolderPrefix(name: string): string | undefined {
+  return PROTECTED_OUTPUT_FOLDER_PREFIXES.find(prefix => name.startsWith(prefix));
+}
+
+/**
+ * Orders folders that share a prefix; the folder name embeds `Date.now()`, so a
+ * larger value means a more recently created (i.e. still-active) folder.
+ */
+function liveFolderOrder(name: string, prefix: string): number {
+  const suffix = Number(name.slice(prefix.length));
+  return Number.isFinite(suffix) ? suffix : -1;
+}
+
+/**
+ * Of all the session-log/trace folders found, keep only the most recent one per
+ * prefix. That is the folder the current session is still writing to, so it is
+ * preserved while older, closed folders stay eligible for eviction.
+ */
+function selectLiveFolders(candidates: LiveFolderCandidate[]): string[] {
+  const newestByPrefix = new Map<string, LiveFolderCandidate>();
+  for (const candidate of candidates) {
+    const current = newestByPrefix.get(candidate.prefix);
+    if (!current || candidate.order > current.order || (candidate.order === current.order && candidate.dirPath > current.dirPath))
+      newestByPrefix.set(candidate.prefix, candidate);
+  }
+  return [...newestByPrefix.values()].map(candidate => candidate.dirPath);
+}
+
+function isWithinAnyDir(filePath: string, dirs: string[]): boolean {
+  return dirs.some(dir => filePath === dir || filePath.startsWith(dir + path.sep));
 }
 
 function isFileNotFoundError(error: unknown): boolean {

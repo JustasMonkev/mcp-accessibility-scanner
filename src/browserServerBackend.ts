@@ -81,7 +81,7 @@ export class BrowserServerBackend implements ServerBackend {
     const context = this._context!;
     const response = new Response(context, name, parsedArguments, requestContext);
     const shouldEvictOutputFiles = !context.isRunningTool();
-    context.setRunningTool(name);
+    const runningToolToken = context.setRunningTool(name);
     try {
       if (shouldEvictOutputFiles)
         await context.evictOutputFiles();
@@ -91,7 +91,7 @@ export class BrowserServerBackend implements ServerBackend {
     } catch (error: any) {
       response.addError(String(error));
     } finally {
-      context.setRunningTool(undefined);
+      context.clearRunningTool(runningToolToken);
     }
     return response.serialize();
   }

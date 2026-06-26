@@ -137,8 +137,8 @@ describe('Context', () => {
         clientInfo: { rootPath: '/tmp' } as any,
       });
 
-      context.setRunningTool('test_tool');
-      context.setRunningTool(undefined);
+      const token = context.setRunningTool('test_tool');
+      context.clearRunningTool(token);
       expect(context.isRunningTool()).toBe(false);
     });
   });

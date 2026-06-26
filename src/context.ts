@@ -67,7 +67,7 @@ export class Context {
   private _clientInfo: ClientInfo;
 
   private _closeBrowserContextPromise: Promise<void> | undefined;
-  private _runningToolNames: string[] = [];
+  private _runningTools = new Map<symbol, string>();
   private _abortController = new AbortController();
 
   constructor(options: ContextOptions) {
@@ -166,14 +166,27 @@ export class Context {
   }
 
   isRunningTool() {
-    return this._runningToolNames.length > 0;
+    return this._runningTools.size > 0;
   }
 
-  setRunningTool(name: string | undefined) {
-    if (name !== undefined)
-      this._runningToolNames.push(name);
-    else
-      this._runningToolNames.pop();
+  // Each in-flight tool call gets its own token so that overlapping calls which
+  // finish out of order remove their own entry rather than popping whichever
+  // tool happened to start last.
+  setRunningTool(name: string): symbol {
+    const token = Symbol(name);
+    this._runningTools.set(token, name);
+    return token;
+  }
+
+  clearRunningTool(token: symbol) {
+    this._runningTools.delete(token);
+  }
+
+  private _currentRunningToolName(): string | undefined {
+    let name: string | undefined;
+    for (const value of this._runningTools.values())
+      name = value;
+    return name;
   }
 
   private async _closeBrowserContextImpl() {
@@ -226,7 +239,7 @@ export class Context {
     if (this._closeBrowserContextPromise)
       throw new Error('Another browser context is being closed.');
     // TODO: move to the browser context factory to make it based on isolation mode.
-    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningToolNames.at(-1));
+    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._currentRunningToolName());
     const { browserContext } = result;
     await this._setupRequestInterception(browserContext);
     if (this.sessionLog)

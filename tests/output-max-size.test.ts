@@ -18,9 +18,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OUTPUT_TRACE_FOLDER_PREFIX, outputFile, resolveCLIConfig, resolveConfig } from '../src/config.js';
+import { OUTPUT_TRACE_FOLDER_PREFIX, evictOutputFiles, outputFile, resolveCLIConfig, resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
-import { SESSION_LOG_FILE_NAME } from '../src/sessionLogConstants.js';
+import { SESSION_LOG_FILE_NAME, SESSION_LOG_FOLDER_PREFIX } from '../src/sessionLogConstants.js';
 
 const tempDirs: string[] = [];
 
@@ -110,6 +110,54 @@ describe('outputMaxSize', () => {
     await expect(fileExists(path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}123`, 'trace.zip'))).resolves.toBe(true);
   });
 
+  it('evicts closed trace folders while keeping the active one', async () => {
+    const outputDir = await createOutputDir();
+    const baseTime = Date.now() - 10_000;
+
+    // An older, closed trace folder and the active (newest) one.
+    await writeSizedFile(path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}100`, 'trace.zip'), 1_000, baseTime);
+    await writeSizedFile(path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}200`, 'trace.zip'), 1_000, baseTime + 5_000);
+
+    const config = await resolveConfig({ outputDir, outputMaxSize: 0 });
+
+    await outputFile(config, undefined, 'next.png');
+
+    await expect(fileExists(path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}100`, 'trace.zip'))).resolves.toBe(false);
+    await expect(fileExists(path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}200`, 'trace.zip'))).resolves.toBe(true);
+  });
+
+  it('preserves the active session log folder nested under the default temp root', async () => {
+    const tempRoot = await createOutputDir();
+    vi.stubEnv('TMPDIR', tempRoot);
+    const outputRoot = path.join(tempRoot, 'playwright-mcp-output');
+    const baseTime = Date.now() - 10_000;
+
+    // In default mode each call nests under a timestamped fallback dir, so the
+    // live session folder is not an immediate child of the eviction root.
+    const sessionDir = path.join(outputRoot, '2026-01-01T00-00-00', `${SESSION_LOG_FOLDER_PREFIX}500`);
+    await writeSizedFile(path.join(sessionDir, SESSION_LOG_FILE_NAME), 1_000, baseTime);
+    await writeSizedFile(path.join(sessionDir, '001.snapshot.yml'), 1_000, baseTime);
+    await writeSizedFile(path.join(outputRoot, '2025-01-01T00-00-00', 'old.png'), 1_000, baseTime - 1_000);
+
+    const config = await resolveConfig({ outputMaxSize: 0 });
+
+    await outputFile(config, undefined, 'next.png');
+
+    await expect(fileExists(path.join(sessionDir, SESSION_LOG_FILE_NAME))).resolves.toBe(true);
+    await expect(fileExists(path.join(sessionDir, '001.snapshot.yml'))).resolves.toBe(true);
+    await expect(fileExists(path.join(outputRoot, '2025-01-01T00-00-00', 'old.png'))).resolves.toBe(false);
+  });
+
+  it('does not create the output directory when no size limit is configured', async () => {
+    const tempRoot = await createOutputDir();
+    const outputDir = path.join(tempRoot, 'unused-output');
+
+    const config = await resolveConfig({ outputDir });
+    await evictOutputFiles(config, undefined);
+
+    await expect(fileExists(outputDir)).resolves.toBe(false);
+  });
+
   it('evicts an oversize previous artifact before returning the next path', async () => {
     const outputDir = await createOutputDir();
     const config = await resolveConfig({ outputDir, outputMaxSize: 100 });
@@ -159,20 +207,24 @@ describe('outputMaxSize', () => {
       clientInfo: { name: 'test', version: '1.0.0', rootPath: undefined },
     });
 
+    const firstToken = context.setRunningTool('test_tool');
     try {
-      context.setRunningTool('test_tool');
       const firstFile = await context.outputFile('issue-screenshot.png');
       await writeSizedFile(firstFile, 1_000, Date.now() - 1_000);
 
-      context.setRunningTool('overlapping_tool');
-      context.setRunningTool(undefined);
+      // A second, overlapping tool starts and finishes before the first one.
+      // Clearing it by token must not end the still-running first tool.
+      const secondToken = context.setRunningTool('overlapping_tool');
+      context.clearRunningTool(secondToken);
+      expect(context.isRunningTool()).toBe(true);
+
       const secondFile = await context.outputFile('report.json');
       await writeSizedFile(secondFile, 1_000, Date.now());
 
       await expect(fileExists(firstFile)).resolves.toBe(true);
       await expect(fileExists(secondFile)).resolves.toBe(true);
     } finally {
-      context.setRunningTool(undefined);
+      context.clearRunningTool(firstToken);
       await context.dispose();
     }
   });
