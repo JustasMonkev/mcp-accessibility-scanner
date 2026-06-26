@@ -206,7 +206,7 @@ Create a `config.json` file with the following options:
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
 - `outputDir`: Directory used for generated reports, screenshots, downloads, traces, and session logs
-- `outputMaxSize`: Maximum bytes of old evictable output artifacts to keep; oldest files are removed before each tool run, while current tool outputs, the active session log folder, and the active trace folder are preserved
+- `outputMaxSize`: Maximum bytes of old evictable output artifacts to keep; oldest files are removed before each tool run, while current tool outputs and every live session's log and trace folders are preserved
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), `--cdp-timeout`, `--output-dir`, and `--output-max-size`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 

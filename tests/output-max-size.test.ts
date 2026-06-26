@@ -18,8 +18,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OUTPUT_TRACE_FOLDER_PREFIX, evictOutputFiles, outputFile, resolveCLIConfig, resolveConfig } from '../src/config.js';
+import { OUTPUT_TRACE_FOLDER_PREFIX, evictOutputFiles, outputFile, resolveCLIConfig, resolveConfig, setProtectedOutputDirsProvider } from '../src/config.js';
 import { Context } from '../src/context.js';
+import { SessionLog } from '../src/sessionLog.js';
 import { SESSION_LOG_FILE_NAME, SESSION_LOG_FOLDER_PREFIX } from '../src/sessionLogConstants.js';
 
 const tempDirs: string[] = [];
@@ -47,6 +48,7 @@ async function sortedEntries(dir: string): Promise<string[]> {
 
 afterEach(async () => {
   vi.unstubAllEnvs();
+  setProtectedOutputDirsProvider(() => []);
   await Promise.all(tempDirs.splice(0).map(dir => fs.promises.rm(dir, { recursive: true, force: true })));
 });
 
@@ -59,6 +61,7 @@ describe('outputMaxSize', () => {
       await writeSizedFile(path.join(outputDir, `file-${i}.bin`), 1_000, baseTime + i);
     await writeSizedFile(path.join(outputDir, 'session-1', SESSION_LOG_FILE_NAME), 1_000, baseTime - 1);
     await writeSizedFile(path.join(outputDir, 'session-1', '001.snapshot.yml'), 1_000, baseTime - 1);
+    setProtectedOutputDirsProvider(() => [path.join(outputDir, 'session-1')]);
 
     const config = await resolveConfig({ outputDir, outputMaxSize: 3_000 });
 
@@ -98,6 +101,7 @@ describe('outputMaxSize', () => {
     await writeSizedFile(path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}123`, 'trace.zip'), 1_000, baseTime);
     await writeSizedFile(path.join(outputDir, 'screenshot-1.png'), 1_000, baseTime + 1);
     await writeSizedFile(path.join(outputDir, 'screenshot-2.png'), 1_000, baseTime + 2);
+    setProtectedOutputDirsProvider(() => [path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}123`)]);
 
     const config = await resolveConfig({ outputDir, outputMaxSize: 1_000 });
 
@@ -114,9 +118,11 @@ describe('outputMaxSize', () => {
     const outputDir = await createOutputDir();
     const baseTime = Date.now() - 10_000;
 
-    // An older, closed trace folder and the active (newest) one.
+    // An older, closed trace folder and the active one (only the active folder
+    // is reported as live).
     await writeSizedFile(path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}100`, 'trace.zip'), 1_000, baseTime);
     await writeSizedFile(path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}200`, 'trace.zip'), 1_000, baseTime + 5_000);
+    setProtectedOutputDirsProvider(() => [path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}200`)]);
 
     const config = await resolveConfig({ outputDir, outputMaxSize: 0 });
 
@@ -124,6 +130,28 @@ describe('outputMaxSize', () => {
 
     await expect(fileExists(path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}100`, 'trace.zip'))).resolves.toBe(false);
     await expect(fileExists(path.join(outputDir, `${OUTPUT_TRACE_FOLDER_PREFIX}200`, 'trace.zip'))).resolves.toBe(true);
+  });
+
+  it('preserves every live session folder when concurrent sessions share an output dir', async () => {
+    const outputDir = await createOutputDir();
+    const baseTime = Date.now() - 10_000;
+
+    // Two concurrent HTTP sessions, each with its own active session-log folder.
+    const sessionA = path.join(outputDir, `${SESSION_LOG_FOLDER_PREFIX}100`);
+    const sessionB = path.join(outputDir, `${SESSION_LOG_FOLDER_PREFIX}200`);
+    await writeSizedFile(path.join(sessionA, SESSION_LOG_FILE_NAME), 1_000, baseTime);
+    await writeSizedFile(path.join(sessionB, SESSION_LOG_FILE_NAME), 1_000, baseTime + 5_000);
+    await writeSizedFile(path.join(outputDir, 'old-report.json'), 1_000, baseTime - 1_000);
+    setProtectedOutputDirsProvider(() => [sessionA, sessionB]);
+
+    const config = await resolveConfig({ outputDir, outputMaxSize: 0 });
+
+    await outputFile(config, undefined, 'next.json');
+
+    // Eviction triggered by either session must not delete the other's log.
+    await expect(fileExists(path.join(sessionA, SESSION_LOG_FILE_NAME))).resolves.toBe(true);
+    await expect(fileExists(path.join(sessionB, SESSION_LOG_FILE_NAME))).resolves.toBe(true);
+    await expect(fileExists(path.join(outputDir, 'old-report.json'))).resolves.toBe(false);
   });
 
   it('preserves the active session log folder nested under the default temp root', async () => {
@@ -138,6 +166,7 @@ describe('outputMaxSize', () => {
     await writeSizedFile(path.join(sessionDir, SESSION_LOG_FILE_NAME), 1_000, baseTime);
     await writeSizedFile(path.join(sessionDir, '001.snapshot.yml'), 1_000, baseTime);
     await writeSizedFile(path.join(outputRoot, '2025-01-01T00-00-00', 'old.png'), 1_000, baseTime - 1_000);
+    setProtectedOutputDirsProvider(() => [sessionDir]);
 
     const config = await resolveConfig({ outputMaxSize: 0 });
 
@@ -226,6 +255,33 @@ describe('outputMaxSize', () => {
     } finally {
       context.clearRunningTool(firstToken);
       await context.dispose();
+    }
+  });
+
+  it('reports its active session log folder as a protected output dir', async () => {
+    const outputDir = await createOutputDir();
+    const sessionFolder = path.join(outputDir, `${SESSION_LOG_FOLDER_PREFIX}999`);
+    const withSession = new Context({
+      tools: [],
+      config: {} as any,
+      browserContextFactory: {} as any,
+      sessionLog: new SessionLog(sessionFolder),
+      clientInfo: { name: 'test', version: '1.0.0', rootPath: undefined },
+    });
+    const withoutSession = new Context({
+      tools: [],
+      config: {} as any,
+      browserContextFactory: {} as any,
+      sessionLog: undefined,
+      clientInfo: { name: 'test', version: '1.0.0', rootPath: undefined },
+    });
+
+    try {
+      expect(withSession.protectedOutputDirs()).toContain(sessionFolder);
+      expect(withoutSession.protectedOutputDirs()).toEqual([]);
+    } finally {
+      await withSession.dispose();
+      await withoutSession.dispose();
     }
   });
 });

@@ -45,14 +45,23 @@ export function contextFactory(config: FullConfig): BrowserContextFactory {
 
 export type ClientInfo = { name?: string, version?: string, rootPath?: string };
 
+export type BrowserContextResult = {
+  browserContext: playwright.BrowserContext;
+  close: () => Promise<void>;
+  // Output folder of the trace recorded for this context, when `--save-trace`
+  // is enabled. Eviction preserves it while the context (and its trace) is live.
+  tracesDir?: string;
+};
+
 export interface BrowserContextFactory {
-  createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }>;
+  createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<BrowserContextResult>;
 }
 
 abstract class BaseContextFactory implements BrowserContextFactory {
   readonly config: FullConfig;
   private _logName: string;
   protected _browserPromise: Promise<playwright.Browser> | undefined;
+  protected _tracesDir: string | undefined;
 
   constructor(name: string, config: FullConfig) {
     this._logName = name;
@@ -76,11 +85,11 @@ abstract class BaseContextFactory implements BrowserContextFactory {
 
   protected abstract _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser>;
 
-  async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  async createContext(clientInfo: ClientInfo): Promise<BrowserContextResult> {
     testDebug(`create browser context (${this._logName})`);
     const browser = await this._obtainBrowser(clientInfo);
     const browserContext = await this._doCreateContext(browser);
-    return { browserContext, close: () => this._closeBrowserContext(browserContext, browser) };
+    return { browserContext, close: () => this._closeBrowserContext(browserContext, browser), tracesDir: this._tracesDir };
   }
 
   protected abstract _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext>;
@@ -105,8 +114,9 @@ class IsolatedContextFactory extends BaseContextFactory {
   protected override async _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser> {
     await injectCdpPort(this.config.browser);
     const browserType = playwright[this.config.browser.browserName];
+    this._tracesDir = await startTraceServer(this.config, clientInfo.rootPath);
     return browserType.launch({
-      tracesDir: await startTraceServer(this.config, clientInfo.rootPath),
+      tracesDir: this._tracesDir,
       ...this.config.browser.launchOptions,
       handleSIGINT: false,
       handleSIGTERM: false,
@@ -127,7 +137,7 @@ class CdpContextFactory extends BaseContextFactory {
     super('cdp', config);
   }
 
-  override async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  override async createContext(clientInfo: ClientInfo): Promise<BrowserContextResult> {
     testDebug('create browser context (cdp)');
     const browser = await this._obtainBrowser(clientInfo);
     const browserContext = await this._doCreateContext(browser);
@@ -177,7 +187,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     this.config = config;
   }
 
-  async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  async createContext(clientInfo: ClientInfo): Promise<BrowserContextResult> {
     const cdpLaunch = this.config.browser.cdpLaunch!;
     const port = cdpLaunch.port ?? await findFreePort();
     const endpoint = `http://127.0.0.1:${port}`;
@@ -238,7 +248,7 @@ class PersistentContextFactory implements BrowserContextFactory {
     this.config = config;
   }
 
-  async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  async createContext(clientInfo: ClientInfo): Promise<BrowserContextResult> {
     await injectCdpPort(this.config.browser);
     testDebug('create browser context (persistent)');
     const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(clientInfo.rootPath);
@@ -258,7 +268,7 @@ class PersistentContextFactory implements BrowserContextFactory {
           handleSIGTERM: false,
         });
         const close = () => this._closeBrowserContext(browserContext, userDataDir);
-        return { browserContext, close };
+        return { browserContext, close, tracesDir };
       } catch (error: any) {
         if (error.message.includes('Executable doesn\'t exist'))
           throw new Error(`Browser specified in your config is not installed. Either install it (likely) or change the config.`);

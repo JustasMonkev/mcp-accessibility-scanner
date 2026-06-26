@@ -19,11 +19,11 @@ import type * as playwright from 'playwright';
 
 import { logUnhandledError } from './utils/log.js';
 import { Tab } from './tab.js';
-import { evictOutputFiles, outputFile } from './config.js';
+import { evictOutputFiles, outputFile, setProtectedOutputDirsProvider } from './config.js';
 
 import type { FullConfig } from './config.js';
 import type { Tool } from './tools/tool.js';
-import type { BrowserContextFactory, ClientInfo } from './browserContextFactory.js';
+import type { BrowserContextFactory, BrowserContextResult, ClientInfo } from './browserContextFactory.js';
 import type * as actions from './actions.js';
 import type { SessionLog } from './sessionLog.js';
 
@@ -43,9 +43,18 @@ class ContextRegistry {
   async disposeAll(): Promise<void> {
     await Promise.all([...this._contexts].map(ctx => ctx.dispose()));
   }
+
+  protectedOutputDirs(): string[] {
+    return [...this._contexts].flatMap(ctx => ctx.protectedOutputDirs());
+  }
 }
 
 const contextRegistry = new ContextRegistry();
+
+// Output eviction must preserve the live session-log and trace folders of every
+// active context (concurrent HTTP sessions share one output directory), so it
+// consults the registry rather than guessing which folders are still in use.
+setProtectedOutputDirsProvider(() => contextRegistry.protectedOutputDirs());
 
 type ContextOptions = {
   tools: Tool[];
@@ -60,11 +69,12 @@ export class Context {
   readonly config: FullConfig;
   readonly sessionLog: SessionLog | undefined;
   readonly options: ContextOptions;
-  private _browserContextPromise: Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> | undefined;
+  private _browserContextPromise: Promise<BrowserContextResult> | undefined;
   private _browserContextFactory: BrowserContextFactory;
   private _tabs: Tab[] = [];
   private _currentTab: Tab | undefined;
   private _clientInfo: ClientInfo;
+  private _tracesDir: string | undefined;
 
   private _closeBrowserContextPromise: Promise<void> | undefined;
   private _runningTools = new Map<symbol, string>();
@@ -139,6 +149,17 @@ export class Context {
     await evictOutputFiles(this.config, this._clientInfo.rootPath);
   }
 
+  // Output folders this context is actively writing to, which must survive
+  // `outputMaxSize` eviction (its own session log and in-progress trace).
+  protectedOutputDirs(): string[] {
+    const dirs: string[] = [];
+    if (this.sessionLog)
+      dirs.push(this.sessionLog.folder);
+    if (this._tracesDir)
+      dirs.push(this._tracesDir);
+    return dirs;
+  }
+
   private _onPageCreated(page: playwright.Page) {
     const tab = new Tab(this, page, tab => this._onPageClosed(tab));
     this._tabs.push(tab);
@@ -197,6 +218,7 @@ export class Context {
 
     const promise = this._browserContextPromise;
     this._browserContextPromise = undefined;
+    this._tracesDir = undefined;
 
     await promise.then(async ({ browserContext, close }) => {
       if (this.config.saveTrace)
@@ -235,12 +257,13 @@ export class Context {
     return this._browserContextPromise;
   }
 
-  private async _setupBrowserContext(): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  private async _setupBrowserContext(): Promise<BrowserContextResult> {
     if (this._closeBrowserContextPromise)
       throw new Error('Another browser context is being closed.');
     // TODO: move to the browser context factory to make it based on isolation mode.
     const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._currentRunningToolName());
     const { browserContext } = result;
+    this._tracesDir = result.tracesDir;
     await this._setupRequestInterception(browserContext);
     if (this.sessionLog)
       await InputRecorder.create(this, browserContext);

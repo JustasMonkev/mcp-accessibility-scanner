@@ -20,22 +20,29 @@ import path from 'node:path';
 import type { BrowserContextOptions, LaunchOptions } from 'playwright';
 import { devices } from 'playwright';
 import { sanitizeForFilePath } from './utils/fileUtils.js';
-import { SESSION_LOG_FOLDER_PREFIX } from './sessionLogConstants.js';
 
 import type { Config, ToolCapability } from '../config.js';
 
 /**
  * Prefix of the per-context trace folder created by `startTraceServer`.
- * Output eviction uses this to recognise and preserve live trace folders.
  */
 export const OUTPUT_TRACE_FOLDER_PREFIX = 'traces-';
 
 /**
- * Output subfolders that hold live session artifacts (session logs and traces).
- * These are preserved during `outputMaxSize` eviction so that the active
- * session's logs and in-progress traces are never deleted out from under it.
+ * Supplies the set of output directories that belong to live sessions (session
+ * logs and in-progress traces) and must be preserved during `outputMaxSize`
+ * eviction. The provider is registered by the context layer so that eviction —
+ * which can be triggered from any tool, in any of several concurrent HTTP
+ * sessions sharing one output directory — protects every active session's
+ * folders, not just a single inferred one. Defaults to protecting nothing.
  */
-const PROTECTED_OUTPUT_FOLDER_PREFIXES = [SESSION_LOG_FOLDER_PREFIX, OUTPUT_TRACE_FOLDER_PREFIX];
+type ProtectedOutputDirsProvider = () => string[];
+
+let protectedOutputDirsProvider: ProtectedOutputDirsProvider = () => [];
+
+export function setProtectedOutputDirsProvider(provider: ProtectedOutputDirsProvider): void {
+  protectedOutputDirsProvider = provider;
+}
 
 export type CLIOptions = {
     allowedOrigins?: string[];
@@ -340,9 +347,11 @@ async function evictOldOutputFiles(outputDir: string, maxSize: number | undefine
   if (limit === undefined)
     return;
 
-  const { files, liveFolders } = await collectOutputTree(outputDir);
-  const protectedDirs = selectLiveFolders(liveFolders);
-  const evictableFiles = files.filter(file => !isWithinAnyDir(file.filePath, protectedDirs));
+  // Folders for every live session (session logs and in-progress traces across
+  // all concurrent contexts) are skipped wholesale so a tool in one session can
+  // never evict another session's active artifacts.
+  const protectedDirs = protectedOutputDirsProvider().map(dir => path.resolve(dir));
+  const evictableFiles = await collectEvictableFiles(outputDir, protectedDirs);
 
   let totalSize = evictableFiles.reduce((total, file) => total + file.size, 0);
   evictableFiles.sort((a, b) => a.mtimeMs - b.mtimeMs || a.filePath.localeCompare(b.filePath));
@@ -360,17 +369,13 @@ type OutputFileEntry = {
   mtimeMs: number;
 };
 
-type LiveFolderCandidate = {
-  prefix: string;
-  dirPath: string;
-  order: number;
-};
-
-async function collectOutputTree(outputDir: string): Promise<{ files: OutputFileEntry[]; liveFolders: LiveFolderCandidate[] }> {
+async function collectEvictableFiles(outputDir: string, protectedDirs: string[]): Promise<OutputFileEntry[]> {
   const files: OutputFileEntry[] = [];
-  const liveFolders: LiveFolderCandidate[] = [];
 
   const walk = async (dir: string): Promise<void> => {
+    if (isWithinAnyDir(dir, protectedDirs))
+      return;
+
     let dirents: fs.Dirent[];
     try {
       dirents = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -383,9 +388,6 @@ async function collectOutputTree(outputDir: string): Promise<{ files: OutputFile
     await Promise.all(dirents.map(async dirent => {
       const filePath = path.join(dir, dirent.name);
       if (dirent.isDirectory()) {
-        const prefix = liveFolderPrefix(dirent.name);
-        if (prefix !== undefined)
-          liveFolders.push({ prefix, dirPath: filePath, order: liveFolderOrder(dirent.name, prefix) });
         await walk(filePath);
         return;
       }
@@ -404,40 +406,8 @@ async function collectOutputTree(outputDir: string): Promise<{ files: OutputFile
     }));
   };
 
-  await walk(outputDir);
-  return { files, liveFolders };
-}
-
-/**
- * Returns the live-artifact folder prefix that `name` matches (e.g. a session
- * log or trace folder), or undefined when the directory is an ordinary one.
- */
-function liveFolderPrefix(name: string): string | undefined {
-  return PROTECTED_OUTPUT_FOLDER_PREFIXES.find(prefix => name.startsWith(prefix));
-}
-
-/**
- * Orders folders that share a prefix; the folder name embeds `Date.now()`, so a
- * larger value means a more recently created (i.e. still-active) folder.
- */
-function liveFolderOrder(name: string, prefix: string): number {
-  const suffix = Number(name.slice(prefix.length));
-  return Number.isFinite(suffix) ? suffix : -1;
-}
-
-/**
- * Of all the session-log/trace folders found, keep only the most recent one per
- * prefix. That is the folder the current session is still writing to, so it is
- * preserved while older, closed folders stay eligible for eviction.
- */
-function selectLiveFolders(candidates: LiveFolderCandidate[]): string[] {
-  const newestByPrefix = new Map<string, LiveFolderCandidate>();
-  for (const candidate of candidates) {
-    const current = newestByPrefix.get(candidate.prefix);
-    if (!current || candidate.order > current.order || (candidate.order === current.order && candidate.dirPath > current.dirPath))
-      newestByPrefix.set(candidate.prefix, candidate);
-  }
-  return [...newestByPrefix.values()].map(candidate => candidate.dirPath);
+  await walk(path.resolve(outputDir));
+  return files;
 }
 
 function isWithinAnyDir(filePath: string, dirs: string[]): boolean {
