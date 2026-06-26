@@ -27,7 +27,7 @@ const { registryDirectory } = coreBundle.registry;
 const { startTraceViewerServer } = coreBundle.server;
 import { logUnhandledError, testDebug } from './utils/log.js';
 import { createHash } from './utils/guid.js';
-import { outputFile  } from './config.js';
+import { OUTPUT_TRACE_FOLDER_PREFIX, outputFile  } from './config.js';
 
 import type { FullConfig } from './config.js';
 
@@ -326,7 +326,7 @@ async function startTraceServer(config: FullConfig, rootPath: string | undefined
   if (!config.saveTrace)
     return undefined;
 
-  const tracesDir = await outputFile(config, rootPath, `traces-${Date.now()}`);
+  const tracesDir = await outputFile(config, rootPath, `${OUTPUT_TRACE_FOLDER_PREFIX}${Date.now()}`);
   const server = await startTraceViewerServer();
   const urlPrefix = server.urlPrefix('human-readable');
   const url = urlPrefix + '/trace/index.html?trace=' + tracesDir + '/trace.json';

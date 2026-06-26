@@ -15,3 +15,9 @@
  */
 
 export const SESSION_LOG_FILE_NAME = 'session.md';
+
+/**
+ * Prefix of the per-session output folder created by `SessionLog.create`.
+ * Output eviction uses this to recognise and preserve live session-log folders.
+ */
+export const SESSION_LOG_FOLDER_PREFIX = 'session-';

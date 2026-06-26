@@ -20,9 +20,22 @@ import path from 'node:path';
 import type { BrowserContextOptions, LaunchOptions } from 'playwright';
 import { devices } from 'playwright';
 import { sanitizeForFilePath } from './utils/fileUtils.js';
-import { SESSION_LOG_FILE_NAME } from './sessionLogConstants.js';
+import { SESSION_LOG_FOLDER_PREFIX } from './sessionLogConstants.js';
 
 import type { Config, ToolCapability } from '../config.js';
+
+/**
+ * Prefix of the per-context trace folder created by `startTraceServer`.
+ * Output eviction uses this to recognise and preserve live trace folders.
+ */
+export const OUTPUT_TRACE_FOLDER_PREFIX = 'traces-';
+
+/**
+ * Output subfolders that hold live session artifacts (session logs and traces).
+ * These are preserved during `outputMaxSize` eviction so that the active
+ * session's logs and in-progress traces are never deleted out from under it.
+ */
+const PROTECTED_OUTPUT_FOLDER_PREFIXES = [SESSION_LOG_FOLDER_PREFIX, OUTPUT_TRACE_FOLDER_PREFIX];
 
 export type CLIOptions = {
     allowedOrigins?: string[];
@@ -323,9 +336,7 @@ async function evictOldOutputFiles(outputDir: string, maxSize: number | undefine
   if (limit === undefined)
     return;
 
-  const protectedDirs = new Set<string>();
-  const files = await collectOutputFiles(outputDir, protectedDirs);
-  const evictableFiles = files.filter(file => !hasProtectedAncestor(file.filePath, protectedDirs));
+  const evictableFiles = await collectEvictableFiles(outputDir, true);
 
   let totalSize = evictableFiles.reduce((total, file) => total + file.size, 0);
   evictableFiles.sort((a, b) => a.mtimeMs - b.mtimeMs || a.filePath.localeCompare(b.filePath));
@@ -343,7 +354,7 @@ type OutputFileEntry = {
   mtimeMs: number;
 };
 
-async function collectOutputFiles(outputDir: string, protectedDirs: Set<string>): Promise<OutputFileEntry[]> {
+async function collectEvictableFiles(outputDir: string, isRoot: boolean): Promise<OutputFileEntry[]> {
   const entries: OutputFileEntry[] = [];
   let dirents: fs.Dirent[];
   try {
@@ -357,13 +368,16 @@ async function collectOutputFiles(outputDir: string, protectedDirs: Set<string>)
   await Promise.all(dirents.map(async dirent => {
     const filePath = path.join(outputDir, dirent.name);
     if (dirent.isDirectory()) {
-      entries.push(...await collectOutputFiles(filePath, protectedDirs));
+      // Preserve live session-log and trace folders for the active session.
+      // These only ever live directly under the output root, so the prefix
+      // check is scoped there to avoid protecting look-alike report subfolders.
+      if (isRoot && isProtectedOutputFolder(dirent.name))
+        return;
+      entries.push(...await collectEvictableFiles(filePath, false));
       return;
     }
     if (!dirent.isFile())
       return;
-    if (dirent.name === SESSION_LOG_FILE_NAME)
-      protectedDirs.add(outputDir);
     let size: number;
     let mtimeMs: number;
     try {
@@ -379,20 +393,12 @@ async function collectOutputFiles(outputDir: string, protectedDirs: Set<string>)
   return entries;
 }
 
-function isFileNotFoundError(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
+function isProtectedOutputFolder(name: string): boolean {
+  return PROTECTED_OUTPUT_FOLDER_PREFIXES.some(prefix => name.startsWith(prefix));
 }
 
-function hasProtectedAncestor(filePath: string, protectedDirs: Set<string>): boolean {
-  let directory = path.dirname(filePath);
-  while (true) {
-    if (protectedDirs.has(directory))
-      return true;
-    const parent = path.dirname(directory);
-    if (parent === directory)
-      return false;
-    directory = parent;
-  }
+function isFileNotFoundError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }
 
 function validateOutputMaxSize(outputMaxSize: number | undefined): number | undefined {

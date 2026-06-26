@@ -20,7 +20,7 @@ import path from 'node:path';
 import { Response } from './response.js';
 import { logUnhandledError } from './utils/log.js';
 import { outputFile } from './config.js';
-import { SESSION_LOG_FILE_NAME } from './sessionLogConstants.js';
+import { SESSION_LOG_FILE_NAME, SESSION_LOG_FOLDER_PREFIX } from './sessionLogConstants.js';
 
 import type { FullConfig } from './config.js';
 import type * as actions from './actions.js';
@@ -70,7 +70,7 @@ export class SessionLog {
   }
 
   static async create(config: FullConfig, rootPath: string | undefined): Promise<SessionLog> {
-    const sessionFolder = await outputFile(config, rootPath, `session-${Date.now()}`);
+    const sessionFolder = await outputFile(config, rootPath, `${SESSION_LOG_FOLDER_PREFIX}${Date.now()}`);
     await fs.promises.mkdir(sessionFolder, { recursive: true });
     // eslint-disable-next-line no-console
     console.error(`Session: ${sessionFolder}`);
