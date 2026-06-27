@@ -120,6 +120,12 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     entry.finished = true;
   }
 
+  // Output paths of downloads still being written; they must survive output
+  // eviction until `saveAs` resolves, since a download can outlive its tool call.
+  pendingDownloadOutputFiles(): string[] {
+    return this._downloads.filter(entry => !entry.finished).map(entry => entry.outputFile);
+  }
+
   private _clearCollectedArtifacts() {
     this._consoleMessages.length = 0;
     this._recentConsoleMessages.length = 0;

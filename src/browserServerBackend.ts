@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { FullConfig } from './config.js';
-import { Context, outputEvictionGate } from './context.js';
+import { Context, currentToolNameStorage, outputEvictionGate } from './context.js';
 import { logUnhandledError } from './utils/log.js';
 import { Response } from './response.js';
 import { SessionLog } from './sessionLog.js';
@@ -87,11 +87,13 @@ export class BrowserServerBackend implements ServerBackend {
       // eviction (even from another HTTP session) never deletes live artifacts.
       await outputEvictionGate.run(
           () => context.evictOutputFiles(),
-          async () => {
+          // Tag the body's async stack with this call's tool name so a lazily
+          // created browser context attributes it to the right call.
+          () => currentToolNameStorage.run(name, async () => {
             await tool.handle(context, parsedArguments, response);
             await response.finish();
             this._sessionLog?.logResponse(response);
-          },
+          }),
       );
     } catch (error: any) {
       response.addError(String(error));

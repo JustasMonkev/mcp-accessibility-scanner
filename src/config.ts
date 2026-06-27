@@ -333,7 +333,10 @@ function outputEvictionDirectory(config: FullConfig, rootPath: string | undefine
 }
 
 function defaultTempOutputDirectory(): string {
-  return path.join(os.tmpdir(), 'playwright-mcp-output');
+  // Scope the shared-temp fallback to this process so that two server instances
+  // running without an explicit `outputDir` don't evict each other's live files
+  // (the eviction gate and protected-dir registry are process-local).
+  return path.join(os.tmpdir(), 'playwright-mcp-output', String(process.pid));
 }
 
 async function evictOldOutputFiles(outputDir: string, maxSize: number | undefined) {

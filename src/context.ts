@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import debug from 'debug';
 import type * as playwright from 'playwright';
 
@@ -84,6 +86,12 @@ class OutputEvictionGate {
 }
 
 export const outputEvictionGate = new OutputEvictionGate();
+
+// Name of the tool whose execution is on the current async call stack. Used when
+// a tool lazily creates the browser context so the right tool name reaches the
+// context factory (e.g. the extension relay's `newTab` flag), even when several
+// first-time tool calls overlap.
+export const currentToolNameStorage = new AsyncLocalStorage<string>();
 
 type ContextOptions = {
   tools: Tool[];
@@ -178,14 +186,17 @@ export class Context {
     await evictOutputFiles(this.config, this._clientInfo.rootPath);
   }
 
-  // Output folders this context is actively writing to, which must survive
-  // `outputMaxSize` eviction (its own session log and in-progress trace).
+  // Output paths this context is actively writing to, which must survive
+  // `outputMaxSize` eviction: its session log, in-progress trace, and any
+  // downloads still being saved.
   protectedOutputDirs(): string[] {
     const dirs: string[] = [];
     if (this.sessionLog)
       dirs.push(this.sessionLog.folder);
     if (this._tracesDir)
       dirs.push(this._tracesDir);
+    for (const tab of this._tabs)
+      dirs.push(...tab.pendingDownloadOutputFiles());
     return dirs;
   }
 
@@ -230,13 +241,6 @@ export class Context {
 
   clearRunningTool(token: symbol) {
     this._runningTools.delete(token);
-  }
-
-  private _currentRunningToolName(): string | undefined {
-    let name: string | undefined;
-    for (const value of this._runningTools.values())
-      name = value;
-    return name;
   }
 
   private async _closeBrowserContextImpl() {
@@ -292,7 +296,7 @@ export class Context {
     if (this._closeBrowserContextPromise)
       throw new Error('Another browser context is being closed.');
     // TODO: move to the browser context factory to make it based on isolation mode.
-    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._currentRunningToolName());
+    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, currentToolNameStorage.getStore());
     const { browserContext } = result;
     this._tracesDir = result.tracesDir;
     await this._setupRequestInterception(browserContext);

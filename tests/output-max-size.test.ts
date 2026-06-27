@@ -161,7 +161,7 @@ describe('outputMaxSize', () => {
   it('preserves the active session log folder nested under the default temp root', async () => {
     const tempRoot = await createOutputDir();
     vi.stubEnv('TMPDIR', tempRoot);
-    const outputRoot = path.join(tempRoot, 'playwright-mcp-output');
+    const outputRoot = path.join(tempRoot, 'playwright-mcp-output', String(process.pid));
     const baseTime = Date.now() - 10_000;
 
     // In default mode each call nests under a timestamped fallback dir, so the
@@ -233,7 +233,7 @@ describe('outputMaxSize', () => {
   it('uses the stable temp output root when evicting fallback output', async () => {
     const tempRoot = await createOutputDir();
     vi.stubEnv('TMPDIR', tempRoot);
-    const outputRoot = path.join(tempRoot, 'playwright-mcp-output');
+    const outputRoot = path.join(tempRoot, 'playwright-mcp-output', String(process.pid));
     const baseTime = Date.now() - 10_000;
 
     await writeSizedFile(path.join(outputRoot, 'old-1', 'artifact.bin'), 1_000, baseTime);
