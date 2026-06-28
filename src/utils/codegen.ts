@@ -51,3 +51,10 @@ export function formatObject(value: any, indent = '  '): string {
   }
   return String(value);
 }
+
+// Formats an options object for code generation, returning an empty string
+// when every property is undefined (i.e. there are no options to emit).
+export function formatObjectOrVoid(value: any, indent = '  '): string {
+  const result = formatObject(value, indent);
+  return result === '{}' ? '' : result;
+}
