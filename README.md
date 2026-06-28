@@ -409,7 +409,7 @@ Move mouse to specific coordinates.
 
 #### `browser_mouse_click_xy`
 Click at specific coordinates.
-- Parameters: `element`, `x`, `y`
+- Parameters: `element`, `x`, `y`, `button` (optional: `left`/`right`/`middle`), `clickCount` (optional), `delay` (optional, ms between mouse down and up)
 
 #### `browser_mouse_drag_xy`
 Drag from one coordinate to another.

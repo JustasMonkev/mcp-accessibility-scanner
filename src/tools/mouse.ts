@@ -16,6 +16,7 @@
 
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
+import * as javascript from '../utils/codegen.js';
 
 const elementSchema = z.object({
   element: z.string().describe('Human-readable element description used to obtain permission to interact with the element'),
@@ -49,10 +50,13 @@ const mouseClick = defineTabTool({
   schema: {
     name: 'browser_mouse_click_xy',
     title: 'Click',
-    description: 'Click left mouse button at a given position',
+    description: 'Click mouse button at a given position',
     inputSchema: elementSchema.extend({
       x: z.number().describe('X coordinate'),
       y: z.number().describe('Y coordinate'),
+      button: z.enum(['left', 'right', 'middle']).optional().describe('Button to click, defaults to left'),
+      clickCount: z.number().min(1).optional().describe('Number of clicks, defaults to 1'),
+      delay: z.number().min(0).optional().describe('Time to wait between mouse down and mouse up in milliseconds, defaults to 0'),
     }),
     type: 'destructive',
   },
@@ -60,15 +64,19 @@ const mouseClick = defineTabTool({
   handle: async (tab, params, response) => {
     response.setIncludeSnapshot();
 
+    const options = {
+      button: params.button,
+      clickCount: params.clickCount,
+      delay: params.delay,
+    };
+    const formatted = javascript.formatObjectOrVoid(options);
+    const optionsArg = formatted ? `, ${formatted}` : '';
+
     response.addCode(`// Click mouse at coordinates (${params.x}, ${params.y})`);
-    response.addCode(`await page.mouse.move(${params.x}, ${params.y});`);
-    response.addCode(`await page.mouse.down();`);
-    response.addCode(`await page.mouse.up();`);
+    response.addCode(`await page.mouse.click(${params.x}, ${params.y}${optionsArg});`);
 
     await tab.waitForCompletion(async () => {
-      await tab.page.mouse.move(params.x, params.y);
-      await tab.page.mouse.down();
-      await tab.page.mouse.up();
+      await tab.page.mouse.click(params.x, params.y, options);
     });
   },
 });
