@@ -29,7 +29,7 @@ const scanPageSchema = z.object({
 });
 
 const snapshotSchema = z.object({
-  compress: z.boolean().optional().describe('Collapse repeated non-interactive ARIA nodes in large snapshots. Keeps the first 10 examples of repeated structural patterns. Use browser_evaluate() to retrieve the full list if needed.'),
+  compress: z.boolean().optional().describe('Collapse repeated non-interactive ARIA nodes in large snapshots when a repeated structural pattern appears more than 100 times. Keeps the first 10 examples of each collapsed pattern. Use browser_evaluate() to retrieve the full list if needed.'),
 });
 
 const scanPage = defineTool({

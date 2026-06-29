@@ -1,3 +1,19 @@
+/**
+ * Copyright (c) Microsoft Corporation.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 const FIRE_THRESHOLD = 100;
 const KEEP_N = 10;
 
@@ -38,11 +54,23 @@ const PROTECTED_LINE_ROLES = new Set([
   'tab',
   'textbox',
   'tree',
+  'treegrid',
   'treeitem',
   'region',
 ]);
 const REF_PROTECTED_LINE_ROLES = new Set([
   'grid',
+  'gridcell',
+  'scrollbar',
+  'separator',
+  'treegrid',
+]);
+const REF_PROTECTED_DESCENDANT_ROLES = new Set([
+  'columnheader',
+  'gridcell',
+  'rowheader',
+  'scrollbar',
+  'separator',
 ]);
 const PROTECTED_SUBTREE_ROLES = new Set([
   'button',
@@ -161,8 +189,8 @@ function parseSnapshotLines(yaml: string): SnapshotLine[] {
       hasRef,
       signature: signature(text),
       selfHasProtectedLineRole: shouldKeepLine(role, hasRef),
-      containsProtectedSubtreeRole: shouldKeepSubtree(role),
-      selfHasProtectedSubtreeRole: shouldKeepSubtree(role),
+      containsProtectedSubtreeRole: shouldKeepSubtree(role) || shouldKeepRefProtectedDescendants(role, hasRef),
+      selfHasProtectedSubtreeRole: shouldKeepSubtree(role) || shouldKeepRefProtectedDescendants(role, hasRef),
       insideProtectedSubtree: false,
     };
   });
@@ -181,7 +209,7 @@ function parseSnapshotLines(yaml: string): SnapshotLine[] {
   }
 
   for (const line of lines) {
-    if (line.role === 'row' && line.hasRef && hasAncestorRole(lines, line, 'grid')) {
+    if (line.role === 'row' && line.hasRef && hasAncestorRole(lines, line, ROW_CONTAINER_ROLES)) {
       line.selfHasProtectedLineRole = true;
       line.containsProtectedSubtreeRole = true;
       line.selfHasProtectedSubtreeRole = true;
@@ -244,9 +272,16 @@ function shouldKeepSubtree(role: string | undefined): boolean {
   return role !== undefined && PROTECTED_SUBTREE_ROLES.has(role);
 }
 
-function hasAncestorRole(lines: SnapshotLine[], line: SnapshotLine, role: string): boolean {
+function shouldKeepRefProtectedDescendants(role: string | undefined, hasRef: boolean): boolean {
+  return role !== undefined && hasRef && REF_PROTECTED_DESCENDANT_ROLES.has(role);
+}
+
+const ROW_CONTAINER_ROLES = new Set(['grid', 'treegrid']);
+
+function hasAncestorRole(lines: SnapshotLine[], line: SnapshotLine, roles: Set<string>): boolean {
   for (let parentIndex = line.parentIndex; parentIndex !== -1; parentIndex = lines[parentIndex].parentIndex) {
-    if (lines[parentIndex].role === role)
+    const role = lines[parentIndex].role;
+    if (role !== undefined && roles.has(role))
       return true;
   }
   return false;

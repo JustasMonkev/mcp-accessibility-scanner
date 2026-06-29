@@ -329,6 +329,19 @@ describe('Utils', () => {
       expect(result.output).toContain('Action 150');
     });
 
+    it('should keep repeated focusable range widget refs', () => {
+      const snapshot = [
+        ...Array.from({ length: 150 }, (_, index) => `- scrollbar "List scroll ${index + 1}" [ref=scroll-${index + 1}]`),
+        ...Array.from({ length: 150 }, (_, index) => `- separator "Pane splitter ${index + 1}" [ref=splitter-${index + 1}]`),
+      ].join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('List scroll 150');
+      expect(result.output).toContain('Pane splitter 150');
+    });
+
     it('should keep repeated non-interactive subtrees that contain interactive descendants', () => {
       const snapshot = Array.from({ length: 150 }, (_, index) => [
         '- listitem:',
@@ -343,6 +356,36 @@ describe('Utils', () => {
       expect(result.output).toContain('Item 11');
       expect(result.output).toContain('Item 150');
       expect(result.output).toContain('Action 150');
+    });
+
+    it('should keep repeated rows with protected gridcell descendants', () => {
+      const snapshot = [
+        '- grid:',
+        ...Array.from({ length: 150 }, (_, index) => [
+          '  - row:',
+          `    - gridcell "Order ${index + 1}" [ref=cell-${index + 1}]`,
+        ].join('\n')),
+      ].join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Order 150');
+    });
+
+    it('should keep repeated actionable treegrid rows', () => {
+      const snapshot = [
+        '- treegrid:',
+        ...Array.from({ length: 150 }, (_, index) => [
+          `  - row "Order ${index + 1}" [ref=row-${index + 1}]:`,
+          `    - gridcell "Order ${index + 1}"`,
+        ].join('\n')),
+      ].join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Order 150');
     });
 
     it('should collapse repeated non-interactive nodes even when they have refs', () => {
