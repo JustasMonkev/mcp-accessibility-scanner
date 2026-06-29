@@ -292,6 +292,9 @@ Set default operation timeout for existing tabs.
 #### `browser_snapshot`
 Capture accessibility snapshot of the current page (better than screenshot for analysis).
 Large `data:` URL payloads in snapshot output are truncated to their media type prefix.
+- Parameters: `compress` (optional boolean, default false)
+  - When true, repeated non-interactive ARIA snapshot nodes are collapsed in the rendered response when a repeated structural pattern appears more than 100 times. The first 10 examples of each collapsed pattern are kept.
+  - Use `browser_evaluate()` to retrieve the full uncompressed list when needed.
 
 #### `browser_click`
 Perform click on a web page element.

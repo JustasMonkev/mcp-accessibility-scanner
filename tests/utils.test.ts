@@ -14,9 +14,33 @@
  * limitations under the License.
  */
 
+import fs from 'fs';
+import { chromium, type Browser } from 'playwright';
 import { describe, it, expect } from 'vitest';
 import { createGuid, createHash } from '../src/utils/guid.js';
+import { compressAriaSnapshot } from '../src/utils/ariaCompression.js';
 import { truncateDataUrl, truncateDataUrls } from '../src/utils/dataUrl.js';
+
+const hasBundledChromium = fs.existsSync(chromium.executablePath());
+async function canLaunchBundledChromium(): Promise<boolean> {
+  if (!hasBundledChromium)
+    return false;
+
+  let browser: Browser | undefined;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      chromiumSandbox: false,
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await browser?.close().catch(() => undefined);
+  }
+}
+
+const canRunAriaSnapshotIntegration = await canLaunchBundledChromium();
 
 describe('Utils', () => {
   describe('createGuid', () => {
@@ -260,4 +284,369 @@ describe('Utils', () => {
       expect(truncateDataUrls(text)).toBe('[LOG] url(data:text/plain,...) done');
     });
   });
+
+  describe('ARIA snapshot compression', () => {
+    it('should collapse repeated non-interactive ARIA nodes', () => {
+      const result = compressAriaSnapshot(repeatedListSnapshot(150));
+
+      expect(result.removed).toBe(140);
+      expect(result.output).toContain('Item 1');
+      expect(result.output).toContain('Item 10');
+      expect(result.output).not.toContain('Item 11');
+      expect(result.output).not.toContain('Item 150');
+      expect(result.output).toContain('# playwright-compress: 140 repeated ARIA nodes collapsed');
+      expect(result.output).toContain('browser_evaluate()');
+    });
+
+    it('should not compress snapshots below the safety threshold', () => {
+      const snapshot = repeatedListSnapshot(50);
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+    });
+
+    it('should collapse repeated ARIA node subtrees', () => {
+      const snapshot = Array.from({ length: 150 }, (_, index) => [
+        '- listitem:',
+        `  - text: Item ${index + 1}`,
+      ].join('\n')).join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result.removed).toBe(280);
+      expect(result.output).toContain('Item 10');
+      expect(result.output).not.toContain('Item 11');
+      expect(result.output).not.toContain('Item 150');
+    });
+
+    it('should keep repeated interactive ARIA nodes', () => {
+      const snapshot = Array.from({ length: 150 }, (_, index) => `- button "Action ${index + 1}" [ref=e${index + 1}]`).join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Action 150');
+    });
+
+    it('should keep repeated focusable range widget refs', () => {
+      const snapshot = [
+        ...Array.from({ length: 150 }, (_, index) => `- scrollbar "List scroll ${index + 1}" [ref=scroll-${index + 1}]`),
+        ...Array.from({ length: 150 }, (_, index) => `- separator "Pane splitter ${index + 1}" [ref=splitter-${index + 1}]`),
+      ].join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('List scroll 150');
+      expect(result.output).toContain('Pane splitter 150');
+    });
+
+    it('should keep repeated cursor-pointer refs', () => {
+      const snapshot = Array.from({ length: 150 }, (_, index) => [
+        `- listitem "Card ${index + 1}" [ref=card-${index + 1}] [cursor=pointer]:`,
+        `  - text: Card ${index + 1}`,
+      ].join('\n')).join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Card 150');
+    });
+
+    it('should keep repeated non-interactive subtrees that contain interactive descendants', () => {
+      const snapshot = Array.from({ length: 150 }, (_, index) => [
+        '- listitem:',
+        `  - text: Item ${index + 1}`,
+        `  - button "Action ${index + 1}" [ref=action-${index + 1}]`,
+      ].join('\n')).join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Item 10');
+      expect(result.output).toContain('Item 11');
+      expect(result.output).toContain('Item 150');
+      expect(result.output).toContain('Action 150');
+    });
+
+    it('should keep repeated rows with protected gridcell descendants', () => {
+      const snapshot = [
+        '- grid:',
+        ...Array.from({ length: 150 }, (_, index) => [
+          '  - row:',
+          `    - gridcell "Order ${index + 1}" [ref=cell-${index + 1}]`,
+        ].join('\n')),
+      ].join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Order 150');
+    });
+
+    it('should keep repeated actionable treegrid rows', () => {
+      const snapshot = [
+        '- treegrid:',
+        ...Array.from({ length: 150 }, (_, index) => [
+          `  - row "Order ${index + 1}" [ref=row-${index + 1}]:`,
+          `    - gridcell "Order ${index + 1}"`,
+        ].join('\n')),
+      ].join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Order 150');
+    });
+
+    it('should collapse repeated non-interactive nodes even when they have refs', () => {
+      const snapshot = Array.from({ length: 150 }, (_, index) => `- listitem [ref=e${index + 1}]: Item ${index + 1}`).join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result.removed).toBe(140);
+      expect(result.output).toContain('Item 10');
+      expect(result.output).not.toContain('Item 11');
+      expect(result.output).not.toContain('Item 150');
+      expect(result.output).toContain('# playwright-compress: 140 repeated ARIA nodes collapsed');
+    });
+
+    it('should keep descendants of interactive nodes', () => {
+      const snapshot = [
+        '- link "Order" [ref=order-link]:',
+        ...Array.from({ length: 150 }, (_, index) => `  - text: Detail ${index + 1}`),
+      ].join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Detail 11');
+      expect(result.output).toContain('Detail 150');
+    });
+
+    it.skipIf(!canRunAriaSnapshotIntegration)('should compress real Playwright list snapshots with non-actionable refs', async () => {
+      let browser: Browser | undefined;
+      try {
+        browser = await chromium.launch({
+          headless: true,
+          chromiumSandbox: false,
+        });
+        const page = await browser.newPage();
+        const items = Array.from({ length: 150 }, (_, index) => `<li>Item ${index + 1}</li>`).join('');
+        await page.setContent(`<ul>${items}</ul>`);
+
+        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
+        const result = compressAriaSnapshot(snapshot);
+
+        expect(snapshot).toContain('[ref=');
+        expect(snapshot).toContain('Item 150');
+        expect(result.removed).toBeGreaterThan(0);
+        expect(result.output).toContain('Item 10');
+        expect(result.output).not.toContain('Item 11');
+        expect(result.output).not.toContain('Item 150');
+        expect(result.output).toContain('playwright-compress:');
+      } finally {
+        await browser?.close().catch(() => undefined);
+      }
+    });
+
+    it.skipIf(!canRunAriaSnapshotIntegration)('should compress real Playwright lists inside landmarks', async () => {
+      let browser: Browser | undefined;
+      try {
+        browser = await chromium.launch({
+          headless: true,
+          chromiumSandbox: false,
+        });
+        const page = await browser.newPage();
+        const items = Array.from({ length: 150 }, (_, index) => `<li>Item ${index + 1}</li>`).join('');
+        await page.setContent(`<main><ul>${items}</ul></main>`);
+
+        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
+        const result = compressAriaSnapshot(snapshot);
+
+        expect(snapshot).toContain('main');
+        expect(snapshot).toContain('Item 150');
+        expect(result.removed).toBeGreaterThan(0);
+        expect(result.output).toContain('main');
+        expect(result.output).toContain('Item 10');
+        expect(result.output).not.toContain('Item 11');
+        expect(result.output).not.toContain('Item 150');
+        expect(result.output).toContain('playwright-compress:');
+      } finally {
+        await browser?.close().catch(() => undefined);
+      }
+    });
+
+    it.skipIf(!canRunAriaSnapshotIntegration)('should compress real Playwright repeated cards with headings', async () => {
+      let browser: Browser | undefined;
+      try {
+        browser = await chromium.launch({
+          headless: true,
+          chromiumSandbox: false,
+        });
+        const page = await browser.newPage();
+        const cards = Array.from({ length: 150 }, (_, index) => [
+          '<article>',
+          `<h2>Title ${index + 1}</h2>`,
+          `<p>Summary ${index + 1}</p>`,
+          '</article>',
+        ].join('')).join('');
+        await page.setContent(`<main>${cards}</main>`);
+
+        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
+        const result = compressAriaSnapshot(snapshot);
+
+        expect(snapshot).toContain('Title 150');
+        expect(result.removed).toBeGreaterThan(0);
+        expect(result.output).toContain('Title 10');
+        expect(result.output).not.toContain('Title 11');
+        expect(result.output).not.toContain('Title 150');
+        expect(result.output).toContain('playwright-compress:');
+      } finally {
+        await browser?.close().catch(() => undefined);
+      }
+    });
+
+    it.skipIf(!canRunAriaSnapshotIntegration)('should preserve real Playwright slider controls', async () => {
+      let browser: Browser | undefined;
+      try {
+        browser = await chromium.launch({
+          headless: true,
+          chromiumSandbox: false,
+        });
+        const page = await browser.newPage();
+        const sliders = Array.from({ length: 150 }, (_, index) => `<input type="range" aria-label="Volume ${index + 1}" min="0" max="100" value="50">`).join('');
+        await page.setContent(`<main>${sliders}</main>`);
+
+        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
+        const result = compressAriaSnapshot(snapshot);
+
+        expect(snapshot).toContain('Volume 150');
+        expect(result).toEqual({ output: snapshot, removed: 0 });
+        expect(result.output).toContain('Volume 11');
+        expect(result.output).toContain('Volume 150');
+      } finally {
+        await browser?.close().catch(() => undefined);
+      }
+    });
+
+    it.skipIf(!canRunAriaSnapshotIntegration)('should preserve real Playwright combobox controls', async () => {
+      let browser: Browser | undefined;
+      try {
+        browser = await chromium.launch({
+          headless: true,
+          chromiumSandbox: false,
+        });
+        const page = await browser.newPage();
+        const selects = Array.from({ length: 150 }, (_, index) => [
+          `<select aria-label="Choice ${index + 1}">`,
+          '<option>One</option>',
+          '<option>Two</option>',
+          '</select>',
+        ].join('')).join('');
+        await page.setContent(`<main>${selects}</main>`);
+
+        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
+        const result = compressAriaSnapshot(snapshot);
+
+        expect(snapshot).toContain('Choice 150');
+        expect(result).toEqual({ output: snapshot, removed: 0 });
+        expect(result.output).toContain('Choice 11');
+        expect(result.output).toContain('Choice 150');
+      } finally {
+        await browser?.close().catch(() => undefined);
+      }
+    });
+
+    it.skipIf(!canRunAriaSnapshotIntegration)('should preserve real Playwright actionable grid rows', async () => {
+      let browser: Browser | undefined;
+      try {
+        browser = await chromium.launch({
+          headless: true,
+          chromiumSandbox: false,
+        });
+        const page = await browser.newPage();
+        const rows = Array.from({ length: 150 }, (_, index) => [
+          `<div role="row" tabindex="0" aria-label="Order ${index + 1}">`,
+          `<span role="gridcell">Order ${index + 1}</span>`,
+          `<span role="gridcell">Status ${index + 1}</span>`,
+          '</div>',
+        ].join('')).join('');
+        await page.setContent(`<div role="grid">${rows}</div>`);
+
+        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
+        const result = compressAriaSnapshot(snapshot);
+
+        expect(snapshot).toContain('Order 150');
+        expect(result).toEqual({ output: snapshot, removed: 0 });
+        expect(result.output).toContain('Order 11');
+        expect(result.output).toContain('Order 150');
+      } finally {
+        await browser?.close().catch(() => undefined);
+      }
+    });
+
+    it.skipIf(!canRunAriaSnapshotIntegration)('should compress real Playwright plain table rows', async () => {
+      let browser: Browser | undefined;
+      try {
+        browser = await chromium.launch({
+          headless: true,
+          chromiumSandbox: false,
+        });
+        const page = await browser.newPage();
+        const rows = Array.from({ length: 150 }, (_, index) => [
+          '<tr>',
+          `<td>Order ${index + 1}</td>`,
+          `<td>Status ${index + 1}</td>`,
+          '</tr>',
+        ].join('')).join('');
+        await page.setContent(`<table><tbody>${rows}</tbody></table>`);
+
+        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
+        const result = compressAriaSnapshot(snapshot);
+
+        expect(snapshot).toContain('Order 150');
+        expect(result.removed).toBeGreaterThan(0);
+        expect(result.output).toContain('Order 10');
+        expect(result.output).not.toContain('Order 11');
+        expect(result.output).not.toContain('Order 150');
+        expect(result.output).toContain('playwright-compress:');
+      } finally {
+        await browser?.close().catch(() => undefined);
+      }
+    });
+
+    it('should compress unrelated repeated siblings under a shared parent with refs', () => {
+      const snapshot = [
+        '- document:',
+        '  - button "Save" [ref=save]',
+        ...Array.from({ length: 150 }, (_, index) => `  - text: Item ${index + 1}`),
+      ].join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result.removed).toBe(140);
+      expect(result.output).toContain('button "Save" [ref=save]');
+      expect(result.output).toContain('Item 10');
+      expect(result.output).not.toContain('Item 11');
+      expect(result.output).not.toContain('Item 150');
+      expect(result.output).toContain('# playwright-compress: 140 repeated ARIA nodes collapsed');
+    });
+
+    it('should not preserve non-interactive lines based on text content only', () => {
+      const snapshot = Array.from({ length: 150 }, (_, index) => `- text: Press the button ${index + 1}`).join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result.removed).toBe(140);
+      expect(result.output).not.toContain('Press the button 11');
+      expect(result.output).not.toContain('Press the button 150');
+      expect(result.output).toContain('Press the button 10');
+    });
+  });
 });
+
+function repeatedListSnapshot(count: number): string {
+  return Array.from({ length: count }, (_, index) => `- listitem: Item ${index + 1}`).join('\n');
+}

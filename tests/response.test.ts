@@ -402,6 +402,50 @@ describe('Response', () => {
       expect(textContent.text).toContain('Example Page');
     });
 
+    it('should compress rendered snapshot output when requested', async () => {
+      mockTab.captureSnapshot = vi.fn().mockResolvedValue({
+        url: 'https://example.com',
+        title: 'Example Page',
+        ariaSnapshot: repeatedListSnapshot(150),
+        modalStates: [],
+        consoleMessages: [],
+        downloads: [],
+      });
+
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeSnapshot(true);
+      await response.finish();
+      const serialized = response.serialize();
+      const textContent = expectTextContent(serialized.content[0]);
+
+      expect(response.tabSnapshot()?.ariaSnapshot).toContain('Item 150');
+      expect(textContent.text).toContain('Item 10');
+      expect(textContent.text).not.toContain('Item 11');
+      expect(textContent.text).not.toContain('Item 150');
+      expect(textContent.text).toContain('playwright-compress:');
+      expect(textContent.text).toContain('browser_evaluate()');
+    });
+
+    it('should leave rendered snapshot output uncompressed when disabled', async () => {
+      mockTab.captureSnapshot = vi.fn().mockResolvedValue({
+        url: 'https://example.com',
+        title: 'Example Page',
+        ariaSnapshot: repeatedListSnapshot(150),
+        modalStates: [],
+        consoleMessages: [],
+        downloads: [],
+      });
+
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeSnapshot(false);
+      await response.finish();
+      const serialized = response.serialize();
+      const textContent = expectTextContent(serialized.content[0]);
+
+      expect(textContent.text).toContain('Item 150');
+      expect(textContent.text).not.toContain('playwright-compress:');
+    });
+
     it('should truncate data URL payloads in rendered snapshot output', async () => {
       const payload = Buffer.from('<p>hello</p>').toString('base64');
       const dataUrl = `data:text/html;base64,${payload}`;
@@ -553,3 +597,7 @@ describe('Response', () => {
     });
   });
 });
+
+function repeatedListSnapshot(count: number): string {
+  return Array.from({ length: count }, (_, index) => `- listitem: Item ${index + 1}`).join('\n');
+}
