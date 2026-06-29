@@ -294,7 +294,7 @@ describe('Utils', () => {
       expect(result.output).toContain('Item 10');
       expect(result.output).not.toContain('Item 11');
       expect(result.output).not.toContain('Item 150');
-      expect(result.output).toContain('playwright-compress: 140 repeated ARIA nodes collapsed');
+      expect(result.output).toContain('# playwright-compress: 140 repeated ARIA nodes collapsed');
       expect(result.output).toContain('browser_evaluate()');
     });
 
@@ -340,6 +340,18 @@ describe('Utils', () => {
       expect(result).toEqual({ output: snapshot, removed: 0 });
       expect(result.output).toContain('List scroll 150');
       expect(result.output).toContain('Pane splitter 150');
+    });
+
+    it('should keep repeated cursor-pointer refs', () => {
+      const snapshot = Array.from({ length: 150 }, (_, index) => [
+        `- listitem "Card ${index + 1}" [ref=card-${index + 1}] [cursor=pointer]:`,
+        `  - text: Card ${index + 1}`,
+      ].join('\n')).join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Card 150');
     });
 
     it('should keep repeated non-interactive subtrees that contain interactive descendants', () => {
@@ -397,7 +409,7 @@ describe('Utils', () => {
       expect(result.output).toContain('Item 10');
       expect(result.output).not.toContain('Item 11');
       expect(result.output).not.toContain('Item 150');
-      expect(result.output).toContain('playwright-compress: 140 repeated ARIA nodes collapsed');
+      expect(result.output).toContain('# playwright-compress: 140 repeated ARIA nodes collapsed');
     });
 
     it('should keep descendants of interactive nodes', () => {
@@ -619,7 +631,7 @@ describe('Utils', () => {
       expect(result.output).toContain('Item 10');
       expect(result.output).not.toContain('Item 11');
       expect(result.output).not.toContain('Item 150');
-      expect(result.output).toContain('playwright-compress: 140 repeated ARIA nodes collapsed');
+      expect(result.output).toContain('# playwright-compress: 140 repeated ARIA nodes collapsed');
     });
 
     it('should not preserve non-interactive lines based on text content only', () => {

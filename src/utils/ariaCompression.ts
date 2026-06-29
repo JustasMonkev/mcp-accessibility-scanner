@@ -19,6 +19,7 @@ const KEEP_N = 10;
 
 const KEEP_REF_ALL = /\[ref=[^\]]+\]/g;
 const HAS_REF = /\[ref=[^\]]+\]/;
+const HAS_CURSOR_POINTER = /\[cursor=pointer\]/;
 const ROLE_PREFIX_RE = /^\s*-\s*([a-z][a-z0-9-]*)\b/i;
 const PROTECTED_LINE_ROLES = new Set([
   'alert',
@@ -102,6 +103,7 @@ type SnapshotLine = {
   parentIndex: number;
   role: string | undefined;
   hasRef: boolean;
+  hasCursorPointer: boolean;
   signature: string;
   selfHasProtectedLineRole: boolean;
   containsProtectedSubtreeRole: boolean;
@@ -173,7 +175,7 @@ export function compressAriaSnapshot(yaml: string): CompressResult {
   if (totalRemoved === 0)
     return { output: yaml, removed: 0 };
 
-  const note = `\n[playwright-compress: ${totalRemoved} repeated ARIA nodes collapsed - use browser_evaluate() to enumerate the full list]`;
+  const note = `\n# playwright-compress: ${totalRemoved} repeated ARIA nodes collapsed - use browser_evaluate() to enumerate the full list`;
   return { output: output.join('\n') + note, removed: totalRemoved };
 }
 
@@ -181,16 +183,18 @@ function parseSnapshotLines(yaml: string): SnapshotLine[] {
   const lines = yaml.split('\n').map((text): SnapshotLine => {
     const role = roleOf(text);
     const hasRef = HAS_REF.test(text);
+    const hasCursorPointer = HAS_CURSOR_POINTER.test(text);
     return {
       text,
       indent: indentOf(text),
       parentIndex: -1,
       role,
       hasRef,
+      hasCursorPointer,
       signature: signature(text),
-      selfHasProtectedLineRole: shouldKeepLine(role, hasRef),
-      containsProtectedSubtreeRole: shouldKeepSubtree(role) || shouldKeepRefProtectedDescendants(role, hasRef),
-      selfHasProtectedSubtreeRole: shouldKeepSubtree(role) || shouldKeepRefProtectedDescendants(role, hasRef),
+      selfHasProtectedLineRole: shouldKeepLine(role, hasRef, hasCursorPointer),
+      containsProtectedSubtreeRole: shouldKeepSubtree(role) || shouldKeepRefProtectedDescendants(role, hasRef) || shouldKeepCursorPointerRef(hasRef, hasCursorPointer),
+      selfHasProtectedSubtreeRole: shouldKeepSubtree(role) || shouldKeepRefProtectedDescendants(role, hasRef) || shouldKeepCursorPointerRef(hasRef, hasCursorPointer),
       insideProtectedSubtree: false,
     };
   });
@@ -262,7 +266,9 @@ function roleOf(line: string): string | undefined {
   return ROLE_PREFIX_RE.exec(line)?.[1]?.toLowerCase();
 }
 
-function shouldKeepLine(role: string | undefined, hasRef: boolean): boolean {
+function shouldKeepLine(role: string | undefined, hasRef: boolean, hasCursorPointer: boolean): boolean {
+  if (shouldKeepCursorPointerRef(hasRef, hasCursorPointer))
+    return true;
   if (role === undefined)
     return false;
   return PROTECTED_LINE_ROLES.has(role) || hasRef && REF_PROTECTED_LINE_ROLES.has(role);
@@ -274,6 +280,10 @@ function shouldKeepSubtree(role: string | undefined): boolean {
 
 function shouldKeepRefProtectedDescendants(role: string | undefined, hasRef: boolean): boolean {
   return role !== undefined && hasRef && REF_PROTECTED_DESCENDANT_ROLES.has(role);
+}
+
+function shouldKeepCursorPointerRef(hasRef: boolean, hasCursorPointer: boolean): boolean {
+  return hasRef && hasCursorPointer;
 }
 
 const ROW_CONTAINER_ROLES = new Set(['grid', 'treegrid']);
