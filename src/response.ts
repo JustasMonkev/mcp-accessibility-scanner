@@ -19,6 +19,7 @@ import { pathToFileURL } from 'node:url';
 import debug from 'debug';
 
 import { renderModalStates } from './tab.js';
+import { compressAriaSnapshot } from './utils/ariaCompression.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
 
 import type { Tab, TabSnapshot } from './tab.js';
@@ -41,6 +42,7 @@ export class Response {
   private _resourceLinks: ResourceLink[] = [];
   private _context: Context;
   private _includeSnapshot = false;
+  private _includeSnapshotCompress: boolean | undefined;
   private _includeTabs = false;
   private _tabSnapshot: TabSnapshot | undefined;
   private _requestContext: CallToolRequestContext | undefined;
@@ -123,8 +125,9 @@ export class Response {
     return this._structuredContent;
   }
 
-  setIncludeSnapshot() {
+  setIncludeSnapshot(compress?: boolean) {
     this._includeSnapshot = true;
+    this._includeSnapshotCompress = compress;
   }
 
   setIncludeTabs() {
@@ -195,7 +198,7 @@ ${this._code.join('\n')}
       response.push(...renderModalStates(this._context, this._tabSnapshot.modalStates));
       response.push('');
     } else if (this._tabSnapshot) {
-      response.push(renderTabSnapshot(this._tabSnapshot));
+      response.push(renderTabSnapshot(this._tabSnapshot, { compress: this._includeSnapshotCompress }));
       response.push('');
     }
 
@@ -221,8 +224,9 @@ ${this._code.join('\n')}
   }
 }
 
-function renderTabSnapshot(tabSnapshot: TabSnapshot): string {
+function renderTabSnapshot(tabSnapshot: TabSnapshot, options: { compress?: boolean } = {}): string {
   const lines: string[] = [];
+  const ariaSnapshot = options.compress ? compressAriaSnapshot(tabSnapshot.ariaSnapshot).output : tabSnapshot.ariaSnapshot;
 
   if (tabSnapshot.consoleMessages.length) {
     lines.push(`### New console messages`);
@@ -247,7 +251,7 @@ function renderTabSnapshot(tabSnapshot: TabSnapshot): string {
   lines.push(`- Page Title: ${truncateDataUrls(tabSnapshot.title)}`);
   lines.push(`- Page Snapshot:`);
   lines.push('```yaml');
-  lines.push(truncateDataUrls(tabSnapshot.ariaSnapshot));
+  lines.push(truncateDataUrls(ariaSnapshot));
   lines.push('```');
 
   return lines.join('\n');

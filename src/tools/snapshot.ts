@@ -28,6 +28,10 @@ const scanPageSchema = z.object({
       .describe('Array of tags to filter violations by. If not specified, all violations are returned.')
 });
 
+const snapshotSchema = z.object({
+  compress: z.boolean().optional().describe('Collapse repeated non-interactive ARIA nodes in large snapshots. Keeps the first 10 examples of repeated structural patterns. Use browser_evaluate() to retrieve the full list if needed.'),
+});
+
 const scanPage = defineTool({
   capability: 'core',
   schema: {
@@ -67,13 +71,13 @@ const snapshot = defineTool({
     name: 'browser_snapshot',
     title: 'Page snapshot',
     description: 'Capture accessibility snapshot of the current page, this is better than screenshot',
-    inputSchema: z.object({}),
+    inputSchema: snapshotSchema,
     type: 'readOnly',
   },
 
   handle: async (context, params, response) => {
     await context.ensureTab();
-    response.setIncludeSnapshot();
+    response.setIncludeSnapshot(params.compress);
   },
 });
 
