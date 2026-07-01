@@ -23,6 +23,7 @@ import debug from 'debug';
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import * as mcpServer from './server.js';
+import { ManualPromise } from './manualPromise.js';
 
 import type { ServerBackendFactory } from './server.js';
 
@@ -58,7 +59,7 @@ export function httpAddressToString(address: string | net.AddressInfo | null): s
 }
 
 export async function installHttpTransport(httpServer: http.Server, serverBackendFactory: ServerBackendFactory) {
-  const streamableSessions = new Map();
+  const streamableSessions = new Map<string, { transport: StreamableHTTPServerTransport, transportInitialized: ManualPromise<void> }>();
   httpServer.on('request', async (req, res) => {
     const validationError = validateRequestHeaders(httpServer, req);
     if (validationError) {
@@ -76,7 +77,7 @@ export async function installHttpTransport(httpServer: http.Server, serverBacken
   });
 }
 
-async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, StreamableHTTPServerTransport>) {
+async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, { transport: StreamableHTTPServerTransport, transportInitialized: ManualPromise<void> }>) {
   const routingError = validateRequestRouting(req, !!req.headers['mcp-session-id']);
   if (routingError) {
     res.statusCode = routingError.statusCode;
@@ -85,13 +86,15 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
   }
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
   if (sessionId) {
-    const transport = sessions.get(sessionId);
-    if (!transport) {
+    const sessionInfo = sessions.get(sessionId);
+    if (!sessionInfo) {
       res.statusCode = 404;
       res.end('Session not found');
       return;
     }
-    return await transport.handleRequest(req, res);
+    if (req.method === 'GET')
+      sessionInfo.transportInitialized.resolve();
+    return await sessionInfo.transport.handleRequest(req, res);
   }
 
   if (req.method === 'POST') {
@@ -99,8 +102,10 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: async sessionId => {
         testDebug(`create http session: ${transport.sessionId}`);
-        await mcpServer.connect(serverBackendFactory, transport, true);
-        sessions.set(sessionId, transport);
+        const sessionInfo = { transport, transportInitialized: new ManualPromise<void>() };
+        setTimeout(() => sessionInfo.transportInitialized.resolve(), 5000);
+        sessions.set(sessionId, sessionInfo);
+        await mcpServer.connect(serverBackendFactory, transport, sessionInfo.transportInitialized, true);
       }
     });
 

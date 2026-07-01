@@ -56,17 +56,17 @@ export type ServerBackendFactory = ServerMetadata & {
   create: () => ServerBackend;
 };
 
-export async function connect(factory: ServerBackendFactory, transport: Transport, runHeartbeat: boolean) {
-  const server = createServer(factory.name, factory.version, factory.create(), runHeartbeat, factory);
+export async function connect(factory: ServerBackendFactory, transport: Transport, transportInitialized: Promise<void>, runHeartbeat: boolean) {
+  const server = createServer(factory.name, factory.version, factory.create(), transportInitialized, runHeartbeat, factory);
   await server.connect(transport);
 }
 
 export async function wrapInProcess(backend: ServerBackend): Promise<Transport> {
-  const server = createServer('Internal', '0.0.0', backend, false);
+  const server = createServer('Internal', '0.0.0', backend, Promise.resolve(), false);
   return new InProcessTransport(server);
 }
 
-export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean, metadata?: ServerMetadata): Server {
+export function createServer(name: string, version: string, backend: ServerBackend, transportInitialized: Promise<void>, runHeartbeat: boolean, metadata?: ServerMetadata): Server {
   let initializedPromiseResolve = () => {};
   const initializedPromise = new Promise<void>(resolve => initializedPromiseResolve = resolve);
   const server = new Server({ name, version, title: metadata?.title }, {
@@ -113,17 +113,12 @@ export function createServer(name: string, version: string, backend: ServerBacke
       const capabilities = server.getClientCapabilities();
       let clientRoots: Root[] = [];
       if (capabilities?.roots) {
-        // mcp sdk opens the standalone SSE channel lazily after sending `initialized`.
-        // If the first tool call comes before, `listRoots` is dropped on the server with no stream to send it on.
-        for (let i = 0; i < 2; i++) {
-          try {
-            const { roots } = await server.listRoots(undefined, { timeout: 2_000 });
-            clientRoots = roots;
-            break;
-          } catch (e) {
-            serverDebug(e);
-          }
-        }
+        await transportInitialized;
+        const { roots } = await server.listRoots(undefined, { timeout: 2_000 }).catch(e => {
+          serverDebug(e);
+          return { roots: [] };
+        });
+        clientRoots = roots;
       }
       const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
       const context: ServerBackendContext = {
@@ -190,7 +185,7 @@ function addServerListener(server: Server, event: 'close' | 'initialized', liste
 
 export async function start(serverBackendFactory: ServerBackendFactory, options: { host?: string; port?: number }) {
   if (options.port === undefined) {
-    await connect(serverBackendFactory, new StdioServerTransport(), false);
+    await connect(serverBackendFactory, new StdioServerTransport(), Promise.resolve(), false);
     return;
   }
 

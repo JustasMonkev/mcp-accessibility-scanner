@@ -15,8 +15,12 @@
  */
 
 import http from 'http';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { ListRootsRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { httpAddressToString, installHttpTransport, startHttpServer } from '../src/mcp/http.js';
+import { ManualPromise } from '../src/mcp/manualPromise.js';
 
 import type { ServerBackendFactory } from '../src/mcp/server.js';
 
@@ -57,10 +61,10 @@ describe('mcp http transport hardening', () => {
     expect(httpAddressToString({ address: '::', family: 'IPv6', port: 1234 })).toBe('http://[::]:1234');
   });
 
-  async function startServer() {
+  async function startServer(serverBackendFactory = testBackendFactory) {
     const server = await startHttpServer({ host: '127.0.0.1', port: 0 });
     servers.add(server);
-    await installHttpTransport(server, testBackendFactory);
+    await installHttpTransport(server, serverBackendFactory);
     const address = server.address();
     if (!address || typeof address === 'string')
       throw new Error('Expected TCP server address');
@@ -209,5 +213,103 @@ describe('mcp http transport hardening', () => {
 
     expect(response.statusCode).toBe(400);
     expect(response.body).toBe('Invalid request');
+  });
+
+  it('waits for the streamable HTTP event stream before listing roots', async () => {
+    const roots = [{ uri: 'file:///workspace', name: 'workspace' }];
+    let initializedRoots: unknown[] | undefined;
+    const callTool = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }));
+    const { port } = await startServer({
+      ...testBackendFactory,
+      create: () => ({
+        async initialize(_context, _clientVersion, clientRoots) {
+          initializedRoots = clientRoots;
+        },
+        async listTools() {
+          return [];
+        },
+        callTool,
+      }),
+    });
+
+    const sawGet = new ManualPromise<void>();
+    const releaseGet = new ManualPromise<void>();
+    const delayedFetch: typeof fetch = async (input, init) => {
+      if (init?.method === 'GET') {
+        sawGet.resolve();
+        await releaseGet;
+      }
+      return fetch(input, init);
+    };
+    const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: { roots: {} } });
+    client.setRequestHandler(ListRootsRequestSchema, () => ({ roots }));
+    client.setRequestHandler(PingRequestSchema, () => ({}));
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { fetch: delayedFetch });
+    await client.connect(transport);
+
+    try {
+      const callPromise = client.callTool({ name: 'probe', arguments: {} });
+      await sawGet;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(callTool).not.toHaveBeenCalled();
+
+      releaseGet.resolve();
+      await callPromise;
+
+      expect(initializedRoots).toEqual(roots);
+      expect(callTool).toHaveBeenCalledTimes(1);
+    } finally {
+      await transport.terminateSession();
+      await client.close();
+    }
+  });
+
+  it('falls back when the streamable HTTP event stream never opens', async () => {
+    let initializedRoots: unknown[] | undefined;
+    const callTool = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }));
+    const listRoots = vi.fn(() => ({ roots: [{ uri: 'file:///workspace' }] }));
+    const { port } = await startServer({
+      ...testBackendFactory,
+      create: () => ({
+        async initialize(_context, _clientVersion, clientRoots) {
+          initializedRoots = clientRoots;
+        },
+        async listTools() {
+          return [];
+        },
+        callTool,
+      }),
+    });
+
+    const originalSetTimeout = globalThis.setTimeout;
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      if (timeout === 5000 || timeout === 2000)
+        return originalSetTimeout(handler, 0, ...args);
+      return originalSetTimeout(handler, timeout, ...args);
+    }) as typeof setTimeout);
+    const noStreamFetch: typeof fetch = async (input, init) => {
+      if (init?.method === 'GET') {
+        return await new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+      }
+      return fetch(input, init);
+    };
+    const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: { roots: {} } });
+    client.setRequestHandler(ListRootsRequestSchema, listRoots);
+    client.setRequestHandler(PingRequestSchema, () => ({}));
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { fetch: noStreamFetch });
+    await client.connect(transport);
+
+    try {
+      await client.callTool({ name: 'probe', arguments: {} });
+
+      expect(initializedRoots).toEqual([]);
+      expect(listRoots).not.toHaveBeenCalled();
+      expect(callTool).toHaveBeenCalledTimes(1);
+    } finally {
+      setTimeoutSpy.mockRestore();
+      await client.close();
+    }
   });
 });
