@@ -29,7 +29,7 @@ import type { ServerBackendFactory } from './server.js';
 
 const testDebug = debug('pw:mcp:test');
 const allowedLoopbackHostnamePattern = /^127(?:\.\d{1,3}){3}$/;
-type StreamableSessionInfo = { transport: StreamableHTTPServerTransport, transportInitialized: ManualPromise<void>, fallbackStarted: boolean };
+type StreamableSessionInfo = { transport: StreamableHTTPServerTransport, transportInitialized: ManualPromise<void> };
 
 export async function startHttpServer(config: { host?: string, port?: number }, abortSignal?: AbortSignal): Promise<http.Server> {
   const host = config.host ?? 'localhost';
@@ -93,12 +93,10 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
       res.end('Session not found');
       return;
     }
-    if (req.method === 'GET' && acceptsEventStream(req)) {
+    if (req.method === 'GET' && acceptsEventStream(req))
       sessionInfo.transportInitialized.resolve();
-    } else if (req.method === 'POST' && !sessionInfo.fallbackStarted) {
-      sessionInfo.fallbackStarted = true;
+    else if (req.method === 'POST')
       setTimeout(() => sessionInfo.transportInitialized.resolve(), 5000);
-    }
     return await sessionInfo.transport.handleRequest(req, res);
   }
 
@@ -107,7 +105,7 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: async sessionId => {
         testDebug(`create http session: ${transport.sessionId}`);
-        const sessionInfo = { transport, transportInitialized: new ManualPromise<void>(), fallbackStarted: false };
+        const sessionInfo = { transport, transportInitialized: new ManualPromise<void>() };
         sessions.set(sessionId, sessionInfo);
         await mcpServer.connect(serverBackendFactory, transport, sessionInfo.transportInitialized, true);
       }
