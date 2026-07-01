@@ -282,11 +282,6 @@ describe('mcp http transport hardening', () => {
     });
 
     const originalSetTimeout = globalThis.setTimeout;
-    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
-      if (timeout === 5000 || timeout === 2000)
-        return originalSetTimeout(handler, 0, ...args);
-      return originalSetTimeout(handler, timeout, ...args);
-    }) as typeof setTimeout);
     const noStreamFetch: typeof fetch = async (input, init) => {
       if (init?.method === 'GET') {
         return await new Promise<Response>((_resolve, reject) => {
@@ -299,9 +294,14 @@ describe('mcp http transport hardening', () => {
     client.setRequestHandler(ListRootsRequestSchema, listRoots);
     client.setRequestHandler(PingRequestSchema, () => ({}));
     const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { fetch: noStreamFetch });
-    await client.connect(transport);
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      if (timeout === 5000 || timeout === 2000)
+        return originalSetTimeout(handler, 0, ...args);
+      return originalSetTimeout(handler, timeout, ...args);
+    }) as typeof setTimeout);
 
     try {
+      await client.connect(transport);
       await client.callTool({ name: 'probe', arguments: {} });
 
       expect(initializedRoots).toEqual([]);

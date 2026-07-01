@@ -113,11 +113,12 @@ export function createServer(name: string, version: string, backend: ServerBacke
       const capabilities = server.getClientCapabilities();
       let clientRoots: Root[] = [];
       if (capabilities?.roots) {
-        await transportInitialized;
-        const { roots } = await server.listRoots(undefined, { timeout: 2_000 }).catch(e => {
-          serverDebug(e);
-          return { roots: [] };
-        });
+        const { roots } = await transportInitialized
+            .then(() => server.listRoots(undefined, { timeout: 2_000 }))
+            .catch(e => {
+              serverDebug(e);
+              return { roots: [] };
+            });
         clientRoots = roots;
       }
       const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
