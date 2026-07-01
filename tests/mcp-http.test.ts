@@ -71,7 +71,7 @@ describe('mcp http transport hardening', () => {
     return { server, port: address.port };
   }
 
-  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string }) {
+  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string, sessionId?: string, accept?: string }) {
     const response = await new Promise<{ statusCode: number, body: string }>((resolve, reject) => {
       const req = http.request({
         host: '127.0.0.1',
@@ -81,6 +81,8 @@ describe('mcp http transport hardening', () => {
         headers: {
           ...(options?.hostHeader ? { host: options.hostHeader } : {}),
           ...(options?.origin ? { origin: options.origin } : {}),
+          ...(options?.sessionId ? { 'mcp-session-id': options.sessionId } : {}),
+          ...(options?.accept ? { accept: options.accept } : {}),
         },
       }, res => {
         const chunks: Buffer[] = [];
@@ -248,6 +250,11 @@ describe('mcp http transport hardening', () => {
     await client.connect(transport);
 
     try {
+      if (!transport.sessionId)
+        throw new Error('Expected initialized session');
+      const invalidGet = await sendRequest(port, { sessionId: transport.sessionId, accept: 'application/json' });
+      expect(invalidGet.statusCode).toBe(406);
+
       const callPromise = client.callTool({ name: 'probe', arguments: {} });
       await sawGet;
       await new Promise(resolve => setTimeout(resolve, 50));

@@ -29,6 +29,7 @@ import type { ServerBackendFactory } from './server.js';
 
 const testDebug = debug('pw:mcp:test');
 const allowedLoopbackHostnamePattern = /^127(?:\.\d{1,3}){3}$/;
+type StreamableSessionInfo = { transport: StreamableHTTPServerTransport, transportInitialized: ManualPromise<void>, fallbackStarted: boolean };
 
 export async function startHttpServer(config: { host?: string, port?: number }, abortSignal?: AbortSignal): Promise<http.Server> {
   const host = config.host ?? 'localhost';
@@ -59,7 +60,7 @@ export function httpAddressToString(address: string | net.AddressInfo | null): s
 }
 
 export async function installHttpTransport(httpServer: http.Server, serverBackendFactory: ServerBackendFactory) {
-  const streamableSessions = new Map<string, { transport: StreamableHTTPServerTransport, transportInitialized: ManualPromise<void> }>();
+  const streamableSessions = new Map<string, StreamableSessionInfo>();
   httpServer.on('request', async (req, res) => {
     const validationError = validateRequestHeaders(httpServer, req);
     if (validationError) {
@@ -77,7 +78,7 @@ export async function installHttpTransport(httpServer: http.Server, serverBacken
   });
 }
 
-async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, { transport: StreamableHTTPServerTransport, transportInitialized: ManualPromise<void> }>) {
+async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, StreamableSessionInfo>) {
   const routingError = validateRequestRouting(req, !!req.headers['mcp-session-id']);
   if (routingError) {
     res.statusCode = routingError.statusCode;
@@ -92,8 +93,12 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
       res.end('Session not found');
       return;
     }
-    if (req.method === 'GET')
+    if (req.method === 'GET' && acceptsEventStream(req)) {
       sessionInfo.transportInitialized.resolve();
+    } else if (req.method === 'POST' && !sessionInfo.fallbackStarted) {
+      sessionInfo.fallbackStarted = true;
+      setTimeout(() => sessionInfo.transportInitialized.resolve(), 5000);
+    }
     return await sessionInfo.transport.handleRequest(req, res);
   }
 
@@ -102,8 +107,7 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: async sessionId => {
         testDebug(`create http session: ${transport.sessionId}`);
-        const sessionInfo = { transport, transportInitialized: new ManualPromise<void>() };
-        setTimeout(() => sessionInfo.transportInitialized.resolve(), 5000);
+        const sessionInfo = { transport, transportInitialized: new ManualPromise<void>(), fallbackStarted: false };
         sessions.set(sessionId, sessionInfo);
         await mcpServer.connect(serverBackendFactory, transport, sessionInfo.transportInitialized, true);
       }
@@ -122,6 +126,11 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
 
   res.statusCode = 400;
   res.end('Invalid request');
+}
+
+function acceptsEventStream(req: http.IncomingMessage): boolean {
+  const accept = req.headers.accept;
+  return Array.isArray(accept) ? accept.some(value => value.includes('text/event-stream')) : !!accept?.includes('text/event-stream');
 }
 
 function decorateServer(server: net.Server) {
