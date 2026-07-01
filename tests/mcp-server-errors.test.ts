@@ -29,7 +29,7 @@ async function connectClient(backend: unknown) {
 }
 
 async function connectHeartbeatClient(backend: unknown, pingHandler: () => object | Promise<object>) {
-  const server = createServer('Test', '1.0.0', backend as any, true);
+  const server = createServer('Test', '1.0.0', backend as any, Promise.resolve(), true);
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   client.setRequestHandler(PingRequestSchema, pingHandler);
   await client.connect(new InProcessTransport(server));
@@ -111,7 +111,7 @@ describe('mcp server error mapping', () => {
 
     const { createServer } = await import('../src/mcp/server.js');
     const { InProcessTransport } = await import('../src/mcp/inProcessTransport.js');
-    const server = createServer('Test', '1.0.0', backend as any, false, {
+    const server = createServer('Test', '1.0.0', backend as any, Promise.resolve(), false, {
       title: 'Test Title',
       instructions: 'Use the tools wisely.',
     });

@@ -64,6 +64,7 @@ async function main(config: FullConfig, connectionString: string, lib: string) {
         version: 'unused'
       },
       new StdioServerTransport(),
+      Promise.resolve(),
       false
   );
 }

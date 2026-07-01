@@ -163,7 +163,7 @@ export async function runMainBackend(backendFactory: mcpServer.ServerBackendFact
     return url;
 
   // Start stdio conditionally.
-  await mcpServer.connect(factory, new StdioServerTransport(), false);
+  await mcpServer.connect(factory, new StdioServerTransport(), Promise.resolve(), false);
 }
 
 export async function runOnPauseBackendLoop(mdbUrl: string, backend: ServerBackendOnPause, introMessage: string) {
