@@ -320,7 +320,7 @@ describe('Tab', () => {
     it('should track network requests', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
-      const mockRequest = { url: () => 'https://api.example.com' } as any;
+      const mockRequest = { url: () => 'https://api.example.com', isNavigationRequest: () => false } as any;
       const mockResponse = { status: () => 200, request: () => mockRequest } as any;
 
       mockPage.emit('request', mockRequest);
@@ -328,6 +328,50 @@ describe('Tab', () => {
 
       expect(tab.requests().size).toBe(1);
       expect(tab.requests().get(mockRequest)).toBe(mockResponse);
+    });
+  });
+
+  describe('main document HTTP status', () => {
+    const mainFrame = {};
+
+    function emitResponse(options: { status?: number, statusText?: string, navigation?: boolean, redirectedTo?: unknown, frame?: unknown } = {}) {
+      const request = {
+        isNavigationRequest: () => options.navigation ?? true,
+        redirectedTo: () => options.redirectedTo ?? null,
+      };
+      mockPage.emit('response', {
+        request: () => request,
+        frame: () => options.frame ?? mainFrame,
+        status: () => options.status ?? 200,
+        statusText: () => options.statusText ?? '',
+      });
+    }
+
+    beforeEach(() => {
+      mockPage.mainFrame = vi.fn().mockReturnValue(mainFrame);
+    });
+
+    it('captures the main document navigation status', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      emitResponse({ status: 404, statusText: 'Not Found' });
+      const snapshot = await tab.captureSnapshot();
+      expect(snapshot.mainDocumentStatus).toEqual({ status: 404, statusText: 'Not Found' });
+    });
+
+    it('ignores redirect hops and keeps the final response status', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      emitResponse({ status: 301, statusText: 'Moved Permanently', redirectedTo: {} });
+      emitResponse({ status: 200, statusText: 'OK' });
+      const snapshot = await tab.captureSnapshot();
+      expect(snapshot.mainDocumentStatus).toEqual({ status: 200, statusText: 'OK' });
+    });
+
+    it('ignores non-navigation and subframe responses', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      emitResponse({ status: 500, navigation: false });
+      emitResponse({ status: 500, frame: {} });
+      const snapshot = await tab.captureSnapshot();
+      expect(snapshot.mainDocumentStatus).toBeUndefined();
     });
   });
 

@@ -39,6 +39,7 @@ export type TabSnapshot = {
   modalStates: ModalState[];
   consoleMessages: ConsoleMessage[];
   downloads: { download: playwright.Download, finished: boolean, outputFile: string }[];
+  mainDocumentStatus?: { status: number, statusText: string };
 };
 
 export class Tab extends EventEmitter<TabEventsInterface> {
@@ -48,6 +49,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _consoleMessages: ConsoleMessage[] = [];
   private _recentConsoleMessages: ConsoleMessage[] = [];
   private _requests: Map<playwright.Request, playwright.Response | null> = new Map();
+  private _mainDocumentStatus: { status: number, statusText: string } | undefined;
   private _onPageClose: (tab: Tab) => void;
   private _modalStates: ModalState[] = [];
   private _downloads: { download: playwright.Download, finished: boolean, outputFile: string }[] = [];
@@ -62,7 +64,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     page.on('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
     page.on('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
     page.on('request', request => this._requests.set(request, null));
-    page.on('response', response => this._requests.set(response.request(), response));
+    page.on('response', response => this._handleResponse(response));
     page.on('close', () => this._onClose());
     page.on('filechooser', chooser => {
       this.setModalState({
@@ -124,6 +126,15 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this._consoleMessages.length = 0;
     this._recentConsoleMessages.length = 0;
     this._requests.clear();
+    this._mainDocumentStatus = undefined;
+  }
+
+  private _handleResponse(response: playwright.Response) {
+    const request = response.request();
+    this._requests.set(request, response);
+    // Ignore redirect hops so only the final main-document response is reported.
+    if (request.isNavigationRequest() && response.frame() === this.page.mainFrame() && !request.redirectedTo())
+      this._mainDocumentStatus = { status: response.status(), statusText: response.statusText() };
   }
 
   private _handleConsoleMessage(message: ConsoleMessage) {
@@ -230,6 +241,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
         modalStates: [],
         consoleMessages: [],
         downloads: this._downloads,
+        mainDocumentStatus: this._mainDocumentStatus,
       };
     });
     if (tabSnapshot) {
