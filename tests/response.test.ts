@@ -402,6 +402,42 @@ describe('Response', () => {
       expect(textContent.text).toContain('Example Page');
     });
 
+    it('should surface non-2xx navigation status in page state', async () => {
+      mockTab.captureSnapshot = vi.fn().mockResolvedValue({
+        url: 'https://example.com/missing',
+        title: 'Not Found',
+        ariaSnapshot: 'document',
+        modalStates: [],
+        consoleMessages: [],
+        downloads: [],
+        mainDocumentStatus: { status: 404, statusText: 'Not Found' },
+      });
+
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeSnapshot();
+      await response.finish();
+      const textContent = expectTextContent(response.serialize().content[0]);
+      expect(textContent.text).toContain('- HTTP status: 404 Not Found');
+    });
+
+    it('should omit HTTP status for successful navigations', async () => {
+      mockTab.captureSnapshot = vi.fn().mockResolvedValue({
+        url: 'https://example.com',
+        title: 'Example Page',
+        ariaSnapshot: 'document',
+        modalStates: [],
+        consoleMessages: [],
+        downloads: [],
+        mainDocumentStatus: { status: 200, statusText: 'OK' },
+      });
+
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeSnapshot();
+      await response.finish();
+      const textContent = expectTextContent(response.serialize().content[0]);
+      expect(textContent.text).not.toContain('HTTP status');
+    });
+
     it('should compress rendered snapshot output when requested', async () => {
       mockTab.captureSnapshot = vi.fn().mockResolvedValue({
         url: 'https://example.com',

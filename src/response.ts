@@ -249,6 +249,9 @@ function renderTabSnapshot(tabSnapshot: TabSnapshot, options: { compress?: boole
   lines.push(`### Page state`);
   lines.push(`- Page URL: ${truncateDataUrls(tabSnapshot.url)}`);
   lines.push(`- Page Title: ${truncateDataUrls(tabSnapshot.title)}`);
+  const status = tabSnapshot.mainDocumentStatus;
+  if (status && (status.status < 200 || status.status >= 300))
+    lines.push(`- HTTP status: ${status.status}${status.statusText ? ' ' + status.statusText : ''}`);
   lines.push(`- Page Snapshot:`);
   lines.push('```yaml');
   lines.push(truncateDataUrls(ariaSnapshot));
