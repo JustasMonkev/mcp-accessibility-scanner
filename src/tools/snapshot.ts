@@ -37,6 +37,11 @@ const snapshotSchema = z.object({
 const findSchema = z.object({
   text: z.string().optional().describe('Plain text to search for in the page snapshot (case-insensitive substring match). Provide either text or regex, not both.'),
   regex: z.string().optional().refine(value => !value || isValidRegex(value), { message: 'Invalid regular expression' }).describe('Regular expression to search for in the page snapshot. Matching is case-sensitive by default; wrap the pattern in slashes to add flags, e.g. "/error/i" for case-insensitive. Provide either text or regex, not both.'),
+}).superRefine((params, context) => {
+  if (!params.text && !params.regex)
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Provide either "text" or "regex" to search for.' });
+  if (params.text && params.regex)
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Provide only one of "text" or "regex", not both.' });
 });
 
 const scanPage = defineTool({

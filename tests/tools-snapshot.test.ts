@@ -89,6 +89,8 @@ describe('Snapshot Tools', () => {
     expect(findTool.schema.type).toBe('readOnly');
     expect(jsonSchema.properties?.text).toBeDefined();
     expect(jsonSchema.properties?.regex).toBeDefined();
+    expect(() => findTool.schema.inputSchema.parse({})).toThrow();
+    expect(() => findTool.schema.inputSchema.parse({ text: 'Submit', regex: 'Submit' })).toThrow();
     expect(() => findTool.schema.inputSchema.parse({ regex: '(' })).toThrow();
     expect(() => findTool.schema.inputSchema.parse({ regex: '(?=a)a' })).toThrow();
   });
@@ -111,6 +113,25 @@ describe('Snapshot Tools', () => {
     await findTool.handle(context as any, { regex: '/apples/i' }, response as any);
 
     expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Found 1 match for /apples/i:'));
+  });
+
+  it('should merge overlapping browser_find context windows', async () => {
+    const context = findContext(['- text "Alpha"', '- text "One"', '- text "Two"', '- text "Beta"'].join('\n'));
+    const response = findResponse();
+
+    await findTool.handle(context as any, { regex: '/Alpha|Beta/' }, response as any);
+
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Found 2 matches for /Alpha|Beta/:'));
+    expect(response.addResult).not.toHaveBeenCalledWith(expect.stringContaining('----'));
+  });
+
+  it('should report when browser_find has no matches', async () => {
+    const context = findContext('- button "Submit"');
+    const response = findResponse();
+
+    await findTool.handle(context as any, { text: 'Cancel' }, response as any);
+
+    expect(response.addResult).toHaveBeenCalledWith('No matches found for "Cancel".');
   });
 
   it('should truncate data URLs in browser_find snippets', async () => {
