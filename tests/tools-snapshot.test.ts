@@ -21,6 +21,7 @@ import { toMcpTool } from '../src/mcp/tool.js';
 
 describe('Snapshot Tools', () => {
   const snapshotTool = snapshotTools.find(tool => tool.schema.name === 'browser_snapshot')!;
+  const findTool = snapshotTools.find(tool => tool.schema.name === 'browser_find')!;
 
   it('should expose browser_snapshot with optional compression', () => {
     const mcpTool = toMcpTool(snapshotTool.schema);
@@ -79,4 +80,98 @@ describe('Snapshot Tools', () => {
     expect(context.ensureTab).toHaveBeenCalled();
     expect(response.setIncludeSnapshot).toHaveBeenCalledWith(false);
   });
+
+  it('should expose browser_find with text and regex search options', () => {
+    const mcpTool = toMcpTool(findTool.schema);
+    const jsonSchema = mcpTool.inputSchema as JSONSchema7;
+
+    expect(findTool).toBeDefined();
+    expect(findTool.schema.type).toBe('readOnly');
+    expect(jsonSchema.properties?.text).toBeDefined();
+    expect(jsonSchema.properties?.regex).toBeDefined();
+    expect(() => findTool.schema.inputSchema.parse({})).toThrow();
+    expect(() => findTool.schema.inputSchema.parse({ text: 'Submit', regex: 'Submit' })).toThrow();
+    expect(() => findTool.schema.inputSchema.parse({ regex: '(' })).toThrow();
+    expect(() => findTool.schema.inputSchema.parse({ regex: '(?=a)a' })).toThrow();
+  });
+
+  it('should find snapshot lines by case-insensitive text', async () => {
+    const context = findContext(`- heading "Groceries"\n- list:\n  - listitem: Apples\n  - listitem: Bananas\n  - listitem: Cherries`);
+    const response = findResponse();
+
+    await findTool.handle(context as any, { text: 'bananas' }, response as any);
+
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Found 1 match for "bananas":'));
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Apples'));
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Cherries'));
+  });
+
+  it('should find snapshot lines by regex with flags', async () => {
+    const context = findContext(`- heading "Groceries"\n- listitem: Apples\n- listitem: Bananas`);
+    const response = findResponse();
+
+    await findTool.handle(context as any, { regex: '/apples/i' }, response as any);
+
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Found 1 match for /apples/i:'));
+  });
+
+  it('should merge overlapping browser_find context windows', async () => {
+    const context = findContext(['- text "Alpha"', '- text "One"', '- text "Two"', '- text "Beta"'].join('\n'));
+    const response = findResponse();
+
+    await findTool.handle(context as any, { regex: '/Alpha|Beta/' }, response as any);
+
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Found 2 matches for /Alpha|Beta/:'));
+    expect(response.addResult).not.toHaveBeenCalledWith(expect.stringContaining('----'));
+  });
+
+  it('should report when browser_find has no matches', async () => {
+    const context = findContext('- button "Submit"');
+    const response = findResponse();
+
+    await findTool.handle(context as any, { text: 'Cancel' }, response as any);
+
+    expect(response.addResult).toHaveBeenCalledWith('No matches found for "Cancel".');
+  });
+
+  it('should truncate data URLs in browser_find snippets', async () => {
+    const payload = '<svg viewBox="0 0 10 10"><text>Hello</text></svg>';
+    const context = findContext(`- link "Logo" [ref=e1]:\n  - /url: data:image/svg+xml,${payload}\n- button "Next" [ref=e2]`);
+    const response = findResponse();
+
+    await findTool.handle(context as any, { text: 'Logo' }, response as any);
+
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('data:image/svg+xml,...'));
+    expect(response.addResult).not.toHaveBeenCalledWith(expect.stringContaining(payload));
+  });
+
+  it('should report browser_find argument errors', async () => {
+    const context = findContext('- button "Submit"');
+    const response = findResponse();
+
+    await findTool.handle(context as any, {}, response as any);
+    await findTool.handle(context as any, { text: 'Submit', regex: 'Submit' }, response as any);
+
+    expect(response.addError).toHaveBeenCalledWith('Provide either "text" or "regex" to search for.');
+    expect(response.addError).toHaveBeenCalledWith('Provide only one of "text" or "regex", not both.');
+  });
 });
+
+function findContext(snapshot: string) {
+  const tab = {
+    modalStates: vi.fn().mockReturnValue([]),
+    page: {
+      ariaSnapshot: vi.fn().mockResolvedValue(snapshot),
+    },
+  };
+  return {
+    currentTabOrDie: vi.fn().mockReturnValue(tab),
+  };
+}
+
+function findResponse() {
+  return {
+    addResult: vi.fn(),
+    addError: vi.fn(),
+  };
+}

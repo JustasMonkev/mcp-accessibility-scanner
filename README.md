@@ -275,6 +275,7 @@ Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) wit
 #### `browser_navigate`
 Navigate to a URL.
 - Parameters: `url` (string)
+- Non-2xx main-document responses are shown as an `HTTP status` line in page state.
 
 #### `browser_navigate_back`
 Go back to the previous page.
@@ -295,6 +296,11 @@ Large `data:` URL payloads in snapshot output are truncated to their media type 
 - Parameters: `compress` (optional boolean, default false)
   - When true, repeated non-interactive ARIA snapshot nodes are collapsed in the rendered response when a repeated structural pattern appears more than 100 times. The first 10 examples of each collapsed pattern are kept.
   - Use `browser_evaluate()` to retrieve the full uncompressed list when needed.
+
+#### `browser_find`
+Search the current page accessibility snapshot without returning the full snapshot.
+- Parameters: `text` (case-insensitive substring) or `regex` (regular expression, supports `/pattern/flags`)
+- Returns matching snapshot lines with surrounding context.
 
 #### `browser_click`
 Perform click on a web page element.

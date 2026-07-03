@@ -35,6 +35,7 @@ describe('Navigate Tools', () => {
     mockTab = {
       page: mockPage,
       navigate: vi.fn().mockResolvedValue(undefined),
+      goBack: vi.fn(async options => await mockPage.goBack(options)),
       modalStates: vi.fn().mockReturnValue([]),
     } as any;
 

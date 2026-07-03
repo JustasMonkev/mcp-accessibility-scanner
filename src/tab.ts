@@ -35,6 +35,7 @@ export type TabEventsInterface = {
 export type TabSnapshot = {
   url: string;
   title: string;
+  mainDocumentStatus?: { status: number, statusText: string };
   ariaSnapshot: string;
   modalStates: ModalState[];
   consoleMessages: ConsoleMessage[];
@@ -48,6 +49,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _consoleMessages: ConsoleMessage[] = [];
   private _recentConsoleMessages: ConsoleMessage[] = [];
   private _requests: Map<playwright.Request, playwright.Response | null> = new Map();
+  private _mainDocumentStatus: { status: number, statusText: string } | undefined;
   private _onPageClose: (tab: Tab) => void;
   private _modalStates: ModalState[] = [];
   private _downloads: { download: playwright.Download, finished: boolean, outputFile: string }[] = [];
@@ -62,7 +64,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     page.on('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
     page.on('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
     page.on('request', request => this._requests.set(request, null));
-    page.on('response', response => this._requests.set(response.request(), response));
+    page.on('response', response => this._handleResponse(response));
     page.on('close', () => this._onClose());
     page.on('filechooser', chooser => {
       this.setModalState({
@@ -124,11 +126,19 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this._consoleMessages.length = 0;
     this._recentConsoleMessages.length = 0;
     this._requests.clear();
+    this._mainDocumentStatus = undefined;
   }
 
   private _handleConsoleMessage(message: ConsoleMessage) {
     this._consoleMessages.push(message);
     this._recentConsoleMessages.push(message);
+  }
+
+  private _handleResponse(response: playwright.Response) {
+    const request = response.request();
+    this._requests.set(request, response);
+    if (request.isNavigationRequest() && response.frame() === this.page.mainFrame() && !request.redirectedTo())
+      this._mainDocumentStatus = { status: response.status(), statusText: response.statusText() };
   }
 
   private _onClose() {
@@ -195,6 +205,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     await this.waitForLoadState('load', { timeout: 5000 });
   }
 
+  goBack(options?: Parameters<playwright.Page['goBack']>[0]) {
+    this._mainDocumentStatus = undefined;
+    return this.page.goBack(options);
+  }
+
   consoleMessages(): ConsoleMessage[] {
     return this._consoleMessages;
   }
@@ -226,6 +241,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       tabSnapshot = {
         url: this.page.url(),
         title,
+        mainDocumentStatus: this._mainDocumentStatus,
         ariaSnapshot: snapshot,
         modalStates: [],
         consoleMessages: [],
@@ -240,6 +256,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return tabSnapshot ?? {
       url: this.page.url(),
       title: '',
+      mainDocumentStatus: this._mainDocumentStatus,
       ariaSnapshot: '',
       modalStates,
       consoleMessages: [],
