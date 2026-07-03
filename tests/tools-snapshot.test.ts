@@ -90,6 +90,7 @@ describe('Snapshot Tools', () => {
     expect(jsonSchema.properties?.text).toBeDefined();
     expect(jsonSchema.properties?.regex).toBeDefined();
     expect(() => findTool.schema.inputSchema.parse({ regex: '(' })).toThrow();
+    expect(() => findTool.schema.inputSchema.parse({ regex: '(?=a)a' })).toThrow();
   });
 
   it('should find snapshot lines by case-insensitive text', async () => {
@@ -110,6 +111,17 @@ describe('Snapshot Tools', () => {
     await findTool.handle(context as any, { regex: '/apples/i' }, response as any);
 
     expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Found 1 match for /apples/i:'));
+  });
+
+  it('should truncate data URLs in browser_find snippets', async () => {
+    const payload = '<svg viewBox="0 0 10 10"><text>Hello</text></svg>';
+    const context = findContext(`- link "Logo" [ref=e1]:\n  - /url: data:image/svg+xml,${payload}\n- button "Next" [ref=e2]`);
+    const response = findResponse();
+
+    await findTool.handle(context as any, { text: 'Logo' }, response as any);
+
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('data:image/svg+xml,...'));
+    expect(response.addResult).not.toHaveBeenCalledWith(expect.stringContaining(payload));
   });
 
   it('should report browser_find argument errors', async () => {

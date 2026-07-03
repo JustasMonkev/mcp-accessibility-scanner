@@ -33,6 +33,7 @@ describe('Tab', () => {
     mockPage._wrapApiCall = vi.fn(async (callback: () => Promise<unknown>) => await callback());
     mockPage.setDefaultNavigationTimeout = vi.fn();
     mockPage.setDefaultTimeout = vi.fn();
+    mockPage.goBack = vi.fn().mockResolvedValue(null);
     mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
     mockPage.locator = vi.fn().mockReturnValue({
       describe: vi.fn().mockReturnValue({}),
@@ -358,6 +359,27 @@ describe('Tab', () => {
       const snapshot = await tab.captureSnapshot();
 
       expect(snapshot.mainDocumentStatus).toEqual({ status: 402, statusText: 'Payment Required' });
+    });
+
+    it('clears main-document status before history navigation', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const request = {
+        isNavigationRequest: () => true,
+        redirectedTo: () => null,
+      } as any;
+
+      mockPage.emit('response', {
+        request: () => request,
+        frame: () => mockPage.mainFrame(),
+        status: () => 402,
+        statusText: () => 'Payment Required',
+      });
+
+      await tab.goBack({ waitUntil: 'commit' });
+      const snapshot = await tab.captureSnapshot();
+
+      expect(mockPage.goBack).toHaveBeenCalledWith({ waitUntil: 'commit' });
+      expect(snapshot.mainDocumentStatus).toBeUndefined();
     });
   });
 

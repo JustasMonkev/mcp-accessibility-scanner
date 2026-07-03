@@ -376,7 +376,7 @@ const auditKeyboard = defineTabTool({
       },
       getCurrentUrl: async () => tab.page.url(),
       goBack: async () => {
-        await tab.page.goBack({ waitUntil: 'domcontentloaded' });
+        await tab.goBack({ waitUntil: 'domcontentloaded' });
       },
       captureScreenshot,
     });

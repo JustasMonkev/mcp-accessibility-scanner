@@ -14,11 +14,13 @@
  * limitations under the License.
  */
 
+import RE2 from 're2';
 import { z } from 'zod';
 import { defineTabTool, defineTool } from './tool.js';
 import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
 import { axeTagValues, dedupeAxeNodes, runAxeScan } from './axe.js';
+import { truncateDataUrls } from '../utils/dataUrl.js';
 
 const scanPageSchema = z.object({
   violationsTag: z
@@ -109,12 +111,9 @@ const find = defineTabTool({
     let query: string;
     let matches: (line: string) => boolean;
     if (params.regex) {
-      const regex = compileRegex(params.regex);
-      query = String(regex);
-      matches = line => {
-        regex.lastIndex = 0;
-        return regex.test(line);
-      };
+      const { regex, display } = compileRegex(params.regex);
+      query = display;
+      matches = line => regex.test(line);
     } else {
       query = `"${params.text}"`;
       const needle = params.text!.toLowerCase();
@@ -144,17 +143,20 @@ const find = defineTabTool({
         windows.push({ start, end });
     }
 
-    const snippets = windows.map(window => lines.slice(window.start, window.end + 1).join('\n'));
+    const snippets = windows.map(window => truncateDataUrls(lines.slice(window.start, window.end + 1).join('\n')));
     const matchWord = matchedLines.length === 1 ? 'match' : 'matches';
     response.addResult(`Found ${matchedLines.length} ${matchWord} for ${query}:\n\n${snippets.join('\n\n----\n\n')}`);
   },
 });
 
-function compileRegex(source: string): RegExp {
+function compileRegex(source: string): { regex: RE2, display: string } {
   const literal = /^\/(.*)\/([a-z]*)$/.exec(source);
   const pattern = literal ? literal[1] : source;
   const flags = literal ? literal[2].replace(/g/g, '') : '';
-  return new RegExp(pattern, flags);
+  return {
+    regex: new RE2(pattern, flags),
+    display: literal ? `/${pattern}/${flags}` : `/${pattern}/`,
+  };
 }
 
 function isValidRegex(source: string): boolean {

@@ -205,6 +205,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     await this.waitForLoadState('load', { timeout: 5000 });
   }
 
+  goBack(options?: Parameters<playwright.Page['goBack']>[0]) {
+    this._mainDocumentStatus = undefined;
+    return this.page.goBack(options);
+  }
+
   consoleMessages(): ConsoleMessage[] {
     return this._consoleMessages;
   }
