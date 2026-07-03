@@ -21,6 +21,7 @@ import { toMcpTool } from '../src/mcp/tool.js';
 
 describe('Snapshot Tools', () => {
   const snapshotTool = snapshotTools.find(tool => tool.schema.name === 'browser_snapshot')!;
+  const findTool = snapshotTools.find(tool => tool.schema.name === 'browser_find')!;
 
   it('should expose browser_snapshot with optional compression', () => {
     const mcpTool = toMcpTool(snapshotTool.schema);
@@ -79,4 +80,65 @@ describe('Snapshot Tools', () => {
     expect(context.ensureTab).toHaveBeenCalled();
     expect(response.setIncludeSnapshot).toHaveBeenCalledWith(false);
   });
+
+  it('should expose browser_find with text and regex search options', () => {
+    const mcpTool = toMcpTool(findTool.schema);
+    const jsonSchema = mcpTool.inputSchema as JSONSchema7;
+
+    expect(findTool).toBeDefined();
+    expect(findTool.schema.type).toBe('readOnly');
+    expect(jsonSchema.properties?.text).toBeDefined();
+    expect(jsonSchema.properties?.regex).toBeDefined();
+    expect(() => findTool.schema.inputSchema.parse({ regex: '(' })).toThrow();
+  });
+
+  it('should find snapshot lines by case-insensitive text', async () => {
+    const context = findContext(`- heading "Groceries"\n- list:\n  - listitem: Apples\n  - listitem: Bananas\n  - listitem: Cherries`);
+    const response = findResponse();
+
+    await findTool.handle(context as any, { text: 'bananas' }, response as any);
+
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Found 1 match for "bananas":'));
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Apples'));
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Cherries'));
+  });
+
+  it('should find snapshot lines by regex with flags', async () => {
+    const context = findContext(`- heading "Groceries"\n- listitem: Apples\n- listitem: Bananas`);
+    const response = findResponse();
+
+    await findTool.handle(context as any, { regex: '/apples/i' }, response as any);
+
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Found 1 match for /apples/i:'));
+  });
+
+  it('should report browser_find argument errors', async () => {
+    const context = findContext('- button "Submit"');
+    const response = findResponse();
+
+    await findTool.handle(context as any, {}, response as any);
+    await findTool.handle(context as any, { text: 'Submit', regex: 'Submit' }, response as any);
+
+    expect(response.addError).toHaveBeenCalledWith('Provide either "text" or "regex" to search for.');
+    expect(response.addError).toHaveBeenCalledWith('Provide only one of "text" or "regex", not both.');
+  });
 });
+
+function findContext(snapshot: string) {
+  const tab = {
+    modalStates: vi.fn().mockReturnValue([]),
+    page: {
+      ariaSnapshot: vi.fn().mockResolvedValue(snapshot),
+    },
+  };
+  return {
+    currentTabOrDie: vi.fn().mockReturnValue(tab),
+  };
+}
+
+function findResponse() {
+  return {
+    addResult: vi.fn(),
+    addError: vi.fn(),
+  };
+}

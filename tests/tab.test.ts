@@ -28,6 +28,7 @@ describe('Tab', () => {
     mockPage = new EventEmitter();
     mockPage.url = vi.fn().mockReturnValue('https://example.com');
     mockPage.title = vi.fn().mockResolvedValue('Example Page');
+    mockPage.mainFrame = vi.fn().mockReturnValue('main-frame');
     mockPage.waitForTimeout = vi.fn().mockResolvedValue(undefined);
     mockPage._wrapApiCall = vi.fn(async (callback: () => Promise<unknown>) => await callback());
     mockPage.setDefaultNavigationTimeout = vi.fn();
@@ -320,7 +321,7 @@ describe('Tab', () => {
     it('should track network requests', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
-      const mockRequest = { url: () => 'https://api.example.com' } as any;
+      const mockRequest = { url: () => 'https://api.example.com', isNavigationRequest: () => false } as any;
       const mockResponse = { status: () => 200, request: () => mockRequest } as any;
 
       mockPage.emit('request', mockRequest);
@@ -328,6 +329,35 @@ describe('Tab', () => {
 
       expect(tab.requests().size).toBe(1);
       expect(tab.requests().get(mockRequest)).toBe(mockResponse);
+    });
+
+    it('tracks only the final main-document HTTP status', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const redirectedRequest = {
+        isNavigationRequest: () => true,
+        redirectedTo: () => ({}),
+      } as any;
+      const finalRequest = {
+        isNavigationRequest: () => true,
+        redirectedTo: () => null,
+      } as any;
+
+      mockPage.emit('response', {
+        request: () => redirectedRequest,
+        frame: () => mockPage.mainFrame(),
+        status: () => 302,
+        statusText: () => 'Found',
+      });
+      mockPage.emit('response', {
+        request: () => finalRequest,
+        frame: () => mockPage.mainFrame(),
+        status: () => 402,
+        statusText: () => 'Payment Required',
+      });
+
+      const snapshot = await tab.captureSnapshot();
+
+      expect(snapshot.mainDocumentStatus).toEqual({ status: 402, statusText: 'Payment Required' });
     });
   });
 

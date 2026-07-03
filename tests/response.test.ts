@@ -149,6 +149,39 @@ describe('Response', () => {
       await response.finish();
       expect(mockTab.captureSnapshot).toHaveBeenCalled();
     });
+
+    it('renders non-2xx HTTP status in page state only', async () => {
+      mockTab.captureSnapshot = vi.fn().mockResolvedValue({
+        url: 'https://example.com/locked',
+        title: 'Payment Required',
+        mainDocumentStatus: { status: 402, statusText: 'Payment Required' },
+        ariaSnapshot: 'text "Pay up"',
+        modalStates: [],
+        consoleMessages: [],
+        downloads: [],
+      });
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeSnapshot();
+
+      await response.finish();
+
+      expect(expectTextContent(response.serialize().content[0]).text).toContain('- HTTP status: 402 Payment Required');
+
+      mockTab.captureSnapshot = vi.fn().mockResolvedValue({
+        url: 'https://example.com',
+        title: 'Example Page',
+        mainDocumentStatus: { status: 200, statusText: 'OK' },
+        ariaSnapshot: 'button "Submit"',
+        modalStates: [],
+        consoleMessages: [],
+        downloads: [],
+      });
+      const okResponse = new Response(mockContext, 'test_tool', {});
+      okResponse.setIncludeSnapshot();
+      await okResponse.finish();
+
+      expect(expectTextContent(okResponse.serialize().content[0]).text).not.toContain('HTTP status');
+    });
   });
 
   describe('setIncludeTabs', () => {
