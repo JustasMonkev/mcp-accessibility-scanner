@@ -109,6 +109,7 @@ type SnapshotLine = {
   containsProtectedSubtreeRole: boolean;
   selfHasProtectedSubtreeRole: boolean;
   insideProtectedSubtree: boolean;
+  hasRowContainerAncestor: boolean;
 };
 
 export type CompressResult = {
@@ -196,6 +197,7 @@ function parseSnapshotLines(yaml: string): SnapshotLine[] {
       containsProtectedSubtreeRole: shouldKeepSubtree(role) || shouldKeepRefProtectedDescendants(role, hasRef) || shouldKeepCursorPointerRef(hasRef, hasCursorPointer),
       selfHasProtectedSubtreeRole: shouldKeepSubtree(role) || shouldKeepRefProtectedDescendants(role, hasRef) || shouldKeepCursorPointerRef(hasRef, hasCursorPointer),
       insideProtectedSubtree: false,
+      hasRowContainerAncestor: false,
     };
   });
 
@@ -209,11 +211,13 @@ function parseSnapshotLines(yaml: string): SnapshotLine[] {
       stack.pop();
 
     line.parentIndex = stack[stack.length - 1] ?? -1;
+    const parent = line.parentIndex === -1 ? undefined : lines[line.parentIndex];
+    line.hasRowContainerAncestor = parent !== undefined && (parent.hasRowContainerAncestor || isRowContainerRole(parent.role));
     stack.push(index);
   }
 
   for (const line of lines) {
-    if (line.role === 'row' && line.hasRef && hasAncestorRole(lines, line, ROW_CONTAINER_ROLES)) {
+    if (line.role === 'row' && line.hasRef && line.hasRowContainerAncestor) {
       line.selfHasProtectedLineRole = true;
       line.containsProtectedSubtreeRole = true;
       line.selfHasProtectedSubtreeRole = true;
@@ -288,13 +292,8 @@ function shouldKeepCursorPointerRef(hasRef: boolean, hasCursorPointer: boolean):
 
 const ROW_CONTAINER_ROLES = new Set(['grid', 'treegrid']);
 
-function hasAncestorRole(lines: SnapshotLine[], line: SnapshotLine, roles: Set<string>): boolean {
-  for (let parentIndex = line.parentIndex; parentIndex !== -1; parentIndex = lines[parentIndex].parentIndex) {
-    const role = lines[parentIndex].role;
-    if (role !== undefined && roles.has(role))
-      return true;
-  }
-  return false;
+function isRowContainerRole(role: string | undefined): boolean {
+  return role !== undefined && ROW_CONTAINER_ROLES.has(role);
 }
 
 function indentOf(line: string): number {
