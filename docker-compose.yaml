@@ -15,7 +15,8 @@ services:
       - --output-dir
       - /app/output
     ports:
-      - "8931:8931"
+      # Bind the unauthenticated MCP HTTP transport to localhost only.
+      - "127.0.0.1:8931:8931"
     volumes:
       - ./output:/app/output
     restart: unless-stopped
