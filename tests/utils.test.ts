@@ -400,6 +400,18 @@ describe('Utils', () => {
       expect(result.output).toContain('Order 150');
     });
 
+    it('should keep deeply nested actionable grid rows without ancestor walks', () => {
+      const snapshot = [
+        '- grid:',
+        ...Array.from({ length: 1500 }, (_, index) => `${'  '.repeat(index + 1)}- row "Order ${index + 1}" [ref=row-${index + 1}]:`),
+      ].join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Order 1500');
+    });
+
     it('should collapse repeated non-interactive nodes even when they have refs', () => {
       const snapshot = Array.from({ length: 150 }, (_, index) => `- listitem [ref=e${index + 1}]: Item ${index + 1}`).join('\n');
 
