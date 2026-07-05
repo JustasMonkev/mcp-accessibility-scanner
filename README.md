@@ -68,6 +68,8 @@ Without the `-v` mount, output files only exist inside the container and are los
 docker compose up -d
 ```
 
+The Compose configuration publishes the unauthenticated MCP HTTP transport on `127.0.0.1:8931` only. Do not expose this port to untrusted networks.
+
 #### Build from source
 
 ```bash
