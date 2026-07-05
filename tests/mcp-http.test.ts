@@ -301,8 +301,14 @@ describe('mcp http transport hardening', () => {
     client.setRequestHandler(ListRootsRequestSchema, listRoots);
     client.setRequestHandler(PingRequestSchema, () => ({}));
     const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { fetch: noStreamFetch });
+    let fallbackTimerCount = 0;
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
-      if (timeout === 5000 || timeout === 2000)
+      if (timeout === 5000) {
+        if (new Error().stack?.includes('/src/mcp/http.ts'))
+          ++fallbackTimerCount;
+        return originalSetTimeout(handler, 0, ...args);
+      }
+      if (timeout === 2000)
         return originalSetTimeout(handler, 0, ...args);
       return originalSetTimeout(handler, timeout, ...args);
     }) as typeof setTimeout);
@@ -311,6 +317,7 @@ describe('mcp http transport hardening', () => {
       await client.connect(transport);
       await client.callTool({ name: 'probe', arguments: {} });
 
+      expect(fallbackTimerCount).toBe(1);
       expect(initializedRoots).toEqual([]);
       expect(listRoots).not.toHaveBeenCalled();
       expect(callTool).toHaveBeenCalledTimes(1);
