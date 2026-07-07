@@ -124,7 +124,7 @@ Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.
 
 Each line is `<tool-name> <json-arguments>`. Omit the JSON to pass `{}`.
 Global browser connection flags still apply here, for example `npx mcp-accessibility-scanner --headless interactive`.
-Use `--mobile` or `PLAYWRIGHT_MCP_MOBILE=1` to emulate a generic mobile device (`Pixel 10` for Chromium, `iPhone 17` for WebKit). It cannot be combined with `--device`.
+Use `--mobile` or `PLAYWRIGHT_MCP_MOBILE=1` to emulate a generic mobile device (`Pixel 10` for Chromium, `iPhone 17` for WebKit). It cannot be combined with `--device`, CDP attach/launch modes, or `--extension`.
 
 ### Discovering available tools (`list-tools` subcommand)
 
