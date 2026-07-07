@@ -297,6 +297,13 @@ describe('Config', () => {
           .rejects.toThrow('Mobile emulation is not supported with cdpEndpoint.');
     });
 
+    it('rejects mobile emulation with a config-file remote endpoint', async () => {
+      const configFile = await writeConfigFile({ browser: { remoteEndpoint: 'ws://127.0.0.1:3000' } });
+
+      await expect(resolveCLIConfig({ config: configFile, mobile: true }))
+          .rejects.toThrow('Mobile emulation is not supported with remoteEndpoint.');
+    });
+
     it('rejects mobile emulation with CDP launch', async () => {
       await expect(resolveCLIConfig({ mobile: true, cdpLaunchCommand: 'echo' }))
           .rejects.toThrow('Mobile emulation is not supported with --cdp-launch-command.');

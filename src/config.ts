@@ -140,6 +140,8 @@ function applyMobileConfig(resolved: FullConfig, configInFile: Config, envOverri
     throw new Error('--mobile is not supported with the Firefox browser.');
   if (resolved.browser.cdpEndpoint)
     throw new Error('Mobile emulation is not supported with cdpEndpoint.');
+  if (resolved.browser.remoteEndpoint)
+    throw new Error('Mobile emulation is not supported with remoteEndpoint.');
   if (resolved.browser.cdpLaunch)
     throw new Error('Mobile emulation is not supported with --cdp-launch-command.');
 
