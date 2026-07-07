@@ -14,9 +14,19 @@
  * limitations under the License.
  */
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, it, expect } from 'vitest';
 import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders } from '../src/config.js';
 import type { Config } from '../config.js';
+
+async function writeConfigFile(config: Config): Promise<string> {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-config-test-'));
+  const configFile = path.join(dir, 'config.json');
+  await fs.promises.writeFile(configFile, JSON.stringify(config), 'utf-8');
+  return configFile;
+}
 
 describe('Config', () => {
   describe('resolveConfig', () => {
@@ -194,6 +204,114 @@ describe('Config', () => {
       });
 
       expect(config.browser.cdpHeaders).toEqual({ 'X-Cli': 'from-cli' });
+    });
+  });
+
+  describe('resolveCLIConfig mobile', () => {
+    const envKeys = [
+      'PLAYWRIGHT_MCP_CDP_ENDPOINT',
+      'PLAYWRIGHT_MCP_DEVICE',
+      'PLAYWRIGHT_MCP_MOBILE',
+    ];
+    const saved: Record<string, string | undefined> = {};
+    for (const key of envKeys)
+      saved[key] = process.env[key];
+
+    afterEach(() => {
+      for (const key of envKeys) {
+        if (saved[key] === undefined)
+          delete process.env[key];
+        else
+          process.env[key] = saved[key];
+      }
+    });
+
+    it('uses a Chromium mobile device by default', async () => {
+      const config = await resolveCLIConfig({ mobile: true });
+
+      expect(config.browser.contextOptions.isMobile).toBe(true);
+      expect(config.browser.contextOptions.userAgent).toContain('Pixel 10');
+    });
+
+    it('uses a WebKit mobile device for WebKit', async () => {
+      const config = await resolveCLIConfig({ mobile: true, browser: 'webkit' });
+
+      expect(config.browser.contextOptions.isMobile).toBe(true);
+      expect(config.browser.contextOptions.viewport).toEqual({ width: 402, height: 681 });
+    });
+
+    it('uses the config-file browser when selecting the mobile device', async () => {
+      const configFile = await writeConfigFile({ browser: { browserName: 'webkit' } });
+
+      const config = await resolveCLIConfig({ config: configFile, mobile: true });
+
+      expect(config.browser.browserName).toBe('webkit');
+      expect(config.browser.contextOptions.isMobile).toBe(true);
+      expect(config.browser.contextOptions.userAgent).toContain('iPhone');
+    });
+
+    it('lets explicit CLI context options override the inferred mobile device', async () => {
+      const config = await resolveCLIConfig({ mobile: true, viewportSize: '800,600' });
+
+      expect(config.browser.contextOptions.isMobile).toBe(true);
+      expect(config.browser.contextOptions.viewport).toEqual({ width: 800, height: 600 });
+    });
+
+    it('reads mobile emulation from the environment', async () => {
+      process.env.PLAYWRIGHT_MCP_MOBILE = '1';
+
+      const config = await resolveCLIConfig({});
+
+      expect(config.browser.contextOptions.isMobile).toBe(true);
+      expect(config.browser.contextOptions.userAgent).toContain('Pixel 10');
+    });
+
+    it('rejects mobile emulation with Firefox', async () => {
+      await expect(resolveCLIConfig({ mobile: true, browser: 'firefox' }))
+          .rejects.toThrow('--mobile is not supported with the Firefox browser.');
+    });
+
+    it('rejects mobile emulation with a config-file Firefox browser', async () => {
+      const configFile = await writeConfigFile({ browser: { browserName: 'firefox' } });
+
+      await expect(resolveCLIConfig({ config: configFile, mobile: true }))
+          .rejects.toThrow('--mobile is not supported with the Firefox browser.');
+    });
+
+    it('rejects mobile emulation with an explicit device', async () => {
+      await expect(resolveCLIConfig({ mobile: true, device: 'iPhone 15' }))
+          .rejects.toThrow('Cannot use --mobile together with --device');
+    });
+
+    it('rejects mobile emulation with an environment device', async () => {
+      process.env.PLAYWRIGHT_MCP_DEVICE = 'iPhone 15';
+
+      await expect(resolveCLIConfig({ mobile: true }))
+          .rejects.toThrow('Cannot use --mobile together with --device');
+    });
+
+    it('rejects mobile emulation with a merged CDP endpoint', async () => {
+      process.env.PLAYWRIGHT_MCP_CDP_ENDPOINT = 'http://127.0.0.1:9222';
+
+      await expect(resolveCLIConfig({ mobile: true }))
+          .rejects.toThrow('Mobile emulation is not supported with cdpEndpoint.');
+    });
+
+    it('rejects mobile emulation with a config-file remote endpoint', async () => {
+      const configFile = await writeConfigFile({ browser: { remoteEndpoint: 'ws://127.0.0.1:3000' } });
+
+      await expect(resolveCLIConfig({ config: configFile, mobile: true }))
+          .rejects.toThrow('Mobile emulation is not supported with remoteEndpoint.');
+    });
+
+    it('rejects mobile emulation with CDP launch', async () => {
+      await expect(resolveCLIConfig({ mobile: true, cdpLaunchCommand: 'echo' }))
+          .rejects.toThrow('Mobile emulation is not supported with --cdp-launch-command.');
+    });
+
+    it('rejects mobile emulation with extension mode', async () => {
+      await expect(resolveCLIConfig({ mobile: true, extension: true }))
+          .rejects.toThrow('Mobile emulation is not supported with --extension.');
     });
   });
 

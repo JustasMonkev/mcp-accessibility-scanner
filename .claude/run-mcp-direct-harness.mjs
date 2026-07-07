@@ -51,6 +51,13 @@ const tests = [
     assertText(result, /Hello MCP/);
   }),
 
+  test('browser_find', async () => {
+    await navigate('<title>Find</title><main><h1>Groceries</h1><ul><li>Apples</li><li>Bananas</li><li>Cherries</li></ul></main>');
+    const result = await callTool('browser_find', { text: 'Bananas' });
+    assertText(result, /Found 1 match for "Bananas"/);
+    assertText(result, /Groceries|listitem.*Bananas/s);
+  }),
+
   test('browser_evaluate', async () => {
     await navigate('<title>Evaluate</title><h1 id="answer">OK</h1>');
     const result = await callTool('browser_evaluate', { function: '() => 2 + 2' });

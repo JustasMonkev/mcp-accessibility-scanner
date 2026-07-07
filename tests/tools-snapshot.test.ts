@@ -125,6 +125,84 @@ describe('Snapshot Tools', () => {
     expect(response.addResult).not.toHaveBeenCalledWith(expect.stringContaining('----'));
   });
 
+  it('should show browser_find matches under their path from the root', async () => {
+    const context = findContext([
+      '- main [ref=e1]:',
+      '  - region "Sidebar" [ref=e2]:',
+      '    - navigation "Primary" [ref=e3]:',
+      '      - list [ref=e4]:',
+      '        - listitem [ref=e5]:',
+      '          - link "Home" [ref=e6]',
+      '        - listitem [ref=e7]:',
+      '          - link "Products" [ref=e8]',
+      '        - listitem [ref=e9]:',
+      '          - link "About" [ref=e10]',
+      '        - listitem [ref=e11]:',
+      '          - link "Contact" [ref=e12]',
+      '        - listitem [ref=e13]:',
+      '          - link "Careers" [ref=e14]',
+      '        - listitem [ref=e15]:',
+      '          - link "Deep Target Link" [ref=e16]',
+    ].join('\n'));
+    const response = findResponse();
+
+    await findTool.handle(context as any, { text: 'Deep Target Link' }, response as any);
+
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining([
+      'Found 1 match for "Deep Target Link":',
+      '',
+      '- main [ref=e1]:',
+      '  - region "Sidebar" [ref=e2]:',
+      '    - navigation "Primary" [ref=e3]:',
+      '      - list [ref=e4]:',
+      '        - listitem [ref=e13]:',
+      '          - link "Careers" [ref=e14]',
+      '        - listitem [ref=e15]:',
+      '          - link "Deep Target Link" [ref=e16]',
+    ].join('\n')));
+  });
+
+  it('should mark gaps inside off-path browser_find context', async () => {
+    const context = findContext([
+      '- main [ref=e1]:',
+      '  - group "Toolbar" [ref=e2]:',
+      '    - button "One" [ref=e3]',
+      '    - button "Two" [ref=e4]',
+      '    - button "Three" [ref=e5]',
+      '    - button "Four" [ref=e6]',
+      '  - group "Content" [ref=e7]:',
+      '    - button "Target Button" [ref=e8]',
+    ].join('\n'));
+    const response = findResponse();
+
+    await findTool.handle(context as any, { text: 'Target Button' }, response as any);
+
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining([
+      '- main [ref=e1]:',
+      '  - group "Toolbar" [ref=e2]:',
+      '    ...',
+      '    - button "Three" [ref=e5]',
+      '    - button "Four" [ref=e6]',
+      '  - group "Content" [ref=e7]:',
+      '    - button "Target Button" [ref=e8]',
+    ].join('\n')));
+  });
+
+  it('should keep broad deep browser_find queries near-linear', async () => {
+    const lines = [];
+    for (let i = 0; i < 3000; i++)
+      lines.push(`${'  '.repeat(i)}- group "Target ${i}":`);
+    const context = findContext(lines.join('\n'));
+    const response = findResponse();
+
+    const start = performance.now();
+    await findTool.handle(context as any, { text: 'Target' }, response as any);
+    const elapsed = performance.now() - start;
+
+    expect(elapsed).toBeLessThan(1500);
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Found 3000 matches for "Target":'));
+  });
+
   it('should report when browser_find has no matches', async () => {
     const context = findContext('- button "Submit"');
     const response = findResponse();

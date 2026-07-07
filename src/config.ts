@@ -40,11 +40,13 @@ export type CLIOptions = {
     config?: string;
     device?: string;
     executablePath?: string;
+    extension?: boolean;
     headless?: boolean;
     host?: string;
     ignoreHttpsErrors?: boolean;
     isolated?: boolean;
     imageResponses?: 'allow' | 'omit';
+    mobile?: boolean;
     sandbox?: boolean;
     outputDir?: string;
     port?: number;
@@ -104,13 +106,48 @@ export async function resolveConfig(config: Config): Promise<FullConfig> {
 
 export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConfig> {
   const configInFile = await loadConfig(cliOptions.config);
-  const envOverrides = configFromEnv();
+  const envOptions = cliOptionsFromEnv();
+  const envOverrides = configFromCLIOptions(envOptions);
   const cliOverrides = configFromCLIOptions(cliOptions);
+  const result = mergeCLIConfigSources(configInFile, envOverrides, cliOverrides);
+  return applyMobileConfig(result, configInFile, envOverrides, cliOverrides, envOptions, cliOptions);
+}
+
+type MobileSource = 'env' | 'cli';
+
+function mergeCLIConfigSources(configInFile: Config, envOverrides: Config, cliOverrides: Config, mobileOverride?: Config, mobileSource?: MobileSource): FullConfig {
   let result = defaultConfig;
   result = mergeConfig(result, configInFile);
+  if (mobileSource === 'env' && mobileOverride)
+    result = mergeConfig(result, mobileOverride);
   result = mergeConfig(result, envOverrides);
+  if (mobileSource === 'cli' && mobileOverride)
+    result = mergeConfig(result, mobileOverride);
   result = mergeConfig(result, cliOverrides);
   return result;
+}
+
+function applyMobileConfig(resolved: FullConfig, configInFile: Config, envOverrides: Config, cliOverrides: Config, envOptions: CLIOptions, cliOptions: CLIOptions): FullConfig {
+  const source = cliOptions.mobile !== undefined ? (cliOptions.mobile ? 'cli' : undefined) : (envOptions.mobile ? 'env' : undefined);
+  if (!source)
+    return resolved;
+
+  if (cliOptions.device || envOptions.device)
+    throw new Error('Cannot use --mobile together with --device, pick one.');
+  if (cliOptions.extension)
+    throw new Error('Mobile emulation is not supported with --extension.');
+  if (resolved.browser.browserName === 'firefox')
+    throw new Error('--mobile is not supported with the Firefox browser.');
+  if (resolved.browser.cdpEndpoint)
+    throw new Error('Mobile emulation is not supported with cdpEndpoint.');
+  if (resolved.browser.remoteEndpoint)
+    throw new Error('Mobile emulation is not supported with remoteEndpoint.');
+  if (resolved.browser.cdpLaunch)
+    throw new Error('Mobile emulation is not supported with --cdp-launch-command.');
+
+  const device = resolved.browser.browserName === 'webkit' ? 'iPhone 17' : 'Pixel 10';
+  const mobileOverride: Config = { browser: { contextOptions: devices[device] } };
+  return mergeCLIConfigSources(configInFile, envOverrides, cliOverrides, mobileOverride, source);
 }
 
 export function configFromCLIOptions(cliOptions: CLIOptions): Config {
@@ -227,7 +264,7 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
   };
 }
 
-function configFromEnv(): Config {
+function cliOptionsFromEnv(): CLIOptions {
   const options: CLIOptions = {};
   options.allowedOrigins = semicolonSeparatedList(process.env.PLAYWRIGHT_MCP_ALLOWED_ORIGINS);
   options.blockedOrigins = semicolonSeparatedList(process.env.PLAYWRIGHT_MCP_BLOCKED_ORIGINS);
@@ -251,6 +288,7 @@ function configFromEnv(): Config {
   options.isolated = envToBoolean(process.env.PLAYWRIGHT_MCP_ISOLATED);
   if (process.env.PLAYWRIGHT_MCP_IMAGE_RESPONSES === 'omit')
     options.imageResponses = 'omit';
+  options.mobile = envToBoolean(process.env.PLAYWRIGHT_MCP_MOBILE);
   options.sandbox = envToBoolean(process.env.PLAYWRIGHT_MCP_SANDBOX);
   options.outputDir = envToString(process.env.PLAYWRIGHT_MCP_OUTPUT_DIR);
   options.port = envToNumber(process.env.PLAYWRIGHT_MCP_PORT);
@@ -263,7 +301,7 @@ function configFromEnv(): Config {
   options.viewportSize = envToString(process.env.PLAYWRIGHT_MCP_VIEWPORT_SIZE);
   options.navigationTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT);
   options.defaultTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_DEFAULT_TIMEOUT);
-  return configFromCLIOptions(options);
+  return options;
 }
 
 async function loadConfig(configFile: string | undefined): Promise<Config> {
