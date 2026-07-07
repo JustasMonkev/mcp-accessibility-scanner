@@ -188,6 +188,21 @@ describe('Snapshot Tools', () => {
     ].join('\n')));
   });
 
+  it('should keep broad deep browser_find queries near-linear', async () => {
+    const lines = [];
+    for (let i = 0; i < 3000; i++)
+      lines.push(`${'  '.repeat(i)}- group "Target ${i}":`);
+    const context = findContext(lines.join('\n'));
+    const response = findResponse();
+
+    const start = performance.now();
+    await findTool.handle(context as any, { text: 'Target' }, response as any);
+    const elapsed = performance.now() - start;
+
+    expect(elapsed).toBeLessThan(1500);
+    expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Found 3000 matches for "Target":'));
+  });
+
   it('should report when browser_find has no matches', async () => {
     const context = findContext('- button "Submit"');
     const response = findResponse();

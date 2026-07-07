@@ -149,15 +149,13 @@ const find = defineTabTool({
         windows.push({ start, end });
     }
 
+    const parents = parentIndices(lines, indents);
     const path = new Set<number>();
-    for (const match of matchedLines) {
-      path.add(match);
-      for (const ancestor of ancestorIndices(lines, indents, match))
-        path.add(ancestor);
-    }
+    for (const match of matchedLines)
+      addPath(path, parents, match);
 
     const snippets = windows.map(window => {
-      const indices = ancestorIndices(lines, indents, window.start);
+      const indices = ancestorIndices(parents, window.start);
       for (let i = window.start; i <= window.end; i++)
         indices.push(i);
 
@@ -198,17 +196,28 @@ function indentOf(line: string): number {
   return line.length - line.trimStart().length;
 }
 
-function ancestorIndices(lines: string[], indents: number[], index: number): number[] {
-  const result: number[] = [];
-  let indent = indents[index];
-  for (let i = index - 1; i >= 0 && indent > 0; i--) {
-    if (!lines[i].trim())
-      continue;
-    if (indents[i] < indent) {
-      result.push(i);
-      indent = indents[i];
-    }
+function parentIndices(lines: string[], indents: number[]): number[] {
+  const parents = new Array<number>(lines.length).fill(-1);
+  const stack: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    while (stack.length && indents[stack[stack.length - 1]] >= indents[i])
+      stack.pop();
+    parents[i] = stack[stack.length - 1] ?? -1;
+    if (lines[i].trim())
+      stack.push(i);
   }
+  return parents;
+}
+
+function addPath(path: Set<number>, parents: number[], index: number) {
+  for (let current = index; current !== -1 && !path.has(current); current = parents[current])
+    path.add(current);
+}
+
+function ancestorIndices(parents: number[], index: number): number[] {
+  const result: number[] = [];
+  for (let current = parents[index]; current !== -1; current = parents[current])
+    result.push(current);
   return result.reverse();
 }
 
