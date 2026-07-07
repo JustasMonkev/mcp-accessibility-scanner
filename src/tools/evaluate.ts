@@ -23,7 +23,7 @@ import { generateLocator } from './utils.js';
 import type * as playwright from 'playwright';
 
 const evaluateSchema = z.object({
-  function: z.string().describe('() => { /* code */ } or (element) => { /* code */ } when element is provided'),
+  function: z.string().describe('A function like () => { /* code */ } or (element) => { /* code */ } when an element is provided, or a plain expression such as "document.title".'),
   element: z.string().optional().describe('Human-readable element description used to obtain permission to interact with the element'),
   ref: z.string().optional().describe('Exact target element reference from the page snapshot'),
 });
@@ -33,7 +33,7 @@ const evaluate = defineTabTool({
   schema: {
     name: 'browser_evaluate',
     title: 'Evaluate JavaScript',
-    description: 'Evaluate JavaScript expression on page or element',
+    description: 'Evaluate a JavaScript expression or function on the page or on a specific element',
     inputSchema: evaluateSchema,
     type: 'destructive',
   },
@@ -42,22 +42,38 @@ const evaluate = defineTabTool({
     response.setIncludeSnapshot();
 
     let locator: playwright.Locator | undefined;
-    if (params.ref && params.element) {
+    if (params.ref && params.element)
       locator = await tab.refLocator({ ref: params.ref, element: params.element });
-      response.addCode(`await page.${await generateLocator(locator)}.evaluate(${javascript.quote(params.function)});`);
-    } else {
-      response.addCode(`await page.evaluate(${javascript.quote(params.function)});`);
-    }
 
     await tab.waitForCompletion(async () => {
-      // playwright-core 1.59 removed the private `_evaluateFunction` helper
-      // (microsoft/playwright#39646). The public `evaluate()` serializes its
-      // argument via `Function.prototype.toString`, so hand it an empty function
-      // whose `toString()` returns the user-supplied source instead.
-      const func = new Function() as any;
-      func.toString = () => params.function;
-      const result = locator ? await locator.evaluate(func) : await tab.page.evaluate(func);
-      response.addResult(JSON.stringify(result, null, 2) || 'undefined');
+      // Evaluate `(${source})` inside the page so both a plain expression
+      // (e.g. `document.title`) and a function form (e.g. `() => ...` or
+      // `(element) => ...`) are accepted. Running the source in-page also avoids
+      // the private `_evaluateFunction` helper removed in playwright-core 1.59.
+      let evalResult: { result: unknown, isFunction: boolean };
+      if (locator) {
+        evalResult = await locator.evaluate(async (element, source) => {
+          const value = eval(`(${source})`);
+          const isFunction = typeof value === 'function';
+          const result = await (isFunction ? (value as (el: Element) => unknown)(element) : value);
+          return { result, isFunction };
+        }, params.function);
+      } else {
+        evalResult = await tab.page.evaluate(async source => {
+          const value = eval(`(${source})`);
+          const isFunction = typeof value === 'function';
+          const result = await (isFunction ? (value as () => unknown)() : value);
+          return { result, isFunction };
+        }, params.function);
+      }
+
+      const codeExpression = evalResult.isFunction ? params.function : `() => (${params.function})`;
+      if (locator)
+        response.addCode(`await page.${await generateLocator(locator)}.evaluate(${javascript.quote(codeExpression)});`);
+      else
+        response.addCode(`await page.evaluate(${javascript.quote(codeExpression)});`);
+
+      response.addResult(JSON.stringify(evalResult.result, null, 2) ?? 'undefined');
     });
   },
 });

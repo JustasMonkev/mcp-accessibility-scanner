@@ -165,6 +165,133 @@ describe('Network Tools', () => {
     });
   });
 
+  describe('browser_network_request tool', () => {
+    const detailTool = networkTools.find(t => t.schema.name === 'browser_network_request')!;
+
+    function setup(entries: [any, any][]) {
+      const map = new Map<any, any>(entries);
+      const tab = {
+        requests: vi.fn().mockReturnValue(map),
+        modalStates: vi.fn().mockReturnValue([]),
+      } as any;
+      const context = { currentTabOrDie: () => tab, config: {} } as any;
+      const detailResponse = new Response(context, 'browser_network_request', {});
+      return { context, response: detailResponse };
+    }
+
+    it('should exist as a readOnly core tool', () => {
+      expect(detailTool).toBeDefined();
+      expect(detailTool.schema.type).toBe('readOnly');
+      expect(detailTool.capability).toBe('core');
+    });
+
+    it('should report an error for an out-of-range index', async () => {
+      const { context, response: r } = setup([]);
+
+      await detailTool.handle(context, { index: 1 }, r);
+
+      expect(r.isError()).toBe(true);
+      expect(r.result()).toContain('not found');
+    });
+
+    it('should render general info and headers by default', async () => {
+      const req = {
+        method: () => 'get',
+        url: () => 'https://api.example.com/data',
+        headers: () => ({ accept: 'application/json' }),
+        postData: () => null,
+      };
+      const res = {
+        status: () => 200,
+        statusText: () => 'OK',
+        headers: () => ({ 'content-type': 'application/json; charset=utf-8' }),
+      };
+      const { context, response: r } = setup([[req, res]]);
+
+      await detailTool.handle(context, { index: 1 }, r);
+
+      const out = r.result();
+      expect(out).toContain('#1 [GET] https://api.example.com/data');
+      expect(out).toContain('status:    [200] OK');
+      expect(out).toContain('mimeType:  application/json');
+      expect(out).toContain('Request headers');
+      expect(out).toContain('accept: application/json');
+      expect(out).toContain('Response headers');
+      expect(out).toContain('content-type: application/json; charset=utf-8');
+      expect(out).toContain('part="response-body"');
+    });
+
+    it('should return response headers only when part=response-headers', async () => {
+      const req = { method: () => 'get', url: () => 'https://x/y', headers: () => ({}), postData: () => null };
+      const res = { status: () => 200, statusText: () => 'OK', headers: () => ({ 'content-type': 'text/html' }) };
+      const { context, response: r } = setup([[req, res]]);
+
+      await detailTool.handle(context, { index: 1, part: 'response-headers' }, r);
+
+      expect(r.result()).toBe('content-type: text/html');
+    });
+
+    it('should return a textual response body when part=response-body', async () => {
+      const req = { method: () => 'get', url: () => 'https://x/y', headers: () => ({}), postData: () => null };
+      const res = {
+        status: () => 200,
+        statusText: () => 'OK',
+        headers: () => ({ 'content-type': 'text/plain' }),
+        text: vi.fn().mockResolvedValue('hello world'),
+        body: vi.fn(),
+      };
+      const { context, response: r } = setup([[req, res]]);
+
+      await detailTool.handle(context, { index: 1, part: 'response-body' }, r);
+
+      expect(r.result()).toBe('hello world');
+      expect(res.text).toHaveBeenCalled();
+      expect(res.body).not.toHaveBeenCalled();
+    });
+
+    it('should render a placeholder for a binary response body', async () => {
+      const req = { method: () => 'get', url: () => 'https://x/img.png', headers: () => ({}), postData: () => null };
+      const res = {
+        status: () => 200,
+        statusText: () => 'OK',
+        headers: () => ({ 'content-type': 'image/png' }),
+        text: vi.fn(),
+        body: vi.fn().mockResolvedValue(Buffer.from([0, 1, 2, 3])),
+      };
+      const { context, response: r } = setup([[req, res]]);
+
+      await detailTool.handle(context, { index: 1, part: 'response-body' }, r);
+
+      expect(r.result()).toBe('<binary data: image/png, 4 bytes>');
+      expect(res.body).toHaveBeenCalled();
+      expect(res.text).not.toHaveBeenCalled();
+    });
+
+    it('should return the request body when part=request-body', async () => {
+      const req = {
+        method: () => 'post',
+        url: () => 'https://api.example.com/data',
+        headers: () => ({}),
+        postData: () => '{"a":1}',
+      };
+      const res = { status: () => 201, statusText: () => 'Created', headers: () => ({}) };
+      const { context, response: r } = setup([[req, res]]);
+
+      await detailTool.handle(context, { index: 1, part: 'request-body' }, r);
+
+      expect(r.result()).toBe('{"a":1}');
+    });
+
+    it('should handle requests without a response', async () => {
+      const req = { method: () => 'get', url: () => 'https://x/y', headers: () => ({}), postData: () => null };
+      const { context, response: r } = setup([[req, null]]);
+
+      await detailTool.handle(context, { index: 1, part: 'response-body' }, r);
+
+      expect(r.result()).toContain('No response');
+    });
+  });
+
   describe('Tool capabilities', () => {
     it('should all have core capability', () => {
       networkTools.forEach(tool => {

@@ -246,6 +246,43 @@ const drag = defineTabTool({
   },
 });
 
+const drop = defineTabTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_drop',
+    title: 'Drop files or data onto an element',
+    description: 'Drop files or MIME-typed data onto an element, as if dragged from outside the page. At least one of "paths" or "data" must be provided.',
+    inputSchema: elementSchema.extend({
+      paths: z.array(z.string()).optional().describe('Absolute paths to files to drop onto the element.'),
+      data: z.record(z.string(), z.string()).optional().describe('Data to drop, as a map of MIME type to string value (e.g. {"text/plain": "hello", "text/uri-list": "https://example.com"}).'),
+    }),
+    type: 'destructive',
+  },
+
+  handle: async (tab, params, response) => {
+    if (!params.paths?.length && !params.data) {
+      response.addError('At least one of "paths" or "data" must be provided.');
+      return;
+    }
+
+    response.setIncludeSnapshot();
+
+    const locator = await tab.refLocator(params);
+
+    const payload: { files?: string | string[], data?: Record<string, string> } = {};
+    if (params.paths?.length)
+      payload.files = params.paths.length === 1 ? params.paths[0] : params.paths;
+    if (params.data)
+      payload.data = params.data;
+
+    await tab.waitForCompletion(async () => {
+      await locator.drop(payload);
+    });
+
+    response.addCode(`await page.${await generateLocator(locator)}.drop(${javascript.formatObject(payload)});`);
+  },
+});
+
 const hover = defineTabTool({
   capability: 'core',
   schema: {
@@ -299,6 +336,7 @@ export default [
   find,
   click,
   drag,
+  drop,
   hover,
   selectOption,
   scanPage

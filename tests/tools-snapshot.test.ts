@@ -157,6 +157,84 @@ describe('Snapshot Tools', () => {
   });
 });
 
+describe('browser_drop tool', () => {
+  const dropTool = snapshotTools.find(tool => tool.schema.name === 'browser_drop')!;
+
+  function dropSetup() {
+    const locator = {
+      drop: vi.fn().mockResolvedValue(undefined),
+      normalize: async () => ({ toString: () => `locator('#drop')` }),
+    };
+    const tab = {
+      modalStates: vi.fn().mockReturnValue([]),
+      refLocator: vi.fn().mockResolvedValue(locator),
+      waitForCompletion: vi.fn(async (callback: () => Promise<void>) => {
+        await callback();
+      }),
+    };
+    const context = { currentTabOrDie: vi.fn().mockReturnValue(tab) };
+    const response = {
+      setIncludeSnapshot: vi.fn(),
+      addError: vi.fn(),
+      addCode: vi.fn(),
+    };
+    return { context, tab, locator, response };
+  }
+
+  it('should exist as a destructive core tool', () => {
+    expect(dropTool).toBeDefined();
+    expect(dropTool.schema.type).toBe('destructive');
+    expect(dropTool.capability).toBe('core');
+  });
+
+  it('should error when neither paths nor data is provided', async () => {
+    const { context, tab, response } = dropSetup();
+
+    await dropTool.handle(context as any, { element: 'zone', ref: 'e1' } as any, response as any);
+
+    expect(response.addError).toHaveBeenCalledWith('At least one of "paths" or "data" must be provided.');
+    expect(tab.refLocator).not.toHaveBeenCalled();
+  });
+
+  it('should drop MIME-typed data onto the element', async () => {
+    const { context, locator, response } = dropSetup();
+
+    await dropTool.handle(
+        context as any,
+        { element: 'zone', ref: 'e1', data: { 'text/plain': 'hello' } } as any,
+        response as any
+    );
+
+    expect(response.setIncludeSnapshot).toHaveBeenCalled();
+    expect(locator.drop).toHaveBeenCalledWith({ data: { 'text/plain': 'hello' } });
+    expect(response.addCode).toHaveBeenCalledWith(expect.stringContaining('.drop('));
+  });
+
+  it('should pass a single file path as a string', async () => {
+    const { context, locator, response } = dropSetup();
+
+    await dropTool.handle(
+        context as any,
+        { element: 'zone', ref: 'e1', paths: ['/tmp/a.txt'] } as any,
+        response as any
+    );
+
+    expect(locator.drop).toHaveBeenCalledWith({ files: '/tmp/a.txt' });
+  });
+
+  it('should pass multiple file paths as an array', async () => {
+    const { context, locator, response } = dropSetup();
+
+    await dropTool.handle(
+        context as any,
+        { element: 'zone', ref: 'e1', paths: ['/tmp/a.txt', '/tmp/b.txt'] } as any,
+        response as any
+    );
+
+    expect(locator.drop).toHaveBeenCalledWith({ files: ['/tmp/a.txt', '/tmp/b.txt'] });
+  });
+});
+
 function findContext(snapshot: string) {
   const tab = {
     modalStates: vi.fn().mockReturnValue([]),

@@ -320,6 +320,10 @@ Hover over element on page.
 Perform drag and drop between two elements.
 - Parameters: `startElement`, `startRef`, `endElement`, `endRef`
 
+#### `browser_drop`
+Drop files or MIME-typed data onto an element, as if dragged from outside the page. At least one of `paths` or `data` must be provided.
+- Parameters: `element`, `ref`, `paths` (optional array of absolute file paths), `data` (optional map of MIME type to string value, e.g. `{"text/plain": "hello", "text/uri-list": "https://example.com"}`)
+
 #### `browser_select_option`
 Select an option in a dropdown.
 - Parameters: `element`, `ref`, `values` (array)
@@ -333,8 +337,8 @@ Press a key on the keyboard.
 - Parameters: `key` (e.g., 'ArrowLeft' or 'a')
 
 #### `browser_evaluate`
-Evaluate a JavaScript expression on the page, or on a specific element when a `ref` is provided. The function's return value is serialized back as the result.
-- Parameters: `function` (e.g., `() => document.title` or `(element) => element.textContent`), `element` (optional), `ref` (optional)
+Evaluate JavaScript on the page, or on a specific element when a `ref` is provided. Accepts either a function (`() => {...}` / `(element) => {...}`) or a plain expression (e.g. `document.title`). The return value is serialized back as the result.
+- Parameters: `function` (e.g., `() => document.title`, `(element) => element.textContent`, or a bare expression like `document.title`), `element` (optional), `ref` (optional)
 
 ### Screenshot & Visual Tools
 
@@ -375,8 +379,13 @@ Returns all console messages from the page.
 Large `data:` URL payloads in console messages are truncated to their media type prefix.
 
 #### `browser_network_requests`
-Returns all network requests since loading the page.
+Returns a numbered list of network requests since loading the page. Use `browser_network_request` with the number to get full headers and body.
 Large `data:` URL payloads in request URLs are truncated to their media type prefix.
+
+#### `browser_network_request`
+Returns full details (headers and body) of a single network request, or a single part if `part` is set. Use the number printed by `browser_network_requests`.
+- Parameters: `index` (1-based index of the request), `part` (optional, one of `request-headers`, `request-body`, `response-headers`, `response-body`)
+- Textual response bodies are returned inline (with `data:` URL payloads truncated); binary bodies are summarized as a `<binary data: mime-type, N bytes>` placeholder.
 
 ### Utility Tools
 

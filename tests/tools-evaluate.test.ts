@@ -29,11 +29,7 @@ describe('browser_evaluate tool', () => {
   let response: Response;
 
   beforeEach(() => {
-    pageEvaluate = vi.fn(async (func: any) => {
-      // Mirror Playwright: it serializes the argument via toString(). Returning
-      // the serialized source lets the test assert the user code was forwarded.
-      return func.toString();
-    });
+    pageEvaluate = vi.fn();
 
     mockTab = {
       modalStates: vi.fn().mockReturnValue([]),
@@ -59,34 +55,51 @@ describe('browser_evaluate tool', () => {
   });
 
   it('evaluates a page-scoped function and returns its value', async () => {
-    pageEvaluate.mockResolvedValueOnce(4);
+    pageEvaluate.mockResolvedValueOnce({ result: 4, isFunction: true });
 
     await evaluateTool.handle(mockContext, { function: '() => 2 + 2' }, response);
 
     expect(pageEvaluate).toHaveBeenCalledTimes(1);
+    // The user source is forwarded as the argument to page.evaluate.
+    expect(pageEvaluate.mock.calls[0][1]).toBe('() => 2 + 2');
     expect(response.result()).toContain('4');
+    expect(response.code()).toContain(`await page.evaluate('() => 2 + 2');`);
     expect(response.isError()).toBeFalsy();
   });
 
-  it('forwards the user source to evaluate via Function.toString (no _evaluateFunction)', async () => {
+  it('accepts a plain expression and wraps it in the generated code', async () => {
+    pageEvaluate.mockResolvedValueOnce({ result: 'Example Domain', isFunction: false });
+
+    await evaluateTool.handle(mockContext, { function: 'document.title' }, response);
+
+    expect(pageEvaluate).toHaveBeenCalledTimes(1);
+    expect(pageEvaluate.mock.calls[0][1]).toBe('document.title');
+    expect(response.result()).toContain('Example Domain');
+    // A bare expression is wrapped so the emitted code stays runnable.
+    expect(response.code()).toContain(`await page.evaluate('() => (document.title)');`);
+    expect(response.isError()).toBeFalsy();
+  });
+
+  it('forwards the user source without the removed _evaluateFunction helper', async () => {
     // Regression guard for #84: playwright-core 1.59 removed _evaluateFunction,
-    // so the tool must call the public evaluate() with a toString-overridden
-    // function instead of the (now missing) private receiver method.
+    // so the tool must evaluate the user source in-page via the public
+    // evaluate() rather than the (now missing) private receiver method.
     mockTab.page._evaluateFunction = vi.fn();
+    pageEvaluate.mockResolvedValueOnce({ result: 'https://example.com/', isFunction: true });
 
     await evaluateTool.handle(mockContext, { function: '() => window.location.href' }, response);
 
     expect(mockTab.page._evaluateFunction).not.toHaveBeenCalled();
-    const passedFunction = pageEvaluate.mock.calls[0][0];
-    expect(typeof passedFunction).toBe('function');
-    expect(passedFunction.toString()).toBe('() => window.location.href');
+    // A real function is passed as the receiver, with the user source as its argument.
+    expect(typeof pageEvaluate.mock.calls[0][0]).toBe('function');
+    expect(pageEvaluate.mock.calls[0][1]).toBe('() => window.location.href');
   });
 
   it('evaluates against an element locator when ref and element are provided', async () => {
-    const locatorEvaluate = vi.fn().mockResolvedValue('hello');
+    const locatorEvaluate = vi.fn().mockResolvedValue({ result: 'hello', isFunction: true });
     mockTab.refLocator.mockResolvedValue({
       evaluate: locatorEvaluate,
-      _resolveSelector: async () => ({ resolvedSelector: 'internal:role=button' }),
+      normalize: async () => ({ toString: () => `locator('#el')` }),
     });
 
     await evaluateTool.handle(
@@ -97,8 +110,8 @@ describe('browser_evaluate tool', () => {
 
     expect(mockTab.refLocator).toHaveBeenCalledWith({ ref: 'e1', element: 'the button' });
     expect(locatorEvaluate).toHaveBeenCalledTimes(1);
+    expect(locatorEvaluate.mock.calls[0][1]).toBe('(el) => el.textContent');
     expect(pageEvaluate).not.toHaveBeenCalled();
-    expect(locatorEvaluate.mock.calls[0][0].toString()).toBe('(el) => el.textContent');
     expect(response.result()).toContain('hello');
   });
 });
