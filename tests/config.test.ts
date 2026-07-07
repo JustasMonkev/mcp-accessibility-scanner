@@ -197,6 +197,50 @@ describe('Config', () => {
     });
   });
 
+  describe('resolveCLIConfig mobile', () => {
+    const savedMobile = process.env.PLAYWRIGHT_MCP_MOBILE;
+
+    afterEach(() => {
+      if (savedMobile === undefined)
+        delete process.env.PLAYWRIGHT_MCP_MOBILE;
+      else
+        process.env.PLAYWRIGHT_MCP_MOBILE = savedMobile;
+    });
+
+    it('uses a Chromium mobile device by default', async () => {
+      const config = await resolveCLIConfig({ mobile: true });
+
+      expect(config.browser.contextOptions.isMobile).toBe(true);
+      expect(config.browser.contextOptions.userAgent).toContain('Pixel 10');
+    });
+
+    it('uses a WebKit mobile device for WebKit', async () => {
+      const config = await resolveCLIConfig({ mobile: true, browser: 'webkit' });
+
+      expect(config.browser.contextOptions.isMobile).toBe(true);
+      expect(config.browser.contextOptions.viewport).toEqual({ width: 402, height: 681 });
+    });
+
+    it('reads mobile emulation from the environment', async () => {
+      process.env.PLAYWRIGHT_MCP_MOBILE = '1';
+
+      const config = await resolveCLIConfig({});
+
+      expect(config.browser.contextOptions.isMobile).toBe(true);
+      expect(config.browser.contextOptions.userAgent).toContain('Pixel 10');
+    });
+
+    it('rejects mobile emulation with Firefox', async () => {
+      await expect(resolveCLIConfig({ mobile: true, browser: 'firefox' }))
+          .rejects.toThrow('--mobile is not supported with the Firefox browser.');
+    });
+
+    it('rejects mobile emulation with an explicit device', async () => {
+      await expect(resolveCLIConfig({ mobile: true, device: 'iPhone 15' }))
+          .rejects.toThrow('Cannot use --mobile together with --device');
+    });
+  });
+
   describe('outputFile', () => {
     it('should generate output file path with filename', async () => {
       const config = await resolveConfig({});

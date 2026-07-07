@@ -124,6 +124,7 @@ Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.
 
 Each line is `<tool-name> <json-arguments>`. Omit the JSON to pass `{}`.
 Global browser connection flags still apply here, for example `npx mcp-accessibility-scanner --headless interactive`.
+Use `--mobile` or `PLAYWRIGHT_MCP_MOBILE=1` to emulate a generic mobile device (`Pixel 10` for Chromium, `iPhone 17` for WebKit). It cannot be combined with `--device`.
 
 ### Discovering available tools (`list-tools` subcommand)
 
@@ -302,7 +303,7 @@ Large `data:` URL payloads in snapshot output are truncated to their media type 
 #### `browser_find`
 Search the current page accessibility snapshot without returning the full snapshot.
 - Parameters: `text` (case-insensitive substring) or `regex` (regular expression, supports `/pattern/flags`)
-- Returns matching snapshot lines with surrounding context.
+- Returns matching snapshot lines with surrounding context, shown under their path from the root of the tree; `...` marks truncated off-path context.
 
 #### `browser_click`
 Perform click on a web page element.

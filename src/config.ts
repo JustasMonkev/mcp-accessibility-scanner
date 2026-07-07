@@ -45,6 +45,7 @@ export type CLIOptions = {
     ignoreHttpsErrors?: boolean;
     isolated?: boolean;
     imageResponses?: 'allow' | 'omit';
+    mobile?: boolean;
     sandbox?: boolean;
     outputDir?: string;
     port?: number;
@@ -156,14 +157,24 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
       launchOptions.proxy.bypass = cliOptions.proxyBypass;
   }
 
-  if (cliOptions.device && cliOptions.cdpEndpoint)
+  let device = cliOptions.device;
+  const resolvedBrowserName = browserName ?? 'chromium';
+  if (cliOptions.mobile) {
+    if (device)
+      throw new Error('Cannot use --mobile together with --device, pick one.');
+    if (resolvedBrowserName === 'firefox')
+      throw new Error('--mobile is not supported with the Firefox browser.');
+    device = resolvedBrowserName === 'webkit' ? 'iPhone 17' : 'Pixel 10';
+  }
+
+  if (device && cliOptions.cdpEndpoint)
     throw new Error('Device emulation is not supported with cdpEndpoint.');
 
   if (cliOptions.cdpEndpoint && cliOptions.cdpLaunchCommand)
     throw new Error('CDP launch is not supported with cdpEndpoint.');
 
   // Context options
-  const contextOptions: BrowserContextOptions = cliOptions.device ? devices[cliOptions.device] : {};
+  const contextOptions: BrowserContextOptions = device ? devices[device] : {};
   if (cliOptions.storageState)
     contextOptions.storageState = cliOptions.storageState;
 
@@ -251,6 +262,7 @@ function configFromEnv(): Config {
   options.isolated = envToBoolean(process.env.PLAYWRIGHT_MCP_ISOLATED);
   if (process.env.PLAYWRIGHT_MCP_IMAGE_RESPONSES === 'omit')
     options.imageResponses = 'omit';
+  options.mobile = envToBoolean(process.env.PLAYWRIGHT_MCP_MOBILE);
   options.sandbox = envToBoolean(process.env.PLAYWRIGHT_MCP_SANDBOX);
   options.outputDir = envToString(process.env.PLAYWRIGHT_MCP_OUTPUT_DIR);
   options.port = envToNumber(process.env.PLAYWRIGHT_MCP_PORT);

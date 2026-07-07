@@ -98,7 +98,7 @@ const find = defineTabTool({
   schema: {
     name: 'browser_find',
     title: 'Find in page snapshot',
-    description: 'Search the accessibility snapshot of the current page for text or a regular expression. Returns matching snapshot nodes with a few lines of surrounding context.',
+    description: 'Search the accessibility snapshot of the current page for text or a regular expression. Returns matching snapshot nodes with a few lines of surrounding context, each shown under its path from the root of the tree.',
     inputSchema: findSchema,
     type: 'readOnly',
   },
@@ -126,6 +126,7 @@ const find = defineTabTool({
     }
 
     const lines = (await tab.page.ariaSnapshot({ mode: 'ai' })).split('\n');
+    const indents = lines.map(indentOf);
     const matchedLines: number[] = [];
     for (let i = 0; i < lines.length; i++) {
       if (matches(lines[i]))
@@ -148,7 +149,27 @@ const find = defineTabTool({
         windows.push({ start, end });
     }
 
-    const snippets = windows.map(window => truncateDataUrls(lines.slice(window.start, window.end + 1).join('\n')));
+    const path = new Set<number>();
+    for (const match of matchedLines) {
+      path.add(match);
+      for (const ancestor of ancestorIndices(lines, indents, match))
+        path.add(ancestor);
+    }
+
+    const snippets = windows.map(window => {
+      const indices = ancestorIndices(lines, indents, window.start);
+      for (let i = window.start; i <= window.end; i++)
+        indices.push(i);
+
+      const out: string[] = [];
+      for (let i = 0; i < indices.length; i++) {
+        const index = indices[i];
+        if (i > 0 && index > indices[i - 1] + 1 && !path.has(index) && !path.has(indices[i - 1]))
+          out.push(' '.repeat(indents[index]) + '...');
+        out.push(lines[index]);
+      }
+      return truncateDataUrls(out.join('\n'));
+    });
     const matchWord = matchedLines.length === 1 ? 'match' : 'matches';
     response.addResult(`Found ${matchedLines.length} ${matchWord} for ${query}:\n\n${snippets.join('\n\n----\n\n')}`);
   },
@@ -171,6 +192,24 @@ function isValidRegex(source: string): boolean {
   } catch {
     return false;
   }
+}
+
+function indentOf(line: string): number {
+  return line.length - line.trimStart().length;
+}
+
+function ancestorIndices(lines: string[], indents: number[], index: number): number[] {
+  const result: number[] = [];
+  let indent = indents[index];
+  for (let i = index - 1; i >= 0 && indent > 0; i--) {
+    if (!lines[i].trim())
+      continue;
+    if (indents[i] < indent) {
+      result.push(i);
+      indent = indents[i];
+    }
+  }
+  return result.reverse();
 }
 
 export const elementSchema = z.object({
