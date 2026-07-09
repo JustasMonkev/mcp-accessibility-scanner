@@ -45,8 +45,10 @@ export function formatObject(value: any, indent = '  '): string {
     if (!keys.length)
       return '{}';
     const tokens: string[] = [];
-    for (const key of keys)
-      tokens.push(`${key}: ${formatObject(value[key])}`);
+    for (const key of keys) {
+      const keyToken = /^[A-Za-z_$][\w$]*$/.test(key) ? key : quote(key);
+      tokens.push(`${keyToken}: ${formatObject(value[key])}`);
+    }
     return `{\n${indent}${tokens.join(`,\n${indent}`)}\n}`;
   }
   return String(value);

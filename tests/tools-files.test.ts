@@ -101,6 +101,8 @@ describe('browser_drop tool', () => {
       data: { 'text/plain': 'hello', 'text/uri-list': 'https://example.com' },
     });
     expect(response.code()).toContain(`await page.locator('#dropzone').drop(`);
+    expect(response.code()).toContain(`'text/plain': 'hello'`);
+    expect(response.code()).toContain(`'text/uri-list': 'https://example.com'`);
   });
 
   it('should pass one file path as a string', async () => {
