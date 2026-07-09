@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import evaluateTools from '../src/tools/evaluate.js';
 import { Response } from '../src/response.js';
+
 import type { Context } from '../src/context.js';
 import type { Tab } from '../src/tab.js';
 
@@ -29,11 +30,7 @@ describe('browser_evaluate tool', () => {
   let response: Response;
 
   beforeEach(() => {
-    pageEvaluate = vi.fn(async (func: any) => {
-      // Mirror Playwright: it serializes the argument via toString(). Returning
-      // the serialized source lets the test assert the user code was forwarded.
-      return func.toString();
-    });
+    pageEvaluate = vi.fn(async (callback: (source: string) => unknown, source: string) => callback(source));
 
     mockTab = {
       modalStates: vi.fn().mockReturnValue([]),
@@ -56,49 +53,113 @@ describe('browser_evaluate tool', () => {
     expect(evaluateTool).toBeDefined();
     expect(evaluateTool.schema.name).toBe('browser_evaluate');
     expect(evaluateTool.capability).toBe('core');
+    expect(evaluateTool.schema.inputSchema.parse({ function: '1 + 1' })).toEqual({ function: '1 + 1' });
   });
 
   it('evaluates a page-scoped function and returns its value', async () => {
-    pageEvaluate.mockResolvedValueOnce(4);
-
     await evaluateTool.handle(mockContext, { function: '() => 2 + 2' }, response);
 
     expect(pageEvaluate).toHaveBeenCalledTimes(1);
-    expect(response.result()).toContain('4');
+    expect(pageEvaluate.mock.calls[0][1]).toBe('() => 2 + 2');
+    expect(response.result()).toBe('4');
+    expect(response.code()).toContain(`await page.evaluate(() => 2 + 2);`);
     expect(response.isError()).toBeFalsy();
   });
 
-  it('forwards the user source to evaluate via Function.toString (no _evaluateFunction)', async () => {
-    // Regression guard for #84: playwright-core 1.59 removed _evaluateFunction,
-    // so the tool must call the public evaluate() with a toString-overridden
-    // function instead of the (now missing) private receiver method.
+  it('evaluates a plain expression and emits runnable code', async () => {
+    await evaluateTool.handle(mockContext, { function: '(1 + 1)' }, response);
+
+    expect(pageEvaluate.mock.calls[0][1]).toBe('(1 + 1)');
+    expect(response.result()).toBe('2');
+    expect(response.code()).toContain(`await page.evaluate(() => ((1 + 1)));`);
+    expect(response.isError()).toBeFalsy();
+  });
+
+  it('does not misclassify an expression containing an arrow callback', async () => {
+    await evaluateTool.handle(mockContext, { function: '[1, 2, 3].map(value => value * 2)' }, response);
+
+    expect(response.result()).toBe('[\n  2,\n  4,\n  6\n]');
+    expect(response.code()).toContain(`await page.evaluate(() => ([1, 2, 3].map(value => value * 2)));`);
+  });
+
+  it('awaits promise expressions', async () => {
+    await evaluateTool.handle(mockContext, { function: 'Promise.resolve(42)' }, response);
+
+    expect(response.result()).toBe('42');
+    expect(response.code()).toContain(`() => (Promise.resolve(42))`);
+  });
+
+  it('uses the public evaluate API instead of the removed _evaluateFunction helper', async () => {
     mockTab.page._evaluateFunction = vi.fn();
 
-    await evaluateTool.handle(mockContext, { function: '() => window.location.href' }, response);
+    await evaluateTool.handle(mockContext, { function: '() => "ok"' }, response);
 
     expect(mockTab.page._evaluateFunction).not.toHaveBeenCalled();
-    const passedFunction = pageEvaluate.mock.calls[0][0];
-    expect(typeof passedFunction).toBe('function');
-    expect(passedFunction.toString()).toBe('() => window.location.href');
+    expect(typeof pageEvaluate.mock.calls[0][0]).toBe('function');
+    expect(pageEvaluate.mock.calls[0][1]).toBe('() => "ok"');
   });
 
   it('evaluates against an element locator when ref and element are provided', async () => {
-    const locatorEvaluate = vi.fn().mockResolvedValue('hello');
+    const locatorEvaluate = vi.fn(async (
+      callback: (element: { textContent: string }, source: string) => unknown,
+      source: string
+    ) => callback({ textContent: 'hello' }, source));
     mockTab.refLocator.mockResolvedValue({
       evaluate: locatorEvaluate,
-      _resolveSelector: async () => ({ resolvedSelector: 'internal:role=button' }),
+      normalize: async () => ({ toString: () => `locator('#button')` }),
     });
 
     await evaluateTool.handle(
         mockContext,
-        { function: '(el) => el.textContent', element: 'the button', ref: 'e1' },
+        { function: '(element) => element.textContent', element: 'the button', ref: 'e1' },
         response
     );
 
     expect(mockTab.refLocator).toHaveBeenCalledWith({ ref: 'e1', element: 'the button' });
     expect(locatorEvaluate).toHaveBeenCalledTimes(1);
+    expect(locatorEvaluate.mock.calls[0][1]).toBe('(element) => element.textContent');
     expect(pageEvaluate).not.toHaveBeenCalled();
-    expect(locatorEvaluate.mock.calls[0][0].toString()).toBe('(el) => el.textContent');
-    expect(response.result()).toContain('hello');
+    expect(response.result()).toBe('"hello"');
+    expect(response.code()).toContain(`await page.locator('#button').evaluate((element) => element.textContent);`);
+  });
+
+  it('emits an element parameter for locator-scoped plain expressions', async () => {
+    const locatorEvaluate = vi.fn(async (
+      callback: (element: { textContent: string }, source: string) => unknown,
+      source: string
+    ) => callback({ textContent: 'hello' }, source));
+    mockTab.refLocator.mockResolvedValue({
+      evaluate: locatorEvaluate,
+      normalize: async () => ({ toString: () => `locator('#button')` }),
+    });
+
+    await evaluateTool.handle(
+        mockContext,
+        { function: 'element.textContent', element: 'the button', ref: 'e1' },
+        response
+    );
+
+    expect(response.result()).toBe('"hello"');
+    expect(response.code()).toContain(`await page.locator('#button').evaluate((element) => (element.textContent));`);
+  });
+
+  it('reports invalid expressions as tool errors', async () => {
+    await evaluateTool.handle(mockContext, { function: 'not valid javascript {' }, response);
+
+    expect(response.isError()).toBe(true);
+    expect(response.result()).toContain('Unexpected');
+  });
+
+  it('falls back cleanly when the result cannot be JSON-stringified', async () => {
+    pageEvaluate.mockResolvedValueOnce((() => {
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+      return { result: circular, isFunction: false };
+    })());
+
+    await evaluateTool.handle(mockContext, { function: 'globalThis' }, response);
+
+    expect(response.isError()).toBeFalsy();
+    expect(response.result()).toBe('[object Object]');
   });
 });

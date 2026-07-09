@@ -321,6 +321,12 @@ Hover over element on page.
 Perform drag and drop between two elements.
 - Parameters: `startElement`, `startRef`, `endElement`, `endRef`
 
+#### `browser_drop`
+Drop files or MIME-typed data onto one element, as if dragged from outside the page.
+- Parameters: `element`, `ref`, `paths` (optional array of absolute file paths), `data` (optional map of MIME type to string value)
+- At least one non-empty `paths` or `data` value is required.
+- File paths must resolve inside the MCP client's filesystem root or the configured output directory.
+
 #### `browser_select_option`
 Select an option in a dropdown.
 - Parameters: `element`, `ref`, `values` (array)
@@ -334,8 +340,8 @@ Press a key on the keyboard.
 - Parameters: `key` (e.g., 'ArrowLeft' or 'a')
 
 #### `browser_evaluate`
-Evaluate a JavaScript expression on the page, or on a specific element when a `ref` is provided. The function's return value is serialized back as the result.
-- Parameters: `function` (e.g., `() => document.title` or `(element) => element.textContent`), `element` (optional), `ref` (optional)
+Evaluate JavaScript on the page, or on a specific element when a `ref` is provided. The input may be a function or a plain expression, and promises are awaited.
+- Parameters: `function` (e.g., `() => document.title`, `(element) => element.textContent`, or `document.title`), `element` (optional), `ref` (optional)
 
 ### Screenshot & Visual Tools
 
@@ -376,8 +382,17 @@ Returns all console messages from the page.
 Large `data:` URL payloads in console messages are truncated to their media type prefix.
 
 #### `browser_network_requests`
-Returns all network requests since loading the page.
+Returns a numbered list of network requests since loading the page. Successful static resources are hidden by default; failed resources and fetch/XHR requests remain visible. The displayed numbers are stable indexes for `browser_network_request`.
+- Parameters: `static` (optional boolean, default `false`), `filter` (optional URL regular expression), `filename` (optional output filename)
 Large `data:` URL payloads in request URLs are truncated to their media type prefix.
+
+#### `browser_network_request`
+Returns metadata and headers for one request, or one specific request/response part. Bodies are read only when a body part is requested.
+- Parameters: `index` (1-based index from `browser_network_requests`), `part` (optional: `request-headers`, `request-body`, `response-headers`, or `response-body`), `filename` (optional output filename), `includeSensitiveHeaders` (optional boolean, default `false`), `allowCompressedBody` (optional boolean, default `false`)
+- Authorization, cookie, API-key, token, and secret header values are redacted by default.
+- Text request/response bodies are returned inline unless `filename` is provided. Binary bodies are saved byte-for-byte to an output file and returned as a file resource link.
+- Inline text bodies are limited to 1 MiB; provide `filename` for larger text. Body reads are capped at 25 MiB, and response reads fail closed when Playwright cannot report their size.
+- Compressed response bodies require explicit `allowCompressedBody: true` because their decoded size cannot be bounded before Playwright materializes them.
 
 ### Utility Tools
 

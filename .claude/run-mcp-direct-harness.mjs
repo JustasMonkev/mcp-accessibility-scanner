@@ -152,6 +152,12 @@ const tests = [
     await callTool('browser_network_requests', {});
   }),
 
+  test('browser_network_request', async () => {
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/audit-site` });
+    const result = await callTool('browser_network_request', { index: 1 });
+    assertText(result, /\[GET\]|General|status:/i);
+  }),
+
   test('browser_take_screenshot', async () => {
     await navigate('<title>Screenshot</title><h1>Screenshot OK</h1>');
     const result = await callTool('browser_take_screenshot', {
@@ -185,6 +191,19 @@ const tests = [
       endElement: 'Drop target',
       endRef,
     });
+  }),
+
+  test('browser_drop', async () => {
+    const snapshot = await navigate([
+      '<title>Drop</title>',
+      '<div aria-label="Drop zone" style="width:120px;height:60px;background:#cfa" ',
+      'ondragover="event.preventDefault()" ',
+      'ondrop="event.preventDefault();document.body.dataset.dropped=event.dataTransfer.getData(\'text/plain\')">Drop zone</div>',
+    ].join(''));
+    const ref = refFor(snapshot, 'Drop zone');
+    await callTool('browser_drop', { element: 'Drop zone', ref, data: { 'text/plain': 'mcp-drop-ok' } });
+    const result = await callTool('browser_evaluate', { function: '() => document.body.dataset.dropped' });
+    assertText(result, /mcp-drop-ok/);
   }),
 
   test('browser_hover', async () => {
