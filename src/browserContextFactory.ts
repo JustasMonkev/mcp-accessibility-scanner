@@ -144,6 +144,7 @@ class CdpContextFactory extends BaseContextFactory {
     return playwright.chromium.connectOverCDP(this.config.browser.cdpEndpoint!, {
       headers: cdpConnectHeaders(clientInfo, this.config.browser),
       timeout: this.config.browser.cdpTimeout,
+      noDefaults: true,
     });
   }
 
@@ -211,6 +212,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     const connectOptions: playwright.ConnectOverCDPOptions = {
       headers: cdpConnectHeaders(clientInfo, this.config.browser),
       timeout: this.config.browser.cdpTimeout,
+      noDefaults: true,
     };
     for (;;) {
       try {

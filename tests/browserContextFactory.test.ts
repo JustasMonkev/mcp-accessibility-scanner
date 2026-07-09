@@ -128,6 +128,7 @@ describe('browserContextFactory', () => {
         'Authorization': 'Bearer token:with:colons',
       },
       timeout: 1234,
+      noDefaults: true,
     });
   });
 
@@ -160,6 +161,7 @@ describe('browserContextFactory', () => {
         'Authorization': 'Bearer abc',
       },
       timeout: 4321,
+      noDefaults: true,
     });
   });
 
@@ -203,6 +205,7 @@ describe('browserContextFactory', () => {
       headers: {
         'User-Agent': 'vitest/1.0.0',
       },
+      noDefaults: true,
     });
 
     await result.close();

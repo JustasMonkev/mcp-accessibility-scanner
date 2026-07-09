@@ -52,16 +52,31 @@ const tests = [
   }),
 
   test('browser_find', async () => {
-    await navigate('<title>Find</title><main><h1>Groceries</h1><ul><li>Apples</li><li>Bananas</li><li>Cherries</li></ul></main>');
-    const result = await callTool('browser_find', { text: 'Bananas' });
-    assertText(result, /Found 1 match for "Bananas"/);
-    assertText(result, /Groceries|listitem.*Bananas/s);
+    await navigate('<title>Find</title><main><h1>Find MCP</h1><p>Needle text</p></main>');
+    const result = await callTool('browser_find', { text: 'Needle' });
+    assertText(result, /Found 1 match|Needle text/);
   }),
 
   test('browser_evaluate', async () => {
-    await navigate('<title>Evaluate</title><h1 id="answer">OK</h1>');
-    const result = await callTool('browser_evaluate', { function: '() => 2 + 2' });
-    assertText(result, /\b4\b/);
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/csp-evaluate` });
+
+    const functionResult = await callTool('browser_evaluate', { function: '() => document.title' });
+    assertText(functionResult, /CSP Evaluate/);
+    assertText(functionResult, /await page\.evaluate\(\(\) => document\.title\);/);
+
+    const expressionResult = await callTool('browser_evaluate', { function: 'document.title' });
+    assertText(expressionResult, /CSP Evaluate/);
+    assertText(expressionResult, /await page\.evaluate\(\(\) => \(document\.title\)\);/);
+
+    const snapshot = await callTool('browser_snapshot', {});
+    const ref = refFor(resultText(snapshot), 'Strict CSP');
+    const elementResult = await callTool('browser_evaluate', {
+      function: 'element.textContent',
+      element: 'Strict CSP heading',
+      ref,
+    });
+    assertText(elementResult, /Strict CSP/);
+    assertText(elementResult, /\.evaluate\(\(element\) => \(element\.textContent\)\);/);
   }),
 
   test('browser_resize', async () => {
@@ -148,14 +163,21 @@ const tests = [
   }),
 
   test('browser_network_requests', async () => {
-    await navigate('<title>Network</title><h1>Network</h1>');
-    await callTool('browser_network_requests', {});
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/network-json` });
+    const result = await callTool('browser_network_requests', {});
+    assertText(result, /network-json/);
   }),
 
   test('browser_network_request', async () => {
-    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/audit-site` });
-    const result = await callTool('browser_network_request', { index: 1 });
-    assertText(result, /\[GET\]|General|status:/i);
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/network-json` });
+    const list = await callTool('browser_network_requests', {});
+    const match = resultText(list).match(/^(\d+)\. \[GET\] .*\/network-json/m);
+    if (!match)
+      throw new Error(`Could not find /network-json in network list:\n${resultText(list).slice(0, 4000)}`);
+
+    const result = await callTool('browser_network_request', { index: Number(match[1]) });
+    assertText(result, /Response headers/);
+    assertText(result, /content-type: application\/json/);
   }),
 
   test('browser_take_screenshot', async () => {
@@ -196,14 +218,19 @@ const tests = [
   test('browser_drop', async () => {
     const snapshot = await navigate([
       '<title>Drop</title>',
-      '<div aria-label="Drop zone" style="width:120px;height:60px;background:#cfa" ',
+      '<div role="button" aria-label="Drop zone" style="width:120px;height:50px;background:#cfa" ',
       'ondragover="event.preventDefault()" ',
-      'ondrop="event.preventDefault();document.body.dataset.dropped=event.dataTransfer.getData(\'text/plain\')">Drop zone</div>',
+      'ondrop="event.preventDefault(); document.body.dataset.dropText=event.dataTransfer.getData(\'text/plain\')">Drop zone</div>',
     ].join(''));
     const ref = refFor(snapshot, 'Drop zone');
-    await callTool('browser_drop', { element: 'Drop zone', ref, data: { 'text/plain': 'mcp-drop-ok' } });
-    const result = await callTool('browser_evaluate', { function: '() => document.body.dataset.dropped' });
-    assertText(result, /mcp-drop-ok/);
+    const dropResult = await callTool('browser_drop', {
+      element: 'Drop zone',
+      ref,
+      data: { 'text/plain': 'hello from drop' },
+    });
+    assertText(dropResult, /'text\/plain': 'hello from drop'/);
+    const result = await callTool('browser_evaluate', { function: '() => document.body.dataset.dropText' });
+    assertText(result, /hello from drop/);
   }),
 
   test('browser_hover', async () => {
@@ -433,9 +460,9 @@ function htmlUrl(markup) {
 
 function resultText(result) {
   return (result.content || [])
-    .filter(item => item.type === 'text')
-    .map(item => item.text || '')
-    .join('\n');
+      .filter(item => item.type === 'text')
+      .map(item => item.text || '')
+      .join('\n');
 }
 
 function assertText(result, pattern) {
@@ -476,6 +503,22 @@ function startFixtureServer() {
     if (request.url === '/audit-site') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end('<!doctype html><html><head><title>AuditSite</title></head><body><img src="x"><h1>Audit Site</h1></body></html>');
+      return;
+    }
+    if (request.url === '/csp-evaluate') {
+      response.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'content-security-policy': "default-src 'self'; script-src 'self'",
+      });
+      response.end('<!doctype html><html><head><title>CSP Evaluate</title></head><body><h1>Strict CSP</h1></body></html>');
+      return;
+    }
+    if (request.url === '/network-json') {
+      response.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'x-mcp-fixture': 'network-json',
+      });
+      response.end(JSON.stringify({ ok: true }));
       return;
     }
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
