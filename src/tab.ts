@@ -152,6 +152,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
         this._lastTitle = await this._withPageStateTimeout(
             callOnPageNoTrace(this.page, page => page.title()),
             'reading page title',
+            Math.min(this._pageStateTimeoutMs(), 5000),
         );
       } catch (error) {
         logUnhandledError(error);
@@ -272,15 +273,15 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this._defaultTimeout > 0 ? this._defaultTimeout : 5000;
   }
 
-  private async _withPageStateTimeout<T>(promise: Promise<T>, description: string): Promise<T> {
+  private async _withPageStateTimeout<T>(promise: Promise<T>, description: string, timeoutMs = this._pageStateTimeoutMs()): Promise<T> {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         promise,
         new Promise<never>((_, reject) => {
           timeoutId = setTimeout(() => {
-            reject(new Error(`Timed out after ${this._pageStateTimeoutMs()}ms while ${description}.`));
-          }, this._pageStateTimeoutMs());
+            reject(new Error(`Timed out after ${timeoutMs}ms while ${description}.`));
+          }, timeoutMs);
         }),
       ]);
     } finally {

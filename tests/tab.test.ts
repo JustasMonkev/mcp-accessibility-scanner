@@ -160,6 +160,25 @@ describe('Tab', () => {
       expect(tab.lastTitle()).toBe('about:blank');
     });
 
+    it('caps unresponsive title refreshes at five seconds', async () => {
+      vi.useFakeTimers();
+      mockContext.config.timeouts.defaultTimeout = 30_000;
+      mockPage.title = vi.fn().mockReturnValue(new Promise(() => {}));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      let finished = false;
+
+      const updatePromise = tab.updateTitle().then(() => {
+        finished = true;
+      });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(finished).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(finished).toBe(true);
+      await updatePromise;
+      expect(tab.lastTitle()).toBe('about:blank');
+    });
+
     it('uses the runtime default timeout when it changes after tab creation', async () => {
       vi.useFakeTimers();
       mockContext.config.timeouts.defaultTimeout = 25;
