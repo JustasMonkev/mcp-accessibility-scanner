@@ -74,4 +74,25 @@ describe('Screenshot Tools', () => {
 
     expect(mockPage.screenshot).toHaveBeenCalledWith(expect.objectContaining({ scale: 'device' }));
   });
+
+  it('should accept the webp type and pass it through without quality', async () => {
+    const params = screenshotTool.schema.inputSchema.parse({ type: 'webp' });
+    await screenshotTool.handle(mockContext, params, response);
+
+    expect(mockPage.screenshot).toHaveBeenCalledWith(expect.objectContaining({ type: 'webp', quality: undefined }));
+  });
+
+  it('should only set quality for jpeg screenshots', async () => {
+    for (const [type, quality] of [['png', undefined], ['jpeg', 90], ['webp', undefined]] as const) {
+      mockPage.screenshot.mockClear();
+      const params = screenshotTool.schema.inputSchema.parse({ type });
+      await screenshotTool.handle(mockContext, params, new Response(mockContext, 'browser_take_screenshot', {}));
+
+      expect(mockPage.screenshot).toHaveBeenCalledWith(expect.objectContaining({ type, quality }));
+    }
+  });
+
+  it('should reject an invalid type value', () => {
+    expect(() => screenshotTool.schema.inputSchema.parse({ type: 'gif' })).toThrow();
+  });
 });
