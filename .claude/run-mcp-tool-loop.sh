@@ -105,7 +105,9 @@ if [[ "$CHECK_COVERAGE" -eq 1 && -z "$ONLY_TOOL" ]]; then
       exit 2
     fi
   else
-    echo "WARN: could not enumerate exposed MCP tools; skipping prompt coverage check." >&2
+    echo "ERROR: could not enumerate exposed MCP tools." >&2
+    echo "Rerun with --skip-coverage to explicitly bypass the coverage check." >&2
+    exit 2
   fi
 fi
 

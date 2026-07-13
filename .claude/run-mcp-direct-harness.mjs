@@ -24,6 +24,7 @@ const transport = new StdioClientTransport({
 const client = new Client({ name: 'mcp-accessibility-direct-harness', version: '1.0.0' });
 
 const state = {
+  tools: [],
   toolNames: [],
   toolsByName: new Map(),
   fixtureOrigin: '',
@@ -60,7 +61,9 @@ const tests = [
 
   test(PROTOCOL, 'tool catalog is well-formed', async () => {
     const names = new Set();
-    for (const tool of state.toolsByName.values()) {
+    // Iterate the raw catalog, not toolsByName: a name-keyed Map silently
+    // collapses duplicates before this check could see them.
+    for (const tool of state.tools) {
       if (names.has(tool.name))
         throw new Error(`Duplicate tool name: ${tool.name}`);
       names.add(tool.name);
@@ -151,11 +154,11 @@ const tests = [
 
     const functionResult = await callTool('browser_evaluate', { function: '() => document.title' });
     assertText(functionResult, /CSP Evaluate/);
-    assertText(functionResult, /await page\.evaluate\('\(\) => document\.title'\);/);
+    assertText(functionResult, /await page\.evaluate\(\(\) => document\.title\);/);
 
     const expressionResult = await callTool('browser_evaluate', { function: 'document.title' });
     assertText(expressionResult, /CSP Evaluate/);
-    assertText(expressionResult, /await page\.evaluate\('\(\) => \(document\.title\)'\);/);
+    assertText(expressionResult, /await page\.evaluate\(\(\) => \(document\.title\)\);/);
 
     const snapshot = await callTool('browser_snapshot', {});
     const ref = refFor(resultText(snapshot), 'Strict CSP');
@@ -165,7 +168,7 @@ const tests = [
       ref,
     });
     assertText(elementResult, /Strict CSP/);
-    assertText(elementResult, /\.evaluate\('\(element\) => \(element\.textContent\)'\);/);
+    assertText(elementResult, /\.evaluate\(\(element\) => \(element\.textContent\)\);/);
   }),
 
   test('browser_evaluate', 'page exception surfaces as tool error', async () => {
@@ -596,6 +599,7 @@ try {
   var closeFixtureServer = await startFixtureServer();
   await client.connect(transport);
   const { tools } = await client.listTools();
+  state.tools = tools;
   state.toolNames = tools.map(t => t.name);
   state.toolsByName = new Map(tools.map(t => [t.name, t]));
   if (options.listTools) {
@@ -680,7 +684,7 @@ async function runTests() {
     finishedAt: new Date().toISOString(),
     server: serverVersion ? { name: serverVersion.name, version: serverVersion.version } : undefined,
     exposedTools: state.toolNames,
-    counts: { passed, skipped, failed, total: selected.length },
+    counts: { passed, skipped, failed, notRun: selected.length - caseResults.length, total: selected.length },
     cases: caseResults,
   }, null, 2));
 

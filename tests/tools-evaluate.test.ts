@@ -76,7 +76,32 @@ describe('browser_evaluate tool', () => {
     const [passedFunction, passedSource] = pageEvaluate.mock.calls[0];
     expect(typeof passedFunction).toBe('function');
     expect(passedSource).toBe('() => window.location.href');
-    expect(response.code()).toContain(`await page.evaluate('() => window.location.href');`);
+    expect(response.code()).toContain('await page.evaluate(() => window.location.href);');
+  });
+
+  it('in-page callback runs functions, expressions, and promises', async () => {
+    await evaluateTool.handle(mockContext, { function: '() => 1' }, response);
+    const callback = pageEvaluate.mock.calls[0][0];
+
+    await expect(callback('() => 2 + 2')).resolves.toEqual({ result: 4, isFunction: true });
+    await expect(callback('1 + 2')).resolves.toEqual({ result: 3, isFunction: false });
+    await expect(callback('Promise.resolve(7)')).resolves.toEqual({ result: 7, isFunction: false });
+    await expect(callback('() => { throw new Error("boom") }')).rejects.toThrow('boom');
+  });
+
+  it('in-page callback evaluates the source in global scope, not the wrapper scope', async () => {
+    // Regression guard: a direct eval would make wrapper locals like `value`
+    // or `result` shadow same-named page globals and throw a TDZ error.
+    await evaluateTool.handle(mockContext, { function: '() => 1' }, response);
+    const callback = pageEvaluate.mock.calls[0][0];
+
+    (globalThis as any).result = 42;
+    try {
+      await expect(callback('() => result')).resolves.toEqual({ result: 42, isFunction: true });
+      await expect(callback('result')).resolves.toEqual({ result: 42, isFunction: false });
+    } finally {
+      delete (globalThis as any).result;
+    }
   });
 
   it('supports bare expressions and reflects them in the generated code', async () => {
@@ -89,7 +114,17 @@ describe('browser_evaluate tool', () => {
 
     expect(pageEvaluate.mock.calls[0][1]).toBe('document.title');
     expect(response.result()).toContain('My Title');
-    expect(response.code()).toContain(`await page.evaluate('() => (document.title)');`);
+    expect(response.code()).toContain('await page.evaluate(() => (document.title));');
+    expect(response.isError()).toBeFalsy();
+  });
+
+  it('accepts expression statements with trailing semicolons', async () => {
+    pageEvaluate.mockResolvedValueOnce({ result: 'My Title', isFunction: false });
+
+    await evaluateTool.handle(mockContext, { function: 'document.title;' }, response);
+
+    expect(pageEvaluate.mock.calls[0][1]).toBe('document.title');
+    expect(response.code()).toContain('await page.evaluate(() => (document.title));');
     expect(response.isError()).toBeFalsy();
   });
 
@@ -113,5 +148,13 @@ describe('browser_evaluate tool', () => {
     expect(typeof passedFunction).toBe('function');
     expect(passedSource).toBe('(el) => el.textContent');
     expect(response.result()).toContain('hello');
+
+    // Run the captured in-page callback: functions receive the element as
+    // their argument, bare expressions can reference it as `element`.
+    const fakeElement = { textContent: 'hello element' };
+    await expect(passedFunction(fakeElement, '(el) => el.textContent'))
+        .resolves.toEqual({ result: 'hello element', isFunction: true });
+    await expect(passedFunction(fakeElement, 'element.textContent'))
+        .resolves.toEqual({ result: 'hello element', isFunction: false });
   });
 });
