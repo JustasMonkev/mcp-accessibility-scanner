@@ -17,7 +17,6 @@
 import { z } from 'zod';
 
 import { defineTabTool } from './tool.js';
-import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
 
 import type * as playwright from 'playwright';
@@ -42,25 +41,55 @@ const evaluate = defineTabTool({
     response.setIncludeSnapshot();
 
     let locator: playwright.Locator | undefined;
-    if (params.ref && params.element) {
+    if (params.ref && params.element)
       locator = await tab.refLocator({ ref: params.ref, element: params.element });
-      response.addCode(`await page.${await generateLocator(locator)}.evaluate(${javascript.quote(params.function)});`);
-    } else {
-      response.addCode(`await page.evaluate(${javascript.quote(params.function)});`);
-    }
 
-    await tab.waitForCompletion(async () => {
-      // playwright-core 1.59 removed the private `_evaluateFunction` helper
-      // (microsoft/playwright#39646). The public `evaluate()` serializes its
-      // argument via `Function.prototype.toString`, so hand it an empty function
-      // whose `toString()` returns the user-supplied source instead.
-      const func = new Function() as any;
-      func.toString = () => params.function;
-      const result = locator ? await locator.evaluate(func) : await tab.page.evaluate(func);
-      response.addResult(JSON.stringify(result, null, 2) || 'undefined');
-    });
+    try {
+      await tab.waitForCompletion(async () => {
+        let evalResult: { result: unknown, isFunction: boolean };
+        if (locator) {
+          evalResult = await locator.evaluate(async (element, source) => {
+            const value = eval(`(${source})`);
+            const isFunction = typeof value === 'function';
+            const result = await (isFunction ? value(element) : value);
+            return { result, isFunction };
+          }, params.function);
+        } else {
+          evalResult = await tab.page.evaluate(async source => {
+            const value = eval(`(${source})`);
+            const isFunction = typeof value === 'function';
+            const result = await (isFunction ? value() : value);
+            return { result, isFunction };
+          }, params.function);
+        }
+
+        const codeExpression = evalResult.isFunction
+          ? params.function
+          : locator ? `(element) => (${params.function})` : `() => (${params.function})`;
+        if (locator)
+          response.addCode(`await page.${await generateLocator(locator)}.evaluate(${codeExpression});`);
+        else
+          response.addCode(`await page.evaluate(${codeExpression});`);
+
+        response.addResult(stringifyResult(evalResult.result));
+      });
+    } catch (error) {
+      response.addError(error instanceof Error ? error.message : String(error));
+    }
   },
 });
+
+function stringifyResult(result: unknown): string {
+  try {
+    return JSON.stringify(result, null, 2) ?? 'undefined';
+  } catch {
+    try {
+      return String(result);
+    } catch {
+      return 'undefined';
+    }
+  }
+}
 
 export default [
   evaluate,

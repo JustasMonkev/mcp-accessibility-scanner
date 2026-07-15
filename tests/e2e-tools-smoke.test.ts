@@ -53,7 +53,17 @@ const homeHtml = `<!doctype html>
     <main id="main">
       <input aria-label="Search" />
       <button type="button">Open menu</button>
+      <div id="dropzone" role="region" aria-label="Drop target">Drop target</div>
     </main>
+    <script>
+      const dropzone = document.querySelector('#dropzone');
+      dropzone.addEventListener('dragover', event => event.preventDefault());
+      dropzone.addEventListener('drop', async event => {
+        event.preventDefault();
+        const file = event.dataTransfer.files[0];
+        dropzone.dataset.dropped = file ? await file.text() : event.dataTransfer.getData('text/plain');
+      });
+    </script>
   </body>
 </html>`;
 
@@ -85,6 +95,15 @@ async function installFixtureRoutes(browserContext: BrowserContext): Promise<voi
         status: 200,
         contentType: 'text/html; charset=utf-8',
         body: aboutHtml,
+      });
+      return;
+    }
+    if (requestUrl.pathname === '/api/data') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json; charset=utf-8',
+        headers: { 'x-fixture-response': 'network-detail' },
+        body: JSON.stringify({ name: 'Ada' }),
       });
       return;
     }
@@ -141,6 +160,8 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
 
   it('runs tool flow end-to-end against a real browser and local pages', async () => {
     const outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-a11y-e2e-'));
+    const dropFilePath = path.join(outputDir, 'drop.txt');
+    await fs.promises.writeFile(dropFilePath, 'dropped file contents');
     launchResources.push(async () => {
       await fs.promises.rm(outputDir, { recursive: true, force: true });
     });
@@ -202,15 +223,67 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
     expect(toolNames).toContain('audit_keyboard');
     expect(toolNames).toContain('audit_site');
     expect(toolNames).toContain('scan_page_matrix');
+    expect(toolNames).toContain('browser_network_request');
+    expect(toolNames).toContain('browser_drop');
 
     const navigateResult = await backend.callTool('browser_navigate', { url: `${fixtureOrigin}/` });
     expect(navigateResult.isError).not.toBe(true);
 
-    // Regression guard for #84: browser_evaluate must run against a real page
-    // without the removed playwright-core `_evaluateFunction` private helper.
-    const evaluateResult = await backend.callTool('browser_evaluate', { function: '() => 2 + 2' });
+    // Regression guards for #84 and #116: browser_evaluate must use the public
+    // evaluate API and accept a plain expression against a real page.
+    const evaluateResult = await backend.callTool('browser_evaluate', { function: 'document.title' });
     expect(evaluateResult.isError).not.toBe(true);
-    expect((evaluateResult.content[0] as any).text).toContain('4');
+    expect((evaluateResult.content[0] as any).text).toContain('"Home"');
+
+    const fetchResult = await backend.callTool('browser_evaluate', {
+      function: `fetch('/api/data').then(response => response.json())`,
+    });
+    expect(fetchResult.isError).not.toBe(true);
+    expect((fetchResult.content[0] as any).text).toContain('"name": "Ada"');
+
+    const networkList = await backend.callTool('browser_network_requests', {});
+    expect(networkList.isError).not.toBe(true);
+    const networkListText = (networkList.content[0] as any).text as string;
+    const networkIndex = networkListText.match(/^(\d+)\. \[GET\] .*\/api\/data => \[200\]/m)?.[1];
+    expect(networkIndex).toBeDefined();
+
+    const networkBody = await backend.callTool('browser_network_request', {
+      index: Number(networkIndex),
+      part: 'response-body',
+    });
+    expect(networkBody.isError).not.toBe(true);
+    expect((networkBody.content[0] as any).text).toContain('{"name":"Ada"}');
+
+    const pageSnapshot = await backend.callTool('browser_snapshot', {});
+    const pageSnapshotText = (pageSnapshot.content[0] as any).text as string;
+    const dropRef = pageSnapshotText.match(/region "Drop target" \[ref=(e\d+)\]/)?.[1];
+    expect(dropRef).toBeDefined();
+
+    const dropResult = await backend.callTool('browser_drop', {
+      element: 'Drop target',
+      ref: dropRef,
+      data: { 'text/plain': 'dropped from MCP' },
+    });
+    expect(dropResult.isError).not.toBe(true);
+
+    const droppedValue = await backend.callTool('browser_evaluate', {
+      function: `document.querySelector('#dropzone').dataset.dropped`,
+    });
+    expect(droppedValue.isError).not.toBe(true);
+    expect((droppedValue.content[0] as any).text).toContain('"dropped from MCP"');
+
+    const fileDropResult = await backend.callTool('browser_drop', {
+      element: 'Drop target',
+      ref: dropRef,
+      paths: [dropFilePath],
+    });
+    expect(fileDropResult.isError).not.toBe(true);
+
+    const droppedFileValue = await backend.callTool('browser_evaluate', {
+      function: `document.querySelector('#dropzone').dataset.dropped`,
+    });
+    expect(droppedFileValue.isError).not.toBe(true);
+    expect((droppedFileValue.content[0] as any).text).toContain('"dropped file contents"');
 
     const keyboardResult1 = await backend.callTool('audit_keyboard', {
       maxTabs: 12,

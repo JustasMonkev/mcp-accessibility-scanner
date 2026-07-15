@@ -205,11 +205,12 @@ These tools are always available and work in the interactive REPL.
 | `browser_press_key` | Press key: `{"key": "Enter"}` |
 | `browser_hover` | Hover over element |
 | `browser_drag` | Drag between elements |
+| `browser_drop` | Drop files or MIME data onto an element |
 | `browser_select_option` | Select dropdown option |
 | `browser_fill_form` | Fill multiple form fields at once |
 | `browser_file_upload` | Upload files: `{"paths": ["/path/to/file"]}` |
 | `browser_handle_dialog` | Handle browser dialog: `{"accept": true}` |
-| `browser_evaluate` | Run JavaScript on page |
+| `browser_evaluate` | Run a JavaScript function or plain expression on page |
 
 ### Tabs & Config
 
@@ -224,7 +225,8 @@ These tools are always available and work in the interactive REPL.
 | Tool | Description |
 |------|-------------|
 | `browser_console_messages` | Get all console messages |
-| `browser_network_requests` | Get all network requests |
+| `browser_network_requests` | List network requests with stable indexes |
+| `browser_network_request` | Inspect headers or body for one indexed request |
 
 ### Optional Tools (require `--caps`)
 

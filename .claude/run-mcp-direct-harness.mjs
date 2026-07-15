@@ -164,13 +164,13 @@ const tests = [
 
   test('browser_network_requests', async () => {
     await callTool('browser_navigate', { url: `${state.fixtureOrigin}/network-json` });
-    const result = await callTool('browser_network_requests', {});
+    const result = await callTool('browser_network_requests', { static: true });
     assertText(result, /network-json/);
   }),
 
   test('browser_network_request', async () => {
     await callTool('browser_navigate', { url: `${state.fixtureOrigin}/network-json` });
-    const list = await callTool('browser_network_requests', {});
+    const list = await callTool('browser_network_requests', { static: true });
     const match = resultText(list).match(/^(\d+)\. \[GET\] .*\/network-json/m);
     if (!match)
       throw new Error(`Could not find /network-json in network list:\n${resultText(list).slice(0, 4000)}`);
