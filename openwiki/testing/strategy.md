@@ -41,7 +41,7 @@ Tests often encode critical nonfunctional invariants: timer caps, restoration in
 
 ### Direct MCP harness
 
-`.claude/run-mcp-direct-harness.mjs` builds/launches the real CLI over stdio in headless isolated mode, drives fixture pages tool by tool, and records logs/results. It validates packaging, transport, tool discovery, and actual browser interaction as one system. The default skips browser installation; `--include-install` enables it.
+Run `npm run build` first; `.claude/run-mcp-direct-harness.mjs` then launches the real CLI over stdio in headless isolated mode, drives fixture pages tool by tool, and records logs/results. It validates packaging, transport, tool discovery, and actual browser interaction as one system. The default skips browser installation; `--include-install` enables it.
 
 ### Docker smoke
 
@@ -60,7 +60,7 @@ The percentage therefore measures a selected testable subset, not whole-system c
 
 ## CI reality
 
-`.github/workflows/ci.yml` installs dependencies and Chromium on Node 24, then runs TypeScript checking, lint, tests, and build. Its current trigger is pull requests targeting the literal branch pattern `feat/`. No repository evidence explains that narrow branch policy, so verify intended CI coverage before relying on it for main/default-branch changes.
+The [CI workflow](../../.github/workflows/ci.yml) installs dependencies and Chromium on Node 24, then runs TypeScript checking, lint, tests, and build. Its only pull-request base filter is the literal `feat/`, so pull requests targeting `main` or any other branch are excluded.
 
 ## Focused change matrix
 

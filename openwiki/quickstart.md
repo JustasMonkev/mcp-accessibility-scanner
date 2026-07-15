@@ -17,7 +17,7 @@ Requirements: Node.js 24 or newer and npm.
 
 ```bash
 npm ci
-npx playwright install chromium
+npx playwright install chrome
 npm run build
 npm test
 ```

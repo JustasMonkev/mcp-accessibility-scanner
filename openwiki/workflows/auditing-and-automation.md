@@ -8,7 +8,7 @@ A robust session follows this sequence:
 2. inspect with `browser_snapshot` or `browser_find`;
 3. interact using current refs;
 4. run the narrowest suitable audit;
-5. consume markdown immediately and retain JSON report links for detail;
+5. consume markdown immediately; retain JSON report links only when the client shares the server filesystem, otherwise copy artifacts through a trusted transfer path;
 6. close tabs/browser context when finished.
 
 In the interactive CLI, each line is `<tool-name> <json>`. In MCP mode, the same names are tool identifiers, not shell subcommands.
