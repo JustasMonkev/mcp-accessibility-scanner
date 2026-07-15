@@ -29,11 +29,7 @@ describe('browser_evaluate tool', () => {
   let response: Response;
 
   beforeEach(() => {
-    pageEvaluate = vi.fn(async (func: any) => {
-      // Mirror Playwright: it serializes the argument via toString(). Returning
-      // the serialized source lets the test assert the user code was forwarded.
-      return func.toString();
-    });
+    pageEvaluate = vi.fn(async () => ({ result: undefined, isFunction: true }));
 
     mockTab = {
       modalStates: vi.fn().mockReturnValue([]),
@@ -59,7 +55,7 @@ describe('browser_evaluate tool', () => {
   });
 
   it('evaluates a page-scoped function and returns its value', async () => {
-    pageEvaluate.mockResolvedValueOnce(4);
+    pageEvaluate.mockResolvedValueOnce({ result: 4, isFunction: true });
 
     await evaluateTool.handle(mockContext, { function: '() => 2 + 2' }, response);
 
@@ -68,22 +64,72 @@ describe('browser_evaluate tool', () => {
     expect(response.isError()).toBeFalsy();
   });
 
-  it('forwards the user source to evaluate via Function.toString (no _evaluateFunction)', async () => {
+  it('forwards the user source as the evaluate argument (no _evaluateFunction)', async () => {
     // Regression guard for #84: playwright-core 1.59 removed _evaluateFunction,
-    // so the tool must call the public evaluate() with a toString-overridden
-    // function instead of the (now missing) private receiver method.
+    // so the tool must call the public evaluate() with an in-page callback that
+    // receives the user source as its argument.
     mockTab.page._evaluateFunction = vi.fn();
 
     await evaluateTool.handle(mockContext, { function: '() => window.location.href' }, response);
 
     expect(mockTab.page._evaluateFunction).not.toHaveBeenCalled();
-    const passedFunction = pageEvaluate.mock.calls[0][0];
+    const [passedFunction, passedSource] = pageEvaluate.mock.calls[0];
     expect(typeof passedFunction).toBe('function');
-    expect(passedFunction.toString()).toBe('() => window.location.href');
+    expect(passedSource).toBe('() => window.location.href');
+    expect(response.code()).toContain('await page.evaluate(() => window.location.href);');
+  });
+
+  it('in-page callback runs functions, expressions, and promises', async () => {
+    await evaluateTool.handle(mockContext, { function: '() => 1' }, response);
+    const callback = pageEvaluate.mock.calls[0][0];
+
+    await expect(callback('() => 2 + 2')).resolves.toEqual({ result: 4, isFunction: true });
+    await expect(callback('1 + 2')).resolves.toEqual({ result: 3, isFunction: false });
+    await expect(callback('Promise.resolve(7)')).resolves.toEqual({ result: 7, isFunction: false });
+    await expect(callback('() => { throw new Error("boom") }')).rejects.toThrow('boom');
+  });
+
+  it('in-page callback evaluates the source in global scope, not the wrapper scope', async () => {
+    // Regression guard: a direct eval would make wrapper locals like `value`
+    // or `result` shadow same-named page globals and throw a TDZ error.
+    await evaluateTool.handle(mockContext, { function: '() => 1' }, response);
+    const callback = pageEvaluate.mock.calls[0][0];
+
+    (globalThis as any).result = 42;
+    try {
+      await expect(callback('() => result')).resolves.toEqual({ result: 42, isFunction: true });
+      await expect(callback('result')).resolves.toEqual({ result: 42, isFunction: false });
+    } finally {
+      delete (globalThis as any).result;
+    }
+  });
+
+  it('supports bare expressions and reflects them in the generated code', async () => {
+    // Regression guard: the source is auto-detected in the page, so a bare
+    // expression like `document.title` must be reported as a wrapped function
+    // in the generated code rather than failing with "result is not a function".
+    pageEvaluate.mockResolvedValueOnce({ result: 'My Title', isFunction: false });
+
+    await evaluateTool.handle(mockContext, { function: 'document.title' }, response);
+
+    expect(pageEvaluate.mock.calls[0][1]).toBe('document.title');
+    expect(response.result()).toContain('My Title');
+    expect(response.code()).toContain('await page.evaluate(() => (document.title));');
+    expect(response.isError()).toBeFalsy();
+  });
+
+  it('accepts expression statements with trailing semicolons', async () => {
+    pageEvaluate.mockResolvedValueOnce({ result: 'My Title', isFunction: false });
+
+    await evaluateTool.handle(mockContext, { function: 'document.title;' }, response);
+
+    expect(pageEvaluate.mock.calls[0][1]).toBe('document.title');
+    expect(response.code()).toContain('await page.evaluate(() => (document.title));');
+    expect(response.isError()).toBeFalsy();
   });
 
   it('evaluates against an element locator when ref and element are provided', async () => {
-    const locatorEvaluate = vi.fn().mockResolvedValue('hello');
+    const locatorEvaluate = vi.fn().mockResolvedValue({ result: 'hello', isFunction: true });
     mockTab.refLocator.mockResolvedValue({
       evaluate: locatorEvaluate,
       _resolveSelector: async () => ({ resolvedSelector: 'internal:role=button' }),
@@ -98,7 +144,17 @@ describe('browser_evaluate tool', () => {
     expect(mockTab.refLocator).toHaveBeenCalledWith({ ref: 'e1', element: 'the button' });
     expect(locatorEvaluate).toHaveBeenCalledTimes(1);
     expect(pageEvaluate).not.toHaveBeenCalled();
-    expect(locatorEvaluate.mock.calls[0][0].toString()).toBe('(el) => el.textContent');
+    const [passedFunction, passedSource] = locatorEvaluate.mock.calls[0];
+    expect(typeof passedFunction).toBe('function');
+    expect(passedSource).toBe('(el) => el.textContent');
     expect(response.result()).toContain('hello');
+
+    // Run the captured in-page callback: functions receive the element as
+    // their argument, bare expressions can reference it as `element`.
+    const fakeElement = { textContent: 'hello element' };
+    await expect(passedFunction(fakeElement, '(el) => el.textContent'))
+        .resolves.toEqual({ result: 'hello element', isFunction: true });
+    await expect(passedFunction(fakeElement, 'element.textContent'))
+        .resolves.toEqual({ result: 'hello element', isFunction: false });
   });
 });

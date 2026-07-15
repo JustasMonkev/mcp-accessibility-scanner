@@ -7,6 +7,7 @@ PROMPTS_FILE="$SCRIPT_DIR/mcp-tool-prompts.tsv"
 SERVER_NAME="mcp-accessibility-scanner"
 MAX_TURNS="${MAX_TURNS:-12}"
 RUN_OPTIONAL=1
+CHECK_COVERAGE=1
 ONLY_TOOL=""
 
 usage() {
@@ -19,6 +20,7 @@ writes JSONL logs plus a summary TSV under .claude/mcp-tool-loop-results/.
 Options:
   --only TOOL          Run a single tool prompt.
   --skip-optional     Skip optional prompts such as browser_install.
+  --skip-coverage     Skip verifying prompt coverage against exposed MCP tools.
   --prompts FILE      Use a custom TSV prompt file.
   --max-turns N       Override Claude Code max turns per prompt.
   -h, --help          Show this help.
@@ -36,6 +38,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-optional)
       RUN_OPTIONAL=0
+      shift
+      ;;
+    --skip-coverage)
+      CHECK_COVERAGE=0
       shift
       ;;
     --prompts)
@@ -80,6 +86,29 @@ if ! claude mcp get "$SERVER_NAME" >/dev/null 2>&1; then
   echo "Run: claude mcp get $SERVER_NAME" >&2
   echo "If it is pending approval, run: claude" >&2
   exit 2
+fi
+
+# Keep the prompt file in sync with the tools the server actually exposes:
+# a tool without a prompt would silently go untested.
+if [[ "$CHECK_COVERAGE" -eq 1 && -z "$ONLY_TOOL" ]]; then
+  if exposed_tools="$(node "$SCRIPT_DIR/run-mcp-direct-harness.mjs" --list-tools 2>/dev/null)"; then
+    missing_tools=()
+    while IFS= read -r exposed_tool; do
+      [[ -z "$exposed_tool" ]] && continue
+      if ! awk -F'\t' -v t="$exposed_tool" '$0!~/^#/ && $1==t {found=1} END{exit !found}' "$PROMPTS_FILE"; then
+        missing_tools+=("$exposed_tool")
+      fi
+    done <<< "$exposed_tools"
+    if [[ ${#missing_tools[@]} -gt 0 ]]; then
+      echo "Prompts file is missing entries for exposed MCP tools: ${missing_tools[*]}" >&2
+      echo "Add prompts to $PROMPTS_FILE or rerun with --skip-coverage." >&2
+      exit 2
+    fi
+  else
+    echo "ERROR: could not enumerate exposed MCP tools." >&2
+    echo "Rerun with --skip-coverage to explicitly bypass the coverage check." >&2
+    exit 2
+  fi
 fi
 
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
