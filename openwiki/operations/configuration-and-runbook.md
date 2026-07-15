@@ -88,10 +88,10 @@ The healthcheck POSTs an intentionally incomplete MCP request and treats HTTP 40
 
 ### Browser executable missing
 
-The factory rewrites Playwright's missing-executable error with install/change-config guidance. Install the configured browser or run the direct harness with installation enabled:
+The factory rewrites Playwright's missing-executable error with install/change-config guidance. Install the configured browser directly; for the default Chrome channel:
 
 ```bash
-npm run test:mcp:install
+npx playwright install chrome
 ```
 
 ### Persistent profile already in use
