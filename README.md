@@ -342,7 +342,7 @@ Evaluate a JavaScript expression on the page, or on a specific element when a `r
 
 #### `browser_take_screenshot`
 Take a screenshot of the current page.
-- Parameters: `filename` (optional), `type` (`png` or `jpeg`), `scale` (`css` or `device`, default `css`), `fullPage` (optional), `element`/`ref` pair (for element screenshots)
+- Parameters: `filename` (optional), `type` (`png`, `jpeg` or `webp`), `scale` (`css` or `device`, default `css`), `fullPage` (optional), `element`/`ref` pair (for element screenshots)
 - `scale: device` captures a high-resolution screenshot using device pixels (accounts for the device pixel ratio); `scale: css` keeps the image sized in CSS pixels.
 
 #### `browser_pdf_save`
