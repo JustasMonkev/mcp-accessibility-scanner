@@ -14,11 +14,16 @@
  * limitations under the License.
  */
 
-import { describe, it, expect } from 'vitest';
+import { beforeAll, describe, it, expect } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
 import path from 'node:path';
 
-const cliArgs = ['--loader', 'ts-node/esm', path.resolve(__dirname, '..', 'src', 'program.ts')];
+const rootDir = path.resolve(__dirname, '..');
+const cliArgs = [path.join(rootDir, 'cli.js')];
+
+beforeAll(() => {
+  execFileSync(process.execPath, [path.join(rootDir, 'node_modules/typescript/bin/tsc'), '--project', path.join(rootDir, 'tsconfig.json')]);
+});
 
 function runCLI(args: string): string {
   return execFileSync(process.execPath, [...cliArgs, ...args.split(' ').filter(Boolean)], {

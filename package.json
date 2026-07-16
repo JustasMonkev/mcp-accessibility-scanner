@@ -27,7 +27,7 @@
 	"scripts": {
 		"build": "tsc --project tsconfig.json",
 		"docker:build:multiarch": "docker buildx build --platform linux/amd64,linux/arm64 -t ${IMAGE:-ghcr.io/justasmonkev/mcp-accessibility-scanner}:latest -t ${IMAGE:-ghcr.io/justasmonkev/mcp-accessibility-scanner}:$npm_package_version --push .",
-		"lint": "eslint . && npm run typecheck",
+		"lint": "oxlint --type-aware . && npm run typecheck",
 		"typecheck": "tsc --noEmit --project tsconfig.json",
 		"watch": "tsc --watch --project tsconfig.json",
 		"run-server": "node lib/browserServer.js",
@@ -56,24 +56,19 @@
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
-		"@eslint/compat": "^2.1.0",
 		"@stylistic/eslint-plugin": "^5.10.0",
 		"@types/chrome": "^0.2.2",
 		"@types/debug": "^4.1.13",
 		"@types/node": "^26.1.1",
 		"@types/ws": "^8.18.1",
-		"@typescript-eslint/eslint-plugin": "^8.64.0",
-		"@typescript-eslint/parser": "^8.64.0",
-		"@typescript-eslint/utils": "^8.64.0",
-		"@typescript/native": "npm:typescript@^7.0.2",
 		"@vitest/coverage-v8": "^4.1.10",
 		"@vitest/ui": "^4.1.10",
 		"eslint": "^10.7.0",
-		"eslint-plugin-import-x": "^4.17.1",
 		"eslint-plugin-notice": "^1.0.0",
 		"happy-dom": "^20.10.6",
-		"ts-node": "^10.9.2",
-		"typescript": "npm:@typescript/typescript6@^6.0.2",
+		"oxlint": "^1.74.0",
+		"oxlint-tsgolint": "^0.24.0",
+		"typescript": "^7.0.2",
 		"vitest": "^4.1.10"
 	},
 	"keywords": [
@@ -103,10 +98,6 @@
 		"diff": "5.2.2",
 		"rollup": "^4.62.2",
 		"qs": ">=6.15.3"
-	},
-	"ts-node": {
-		"transpileOnly": true,
-		"esm": true
 	},
 	"allowScripts": {
 		"fsevents@2.3.2": true,
