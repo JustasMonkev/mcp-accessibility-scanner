@@ -21,6 +21,14 @@ import { waitForCompletion, generateLocator, callOnPageNoTrace } from '../src/to
 import type { Tab } from '../src/tab.js';
 import { EventEmitter } from 'events';
 
+vi.mock('playwright-core/lib/coreBundle', () => ({
+  default: {
+    iso: {
+      asLocator: (lang: string, selector: string) => `locator('${selector}')`,
+    },
+  },
+}));
+
 const hasBundledChromium = fs.existsSync(chromium.executablePath());
 async function canLaunchBundledChromium(): Promise<boolean> {
   if (!hasBundledChromium)
@@ -161,15 +169,6 @@ describe('Tool Utils', () => {
           resolvedSelector: 'button[name="submit"]',
         }),
       } as any;
-
-      // Mock the asLocator function (exposed via the coreBundle `iso` namespace)
-      vi.mock('playwright-core/lib/coreBundle', () => ({
-        default: {
-          iso: {
-            asLocator: (lang: string, selector: string) => `locator('${selector}')`,
-          },
-        },
-      }));
 
       const result = await generateLocator(mockLocator);
 

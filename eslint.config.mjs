@@ -16,11 +16,12 @@
 
 import typescriptEslint from "@typescript-eslint/eslint-plugin";
 import tsParser from "@typescript-eslint/parser";
+import { fixupPluginRules } from "@eslint/compat";
 import notice from "eslint-plugin-notice";
 import path from "path";
 import { fileURLToPath } from "url";
 import stylistic from "@stylistic/eslint-plugin";
-import importRules from "eslint-plugin-import";
+import importRules from "eslint-plugin-import-x";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,7 +29,7 @@ const __dirname = path.dirname(__filename);
 const plugins = {
   "@stylistic": stylistic,
   "@typescript-eslint": typescriptEslint,
-  notice,
+  notice: fixupPluginRules(notice),
   import: importRules,
 };
 
