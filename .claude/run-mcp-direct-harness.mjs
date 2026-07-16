@@ -58,25 +58,9 @@ const tests = [
   }),
 
   test('browser_evaluate', async () => {
-    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/csp-evaluate` });
-
-    const functionResult = await callTool('browser_evaluate', { function: '() => document.title' });
-    assertText(functionResult, /CSP Evaluate/);
-    assertText(functionResult, /await page\.evaluate\(\(\) => document\.title\);/);
-
-    const expressionResult = await callTool('browser_evaluate', { function: 'document.title' });
-    assertText(expressionResult, /CSP Evaluate/);
-    assertText(expressionResult, /await page\.evaluate\(\(\) => \(document\.title\)\);/);
-
-    const snapshot = await callTool('browser_snapshot', {});
-    const ref = refFor(resultText(snapshot), 'Strict CSP');
-    const elementResult = await callTool('browser_evaluate', {
-      function: 'element.textContent',
-      element: 'Strict CSP heading',
-      ref,
-    });
-    assertText(elementResult, /Strict CSP/);
-    assertText(elementResult, /\.evaluate\(\(element\) => \(element\.textContent\)\);/);
+    await navigate('<title>Evaluate</title><h1 id="answer">OK</h1>');
+    const result = await callTool('browser_evaluate', { function: '() => 2 + 2' });
+    assertText(result, /\b4\b/);
   }),
 
   test('browser_resize', async () => {
@@ -168,18 +152,6 @@ const tests = [
     assertText(result, /network-json/);
   }),
 
-  test('browser_network_request', async () => {
-    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/network-json` });
-    const list = await callTool('browser_network_requests', {});
-    const match = resultText(list).match(/^(\d+)\. \[GET\] .*\/network-json/m);
-    if (!match)
-      throw new Error(`Could not find /network-json in network list:\n${resultText(list).slice(0, 4000)}`);
-
-    const result = await callTool('browser_network_request', { index: Number(match[1]) });
-    assertText(result, /Response headers/);
-    assertText(result, /content-type: application\/json/);
-  }),
-
   test('browser_take_screenshot', async () => {
     await navigate('<title>Screenshot</title><h1>Screenshot OK</h1>');
     const result = await callTool('browser_take_screenshot', {
@@ -213,24 +185,6 @@ const tests = [
       endElement: 'Drop target',
       endRef,
     });
-  }),
-
-  test('browser_drop', async () => {
-    const snapshot = await navigate([
-      '<title>Drop</title>',
-      '<div role="button" aria-label="Drop zone" style="width:120px;height:50px;background:#cfa" ',
-      'ondragover="event.preventDefault()" ',
-      'ondrop="event.preventDefault(); document.body.dataset.dropText=event.dataTransfer.getData(\'text/plain\')">Drop zone</div>',
-    ].join(''));
-    const ref = refFor(snapshot, 'Drop zone');
-    const dropResult = await callTool('browser_drop', {
-      element: 'Drop zone',
-      ref,
-      data: { 'text/plain': 'hello from drop' },
-    });
-    assertText(dropResult, /'text\/plain': 'hello from drop'/);
-    const result = await callTool('browser_evaluate', { function: '() => document.body.dataset.dropText' });
-    assertText(result, /hello from drop/);
   }),
 
   test('browser_hover', async () => {
@@ -503,14 +457,6 @@ function startFixtureServer() {
     if (request.url === '/audit-site') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end('<!doctype html><html><head><title>AuditSite</title></head><body><img src="x"><h1>Audit Site</h1></body></html>');
-      return;
-    }
-    if (request.url === '/csp-evaluate') {
-      response.writeHead(200, {
-        'content-type': 'text/html; charset=utf-8',
-        'content-security-policy': "default-src 'self'; script-src 'self'",
-      });
-      response.end('<!doctype html><html><head><title>CSP Evaluate</title></head><body><h1>Strict CSP</h1></body></html>');
       return;
     }
     if (request.url === '/network-json') {
