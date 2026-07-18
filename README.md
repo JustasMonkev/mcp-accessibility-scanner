@@ -134,6 +134,8 @@ Use `--extension` to connect through the current [Playwright Extension](https://
 npx mcp-accessibility-scanner --extension
 ```
 
+Set `PLAYWRIGHT_MCP_EXTENSION_TOKEN` to the token shown by the extension to bypass the connection approval dialog.
+
 ### Discovering available tools (`list-tools` subcommand)
 
 To print every tool name and its description:

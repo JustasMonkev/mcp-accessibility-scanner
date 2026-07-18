@@ -77,7 +77,10 @@ export class ExtensionProtocolV2 {
       case 'Target.setAutoAttach': {
         if (sessionId)
           return undefined;
-        await this._model.enableAutoAttach();
+        if (params?.autoAttach)
+          await this._model.enableAutoAttach();
+        else
+          await this._model.disableAutoAttach();
         return { result: {} };
       }
       case 'Target.createTarget':

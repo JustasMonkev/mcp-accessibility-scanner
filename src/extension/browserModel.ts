@@ -42,6 +42,8 @@ export class BrowserModel {
   private _sendToCDPClient: SendToCDPClient | null = null;
   private _knownTabs = new Map<number, Tab>();
   private _tabSessions = new Map<number, TabSession>();
+  private _tabAttachmentPromises = new Map<number, Promise<TabSession>>();
+  private _autoAttachOperation = Promise.resolve();
   private _autoAttach = false;
   private _nextSessionId = 1;
 
@@ -89,9 +91,22 @@ export class BrowserModel {
       this._detachTab(source.tabId);
   }
 
-  async enableAutoAttach(): Promise<void> {
-    this._autoAttach = true;
-    await Promise.all([...this._knownTabs.keys()].map(tabId => this._attachTab(tabId).catch(logUnhandledError)));
+  enableAutoAttach(): Promise<void> {
+    return this._runAutoAttachOperation(async () => {
+      this._autoAttach = true;
+      await Promise.all([...this._knownTabs.keys()].map(tabId => this._attachTab(tabId)));
+    });
+  }
+
+  disableAutoAttach(): Promise<void> {
+    return this._runAutoAttachOperation(async () => {
+      this._autoAttach = false;
+      await Promise.allSettled(this._tabAttachmentPromises.values());
+      await Promise.all([...this._tabSessions.keys()].map(async tabId => {
+        await this._sendToExtension('chrome.debugger.detach', [{ tabId }]);
+        this._detachTab(tabId);
+      }));
+    });
   }
 
   async createTarget(url: string | undefined): Promise<{ targetId: string | undefined }> {
@@ -144,10 +159,28 @@ export class BrowserModel {
     ]);
   }
 
-  private async _attachTab(tabId: number): Promise<TabSession> {
+  private _attachTab(tabId: number): Promise<TabSession> {
     const existing = this._tabSessions.get(tabId);
     if (existing)
-      return existing;
+      return Promise.resolve(existing);
+    const inFlight = this._tabAttachmentPromises.get(tabId);
+    if (inFlight)
+      return inFlight;
+    const promise = Promise.resolve().then(() => this._attachTabImpl(tabId));
+    this._tabAttachmentPromises.set(tabId, promise);
+    return promise.finally(() => {
+      if (this._tabAttachmentPromises.get(tabId) === promise)
+        this._tabAttachmentPromises.delete(tabId);
+    });
+  }
+
+  private _runAutoAttachOperation(operation: () => Promise<void>): Promise<void> {
+    const result = this._autoAttachOperation.then(operation);
+    this._autoAttachOperation = result.catch(() => {});
+    return result;
+  }
+
+  private async _attachTabImpl(tabId: number): Promise<TabSession> {
     await this._sendToExtension('chrome.debugger.attach', [{ tabId }, '1.3']);
     const result = await this._sendToExtension('chrome.debugger.sendCommand', [
       { tabId },

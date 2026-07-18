@@ -62,8 +62,8 @@ export class CDPRelayServer {
   private _wss: WebSocketServer;
   private _playwrightConnection: WebSocket | null = null;
   private _extensionConnection: ExtensionConnection | null = null;
-  private _handler: ExtensionProtocolV2;
-  private _extensionConnectionPromise = new ManualPromise<void>();
+  private _handler!: ExtensionProtocolV2;
+  private _extensionConnectionPromise!: ManualPromise<void>;
 
   constructor(server: http.Server, browserChannel: string, userDataDir?: string, executablePath?: string) {
     this._wsHost = httpAddressToString(server.address()).replace(/^http/, 'ws');
@@ -71,18 +71,11 @@ export class CDPRelayServer {
     this._userDataDir = userDataDir;
     this._executablePath = executablePath;
 
-    const sendCommand = (method: string, params: any): Promise<any> => {
-      if (!this._extensionConnection)
-        throw new Error('Extension not connected');
-      return this._extensionConnection.send(method as keyof ExtensionCommandV2, params);
-    };
-    this._handler = new ExtensionProtocolV2(sendCommand);
-
     const uuid = crypto.randomUUID();
     this._cdpPath = `/cdp/${uuid}`;
     this._extensionPath = `/extension/${uuid}`;
 
-    void this._extensionConnectionPromise.catch(logUnhandledError);
+    this._resetExtensionConnection();
     this._wss = new WebSocketServer({ server });
     this._wss.on('connection', this._onConnection.bind(this));
   }
@@ -97,14 +90,13 @@ export class CDPRelayServer {
 
   async ensureExtensionConnectionForMCPContext(clientInfo: ClientInfo, abortSignal: AbortSignal, _toolName: string | undefined) {
     debugLogger('Ensuring extension connection for MCP context');
+    if (abortSignal.aborted)
+      throw abortSignal.reason;
     if (!this._extensionConnection)
       this._connectBrowser(clientInfo);
     debugLogger('Waiting for incoming extension connection');
     await Promise.race([
       Promise.all([this._extensionConnectionPromise, this._handler.ready()]),
-      new Promise((_, reject) => setTimeout(() => {
-        reject(new Error(`Extension connection timeout. Make sure the "Playwright Extension" is installed. See https://github.com/microsoft/playwright/blob/main/packages/extension/README.md for installation instructions.`));
-      }, process.env.PWMCP_TEST_CONNECTION_TIMEOUT ? parseInt(process.env.PWMCP_TEST_CONNECTION_TIMEOUT, 10) : 5_000)),
       new Promise((_, reject) => abortSignal.addEventListener('abort', reject))
     ]);
     debugLogger('Extension connection established');
@@ -121,6 +113,9 @@ export class CDPRelayServer {
     };
     url.searchParams.set('client', JSON.stringify(client));
     url.searchParams.set('protocolVersion', process.env.PWMCP_TEST_PROTOCOL_VERSION ?? protocol.VERSION.toString());
+    const token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
+    if (token)
+      url.searchParams.set('token', token);
     const href = url.toString();
 
     let executablePath = this._executablePath;
@@ -207,6 +202,19 @@ export class CDPRelayServer {
     this._extensionConnection?.close(reason);
     if (!this._extensionConnectionPromise.isDone())
       this._extensionConnectionPromise.reject(new Error(reason));
+    this._handler.onExtensionDisconnect(reason);
+    this._resetExtensionConnection();
+  }
+
+  private _resetExtensionConnection() {
+    this._extensionConnection = null;
+    this._extensionConnectionPromise = new ManualPromise<void>();
+    void this._extensionConnectionPromise.catch(logUnhandledError);
+    this._handler = new ExtensionProtocolV2((method, params) => {
+      if (!this._extensionConnection)
+        throw new Error('Extension not connected');
+      return this._extensionConnection.send(method as keyof ExtensionCommandV2, params);
+    });
   }
 
   private _closePlaywrightConnection(reason: string) {
@@ -220,13 +228,18 @@ export class CDPRelayServer {
       ws.close(1000, 'Another extension connection already established');
       return;
     }
-    this._extensionConnection = new ExtensionConnection(ws);
-    this._extensionConnection.onclose = reason => {
+    const connection = new ExtensionConnection(ws);
+    const handler = this._handler;
+    this._extensionConnection = connection;
+    connection.onclose = reason => {
+      if (this._extensionConnection !== connection)
+        return;
       debugLogger('Extension WebSocket closed:', reason);
-      this._handler.onExtensionDisconnect(reason);
+      handler.onExtensionDisconnect(reason);
       this._closePlaywrightConnection(`Extension disconnected: ${reason}`);
+      this._resetExtensionConnection();
     };
-    this._extensionConnection.onmessage = (method, params) => this._handler.handleExtensionEvent(method, params);
+    connection.onmessage = (method, params) => handler.handleExtensionEvent(method, params);
     this._extensionConnectionPromise.resolve();
   }
 
