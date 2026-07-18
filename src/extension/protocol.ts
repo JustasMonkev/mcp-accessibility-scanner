@@ -14,29 +14,75 @@
  * limitations under the License.
  */
 
-// Whenever the commands/events change, the version must be updated. The latest
-// extension version should be compatible with the old MCP clients.
-export const VERSION = 1;
+// The protocol version defined in this file. Bumped whenever the
+// commands/events change. Sent to the extension, which rejects clients
+// requesting a version it does not support.
+export const VERSION = 2;
+export const EXTENSION_ID = 'mmlmfjhmonkocbjadbfplnigmagldckm';
 
-export type ExtensionCommand = {
-  'attachToTab': {
-    params: {};
+// Structural mirrors of @types/chrome shapes used over the wire. The extension
+// imports the real chrome.* types and they are structurally compatible.
+export type Debuggee = { tabId?: number; extensionId?: string; targetId?: string };
+export type DebuggerSession = Debuggee & { sessionId?: string };
+export type TabCreateProperties = {
+  active?: boolean;
+  index?: number;
+  openerTabId?: number;
+  pinned?: boolean;
+  url?: string;
+  windowId?: number;
+};
+export type Tab = {
+  id?: number;
+  index: number;
+  windowId: number;
+  openerTabId?: number;
+  url?: string;
+  title?: string;
+  active: boolean;
+  pinned: boolean;
+};
+export type TabRemoveInfo = { windowId: number; isWindowClosing: boolean };
+
+// Protocol v2 command params/results mirror chrome.* positional arguments.
+export type ExtensionCommandV2 = {
+  'chrome.debugger.attach': {
+    params: [target: Debuggee, requiredVersion: string];
+    result: void;
   };
-  'forwardCDPCommand': {
-    params: {
-      method: string,
-      sessionId?: string
-      params?: any,
-    };
+  'chrome.debugger.detach': {
+    params: [target: Debuggee];
+    result: void;
+  };
+  'chrome.debugger.sendCommand': {
+    params: [target: DebuggerSession, method: string, commandParams?: object];
+    result: any;
+  };
+  'chrome.tabs.create': {
+    params: [createProperties: TabCreateProperties];
+    result: Tab;
+  };
+  'chrome.tabs.remove': {
+    params: [tabIds: number | number[]];
+    result: void;
   };
 };
 
-export type ExtensionEvents = {
-  'forwardCDPEvent': {
-    params: {
-      method: string,
-      sessionId?: string
-      params?: any,
-    };
+// Protocol v2 events mirror chrome.<api>.<event>.addListener callback signatures.
+export type ExtensionEventsV2 = {
+  'chrome.debugger.onEvent': {
+    params: [source: DebuggerSession, method: string, eventParams?: object];
+  };
+  'chrome.debugger.onDetach': {
+    params: [source: Debuggee, reason: string];
+  };
+  'chrome.tabs.onCreated': {
+    params: [tab: Tab];
+  };
+  'chrome.tabs.onRemoved': {
+    params: [tabId: number, removeInfo: TabRemoveInfo];
+  };
+  'extension.initialized': {
+    params: [];
   };
 };
