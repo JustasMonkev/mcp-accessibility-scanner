@@ -143,6 +143,7 @@ describe('extension protocol v2', () => {
     void enabling.then(() => enabled = true);
     await Promise.resolve();
     expect(enabled).toBe(false);
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(1);
 
     resolveDetach();
     await expect(Promise.all([disabling, enabling])).resolves.toEqual([{ result: {} }, { result: {} }]);
