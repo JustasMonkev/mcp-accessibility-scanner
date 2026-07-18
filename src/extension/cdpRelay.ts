@@ -92,9 +92,11 @@ export class CDPRelayServer {
     debugLogger('Ensuring extension connection for MCP context');
     if (abortSignal.aborted)
       throw abortSignal.reason;
+    // Protocol v2 requires explicit tab selection; the legacy newTab hint hides its only approval controls.
     if (!this._extensionConnection)
       this._connectBrowser(clientInfo);
     debugLogger('Waiting for incoming extension connection');
+    // Manual approval is intentionally unbounded; callers cancel it through the abort signal.
     await Promise.race([
       Promise.all([this._extensionConnectionPromise, this._handler.ready()]),
       new Promise((_, reject) => abortSignal.addEventListener('abort', reject))
