@@ -70,6 +70,12 @@ describe('extension protocol v2', () => {
       { expression: '1 + 1' },
     ]);
 
+    await handler.forwardToExtension('Page.enable', undefined, 'pw-tab-1');
+    expect(sendCommand).toHaveBeenLastCalledWith('chrome.debugger.sendCommand', [
+      { tabId: 7, sessionId: undefined },
+      'Page.enable',
+    ]);
+
     handler.handleExtensionEvent('chrome.debugger.onEvent', [
       { tabId: 7 },
       'Target.attachedToTarget',

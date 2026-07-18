@@ -136,11 +136,7 @@ export class BrowserModel {
     const tabSession = this._tabSessions.values().next().value;
     if (!tabSession)
       throw new Error(`No attached tab to forward browser-level command: ${method}`);
-    return await this._sendToExtension('chrome.debugger.sendCommand', [
-      { tabId: tabSession.tabId },
-      method,
-      params,
-    ]);
+    return await this._sendDebuggerCommand({ tabId: tabSession.tabId }, method, params);
   }
 
   async sendCommand(sessionId: string, method: string, params: any): Promise<any> {
@@ -152,11 +148,14 @@ export class BrowserModel {
     }
     if (!tabSession)
       throw new Error(`No tab found for sessionId: ${sessionId}`);
-    return await this._sendToExtension('chrome.debugger.sendCommand', [
-      { tabId: tabSession.tabId, sessionId: cdpSessionId },
-      method,
-      params,
-    ]);
+    return await this._sendDebuggerCommand({ tabId: tabSession.tabId, sessionId: cdpSessionId }, method, params);
+  }
+
+  private async _sendDebuggerCommand(target: DebuggerSession, method: string, params: any): Promise<any> {
+    const command: [DebuggerSession, string, object?] = [target, method];
+    if (params !== undefined)
+      command.push(params);
+    return await this._sendToExtension('chrome.debugger.sendCommand', command);
   }
 
   private _attachTab(tabId: number): Promise<TabSession> {
