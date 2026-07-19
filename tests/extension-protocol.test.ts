@@ -126,24 +126,31 @@ describe('extension protocol v2', () => {
         .rejects.toThrow('attach failed');
   });
 
-  it('removes the token-bypass connect page after creating a target', async () => {
+  it('best-effort removes only this relay\'s token-bypass connect page', async () => {
+    const connectPage = new URL(`chrome-extension://${EXTENSION_ID}/connect.html`);
+    connectPage.searchParams.set('mcpRelayUrl', 'ws://127.0.0.1/current');
+    const connectPagePrefix = connectPage.toString();
     const sendCommand = vi.fn(async (method: string, params: any[]) => {
       if (method === 'chrome.tabs.create')
         return { id: 8, url: params[0].url };
       if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')
         return { targetInfo: { targetId: `target-${params[0].tabId}`, type: 'page' } };
+      if (method === 'chrome.tabs.remove')
+        throw new Error('tab already closed');
       return {};
     });
-    const handler = new ExtensionProtocolV2(sendCommand);
-    handler.handleExtensionEvent('chrome.tabs.onCreated', [{
-      id: 7,
-      url: `chrome-extension://${EXTENSION_ID}/connect.html?mcpRelayUrl=ws%3A%2F%2F127.0.0.1`,
-    }]);
+    const handler = new ExtensionProtocolV2(sendCommand, connectPagePrefix);
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [
+      { id: 7, url: `${connectPagePrefix}&client=current` },
+      { id: 9, url: `chrome-extension://${EXTENSION_ID}/connect.html?mcpRelayUrl=ws%3A%2F%2F127.0.0.1%2Fother` },
+    ]);
 
     await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
-    await handler.handleCDPCommand('Target.createTarget', {}, undefined);
+    await expect(handler.handleCDPCommand('Target.createTarget', {}, undefined))
+        .resolves.toEqual({ result: { targetId: 'target-8' } });
 
     expect(sendCommand).toHaveBeenCalledWith('chrome.tabs.remove', [7]);
+    expect(sendCommand).not.toHaveBeenCalledWith('chrome.tabs.remove', [9]);
   });
 
   it('serializes concurrent auto-attach state changes', async () => {
