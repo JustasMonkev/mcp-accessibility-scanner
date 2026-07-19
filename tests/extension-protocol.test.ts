@@ -126,6 +126,26 @@ describe('extension protocol v2', () => {
         .rejects.toThrow('attach failed');
   });
 
+  it('removes the token-bypass connect page after creating a target', async () => {
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.tabs.create')
+        return { id: 8, url: params[0].url };
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')
+        return { targetInfo: { targetId: `target-${params[0].tabId}`, type: 'page' } };
+      return {};
+    });
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [{
+      id: 7,
+      url: `chrome-extension://${EXTENSION_ID}/connect.html?mcpRelayUrl=ws%3A%2F%2F127.0.0.1`,
+    }]);
+
+    await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+    await handler.handleCDPCommand('Target.createTarget', {}, undefined);
+
+    expect(sendCommand).toHaveBeenCalledWith('chrome.tabs.remove', [7]);
+  });
+
   it('serializes concurrent auto-attach state changes', async () => {
     let resolveDetach!: () => void;
     const detach = new Promise<void>(resolve => resolveDetach = resolve);

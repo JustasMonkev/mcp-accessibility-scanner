@@ -15,6 +15,7 @@
  */
 
 import { logUnhandledError } from '../utils/log.js';
+import { EXTENSION_ID } from './protocol.js';
 
 import type { DebuggerSession, Debuggee, Tab } from './protocol.js';
 
@@ -115,6 +116,10 @@ export class BrowserModel {
       throw new Error('Failed to create tab');
     this._knownTabs.set(tab.id, tab);
     const tabSession = await this._attachTab(tab.id);
+    const connectPagePrefix = `chrome-extension://${EXTENSION_ID}/connect.html?mcpRelayUrl=`;
+    await Promise.all([...this._knownTabs.values()]
+        .filter(knownTab => knownTab.id !== tab.id && knownTab.url?.startsWith(connectPagePrefix))
+        .map(knownTab => this._sendToExtension('chrome.tabs.remove', [knownTab.id])));
     return { targetId: tabSession.targetInfo?.targetId };
   }
 
