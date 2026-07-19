@@ -115,9 +115,16 @@ export class BrowserModel {
       throw new Error('Failed to create tab');
     this._knownTabs.set(tab.id, tab);
     const tabSession = await this._attachTab(tab.id);
-    await Promise.allSettled([...this._knownTabs.values()]
-        .filter(knownTab => knownTab.id !== tab.id && this._connectPagePrefix && knownTab.url?.startsWith(this._connectPagePrefix))
-        .map(knownTab => this._sendToExtension('chrome.tabs.remove', [knownTab.id])));
+    if (this._connectPagePrefix) {
+      const connectPagePrefix = this._connectPagePrefix;
+      await Promise.allSettled([...this._knownTabs]
+          .filter(([tabId, knownTab]) => tabId !== tab.id && knownTab.url?.startsWith(connectPagePrefix))
+          .map(async ([tabId]) => {
+            const result = await this._sendDebuggerCommand({ tabId }, 'Target.getTargetInfo', undefined);
+            if (result?.targetInfo?.url?.startsWith(connectPagePrefix))
+              await this._sendToExtension('chrome.tabs.remove', [tabId]);
+          }));
+    }
     return { targetId: tabSession.targetInfo?.targetId };
   }
 

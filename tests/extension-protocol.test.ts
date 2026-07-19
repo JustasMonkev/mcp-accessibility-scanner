@@ -126,15 +126,18 @@ describe('extension protocol v2', () => {
         .rejects.toThrow('attach failed');
   });
 
-  it('best-effort removes only this relay\'s token-bypass connect page', async () => {
+  it('best-effort removes only this relay\'s seed while it is still on the connect page', async () => {
     const connectPage = new URL(`chrome-extension://${EXTENSION_ID}/connect.html`);
     connectPage.searchParams.set('mcpRelayUrl', 'ws://127.0.0.1/current');
     const connectPagePrefix = connectPage.toString();
     const sendCommand = vi.fn(async (method: string, params: any[]) => {
       if (method === 'chrome.tabs.create')
         return { id: 8, url: params[0].url };
-      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')
-        return { targetInfo: { targetId: `target-${params[0].tabId}`, type: 'page' } };
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
+        const tabId = params[0].tabId;
+        const url = tabId === 7 ? `${connectPagePrefix}&client=current` : tabId === 10 ? 'https://example.com' : undefined;
+        return { targetInfo: { targetId: `target-${tabId}`, type: 'page', url } };
+      }
       if (method === 'chrome.tabs.remove')
         throw new Error('tab already closed');
       return {};
@@ -143,6 +146,7 @@ describe('extension protocol v2', () => {
     handler.handleExtensionEvent('chrome.tabs.onCreated', [
       { id: 7, url: `${connectPagePrefix}&client=current` },
       { id: 9, url: `chrome-extension://${EXTENSION_ID}/connect.html?mcpRelayUrl=ws%3A%2F%2F127.0.0.1%2Fother` },
+      { id: 10, url: `${connectPagePrefix}&client=current` },
     ]);
 
     await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
@@ -151,6 +155,7 @@ describe('extension protocol v2', () => {
 
     expect(sendCommand).toHaveBeenCalledWith('chrome.tabs.remove', [7]);
     expect(sendCommand).not.toHaveBeenCalledWith('chrome.tabs.remove', [9]);
+    expect(sendCommand).not.toHaveBeenCalledWith('chrome.tabs.remove', [10]);
   });
 
   it('serializes concurrent auto-attach state changes', async () => {
