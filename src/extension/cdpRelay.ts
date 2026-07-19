@@ -59,6 +59,7 @@ export class CDPRelayServer {
   private _executablePath?: string;
   private _cdpPath: string;
   private _extensionPath: string;
+  private _connectPagePrefix: string;
   private _wss: WebSocketServer;
   private _playwrightConnection: WebSocket | null = null;
   private _extensionConnection: ExtensionConnection | null = null;
@@ -74,6 +75,9 @@ export class CDPRelayServer {
     const uuid = crypto.randomUUID();
     this._cdpPath = `/cdp/${uuid}`;
     this._extensionPath = `/extension/${uuid}`;
+    const connectPageUrl = new URL(`chrome-extension://${protocol.EXTENSION_ID}/connect.html`);
+    connectPageUrl.searchParams.set('mcpRelayUrl', this.extensionEndpoint());
+    this._connectPagePrefix = connectPageUrl.toString();
 
     this._resetExtensionConnection();
     this._wss = new WebSocketServer({ server });
@@ -105,10 +109,8 @@ export class CDPRelayServer {
   }
 
   private _connectBrowser(clientInfo: ClientInfo) {
-    const mcpRelayEndpoint = `${this._wsHost}${this._extensionPath}`;
     // Need to specify "key" in the manifest.json to make the id stable when loading from file.
-    const url = new URL(`chrome-extension://${protocol.EXTENSION_ID}/connect.html`);
-    url.searchParams.set('mcpRelayUrl', mcpRelayEndpoint);
+    const url = new URL(this._connectPagePrefix);
     const client = {
       name: clientInfo.name,
       version: clientInfo.version,
@@ -216,7 +218,7 @@ export class CDPRelayServer {
       if (!this._extensionConnection)
         throw new Error('Extension not connected');
       return this._extensionConnection.send(method as keyof ExtensionCommandV2, params);
-    });
+    }, this._connectPagePrefix);
   }
 
   private _closePlaywrightConnection(reason: string) {

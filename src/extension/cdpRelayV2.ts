@@ -25,8 +25,8 @@ export class ExtensionProtocolV2 {
   private _model: BrowserModel;
   private _ready = new ManualPromise<void>();
 
-  constructor(sendCommand: SendCommand) {
-    this._model = new BrowserModel(sendCommand);
+  constructor(sendCommand: SendCommand, connectPagePrefix?: string) {
+    this._model = new BrowserModel(sendCommand, connectPagePrefix);
     void this._ready.catch(logUnhandledError);
   }
 
