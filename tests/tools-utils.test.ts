@@ -62,6 +62,7 @@ describe('Tool Utils', () => {
     mockPage._wrapApiCall = vi.fn().mockImplementation(cb => cb());
 
     mockTab = {
+      context: { config: { timeouts: { settle: 500 } } },
       page: mockPage,
       waitForLoadState: vi.fn().mockResolvedValue(undefined),
       waitForTimeout: vi.fn().mockResolvedValue(undefined),
@@ -125,12 +126,13 @@ describe('Tool Utils', () => {
       vi.useRealTimers();
     });
 
-    it('should wait 1 second after completion', async () => {
+    it('should use the configured settle delay after completion', async () => {
       const callback = vi.fn().mockResolvedValue('result');
+      mockTab.context.config.timeouts.settle = 25;
 
       await waitForCompletion(mockTab, callback);
 
-      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(1000);
+      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
     });
   });
 

@@ -180,5 +180,10 @@ export type Config = {
      * Default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).
      */
     defaultTimeout?: number;
+
+    /**
+     * How long to wait after each action for triggered work to settle before responding. Defaults to 500ms.
+     */
+    settle?: number;
   };
 };

@@ -196,7 +196,8 @@ Create a `config.json` file with the following options:
   },
   "timeouts": {
     "navigationTimeout": 60000,
-    "defaultTimeout": 5000
+    "defaultTimeout": 5000,
+    "settle": 500
   },
   "network": {
     "allowedOrigins": ["example.com", "trusted-site.com"],
@@ -217,10 +218,13 @@ Create a `config.json` file with the following options:
 - CDP attach modes preserve the target browser's existing default-context settings instead of applying Playwright's defaults.
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
+- `timeouts.settle`: How long to wait after each action for triggered work to settle before responding (default: `500`)
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
+
+Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay.
 
 #### HTTP Heartbeat
 

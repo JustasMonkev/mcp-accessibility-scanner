@@ -105,6 +105,7 @@ function configureBaseProgram() {
       .option('--viewport-size <size>', 'specify browser viewport size in pixels, for example "1280, 720"')
       .option('--navigation-timeout <ms>', 'maximum time in milliseconds for page navigation. Defaults to 60000ms (60 seconds).', parseInt)
       .option('--default-timeout <ms>', 'default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).', parseInt)
+      .option('--timeout-settle <ms>', 'how long to wait after each action for triggered work to settle, in milliseconds. Defaults to 500ms.', parseInt)
       .addOption(new Option('--connect-tool', 'Allow to switch between different browser connection methods.').hideHelp())
       .addOption(new Option('--vscode', 'VS Code tools.').hideHelp());
 
