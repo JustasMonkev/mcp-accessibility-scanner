@@ -36,6 +36,7 @@ describe('Config', () => {
       expect(config.browser.browserName).toBe('chromium');
       expect(config.timeouts.navigationTimeout).toBe(60000);
       expect(config.timeouts.defaultTimeout).toBe(5000);
+      expect(config.timeouts.settle).toBe(500);
       expect(config.saveTrace).toBe(false);
     });
 
@@ -60,6 +61,7 @@ describe('Config', () => {
         timeouts: {
           navigationTimeout: 30000,
           defaultTimeout: 10000,
+          settle: 250,
         },
       };
 
@@ -67,6 +69,7 @@ describe('Config', () => {
 
       expect(config.timeouts.navigationTimeout).toBe(30000);
       expect(config.timeouts.defaultTimeout).toBe(10000);
+      expect(config.timeouts.settle).toBe(250);
     });
 
     it('should merge network config', async () => {
@@ -106,6 +109,20 @@ describe('Config', () => {
       expect(config.timeouts.navigationTimeout).toBe(60000);
       expect(config.saveTrace).toBe(false);
     });
+  });
+
+  it('reads the settle timeout from the environment and lets CLI override it', async () => {
+    const previous = process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE;
+    process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE = '250';
+    try {
+      expect((await resolveCLIConfig({})).timeouts.settle).toBe(250);
+      expect((await resolveCLIConfig({ settleTimeout: 100 })).timeouts.settle).toBe(100);
+    } finally {
+      if (previous === undefined)
+        delete process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE;
+      else
+        process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE = previous;
+    }
   });
 
   describe('parseCdpHeaders', () => {

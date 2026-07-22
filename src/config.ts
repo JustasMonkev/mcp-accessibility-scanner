@@ -60,6 +60,7 @@ export type CLIOptions = {
     viewportSize?: string;
     navigationTimeout?: number;
     defaultTimeout?: number;
+    settleTimeout?: number;
 };
 
 const defaultConfig: FullConfig = {
@@ -83,6 +84,7 @@ const defaultConfig: FullConfig = {
   timeouts: {
     navigationTimeout: 60000,
     defaultTimeout: 5000,
+    settle: 500,
   },
 };
 
@@ -260,6 +262,7 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
     timeouts: {
       navigationTimeout: cliOptions.navigationTimeout,
       defaultTimeout: cliOptions.defaultTimeout,
+      settle: cliOptions.settleTimeout,
     }
   };
 }
@@ -301,6 +304,7 @@ function cliOptionsFromEnv(): CLIOptions {
   options.viewportSize = envToString(process.env.PLAYWRIGHT_MCP_VIEWPORT_SIZE);
   options.navigationTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT);
   options.defaultTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_DEFAULT_TIMEOUT);
+  options.settleTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE);
   return options;
 }
 
@@ -366,6 +370,7 @@ function mergeConfig(base: FullConfig, overrides: Config): FullConfig {
     timeouts: {
       navigationTimeout: overrides.timeouts?.navigationTimeout ?? base.timeouts.navigationTimeout,
       defaultTimeout: overrides.timeouts?.defaultTimeout ?? base.timeouts.defaultTimeout,
+      settle: overrides.timeouts?.settle ?? base.timeouts.settle,
     },
   } as FullConfig;
 }

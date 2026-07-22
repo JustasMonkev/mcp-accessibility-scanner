@@ -66,6 +66,7 @@ describe('CLI command dispatch contract', () => {
       expect(help).toContain('--config');
       expect(help).toContain('--headless');
       expect(help).toContain('--mobile');
+      expect(help).toContain('--timeout-settle');
     });
   });
 

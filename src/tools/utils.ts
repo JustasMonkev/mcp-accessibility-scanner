@@ -22,6 +22,7 @@ import type * as playwright from 'playwright';
 import type { Tab } from '../tab.js';
 
 export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>): Promise<R> {
+  const settleMs = tab.context.config.timeouts.settle ?? 500;
   const requests = new Set<playwright.Request>();
   let frameNavigated = false;
   let waitCallback: () => void = () => {};
@@ -65,7 +66,7 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
     if (!requests.size && !frameNavigated)
       waitCallback();
     await waitBarrier;
-    await tab.waitForTimeout(1000);
+    await tab.waitForTimeout(settleMs);
     return result;
   } finally {
     dispose();
