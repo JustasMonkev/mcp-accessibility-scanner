@@ -329,9 +329,11 @@ describe('extension protocol v2', () => {
       );
       await vi.waitFor(() => expect(readdir).toHaveBeenCalled());
       controller.abort(new Error('cancelled during profile discovery'));
-      finishScan();
 
       await expect(connecting).rejects.toThrow('cancelled during profile discovery');
+      expect(spawn).not.toHaveBeenCalled();
+      finishScan();
+      await Promise.resolve();
       expect(spawn).not.toHaveBeenCalled();
     } finally {
       readdir.mockRestore();

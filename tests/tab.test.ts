@@ -47,6 +47,7 @@ describe('Tab', () => {
         },
       },
       currentTab: vi.fn(),
+      outputFile: vi.fn().mockResolvedValue('/tmp/download'),
       tools: [],
     } as any;
 
@@ -212,20 +213,30 @@ describe('Tab', () => {
     });
 
     it('waits for an explicitly reported download', async () => {
-      mockPage.goto = vi.fn().mockRejectedValue(new Error('Download is starting'));
-      mockPage.waitForEvent = vi.fn().mockResolvedValue({});
+      const download = {
+        suggestedFilename: vi.fn().mockReturnValue('download.txt'),
+        saveAs: vi.fn().mockResolvedValue(undefined),
+      };
+      mockPage.goto = vi.fn(async () => {
+        mockPage.emit('download', download);
+        throw new Error('Download is starting');
+      });
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
       await expect(tab.navigate('https://example.com/download')).resolves.toBeUndefined();
-      expect(mockPage.waitForEvent).toHaveBeenCalledWith('download', { timeout: 6000 });
+      expect(download.saveAs).toHaveBeenCalledWith('/tmp/download');
+      expect(mockPage.listenerCount('download')).toBe(1);
     });
 
     it('rethrows when an explicitly reported download never arrives', async () => {
+      vi.useFakeTimers();
       mockPage.goto = vi.fn().mockRejectedValue(new Error('Download is starting'));
-      mockPage.waitForEvent = vi.fn().mockRejectedValue(new Error('Timeout 6000ms exceeded'));
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
-      await expect(tab.navigate('https://example.com/download')).rejects.toThrow('Download is starting');
+      const result = expect(tab.navigate('https://example.com/download')).rejects.toThrow('Download is starting');
+      await vi.advanceTimersByTimeAsync(6000);
+      await result;
+      expect(mockPage.listenerCount('download')).toBe(1);
     });
   });
 

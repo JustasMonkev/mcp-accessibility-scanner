@@ -180,19 +180,25 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   async navigate(url: string) {
     this._clearCollectedArtifacts();
 
-    const downloadEvent = callOnPageNoTrace(this.page, page => page.waitForEvent('download', { timeout: this._pageStateTimeoutMs() }).catch(logUnhandledError));
+    const downloadEvent = new ManualPromise<playwright.Download>();
+    const downloadListener = (download: playwright.Download) => downloadEvent.resolve(download);
+    this.page.once('download', downloadListener);
     try {
-      await this.page.goto(url, { waitUntil: 'domcontentloaded' });
-    } catch (_e: unknown) {
-      const e = _e as Error;
-      if (!e.message.includes('Download is starting'))
-        throw e;
-      const download = await downloadEvent;
-      if (!download)
-        throw e;
-      // Make sure other "download" listeners are notified first.
-      await new Promise(resolve => setTimeout(resolve, 500));
-      return;
+      try {
+        await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+      } catch (_e: unknown) {
+        const e = _e as Error;
+        if (!e.message.includes('Download is starting'))
+          throw e;
+        const download = await this._withPageStateTimeout(downloadEvent, 'waiting for download').catch(() => undefined);
+        if (!download)
+          throw e;
+        // Make sure other "download" listeners are notified first.
+        await new Promise(resolve => setTimeout(resolve, 500));
+        return;
+      }
+    } finally {
+      this.page.off('download', downloadListener);
     }
 
     // Cap load event to 5 seconds, the page is operational at this point.
