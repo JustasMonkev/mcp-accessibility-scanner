@@ -180,7 +180,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   async navigate(url: string) {
     this._clearCollectedArtifacts();
 
-    const downloadEvent = callOnPageNoTrace(this.page, page => page.waitForEvent('download').catch(logUnhandledError));
+    const downloadEvent = callOnPageNoTrace(this.page, page => page.waitForEvent('download', { timeout: this._pageStateTimeoutMs() }).catch(logUnhandledError));
     try {
       await this.page.goto(url, { waitUntil: 'domcontentloaded' });
     } catch (_e: unknown) {

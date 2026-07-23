@@ -275,7 +275,7 @@ describe('extension protocol v2', () => {
   it('launches the profile containing the extension', async () => {
     vi.mocked(spawn).mockClear();
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
-    await fs.mkdir(path.join(userDataDir, 'Default'), { recursive: true });
+    await fs.mkdir(path.join(userDataDir, 'Default', 'Extensions', EXTENSION_ID), { recursive: true });
     await fs.mkdir(path.join(userDataDir, 'Profile 1', 'Extensions', EXTENSION_ID), { recursive: true });
     await fs.writeFile(path.join(userDataDir, 'Local State'), JSON.stringify({ profile: { last_used: 'Profile 1' } }));
     const server = http.createServer();
@@ -303,6 +303,40 @@ describe('extension protocol v2', () => {
       relay.stop();
       await new Promise<void>(resolve => server.close(() => resolve()));
       await fs.rm(userDataDir, { recursive: true });
+    }
+  });
+
+  it('does not launch Chrome when cancelled during profile discovery', async () => {
+    vi.mocked(spawn).mockClear();
+    let finishScan!: () => void;
+    const scan = new Promise<void>(resolve => finishScan = resolve);
+    const readdir = vi.spyOn(fs, 'readdir').mockImplementationOnce(async () => {
+      await scan;
+      return [] as any;
+    });
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', '/tmp/profile', '/tmp/chrome');
+    try {
+      const controller = new AbortController();
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          controller.signal,
+          undefined,
+      );
+      await vi.waitFor(() => expect(readdir).toHaveBeenCalled());
+      controller.abort(new Error('cancelled during profile discovery'));
+      finishScan();
+
+      await expect(connecting).rejects.toThrow('cancelled during profile discovery');
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      readdir.mockRestore();
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });
 });

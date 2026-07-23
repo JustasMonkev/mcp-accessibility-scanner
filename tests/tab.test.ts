@@ -217,6 +217,15 @@ describe('Tab', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
       await expect(tab.navigate('https://example.com/download')).resolves.toBeUndefined();
+      expect(mockPage.waitForEvent).toHaveBeenCalledWith('download', { timeout: 6000 });
+    });
+
+    it('rethrows when an explicitly reported download never arrives', async () => {
+      mockPage.goto = vi.fn().mockRejectedValue(new Error('Download is starting'));
+      mockPage.waitForEvent = vi.fn().mockRejectedValue(new Error('Timeout 6000ms exceeded'));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      await expect(tab.navigate('https://example.com/download')).rejects.toThrow('Download is starting');
     });
   });
 

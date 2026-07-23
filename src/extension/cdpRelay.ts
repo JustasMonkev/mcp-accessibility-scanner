@@ -100,7 +100,7 @@ export class CDPRelayServer {
       throw abortSignal.reason;
     // Protocol v2 requires explicit tab selection; the legacy newTab hint hides its only approval controls.
     if (!this._extensionConnection)
-      await this._connectBrowser(clientInfo);
+      await this._connectBrowser(clientInfo, abortSignal);
     debugLogger('Waiting for incoming extension connection');
     // Manual approval is intentionally unbounded; callers cancel it through the abort signal.
     await Promise.race([
@@ -110,7 +110,7 @@ export class CDPRelayServer {
     debugLogger('Extension connection established');
   }
 
-  private async _connectBrowser(clientInfo: ClientInfo) {
+  private async _connectBrowser(clientInfo: ClientInfo, abortSignal: AbortSignal) {
     // Need to specify "key" in the manifest.json to make the id stable when loading from file.
     const url = new URL(this._connectPagePrefix);
     const client = {
@@ -141,6 +141,7 @@ export class CDPRelayServer {
       if (profileDirectory)
         args.push(`--profile-directory=${profileDirectory}`);
     }
+    abortSignal.throwIfAborted();
     args.push(href);
 
     spawn(executablePath, args, {
