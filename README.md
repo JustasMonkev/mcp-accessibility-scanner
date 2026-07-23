@@ -135,6 +135,7 @@ npx mcp-accessibility-scanner --extension
 ```
 
 Set `PLAYWRIGHT_MCP_EXTENSION_TOKEN` to the token shown by the extension to bypass the connection approval dialog.
+When `--user-data-dir` contains multiple Chrome profiles, the profile with the extension installed is selected automatically, preferring Chrome's last-used profile.
 
 ### Discovering available tools (`list-tools` subcommand)
 

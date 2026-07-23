@@ -16,7 +16,10 @@
 
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import fs from 'node:fs/promises';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import { WebSocket } from 'ws';
 import { describe, expect, it, vi } from 'vitest';
 import { CDPRelayServer } from '../src/extension/cdpRelay.js';
@@ -266,6 +269,76 @@ describe('extension protocol v2', () => {
       relay.stop();
       await new Promise<void>(resolve => server.close(() => resolve()));
       vi.unstubAllEnvs();
+    }
+  });
+
+  it('launches the profile containing the extension', async () => {
+    vi.mocked(spawn).mockClear();
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
+    await fs.mkdir(path.join(userDataDir, 'Default', 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.mkdir(path.join(userDataDir, 'Profile 1', 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.writeFile(path.join(userDataDir, 'Local State'), JSON.stringify({ profile: { last_used: 'Profile 1' } }));
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome');
+    let extension: WebSocket | undefined;
+    try {
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          new AbortController().signal,
+          undefined,
+      );
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+      expect(vi.mocked(spawn).mock.calls[0][1]).toContain('--profile-directory=Profile 1');
+
+      extension = new WebSocket(relay.extensionEndpoint());
+      await once(extension, 'open');
+      extension.send(JSON.stringify({ method: 'extension.initialized', params: [] }));
+      await expect(connecting).resolves.toBeUndefined();
+    } finally {
+      extension?.close();
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await fs.rm(userDataDir, { recursive: true });
+    }
+  });
+
+  it('does not launch Chrome when cancelled during profile discovery', async () => {
+    vi.mocked(spawn).mockClear();
+    let finishScan!: () => void;
+    const scan = new Promise<void>(resolve => finishScan = resolve);
+    const readdir = vi.spyOn(fs, 'readdir').mockImplementationOnce(async () => {
+      await scan;
+      return [] as any;
+    });
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', '/tmp/profile', '/tmp/chrome');
+    try {
+      const controller = new AbortController();
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          controller.signal,
+          undefined,
+      );
+      await vi.waitFor(() => expect(readdir).toHaveBeenCalled());
+      controller.abort(new Error('cancelled during profile discovery'));
+
+      await expect(connecting).rejects.toThrow('cancelled during profile discovery');
+      expect(spawn).not.toHaveBeenCalled();
+      finishScan();
+      await Promise.resolve();
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      readdir.mockRestore();
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });
 });

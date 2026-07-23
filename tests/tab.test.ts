@@ -47,6 +47,7 @@ describe('Tab', () => {
         },
       },
       currentTab: vi.fn(),
+      outputFile: vi.fn().mockResolvedValue('/tmp/download'),
       tools: [],
     } as any;
 
@@ -199,6 +200,43 @@ describe('Tab', () => {
 
       expect(finished).toBe(true);
       expect(mockPage.setDefaultTimeout).toHaveBeenLastCalledWith(75);
+    });
+  });
+
+  describe('navigate', () => {
+    it('does not wait for a download after an unrelated aborted navigation', async () => {
+      mockPage.goto = vi.fn().mockRejectedValue(new Error('page.goto: net::ERR_ABORTED'));
+      mockPage.waitForEvent = vi.fn().mockReturnValue(new Promise(() => {}));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      await expect(tab.navigate('chrome://crash')).rejects.toThrow('net::ERR_ABORTED');
+    });
+
+    it('waits for an explicitly reported download', async () => {
+      const download = {
+        suggestedFilename: vi.fn().mockReturnValue('download.txt'),
+        saveAs: vi.fn().mockResolvedValue(undefined),
+      };
+      mockPage.goto = vi.fn(async () => {
+        mockPage.emit('download', download);
+        throw new Error('Download is starting');
+      });
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      await expect(tab.navigate('https://example.com/download')).resolves.toBeUndefined();
+      expect(download.saveAs).toHaveBeenCalledWith('/tmp/download');
+      expect(mockPage.listenerCount('download')).toBe(1);
+    });
+
+    it('rethrows when an explicitly reported download never arrives', async () => {
+      vi.useFakeTimers();
+      mockPage.goto = vi.fn().mockRejectedValue(new Error('Download is starting'));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const result = expect(tab.navigate('https://example.com/download')).rejects.toThrow('Download is starting');
+      await vi.advanceTimersByTimeAsync(6000);
+      await result;
+      expect(mockPage.listenerCount('download')).toBe(1);
     });
   });
 
