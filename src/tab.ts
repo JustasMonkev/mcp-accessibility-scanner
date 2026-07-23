@@ -185,16 +185,9 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       await this.page.goto(url, { waitUntil: 'domcontentloaded' });
     } catch (_e: unknown) {
       const e = _e as Error;
-      const mightBeDownload =
-        e.message.includes('net::ERR_ABORTED') // chromium
-        || e.message.includes('Download is starting'); // firefox + webkit
-      if (!mightBeDownload)
+      if (!e.message.includes('Download is starting'))
         throw e;
-      // on chromium, the download event is fired *after* page.goto rejects, so we wait a lil bit
-      const download = await Promise.race([
-        downloadEvent,
-        new Promise(resolve => setTimeout(resolve, 3000)),
-      ]);
+      const download = await downloadEvent;
       if (!download)
         throw e;
       // Make sure other "download" listeners are notified first.

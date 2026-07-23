@@ -23,7 +23,9 @@
  */
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
 import http from 'node:http';
+import path from 'node:path';
 import debug from 'debug';
 import { WebSocket, WebSocketServer } from 'ws';
 import { httpAddressToString } from '../mcp/http.js';
@@ -98,7 +100,7 @@ export class CDPRelayServer {
       throw abortSignal.reason;
     // Protocol v2 requires explicit tab selection; the legacy newTab hint hides its only approval controls.
     if (!this._extensionConnection)
-      this._connectBrowser(clientInfo);
+      await this._connectBrowser(clientInfo);
     debugLogger('Waiting for incoming extension connection');
     // Manual approval is intentionally unbounded; callers cancel it through the abort signal.
     await Promise.race([
@@ -108,7 +110,7 @@ export class CDPRelayServer {
     debugLogger('Extension connection established');
   }
 
-  private _connectBrowser(clientInfo: ClientInfo) {
+  private async _connectBrowser(clientInfo: ClientInfo) {
     // Need to specify "key" in the manifest.json to make the id stable when loading from file.
     const url = new URL(this._connectPagePrefix);
     const client = {
@@ -133,8 +135,12 @@ export class CDPRelayServer {
     }
 
     const args: string[] = [];
-    if (this._userDataDir)
+    if (this._userDataDir) {
       args.push(`--user-data-dir=${this._userDataDir}`);
+      const profileDirectory = await findPlaywrightExtensionProfile(this._userDataDir);
+      if (profileDirectory)
+        args.push(`--profile-directory=${profileDirectory}`);
+    }
     args.push(href);
 
     spawn(executablePath, args, {
@@ -285,6 +291,36 @@ export class CDPRelayServer {
   private _sendToPlaywright(message: CDPResponse): void {
     debugLogger('→ Playwright:', `${message.method ?? `response(id=${message.id})`}`);
     this._playwrightConnection?.send(JSON.stringify(message));
+  }
+}
+
+async function findPlaywrightExtensionProfile(userDataDir: string): Promise<string | undefined> {
+  let profiles: string[];
+  try {
+    profiles = (await fs.readdir(userDataDir, { withFileTypes: true }))
+        .filter(entry => entry.isDirectory() && (entry.name === 'Default' || /^Profile \d+$/.test(entry.name)))
+        .map(entry => entry.name)
+        .sort((a, b) => a === 'Default' ? -1 : b === 'Default' ? 1 : parseInt(a.slice(8), 10) - parseInt(b.slice(8), 10));
+  } catch {
+    return;
+  }
+
+  try {
+    const localState = JSON.parse(await fs.readFile(path.join(userDataDir, 'Local State'), 'utf8'));
+    const lastUsed = localState?.profile?.last_used;
+    if (typeof lastUsed === 'string' && profiles.includes(lastUsed))
+      profiles = [lastUsed, ...profiles.filter(profile => profile !== lastUsed)];
+  } catch {
+    // Fall back to the deterministic profile order when Local State is unavailable.
+  }
+
+  for (const profile of profiles) {
+    try {
+      await fs.access(path.join(userDataDir, profile, 'Extensions', protocol.EXTENSION_ID));
+      return profile;
+    } catch {
+      continue;
+    }
   }
 }
 

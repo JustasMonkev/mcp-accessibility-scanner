@@ -202,6 +202,24 @@ describe('Tab', () => {
     });
   });
 
+  describe('navigate', () => {
+    it('does not wait for a download after an unrelated aborted navigation', async () => {
+      mockPage.goto = vi.fn().mockRejectedValue(new Error('page.goto: net::ERR_ABORTED'));
+      mockPage.waitForEvent = vi.fn().mockReturnValue(new Promise(() => {}));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      await expect(tab.navigate('chrome://crash')).rejects.toThrow('net::ERR_ABORTED');
+    });
+
+    it('waits for an explicitly reported download', async () => {
+      mockPage.goto = vi.fn().mockRejectedValue(new Error('Download is starting'));
+      mockPage.waitForEvent = vi.fn().mockResolvedValue({});
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      await expect(tab.navigate('https://example.com/download')).resolves.toBeUndefined();
+    });
+  });
+
   describe('captureSnapshot', () => {
     it('should capture page snapshot', async () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
