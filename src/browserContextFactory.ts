@@ -111,7 +111,7 @@ class IsolatedContextFactory extends BaseContextFactory {
       handleSIGTERM: false,
     }).catch(error => {
       if (error.message.includes('Executable doesn\'t exist'))
-        throw new Error(`Browser specified in your config is not installed. Either install it (likely) or change the config.`);
+        throw browserNotInstalledError(error);
       throw error;
     });
   }
@@ -262,7 +262,7 @@ class PersistentContextFactory implements BrowserContextFactory {
         return { browserContext, close };
       } catch (error: any) {
         if (error.message.includes('Executable doesn\'t exist'))
-          throw new Error(`Browser specified in your config is not installed. Either install it (likely) or change the config.`);
+          throw browserNotInstalledError(error);
         if (error.message.includes('ProcessSingleton') || error.message.includes('Invalid URL')) {
           // User data directory is already in use, try again.
           await new Promise(resolve => setTimeout(resolve, 1000));
@@ -321,6 +321,20 @@ async function findFreePort(): Promise<number> {
     });
     server.on('error', reject);
   });
+}
+
+/**
+ * Builds the user-facing "browser not installed" error from Playwright's raw
+ * launch failure. When the raw message carries a version-specific executable
+ * path (e.g. `chromium-1234`), that path is surfaced so a version mismatch is
+ * distinguishable from a genuinely missing install; otherwise the generic
+ * message is returned unchanged. Mirrors Playwright MCP throwIfExecutableMissing
+ * (microsoft/playwright#41941).
+ */
+function browserNotInstalledError(error: Error): Error {
+  const match = error.message.match(/Executable doesn't exist at ([^\r\n]+)/);
+  const location = match ? `; expected executable at ${match[1].trim()}` : '';
+  return new Error(`Browser specified in your config is not installed${location}. Either install it (likely) or change the config.`);
 }
 
 async function startTraceServer(config: FullConfig, rootPath: string | undefined): Promise<string | undefined> {

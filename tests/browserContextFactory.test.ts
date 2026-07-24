@@ -45,6 +45,7 @@ vi.mock('node:child_process', () => ({
   spawn: spawnMock,
 }));
 
+import * as playwright from 'playwright';
 import { contextFactory } from '../src/browserContextFactory.js';
 import { resolveConfig } from '../src/config.js';
 
@@ -233,5 +234,42 @@ describe('browserContextFactory', () => {
 
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow('Timed out waiting for CDP endpoint http://127.0.0.1:9222.');
     expect(childProcess.kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('surfaces the missing browser executable path on the isolated launch path', async () => {
+    (playwright.chromium.launch as any).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
+
+    const config = await resolveConfig({
+      browser: {
+        isolated: true,
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('Browser specified in your config is not installed; expected executable at /ms-playwright/chromium-1234/chrome-linux/chrome. Either install it (likely) or change the config.');
+  });
+
+  it('surfaces the missing browser executable path on the persistent launch path', async () => {
+    (playwright.chromium.launchPersistentContext as any).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
+
+    const config = await resolveConfig({});
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('Browser specified in your config is not installed; expected executable at /ms-playwright/chromium-1234/chrome-linux/chrome. Either install it (likely) or change the config.');
+  });
+
+  it('falls back to the generic not-installed message when no executable path is present', async () => {
+    (playwright.chromium.launchPersistentContext as any).mockRejectedValue(new Error(`Executable doesn't exist`));
+
+    const config = await resolveConfig({});
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('Browser specified in your config is not installed. Either install it (likely) or change the config.');
   });
 });
