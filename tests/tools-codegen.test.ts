@@ -23,6 +23,7 @@ describe('tool code generation', () => {
   it.each([
     ['browser_navigate', { url: `https://example.com/it's` }],
     ['browser_press_key', { key: `'` }],
+    ['browser_press_key', { key: '\ninvalid javascript }' }],
   ])('escapes user input for %s', async (toolName, args) => {
     const tab = {
       modalStates: () => [],
