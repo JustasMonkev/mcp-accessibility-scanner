@@ -261,4 +261,15 @@ describe('browserContextFactory', () => {
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
         .rejects.toThrow('Browser specified in your config is not installed; expected executable at /ms-playwright/chromium-1234/chrome-linux/chrome. Either install it (likely) or change the config.');
   });
+
+  it('falls back to the generic not-installed message when no executable path is present', async () => {
+    (playwright.chromium.launchPersistentContext as any).mockRejectedValue(new Error(`Executable doesn't exist`));
+
+    const config = await resolveConfig({});
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('Browser specified in your config is not installed. Either install it (likely) or change the config.');
+  });
 });

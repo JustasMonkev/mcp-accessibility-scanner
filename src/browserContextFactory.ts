@@ -323,10 +323,15 @@ async function findFreePort(): Promise<number> {
   });
 }
 
+/**
+ * Builds the user-facing "browser not installed" error from Playwright's raw
+ * launch failure. When the raw message carries a version-specific executable
+ * path (e.g. `chromium-1234`), that path is surfaced so a version mismatch is
+ * distinguishable from a genuinely missing install; otherwise the generic
+ * message is returned unchanged. Mirrors Playwright MCP throwIfExecutableMissing
+ * (microsoft/playwright#41941).
+ */
 function browserNotInstalledError(error: Error): Error {
-  // Surface the version-specific executable path (e.g. chromium-1234) so a
-  // version mismatch is distinguishable from a missing install. Mirrors
-  // Playwright MCP throwIfExecutableMissing (microsoft/playwright#41941).
   const match = error.message.match(/Executable doesn't exist at ([^\r\n]+)/);
   const location = match ? `; expected executable at ${match[1].trim()}` : '';
   return new Error(`Browser specified in your config is not installed${location}. Either install it (likely) or change the config.`);
