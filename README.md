@@ -245,6 +245,12 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 - `includeIncomplete` (default `true`): also report Axe "incomplete" results
 - `maxNodesPerViolation` (default `10`): cap on nodes reported per rule
 - `includeSelectors` / `excludeSelectors`: CSS selectors that scope the scan
+- `annotateScreenshot` (default `false`): capture an annotated screenshot of the violations
+
+**Annotated screenshots:**
+When `annotateScreenshot` is `true`, each violating element is outlined and labelled with the rule ids it failed, a full-page PNG is written to the MCP output directory (`scan-page-annotated-{timestamp}.png`) and returned as a resource link, and the markers are then removed so the page is left exactly as it was. The markers are drawn in an out-of-flow overlay clipped to each element's own box, so they never reflow the page. The overlay uses a fresh id per scan, is placed in the browser's top layer so it stays visible over an open dialog, popover or fullscreen element, and compensates for a CSS `zoom` or a scaled ancestor so markers line up with what is rendered.
+An element that fails several rules gets one box listing every rule id, and elements inside open shadow roots are marked by walking the shadow path Axe reports.
+At most 50 elements are annotated per scan. The result text always reports how many nodes were marked out of the total, plus how many were left out because they exceeded the limit, were hidden or zero-size, or were inside an iframe (cross-frame selectors cannot be resolved from the top document).
 
 **Supported Violation Tags:**
 - WCAG standards (in the default set): `wcag2a`, `wcag2aa`, `wcag2aaa`, `wcag21a`, `wcag21aa`, `wcag21aaa`, `wcag22a`, `wcag22aa`, `wcag22aaa`

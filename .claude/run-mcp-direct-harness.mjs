@@ -270,6 +270,29 @@ const tests = [
         'scan_page',
         { ...scanArgs, excludeSelectors: [':::not-css'] },
         /Invalid CSS in excludeSelectors: :::not-css/);
+
+    // Annotated screenshots.
+    await navigate('<title>Scan</title><img src="x" width="120" height="60"><h1>Scan</h1>');
+    const plain = await callTool('scan_page', { violationsTag: ['wcag2a', 'wcag2aa'] });
+    if (/Annotated screenshot/.test(resultText(plain)))
+      throw new Error('scan_page annotated a screenshot without annotateScreenshot');
+
+    const annotated = await callTool('scan_page', { violationsTag: ['wcag2a', 'wcag2aa'], annotateScreenshot: true });
+    const annotatedText = resultText(annotated);
+    assertText(annotatedText, /Annotated screenshot: .+\.png/);
+    const screenshotPath = annotatedText.match(/Annotated screenshot: (.+\.png)/)[1];
+    const screenshotSize = fs.statSync(screenshotPath).size;
+    if (screenshotSize < 1000)
+      throw new Error(`Annotated screenshot looks empty (${screenshotSize} bytes): ${screenshotPath}`);
+    const marked = annotatedText.match(/Marked (\d+) of (\d+) violating nodes\./);
+    if (!marked || Number(marked[1]) < 1)
+      throw new Error(`Expected at least one marked node in result:\n${annotatedText.slice(0, 4000)}`);
+
+    const leftovers = await callTool('browser_evaluate', {
+      function: '() => ({ layers: document.querySelectorAll("#mcp-a11y-annotation-layer").length, idInHtml: document.documentElement.innerHTML.includes("mcp-a11y-annotation-layer") })',
+    });
+    assertText(leftovers, /"layers":\s*0/);
+    assertText(leftovers, /"idInHtml":\s*false/);
   }),
 
   test('browser_tabs', async () => {
