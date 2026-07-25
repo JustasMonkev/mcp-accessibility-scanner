@@ -21,7 +21,7 @@ import * as mcpServer from './mcp/server.js';
 import { commaSeparatedList, resolveCLIConfig, semicolonSeparatedList } from './config.js';
 import { packageJSON } from './utils/package.js';
 import { Context } from './context.js';
-import { contextFactory } from './browserContextFactory.js';
+import { assertStorageStateSupported, contextFactory } from './browserContextFactory.js';
 import { ProxyBackend } from './mcp/proxyBackend.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
@@ -41,8 +41,14 @@ type ProgramContext = {
 
 async function resolveProgramContext(options: Record<string, unknown>): Promise<ProgramContext> {
   const config = await resolveCLIConfig(options);
-  const browserContextFactory = contextFactory(config);
   const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath);
+  // These modes run every tool through the extension factory, not the one
+  // contextFactory() builds, so validate the factory that will actually create the
+  // context. Checked first because contextFactory() would otherwise recommend
+  // --isolated, which does not help here.
+  if (options.extension || options.connectTool)
+    assertStorageStateSupported(config, extensionContextFactory, '--extension attaches to the browser you are already running and uses the context it already has; --isolated does not change that. Drop the storage state and sign in in that browser before auditing.');
+  const browserContextFactory = contextFactory(config);
   return { config, browserContextFactory, extensionContextFactory };
 }
 

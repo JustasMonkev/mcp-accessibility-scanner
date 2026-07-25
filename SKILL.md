@@ -57,7 +57,7 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--config <path>` | Path to configuration file |
 | `--user-data-dir <path>` | Browser profile directory |
 | `--isolated` | Keep browser profile in memory only |
-| `--storage-state <path>` | Storage state file for isolated sessions |
+| `--storage-state <path>` | Storage state file for sessions that create their own context (`--isolated`, remote endpoint, CDP + `--isolated`) |
 | `--executable-path <path>` | Custom browser executable |
 | `--cdp-endpoint <endpoint>` | Connect to existing CDP endpoint |
 | `--cdp-header <header>` | CDP connect header, e.g. `"Authorization: Bearer <token>"`. Repeat the flag for multiple |
@@ -122,6 +122,8 @@ Crawl and aggregate accessibility violations across multiple pages. Writes a JSO
 - `includeSubdomains` - Allow subdomains when `sameOriginOnly=true`
 - `excludePathPatterns` - Regex patterns to skip (default: `logout|signout`)
 - `reportFile` - Custom output filename
+
+**Behind a login:** the crawl shares the browser context, so signing in with `browser_navigate` / `browser_fill_form` first is enough. Alternatively record a session with `npx playwright codegen --save-storage=auth.json <login-url>` and start the server with `--isolated --storage-state ./auth.json` (storage state needs a mode that creates its own context — `--isolated`, a remote endpoint, or CDP with `--isolated`; the persistent profile, plain CDP attach and `--extension` error out rather than auditing anonymously). Extend `excludePathPatterns` with anything else that ends the session (account deletion, session revocation, account/locale switchers) — it replaces the default, so keep `logout|signout` in the list. If the crawl loses the cookies it started with, the result opens with a `WARNING: session cookie(s) …` line and the report carries a `sessionLoss` object naming the page reached after any redirect, even when that page failed to load; everything scanned after it was audited signed-out. Cookie values are not compared and a cookie the browser dropped at its own expiry is ignored, but any other cookie the crawl started with and lost is reported — nothing marks a cookie as an authentication one.
 
 ### scan_page_matrix
 

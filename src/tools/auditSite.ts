@@ -232,6 +232,57 @@ function normalizeUrl(rawUrl: string, baseUrl: URL, ignoredParams: Set<string>):
   return url;
 }
 
+/**
+ * Cookies the crawled URLs would actually send, keyed by name + domain + path and
+ * mapped to the name and expiry needed to report on them. Scoping to the crawl URLs
+ * keeps an unrelated origin's expiring cookie from raising a false alarm, and keying
+ * on the full identity stops a same-named cookie elsewhere from masking a deleted one.
+ * Values are deliberately not compared: a rotating CSRF token is not a lost session.
+ * Ceiling: a session cookie scoped to a path below the crawl URLs is not tracked.
+ */
+async function readCrawlCookies(page: import('playwright').Page, urls: string[]): Promise<Map<string, { name: string, expires: number }>> {
+  const cookies = await page.context().cookies(urls);
+  return new Map(cookies.map(cookie => [`${cookie.name}\n${cookie.domain}\n${cookie.path}`, { name: cookie.name, expires: cookie.expires }]));
+}
+
+/**
+ * Baseline cookies the context no longer carries, or null when nothing is missing.
+ *
+ * A cookie whose own expiry has already passed was deleted by the clock rather than
+ * by the site, so it is not a lost session: Cloudflare's `__cf_bm` lives 30 minutes
+ * and would otherwise warn on any longer crawl. Cookies are still not classified as
+ * "authentication" ones — no cookie attribute marks that, and every proxy for it
+ * (httpOnly, session scope) misfires both ways on real sites, which would turn a
+ * false warning into a missed logout.
+ *
+ * A cookie read failure yields no loss: the context is gone, and aborting here would
+ * throw away the pages already scanned along with the navigation error for this one.
+ */
+async function findSessionLoss(
+  page: import('playwright').Page,
+  urls: string[],
+  baseline: Map<string, { name: string, expires: number }>,
+  requestedUrl: string,
+  urlBeforeNavigation: string
+): Promise<{ url: string, cookies: string[] } | null> {
+  const current = await readCrawlCookies(page, urls).catch(() => null);
+  if (!current)
+    return null;
+  const now = Date.now();
+  const missing = [...baseline]
+      .filter(([identity, cookie]) => !current.has(identity) && !(cookie.expires > 0 && cookie.expires * 1000 <= now))
+      .map(([, cookie]) => cookie.name);
+  if (!missing.length)
+    return null;
+  // The page reached after redirects is the one that dropped the cookie, and the one
+  // worth excluding; the queued URL may only have pointed at it. A navigation that
+  // never committed leaves the tab on the previous page, which is innocent — there
+  // the URL asked for is the one whose response dropped the cookie.
+  const reachedUrl = page.url();
+  const url = !reachedUrl || reachedUrl === urlBeforeNavigation ? requestedUrl : reachedUrl;
+  return { url, cookies: [...new Set(missing)] };
+}
+
 async function extractLinks(page: import('playwright').Page): Promise<string[]> {
   return await page.evaluate(() => {
     return Array.from(document.querySelectorAll('a[href]'))
@@ -435,6 +486,12 @@ const auditSite = defineTabTool({
     });
 
     const crawlTab = await context.newTab();
+    // Cookies the crawl URLs carry before the crawl are the session the caller
+    // signed in with. If one disappears mid-crawl every later page is audited as a
+    // signed-out user, which still looks like a clean run, so record where it happened.
+    const cookieScopeUrls = queue.map(item => item.url);
+    const baselineCookies = await readCrawlCookies(crawlTab.page, cookieScopeUrls);
+    let sessionLoss: { url: string, cookies: string[] } | null = null;
     let processedPages = 0;
     try {
       while (queue.length && pages.length < params.maxPages) {
@@ -459,6 +516,7 @@ const auditSite = defineTabTool({
         };
         pages.push(pageReport);
 
+        const urlBeforeNavigation = crawlTab.page.url();
         try {
           await crawlTab.navigate(item.url);
           await crawlTab.waitForTimeout(params.waitAfterNavigationMs);
@@ -501,6 +559,11 @@ const auditSite = defineTabTool({
           pageReport.status = 'error';
           pageReport.error = error instanceof Error ? error.message : String(error);
         } finally {
+          // Checked after failed navigations too: a logout URL that clears the cookie
+          // and then times out still ended the session, and skipping it pins the
+          // warning on the next page that happens to load — an innocent route.
+          if (baselineCookies.size && !sessionLoss)
+            sessionLoss = await findSessionLoss(crawlTab.page, cookieScopeUrls, baselineCookies, item.url, urlBeforeNavigation);
           processedPages++;
           const message = pageReport.status === 'scanned'
             ? `Scanned page ${processedPages}/${params.maxPages}: ${item.url}`
@@ -561,6 +624,7 @@ const auditSite = defineTabTool({
       },
       pages,
       summary,
+      sessionLoss,
     };
 
     const reportFileName = sanitizeForFilePath(params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`);
@@ -587,6 +651,7 @@ const auditSite = defineTabTool({
         durationMs: report.metadata.durationMs,
       },
       totals: summary.totals,
+      sessionLoss,
       topViolations: summaryViolations.slice(0, 5).map(violation => ({
         id: violation.id,
         impact: violation.impact ?? null,
@@ -614,8 +679,14 @@ const auditSite = defineTabTool({
     const topViolations = summarizeTopViolations(summaryViolations, 10);
     const topIncomplete = summarizeTopViolations(summaryIncomplete, 10);
     const topPages = summarizeTopPages(scannedPagesByViolations, 20);
+    const sessionWarning = sessionLoss ? [
+      `WARNING: session cookie(s) ${sessionLoss.cookies.join(', ')} disappeared while loading ${sessionLoss.url}.`,
+      'Pages scanned from that point on were audited as a signed-out user. Add that URL to excludePathPatterns, sign in again, and re-run.',
+      '',
+    ] : [];
     response.addCode('// Crawled pages in a temporary tab and aggregated Axe violations.');
     response.addResult([
+      ...sessionWarning,
       `Scanned pages: ${summary.totals.scannedPages}`,
       `Errored pages: ${summary.totals.erroredPages}`,
       `Skipped URLs: ${summary.totals.skippedUrls}`,
