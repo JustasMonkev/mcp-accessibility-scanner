@@ -111,6 +111,10 @@ describe('scan_page_matrix tool', () => {
     // "0" would be indistinguishable from "no needs-review findings".
     expect(included.response.result()).toMatch(/^baseline \| 1 \| 1 \| 1 \| /m);
     expect(excluded.response.result()).toMatch(/^baseline \| 1 \| 1 \| - \| /m);
+    // Same reasoning for structuredContent, which carries no includeIncomplete
+    // flag for consumers to disambiguate a 0 with.
+    expect((included.response.structuredContent() as any).variants[0].totalIncomplete).toBe(1);
+    expect((excluded.response.structuredContent() as any).variants[0].totalIncomplete).toBeNull();
   });
 
   it('runs variants in baseline-first order and computes baseline diffs', async () => {

@@ -257,7 +257,10 @@ const scanPageMatrix = defineTabTool({
         name: result.name,
         totalViolations: result.summary.totalRules,
         totalNodes: result.summary.totalNodes,
-        totalIncomplete: result.incomplete.length,
+        // null, not 0, when collection is off: structuredContent does not carry
+        // includeIncomplete, so a 0 here is indistinguishable from a variant
+        // with no needs-review findings. Matches the "-" in the markdown table.
+        totalIncomplete: params.includeIncomplete ? result.incomplete.length : null,
         newViolationIds: result.diffFromBaseline.newViolationIds,
         resolvedViolationIds: result.diffFromBaseline.resolvedViolationIds,
         changedRuleIds: Object.keys(result.diffFromBaseline.changedCounts),

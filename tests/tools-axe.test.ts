@@ -89,6 +89,27 @@ describe('axe helpers', () => {
     expect(allRuleIds).toContain('landmark-one-main');
   });
 
+  // Pins a deliberate decision rather than a bug: `experimental` marks how
+  // settled a heuristic is, not whether the criterion is real, so the few
+  // experimental rules carrying a `wcag*` tag stay in the conformance default.
+  // Fails if that set changes, so README and comment can be updated with it.
+  it('keeps experimental rules that map to a WCAG criterion in the default set', async () => {
+    const axeCore = (await import('axe-core')).default;
+    const defaults = new Set<string>(defaultAxeTags);
+    const experimental = axeCore.getRules()
+        .filter(rule => rule.tags.includes('experimental') && rule.tags.some(tag => defaults.has(tag)))
+        .map(rule => rule.ruleId)
+        .sort();
+
+    expect(experimental).toEqual([
+      'css-orientation-lock',
+      'label-content-name-mismatch',
+      'p-as-heading',
+      'table-fake-caption',
+      'td-has-header',
+    ]);
+  });
+
   it('dedupes nodes by target and html', () => {
     const nodes = [node('#a', '<a>'), node('#a', '<a>'), node('#a', '<b>'), node('#b', '<a>')];
     expect(dedupeAxeNodes(nodes)).toHaveLength(3);

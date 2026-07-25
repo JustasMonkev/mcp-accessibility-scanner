@@ -250,9 +250,11 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 - WCAG standards (in the default set): `wcag2a`, `wcag2aa`, `wcag2aaa`, `wcag21a`, `wcag21aa`, `wcag21aaa`, `wcag22a`, `wcag22aa`, `wcag22aaa`
 - Section 508 (in the default set): `section508`
 - Categories (opt-in): `cat.aria`, `cat.color`, `cat.forms`, `cat.keyboard`, `cat.language`, `cat.name-role-value`, `cat.parsing`, `cat.semantics`, `cat.sensory-and-visual-cues`, `cat.structure`, `cat.tables`, `cat.text-alternatives`, `cat.time-and-media`
-- Non-conformance tags (opt-in): `best-practice`, `experimental`
+- Non-conformance tags (opt-in): `best-practice`, `experimental` (see the caveat below -- a few experimental rules also carry a WCAG tag and run by default)
 
 The default set is the WCAG and Section 508 tags only, so a default report means "this fails a conformance criterion". Category tags are opt-in for that reason: Axe matches requested tags with OR, so asking for `cat.keyboard` also pulls in best-practice rules such as `region` and `skip-link` that carry both tags. No live conformance rule is lost by leaving them out: the only rules reachable *only* through a `cat.*` tag are `duplicate-id` and `duplicate-id-active`, which Axe marks deprecated because WCAG removed SC 4.1.1. Add `best-practice` (landmark structure, heading order, `tabindex` hygiene) or a `cat.*` tag when you want that broader review.
+
+The same OR semantics apply to `experimental`, with one deliberate exception: five experimental rules -- `css-orientation-lock` (SC 1.3.4), `label-content-name-mismatch` (SC 2.5.3), `p-as-heading`, `table-fake-caption` and `td-has-header` (SC 1.3.1) -- also carry a `wcag*` tag and so run in the default set. In Axe, `experimental` describes how settled the heuristic is, not whether the criterion is real, so these are kept rather than filtered out. Adding the `experimental` tag pulls in the remaining experimental rules, which have no conformance tag of their own.
 
 **Scan scoping:**
 `scan_page`, `audit_site`, and `scan_page_matrix` accept `includeSelectors` and `excludeSelectors` to limit what Axe looks at. Use `includeSelectors` to audit one component (`["#checkout-form"]`) and `excludeSelectors` to drop third-party noise that pollutes every report (`["#cookie-banner", "iframe.intercom-frame"]`). Exclusions are applied after inclusions, so you can carve a widget out of an included subtree.
