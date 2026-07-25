@@ -4,6 +4,8 @@ import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { sanitizeForFilePath } from '../utils/fileUtils.js';
 import {
+  assertRuleOptionsValid,
+  axeRuleSchemaShape,
   axeScopeSchemaShape,
   axeTagValues,
   defaultAxeTags,
@@ -122,6 +124,7 @@ const auditSiteSchema = z.object({
   waitAfterNavigationMs: z.number().int().min(0).max(5000).default(250).describe('Extra wait after navigation before scanning.'),
   reportFile: z.string().optional().describe('Output JSON report file name.'),
   ...axeScopeSchemaShape,
+  ...axeRuleSchemaShape,
 }).superRefine((value, context) => {
   if (value.strategy === 'provided' && (!value.urls || !value.urls.length)) {
     context.addIssue({
@@ -364,6 +367,11 @@ const auditSite = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
+    // Rule ids apply to the whole run, so a bad one must fail before any tab is
+    // opened or any URL visited; leaving it to the per-page scan would crawl the
+    // entire site and write a "completed" report of nothing but errored pages.
+    assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
+
     const context = tab.context;
     const originalTab = tab;
     const queue: CrawlItem[] = [];
@@ -511,6 +519,8 @@ const auditSite = defineTabTool({
 
           const axeResult = await runAxeScan(crawlTab.page, {
             tags: params.violationsTag as AxeTag[],
+            rules: params.withRules,
+            disableRules: params.disableRules,
             include: params.includeSelectors,
             exclude: params.excludeSelectors,
           });
@@ -582,6 +592,8 @@ const auditSite = defineTabTool({
           includeIncomplete: params.includeIncomplete,
           includeSelectors: params.includeSelectors ?? null,
           excludeSelectors: params.excludeSelectors ?? null,
+          withRules: params.withRules ?? null,
+          disableRules: params.disableRules ?? null,
           maxNodesPerViolation: params.maxNodesPerViolation,
           waitAfterNavigationMs: params.waitAfterNavigationMs,
         },

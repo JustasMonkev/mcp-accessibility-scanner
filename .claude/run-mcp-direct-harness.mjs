@@ -33,6 +33,9 @@ const client = new Client({ name: 'mcp-accessibility-direct-harness', version: '
 const state = {
   toolNames: [],
   fixtureOrigin: '',
+  // Every path the fixture server was asked for, so a test can assert a tool
+  // rejected its arguments without visiting anything.
+  fixtureRequests: [],
 };
 
 class SkipError extends Error {}
@@ -293,6 +296,56 @@ const tests = [
     });
     assertText(leftovers, /"layers":\s*0/);
     assertText(leftovers, /"idInHtml":\s*false/);
+
+    // Rule-level control: two images with no alt (image-alt) plus a form input
+    // with no label (label), so each rule filter has a different rule to move.
+    await navigate([
+      '<title>Rules</title>',
+      '<img src="x"><img src="y">',
+      '<input type="text" name="q">',
+    ].join(''));
+    const ruleArgs = { violationsTag: ['wcag2a', 'wcag2aa'], includeIncomplete: false };
+    const both = await callTool('scan_page', ruleArgs);
+    assertViolationNodeCount(both, 'image-alt', 2);
+    assertViolationNodeCount(both, 'label', 1);
+
+    // withRules overrides violationsTag entirely: axe holds either a rule list
+    // or a tag list, never both.
+    const onlyLabel = await callTool('scan_page', { ...ruleArgs, withRules: ['label'] });
+    assertViolationNodeCount(onlyLabel, 'label', 1);
+    assertViolationNodeCount(onlyLabel, 'image-alt', 0);
+
+    // disableRules subtracts from whatever is selected — tags here...
+    const noImages = await callTool('scan_page', { ...ruleArgs, disableRules: ['image-alt'] });
+    assertViolationNodeCount(noImages, 'image-alt', 0);
+    assertViolationNodeCount(noImages, 'label', 1);
+    // ...and an explicit rule list here. Axe drops the disabled-rule flag once
+    // runOnly holds a rule list, so without the scanner subtracting up front
+    // this would still report image-alt.
+    const listMinusImages = await callTool('scan_page', {
+      ...ruleArgs,
+      withRules: ['image-alt', 'label'],
+      disableRules: ['image-alt'],
+    });
+    assertViolationNodeCount(listMinusImages, 'image-alt', 0);
+    assertViolationNodeCount(listMinusImages, 'label', 1);
+
+    // Emptying the rule list must fail, not fall back to scanning everything.
+    await assertToolError(
+        'scan_page',
+        { ...ruleArgs, withRules: ['image-alt'], disableRules: ['image-alt'] },
+        /disableRules disabled every rule in withRules \(image-alt\)/);
+
+    // A misspelled rule id would otherwise select/disable nothing and return a
+    // clean-looking report, so it must fail by name instead.
+    await assertToolError(
+        'scan_page',
+        { ...ruleArgs, withRules: ['label', 'image-altt'] },
+        /Unknown Axe rule id\(s\) in withRules: image-altt/);
+    await assertToolError(
+        'scan_page',
+        { ...ruleArgs, disableRules: ['colour-contrast'] },
+        /Unknown Axe rule id\(s\) in disableRules: colour-contrast/);
   }),
 
   test('browser_tabs', async () => {
@@ -400,6 +453,27 @@ const tests = [
     });
     if (redirected.structuredContent?.sessionLoss?.url !== `${state.fixtureOrigin}/signed-out`)
       throw new Error(`Expected sessionLoss at /signed-out, got ${JSON.stringify(redirected.structuredContent?.sessionLoss)}`);
+
+    // Rule ids are run-wide input, so a bad one must be rejected before the
+    // crawl starts. Otherwise every supplied URL is visited, errored, and
+    // written up as a completed audit.
+    const requestsBeforeBadRule = state.fixtureRequests.length;
+    await assertToolError(
+        'audit_site',
+        {
+          ...auditSiteDefaults,
+          maxPages: 3,
+          urls: [
+            `${state.fixtureOrigin}/audit-site`,
+            `${state.fixtureOrigin}/secure`,
+            `${state.fixtureOrigin}/secure-2`,
+          ],
+          withRules: ['image-altt'],
+        },
+        /Unknown Axe rule id\(s\) in withRules: image-altt/);
+    const visitedAfterBadRule = state.fixtureRequests.slice(requestsBeforeBadRule);
+    if (visitedAfterBadRule.length)
+      throw new Error(`audit_site visited ${visitedAfterBadRule.length} page(s) before rejecting an invalid rule id: ${visitedAfterBadRule.join(', ')}`);
   }),
 
   test('scan_page_matrix', async () => {
@@ -498,6 +572,54 @@ const tests = [
     const summary = result.structuredContent?.summary ?? {};
     if (summary.targetSizeIssueCount !== 2 || summary.focusObscuredIssueCount !== 2) {
       throw new Error(`Expected 2 target-size and 2 obscured findings, got ${JSON.stringify(summary)}`);
+    }
+  }),
+
+  test('audit_screen_reader', async () => {
+    await navigate([
+      '<title>ScreenReader</title><main>',
+      // Broken markup: one instance per check.
+      '<p><a href="/pricing">Read more</a></p>',
+      '<p><img src="/IMG_2048.jpg" alt="IMG_2048.jpg"></p>',
+      '<p><button aria-label="Submit form">Send</button></p>',
+      '<p><input type="text"></p>',
+      '<p><a href="/a.pdf">Download</a> <a href="/b.pdf">Download</a></p>',
+      '<div style="display:flex;flex-direction:row-reverse">',
+      '<button>Reversed first</button><button>Reversed second</button></div>',
+      // Correct markup: none of these may be flagged.
+      '<p><a href="/pricing-detail">Read more about pricing</a></p>',
+      '<p><img src="/team.jpg" alt="The team at the 2024 offsite"></p>',
+      '<p><button aria-label="Search products">Search</button></p>',
+      '<p><label>Email address <input type="email"></label></p>',
+      '<p><a href="/help">Help centre</a> <a href="/help">Help centre</a></p>',
+      '<div style="display:flex"><button>Ordered first</button><button>Ordered second</button></div>',
+      '<div style="columns:2;width:300px"><p>Column one top</p><p>Column one bottom</p>',
+      '<p>Column two top</p><p>Column two bottom</p></div>',
+      '</main>',
+    ].join(''));
+    const result = await callTool('audit_screen_reader', {
+      checkNames: true,
+      checkReadingOrder: true,
+      maxElements: 200,
+      maxFindingsPerCheck: 10,
+    });
+    const text = resultText(result);
+    const expected = [
+      /missing-accessible-name \| [1-9]/,
+      /uninformative-accessible-name \| [1-9]/,
+      /filename-as-accessible-name \| [1-9]/,
+      /label-in-name-mismatch \| [1-9]/,
+      /duplicate-accessible-name \| [1-9]/,
+      /reading-order-mismatch \| [1-9]/,
+    ];
+    for (const pattern of expected)
+      assertText(text, pattern);
+    assertText(text, /JSON report:/);
+    const clean = ['Read more about pricing', 'The team at the 2024 offsite', 'Search products',
+      'Email address', 'Help centre', 'Ordered first', 'Column one top'];
+    for (const label of clean) {
+      if (text.includes(label))
+        throw new Error(`Correct markup was flagged: ${label}\n${text.slice(0, 4000)}`);
     }
   }),
 
@@ -701,6 +823,7 @@ async function verifyCoverage(testCases, toolNames) {
 
 function startFixtureServer() {
   const server = http.createServer((request, response) => {
+    state.fixtureRequests.push(request.url);
     if (request.url === '/audit-site') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end('<!doctype html><html><head><title>AuditSite</title></head><body><img src="x"><h1>Audit Site</h1></body></html>');
