@@ -204,9 +204,72 @@ const tests = [
   }),
 
   test('scan_page', async () => {
-    await navigate('<title>Scan</title><img src="x"><h1>Scan</h1>');
+    // The background-image heading makes axe report color-contrast as
+    // "incomplete" rather than pass/fail, exercising the needs-review path.
+    await navigate('<title>Scan</title><img src="x"><h1 style="background-image:url(x);color:#777">Scan</h1>');
     const result = await callTool('scan_page', { violationsTag: ['wcag2a', 'wcag2aa'] });
     assertText(result, /Violations:/);
+    assertText(result, /Incomplete \(needs review/);
+    assertText(result, /Incomplete rule: color-contrast/);
+
+    const withoutIncomplete = await callTool('scan_page', {
+      violationsTag: ['wcag2a', 'wcag2aa'],
+      includeIncomplete: false,
+    });
+    if (/Incomplete/.test(resultText(withoutIncomplete)))
+      throw new Error('includeIncomplete=false still reported incomplete rules or their count');
+
+    // Defaults must mean "this fails WCAG/Section 508". Axe ORs runOnly tags,
+    // so a cat.* tag in the default set silently readmits best-practice rules
+    // like region and landmark-one-main, which this page triggers.
+    await navigate('<title>Defaults</title><h1>Defaults</h1><p>Loose content outside any landmark.</p>');
+    const defaults = resultText(await callTool('scan_page', { includeIncomplete: false }));
+    for (const ruleId of ['region', 'landmark-one-main']) {
+      if (new RegExp(`Violation rule: ${ruleId}\\b`).test(defaults))
+        throw new Error(`Default scan reported best-practice rule "${ruleId}"; defaults must be conformance-only`);
+    }
+    // Same page, best-practice requested: proves the rules really do fire here.
+    const bestPractice = resultText(await callTool('scan_page', {
+      violationsTag: ['best-practice'],
+      includeIncomplete: false,
+    }));
+    for (const ruleId of ['region', 'landmark-one-main']) {
+      if (!new RegExp(`Violation rule: ${ruleId}\\b`).test(bestPractice))
+        throw new Error(`Fixture no longer triggers "${ruleId}"; the default-tags assertion above proves nothing`);
+    }
+
+    // Scoping: one violating image inside the widget, one outside it.
+    await navigate([
+      '<title>Scope</title>',
+      '<div id="widget"><img src="x"></div>',
+      '<main id="content"><img src="y"></main>',
+    ].join(''));
+    const scanArgs = { violationsTag: ['wcag2a', 'wcag2aa'], includeIncomplete: false };
+    assertViolationNodeCount(await callTool('scan_page', scanArgs), 'image-alt', 2);
+    assertViolationNodeCount(
+        await callTool('scan_page', { ...scanArgs, includeSelectors: ['#content'] }), 'image-alt', 1);
+    assertViolationNodeCount(
+        await callTool('scan_page', { ...scanArgs, excludeSelectors: ['#widget'] }), 'image-alt', 1);
+    assertViolationNodeCount(
+        await callTool('scan_page', { ...scanArgs, excludeSelectors: ['#widget', '#content'] }), 'image-alt', 0);
+    // An exclude that is absent from this page is a legitimate no-op.
+    assertViolationNodeCount(
+        await callTool('scan_page', { ...scanArgs, excludeSelectors: ['#not-on-this-page'] }), 'image-alt', 2);
+
+    // Axe alone accepts a partly-matching include set and silently scans less;
+    // the scanner must refuse instead of returning a clean half-scoped report.
+    await assertToolError(
+        'scan_page',
+        { ...scanArgs, includeSelectors: ['#content', '#typo-not-here'] },
+        /No elements matched includeSelectors: #typo-not-here/);
+    await assertToolError(
+        'scan_page',
+        { ...scanArgs, includeSelectors: ['#nope-does-not-exist'] },
+        /No elements matched includeSelectors: #nope-does-not-exist/);
+    await assertToolError(
+        'scan_page',
+        { ...scanArgs, excludeSelectors: [':::not-css'] },
+        /Invalid CSS in excludeSelectors: :::not-css/);
   }),
 
   test('browser_tabs', async () => {
@@ -236,6 +299,9 @@ const tests = [
   }),
 
   test('audit_site', async () => {
+    // audit_site crawls in a second tab, so it needs an open page to return to.
+    // Without this the test only passes when an earlier test left a tab open.
+    await navigate('<title>AuditSiteStart</title><h1>Audit Site Start</h1>');
     const result = await callTool('audit_site', {
       strategy: 'provided',
       urls: [`${state.fixtureOrigin}/audit-site`],
@@ -250,6 +316,27 @@ const tests = [
       waitAfterNavigationMs: 50,
     });
     assertText(result, /JSON report:|scanned/i);
+
+    // Link discovery must not hang off the scan succeeding: the gate page fails
+    // its scoped scan, and the child is reachable only through it.
+    const throughErroredPage = await callTool('audit_site', {
+      strategy: 'links',
+      startUrl: `${state.fixtureOrigin}/audit-gate`,
+      maxPages: 5,
+      maxDepth: 1,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2a', 'wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 5,
+      waitAfterNavigationMs: 50,
+      includeSelectors: ['#only-on-child'],
+    });
+    assertText(throughErroredPage, /Errored pages: 1/);
+    assertText(throughErroredPage, /Scanned pages: 1/);
+    assertText(throughErroredPage, /audit-gate-child/);
   }),
 
   test('scan_page_matrix', async () => {
@@ -425,6 +512,33 @@ function assertText(result, pattern) {
     throw new Error(`Expected ${pattern} in result:\n${text.slice(0, 4000)}`);
 }
 
+// Counts nodes reported for one axe rule in a scan_page result. Each rule block
+// is `Violation rule: <id> ...` down to its `Violations...: [...]` JSON array.
+function assertViolationNodeCount(result, ruleId, expected) {
+  const text = resultText(result);
+  const blocks = [...text.matchAll(new RegExp(`Violation rule: ${ruleId} [\\s\\S]*?Violations[^:]*: (\\[[\\s\\S]*?\\n\\])`, 'g'))];
+  // A zero expectation must mean "the rule is absent", not "the format changed":
+  // require the report itself to be well formed before trusting an empty count.
+  // The incomplete count is omitted entirely when includeIncomplete is false.
+  if (!blocks.length && !/^Violations: \d+, (Incomplete: \d+, )?Passes: \d+/m.test(text))
+    throw new Error(`scan_page output is not in the expected format:\n${text.slice(0, 2000)}`);
+  const count = blocks.reduce((total, [, json]) => total + JSON.parse(json).length, 0);
+  if (count !== expected)
+    throw new Error(`Expected ${expected} ${ruleId} node(s), got ${count} in:\n${text.slice(0, 2000)}`);
+}
+
+async function assertToolError(name, args, pattern) {
+  let text = '';
+  try {
+    text = resultText(await callTool(name, args));
+  } catch (error) {
+    if (pattern.test(error.message))
+      return;
+    throw new Error(`Expected ${name} to fail matching ${pattern}, got:\n${error.message}`);
+  }
+  throw new Error(`Expected ${name} to fail matching ${pattern}, but it succeeded:\n${text.slice(0, 2000)}`);
+}
+
 function refFor(snapshotText, label) {
   const lines = snapshotText.split('\n');
   const line = lines.find(candidate => candidate.includes(label) && candidate.includes('[ref='));
@@ -457,6 +571,18 @@ function startFixtureServer() {
     if (request.url === '/audit-site') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end('<!doctype html><html><head><title>AuditSite</title></head><body><img src="x"><h1>Audit Site</h1></body></html>');
+      return;
+    }
+    // Gate page links to a child but lacks #only-on-child, so a scoped audit
+    // errors on the gate. The child must still be crawled through it.
+    if (request.url === '/audit-gate') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Gate</title></head><body><a href="/audit-gate-child">Child</a></body></html>');
+      return;
+    }
+    if (request.url === '/audit-gate-child') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>GateChild</title></head><body><div id="only-on-child"><img src="x"></div></body></html>');
       return;
     }
     if (request.url === '/network-json') {

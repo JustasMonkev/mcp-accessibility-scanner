@@ -19,15 +19,27 @@ import { z } from 'zod';
 import { defineTabTool, defineTool } from './tool.js';
 import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
-import { axeTagValues, dedupeAxeNodes, runAxeScan } from './axe.js';
+import { axeScopeSchemaShape, axeTagValues, defaultAxeTags, prepareAxeResults, runAxeScan } from './axe.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 
 const scanPageSchema = z.object({
   violationsTag: z
       .array(z.enum(axeTagValues))
       .min(1)
-      .default([...axeTagValues])
-      .describe('Array of tags to filter violations by. If not specified, all violations are returned.')
+      .default([...defaultAxeTags])
+      .describe('Axe tags to scan for. Defaults to the WCAG and Section 508 conformance tags, so a default report means "this fails a conformance criterion". The category tags ("cat.*") and "best-practice" also select rules that are not conformance failures, so they must be requested explicitly.'),
+  includeIncomplete: z
+      .boolean()
+      .default(true)
+      .describe('Include Axe "incomplete" results — checks Axe could not decide automatically (e.g. contrast over an image). Inspect the page yourself to resolve them.'),
+  maxNodesPerViolation: z
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .default(10)
+      .describe('Maximum nodes reported per rule. Raise it when you need every occurrence of a rule rather than a sample.'),
+  ...axeScopeSchemaShape,
 });
 
 const snapshotSchema = z.object({
@@ -56,26 +68,59 @@ const scanPage = defineTool({
 
   handle: async (context, params, response) => {
     const tab = context.currentTabOrDie();
-    const results = await runAxeScan(tab.page, params.violationsTag);
+    const results = await runAxeScan(tab.page, {
+      tags: params.violationsTag,
+      include: params.includeSelectors,
+      exclude: params.excludeSelectors,
+    });
 
+    // Omit the incomplete count entirely when it was not requested, matching
+    // audit_site: a bare "Incomplete: 3" with no rule blocks below reads as
+    // findings that were dropped from the report.
+    const incompleteCount = params.includeIncomplete ? `Incomplete: ${results.incomplete.length}, ` : '';
     response.addResult([
       `URL: ${results.url}`,
       '',
-      `Violations: ${results.violations.length}, Incomplete: ${results.incomplete.length}, Passes: ${results.passes.length}, Inapplicable: ${results.inapplicable.length}`,
+      `Violations: ${results.violations.length}, ${incompleteCount}Passes: ${results.passes.length}, Inapplicable: ${results.inapplicable.length}`,
     ].join('\n'));
 
 
-    results.violations.forEach(violation => {
-      const uniqueNodes = dedupeAxeNodes(violation.nodes);
-
+    // Trimmed nodes drop axe's any/all/none check arrays, which are the bulk of
+    // a raw result — a content-heavy page otherwise serializes to ~1MB here.
+    const { deduped, trimmed: violations } = prepareAxeResults(results.violations, params.maxNodesPerViolation);
+    violations.forEach((violation, index) => {
       response.addResult([
         '',
+        `Violation rule: ${violation.id} (${violation.impact ?? 'unknown'}) — ${violation.help}`,
+        `Help: ${violation.helpUrl}`,
         `Tags : ${violation.tags}`,
-        `Violations: ${JSON.stringify(uniqueNodes, null, 2)}`,
+        `Violations${nodeCountSuffix(violation.nodes.length, deduped[index].nodes.length)}: ${JSON.stringify(violation.nodes, null, 2)}`,
       ].join('\n'));
     });
+
+    if (params.includeIncomplete && results.incomplete.length) {
+      const incomplete = prepareAxeResults(results.incomplete, params.maxNodesPerViolation);
+      response.addResult([
+        '',
+        `Incomplete (needs review — Axe could not decide, verify these on the page): ${incomplete.trimmed.length} rule(s)`,
+      ].join('\n'));
+      incomplete.trimmed.forEach((item, index) => {
+        response.addResult([
+          '',
+          `Incomplete rule: ${item.id} (${item.impact ?? 'unknown'}) — ${item.help}`,
+          `Help: ${item.helpUrl}`,
+          `Nodes${nodeCountSuffix(item.nodes.length, incomplete.deduped[index].nodes.length)}: ${JSON.stringify(item.nodes, null, 2)}`,
+        ].join('\n'));
+      });
+    }
   },
 });
+
+// Node lists are capped by maxNodesPerViolation; say so rather than letting a
+// rule with 40 occurrences look identical to one with 10.
+function nodeCountSuffix(shown: number, total: number): string {
+  return shown < total ? ` (showing ${shown} of ${total} nodes, raise maxNodesPerViolation for the rest)` : '';
+}
 
 const snapshot = defineTool({
   capability: 'core',

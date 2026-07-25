@@ -3,11 +3,12 @@ import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { sanitizeForFilePath } from '../utils/fileUtils.js';
 import {
+  axeScopeSchemaShape,
   axeTagValues,
-  dedupeAxeNodes,
+  defaultAxeTags,
+  prepareAxeResults,
   runAxeScan,
   summarizeAxeViolations,
-  trimAxeResults,
   type AxeTag,
   type TrimmedAxeViolation
 } from './axe.js';
@@ -26,6 +27,7 @@ type VariantResult = {
   };
   summary: ReturnType<typeof summarizeAxeViolations>;
   violations: TrimmedAxeViolation[];
+  incomplete: TrimmedAxeViolation[];
   nodeCountByRuleId: Record<string, number>;
   diffFromBaseline: {
     newViolationIds: string[];
@@ -77,11 +79,13 @@ const defaultVariants: z.output<typeof variantSchema>[] = [
 
 const scanPageMatrixSchema = z.object({
   variants: z.array(variantSchema).min(1).optional().describe('Variant list to run. Defaults to baseline/mobile/desktop/forced-colors/reduced-motion/zoom-200.'),
-  violationsTag: z.array(z.enum(axeTagValues)).min(1).default([...axeTagValues]).describe('Axe tags to include in scans.'),
+  violationsTag: z.array(z.enum(axeTagValues)).min(1).default([...defaultAxeTags]).describe('Axe tags to include in scans.'),
+  includeIncomplete: z.boolean().default(true).describe('Also collect Axe "incomplete" results per variant — checks Axe could not decide automatically.'),
   maxNodesPerViolation: z.number().int().min(1).max(50).default(10).describe('Maximum nodes kept per violation in the report.'),
   waitAfterApplyMs: z.number().int().min(0).max(5000).default(250).describe('Wait after applying each variant before scanning.'),
   reloadBetweenVariants: z.boolean().default(false).describe('Reload page between variants.'),
   reportFile: z.string().optional().describe('Output JSON report file name.'),
+  ...axeScopeSchemaShape,
 });
 
 function normalizeMedia(variantMedia: z.output<typeof variantSchema>['media'] | undefined) {
@@ -157,13 +161,13 @@ const scanPageMatrix = defineTabTool({
 
         await tab.waitForTimeout(params.waitAfterApplyMs);
 
-        const axeResult = await runAxeScan(tab.page, params.violationsTag as AxeTag[]);
-        const dedupedViolations = axeResult.violations.map(violation => ({
-          ...violation,
-          nodes: dedupeAxeNodes(violation.nodes),
-        }));
-        const trimmedViolations = trimAxeResults({ violations: dedupedViolations }, { maxNodesPerViolation: params.maxNodesPerViolation, dedupe: false });
-        const nodeCountByRuleId = countNodesByRule(dedupedViolations);
+        const axeResult = await runAxeScan(tab.page, {
+          tags: params.violationsTag as AxeTag[],
+          include: params.includeSelectors,
+          exclude: params.excludeSelectors,
+        });
+        const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
+        const nodeCountByRuleId = countNodesByRule(violations.deduped);
 
         variantResults.push({
           name: variant.name,
@@ -172,8 +176,11 @@ const scanPageMatrix = defineTabTool({
             media: normalizeMedia(variant.media),
             zoomPercent: variant.zoomPercent ?? null,
           },
-          summary: summarizeAxeViolations(trimmedViolations),
-          violations: trimmedViolations,
+          summary: summarizeAxeViolations(violations.trimmed),
+          violations: violations.trimmed,
+          incomplete: params.includeIncomplete
+            ? prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation).trimmed
+            : [],
           nodeCountByRuleId,
           diffFromBaseline: {
             newViolationIds: [],
@@ -212,6 +219,9 @@ const scanPageMatrix = defineTabTool({
         baselineVariant: variantResults[0]?.name ?? 'baseline',
         options: {
           violationsTag: params.violationsTag,
+          includeIncomplete: params.includeIncomplete,
+          includeSelectors: params.includeSelectors ?? null,
+          excludeSelectors: params.excludeSelectors ?? null,
           maxNodesPerViolation: params.maxNodesPerViolation,
           waitAfterApplyMs: params.waitAfterApplyMs,
           reloadBetweenVariants: params.reloadBetweenVariants,
@@ -247,6 +257,7 @@ const scanPageMatrix = defineTabTool({
         name: result.name,
         totalViolations: result.summary.totalRules,
         totalNodes: result.summary.totalNodes,
+        totalIncomplete: result.incomplete.length,
         newViolationIds: result.diffFromBaseline.newViolationIds,
         resolvedViolationIds: result.diffFromBaseline.resolvedViolationIds,
         changedRuleIds: Object.keys(result.diffFromBaseline.changedCounts),
@@ -255,11 +266,15 @@ const scanPageMatrix = defineTabTool({
     });
 
     const lines = [
-      'Variant | Violations | Nodes | Top new vs baseline',
-      '--- | --- | --- | ---',
+      'Variant | Violations | Nodes | Incomplete | Top new vs baseline',
+      '--- | --- | --- | --- | ---',
       ...variantResults.map(result => {
         const topNew = result.diffFromBaseline.newViolationIds.slice(0, 5).join(', ') || '-';
-        return `${result.name} | ${result.summary.totalRules} | ${result.summary.totalNodes} | ${topNew}`;
+        // "-" rather than 0: with collection off, 0 is indistinguishable from
+        // "no needs-review findings". audit_site omits its section for the same
+        // reason.
+        const incomplete = params.includeIncomplete ? String(result.incomplete.length) : '-';
+        return `${result.name} | ${result.summary.totalRules} | ${result.summary.totalNodes} | ${incomplete} | ${topNew}`;
       }),
       '',
       `JSON report: ${reportPath}`,

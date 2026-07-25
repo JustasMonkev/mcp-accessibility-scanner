@@ -22,11 +22,11 @@ function createViolation(id: string, html: string, target: string[] = ['#target'
   };
 }
 
-function createAxeResult(url: string, violations: any[]) {
+function createAxeResult(url: string, violations: any[], incomplete: any[] = []) {
   return {
     url,
     violations,
-    incomplete: [],
+    incomplete,
     passes: [],
     inapplicable: [],
   } as any;
@@ -142,6 +142,107 @@ describe('audit_site tool', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
+  });
+
+  it('passes tags and scope selectors through to the axe scan', async () => {
+    const { context, response } = createHarness({ 'https://example.com/': [] });
+    const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan')
+        .mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 1,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      includeSelectors: ['#main'],
+      excludeSelectors: ['#chat-widget'],
+    } as any, response);
+
+    expect(runAxeScanSpy.mock.calls[0][1]).toEqual({
+      tags: ['wcag2aa'],
+      include: ['#main'],
+      exclude: ['#chat-widget'],
+    });
+  });
+
+  it('reports incomplete results per page and aggregated, and drops them when disabled', async () => {
+    const runScan = async (page: any) => createAxeResult(
+        page.url(),
+        [createViolation('image-alt', '<img>')],
+        [createViolation('color-contrast', '<h1>Hi</h1>', ['h1'])]
+    );
+
+    const included = createHarness({ 'https://example.com/': [] });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(runScan);
+    const baseParams = {
+      strategy: 'links',
+      maxPages: 1,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    };
+
+    await tool.handle(included.context as any, { ...baseParams, includeIncomplete: true } as any, included.response);
+    const withIncomplete = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(withIncomplete.pages[0].incomplete.map((item: any) => item.id)).toEqual(['color-contrast']);
+    expect(withIncomplete.summary.incomplete.map((item: any) => item.id)).toEqual(['color-contrast']);
+    // Incomplete results must never leak into the violations list.
+    expect(withIncomplete.summary.violations.map((item: any) => item.id)).toEqual(['image-alt']);
+
+    writeFileSpy.mockClear();
+    const excluded = createHarness({ 'https://example.com/': [] });
+    await tool.handle(excluded.context as any, { ...baseParams, includeIncomplete: false } as any, excluded.response);
+    const withoutIncomplete = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(withoutIncomplete.pages[0].incomplete).toEqual([]);
+    expect(withoutIncomplete.summary.incomplete).toEqual([]);
+  });
+
+  it('keeps crawling through a page whose scan failed', async () => {
+    // A scoped scan throws when includeSelectors is absent from one page. If
+    // discovery hung off the scan succeeding, every descendant reachable only
+    // through that page would vanish from the audit without a trace.
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/gate'],
+      'https://example.com/gate': ['https://example.com/behind-the-gate'],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      if (page.url() === 'https://example.com/gate')
+        throw new Error('No elements matched includeSelectors: #main');
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      includeSelectors: ['#main'],
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    const byUrl = new Map<string, any>(report.pages.map((page: any) => [page.url, page]));
+    expect(byUrl.get('https://example.com/gate').status).toBe('error');
+    expect(byUrl.get('https://example.com/behind-the-gate')?.status).toBe('scanned');
+    expect(byUrl.get('https://example.com/behind-the-gate')?.discoveredFrom).toBe('https://example.com/gate');
   });
 
   it('respects BFS maxPages and maxDepth limits', async () => {
