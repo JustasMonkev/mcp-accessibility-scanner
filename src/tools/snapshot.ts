@@ -20,7 +20,7 @@ import { z } from 'zod';
 import { defineTabTool, defineTool } from './tool.js';
 import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
-import { axeScopeSchemaShape, axeTagValues, dedupeAxeNodes, defaultAxeTags, prepareAxeResults, runAxeScan } from './axe.js';
+import { axeRuleSchemaShape, axeScopeSchemaShape, axeTagValues, dedupeAxeNodes, defaultAxeTags, prepareAxeResults, runAxeScan } from './axe.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 import { sanitizeForFilePath } from '../utils/fileUtils.js';
 
@@ -53,6 +53,7 @@ const scanPageSchema = z.object({
       .default(false)
       .describe(`Capture a full-page PNG with every violating element outlined and labelled with its rule ids, then remove the markers. Off by default because screenshots are expensive. At most ${maxAnnotatedElements} elements are marked; nodes that are hidden, zero-size, off-canvas, or inside an iframe cannot be marked and are reported as skipped.`),
   ...axeScopeSchemaShape,
+  ...axeRuleSchemaShape,
 });
 
 const snapshotSchema = z.object({
@@ -83,6 +84,8 @@ const scanPage = defineTool({
     const tab = context.currentTabOrDie();
     const results = await runAxeScan(tab.page, {
       tags: params.violationsTag,
+      rules: params.withRules,
+      disableRules: params.disableRules,
       include: params.includeSelectors,
       exclude: params.excludeSelectors,
     });

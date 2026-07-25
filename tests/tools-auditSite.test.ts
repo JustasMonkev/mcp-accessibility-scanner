@@ -164,7 +164,7 @@ describe('audit_site tool', () => {
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
   });
 
-  it('passes tags and scope selectors through to the axe scan', async () => {
+  it('passes tags, rule filters and scope selectors through to the axe scan', async () => {
     const { context, response } = createHarness({ 'https://example.com/': [] });
     const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan')
         .mockImplementation(async (page: any) => createAxeResult(page.url(), []));
@@ -183,13 +183,23 @@ describe('audit_site tool', () => {
       waitAfterNavigationMs: 0,
       includeSelectors: ['#main'],
       excludeSelectors: ['#chat-widget'],
+      withRules: ['image-alt'],
+      disableRules: ['color-contrast'],
     } as any, response);
 
     expect(runAxeScanSpy.mock.calls[0][1]).toEqual({
       tags: ['wcag2aa'],
+      rules: ['image-alt'],
+      disableRules: ['color-contrast'],
       include: ['#main'],
       exclude: ['#chat-widget'],
     });
+
+    // The report has to say which rule filter produced it, or a stored audit
+    // cannot be told apart from a full scan.
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.metadata.options.withRules).toEqual(['image-alt']);
+    expect(report.metadata.options.disableRules).toEqual(['color-contrast']);
   });
 
   it('reports incomplete results per page and aggregated, and drops them when disabled', async () => {
@@ -464,6 +474,83 @@ describe('audit_site tool', () => {
       maxNodesPerViolation: 10,
       waitAfterNavigationMs: 0,
     } as any, response)).rejects.toThrow('excludePathPatterns[0] is too long');
+  });
+
+  it('rejects unknown rule ids before crawling anything, instead of erroring every page', async () => {
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+    const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan');
+
+    await expect(tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/', 'https://example.com/pricing', 'https://example.com/contact'],
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      withRules: ['image-altt'],
+    } as any, response)).rejects.toThrow('Unknown Axe rule id(s) in withRules: image-altt');
+
+    // The point of the up-front check: no tab opened, no page visited, no
+    // report claiming a completed audit.
+    expect(context.newTab).not.toHaveBeenCalled();
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
+    expect(runAxeScanSpy).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a disableRules set that empties withRules before crawling anything', async () => {
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/'],
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      withRules: ['image-alt'],
+      disableRules: ['image-alt'],
+    } as any, response)).rejects.toThrow('disableRules disabled every rule in withRules (image-alt)');
+
+    expect(context.newTab).not.toHaveBeenCalled();
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
+  });
+
+  it('still validates scope selectors per page, not up front', async () => {
+    // A component may legitimately be missing from some crawled pages, so an
+    // unmatched selector is a page-level error — unlike a bad rule id.
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+    vi.spyOn(axe, 'runAxeScan').mockRejectedValue(new Error('No elements matched includeSelectors: #missing'));
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/'],
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      includeSelectors: ['#missing'],
+    } as any, response);
+
+    expect(crawlTab.navigate).toHaveBeenCalledTimes(1);
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages[0].status).toBe('error');
+    expect(report.pages[0].error).toContain('No elements matched includeSelectors');
   });
 
   it('includes subdomains when sameOriginOnly=true and includeSubdomains=true', async () => {

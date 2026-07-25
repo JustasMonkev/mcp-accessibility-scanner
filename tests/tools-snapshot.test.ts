@@ -270,7 +270,7 @@ describe('Snapshot Tools', () => {
       return { context, response, text };
     }
 
-    it('passes tags and scope selectors through to the axe scan', async () => {
+    it('passes tags, rule filters and scope selectors through to the axe scan', async () => {
       const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan').mockResolvedValue(scanResult([]));
       const { context, response } = scanHarness();
 
@@ -280,10 +280,14 @@ describe('Snapshot Tools', () => {
         maxNodesPerViolation: 10,
         includeSelectors: ['#checkout'],
         excludeSelectors: ['#cookie-banner'],
+        withRules: ['image-alt'],
+        disableRules: ['color-contrast'],
       } as any, response as any);
 
       expect(runAxeScanSpy.mock.calls[0][1]).toEqual({
         tags: ['wcag2aa'],
+        rules: ['image-alt'],
+        disableRules: ['color-contrast'],
         include: ['#checkout'],
         exclude: ['#cookie-banner'],
       });

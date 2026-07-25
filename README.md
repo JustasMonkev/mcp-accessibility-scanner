@@ -312,6 +312,7 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 - `includeIncomplete` (default `true`): also report Axe "incomplete" results
 - `maxNodesPerViolation` (default `10`): cap on nodes reported per rule
 - `includeSelectors` / `excludeSelectors`: CSS selectors that scope the scan
+- `withRules` / `disableRules`: Axe rule ids that narrow which rules run
 - `annotateScreenshot` (default `false`): capture an annotated screenshot of the violations
 
 **Annotated screenshots:**
@@ -339,6 +340,15 @@ Selectors are resolved before the scan runs:
 - An `excludeSelectors` entry that matches nothing is a no-op, not an error -- a crawl legitimately visits pages that lack the excluded widget.
 
 In `audit_site`, selectors apply to every crawled page, so an `includeSelectors` value that is absent from a given page marks *that page* as errored in the report while the crawl continues. Link discovery runs before the scan, so pages reachable only through an errored page are still crawled.
+
+**Rule-level control:**
+`scan_page`, `audit_site`, and `scan_page_matrix` accept `withRules` and `disableRules` to pick individual Axe rules instead of whole tag sets. Use `withRules` to re-check one rule after a fix (`["color-contrast"]`) and `disableRules` to mute a rule you have already triaged (`["region"]`). Rule ids are the ones Axe reports (`image-alt`, `color-contrast`, ...); see the [Deque rule reference](https://dequeuniversity.com/rules/axe/).
+
+- **`withRules` overrides `violationsTag`.** Axe can run either a rule list or a tag list, never both, so when `withRules` is set the tags are ignored entirely -- `withRules: ["image-alt"]` runs exactly that one rule regardless of `violationsTag`. Rule ids are the more specific request, so they win.
+- **`disableRules` subtracts from whatever is selected.** It applies to `violationsTag` and `withRules` alike. (Axe itself ignores disabled rules once you give it an explicit rule list; the scanner subtracts them up front so the two options mean the same thing together as apart.) Disabling every rule in `withRules` is an error rather than an empty scan.
+- **Unknown rule ids fail the scan, naming the id.** Both options are checked against Axe's rule catalogue before the browser is touched, so a typo is reported as `Unknown Axe rule id(s) in withRules: image-altt` rather than surfacing later as an `frame.evaluate` failure from inside the page. Rule ids apply to a whole run, so `audit_site` and `scan_page_matrix` check them once before they touch the page -- a bad id fails the call outright instead of crawling every URL, or reloading and re-emulating the page, before rejecting the argument.
+
+`audit_site` and `scan_page_matrix` record both values in their JSON report metadata, so a stored report can be told apart from a full scan.
 
 **Incomplete ("needs review") results:**
 Axe returns `incomplete` for checks it cannot decide on its own -- contrast over a background image or gradient, ambiguous labels, elements it could not fully evaluate. `scan_page`, `audit_site`, and `scan_page_matrix` report these in a section separate from violations so you can resolve them by inspecting the page (screenshot, snapshot, `browser_evaluate`). Set `includeIncomplete: false` to suppress them.
