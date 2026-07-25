@@ -31,6 +31,10 @@ function focusPoint(overrides: Partial<FocusPoint>): FocusPoint {
     boundingBox: { x: 0, y: 0, width: 40, height: 20 },
     inViewport: true,
     hasVisibleIndicator: true,
+    isPointerTarget: false,
+    inlineTarget: false,
+    neighborTargets: [],
+    obstruction: null,
     scrollX: 0,
     scrollY: 0,
     ...overrides,
@@ -97,6 +101,8 @@ describe('audit_keyboard tool', () => {
       checkFocusTrap: true,
       checkFocusVisibility: true,
       checkFocusJumps: true,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
@@ -126,6 +132,8 @@ describe('audit_keyboard tool', () => {
       checkFocusTrap: false,
       checkFocusVisibility: true,
       checkFocusJumps: true,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 10,
       screenshotOnIssue: true,
       maxIssueScreenshots: 1,
@@ -133,6 +141,115 @@ describe('audit_keyboard tool', () => {
 
     expect(page.screenshot).toHaveBeenCalledTimes(1);
     expect(response.result()).toContain('Issue screenshots:');
+  });
+
+  it('reports WCAG 2.2 target size and obscured focus findings without flagging compliant stops', async () => {
+    const { context, response } = createHarness([
+      focusPoint({ role: 'document', tagName: 'BODY' }),
+      focusPoint({
+        role: 'link', tagName: 'A', name: 'Tiny link', isPointerTarget: true,
+        boundingBox: { x: 0, y: 0, width: 12, height: 12 },
+        neighborTargets: [{ x: 14, y: 0, width: 12, height: 12 }],
+      }),
+      focusPoint({
+        role: 'button', tagName: 'BUTTON', name: 'Compliant', isPointerTarget: true,
+        boundingBox: { x: 0, y: 100, width: 24, height: 24 },
+        obstruction: { sampled: 5, blocked: 2, blockedBy: 'div.sticky' },
+      }),
+      focusPoint({
+        role: 'link', tagName: 'A', name: 'Buried', isPointerTarget: true,
+        boundingBox: { x: 0, y: 400, width: 80, height: 30 },
+        obstruction: { sampled: 5, blocked: 5, blockedBy: 'div#sticky-footer' },
+      }),
+    ]);
+
+    await tool.handle(context as any, {
+      maxTabs: 3,
+      includeShiftTab: false,
+      stopOnCycle: false,
+      cycleWindow: 10,
+      checkSkipLink: false,
+      skipLinkMaxTabs: 3,
+      activateSkipLink: false,
+      checkFocusTrap: false,
+      checkFocusVisibility: false,
+      checkFocusJumps: false,
+      checkTargetSize: true,
+      checkFocusObscured: true,
+      jumpScrollThresholdPx: 800,
+      screenshotOnIssue: false,
+      maxIssueScreenshots: 3,
+    } as any, response);
+
+    const text = response.result();
+    expect(text).toContain('Target size below 24x24 CSS px');
+    expect(text).toContain('Tiny link is 12x12 CSS px');
+    expect(text).toContain('Buried hidden behind div#sticky-footer');
+    expect(text).not.toContain('Compliant');
+    const report = JSON.parse(writeFileSpy.mock.calls[0]?.[1] as string);
+    expect(report.targetSizeIssues).toHaveLength(1);
+    expect(report.focusObscuredIssues).toHaveLength(1);
+    expect((response.structuredContent() as any).summary).toMatchObject({
+      targetSizeIssueCount: 1,
+      focusObscuredIssueCount: 1,
+    });
+  });
+
+  it('reports an obscured non-pointer-target and keeps inline-block and disabled-neighbour stops clean', async () => {
+    const { context, response } = createHarness([
+      focusPoint({ role: 'document', tagName: 'BODY' }),
+      // Inline-level link inside a sentence: crowded, but exempt.
+      focusPoint({
+        role: 'link', tagName: 'A', name: 'Inline block terms', isPointerTarget: true, inlineTarget: true,
+        boundingBox: { x: 0, y: 340, width: 12, height: 18 },
+        neighborTargets: [{ x: 16, y: 340, width: 12, height: 18 }],
+      }),
+      // Only neighbour is a disabled button, which measurement no longer collects.
+      focusPoint({
+        role: 'link', tagName: 'A', name: 'Isolated link', isPointerTarget: true,
+        boundingBox: { x: 0, y: 400, width: 18, height: 18 },
+      }),
+      // Transparent click-catcher: hit-tested but paints nothing.
+      focusPoint({
+        role: 'button', tagName: 'BUTTON', name: 'Covered control', isPointerTarget: true,
+        boundingBox: { x: 300, y: 400, width: 40, height: 30 },
+        obstruction: { sampled: 5, blocked: 0, blockedBy: null },
+      }),
+      // Focusable but not a pointer target, fully hidden by an opaque sticky panel.
+      focusPoint({
+        role: 'div', tagName: 'DIV', name: 'Editable region', isPointerTarget: false,
+        boundingBox: { x: 0, y: 460, width: 200, height: 40 },
+        obstruction: { sampled: 5, blocked: 5, blockedBy: 'div#panel' },
+      }),
+    ]);
+
+    await tool.handle(context as any, {
+      maxTabs: 4,
+      includeShiftTab: false,
+      stopOnCycle: false,
+      cycleWindow: 10,
+      checkSkipLink: false,
+      skipLinkMaxTabs: 3,
+      activateSkipLink: false,
+      checkFocusTrap: false,
+      checkFocusVisibility: false,
+      checkFocusJumps: false,
+      checkTargetSize: true,
+      checkFocusObscured: true,
+      jumpScrollThresholdPx: 800,
+      screenshotOnIssue: false,
+      maxIssueScreenshots: 3,
+    } as any, response);
+
+    const text = response.result();
+    expect(text).toContain('Editable region hidden behind div#panel');
+    expect(text).not.toContain('Inline block terms is');
+    expect(text).not.toContain('Isolated link is');
+    expect(text).not.toContain('Covered control');
+    expect((response.structuredContent() as any).summary).toMatchObject({
+      targetSizeIssueCount: 0,
+      focusObscuredIssueCount: 1,
+    });
   });
 
   it('emits progress notifications for each keyboard step', async () => {
@@ -160,6 +277,8 @@ describe('audit_keyboard tool', () => {
       checkFocusTrap: false,
       checkFocusVisibility: false,
       checkFocusJumps: false,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
