@@ -13,12 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    // Agent worktrees live under .claude/worktrees and carry their own copy of
+    // tests/; without this they are collected alongside the real suite.
+    exclude: [...configDefaults.exclude, '.claude/worktrees/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html', 'lcov'],
