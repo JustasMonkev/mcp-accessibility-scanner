@@ -34,6 +34,7 @@ import verify from './tools/verify.js';
 import auditSite from './tools/auditSite.js';
 import scanPageMatrix from './tools/scanPageMatrix.js';
 import auditKeyboard from './tools/auditKeyboard.js';
+import auditScreenReader from './tools/auditScreenReader.js';
 
 import type { Tool } from './tools/tool.js';
 import type { FullConfig } from './config.js';
@@ -59,6 +60,7 @@ export const allTools: Tool<any>[] = [
   ...auditSite,
   ...scanPageMatrix,
   ...auditKeyboard,
+  ...auditScreenReader,
 ];
 
 export function filteredTools(config: FullConfig) {
@@ -68,8 +70,9 @@ export function filteredTools(config: FullConfig) {
 export const serverInstructions = [
   'This server runs automated web accessibility audits (axe-core / WCAG) and drives a real browser via Playwright.',
   'Use `browser_navigate` to load a page first. Then use `audit_site` to crawl and scan multiple pages of a site,',
-  '`scan_page_matrix` to scan the current page across viewports and WCAG tag sets, and `audit_keyboard` to check',
-  'keyboard navigation, focus visibility and skip links. Results are returned as markdown with axe-core rule ids,',
+  '`scan_page_matrix` to scan the current page across viewports and WCAG tag sets, `audit_keyboard` to check',
+  'keyboard navigation, focus visibility and skip links, and `audit_screen_reader` to check accessible name quality',
+  'and reading order. Results are returned as markdown with axe-core rule ids,',
   'impact levels, failure summaries and remediation links. Regular browser interaction tools (click, type, snapshot,',
   'screenshot, tabs) are also available for navigating to the state you want to audit.',
 ].join(' ');

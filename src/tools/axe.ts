@@ -1,4 +1,5 @@
 import { AxeBuilder } from '@axe-core/playwright';
+import axe from 'axe-core';
 import type { AxeResults } from 'axe-core';
 import { z } from 'zod';
 
@@ -24,6 +25,14 @@ export type AxeTag = (typeof axeTagValues)[number];
 // the `best-practice` tag does not make those rules opt-in. Almost nothing is
 // lost: the only rules reachable solely through a `cat.*` tag are `duplicate-id`
 // and `duplicate-id-active`, both deprecated in Axe since WCAG dropped SC 4.1.1.
+//
+// Five rules tagged `experimental` also carry a real `wcag*` tag and therefore
+// still run by default: css-orientation-lock (SC 1.3.4),
+// label-content-name-mismatch (SC 2.5.3), p-as-heading, table-fake-caption and
+// td-has-header (SC 1.3.1). That is deliberate. `experimental` in Axe describes
+// how settled the heuristic is, not whether the criterion is real, so filtering
+// them out would drop genuine conformance coverage from the default scan — the
+// opposite of what this tag set is for.
 export const defaultAxeTags: readonly AxeTag[] = axeTagValues.filter(
     tag => tag.startsWith('wcag') || tag === 'section508'
 );
@@ -49,6 +58,8 @@ export type TrimmedAxeViolation = {
 
 export type AxeScanOptions = {
   tags?: readonly AxeTag[];
+  rules?: readonly string[];
+  disableRules?: readonly string[];
   include?: readonly string[];
   exclude?: readonly string[];
 };
@@ -58,6 +69,53 @@ export const axeScopeSchemaShape = {
   includeSelectors: z.array(z.string().min(1)).optional().describe('CSS selectors to restrict the scan to, e.g. ["#checkout-form"]. Omit to scan the whole page. Each selector may match multiple elements.'),
   excludeSelectors: z.array(z.string().min(1)).optional().describe('CSS selectors to exclude from the scan, e.g. ["#cookie-banner", "iframe.chat-widget"]. Applied after includeSelectors, so it can carve regions out of an included subtree.'),
 };
+
+// Shared by every scan tool so rule filtering means the same thing everywhere.
+export const axeRuleSchemaShape = {
+  withRules: z.array(z.string().min(1)).optional().describe('Run only these Axe rule ids, e.g. ["color-contrast", "image-alt"]. Axe can run a rule list or a tag list but never both, so setting withRules ignores violationsTag entirely. Unknown rule ids are rejected rather than silently skipped.'),
+  disableRules: z.array(z.string().min(1)).optional().describe('Axe rule ids to skip, e.g. ["color-contrast"]. Unlike withRules this narrows whatever is already selected, so it applies to violationsTag and withRules alike. Disabling every rule in withRules is an error, not an empty scan. Unknown rule ids are rejected rather than silently skipped.'),
+};
+
+// The rule catalogue comes from the same axe-core build that AxeBuilder injects
+// into the page (it ships `axe.source`), so ids can never drift from what the
+// scan actually supports and no extra injection is needed to check them.
+// package.json pins axe-core to the exact version @axe-core/playwright requires
+// so the two can never resolve to different builds.
+// Axe does reject unknown ids itself, but only from inside the page after
+// injection, surfacing as an opaque `frame.evaluate` failure; checking up front
+// names the bad id and costs nothing.
+let knownRuleIds: Set<string> | undefined;
+function assertRuleIdsExist(ruleIds: readonly string[], label: 'withRules' | 'disableRules') {
+  if (!ruleIds.length)
+    return;
+  knownRuleIds ??= new Set(axe.getRules().map(rule => rule.ruleId));
+  const unknown = ruleIds.filter(ruleId => !knownRuleIds!.has(ruleId));
+  if (unknown.length)
+    throw new Error(`Unknown Axe rule id(s) in ${label}: ${unknown.join(', ')}. See https://dequeuniversity.com/rules/axe/ for valid ids.`);
+}
+
+// Rule options are run-wide input and need no page, so a crawler can validate
+// them once before navigating anything instead of failing every page in turn.
+// Returns the rule list to actually run, empty when the caller passed none.
+// (Scope selectors stay per-page on purpose: a component may legitimately be
+// absent from some pages of a crawl.)
+export function assertRuleOptionsValid(options: Pick<AxeScanOptions, 'rules' | 'disableRules'>): string[] {
+  assertRuleIdsExist(options.rules ?? [], 'withRules');
+  assertRuleIdsExist(options.disableRules ?? [], 'disableRules');
+  if (!options.rules?.length)
+    return [];
+  // axe's ruleShouldRun returns on the runOnly-is-a-rule-list branch before it
+  // ever reads the per-rule `enabled` flag that disableRules sets, so passing
+  // both would silently run a rule the caller asked to disable. Subtract here
+  // so disableRules means the same thing next to withRules as next to tags.
+  const disabled = new Set(options.disableRules ?? []);
+  const rules = options.rules.filter(rule => !disabled.has(rule));
+  // axe rejects an empty runOnly list with a message that names neither
+  // option, and falling back to the tag set would scan far more than asked.
+  if (!rules.length)
+    throw new Error(`disableRules disabled every rule in withRules (${options.rules.join(', ')}), leaving nothing to scan.`);
+  return rules;
+}
 
 // Axe only rejects a scope when the *whole* include set resolves to nothing, so
 // one typo among several include selectors silently shrinks the scan and the
@@ -92,10 +150,21 @@ async function assertScopeSelectorsResolve(
 }
 
 export async function runAxeScan(page: playwright.Page, options: AxeScanOptions = {}): Promise<AxeScanResult> {
+  const rules = assertRuleOptionsValid(options);
   await assertScopeSelectorsResolve(page, options.include ?? [], 'includeSelectors');
   await assertScopeSelectorsResolve(page, options.exclude ?? [], 'excludeSelectors');
 
-  const builder = new AxeBuilder({ page }).withTags([...(options.tags ?? defaultAxeTags)]);
+  const builder = new AxeBuilder({ page });
+  // withRules and withTags both overwrite axe's single `runOnly` slot, so only
+  // one may be called. Explicit rule ids are the more specific request, so they
+  // win over tags.
+  if (rules.length) {
+    builder.withRules(rules);
+  } else {
+    builder.withTags([...(options.tags ?? defaultAxeTags)]);
+    if (options.disableRules?.length)
+      builder.disableRules([...options.disableRules]);
+  }
   // include/exclude are cumulative in AxeBuilder; exclude wins over include for
   // overlapping subtrees, which is what "scan this component minus the widget"
   // needs.

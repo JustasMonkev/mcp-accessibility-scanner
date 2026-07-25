@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { runKeyboardFocusAudit, type FocusPoint } from '../src/tools/auditKeyboard.js';
+import { runKeyboardFocusAudit, type FocusPoint, type KeyboardAuditOptions } from '../src/tools/auditKeyboard.js';
 
 function focusPoint(overrides: Partial<FocusPoint>): FocusPoint {
   return {
@@ -12,10 +12,41 @@ function focusPoint(overrides: Partial<FocusPoint>): FocusPoint {
     boundingBox: { x: 0, y: 0, width: 50, height: 20 },
     inViewport: true,
     hasVisibleIndicator: true,
+    isPointerTarget: false,
+    inlineTarget: false,
+    neighborTargets: [],
+    obstruction: null,
     scrollX: 0,
     scrollY: 0,
     ...overrides,
   };
+}
+
+const baseOptions: KeyboardAuditOptions = {
+  maxTabs: 1,
+  includeShiftTab: false,
+  stopOnCycle: false,
+  cycleWindow: 4,
+  checkSkipLink: false,
+  skipLinkMaxTabs: 3,
+  activateSkipLink: false,
+  checkFocusTrap: false,
+  checkFocusVisibility: false,
+  checkFocusJumps: false,
+  checkTargetSize: true,
+  checkFocusObscured: true,
+  jumpScrollThresholdPx: 800,
+  screenshotOnIssue: false,
+  maxIssueScreenshots: 3,
+};
+
+function auditSingleStop(point: FocusPoint, options: Partial<KeyboardAuditOptions> = {}) {
+  const sequence = [focusPoint({ tagName: 'BODY' }), point];
+  let index = 0;
+  return runKeyboardFocusAudit({ ...baseOptions, ...options }, {
+    pressKey: vi.fn(async () => undefined),
+    getActiveElementInfo: vi.fn(async () => sequence[index++]),
+  });
 }
 
 describe('runKeyboardFocusAudit', () => {
@@ -40,6 +71,8 @@ describe('runKeyboardFocusAudit', () => {
       checkFocusTrap: true,
       checkFocusVisibility: true,
       checkFocusJumps: true,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
@@ -78,6 +111,8 @@ describe('runKeyboardFocusAudit', () => {
       checkFocusTrap: true,
       checkFocusVisibility: true,
       checkFocusJumps: true,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
@@ -121,6 +156,8 @@ describe('runKeyboardFocusAudit', () => {
       checkFocusTrap: true,
       checkFocusVisibility: false,
       checkFocusJumps: false,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
@@ -162,6 +199,8 @@ describe('runKeyboardFocusAudit', () => {
       checkFocusTrap: false,
       checkFocusVisibility: false,
       checkFocusJumps: false,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
@@ -197,6 +236,8 @@ describe('runKeyboardFocusAudit', () => {
       checkFocusTrap: false,
       checkFocusVisibility: false,
       checkFocusJumps: false,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
@@ -238,6 +279,8 @@ describe('runKeyboardFocusAudit', () => {
       checkFocusTrap: false,
       checkFocusVisibility: false,
       checkFocusJumps: false,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
@@ -277,6 +320,8 @@ describe('runKeyboardFocusAudit', () => {
       checkFocusTrap: false,
       checkFocusVisibility: false,
       checkFocusJumps: false,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
@@ -321,6 +366,8 @@ describe('runKeyboardFocusAudit', () => {
       checkFocusTrap: false,
       checkFocusVisibility: false,
       checkFocusJumps: false,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
@@ -362,6 +409,8 @@ describe('runKeyboardFocusAudit', () => {
       checkFocusTrap: true,
       checkFocusVisibility: true,
       checkFocusJumps: true,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 10,
       screenshotOnIssue: true,
       maxIssueScreenshots: 2,
@@ -401,6 +450,8 @@ describe('runKeyboardFocusAudit', () => {
       checkFocusTrap: false,
       checkFocusVisibility: false,
       checkFocusJumps: false,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
@@ -414,6 +465,178 @@ describe('runKeyboardFocusAudit', () => {
     });
 
     expect(result.stops).toHaveLength(100);
+  });
+
+  it('treats 24x24 as compliant and 23x23 as compliant only while it stays isolated', async () => {
+    const boundary = await auditSingleStop(focusPoint({
+      role: 'button', tagName: 'BUTTON', name: 'Exactly', isPointerTarget: true,
+      boundingBox: { x: 0, y: 0, width: 24, height: 24 },
+      neighborTargets: [{ x: 24, y: 0, width: 24, height: 24 }],
+    }));
+    expect(boundary.targetSizeIssues).toHaveLength(0);
+
+    // An isolated undersized target still satisfies the spacing exception.
+    const isolated = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'Tiny', isPointerTarget: true,
+      boundingBox: { x: 0, y: 0, width: 23, height: 23 },
+    }));
+    expect(isolated.targetSizeIssues).toHaveLength(0);
+
+    // Two 16px targets 4px apart: centers are 20px apart, so the circles overlap.
+    const crowded = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'Tiny', isPointerTarget: true,
+      boundingBox: { x: 0, y: 0, width: 16, height: 16 },
+      neighborTargets: [{ x: 20, y: 0, width: 16, height: 16 }],
+    }));
+    expect(crowded.targetSizeIssues.map(stop => stop.step)).toEqual([1]);
+    expect(crowded.stops[0]?.issues).toContain('target-size-below-minimum');
+  });
+
+  it('passes an undersized target that satisfies the SC 2.5.8 spacing exception', async () => {
+    const result = await auditSingleStop(focusPoint({
+      role: 'button', tagName: 'BUTTON', name: 'Spaced', isPointerTarget: true,
+      boundingBox: { x: 100, y: 100, width: 16, height: 16 },
+      // Neighbor center is 48px away, so the two 24px-diameter circles never meet.
+      neighborTargets: [{ x: 148, y: 100, width: 16, height: 16 }],
+    }));
+    expect(result.targetSizeIssues).toHaveLength(0);
+  });
+
+  it('flags an undersized target whose spacing circle intersects a neighbor', async () => {
+    const crowdedCircles = await auditSingleStop(focusPoint({
+      role: 'button', tagName: 'BUTTON', name: 'Crowded', isPointerTarget: true,
+      boundingBox: { x: 100, y: 100, width: 16, height: 16 },
+      neighborTargets: [{ x: 120, y: 100, width: 16, height: 16 }],
+    }));
+    expect(crowdedCircles.targetSizeIssues).toHaveLength(1);
+
+    const nextToLargeTarget = await auditSingleStop(focusPoint({
+      role: 'button', tagName: 'BUTTON', name: 'Adjacent', isPointerTarget: true,
+      boundingBox: { x: 100, y: 100, width: 16, height: 16 },
+      neighborTargets: [{ x: 112, y: 100, width: 80, height: 40 }],
+    }));
+    expect(nextToLargeTarget.targetSizeIssues).toHaveLength(1);
+  });
+
+  it('tests an undersized neighbour by its box as well as by its circle', async () => {
+    // A 100x10 strip is undersized, so it owns a circle, but it is also "another
+    // target": its box starts 2px away even though its center is 57px away.
+    const stripInsideCircle = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'Short target', isPointerTarget: true,
+      boundingBox: { x: 0, y: 0, width: 10, height: 10 },
+      neighborTargets: [{ x: 12, y: 0, width: 100, height: 10 }],
+    }));
+    expect(stripInsideCircle.targetSizeIssues).toHaveLength(1);
+
+    // Same strip moved clear of the circle passes both tests.
+    const stripClear = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'Short clear', isPointerTarget: true,
+      boundingBox: { x: 0, y: 0, width: 10, height: 10 },
+      neighborTargets: [{ x: 30, y: 0, width: 100, height: 10 }],
+    }));
+    expect(stripClear.targetSizeIssues).toHaveLength(0);
+
+    // The relation is asymmetric: from the strip's side the short target's box is
+    // 45px away, so the strip itself stays compliant.
+    const fromTheStrip = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'Long strip', isPointerTarget: true,
+      boundingBox: { x: 12, y: 0, width: 100, height: 10 },
+      neighborTargets: [{ x: 0, y: 0, width: 10, height: 10 }],
+    }));
+    expect(fromTheStrip.targetSizeIssues).toHaveLength(0);
+  });
+
+  it('does not apply target size to inline targets or non-target focus stops', async () => {
+    const inline = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'terms', isPointerTarget: true, inlineTarget: true,
+      boundingBox: { x: 0, y: 0, width: 40, height: 18 },
+      neighborTargets: [{ x: 44, y: 0, width: 40, height: 18 }],
+    }));
+    expect(inline.targetSizeIssues).toHaveLength(0);
+
+    const documentRoot = await auditSingleStop(focusPoint({
+      role: 'document', tagName: 'BODY',
+      boundingBox: { x: 0, y: 0, width: 10, height: 10 },
+    }));
+    expect(documentRoot.targetSizeIssues).toHaveLength(0);
+
+    const checkOff = await auditSingleStop(focusPoint({
+      role: 'button', tagName: 'BUTTON', isPointerTarget: true,
+      boundingBox: { x: 0, y: 0, width: 10, height: 10 },
+    }), { checkTargetSize: false });
+    expect(checkOff.targetSizeIssues).toHaveLength(0);
+  });
+
+  it('flags a fully obscured focus target but not a partially obscured one', async () => {
+    const hidden = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'Behind footer', isPointerTarget: true,
+      obstruction: { sampled: 5, blocked: 5, blockedBy: 'div#sticky-footer' },
+    }));
+    expect(hidden.focusObscuredIssues.map(stop => stop.step)).toEqual([1]);
+    expect(hidden.stops[0]?.issues).toContain('focus-entirely-obscured');
+
+    const partial = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'Half covered', isPointerTarget: true,
+      obstruction: { sampled: 5, blocked: 4, blockedBy: 'div#sticky-footer' },
+    }));
+    expect(partial.focusObscuredIssues).toHaveLength(0);
+  });
+
+  it('applies SC 2.4.11 to focusable stops that are not pointer targets', async () => {
+    // A contenteditable or iframe is measured too; the measurement layer no longer
+    // gates obstruction sampling on isPointerTarget.
+    const editable = await auditSingleStop(focusPoint({
+      role: 'div', tagName: 'DIV', name: 'Editable region', isPointerTarget: false,
+      obstruction: { sampled: 5, blocked: 5, blockedBy: 'div#panel' },
+    }));
+    expect(editable.focusObscuredIssues.map(stop => stop.step)).toEqual([1]);
+    expect(editable.targetSizeIssues).toHaveLength(0);
+
+    // A transparent click-catcher paints nothing, so measurement reports it unblocked.
+    const behindGlass = await auditSingleStop(focusPoint({
+      role: 'button', tagName: 'BUTTON', name: 'Covered control', isPointerTarget: true,
+      obstruction: { sampled: 5, blocked: 0, blockedBy: null },
+    }));
+    expect(behindGlass.focusObscuredIssues).toHaveLength(0);
+  });
+
+  it('keeps the inline exception and ignores disabled neighbours for SC 2.5.8', async () => {
+    // An inline-block link inside a sentence is inline-level, so it stays exempt even
+    // with a crowding neighbour.
+    const inlineBlock = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'Inline block terms', isPointerTarget: true, inlineTarget: true,
+      boundingBox: { x: 0, y: 340, width: 12, height: 18 },
+      neighborTargets: [{ x: 16, y: 340, width: 12, height: 18 }],
+    }));
+    expect(inlineBlock.targetSizeIssues).toHaveLength(0);
+
+    // The same geometry without the sentence context is still a real failure.
+    const standalone = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'Standalone', isPointerTarget: true,
+      boundingBox: { x: 0, y: 340, width: 12, height: 18 },
+      neighborTargets: [{ x: 16, y: 340, width: 12, height: 18 }],
+    }));
+    expect(standalone.targetSizeIssues).toHaveLength(1);
+
+    // A disabled control is filtered out during measurement, so it never reaches
+    // neighborTargets and the isolated target passes.
+    const nextToDisabled = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'Isolated link', isPointerTarget: true,
+      boundingBox: { x: 0, y: 400, width: 18, height: 18 },
+      neighborTargets: [],
+    }));
+    expect(nextToDisabled.targetSizeIssues).toHaveLength(0);
+  });
+
+  it('does not flag obscured focus when nothing was measured or the check is off', async () => {
+    const unmeasured = await auditSingleStop(focusPoint({ role: 'button', tagName: 'BUTTON', isPointerTarget: true }));
+    expect(unmeasured.focusObscuredIssues).toHaveLength(0);
+
+    const off = await auditSingleStop(focusPoint({
+      role: 'button', tagName: 'BUTTON', isPointerTarget: true,
+      obstruction: { sampled: 5, blocked: 5, blockedBy: 'div' },
+    }), { checkFocusObscured: false });
+    expect(off.focusObscuredIssues).toHaveLength(0);
   });
 
   it('handles iframe-like focus transitions without crashing', async () => {
@@ -438,6 +661,8 @@ describe('runKeyboardFocusAudit', () => {
       checkFocusTrap: true,
       checkFocusVisibility: true,
       checkFocusJumps: true,
+      checkTargetSize: false,
+      checkFocusObscured: false,
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,

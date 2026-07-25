@@ -48,7 +48,7 @@ function createMatrixHarness(outputFile: string) {
     context: { outputFile: vi.fn(async () => outputFile) },
   };
   const context = { currentTabOrDie: vi.fn(() => mockTab), config: {} };
-  return { context, response: new Response(context as any, 'scan_page_matrix', {}) };
+  return { context, mockPage, response: new Response(context as any, 'scan_page_matrix', {}) };
 }
 
 describe('scan_page_matrix tool', () => {
@@ -60,7 +60,7 @@ describe('scan_page_matrix tool', () => {
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
   });
 
-  it('passes tags and scope selectors through to the axe scan', async () => {
+  it('passes tags, rule filters and scope selectors through to the axe scan', async () => {
     const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan')
         .mockResolvedValue(createAxeResult('https://example.com/page', []));
     const { context, response } = createMatrixHarness('/tmp/scan-scope.json');
@@ -74,13 +74,48 @@ describe('scan_page_matrix tool', () => {
       reloadBetweenVariants: false,
       includeSelectors: ['#checkout'],
       excludeSelectors: ['#cookie-banner'],
+      withRules: ['image-alt'],
+      disableRules: ['color-contrast'],
     } as any, response);
 
     expect(runAxeScanSpy.mock.calls[0][1]).toEqual({
       tags: ['wcag2aa'],
+      rules: ['image-alt'],
+      disableRules: ['color-contrast'],
       include: ['#checkout'],
       exclude: ['#cookie-banner'],
     });
+
+    // The report has to say which rule filter produced it, or a stored matrix
+    // run cannot be told apart from a full scan.
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.metadata.options.withRules).toEqual(['image-alt']);
+    expect(report.metadata.options.disableRules).toEqual(['color-contrast']);
+  });
+
+  it.each([
+    [{ withRules: ['image-altt'] }, /Unknown Axe rule id\(s\) in withRules: image-altt/],
+    [{ withRules: ['image-alt'], disableRules: ['image-alt'] }, /disabled every rule in withRules/],
+  ])('rejects run-wide rule filters before applying any variant (%o)', async (ruleParams, message) => {
+    const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan');
+    const { context, mockPage, response } = createMatrixHarness('/tmp/scan-invalid-rules.json');
+
+    await expect(tool.handle(context as any, {
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterApplyMs: 0,
+      reloadBetweenVariants: true,
+      ...ruleParams,
+    } as any, response)).rejects.toThrow(message);
+
+    // The finally block restores emulation, but a reload has already discarded
+    // form state by then, so nothing may touch the page before the check.
+    expect(mockPage.setViewportSize).not.toHaveBeenCalled();
+    expect(mockPage.emulateMedia).not.toHaveBeenCalled();
+    expect(mockPage.reload).not.toHaveBeenCalled();
+    expect(runAxeScanSpy).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
   });
 
   it('records incomplete results per variant only when enabled', async () => {
@@ -111,6 +146,10 @@ describe('scan_page_matrix tool', () => {
     // "0" would be indistinguishable from "no needs-review findings".
     expect(included.response.result()).toMatch(/^baseline \| 1 \| 1 \| 1 \| /m);
     expect(excluded.response.result()).toMatch(/^baseline \| 1 \| 1 \| - \| /m);
+    // Same reasoning for structuredContent, which carries no includeIncomplete
+    // flag for consumers to disambiguate a 0 with.
+    expect((included.response.structuredContent() as any).variants[0].totalIncomplete).toBe(1);
+    expect((excluded.response.structuredContent() as any).variants[0].totalIncomplete).toBeNull();
   });
 
   it('runs variants in baseline-first order and computes baseline diffs', async () => {

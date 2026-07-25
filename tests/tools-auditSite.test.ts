@@ -40,6 +40,9 @@ function createHarness(
     redirectMap?: Record<string, string>;
     sitemapXmlByUrl?: Record<string, string>;
     requestContext?: any;
+    cookiesForUrl?: (url: string) => { name: string, domain?: string, path?: string, expires?: number }[];
+    navigationFailsFor?: (url: string) => boolean;
+    navigationAbortsFor?: (url: string) => boolean;
   }
 ) {
   const startUrl = options?.startUrl ?? 'https://example.com/';
@@ -47,7 +50,13 @@ function createHarness(
   const navLinkMap = options?.navLinkMap ?? {};
   const redirectMap = options?.redirectMap ?? {};
 
+  let abortedNavigationClearedCookies = false;
+  const cookiesMock = vi.fn(async (_urls?: string[]) =>
+    (abortedNavigationClearedCookies ? [] : options?.cookiesForUrl?.(currentUrl) ?? [])
+        .map(cookie => ({ domain: 'example.com', path: '/', expires: -1, ...cookie })));
+
   const crawlPage = {
+    context: vi.fn(() => ({ cookies: cookiesMock })),
     url: vi.fn(() => currentUrl),
     title: vi.fn(async () => `Title for ${currentUrl}`),
     evaluate: vi.fn(async (callback: () => unknown) => {
@@ -62,7 +71,17 @@ function createHarness(
   const crawlTab: any = {
     page: crawlPage,
     navigate: vi.fn(async (url: string) => {
+      // A navigation that aborts leaves the tab on the previous page even though the
+      // response — and its cookie changes — already landed.
+      if (options?.navigationAbortsFor?.(url)) {
+        abortedNavigationClearedCookies = true;
+        throw new Error(`net::ERR_ABORTED navigating to ${url}`);
+      }
       currentUrl = redirectMap[url] ?? url;
+      // The response landed and the page committed, but the load never finished,
+      // which is how a hanging logout endpoint behaves.
+      if (options?.navigationFailsFor?.(currentUrl))
+        throw new Error(`Timeout 60000ms exceeded navigating to ${url}`);
     }),
     waitForTimeout: vi.fn(async () => undefined),
   };
@@ -132,6 +151,7 @@ function createHarness(
     response,
     crawlTab,
     temporaryTab,
+    cookiesMock,
   };
 }
 
@@ -144,7 +164,7 @@ describe('audit_site tool', () => {
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
   });
 
-  it('passes tags and scope selectors through to the axe scan', async () => {
+  it('passes tags, rule filters and scope selectors through to the axe scan', async () => {
     const { context, response } = createHarness({ 'https://example.com/': [] });
     const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan')
         .mockImplementation(async (page: any) => createAxeResult(page.url(), []));
@@ -163,13 +183,23 @@ describe('audit_site tool', () => {
       waitAfterNavigationMs: 0,
       includeSelectors: ['#main'],
       excludeSelectors: ['#chat-widget'],
+      withRules: ['image-alt'],
+      disableRules: ['color-contrast'],
     } as any, response);
 
     expect(runAxeScanSpy.mock.calls[0][1]).toEqual({
       tags: ['wcag2aa'],
+      rules: ['image-alt'],
+      disableRules: ['color-contrast'],
       include: ['#main'],
       exclude: ['#chat-widget'],
     });
+
+    // The report has to say which rule filter produced it, or a stored audit
+    // cannot be told apart from a full scan.
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.metadata.options.withRules).toEqual(['image-alt']);
+    expect(report.metadata.options.disableRules).toEqual(['color-contrast']);
   });
 
   it('reports incomplete results per page and aggregated, and drops them when disabled', async () => {
@@ -444,6 +474,83 @@ describe('audit_site tool', () => {
       maxNodesPerViolation: 10,
       waitAfterNavigationMs: 0,
     } as any, response)).rejects.toThrow('excludePathPatterns[0] is too long');
+  });
+
+  it('rejects unknown rule ids before crawling anything, instead of erroring every page', async () => {
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+    const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan');
+
+    await expect(tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/', 'https://example.com/pricing', 'https://example.com/contact'],
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      withRules: ['image-altt'],
+    } as any, response)).rejects.toThrow('Unknown Axe rule id(s) in withRules: image-altt');
+
+    // The point of the up-front check: no tab opened, no page visited, no
+    // report claiming a completed audit.
+    expect(context.newTab).not.toHaveBeenCalled();
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
+    expect(runAxeScanSpy).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a disableRules set that empties withRules before crawling anything', async () => {
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/'],
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      withRules: ['image-alt'],
+      disableRules: ['image-alt'],
+    } as any, response)).rejects.toThrow('disableRules disabled every rule in withRules (image-alt)');
+
+    expect(context.newTab).not.toHaveBeenCalled();
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
+  });
+
+  it('still validates scope selectors per page, not up front', async () => {
+    // A component may legitimately be missing from some crawled pages, so an
+    // unmatched selector is a page-level error — unlike a bad rule id.
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+    vi.spyOn(axe, 'runAxeScan').mockRejectedValue(new Error('No elements matched includeSelectors: #missing'));
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/'],
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      includeSelectors: ['#missing'],
+    } as any, response);
+
+    expect(crawlTab.navigate).toHaveBeenCalledTimes(1);
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages[0].status).toBe('error');
+    expect(report.pages[0].error).toContain('No elements matched includeSelectors');
   });
 
   it('includes subdomains when sameOriginOnly=true and includeSubdomains=true', async () => {
@@ -778,5 +885,251 @@ describe('audit_site tool', () => {
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     expect(report.summary.totals.scannedPages).toBeGreaterThanOrEqual(1);
+  });
+
+  it('reports the page where the authenticated session was lost', async () => {
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: url => url.endsWith('/account/close') || url.endsWith('/profile') ? [] : [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/account/close', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLoss).toEqual({ url: 'https://example.com/account/close', cookies: ['sid'] });
+    expect(response.result()).toContain('WARNING: session cookie(s) sid disappeared while loading https://example.com/account/close.');
+  });
+
+  it('scopes the cookie baseline to the crawled URLs', async () => {
+    const { context, response, cookiesMock } = createHarness({}, {
+      cookiesForUrl: () => [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(cookiesMock).toHaveBeenCalledWith(['https://example.com/dashboard', 'https://example.com/profile']);
+  });
+
+  it('reports a deleted auth cookie masked by a same-named cookie on another domain', async () => {
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: url => url.endsWith('/account/close')
+        ? [{ name: 'sid', domain: 'cdn.example.com' }]
+        : [{ name: 'sid', domain: 'example.com' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/account/close'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLoss).toEqual({ url: 'https://example.com/account/close', cookies: ['sid'] });
+  });
+
+  it('reports the URL reached after a redirect as the page that lost the session', async () => {
+    const { context, response } = createHarness({}, {
+      redirectMap: { 'https://example.com/account/close': 'https://example.com/signed-out' },
+      cookiesForUrl: url => url.endsWith('/signed-out') ? [] : [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/account/close'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLoss).toEqual({ url: 'https://example.com/signed-out', cookies: ['sid'] });
+    expect(response.result()).toContain('while loading https://example.com/signed-out.');
+  });
+
+  it('reports the page that lost the session even when its navigation failed', async () => {
+    const { context, response } = createHarness({}, {
+      navigationFailsFor: url => url.endsWith('/slow-logout'),
+      cookiesForUrl: url => url.endsWith('/slow-logout') || url.endsWith('/profile') ? [] : [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/slow-logout', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLoss).toEqual({ url: 'https://example.com/slow-logout', cookies: ['sid'] });
+  });
+
+  // An aborted navigation never leaves the previous page, so the URL asked for is the
+  // only thing identifying the response that cleared the cookie.
+  it('blames the requested URL when the navigation that lost the session never committed', async () => {
+    const { context, response } = createHarness({}, {
+      navigationAbortsFor: url => url.endsWith('/failing-logout'),
+      cookiesForUrl: () => [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/failing-logout', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLoss).toEqual({ url: 'https://example.com/failing-logout', cookies: ['sid'] });
+  });
+
+  it('does not report session loss for a cookie the browser dropped at its own expiry', async () => {
+    const expired = Math.floor(Date.now() / 1000) - 60;
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: url => url.endsWith('/profile')
+        ? [{ name: 'sid' }]
+        : [{ name: 'sid' }, { name: '__cf_bm', expires: expired }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLoss).toBeNull();
+  });
+
+  it('still reports a cookie deleted before its expiry passed', async () => {
+    const notYetExpired = Math.floor(Date.now() / 1000) + 3600;
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: url => url.endsWith('/profile') ? [] : [{ name: 'sid', expires: notYetExpired }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLoss).toEqual({ url: 'https://example.com/profile', cookies: ['sid'] });
+  });
+
+  it('does not report session loss when cookies survive the crawl', async () => {
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: () => [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLoss).toBeNull();
   });
 });

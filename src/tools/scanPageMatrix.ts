@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { sanitizeForFilePath } from '../utils/fileUtils.js';
 import {
+  assertRuleOptionsValid,
+  axeRuleSchemaShape,
   axeScopeSchemaShape,
   axeTagValues,
   defaultAxeTags,
@@ -86,6 +88,7 @@ const scanPageMatrixSchema = z.object({
   reloadBetweenVariants: z.boolean().default(false).describe('Reload page between variants.'),
   reportFile: z.string().optional().describe('Output JSON report file name.'),
   ...axeScopeSchemaShape,
+  ...axeRuleSchemaShape,
 });
 
 function normalizeMedia(variantMedia: z.output<typeof variantSchema>['media'] | undefined) {
@@ -138,6 +141,12 @@ const scanPageMatrix = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
+    // Rule ids apply to the whole run, so a bad one must fail before the first
+    // variant is applied. The finally block restores viewport/media/zoom, but
+    // reloadBetweenVariants has already thrown away form and application state
+    // by the time the per-scan check would reject the argument.
+    assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
+
     const variants = params.variants ?? defaultVariants;
     const originalViewport = tab.page.viewportSize() ?? await tab.page.evaluate(() => ({
       width: window.innerWidth,
@@ -163,6 +172,8 @@ const scanPageMatrix = defineTabTool({
 
         const axeResult = await runAxeScan(tab.page, {
           tags: params.violationsTag as AxeTag[],
+          rules: params.withRules,
+          disableRules: params.disableRules,
           include: params.includeSelectors,
           exclude: params.excludeSelectors,
         });
@@ -222,6 +233,8 @@ const scanPageMatrix = defineTabTool({
           includeIncomplete: params.includeIncomplete,
           includeSelectors: params.includeSelectors ?? null,
           excludeSelectors: params.excludeSelectors ?? null,
+          withRules: params.withRules ?? null,
+          disableRules: params.disableRules ?? null,
           maxNodesPerViolation: params.maxNodesPerViolation,
           waitAfterApplyMs: params.waitAfterApplyMs,
           reloadBetweenVariants: params.reloadBetweenVariants,
@@ -257,7 +270,10 @@ const scanPageMatrix = defineTabTool({
         name: result.name,
         totalViolations: result.summary.totalRules,
         totalNodes: result.summary.totalNodes,
-        totalIncomplete: result.incomplete.length,
+        // null, not 0, when collection is off: structuredContent does not carry
+        // includeIncomplete, so a 0 here is indistinguishable from a variant
+        // with no needs-review findings. Matches the "-" in the markdown table.
+        totalIncomplete: params.includeIncomplete ? result.incomplete.length : null,
         newViolationIds: result.diffFromBaseline.newViolationIds,
         resolvedViolationIds: result.diffFromBaseline.resolvedViolationIds,
         changedRuleIds: Object.keys(result.diffFromBaseline.changedCounts),

@@ -33,6 +33,10 @@ const client = new Client({ name: 'mcp-accessibility-direct-harness', version: '
 const state = {
   toolNames: [],
   fixtureOrigin: '',
+  deadPort: 0,
+  // Every path the fixture server was asked for, so a test can assert a tool
+  // rejected its arguments without visiting anything.
+  fixtureRequests: [],
 };
 
 class SkipError extends Error {}
@@ -270,6 +274,79 @@ const tests = [
         'scan_page',
         { ...scanArgs, excludeSelectors: [':::not-css'] },
         /Invalid CSS in excludeSelectors: :::not-css/);
+
+    // Annotated screenshots.
+    await navigate('<title>Scan</title><img src="x" width="120" height="60"><h1>Scan</h1>');
+    const plain = await callTool('scan_page', { violationsTag: ['wcag2a', 'wcag2aa'] });
+    if (/Annotated screenshot/.test(resultText(plain)))
+      throw new Error('scan_page annotated a screenshot without annotateScreenshot');
+
+    const annotated = await callTool('scan_page', { violationsTag: ['wcag2a', 'wcag2aa'], annotateScreenshot: true });
+    const annotatedText = resultText(annotated);
+    assertText(annotatedText, /Annotated screenshot: .+\.png/);
+    const screenshotPath = annotatedText.match(/Annotated screenshot: (.+\.png)/)[1];
+    const screenshotSize = fs.statSync(screenshotPath).size;
+    if (screenshotSize < 1000)
+      throw new Error(`Annotated screenshot looks empty (${screenshotSize} bytes): ${screenshotPath}`);
+    const marked = annotatedText.match(/Marked (\d+) of (\d+) violating nodes\./);
+    if (!marked || Number(marked[1]) < 1)
+      throw new Error(`Expected at least one marked node in result:\n${annotatedText.slice(0, 4000)}`);
+
+    const leftovers = await callTool('browser_evaluate', {
+      function: '() => ({ layers: document.querySelectorAll("#mcp-a11y-annotation-layer").length, idInHtml: document.documentElement.innerHTML.includes("mcp-a11y-annotation-layer") })',
+    });
+    assertText(leftovers, /"layers":\s*0/);
+    assertText(leftovers, /"idInHtml":\s*false/);
+
+    // Rule-level control: two images with no alt (image-alt) plus a form input
+    // with no label (label), so each rule filter has a different rule to move.
+    await navigate([
+      '<title>Rules</title>',
+      '<img src="x"><img src="y">',
+      '<input type="text" name="q">',
+    ].join(''));
+    const ruleArgs = { violationsTag: ['wcag2a', 'wcag2aa'], includeIncomplete: false };
+    const both = await callTool('scan_page', ruleArgs);
+    assertViolationNodeCount(both, 'image-alt', 2);
+    assertViolationNodeCount(both, 'label', 1);
+
+    // withRules overrides violationsTag entirely: axe holds either a rule list
+    // or a tag list, never both.
+    const onlyLabel = await callTool('scan_page', { ...ruleArgs, withRules: ['label'] });
+    assertViolationNodeCount(onlyLabel, 'label', 1);
+    assertViolationNodeCount(onlyLabel, 'image-alt', 0);
+
+    // disableRules subtracts from whatever is selected — tags here...
+    const noImages = await callTool('scan_page', { ...ruleArgs, disableRules: ['image-alt'] });
+    assertViolationNodeCount(noImages, 'image-alt', 0);
+    assertViolationNodeCount(noImages, 'label', 1);
+    // ...and an explicit rule list here. Axe drops the disabled-rule flag once
+    // runOnly holds a rule list, so without the scanner subtracting up front
+    // this would still report image-alt.
+    const listMinusImages = await callTool('scan_page', {
+      ...ruleArgs,
+      withRules: ['image-alt', 'label'],
+      disableRules: ['image-alt'],
+    });
+    assertViolationNodeCount(listMinusImages, 'image-alt', 0);
+    assertViolationNodeCount(listMinusImages, 'label', 1);
+
+    // Emptying the rule list must fail, not fall back to scanning everything.
+    await assertToolError(
+        'scan_page',
+        { ...ruleArgs, withRules: ['image-alt'], disableRules: ['image-alt'] },
+        /disableRules disabled every rule in withRules \(image-alt\)/);
+
+    // A misspelled rule id would otherwise select/disable nothing and return a
+    // clean-looking report, so it must fail by name instead.
+    await assertToolError(
+        'scan_page',
+        { ...ruleArgs, withRules: ['label', 'image-altt'] },
+        /Unknown Axe rule id\(s\) in withRules: image-altt/);
+    await assertToolError(
+        'scan_page',
+        { ...ruleArgs, disableRules: ['colour-contrast'] },
+        /Unknown Axe rule id\(s\) in disableRules: colour-contrast/);
   }),
 
   test('browser_tabs', async () => {
@@ -302,9 +379,8 @@ const tests = [
     // audit_site crawls in a second tab, so it needs an open page to return to.
     // Without this the test only passes when an earlier test left a tab open.
     await navigate('<title>AuditSiteStart</title><h1>Audit Site Start</h1>');
-    const result = await callTool('audit_site', {
+    const auditSiteDefaults = {
       strategy: 'provided',
-      urls: [`${state.fixtureOrigin}/audit-site`],
       maxPages: 1,
       maxDepth: 0,
       sameOriginOnly: true,
@@ -314,6 +390,10 @@ const tests = [
       violationsTag: ['wcag2a', 'wcag2aa'],
       maxNodesPerViolation: 5,
       waitAfterNavigationMs: 50,
+    };
+    const result = await callTool('audit_site', {
+      ...auditSiteDefaults,
+      urls: [`${state.fixtureOrigin}/audit-site`],
     });
     assertText(result, /JSON report:|scanned/i);
 
@@ -337,6 +417,83 @@ const tests = [
     assertText(throughErroredPage, /Errored pages: 1/);
     assertText(throughErroredPage, /Scanned pages: 1/);
     assertText(throughErroredPage, /audit-gate-child/);
+
+    // Signing in interactively must carry over to the crawl tab, which shares
+    // the browser context, and losing that session mid-crawl must be reported.
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/login` });
+    const authed = await callTool('audit_site', {
+      ...auditSiteDefaults,
+      urls: [`${state.fixtureOrigin}/secure`],
+    });
+    const authedTitle = authed.structuredContent?.topPages?.[0]?.title;
+    if (authedTitle !== 'Members Area')
+      throw new Error(`Expected audit_site to scan authenticated content, got title ${JSON.stringify(authedTitle)}`);
+
+    const lost = await callTool('audit_site', {
+      ...auditSiteDefaults,
+      maxPages: 3,
+      urls: [
+        `${state.fixtureOrigin}/secure`,
+        `${state.fixtureOrigin}/account/close`,
+        `${state.fixtureOrigin}/secure-2`,
+      ],
+    });
+    assertText(lost, /WARNING: session cookie\(s\) mcp_session disappeared/);
+    if (lost.structuredContent?.sessionLoss?.url !== `${state.fixtureOrigin}/account/close`)
+      throw new Error(`Expected sessionLoss at /account/close, got ${JSON.stringify(lost.structuredContent?.sessionLoss)}`);
+
+    // A redirecting logout must be reported at the page reached, not requested.
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/login` });
+    const redirected = await callTool('audit_site', {
+      ...auditSiteDefaults,
+      maxPages: 2,
+      urls: [
+        `${state.fixtureOrigin}/secure`,
+        `${state.fixtureOrigin}/goodbye`,
+      ],
+    });
+    if (redirected.structuredContent?.sessionLoss?.url !== `${state.fixtureOrigin}/signed-out`)
+      throw new Error(`Expected sessionLoss at /signed-out, got ${JSON.stringify(redirected.structuredContent?.sessionLoss)}`);
+
+    // A logout URL that clears the cookie and then fails to load still ended the
+    // session: the warning must name it, not the next page that happened to load.
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/login` });
+    const failed = await callTool('audit_site', {
+      ...auditSiteDefaults,
+      maxPages: 3,
+      urls: [
+        `${state.fixtureOrigin}/secure`,
+        `${state.fixtureOrigin}/session/revoke`,
+        `${state.fixtureOrigin}/secure-2`,
+      ],
+    });
+    if (failed.structuredContent?.sessionLoss?.url !== `${state.fixtureOrigin}/session/revoke`)
+      throw new Error(`Expected sessionLoss at /session/revoke, got ${JSON.stringify(failed.structuredContent?.sessionLoss)}`);
+    // Only /secure loads: /session/revoke throws, and Chromium's error page for it
+    // interrupts /secure-2. Nothing after /secure is scanned, so a check that only
+    // ran on successful navigations would have reported no session loss at all.
+    assertText(failed, /Scanned pages: 1/);
+
+    // Rule ids are run-wide input, so a bad one must be rejected before the
+    // crawl starts. Otherwise every supplied URL is visited, errored, and
+    // written up as a completed audit.
+    const requestsBeforeBadRule = state.fixtureRequests.length;
+    await assertToolError(
+        'audit_site',
+        {
+          ...auditSiteDefaults,
+          maxPages: 3,
+          urls: [
+            `${state.fixtureOrigin}/audit-site`,
+            `${state.fixtureOrigin}/secure`,
+            `${state.fixtureOrigin}/secure-2`,
+          ],
+          withRules: ['image-altt'],
+        },
+        /Unknown Axe rule id\(s\) in withRules: image-altt/);
+    const visitedAfterBadRule = state.fixtureRequests.slice(requestsBeforeBadRule);
+    if (visitedAfterBadRule.length)
+      throw new Error(`audit_site visited ${visitedAfterBadRule.length} page(s) before rejecting an invalid rule id: ${visitedAfterBadRule.join(', ')}`);
   }),
 
   test('scan_page_matrix', async () => {
@@ -355,9 +512,83 @@ const tests = [
   }),
 
   test('audit_keyboard', async () => {
-    await navigate('<title>Keyboard</title><a href="#main">Skip to main</a><main id="main"><input aria-label="Search"><button>Go</button></main>');
+    // Fixture mixes real SC 2.5.8 / SC 2.4.11 failures with targets that a naive
+    // check would flag but that the exceptions legitimately allow.
+    await navigate([
+      '<title>Keyboard</title>',
+      '<style>',
+      'a, button { position: absolute; background: #06c; color: #fff; }',
+      '#skip { top: 0; left: 0; }',
+      '#tiny-a { top: 40px; left: 0; display: block; width: 16px; height: 16px; }',
+      '#tiny-b { top: 40px; left: 20px; display: block; width: 16px; height: 16px; }',
+      '#compliant { top: 100px; left: 0; width: 24px; height: 24px; padding: 0; border: 0; }',
+      '#buried { top: 200px; left: 0; display: block; width: 60px; height: 30px; }',
+      '#cookie-bar { position: fixed; top: 190px; left: 0; width: 100%; height: 60px; background: #222; z-index: 10; }',
+      '#sentence { position: absolute; top: 300px; left: 0; width: 380px; }',
+      '#terms { position: static; }',
+      '#inline-block-sentence { position: absolute; top: 340px; left: 0; width: 380px; }',
+      '#ib-terms, #ib-next { position: static; display: inline-block; width: 12px; height: 18px; }',
+      '#isolated { top: 400px; left: 0; display: block; width: 18px; height: 18px; }',
+      '#disabled-neighbor { top: 400px; left: 18px; width: 40px; height: 30px; }',
+      '#covered { top: 400px; left: 300px; width: 40px; height: 30px; }',
+      // Transparent but clickable: intercepts hit testing without hiding anything.
+      '#glass { position: fixed; top: 395px; left: 290px; width: 200px; height: 40px; z-index: 30; }',
+      '#editable { position: absolute; top: 460px; left: 0; width: 200px; height: 40px; }',
+      '#panel { position: fixed; top: 450px; left: 0; width: 100%; height: 60px; background: #333; z-index: 20; }',
+      // Right column: a crowded contenteditable, an inline link behind a <strong>
+      // wrapper, an undersized strip neighbour, an invisible click-catcher and a
+      // clipping ancestor, each next to the conforming variant of the same shape.
+      '#tiny-edit { position: absolute; top: 20px; left: 450px; width: 12px; height: 12px; }',
+      '#edit-neighbor { top: 20px; left: 464px; width: 40px; height: 30px; }',
+      '#wrapped-sentence { position: absolute; top: 70px; left: 450px; width: 330px; }',
+      '#bare-wrap { position: absolute; top: 110px; left: 450px; }',
+      '#w-terms, #w-next, #w-bare, #w-bare2 { position: static; display: inline-block; width: 12px; height: 18px; }',
+      '#short { top: 150px; left: 450px; display: block; width: 10px; height: 10px; }',
+      '#long { top: 150px; left: 462px; display: block; width: 100px; height: 10px; }',
+      '#veiled { top: 260px; left: 450px; width: 40px; height: 30px; }',
+      '#ghost { position: fixed; top: 255px; left: 440px; width: 200px; height: 40px; opacity: 0; z-index: 30; }',
+      '#ghost-inner { width: 100%; height: 100%; background: #000; }',
+      '#short-clear { top: 310px; left: 450px; display: block; width: 10px; height: 10px; }',
+      '#long-clear { top: 310px; left: 480px; display: block; width: 100px; height: 10px; }',
+      '#clipper { position: absolute; top: 350px; left: 450px; width: 10px; height: 10px; overflow: hidden; }',
+      '#roomy-clipper { position: absolute; top: 350px; left: 600px; width: 60px; height: 60px; overflow: hidden; }',
+      '#clipped, #roomy { position: static; width: 40px; height: 40px; }',
+      '</style>',
+      '<a href="#main" id="skip">Skip to main</a>',
+      '<main id="main">',
+      '<a href="#a" id="tiny-a" aria-label="Tiny A">a</a>',
+      '<a href="#b" id="tiny-b" aria-label="Tiny B">b</a>',
+      '<button id="compliant" aria-label="Compliant control">C</button>',
+      '<a href="#c" id="buried" aria-label="Buried link">Buried</a>',
+      '<p id="sentence">Please read the <a href="#terms" id="terms" aria-label="Inline terms">terms</a> before continuing.</p>',
+      '<p id="inline-block-sentence">Please read the <a href="#p" id="ib-terms" aria-label="Inline block terms">p</a> <a href="#h" id="ib-next" aria-label="Inline block help">h</a> notes before continuing.</p>',
+      '<a href="#d" id="isolated" aria-label="Isolated link">i</a>',
+      '<button id="disabled-neighbor" aria-label="Disabled neighbor" disabled>D</button>',
+      '<button id="covered" aria-label="Covered control">X</button>',
+      '<div id="editable" contenteditable="true">Editable region</div>',
+      '<div id="tiny-edit" contenteditable="true" aria-label="Tiny editor">e</div>',
+      '<button id="edit-neighbor" aria-label="Editor neighbor">N</button>',
+      '<p id="wrapped-sentence">Read <strong><a href="#wt" id="w-terms" aria-label="Wrapped terms">t</a></strong><a href="#wn" id="w-next" aria-label="Wrapped next">h</a> now</p>',
+      '<div id="bare-wrap"><strong><a href="#wb" id="w-bare" aria-label="Bare wrapped">b</a></strong><a href="#wb2" id="w-bare2" aria-label="Bare wrapped next">c</a></div>',
+      '<a href="#s" id="short" aria-label="Short target">s</a>',
+      '<a href="#l" id="long" aria-label="Long strip">l</a>',
+      '<button id="veiled" aria-label="Veiled control">V</button>',
+      '<a href="#sc" id="short-clear" aria-label="Short clear">s</a>',
+      '<a href="#lc" id="long-clear" aria-label="Long clear">l</a>',
+      '<div id="clipper"><button id="clipped" aria-label="Clipped control">K</button></div>',
+      '<div id="roomy-clipper"><button id="roomy" aria-label="Roomy control">R</button></div>',
+      '</main>',
+      '<div id="cookie-bar">Cookie bar</div>',
+      '<div id="glass"></div>',
+      // Fully transparent wrapper around an opaque child: hit tested, paints nothing.
+      '<div id="ghost"><div id="ghost-inner"></div></div>',
+      '<div id="panel">Sticky panel</div>',
+    ].join(''));
+    // Fixed size so earlier resize/matrix tests cannot make the page scroll under the
+    // fixed overlays this fixture relies on.
+    await callTool('browser_resize', { width: 800, height: 600 });
     const result = await callTool('audit_keyboard', {
-      maxTabs: 8,
+      maxTabs: 24,
       includeShiftTab: false,
       stopOnCycle: true,
       cycleWindow: 4,
@@ -367,11 +598,97 @@ const tests = [
       checkFocusTrap: true,
       checkFocusVisibility: true,
       checkFocusJumps: true,
+      checkTargetSize: true,
+      checkFocusObscured: true,
       jumpScrollThresholdPx: 600,
       screenshotOnIssue: false,
       maxIssueScreenshots: 2,
     });
     assertText(result, /JSON report:|Skip link|summary/i);
+    assertText(result, /Tiny A is 16x16 CSS px/);
+    assertText(result, /Tiny B is 16x16 CSS px/);
+    assertText(result, /Buried link hidden behind div#cookie-bar/);
+    // A focusable non-pointer-target under an opaque sticky bar is still a SC 2.4.11 fail.
+    assertText(result, /Editable region hidden behind div#panel/);
+    // A check that flags compliant controls is worse than no check: the 24x24 button,
+    // the inline link inside a sentence, and the isolated skip link must all stay clean.
+    assertNoText(result, /Compliant control (is \d+x\d+|hidden behind)/);
+    assertNoText(result, /Inline terms (is \d+x\d+|hidden behind)/);
+    assertNoText(result, /Skip to main (is \d+x\d+|hidden behind)/);
+    // Inline-block links in a sentence keep the SC 2.5.8 inline exception, a disabled
+    // control is not a spacing neighbor, and a transparent click-catcher hides nothing.
+    assertNoText(result, /Inline block (terms|help) (is \d+x\d+|hidden behind)/);
+    assertNoText(result, /Isolated link (is \d+x\d+|hidden behind)/);
+    assertNoText(result, /Covered control (is \d+x\d+|hidden behind)/);
+    // A crowded contenteditable is a pointer target; a roomy one stays clean.
+    assertText(result, /Tiny editor is 12x12 CSS px/);
+    assertNoText(result, /Editable region is \d+x\d+/);
+    // An undersized neighbour is tested by its box too, not only by its circle.
+    assertText(result, /Short target is 10x10 CSS px/);
+    assertNoText(result, /Short clear is \d+x\d+/);
+    assertNoText(result, /Long (strip|clear) is \d+x\d+/);
+    // The sentence exception survives inline wrappers, but only where there is
+    // running text: the same markup without it is still a failure.
+    assertNoText(result, /Wrapped (terms|next) is \d+x\d+/);
+    assertText(result, /Bare wrapped is 12x18 CSS px/);
+    assertText(result, /Bare wrapped next is 12x18 CSS px/);
+    // An opaque child inside an opacity: 0 wrapper renders nothing, so it covers nothing.
+    assertNoText(result, /Veiled control hidden behind/);
+    // Documented ceiling: target size is the layout box, so a 40x40 control that an
+    // overflow ancestor clips to 10x10 is not reported.
+    assertNoText(result, /(Clipped|Roomy) control is \d+x\d+/);
+    const summary = result.structuredContent?.summary ?? {};
+    if (summary.targetSizeIssueCount !== 6 || summary.focusObscuredIssueCount !== 2) {
+      throw new Error(`Expected 6 target-size and 2 obscured findings, got ${JSON.stringify(summary)}`);
+    }
+  }),
+
+  test('audit_screen_reader', async () => {
+    await navigate([
+      '<title>ScreenReader</title><main>',
+      // Broken markup: one instance per check.
+      '<p><a href="/pricing">Read more</a></p>',
+      '<p><img src="/IMG_2048.jpg" alt="IMG_2048.jpg"></p>',
+      '<p><button aria-label="Submit form">Send</button></p>',
+      '<p><input type="text"></p>',
+      '<p><a href="/a.pdf">Download</a> <a href="/b.pdf">Download</a></p>',
+      '<div style="display:flex;flex-direction:row-reverse">',
+      '<button>Reversed first</button><button>Reversed second</button></div>',
+      // Correct markup: none of these may be flagged.
+      '<p><a href="/pricing-detail">Read more about pricing</a></p>',
+      '<p><img src="/team.jpg" alt="The team at the 2024 offsite"></p>',
+      '<p><button aria-label="Search products">Search</button></p>',
+      '<p><label>Email address <input type="email"></label></p>',
+      '<p><a href="/help">Help centre</a> <a href="/help">Help centre</a></p>',
+      '<div style="display:flex"><button>Ordered first</button><button>Ordered second</button></div>',
+      '<div style="columns:2;width:300px"><p>Column one top</p><p>Column one bottom</p>',
+      '<p>Column two top</p><p>Column two bottom</p></div>',
+      '</main>',
+    ].join(''));
+    const result = await callTool('audit_screen_reader', {
+      checkNames: true,
+      checkReadingOrder: true,
+      maxElements: 200,
+      maxFindingsPerCheck: 10,
+    });
+    const text = resultText(result);
+    const expected = [
+      /missing-accessible-name \| [1-9]/,
+      /uninformative-accessible-name \| [1-9]/,
+      /filename-as-accessible-name \| [1-9]/,
+      /label-in-name-mismatch \| [1-9]/,
+      /duplicate-accessible-name \| [1-9]/,
+      /reading-order-mismatch \| [1-9]/,
+    ];
+    for (const pattern of expected)
+      assertText(text, pattern);
+    assertText(text, /JSON report:/);
+    const clean = ['Read more about pricing', 'The team at the 2024 offsite', 'Search products',
+      'Email address', 'Help centre', 'Ordered first', 'Column one top'];
+    for (const label of clean) {
+      if (text.includes(label))
+        throw new Error(`Correct markup was flagged: ${label}\n${text.slice(0, 4000)}`);
+    }
   }),
 
   test('browser_install', async () => {
@@ -512,6 +829,12 @@ function assertText(result, pattern) {
     throw new Error(`Expected ${pattern} in result:\n${text.slice(0, 4000)}`);
 }
 
+function assertNoText(result, pattern) {
+  const text = typeof result === 'string' ? result : resultText(result);
+  if (pattern.test(text))
+    throw new Error(`Did not expect ${pattern} in result:\n${text.slice(0, 4000)}`);
+}
+
 // Counts nodes reported for one axe rule in a scan_page result. Each rule block
 // is `Violation rule: <id> ...` down to its `Violations...: [...]` JSON array.
 function assertViolationNodeCount(result, ruleId, expected) {
@@ -568,6 +891,7 @@ async function verifyCoverage(testCases, toolNames) {
 
 function startFixtureServer() {
   const server = http.createServer((request, response) => {
+    state.fixtureRequests.push(request.url);
     if (request.url === '/audit-site') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end('<!doctype html><html><head><title>AuditSite</title></head><body><img src="x"><h1>Audit Site</h1></body></html>');
@@ -583,6 +907,58 @@ function startFixtureServer() {
     if (request.url === '/audit-gate-child') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end('<!doctype html><html><head><title>GateChild</title></head><body><div id="only-on-child"><img src="x"></div></body></html>');
+      return;
+    }
+    // Cookie-gated fixture: /login mints the session, /secure serves real
+    // content only while it is present, /account/close destroys it.
+    if (request.url === '/login') {
+      response.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'set-cookie': 'mcp_session=granted; Path=/',
+      });
+      response.end('<!doctype html><html><head><title>Login</title></head><body><h1>Signed In</h1></body></html>');
+      return;
+    }
+    if (request.url === '/secure' || request.url === '/secure-2') {
+      const signedIn = (request.headers.cookie ?? '').includes('mcp_session=granted');
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(signedIn
+        ? '<!doctype html><html><head><title>Members Area</title></head><body><img src="x"><h1>Members Only Content</h1></body></html>'
+        : '<!doctype html><html><head><title>Login Required</title></head><body><h1>Please sign in</h1></body></html>');
+      return;
+    }
+    if (request.url === '/account/close') {
+      response.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'set-cookie': 'mcp_session=; Path=/; Max-Age=0',
+      });
+      response.end('<!doctype html><html><head><title>Account Closed</title></head><body><h1>Account Closed</h1></body></html>');
+      return;
+    }
+    // /goodbye clears the session and redirects, so the page that actually lost
+    // the cookie is /signed-out rather than the URL the crawl asked for.
+    if (request.url === '/goodbye') {
+      response.writeHead(302, {
+        'set-cookie': 'mcp_session=; Path=/; Max-Age=0',
+        'location': '/signed-out',
+      });
+      response.end();
+      return;
+    }
+    // /session/revoke clears the session and then redirects somewhere that refuses
+    // the connection, so the navigation throws and no page is ever reached. The
+    // session is gone all the same, and this URL is the one that ended it.
+    if (request.url === '/session/revoke') {
+      response.writeHead(302, {
+        'set-cookie': 'mcp_session=; Path=/; Max-Age=0',
+        'location': `http://127.0.0.1:${state.deadPort}/gone`,
+      });
+      response.end();
+      return;
+    }
+    if (request.url === '/signed-out') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Signed Out</title></head><body><h1>Signed Out</h1></body></html>');
       return;
     }
     if (request.url === '/network-json') {
@@ -606,7 +982,15 @@ function startFixtureServer() {
         return;
       }
       state.fixtureOrigin = `http://127.0.0.1:${address.port}`;
-      resolve(() => new Promise(resolveClose => server.close(resolveClose)));
+      // A port nothing listens on, for /session/revoke to redirect into. Bound and
+      // released so it is free and safe, unlike the low ports Chromium blocks
+      // outright — a blocked port fails the navigation after it commits, which
+      // interrupts the next one.
+      const deadServer = http.createServer();
+      deadServer.listen(0, '127.0.0.1', () => {
+        state.deadPort = deadServer.address().port;
+        deadServer.close(() => resolve(() => new Promise(resolveClose => server.close(resolveClose))));
+      });
     });
   });
 }

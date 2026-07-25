@@ -24,6 +24,7 @@ const { connectOverCDP, spawnMock } = vi.hoisted(() => ({
 
 vi.mock('playwright', () => ({
   chromium: {
+    connect: vi.fn(),
     connectOverCDP,
     launch: vi.fn(),
     launchPersistentContext: vi.fn(),
@@ -46,7 +47,8 @@ vi.mock('node:child_process', () => ({
 }));
 
 import * as playwright from 'playwright';
-import { contextFactory } from '../src/browserContextFactory.js';
+import { assertStorageStateSupported, contextFactory } from '../src/browserContextFactory.js';
+import { ExtensionContextFactory } from '../src/extension/extensionContextFactory.js';
 import { resolveConfig } from '../src/config.js';
 
 function createMockBrowserContext() {
@@ -66,6 +68,7 @@ function createMockBrowser(browserContext: any) {
   return {
     close: vi.fn().mockResolvedValue(undefined),
     contexts: vi.fn().mockReturnValue([browserContext]),
+    newContext: vi.fn().mockResolvedValue(browserContext),
     on: vi.fn(),
   } as any;
 }
@@ -271,5 +274,128 @@ describe('browserContextFactory', () => {
 
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
         .rejects.toThrow('Browser specified in your config is not installed. Either install it (likely) or change the config.');
+  });
+
+  it('rejects a storage state that the persistent profile mode would silently drop', async () => {
+    const config = await resolveConfig({
+      browser: {
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    expect(() => contextFactory(config)).toThrow('Storage state needs a fresh browser context');
+  });
+
+  it('rejects a storage state when attaching over CDP without isolation', async () => {
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    expect(() => contextFactory(config)).toThrow('Storage state needs a fresh browser context');
+  });
+
+  it('rejects a storage state when launching over CDP without isolation', async () => {
+    const config = await resolveConfig({
+      browser: {
+        cdpLaunch: { command: 'open', port: 9222 },
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    expect(() => contextFactory(config)).toThrow('Storage state needs a fresh browser context');
+  });
+
+  it('applies the storage state to isolated CDP attach sessions', async () => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        isolated: true,
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({ storageState: '/tmp/auth.json' }));
+  });
+
+  it('applies the storage state to isolated CDP launch sessions', async () => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    spawnMock.mockReturnValue(createMockChildProcess());
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        isolated: true,
+        cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 500 },
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({ storageState: '/tmp/auth.json' }));
+  });
+
+  it('applies the storage state to remote browser sessions', async () => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    (playwright.chromium.connect as any).mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        remoteEndpoint: 'ws://127.0.0.1:3000/',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({ storageState: '/tmp/auth.json' }));
+  });
+
+  it('applies the storage state to isolated browser contexts', async () => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    (playwright.chromium.launch as any).mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        isolated: true,
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({ storageState: '/tmp/auth.json' }));
+  });
+
+  // --extension runs every tool through ExtensionContextFactory whatever
+  // contextFactory() built, so --isolated must not talk it past the guard.
+  it('rejects a storage state the extension factory would silently drop, even with --isolated', async () => {
+    const config = await resolveConfig({
+      browser: {
+        isolated: true,
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+    const extensionFactory = new ExtensionContextFactory('chrome', undefined, undefined);
+
+    expect(() => contextFactory(config)).not.toThrow();
+    expect(() => assertStorageStateSupported(config, extensionFactory, 'remedy'))
+        .toThrow('Storage state needs a fresh browser context');
   });
 });

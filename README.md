@@ -120,6 +120,7 @@ Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.
 > browser_navigate {"url": "https://example.com"}
 > scan_page {"violationsTag": ["wcag21aa"]}
 > audit_keyboard {"maxTabs": 30}
+> audit_screen_reader {}
 ```
 
 Each line is `<tool-name> <json-arguments>`. Omit the JSON to pass `{}`.
@@ -217,6 +218,7 @@ Create a `config.json` file with the following options:
 - `browser.cdpTimeout`: Maximum time in milliseconds to wait when connecting to the CDP endpoint (default: `30000`)
 - `browser.cdpLaunch`: Launch a Chromium-family desktop app with CDP enabled, wait for the endpoint, and manage the child process lifecycle
 - CDP attach modes preserve the target browser's existing default-context settings instead of applying Playwright's defaults.
+- `browser.contextOptions.storageState`: Start each session from a recorded Playwright storage state; needs a mode that creates its own context (`browser.isolated`, `browser.remoteEndpoint`, or a CDP mode with `browser.isolated`) — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
 - `timeouts.settle`: How long to wait after each action for triggered work to settle before responding (default: `500`)
@@ -230,6 +232,72 @@ Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-a
 #### HTTP Heartbeat
 
 When the server runs with `--port`, it sends MCP heartbeat pings for Streamable HTTP sessions. Set `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` to override the default `5000` ms timeout. Set it to `0` or any negative value to disable heartbeat pings for clients or proxies that do not answer server-initiated pings.
+
+## Auditing pages behind a login
+
+Most real audits target pages that only exist for a signed-in user. There are two ways to get there.
+
+### Interactive route (no setup)
+
+Every tool shares one browser context, and `audit_site` crawls in a temporary tab of that same context, so cookies and local storage created while you drive the browser are already available to the crawl:
+
+```text
+1. browser_navigate to the login page
+2. browser_fill_form / browser_click to sign in
+3. browser_navigate to the first page you want audited
+4. audit_site — the crawl inherits the session you just created
+```
+
+This works out of the box in every mode, including the default persistent-profile mode. With the default profile the session also survives across server restarts, so you usually only sign in once.
+
+### Storage state route (repeatable, CI-friendly)
+
+Record a session once with Playwright's codegen, then hand the file to the server:
+
+```bash
+npx playwright codegen --save-storage=auth.json https://example.com/login
+```
+
+Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.
+
+Pass it to the server with the CLI flag, the environment variable, or the config file:
+
+```bash
+npx mcp-accessibility-scanner --isolated --storage-state ./auth.json
+```
+
+```bash
+PLAYWRIGHT_MCP_ISOLATED=true PLAYWRIGHT_MCP_STORAGE_STATE=./auth.json npx mcp-accessibility-scanner
+```
+
+```json
+{
+  "browser": {
+    "isolated": true,
+    "contextOptions": {
+      "storageState": "./auth.json"
+    }
+  }
+}
+```
+
+> **A fresh browser context is required.** Playwright only applies a storage state to a context it creates. That means `--isolated`, the remote-endpoint mode, or either CDP mode combined with `--isolated`. The default persistent-profile mode has no storage-state option at all, and the CDP modes without `--isolated` attach to the browser's existing context, so the server refuses to start with a storage state in those modes rather than silently auditing your site as an anonymous user. `--extension` is refused too, with or without `--isolated`: it always works through the context of the browser you are already running. There, sign in interactively instead — the persistent profile also keeps the session across restarts.
+
+### Keep the crawl from destroying its own session
+
+`audit_site` excludes `logout|signout` by default, which is not enough for most applications. Add anything else that ends or changes the session before you start the crawl:
+
+```json
+{
+  "excludePathPatterns": ["logout|signout", "account/(close|delete)", "sessions/revoke", "/switch-(locale|account|org)"]
+}
+```
+
+Note that `excludePathPatterns` replaces the default rather than extending it, so repeat `logout|signout` in your list.
+
+If a session cookie disappears anyway, `audit_site` says so instead of reporting a confident, wrong audit: the result starts with a `WARNING: session cookie(s) … disappeared while loading <url>` line, and both the JSON report and the structured content carry a `sessionLoss` object naming the page that dropped the cookies — the page reached after any redirect, and reported even when that page failed to finish loading. Every page scanned after that point was audited as a signed-out user — exclude the offending URL, sign in again, and re-run.
+
+The check compares which cookies the crawled URLs carry, not their values, so a rotating CSRF token never reads as a lost session. A cookie the browser deleted at its own stated expiry is ignored for the same reason — Cloudflare's `__cf_bm` lives 30 minutes and would otherwise warn on any longer crawl. Beyond that no attempt is made to tell an authentication cookie from any other: nothing in a cookie marks it as one, so any cookie the crawl started with and later lost is reported.
 
 ## Available Tools
 
@@ -245,14 +313,24 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 - `includeIncomplete` (default `true`): also report Axe "incomplete" results
 - `maxNodesPerViolation` (default `10`): cap on nodes reported per rule
 - `includeSelectors` / `excludeSelectors`: CSS selectors that scope the scan
+- `withRules` / `disableRules`: Axe rule ids that narrow which rules run
+- `annotateScreenshot` (default `false`): capture an annotated screenshot of the violations
+
+**Annotated screenshots:**
+When `annotateScreenshot` is `true`, each violating element is outlined and labelled with the rule ids it failed, a full-page PNG is written to the MCP output directory (`scan-page-annotated-{timestamp}.png`) and returned as a resource link, and the markers are then removed so the page is left exactly as it was. The markers are drawn in an out-of-flow overlay clipped to each element's own box, so they never reflow the page. The overlay uses a fresh id per scan, is placed in the browser's top layer so it stays visible over an open dialog, popover or fullscreen element, and compensates for a CSS `zoom` or a scaled ancestor so markers line up with what is rendered.
+An element that fails several rules gets one box listing every rule id, and elements inside open shadow roots are marked by walking the shadow path Axe reports.
+Running animations are paused before the elements are measured and resumed after the capture, so a moving target keeps its marker. The markers themselves live in a shadow root under an overlay whose own styles are `!important`, so page CSS cannot restyle or hide what the report counts, and each rule label sits outside the clipped box so it stays readable on an element smaller than its own label.
+At most 50 elements are annotated per scan. The result text always reports how many nodes were marked out of the total, plus how many were left out because they exceeded the limit, were hidden, zero-size or off-canvas (a full-page screenshot is clipped to the document box), or were inside an iframe (cross-frame selectors cannot be resolved from the top document).
 
 **Supported Violation Tags:**
 - WCAG standards (in the default set): `wcag2a`, `wcag2aa`, `wcag2aaa`, `wcag21a`, `wcag21aa`, `wcag21aaa`, `wcag22a`, `wcag22aa`, `wcag22aaa`
 - Section 508 (in the default set): `section508`
 - Categories (opt-in): `cat.aria`, `cat.color`, `cat.forms`, `cat.keyboard`, `cat.language`, `cat.name-role-value`, `cat.parsing`, `cat.semantics`, `cat.sensory-and-visual-cues`, `cat.structure`, `cat.tables`, `cat.text-alternatives`, `cat.time-and-media`
-- Non-conformance tags (opt-in): `best-practice`, `experimental`
+- Non-conformance tags (opt-in): `best-practice`, `experimental` (see the caveat below -- a few experimental rules also carry a WCAG tag and run by default)
 
 The default set is the WCAG and Section 508 tags only, so a default report means "this fails a conformance criterion". Category tags are opt-in for that reason: Axe matches requested tags with OR, so asking for `cat.keyboard` also pulls in best-practice rules such as `region` and `skip-link` that carry both tags. No live conformance rule is lost by leaving them out: the only rules reachable *only* through a `cat.*` tag are `duplicate-id` and `duplicate-id-active`, which Axe marks deprecated because WCAG removed SC 4.1.1. Add `best-practice` (landmark structure, heading order, `tabindex` hygiene) or a `cat.*` tag when you want that broader review.
+
+The same OR semantics apply to `experimental`, with one deliberate exception: five experimental rules -- `css-orientation-lock` (SC 1.3.4), `label-content-name-mismatch` (SC 2.5.3), `p-as-heading`, `table-fake-caption` and `td-has-header` (SC 1.3.1) -- also carry a `wcag*` tag and so run in the default set. In Axe, `experimental` describes how settled the heuristic is, not whether the criterion is real, so these are kept rather than filtered out. Adding the `experimental` tag pulls in the remaining experimental rules, which have no conformance tag of their own.
 
 **Scan scoping:**
 `scan_page`, `audit_site`, and `scan_page_matrix` accept `includeSelectors` and `excludeSelectors` to limit what Axe looks at. Use `includeSelectors` to audit one component (`["#checkout-form"]`) and `excludeSelectors` to drop third-party noise that pollutes every report (`["#cookie-banner", "iframe.intercom-frame"]`). Exclusions are applied after inclusions, so you can carve a widget out of an included subtree.
@@ -264,6 +342,15 @@ Selectors are resolved before the scan runs:
 
 In `audit_site`, selectors apply to every crawled page, so an `includeSelectors` value that is absent from a given page marks *that page* as errored in the report while the crawl continues. Link discovery runs before the scan, so pages reachable only through an errored page are still crawled.
 
+**Rule-level control:**
+`scan_page`, `audit_site`, and `scan_page_matrix` accept `withRules` and `disableRules` to pick individual Axe rules instead of whole tag sets. Use `withRules` to re-check one rule after a fix (`["color-contrast"]`) and `disableRules` to mute a rule you have already triaged (`["region"]`). Rule ids are the ones Axe reports (`image-alt`, `color-contrast`, ...); see the [Deque rule reference](https://dequeuniversity.com/rules/axe/).
+
+- **`withRules` overrides `violationsTag`.** Axe can run either a rule list or a tag list, never both, so when `withRules` is set the tags are ignored entirely -- `withRules: ["image-alt"]` runs exactly that one rule regardless of `violationsTag`. Rule ids are the more specific request, so they win.
+- **`disableRules` subtracts from whatever is selected.** It applies to `violationsTag` and `withRules` alike. (Axe itself ignores disabled rules once you give it an explicit rule list; the scanner subtracts them up front so the two options mean the same thing together as apart.) Disabling every rule in `withRules` is an error rather than an empty scan.
+- **Unknown rule ids fail the scan, naming the id.** Both options are checked against Axe's rule catalogue before the browser is touched, so a typo is reported as `Unknown Axe rule id(s) in withRules: image-altt` rather than surfacing later as an `frame.evaluate` failure from inside the page. Rule ids apply to a whole run, so `audit_site` and `scan_page_matrix` check them once before they touch the page -- a bad id fails the call outright instead of crawling every URL, or reloading and re-emulating the page, before rejecting the argument.
+
+`audit_site` and `scan_page_matrix` record both values in their JSON report metadata, so a stored report can be told apart from a full scan.
+
 **Incomplete ("needs review") results:**
 Axe returns `incomplete` for checks it cannot decide on its own -- contrast over a background image or gradient, ambiguous labels, elements it could not fully evaluate. `scan_page`, `audit_site`, and `scan_page_matrix` report these in a section separate from violations so you can resolve them by inspecting the page (screenshot, snapshot, `browser_evaluate`). Set `includeIncomplete: false` to suppress them.
 
@@ -274,6 +361,7 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 - Default strategy: link-based BFS from the current URL
 - Supports `links`, `nav`, `sitemap`, and `provided` URL strategies
 - Always writes a JSON report (default filename: `audit-site-{timestamp}.json`)
+- Warns and records `sessionLoss` if the crawl loses the cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 
 **Example flow:**
 ```text
@@ -298,14 +386,68 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 #### `audit_keyboard`
 Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) with practical heuristics.
 - Checks skip links, focus visibility, focus jumps, and possible focus traps
+- Checks target size against WCAG 2.2 SC 2.5.8 (`checkTargetSize`, default on)
+- Checks that focus is not entirely obscured, WCAG 2.2 SC 2.4.11 (`checkFocusObscured`, default on)
 - Optional issue screenshots (`screenshotOnIssue`)
 - Always writes a JSON report (default filename: `audit-keyboard-{timestamp}.json`)
+
+**Limits of the WCAG 2.2 checks** — these are heuristics, not a conformance verdict:
+- Target size only inspects elements the tab order actually reaches, so pointer-only targets are never measured.
+- Of the SC 2.5.8 exceptions, only *spacing* (a 24px-diameter circle centered on the target must reach neither another
+  target's box nor another undersized target's circle) and *inline* (an inline-level target — `inline`, `inline-block`,
+  `inline-flex`, … — inside surrounding sentence text, found by walking out through inline wrappers such as `<strong>`
+  to the containing block) are evaluated. The *user agent control*, *essential*, and *equivalent* exceptions cannot be
+  detected from the DOM, so a target relying on one of them is still reported and needs manual triage.
+- Spacing neighbours use the same pointer-target rule as the focused element, so rendered `:disabled` controls are not
+  counted as neighbours, and `contenteditable` regions are counted as targets on both sides.
+- Target size uses the element's bounding box, so an inline target wrapped over several lines is measured as one
+  union box rather than per line, and a target whose visible area is cut down by an `overflow` or `clip-path` ancestor
+  is measured at its full unclipped size.
+- SC 2.4.11 is the Minimum (AA) level: a focused element is only reported when *every* sampled point of its box is
+  covered by other content. Partially covered focus passes here, and the stricter SC 2.4.12 (AAA) is not checked.
+  It applies to every focus stop with a rendered box, including elements that are not pointer targets such as iframes.
+- Coverage is measured by hit-testing sample points and then checking that the element hit actually paints (visible,
+  non-zero opacity all the way up to the first wrapper shared with the focused element, non-transparent background or
+  background image). A transparent click-catching overlay therefore does *not* count as obscuration, but a covering
+  layer with `pointer-events: none` is never returned by hit testing and is missed. Semi-transparent overlays that
+  still leave content legible are reported.
 
 **Example flow:**
 ```text
 1. Navigate to the target page and let it fully load
 2. Run audit_keyboard with maxTabs: 50
 3. Review focus findings and open the generated JSON report path
+```
+
+#### `audit_screen_reader`
+Audits what a screen reader actually announces, using the browser's own accessibility tree (`page.ariaSnapshot`) plus element geometry. No screen reader is installed or driven; this is a static reading of the exposed tree.
+
+**Checks (`checkNames`)**
+- `missing-accessible-name`: controls and images exposed with no accessible name (WCAG 4.1.2)
+- `uninformative-accessible-name`: names such as "click here", "read more", "image" that mean nothing out of context (WCAG 2.4.4)
+- `filename-as-accessible-name`: image alt text that is a file name, e.g. `IMG_1234.jpg`, `DSC00123` (WCAG 1.1.1). Only images are checked: a link or button legitimately named after the file it downloads (`logo.png`) is not a defect.
+- `label-in-name-mismatch`: the accessible name does not contain the visible label, which breaks voice control (WCAG 2.5.3). The visible label of `<input type="submit|button|reset">` is read from its `value`, and a web component's label is read from its open shadow root.
+- `duplicate-accessible-name`: sibling links with the same name that lead to different URLs (WCAG 2.4.4)
+
+**Check (`checkReadingOrder`)**
+- `reading-order-mismatch`: accessibility tree order (what is read) versus visual position (WCAG 1.3.2), i.e. `order`, `flex-direction: row-reverse`, absolute positioning
+
+**What it deliberately does not detect**
+- Reading order is only compared between siblings that form a single row or a single column. Genuine two-dimensional layouts (grid, CSS multi-column, wrapped flex) have no single correct linear order and are skipped rather than guessed.
+- Elements are excluded from the reading-order comparison when they render no text, are `aria-hidden`, floated, `position: fixed`, off-canvas, or clipped to 1px, because their visual position is decoupled from source order by design. Tolerance: two boxes count as swapped only when they are fully separated along the compared axis (1px), and right-to-left containers are compared right-to-left.
+- Duplicate names are only reported when the destinations differ *and* are observable, which today means resolved link URLs (`/help` and `https://site/help` are the same destination). Two `Save` submit buttons in one form are never called ambiguous, because nothing in the exposed tree says whether they do different things.
+- Only elements the AI snapshot gives a `ref` are analyzed, and Playwright refs the elements that are visible and receive pointer events. A control that is announced but not interactable (`pointer-events: none`, some off-canvas widgets) is therefore skipped: without a ref it cannot be measured, so neither its `aria-hidden` state nor a selector to fix it can be established, and reporting it would mostly surface decorative `aria-hidden` icons.
+- Heading levels and landmark structure are not checked; axe already reports those (`heading-order`, `region`, `landmark-one-main`), so use `scan_page` for them.
+- Findings for names overlap with axe rules such as `link-name`, `button-name` and `image-alt`; this tool adds the quality checks (generic names, file names, label-in-name, duplicates) that axe cannot make.
+- It reports the page as currently rendered. Content behind a collapsed panel or another viewport is judged in that state.
+
+**Bounds:** `maxElements` (default 400) caps how many *screen-reader-reachable* accessibility tree elements are analyzed. The snapshot also refs `aria-hidden` subtrees, which no check reports, so measuring continues past them until the budget is filled with reachable elements (up to a hard ceiling of twice `maxElements` measured, so a page built mostly of hidden refs stays bounded). `maxFindingsPerCheck` (default 20) caps the findings listed per check. Both truncations are stated in the summary and the JSON report, and the full counts are always reported. Always writes a JSON report (default filename: `audit-screen-reader-{timestamp}.json`).
+
+**Example flow:**
+```text
+1. Navigate to the target page and let it fully load
+2. Run audit_screen_reader (optionally raise maxElements for a large page)
+3. Fix the reported elements by ref, then re-run to confirm
 ```
 
 ### Navigation Tools
