@@ -40,6 +40,7 @@ function createHarness(
     redirectMap?: Record<string, string>;
     sitemapXmlByUrl?: Record<string, string>;
     requestContext?: any;
+    cookiesForUrl?: (url: string) => { name: string, domain?: string, path?: string }[];
   }
 ) {
   const startUrl = options?.startUrl ?? 'https://example.com/';
@@ -47,7 +48,11 @@ function createHarness(
   const navLinkMap = options?.navLinkMap ?? {};
   const redirectMap = options?.redirectMap ?? {};
 
+  const cookiesMock = vi.fn(async (_urls?: string[]) =>
+    (options?.cookiesForUrl?.(currentUrl) ?? []).map(cookie => ({ domain: 'example.com', path: '/', ...cookie })));
+
   const crawlPage = {
+    context: vi.fn(() => ({ cookies: cookiesMock })),
     url: vi.fn(() => currentUrl),
     title: vi.fn(async () => `Title for ${currentUrl}`),
     evaluate: vi.fn(async (callback: () => unknown) => {
@@ -132,6 +137,7 @@ function createHarness(
     response,
     crawlTab,
     temporaryTab,
+    cookiesMock,
   };
 }
 
@@ -778,5 +784,139 @@ describe('audit_site tool', () => {
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     expect(report.summary.totals.scannedPages).toBeGreaterThanOrEqual(1);
+  });
+
+  it('reports the page where the authenticated session was lost', async () => {
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: url => url.endsWith('/account/close') || url.endsWith('/profile') ? [] : [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/account/close', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLoss).toEqual({ url: 'https://example.com/account/close', cookies: ['sid'] });
+    expect(response.result()).toContain('WARNING: session cookie(s) sid disappeared while loading https://example.com/account/close.');
+  });
+
+  it('scopes the cookie baseline to the crawled URLs', async () => {
+    const { context, response, cookiesMock } = createHarness({}, {
+      cookiesForUrl: () => [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(cookiesMock).toHaveBeenCalledWith(['https://example.com/dashboard', 'https://example.com/profile']);
+  });
+
+  it('reports a deleted auth cookie masked by a same-named cookie on another domain', async () => {
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: url => url.endsWith('/account/close')
+        ? [{ name: 'sid', domain: 'cdn.example.com' }]
+        : [{ name: 'sid', domain: 'example.com' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/account/close'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLoss).toEqual({ url: 'https://example.com/account/close', cookies: ['sid'] });
+  });
+
+  it('reports the URL reached after a redirect as the page that lost the session', async () => {
+    const { context, response } = createHarness({}, {
+      redirectMap: { 'https://example.com/account/close': 'https://example.com/signed-out' },
+      cookiesForUrl: url => url.endsWith('/signed-out') ? [] : [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/account/close'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLoss).toEqual({ url: 'https://example.com/signed-out', cookies: ['sid'] });
+    expect(response.result()).toContain('while loading https://example.com/signed-out.');
+  });
+
+  it('does not report session loss when cookies survive the crawl', async () => {
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: () => [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLoss).toBeNull();
   });
 });

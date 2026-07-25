@@ -217,6 +217,7 @@ Create a `config.json` file with the following options:
 - `browser.cdpTimeout`: Maximum time in milliseconds to wait when connecting to the CDP endpoint (default: `30000`)
 - `browser.cdpLaunch`: Launch a Chromium-family desktop app with CDP enabled, wait for the endpoint, and manage the child process lifecycle
 - CDP attach modes preserve the target browser's existing default-context settings instead of applying Playwright's defaults.
+- `browser.contextOptions.storageState`: Start each session from a recorded Playwright storage state; needs a mode that creates its own context (`browser.isolated`, `browser.remoteEndpoint`, or a CDP mode with `browser.isolated`) — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
 - `timeouts.settle`: How long to wait after each action for triggered work to settle before responding (default: `500`)
@@ -230,6 +231,70 @@ Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-a
 #### HTTP Heartbeat
 
 When the server runs with `--port`, it sends MCP heartbeat pings for Streamable HTTP sessions. Set `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` to override the default `5000` ms timeout. Set it to `0` or any negative value to disable heartbeat pings for clients or proxies that do not answer server-initiated pings.
+
+## Auditing pages behind a login
+
+Most real audits target pages that only exist for a signed-in user. There are two ways to get there.
+
+### Interactive route (no setup)
+
+Every tool shares one browser context, and `audit_site` crawls in a temporary tab of that same context, so cookies and local storage created while you drive the browser are already available to the crawl:
+
+```text
+1. browser_navigate to the login page
+2. browser_fill_form / browser_click to sign in
+3. browser_navigate to the first page you want audited
+4. audit_site — the crawl inherits the session you just created
+```
+
+This works out of the box in every mode, including the default persistent-profile mode. With the default profile the session also survives across server restarts, so you usually only sign in once.
+
+### Storage state route (repeatable, CI-friendly)
+
+Record a session once with Playwright's codegen, then hand the file to the server:
+
+```bash
+npx playwright codegen --save-storage=auth.json https://example.com/login
+```
+
+Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.
+
+Pass it to the server with the CLI flag, the environment variable, or the config file:
+
+```bash
+npx mcp-accessibility-scanner --isolated --storage-state ./auth.json
+```
+
+```bash
+PLAYWRIGHT_MCP_ISOLATED=true PLAYWRIGHT_MCP_STORAGE_STATE=./auth.json npx mcp-accessibility-scanner
+```
+
+```json
+{
+  "browser": {
+    "isolated": true,
+    "contextOptions": {
+      "storageState": "./auth.json"
+    }
+  }
+}
+```
+
+> **A fresh browser context is required.** Playwright only applies a storage state to a context it creates. That means `--isolated`, the remote-endpoint mode, or either CDP mode combined with `--isolated`. The default persistent-profile mode has no storage-state option at all, and the CDP modes without `--isolated` attach to the browser's existing context, so the server refuses to start with a storage state in those modes rather than silently auditing your site as an anonymous user. There, sign in interactively instead — the persistent profile also keeps the session across restarts.
+
+### Keep the crawl from destroying its own session
+
+`audit_site` excludes `logout|signout` by default, which is not enough for most applications. Add anything else that ends or changes the session before you start the crawl:
+
+```json
+{
+  "excludePathPatterns": ["logout|signout", "account/(close|delete)", "sessions/revoke", "/switch-(locale|account|org)"]
+}
+```
+
+Note that `excludePathPatterns` replaces the default rather than extending it, so repeat `logout|signout` in your list.
+
+If a session cookie disappears anyway, `audit_site` says so instead of reporting a confident, wrong audit: the result starts with a `WARNING: session cookie(s) … disappeared while loading <url>` line, and both the JSON report and the structured content carry a `sessionLoss` object naming the page that dropped the cookies. Every page scanned after that point was audited as a signed-out user — exclude the offending URL, sign in again, and re-run.
 
 ## Available Tools
 
@@ -280,6 +345,7 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 - Default strategy: link-based BFS from the current URL
 - Supports `links`, `nav`, `sitemap`, and `provided` URL strategies
 - Always writes a JSON report (default filename: `audit-site-{timestamp}.json`)
+- Warns and records `sessionLoss` if the crawl loses the cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 
 **Example flow:**
 ```text
