@@ -14,13 +14,22 @@
  * limitations under the License.
  */
 
+import crypto from 'node:crypto';
 import RE2 from 're2';
 import { z } from 'zod';
 import { defineTabTool, defineTool } from './tool.js';
 import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
-import { axeScopeSchemaShape, axeTagValues, defaultAxeTags, prepareAxeResults, runAxeScan } from './axe.js';
+import { axeScopeSchemaShape, axeTagValues, dedupeAxeNodes, defaultAxeTags, prepareAxeResults, runAxeScan } from './axe.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
+import { sanitizeForFilePath } from '../utils/fileUtils.js';
+
+import type { AxeViolation } from './axe.js';
+import type { Response } from '../response.js';
+import type { Tab } from '../tab.js';
+import type * as playwright from 'playwright';
+
+const maxAnnotatedElements = 50;
 
 const scanPageSchema = z.object({
   violationsTag: z
@@ -39,6 +48,10 @@ const scanPageSchema = z.object({
       .max(50)
       .default(10)
       .describe('Maximum nodes reported per rule. Raise it when you need every occurrence of a rule rather than a sample.'),
+  annotateScreenshot: z
+      .boolean()
+      .default(false)
+      .describe(`Capture a full-page PNG with every violating element outlined and labelled with its rule ids, then remove the markers. Off by default because screenshots are expensive. At most ${maxAnnotatedElements} elements are marked; nodes that are hidden, zero-size, or inside an iframe cannot be marked and are reported as skipped.`),
   ...axeScopeSchemaShape,
 });
 
@@ -74,6 +87,10 @@ const scanPage = defineTool({
       exclude: params.excludeSelectors,
     });
 
+    const annotationLines = params.annotateScreenshot
+      ? await annotateAndScreenshot(tab, results.violations, response)
+      : [];
+
     // Omit the incomplete count entirely when it was not requested, matching
     // audit_site: a bare "Incomplete: 3" with no rule blocks below reads as
     // findings that were dropped from the report.
@@ -82,6 +99,7 @@ const scanPage = defineTool({
       `URL: ${results.url}`,
       '',
       `Violations: ${results.violations.length}, ${incompleteCount}Passes: ${results.passes.length}, Inapplicable: ${results.inapplicable.length}`,
+      ...annotationLines,
     ].join('\n'));
 
 
@@ -120,6 +138,144 @@ const scanPage = defineTool({
 // rule with 40 occurrences look identical to one with 10.
 function nodeCountSuffix(shown: number, total: number): string {
   return shown < total ? ` (showing ${shown} of ${total} nodes, raise maxNodesPerViolation for the rest)` : '';
+}
+
+function safeIsoTimestampForFileName() {
+  return sanitizeForFilePath(new Date().toISOString());
+}
+
+/**
+ * Draws a labelled outline over every violating element, screenshots the page,
+ * then removes the markers. Returns the lines to append to the tool result.
+ */
+async function annotateAndScreenshot(tab: Tab, violations: AxeViolation[], response: Response): Promise<string[]> {
+  const marks = new Map<string, AnnotationMark>();
+  let totalNodes = 0;
+  let unreachableNodes = 0;
+  let queuedNodes = 0;
+  for (const violation of violations) {
+    for (const node of dedupeAxeNodes(violation.nodes)) {
+      totalNodes++;
+      const target = node.target ?? [];
+      // A target with more than one step is nested inside an iframe, which
+      // page.evaluate cannot reach from the top document. A single step may
+      // still be an array — that is a path through open shadow roots, which we
+      // can walk, so flatten it rather than rejecting it as cross-frame.
+      const path = (target.length === 1 ? [target[0]].flat(Infinity) : []) as unknown[];
+      if (!path.length || path.some(step => typeof step !== 'string')) {
+        unreachableNodes++;
+        continue;
+      }
+      const key = JSON.stringify(path);
+      const existing = marks.get(key);
+      // One element commonly fails several rules. Keep a single box listing
+      // every rule id instead of stacking boxes whose labels hide each other.
+      if (existing)
+        existing.labels.push(violation.id);
+      else if (marks.size < maxAnnotatedElements)
+        marks.set(key, { path: path as string[], labels: [violation.id] });
+      else
+        continue;
+      queuedNodes++;
+    }
+  }
+
+  const fileName = await tab.context.outputFile(`scan-page-annotated-${safeIsoTimestampForFileName()}.png`);
+  // Unique per scan: cleanup resolves the id document-order first, so a fixed
+  // id would delete the audited page's own element if it already used it.
+  const layerId = `mcp-a11y-annotation-layer-${crypto.randomUUID()}`;
+  let markedNodes = 0;
+  try {
+    markedNodes = await drawAnnotations(tab.page, layerId, [...marks.values()]);
+    await tab.page.screenshot({ path: fileName, fullPage: true });
+  } finally {
+    await tab.page.evaluate(id => document.getElementById(id)?.remove(), layerId);
+  }
+
+  response.addFileResourceLink(fileName, {
+    name: 'scan-page-annotated-screenshot',
+    title: 'Annotated violation screenshot',
+    description: 'Full-page screenshot with violating elements outlined and labelled with their rule id.',
+    mimeType: 'image/png',
+  });
+
+  const truncatedNodes = totalNodes - unreachableNodes - queuedNodes;
+  const invisibleNodes = queuedNodes - markedNodes;
+  return [
+    '',
+    `Annotated screenshot: ${fileName}`,
+    `Marked ${markedNodes} of ${totalNodes} violating nodes.`,
+    ...(markedNodes < totalNodes ? [
+      `Not marked: ${truncatedNodes} over the ${maxAnnotatedElements}-element annotation limit, ${invisibleNodes} hidden or zero-size, ${unreachableNodes} inside an iframe.`,
+    ] : []),
+  ];
+}
+
+type AnnotationMark = { path: string[], labels: string[] };
+
+async function drawAnnotations(page: playwright.Page, layerId: string, marks: AnnotationMark[]): Promise<number> {
+  return await page.evaluate(({ marks, layerId }) => {
+    const layer = document.createElement('div');
+    layer.id = layerId;
+    // Absolutely positioned and out of flow, so the layer can never reflow the
+    // page we are about to photograph. It starts 100px square as a probe: the
+    // rendered size of a known length reveals the scale a CSS zoom or an
+    // ancestor transform applies to every length we write inside the layer.
+    // The overrides after `display` neutralise the UA popover stylesheet.
+    layer.style.cssText = 'display:block;position:absolute;left:0;top:0;right:auto;bottom:auto;margin:0;border:0;padding:0;background:none;overflow:visible;width:100px;height:100px;z-index:2147483647;pointer-events:none;';
+    document.body.appendChild(layer);
+    // A manual popover joins the top layer, which paints above any open dialog,
+    // popover or fullscreen element — those sit above every z-index otherwise.
+    try {
+      layer.popover = 'manual';
+      layer.showPopover();
+    } catch {
+      // Engine without popover support: markers stay below top-layer content.
+      layer.removeAttribute('popover');
+    }
+    // The layer's own rect tells us where its (0,0) landed, which is not the
+    // document origin when an ancestor is itself positioned.
+    const origin = layer.getBoundingClientRect();
+    // ponytail: uniform scale only — a rotated or skewed ancestor still
+    // misplaces markers. Fixing that needs the full transform matrix.
+    const scaleX = origin.width / 100 || 1;
+    const scaleY = origin.height / 100 || 1;
+    layer.style.width = layer.style.height = '0px';
+
+    let marked = 0;
+    for (const mark of marks) {
+      let rect: DOMRect | undefined;
+      try {
+        // Each step after the first descends into an open shadow root.
+        let root: Document | ShadowRoot | Element = document;
+        let element: Element | null = null;
+        for (const step of mark.path) {
+          element = root.querySelector(step);
+          if (!element)
+            break;
+          root = element.shadowRoot ?? element;
+        }
+        rect = element?.getBoundingClientRect();
+      } catch {
+        // Axe can report a selector this browser refuses to parse; skip it.
+        continue;
+      }
+      if (!rect || rect.width === 0 || rect.height === 0)
+        continue;
+      const box = document.createElement('div');
+      // The marker is clipped to the element's own box (inset ring, overflow
+      // hidden) so it cannot extend the scrollable area or add scrollbars.
+      box.style.cssText = `position:absolute;left:${(rect.left - origin.left) / scaleX}px;top:${(rect.top - origin.top) / scaleY}px;width:${rect.width / scaleX}px;height:${rect.height / scaleY}px;overflow:hidden;box-shadow:inset 0 0 0 3px #e11d48;font:11px/1.4 sans-serif;`;
+      const label = document.createElement('span');
+      label.style.cssText = 'display:inline-block;background:#e11d48;color:#fff;padding:0 4px;';
+      label.textContent = mark.labels.join(', ');
+      box.appendChild(label);
+      layer.appendChild(box);
+      // Every rule that named this element is now visible on its one box.
+      marked += mark.labels.length;
+    }
+    return marked;
+  }, { marks, layerId });
 }
 
 const snapshot = defineTool({

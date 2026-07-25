@@ -270,6 +270,29 @@ const tests = [
         'scan_page',
         { ...scanArgs, excludeSelectors: [':::not-css'] },
         /Invalid CSS in excludeSelectors: :::not-css/);
+
+    // Annotated screenshots.
+    await navigate('<title>Scan</title><img src="x" width="120" height="60"><h1>Scan</h1>');
+    const plain = await callTool('scan_page', { violationsTag: ['wcag2a', 'wcag2aa'] });
+    if (/Annotated screenshot/.test(resultText(plain)))
+      throw new Error('scan_page annotated a screenshot without annotateScreenshot');
+
+    const annotated = await callTool('scan_page', { violationsTag: ['wcag2a', 'wcag2aa'], annotateScreenshot: true });
+    const annotatedText = resultText(annotated);
+    assertText(annotatedText, /Annotated screenshot: .+\.png/);
+    const screenshotPath = annotatedText.match(/Annotated screenshot: (.+\.png)/)[1];
+    const screenshotSize = fs.statSync(screenshotPath).size;
+    if (screenshotSize < 1000)
+      throw new Error(`Annotated screenshot looks empty (${screenshotSize} bytes): ${screenshotPath}`);
+    const marked = annotatedText.match(/Marked (\d+) of (\d+) violating nodes\./);
+    if (!marked || Number(marked[1]) < 1)
+      throw new Error(`Expected at least one marked node in result:\n${annotatedText.slice(0, 4000)}`);
+
+    const leftovers = await callTool('browser_evaluate', {
+      function: '() => ({ layers: document.querySelectorAll("#mcp-a11y-annotation-layer").length, idInHtml: document.documentElement.innerHTML.includes("mcp-a11y-annotation-layer") })',
+    });
+    assertText(leftovers, /"layers":\s*0/);
+    assertText(leftovers, /"idInHtml":\s*false/);
   }),
 
   test('browser_tabs', async () => {
@@ -302,9 +325,8 @@ const tests = [
     // audit_site crawls in a second tab, so it needs an open page to return to.
     // Without this the test only passes when an earlier test left a tab open.
     await navigate('<title>AuditSiteStart</title><h1>Audit Site Start</h1>');
-    const result = await callTool('audit_site', {
+    const auditSiteDefaults = {
       strategy: 'provided',
-      urls: [`${state.fixtureOrigin}/audit-site`],
       maxPages: 1,
       maxDepth: 0,
       sameOriginOnly: true,
@@ -314,6 +336,10 @@ const tests = [
       violationsTag: ['wcag2a', 'wcag2aa'],
       maxNodesPerViolation: 5,
       waitAfterNavigationMs: 50,
+    };
+    const result = await callTool('audit_site', {
+      ...auditSiteDefaults,
+      urls: [`${state.fixtureOrigin}/audit-site`],
     });
     assertText(result, /JSON report:|scanned/i);
 
@@ -337,6 +363,43 @@ const tests = [
     assertText(throughErroredPage, /Errored pages: 1/);
     assertText(throughErroredPage, /Scanned pages: 1/);
     assertText(throughErroredPage, /audit-gate-child/);
+
+    // Signing in interactively must carry over to the crawl tab, which shares
+    // the browser context, and losing that session mid-crawl must be reported.
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/login` });
+    const authed = await callTool('audit_site', {
+      ...auditSiteDefaults,
+      urls: [`${state.fixtureOrigin}/secure`],
+    });
+    const authedTitle = authed.structuredContent?.topPages?.[0]?.title;
+    if (authedTitle !== 'Members Area')
+      throw new Error(`Expected audit_site to scan authenticated content, got title ${JSON.stringify(authedTitle)}`);
+
+    const lost = await callTool('audit_site', {
+      ...auditSiteDefaults,
+      maxPages: 3,
+      urls: [
+        `${state.fixtureOrigin}/secure`,
+        `${state.fixtureOrigin}/account/close`,
+        `${state.fixtureOrigin}/secure-2`,
+      ],
+    });
+    assertText(lost, /WARNING: session cookie\(s\) mcp_session disappeared/);
+    if (lost.structuredContent?.sessionLoss?.url !== `${state.fixtureOrigin}/account/close`)
+      throw new Error(`Expected sessionLoss at /account/close, got ${JSON.stringify(lost.structuredContent?.sessionLoss)}`);
+
+    // A redirecting logout must be reported at the page reached, not requested.
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/login` });
+    const redirected = await callTool('audit_site', {
+      ...auditSiteDefaults,
+      maxPages: 2,
+      urls: [
+        `${state.fixtureOrigin}/secure`,
+        `${state.fixtureOrigin}/goodbye`,
+      ],
+    });
+    if (redirected.structuredContent?.sessionLoss?.url !== `${state.fixtureOrigin}/signed-out`)
+      throw new Error(`Expected sessionLoss at /signed-out, got ${JSON.stringify(redirected.structuredContent?.sessionLoss)}`);
   }),
 
   test('scan_page_matrix', async () => {
@@ -583,6 +646,47 @@ function startFixtureServer() {
     if (request.url === '/audit-gate-child') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end('<!doctype html><html><head><title>GateChild</title></head><body><div id="only-on-child"><img src="x"></div></body></html>');
+      return;
+    }
+    // Cookie-gated fixture: /login mints the session, /secure serves real
+    // content only while it is present, /account/close destroys it.
+    if (request.url === '/login') {
+      response.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'set-cookie': 'mcp_session=granted; Path=/',
+      });
+      response.end('<!doctype html><html><head><title>Login</title></head><body><h1>Signed In</h1></body></html>');
+      return;
+    }
+    if (request.url === '/secure' || request.url === '/secure-2') {
+      const signedIn = (request.headers.cookie ?? '').includes('mcp_session=granted');
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(signedIn
+        ? '<!doctype html><html><head><title>Members Area</title></head><body><img src="x"><h1>Members Only Content</h1></body></html>'
+        : '<!doctype html><html><head><title>Login Required</title></head><body><h1>Please sign in</h1></body></html>');
+      return;
+    }
+    if (request.url === '/account/close') {
+      response.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'set-cookie': 'mcp_session=; Path=/; Max-Age=0',
+      });
+      response.end('<!doctype html><html><head><title>Account Closed</title></head><body><h1>Account Closed</h1></body></html>');
+      return;
+    }
+    // /goodbye clears the session and redirects, so the page that actually lost
+    // the cookie is /signed-out rather than the URL the crawl asked for.
+    if (request.url === '/goodbye') {
+      response.writeHead(302, {
+        'set-cookie': 'mcp_session=; Path=/; Max-Age=0',
+        'location': '/signed-out',
+      });
+      response.end();
+      return;
+    }
+    if (request.url === '/signed-out') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Signed Out</title></head><body><h1>Signed Out</h1></body></html>');
       return;
     }
     if (request.url === '/network-json') {
