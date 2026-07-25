@@ -418,9 +418,52 @@ const tests = [
   }),
 
   test('audit_keyboard', async () => {
-    await navigate('<title>Keyboard</title><a href="#main">Skip to main</a><main id="main"><input aria-label="Search"><button>Go</button></main>');
+    // Fixture mixes real SC 2.5.8 / SC 2.4.11 failures with targets that a naive
+    // check would flag but that the exceptions legitimately allow.
+    await navigate([
+      '<title>Keyboard</title>',
+      '<style>',
+      'a, button { position: absolute; background: #06c; color: #fff; }',
+      '#skip { top: 0; left: 0; }',
+      '#tiny-a { top: 40px; left: 0; display: block; width: 16px; height: 16px; }',
+      '#tiny-b { top: 40px; left: 20px; display: block; width: 16px; height: 16px; }',
+      '#compliant { top: 100px; left: 0; width: 24px; height: 24px; padding: 0; border: 0; }',
+      '#buried { top: 200px; left: 0; display: block; width: 60px; height: 30px; }',
+      '#cookie-bar { position: fixed; top: 190px; left: 0; width: 100%; height: 60px; background: #222; z-index: 10; }',
+      '#sentence { position: absolute; top: 300px; left: 0; width: 380px; }',
+      '#terms { position: static; }',
+      '#inline-block-sentence { position: absolute; top: 340px; left: 0; width: 380px; }',
+      '#ib-terms, #ib-next { position: static; display: inline-block; width: 12px; height: 18px; }',
+      '#isolated { top: 400px; left: 0; display: block; width: 18px; height: 18px; }',
+      '#disabled-neighbor { top: 400px; left: 18px; width: 40px; height: 30px; }',
+      '#covered { top: 400px; left: 300px; width: 40px; height: 30px; }',
+      // Transparent but clickable: intercepts hit testing without hiding anything.
+      '#glass { position: fixed; top: 395px; left: 290px; width: 200px; height: 40px; z-index: 30; }',
+      '#editable { position: absolute; top: 460px; left: 0; width: 200px; height: 40px; }',
+      '#panel { position: fixed; top: 450px; left: 0; width: 100%; height: 60px; background: #333; z-index: 20; }',
+      '</style>',
+      '<a href="#main" id="skip">Skip to main</a>',
+      '<main id="main">',
+      '<a href="#a" id="tiny-a" aria-label="Tiny A">a</a>',
+      '<a href="#b" id="tiny-b" aria-label="Tiny B">b</a>',
+      '<button id="compliant" aria-label="Compliant control">C</button>',
+      '<a href="#c" id="buried" aria-label="Buried link">Buried</a>',
+      '<p id="sentence">Please read the <a href="#terms" id="terms" aria-label="Inline terms">terms</a> before continuing.</p>',
+      '<p id="inline-block-sentence">Please read the <a href="#p" id="ib-terms" aria-label="Inline block terms">p</a> <a href="#h" id="ib-next" aria-label="Inline block help">h</a> notes before continuing.</p>',
+      '<a href="#d" id="isolated" aria-label="Isolated link">i</a>',
+      '<button id="disabled-neighbor" aria-label="Disabled neighbor" disabled>D</button>',
+      '<button id="covered" aria-label="Covered control">X</button>',
+      '<div id="editable" contenteditable="true">Editable region</div>',
+      '</main>',
+      '<div id="cookie-bar">Cookie bar</div>',
+      '<div id="glass"></div>',
+      '<div id="panel">Sticky panel</div>',
+    ].join(''));
+    // Fixed size so earlier resize/matrix tests cannot make the page scroll under the
+    // fixed overlays this fixture relies on.
+    await callTool('browser_resize', { width: 800, height: 600 });
     const result = await callTool('audit_keyboard', {
-      maxTabs: 8,
+      maxTabs: 11,
       includeShiftTab: false,
       stopOnCycle: true,
       cycleWindow: 4,
@@ -430,11 +473,32 @@ const tests = [
       checkFocusTrap: true,
       checkFocusVisibility: true,
       checkFocusJumps: true,
+      checkTargetSize: true,
+      checkFocusObscured: true,
       jumpScrollThresholdPx: 600,
       screenshotOnIssue: false,
       maxIssueScreenshots: 2,
     });
     assertText(result, /JSON report:|Skip link|summary/i);
+    assertText(result, /Tiny A is 16x16 CSS px/);
+    assertText(result, /Tiny B is 16x16 CSS px/);
+    assertText(result, /Buried link hidden behind div#cookie-bar/);
+    // A focusable non-pointer-target under an opaque sticky bar is still a SC 2.4.11 fail.
+    assertText(result, /Editable region hidden behind div#panel/);
+    // A check that flags compliant controls is worse than no check: the 24x24 button,
+    // the inline link inside a sentence, and the isolated skip link must all stay clean.
+    assertNoText(result, /Compliant control (is \d+x\d+|hidden behind)/);
+    assertNoText(result, /Inline terms (is \d+x\d+|hidden behind)/);
+    assertNoText(result, /Skip to main (is \d+x\d+|hidden behind)/);
+    // Inline-block links in a sentence keep the SC 2.5.8 inline exception, a disabled
+    // control is not a spacing neighbor, and a transparent click-catcher hides nothing.
+    assertNoText(result, /Inline block (terms|help) (is \d+x\d+|hidden behind)/);
+    assertNoText(result, /Isolated link (is \d+x\d+|hidden behind)/);
+    assertNoText(result, /Covered control (is \d+x\d+|hidden behind)/);
+    const summary = result.structuredContent?.summary ?? {};
+    if (summary.targetSizeIssueCount !== 2 || summary.focusObscuredIssueCount !== 2) {
+      throw new Error(`Expected 2 target-size and 2 obscured findings, got ${JSON.stringify(summary)}`);
+    }
   }),
 
   test('browser_install', async () => {
@@ -573,6 +637,12 @@ function assertText(result, pattern) {
   const text = typeof result === 'string' ? result : resultText(result);
   if (!pattern.test(text))
     throw new Error(`Expected ${pattern} in result:\n${text.slice(0, 4000)}`);
+}
+
+function assertNoText(result, pattern) {
+  const text = typeof result === 'string' ? result : resultText(result);
+  if (pattern.test(text))
+    throw new Error(`Did not expect ${pattern} in result:\n${text.slice(0, 4000)}`);
 }
 
 // Counts nodes reported for one axe rule in a scan_page result. Each rule block
