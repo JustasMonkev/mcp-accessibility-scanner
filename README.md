@@ -120,6 +120,7 @@ Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.
 > browser_navigate {"url": "https://example.com"}
 > scan_page {"violationsTag": ["wcag21aa"]}
 > audit_keyboard {"maxTabs": 30}
+> audit_screen_reader {}
 ```
 
 Each line is `<tool-name> <json-arguments>`. Omit the JSON to pass `{}`.
@@ -410,6 +411,37 @@ Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) wit
 1. Navigate to the target page and let it fully load
 2. Run audit_keyboard with maxTabs: 50
 3. Review focus findings and open the generated JSON report path
+```
+
+#### `audit_screen_reader`
+Audits what a screen reader actually announces, using the browser's own accessibility tree (`page.ariaSnapshot`) plus element geometry. No screen reader is installed or driven; this is a static reading of the exposed tree.
+
+**Checks (`checkNames`)**
+- `missing-accessible-name`: controls and images exposed with no accessible name (WCAG 4.1.2)
+- `uninformative-accessible-name`: names such as "click here", "read more", "image" that mean nothing out of context (WCAG 2.4.4)
+- `filename-as-accessible-name`: image alt text that is a file name, e.g. `IMG_1234.jpg`, `DSC00123` (WCAG 1.1.1). Only images are checked: a link or button legitimately named after the file it downloads (`logo.png`) is not a defect.
+- `label-in-name-mismatch`: the accessible name does not contain the visible label, which breaks voice control (WCAG 2.5.3). The visible label of `<input type="submit|button|reset">` is read from its `value`.
+- `duplicate-accessible-name`: sibling links with the same name that lead to different URLs (WCAG 2.4.4)
+
+**Check (`checkReadingOrder`)**
+- `reading-order-mismatch`: accessibility tree order (what is read) versus visual position (WCAG 1.3.2), i.e. `order`, `flex-direction: row-reverse`, absolute positioning
+
+**What it deliberately does not detect**
+- Reading order is only compared between siblings that form a single row or a single column. Genuine two-dimensional layouts (grid, CSS multi-column, wrapped flex) have no single correct linear order and are skipped rather than guessed.
+- Elements are excluded from the reading-order comparison when they render no text, are `aria-hidden`, floated, `position: fixed`, off-canvas, or clipped to 1px, because their visual position is decoupled from source order by design. Tolerance: two boxes count as swapped only when they are fully separated along the compared axis (1px), and right-to-left containers are compared right-to-left.
+- Duplicate names are only reported when the destinations differ *and* are observable, which today means link `href`s. Two `Save` submit buttons in one form are never called ambiguous, because nothing in the exposed tree says whether they do different things.
+- Only elements the AI snapshot gives a `ref` are analyzed, and Playwright refs the elements that are visible and receive pointer events. A control that is announced but not interactable (`pointer-events: none`, some off-canvas widgets) is therefore skipped: without a ref it cannot be measured, so neither its `aria-hidden` state nor a selector to fix it can be established, and reporting it would mostly surface decorative `aria-hidden` icons.
+- Heading levels and landmark structure are not checked; axe already reports those (`heading-order`, `region`, `landmark-one-main`), so use `scan_page` for them.
+- Findings for names overlap with axe rules such as `link-name`, `button-name` and `image-alt`; this tool adds the quality checks (generic names, file names, label-in-name, duplicates) that axe cannot make.
+- It reports the page as currently rendered. Content behind a collapsed panel or another viewport is judged in that state.
+
+**Bounds:** `maxElements` (default 400) caps how many *screen-reader-reachable* accessibility tree elements are analyzed. The snapshot also refs `aria-hidden` subtrees, which no check reports, so measuring continues past them until the budget is filled with reachable elements (up to a hard ceiling of twice `maxElements` measured, so a page built mostly of hidden refs stays bounded). `maxFindingsPerCheck` (default 20) caps the findings listed per check. Both truncations are stated in the summary and the JSON report, and the full counts are always reported. Always writes a JSON report (default filename: `audit-screen-reader-{timestamp}.json`).
+
+**Example flow:**
+```text
+1. Navigate to the target page and let it fully load
+2. Run audit_screen_reader (optionally raise maxElements for a large page)
+3. Fix the reported elements by ref, then re-run to confirm
 ```
 
 ### Navigation Tools
