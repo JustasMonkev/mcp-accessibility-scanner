@@ -231,6 +231,8 @@
         "src/tools/auditSite.ts",
         "src/tools/scanPageMatrix.ts",
         "src/tools/auditKeyboard.ts",
+        "src/tools/auditScreenReader.ts",
+        "tests/tools-auditScreenReader.test.ts",
         "tests/tools-auditSite.test.ts",
         "tests/tools-axe.test.ts",
         "tests/tools-scanPageMatrix.test.ts",

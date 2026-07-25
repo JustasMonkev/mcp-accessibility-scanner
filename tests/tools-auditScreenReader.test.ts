@@ -1,0 +1,474 @@
+import fs from 'fs';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { chromium, type Browser } from 'playwright';
+import auditScreenReaderTools, {
+  analyzeScreenReader,
+  collectElementFacts,
+  parseAriaSnapshot,
+  type ElementFacts,
+  type Rect,
+  type ScreenReaderCheck,
+  type ScreenReaderNode,
+} from '../src/tools/auditScreenReader.js';
+import { Response } from '../src/response.js';
+
+function node(overrides: Partial<ScreenReaderNode>): ScreenReaderNode {
+  return {
+    role: 'generic',
+    name: null,
+    level: null,
+    ref: 'e1',
+    depth: 0,
+    parent: null,
+    tagName: 'div',
+    selector: 'div',
+    visibleText: null,
+    href: null,
+    rect: null,
+    direction: 'ltr',
+    positionFixed: false,
+    floating: false,
+    ariaHidden: false,
+    childCount: 0,
+    ...overrides,
+  };
+}
+
+function rect(x: number, y: number, width = 100, height = 20): Rect {
+  return { x, y, width, height };
+}
+
+function analyze(nodes: ScreenReaderNode[], maxFindingsPerCheck = 20) {
+  return analyzeScreenReader(nodes, { checkNames: true, checkReadingOrder: true, maxFindingsPerCheck });
+}
+
+function checks(nodes: ScreenReaderNode[]): ScreenReaderCheck[] {
+  return analyze(nodes).findings.map(finding => finding.check);
+}
+
+describe('parseAriaSnapshot', () => {
+  it('parses roles, names, refs, levels and parent links', () => {
+    const nodes = parseAriaSnapshot([
+      '- generic [active] [ref=e1]:',
+      '  - link "click here" [ref=e2] [cursor=pointer]:',
+      '    - /url: /a',
+      '  - heading "Title" [level=2] [ref=e3]',
+      '  - button "Say \\"hi\\" now" [ref=e4]: Hi',
+      '  - text: loose text',
+    ].join('\n'));
+
+    expect(nodes.map(entry => entry.role)).toEqual(['generic', 'link', 'heading', 'button', 'text']);
+    expect(nodes[1]).toMatchObject({ name: 'click here', ref: 'e2', parent: 0 });
+    expect(nodes[2]).toMatchObject({ level: 2, ref: 'e3', parent: 0 });
+    expect(nodes[3].name).toBe('Say "hi" now');
+    expect(nodes[4].ref).toBeNull();
+  });
+});
+
+describe('analyzeScreenReader accessible names', () => {
+  it('flags controls and images with no accessible name', () => {
+    expect(checks([node({ role: 'textbox', ref: 'e1' })])).toEqual(['missing-accessible-name']);
+    expect(checks([node({ role: 'img', ref: 'e1' })])).toEqual(['missing-accessible-name']);
+  });
+
+  it('ignores aria-hidden elements, which the snapshot still lists', () => {
+    expect(checks([
+      node({ role: 'img', ref: 'e1', ariaHidden: true }),
+      node({ role: 'button', ref: 'e2', ariaHidden: true, visibleText: 'Decorative' }),
+      node({ role: 'link', ref: 'e3', ariaHidden: true, name: 'Read more', href: '/a' }),
+    ])).toEqual([]);
+  });
+
+  it('does not flag containers, text nodes or named controls', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      node({ role: 'paragraph', ref: 'e2', visibleText: 'Some prose' }),
+      node({ role: 'button', ref: 'e3', name: 'Save', visibleText: 'Save' }),
+      node({ role: 'button', ref: null, name: null }),
+    ])).toEqual([]);
+  });
+
+  it('flags names that are useless out of context but keeps specific ones', () => {
+    expect(checks([node({ role: 'link', ref: 'e1', name: 'Read more', visibleText: 'Read more', href: '/a' })]))
+        .toEqual(['uninformative-accessible-name']);
+    expect(checks([node({ role: 'link', ref: 'e1', name: 'Read more about pricing', visibleText: 'Read more about pricing', href: '/a' })]))
+        .toEqual([]);
+    expect(checks([node({ role: 'link', ref: 'e1', name: 'Click here!', visibleText: 'Click here!', href: '/a' })]))
+        .toEqual(['uninformative-accessible-name']);
+  });
+
+  it('flags an exposed option with no name but not a named one', () => {
+    // A closed <select> exposes no refs, so this only fires for a rendered
+    // listbox, where a blank row is an unpickable choice.
+    expect(checks([node({ role: 'option', ref: 'e1' })])).toEqual(['missing-accessible-name']);
+    expect(checks([node({ role: 'option', ref: 'e1', name: 'Apples', visibleText: 'Apples' })])).toEqual([]);
+  });
+
+  it('flags file names used as alt text but not descriptions that mention a photo', () => {
+    expect(checks([node({ role: 'img', ref: 'e1', name: 'IMG_1234.jpg' })]))
+        .toEqual(['filename-as-accessible-name']);
+    expect(checks([node({ role: 'img', ref: 'e1', name: 'DSC00123' })]))
+        .toEqual(['filename-as-accessible-name']);
+    expect(checks([node({ role: 'img', ref: 'e1', name: 'Photo of the 2024 team offsite' })]))
+        .toEqual([]);
+  });
+
+  it('does not read a link or button named after a file as bad alt text', () => {
+    // Only an image is described by its name; a download link named after the
+    // file it fetches has nothing to fix.
+    expect(checks([node({ role: 'link', ref: 'e1', name: 'logo.png', visibleText: 'logo.png', href: '/logo.png' })]))
+        .toEqual([]);
+    expect(checks([node({ role: 'button', ref: 'e1', name: 'IMG_1234.jpg', visibleText: 'IMG_1234.jpg' })]))
+        .toEqual([]);
+  });
+
+  it('flags visible label and accessible name mismatches without punctuation or case noise', () => {
+    expect(checks([node({ role: 'button', ref: 'e1', name: 'Submit form', visibleText: 'Send' })]))
+        .toEqual(['label-in-name-mismatch']);
+    expect(checks([node({ role: 'button', ref: 'e1', name: 'Search products', visibleText: 'Search' })]))
+        .toEqual([]);
+    expect(checks([node({ role: 'button', ref: 'e1', name: 'save changes', visibleText: 'SAVE CHANGES!' })]))
+        .toEqual([]);
+  });
+
+  it('does not treat container text or icon-only controls as a label mismatch', () => {
+    expect(checks([
+      node({ role: 'link', ref: 'e1', name: 'Product card', visibleText: 'Nice hat 19.99 Add to cart', childCount: 3 }),
+      node({ role: 'button', ref: 'e2', name: 'Close dialog', visibleText: '×' }),
+    ])).toEqual([]);
+  });
+
+  it('flags sibling controls that share a name but lead elsewhere', () => {
+    const siblings = [
+      node({ role: 'list', ref: 'e1' }),
+      node({ role: 'link', ref: 'e2', parent: 0, name: 'Download', visibleText: 'Download', href: '/a.pdf' }),
+      node({ role: 'link', ref: 'e3', parent: 0, name: 'Download', visibleText: 'Download', href: '/b.pdf' }),
+    ];
+    expect(checks(siblings)).toEqual(['duplicate-accessible-name']);
+  });
+
+  it('does not flag repeated names with the same target or in different containers', () => {
+    expect(checks([
+      node({ role: 'list', ref: 'e1' }),
+      node({ role: 'link', ref: 'e2', parent: 0, name: 'Home', visibleText: 'Home', href: '/' }),
+      node({ role: 'link', ref: 'e3', parent: 0, name: 'Home', visibleText: 'Home', href: '/' }),
+    ])).toEqual([]);
+
+    expect(checks([
+      node({ role: 'listitem', ref: 'e1' }),
+      node({ role: 'listitem', ref: 'e2' }),
+      node({ role: 'button', ref: 'e3', parent: 0, name: 'Edit', visibleText: 'Edit' }),
+      node({ role: 'button', ref: 'e4', parent: 1, name: 'Edit', visibleText: 'Edit' }),
+    ])).toEqual([]);
+  });
+
+  it('does not claim controls differ when their destination is not observable', () => {
+    // Two "Save" submit buttons in one form, or an ARIA link with no href: the
+    // audit cannot see what either one does, so it cannot call them ambiguous.
+    expect(checks([
+      node({ role: 'form', ref: 'e1' }),
+      node({ role: 'button', ref: 'e2', parent: 0, name: 'Save', visibleText: 'Save' }),
+      node({ role: 'button', ref: 'e3', parent: 0, name: 'Save', visibleText: 'Save' }),
+    ])).toEqual([]);
+
+    expect(checks([
+      node({ role: 'list', ref: 'e1' }),
+      node({ role: 'link', ref: 'e2', parent: 0, name: 'Download', visibleText: 'Download', href: '/a.pdf' }),
+      node({ role: 'link', ref: 'e3', parent: 0, name: 'Download', visibleText: 'Download' }),
+    ])).toEqual([]);
+  });
+});
+
+describe('analyzeScreenReader reading order', () => {
+  // Every reading-order participant needs rendered text; see the icon-only test below.
+  function block(ref: string, text: string, x: number, y: number, overrides: Partial<ScreenReaderNode> = {}) {
+    return node({ role: 'paragraph', ref, parent: 0, name: null, visibleText: text, rect: rect(x, y), ...overrides });
+  }
+
+  it('flags a single row whose visual order is reversed', () => {
+    const result = analyze([
+      node({ role: 'generic', ref: 'e1', selector: 'div.toolbar', visibleText: 'First in DOM Second in DOM' }),
+      block('e2', 'First in DOM', 200, 10, { role: 'button', name: 'First in DOM' }),
+      block('e3', 'Second in DOM', 50, 10, { role: 'button', name: 'Second in DOM' }),
+    ]);
+    expect(result.findings.map(finding => finding.check)).toEqual(['reading-order-mismatch']);
+    expect(result.findings[0].problem).toContain('First in DOM');
+    expect(result.findings[0].fix).toContain('Reorder the source');
+  });
+
+  it('flags a column whose visual order is reversed by absolute positioning', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Lower but first in DOM', 10, 200),
+      block('e3', 'Upper but second in DOM', 10, 10),
+    ])).toEqual(['reading-order-mismatch']);
+  });
+
+  it('accepts a matching row, a matching column and a right-to-left row', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Back', 10, 10, { role: 'button', name: 'Back' }),
+      block('e3', 'Next', 200, 10, { role: 'button', name: 'Next' }),
+    ])).toEqual([]);
+
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Top paragraph', 10, 10),
+      block('e3', 'Bottom paragraph', 10, 200),
+    ])).toEqual([]);
+
+    expect(checks([
+      node({ role: 'generic', ref: 'e1', direction: 'rtl' }),
+      block('e2', 'الأول', 300, 10, { role: 'link', name: 'الأول', href: '/1', direction: 'rtl' }),
+      block('e3', 'الثاني', 150, 10, { role: 'link', name: 'الثاني', href: '/2', direction: 'rtl' }),
+    ])).toEqual([]);
+  });
+
+  it('flags a right-to-left row only when it contradicts right-to-left reading', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1', direction: 'rtl' }),
+      block('e2', 'الأول', 150, 10, { role: 'link', name: 'الأول', href: '/1', direction: 'rtl' }),
+      block('e3', 'الثاني', 300, 10, { role: 'link', name: 'الثاني', href: '/2', direction: 'rtl' }),
+    ])).toEqual(['reading-order-mismatch']);
+  });
+
+  it('ignores two-dimensional layouts such as CSS multi-column and grids', () => {
+    // DOM order goes down column one then column two; row-major comparison would
+    // wrongly call this a mismatch.
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Column one top', 10, 100),
+      block('e3', 'Column one bottom', 10, 140),
+      block('e4', 'Column two top', 200, 100),
+      block('e5', 'Column two bottom', 200, 140),
+    ])).toEqual([]);
+  });
+
+  it('ignores an icon-only control rendered before its label', () => {
+    // Disclosure arrows and leading icons carry no text, so their position is a
+    // rendering detail rather than a change of reading sequence.
+    expect(checks([
+      node({ role: 'listitem', ref: 'e1' }),
+      block('e2', 'Legislation', 60, 200, { role: 'link', name: 'Legislation', href: '#legislation' }),
+      node({ role: 'button', ref: 'e3', parent: 0, name: 'Toggle Legislation subsection', visibleText: '', rect: rect(37, 201, 22, 22) }),
+    ])).toEqual([]);
+  });
+
+  it('ignores floated media placed beside a later paragraph', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Figure caption', 756, 628, { role: 'figure', name: 'Figure caption', floating: true }),
+      block('e3', 'Body paragraph', 264, 347),
+    ])).toEqual([]);
+  });
+
+  it('ignores off-canvas, clipped, fixed and overlapping boxes', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Skip to content', -9999, 10, { role: 'link', name: 'Skip to content' }),
+      block('e3', 'Clipped', 10, 10, { role: 'link', name: 'Clipped', rect: rect(10, 10, 1, 1) }),
+      block('e4', 'Sticky header', 10, 500, { role: 'banner', positionFixed: true }),
+      block('e5', 'First paragraph', 10, 10),
+      block('e6', 'Overlapping paragraph', 15, 15),
+    ])).toEqual([]);
+  });
+
+  it('reads direction from the children when the parent carries none of its own', () => {
+    // An iframe element's direction is the embedding page's, and a parent that
+    // was never measured has no direction at all; both would otherwise be read
+    // as ltr and turn a correct right-to-left row into a false mismatch.
+    const rtlRow = (parent: Partial<ScreenReaderNode>) => [
+      node({ role: 'iframe', ref: 'e1', tagName: 'iframe', direction: 'ltr', ...parent }),
+      block('f1e2', 'rishon', 300, 10, { role: 'link', name: 'rishon', href: '/1', direction: 'rtl' }),
+      block('f1e3', 'sheni', 150, 10, { role: 'link', name: 'sheni', href: '/2', direction: 'rtl' }),
+    ];
+    expect(checks(rtlRow({ rect: rect(0, 0, 300, 80) }))).toEqual([]);
+    expect(checks(rtlRow({ ref: null, rect: null, tagName: null }))).toEqual([]);
+
+    // The same row in the wrong right-to-left order is still reported.
+    expect(checks([
+      node({ role: 'iframe', ref: 'e1', tagName: 'iframe', rect: rect(0, 0, 300, 80) }),
+      block('f1e2', 'rishon', 150, 10, { role: 'link', name: 'rishon', href: '/1', direction: 'rtl' }),
+      block('f1e3', 'sheni', 300, 10, { role: 'link', name: 'sheni', href: '/2', direction: 'rtl' }),
+    ])).toEqual(['reading-order-mismatch']);
+  });
+
+  it('ignores elements that were not measured', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Unmeasured', 0, 0, { rect: null }),
+      block('e3', 'Measured', 10, 10),
+    ])).toEqual([]);
+  });
+});
+
+describe('analyzeScreenReader bounds and toggles', () => {
+  it('caps findings per check while still counting and reporting the truncation', () => {
+    const nodes = Array.from({ length: 5 }, (_, index) => node({ role: 'textbox', ref: `e${index + 1}` }));
+    const result = analyze(nodes, 2);
+    expect(result.findings).toHaveLength(2);
+    expect(result.countByCheck['missing-accessible-name']).toBe(5);
+    expect(result.truncatedChecks).toEqual(['missing-accessible-name']);
+  });
+
+  it('honours the check toggles', () => {
+    const nodes = [
+      node({ role: 'textbox', ref: 'e1' }),
+      node({ role: 'generic', ref: 'e2' }),
+      node({ role: 'button', ref: 'e3', parent: 1, name: 'Back', visibleText: 'Back', rect: rect(200, 10) }),
+      node({ role: 'button', ref: 'e4', parent: 1, name: 'Next', visibleText: 'Next', rect: rect(50, 10) }),
+    ];
+    expect(analyzeScreenReader(nodes, { checkNames: false, checkReadingOrder: true, maxFindingsPerCheck: 20 })
+        .findings.map(finding => finding.check)).toEqual(['reading-order-mismatch']);
+    expect(analyzeScreenReader(nodes, { checkNames: true, checkReadingOrder: false, maxFindingsPerCheck: 20 })
+        .findings.map(finding => finding.check)).toEqual(['missing-accessible-name']);
+  });
+});
+
+const baseFacts: ElementFacts = {
+  tagName: 'div',
+  selector: 'div',
+  visibleText: null,
+  href: null,
+  rect: null,
+  direction: 'ltr',
+  positionFixed: false,
+  floating: false,
+  ariaHidden: false,
+};
+
+function snapshotOf(entries: { role: string; ref: string }[]): string {
+  return ['- generic:', ...entries.map(entry => `  - ${entry.role} [ref=${entry.ref}]`)].join('\n');
+}
+
+function createToolHarness(options: {
+  snapshot: string;
+  factsFor?: (ref: string) => Partial<ElementFacts>;
+  staleRefs?: (ref: string) => boolean;
+  staleDelayMs?: number;
+}) {
+  const concurrency = { current: 0, max: 0 };
+  const frame: any = {
+    evaluate: vi.fn(async (_collect: unknown, handles: { ref: string }[]) =>
+      handles.map(handle => ({ ...baseFacts, ...options.factsFor?.(handle.ref) }))),
+  };
+  const page: any = {
+    ariaSnapshot: vi.fn(async () => options.snapshot),
+    frames: vi.fn(() => [frame]),
+    mainFrame: vi.fn(() => frame),
+    url: vi.fn(() => 'https://example.com/'),
+    locator: vi.fn((selector: string) => ({
+      elementHandle: async () => {
+        const ref = selector.replace('aria-ref=', '');
+        const stale = options.staleRefs?.(ref) ?? false;
+        concurrency.current++;
+        concurrency.max = Math.max(concurrency.max, concurrency.current);
+        await new Promise(resolve => setTimeout(resolve, stale ? options.staleDelayMs ?? 0 : 0));
+        concurrency.current--;
+        return stale ? null : { ref, ownerFrame: async () => frame, dispose: async () => undefined };
+      },
+    })),
+  };
+  const tab: any = {
+    modalStates: () => [],
+    page,
+    context: { outputFile: async (name: string) => `/tmp/${name}` },
+  };
+  const context: any = { currentTabOrDie: () => tab, config: {} };
+  return { context, response: new Response(context, 'audit_screen_reader', {}), concurrency };
+}
+
+describe('audit_screen_reader tool measurement', () => {
+  const tool = auditScreenReaderTools.find(entry => entry.schema.name === 'audit_screen_reader')!;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
+  });
+
+  async function run(harness: ReturnType<typeof createToolHarness>, maxElements: number) {
+    await tool.handle(harness.context, {
+      checkNames: true,
+      checkReadingOrder: true,
+      maxElements,
+      maxFindingsPerCheck: 20,
+    } as any, harness.response);
+    return harness.response.result();
+  }
+
+  it('spends the element budget on elements a screen reader can reach', async () => {
+    // The AI snapshot also refs aria-hidden subtrees: slicing the raw ref list
+    // let 60 decorative icons eat the whole budget and hide the two real defects.
+    const harness = createToolHarness({
+      snapshot: snapshotOf([
+        ...Array.from({ length: 60 }, (_, index) => ({ role: 'img', ref: `h${index}` })),
+        { role: 'button', ref: 'b1' },
+        { role: 'button', ref: 'b2' },
+      ]),
+      factsFor: ref => ref.startsWith('h') ? { ariaHidden: true } : {},
+    });
+
+    const result = await run(harness, 50);
+    expect(result).toContain('Elements analyzed: 62');
+    expect(result).toContain('missing-accessible-name | 2');
+  });
+
+  it('still stops at the budget when every element is reachable', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 62 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+    });
+
+    const result = await run(harness, 50);
+    expect(result).toContain('Elements analyzed: 50');
+    expect(result).toContain('truncated: analyzed the first 50 of 62');
+    expect(result).toContain('missing-accessible-name | 50');
+  });
+
+  it('resolves refs in parallel batches so a stale snapshot cannot stall the audit', async () => {
+    // Every ref of a rerendered page times out; resolving them one at a time
+    // costs one full timeout per element.
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 120 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      staleRefs: () => true,
+      staleDelayMs: 5,
+    });
+
+    const result = await run(harness, 50);
+    expect(harness.concurrency.max).toBe(50);
+    // Unresolvable refs never fill the budget, so measurement stops at the ceiling.
+    expect(result).toContain('Elements analyzed: 100');
+    expect(result).toContain('Findings: 0');
+  });
+});
+
+describe('collectElementFacts in a real page', () => {
+  let browser: Browser | undefined;
+
+  beforeEach(async () => {
+    browser ??= await chromium.launch();
+  });
+
+  it('takes the visible label of button-like inputs from value', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <input type="submit" id="send" value="Send" aria-label="Submit form">
+      <input type="reset" id="clear" value="Clear">
+      <input type="submit" id="bare">
+      <input type="text" id="text" value="typed text" aria-label="Query">
+      <button id="save">Save</button>
+      <button id="icon"><svg width="12" height="12"></svg></button>`);
+    const handles = await Promise.all(['#send', '#clear', '#bare', '#text', '#save', '#icon']
+        .map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // #bare has no value: the UA renders "Submit" but exposes no label to copy,
+    // and #text holds user input rather than a label.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', 'Clear', null, null, 'Save', null]);
+    await page.close();
+  });
+
+  afterAll(async () => {
+    await browser?.close();
+  });
+});

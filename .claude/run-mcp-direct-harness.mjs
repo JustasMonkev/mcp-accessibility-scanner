@@ -575,6 +575,54 @@ const tests = [
     }
   }),
 
+  test('audit_screen_reader', async () => {
+    await navigate([
+      '<title>ScreenReader</title><main>',
+      // Broken markup: one instance per check.
+      '<p><a href="/pricing">Read more</a></p>',
+      '<p><img src="/IMG_2048.jpg" alt="IMG_2048.jpg"></p>',
+      '<p><button aria-label="Submit form">Send</button></p>',
+      '<p><input type="text"></p>',
+      '<p><a href="/a.pdf">Download</a> <a href="/b.pdf">Download</a></p>',
+      '<div style="display:flex;flex-direction:row-reverse">',
+      '<button>Reversed first</button><button>Reversed second</button></div>',
+      // Correct markup: none of these may be flagged.
+      '<p><a href="/pricing-detail">Read more about pricing</a></p>',
+      '<p><img src="/team.jpg" alt="The team at the 2024 offsite"></p>',
+      '<p><button aria-label="Search products">Search</button></p>',
+      '<p><label>Email address <input type="email"></label></p>',
+      '<p><a href="/help">Help centre</a> <a href="/help">Help centre</a></p>',
+      '<div style="display:flex"><button>Ordered first</button><button>Ordered second</button></div>',
+      '<div style="columns:2;width:300px"><p>Column one top</p><p>Column one bottom</p>',
+      '<p>Column two top</p><p>Column two bottom</p></div>',
+      '</main>',
+    ].join(''));
+    const result = await callTool('audit_screen_reader', {
+      checkNames: true,
+      checkReadingOrder: true,
+      maxElements: 200,
+      maxFindingsPerCheck: 10,
+    });
+    const text = resultText(result);
+    const expected = [
+      /missing-accessible-name \| [1-9]/,
+      /uninformative-accessible-name \| [1-9]/,
+      /filename-as-accessible-name \| [1-9]/,
+      /label-in-name-mismatch \| [1-9]/,
+      /duplicate-accessible-name \| [1-9]/,
+      /reading-order-mismatch \| [1-9]/,
+    ];
+    for (const pattern of expected)
+      assertText(text, pattern);
+    assertText(text, /JSON report:/);
+    const clean = ['Read more about pricing', 'The team at the 2024 offsite', 'Search products',
+      'Email address', 'Help centre', 'Ordered first', 'Column one top'];
+    for (const label of clean) {
+      if (text.includes(label))
+        throw new Error(`Correct markup was flagged: ${label}\n${text.slice(0, 4000)}`);
+    }
+  }),
+
   test('browser_install', async () => {
     if (!options.includeInstall)
       throw new SkipError('browser_install skipped by default; rerun with --include-install');
