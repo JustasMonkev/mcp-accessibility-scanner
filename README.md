@@ -375,8 +375,31 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 #### `audit_keyboard`
 Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) with practical heuristics.
 - Checks skip links, focus visibility, focus jumps, and possible focus traps
+- Checks target size against WCAG 2.2 SC 2.5.8 (`checkTargetSize`, default on)
+- Checks that focus is not entirely obscured, WCAG 2.2 SC 2.4.11 (`checkFocusObscured`, default on)
 - Optional issue screenshots (`screenshotOnIssue`)
 - Always writes a JSON report (default filename: `audit-keyboard-{timestamp}.json`)
+
+**Limits of the WCAG 2.2 checks** — these are heuristics, not a conformance verdict:
+- Target size only inspects elements the tab order actually reaches, so pointer-only targets are never measured.
+- Of the SC 2.5.8 exceptions, only *spacing* (a 24px-diameter circle centered on the target must reach neither another
+  target's box nor another undersized target's circle) and *inline* (an inline-level target — `inline`, `inline-block`,
+  `inline-flex`, … — inside surrounding sentence text, found by walking out through inline wrappers such as `<strong>`
+  to the containing block) are evaluated. The *user agent control*, *essential*, and *equivalent* exceptions cannot be
+  detected from the DOM, so a target relying on one of them is still reported and needs manual triage.
+- Spacing neighbours use the same pointer-target rule as the focused element, so rendered `:disabled` controls are not
+  counted as neighbours, and `contenteditable` regions are counted as targets on both sides.
+- Target size uses the element's bounding box, so an inline target wrapped over several lines is measured as one
+  union box rather than per line, and a target whose visible area is cut down by an `overflow` or `clip-path` ancestor
+  is measured at its full unclipped size.
+- SC 2.4.11 is the Minimum (AA) level: a focused element is only reported when *every* sampled point of its box is
+  covered by other content. Partially covered focus passes here, and the stricter SC 2.4.12 (AAA) is not checked.
+  It applies to every focus stop with a rendered box, including elements that are not pointer targets such as iframes.
+- Coverage is measured by hit-testing sample points and then checking that the element hit actually paints (visible,
+  non-zero opacity all the way up to the first wrapper shared with the focused element, non-transparent background or
+  background image). A transparent click-catching overlay therefore does *not* count as obscuration, but a covering
+  layer with `pointer-events: none` is never returned by hit testing and is missed. Semi-transparent overlays that
+  still leave content legible are reported.
 
 **Example flow:**
 ```text
