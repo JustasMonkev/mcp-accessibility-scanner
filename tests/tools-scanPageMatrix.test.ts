@@ -22,14 +22,33 @@ function createViolation(id: string) {
   };
 }
 
-function createAxeResult(url: string, violationIds: string[]) {
+function createAxeResult(url: string, violationIds: string[], incompleteIds: string[] = []) {
   return {
     url,
     violations: violationIds.map(id => createViolation(id)),
-    incomplete: [],
+    incomplete: incompleteIds.map(id => createViolation(id)),
     passes: [],
     inapplicable: [],
   } as any;
+}
+
+function createMatrixHarness(outputFile: string) {
+  const mockPage = {
+    url: vi.fn(() => 'https://example.com/page'),
+    viewportSize: vi.fn(() => ({ width: 1024, height: 768 })),
+    setViewportSize: vi.fn(async () => undefined),
+    emulateMedia: vi.fn(async () => undefined),
+    evaluate: vi.fn().mockResolvedValueOnce('').mockResolvedValue(undefined),
+    reload: vi.fn(async () => undefined),
+  };
+  const mockTab = {
+    page: mockPage,
+    waitForTimeout: vi.fn(async () => undefined),
+    modalStates: vi.fn(() => []),
+    context: { outputFile: vi.fn(async () => outputFile) },
+  };
+  const context = { currentTabOrDie: vi.fn(() => mockTab), config: {} };
+  return { context, response: new Response(context as any, 'scan_page_matrix', {}) };
 }
 
 describe('scan_page_matrix tool', () => {
@@ -39,6 +58,59 @@ describe('scan_page_matrix tool', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
+  });
+
+  it('passes tags and scope selectors through to the axe scan', async () => {
+    const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan')
+        .mockResolvedValue(createAxeResult('https://example.com/page', []));
+    const { context, response } = createMatrixHarness('/tmp/scan-scope.json');
+
+    await tool.handle(context as any, {
+      variants: [{ name: 'baseline' }],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterApplyMs: 0,
+      reloadBetweenVariants: false,
+      includeSelectors: ['#checkout'],
+      excludeSelectors: ['#cookie-banner'],
+    } as any, response);
+
+    expect(runAxeScanSpy.mock.calls[0][1]).toEqual({
+      tags: ['wcag2aa'],
+      include: ['#checkout'],
+      exclude: ['#cookie-banner'],
+    });
+  });
+
+  it('records incomplete results per variant only when enabled', async () => {
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(
+        createAxeResult('https://example.com/page', ['color-contrast'], ['aria-hidden-focus'])
+    );
+    const baseParams = {
+      variants: [{ name: 'baseline' }],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterApplyMs: 0,
+      reloadBetweenVariants: false,
+    };
+
+    const included = createMatrixHarness('/tmp/scan-incomplete.json');
+    await tool.handle(included.context as any, { ...baseParams, includeIncomplete: true } as any, included.response);
+    const withIncomplete = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(withIncomplete.variants[0].incomplete.map((item: any) => item.id)).toEqual(['aria-hidden-focus']);
+    // Incomplete rules must not be counted as violations or diffed as new.
+    expect(withIncomplete.variants[0].violations.map((item: any) => item.id)).toEqual(['color-contrast']);
+    expect(withIncomplete.variants[0].nodeCountByRuleId['aria-hidden-focus']).toBeUndefined();
+
+    writeFileSpy.mockClear();
+    const excluded = createMatrixHarness('/tmp/scan-no-incomplete.json');
+    await tool.handle(excluded.context as any, { ...baseParams, includeIncomplete: false } as any, excluded.response);
+    const withoutIncomplete = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(withoutIncomplete.variants[0].incomplete).toEqual([]);
+    // "0" would be indistinguishable from "no needs-review findings".
+    expect(included.response.result()).toMatch(/^baseline \| 1 \| 1 \| 1 \| /m);
+    expect(excluded.response.result()).toMatch(/^baseline \| 1 \| 1 \| - \| /m);
   });
 
   it('runs variants in baseline-first order and computes baseline diffs', async () => {

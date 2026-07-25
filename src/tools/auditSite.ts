@@ -4,11 +4,12 @@ import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { sanitizeForFilePath } from '../utils/fileUtils.js';
 import {
+  axeScopeSchemaShape,
   axeTagValues,
-  dedupeAxeNodes,
+  defaultAxeTags,
+  prepareAxeResults,
   runAxeScan,
   summarizeAxeViolations,
-  trimAxeResults,
   type AxeTag,
   type AxeViolation,
   type TrimmedAxeViolation
@@ -33,6 +34,7 @@ type PageReport = {
   error: string | null;
   summary: ReturnType<typeof summarizeAxeViolations> | null;
   violations: TrimmedAxeViolation[];
+  incomplete: TrimmedAxeViolation[];
 };
 
 type SummaryViolation = {
@@ -61,6 +63,7 @@ type SummaryReport = {
     queuedUrls: number;
   };
   violations: SummaryViolation[];
+  incomplete: SummaryViolation[];
 };
 
 type ViolationSummaryAggregate = {
@@ -113,10 +116,12 @@ const auditSiteSchema = z.object({
   includeSubdomains: z.boolean().default(false).describe('Only applies when sameOriginOnly=true. When enabled, also allows subdomains of the start host (e.g. blog.example.com when start host is example.com). Ignored when sameOriginOnly=false.'),
   excludePathPatterns: z.array(z.string()).default(defaultExcludePathPatterns).describe('Regex patterns applied to pathname+query. Avoid complex nested quantifiers to prevent performance issues.'),
   ignoreQueryParams: z.array(z.string()).default(defaultIgnoreQueryParams).describe('Query parameters dropped during URL normalization.'),
-  violationsTag: z.array(z.enum(axeTagValues)).min(1).default([...axeTagValues]).describe('Axe tags to include in scans.'),
+  violationsTag: z.array(z.enum(axeTagValues)).min(1).default([...defaultAxeTags]).describe('Axe tags to include in scans.'),
+  includeIncomplete: z.boolean().default(true).describe('Also collect Axe "incomplete" results — checks Axe could not decide automatically. They are reported separately from violations.'),
   maxNodesPerViolation: z.number().int().min(1).max(50).default(10).describe('Maximum nodes kept per violation in the report.'),
   waitAfterNavigationMs: z.number().int().min(0).max(5000).default(250).describe('Extra wait after navigation before scanning.'),
   reportFile: z.string().optional().describe('Output JSON report file name.'),
+  ...axeScopeSchemaShape,
 }).superRefine((value, context) => {
   if (value.strategy === 'provided' && (!value.urls || !value.urls.length)) {
     context.addIssue({
@@ -253,6 +258,70 @@ async function extractSitemapUrls(page: import('playwright').Page, sitemapUrl: s
   return matches.map(match => match[1].replace('<![CDATA[', '').replace(']]>', '').trim()).filter(Boolean);
 }
 
+function aggregateIntoSummary(
+  summaryByRuleId: Map<string, ViolationSummaryAggregate>,
+  violations: AxeViolation[],
+  pageUrl: string
+) {
+  for (const violation of violations) {
+    const existingSummary = summaryByRuleId.get(violation.id);
+    const summary: ViolationSummaryAggregate = existingSummary ?? {
+      id: violation.id,
+      impact: violation.impact,
+      tags: [...violation.tags],
+      help: violation.help,
+      helpUrl: violation.helpUrl,
+      description: violation.description,
+      pagesAffected: new Set<string>(),
+      totalOccurrences: 0,
+      fingerprints: new Set<string>(),
+      sampleNodes: [],
+    };
+    summary.pagesAffected.add(pageUrl);
+    summary.totalOccurrences += violation.nodes.length;
+
+    for (const node of violation.nodes) {
+      // The fingerprint set is scoped to one violation id, so the
+      // normalized node HTML alone identifies a unique occurrence.
+      const fingerprint = fastFingerprint(normalizeWhitespace(node.html ?? ''));
+      if (summary.fingerprints.has(fingerprint))
+        continue;
+      summary.fingerprints.add(fingerprint);
+      if (summary.sampleNodes.length < 3) {
+        summary.sampleNodes.push({
+          pageUrl,
+          target: [...(node.target ?? [])],
+          html: node.html ?? '',
+          failureSummary: node.failureSummary ?? null,
+        });
+      }
+    }
+
+    summaryByRuleId.set(violation.id, summary);
+  }
+}
+
+function toSortedSummaryViolations(summaryByRuleId: Map<string, ViolationSummaryAggregate>): SummaryViolation[] {
+  return [...summaryByRuleId.values()].map(summary => ({
+    id: summary.id,
+    impact: summary.impact,
+    tags: summary.tags,
+    help: summary.help,
+    helpUrl: summary.helpUrl,
+    description: summary.description,
+    pagesAffected: [...summary.pagesAffected],
+    totalOccurrences: summary.totalOccurrences,
+    uniqueOccurrences: summary.fingerprints.size,
+    sampleNodes: summary.sampleNodes,
+  })).sort((first, second) => {
+    const firstImpact = impactPriority[first.impact ?? 'unknown'] ?? impactPriority.unknown;
+    const secondImpact = impactPriority[second.impact ?? 'unknown'] ?? impactPriority.unknown;
+    if (firstImpact !== secondImpact)
+      return firstImpact - secondImpact;
+    return second.pagesAffected.length - first.pagesAffected.length;
+  });
+}
+
 function summarizeTopViolations(violations: SummaryViolation[], count: number): string[] {
   return violations
       .slice(0, count)
@@ -302,6 +371,7 @@ const auditSite = defineTabTool({
     const excludePatterns = buildExcludePathPatterns(params.excludePathPatterns);
 
     const summaryByViolation = new Map<string, ViolationSummaryAggregate>();
+    const summaryByIncomplete = new Map<string, ViolationSummaryAggregate>();
 
     const enqueueUrl = (rawUrl: string, depth: number, discoveredFrom: string | null) => {
       const normalizedUrl = normalizeUrl(rawUrl, startUrl, ignoredParams);
@@ -385,6 +455,7 @@ const auditSite = defineTabTool({
           error: null,
           summary: null,
           violations: [],
+          incomplete: [],
         };
         pages.push(pageReport);
 
@@ -393,54 +464,9 @@ const auditSite = defineTabTool({
           await crawlTab.waitForTimeout(params.waitAfterNavigationMs);
           pageReport.title = await crawlTab.page.title();
 
-          const axeResult = await runAxeScan(crawlTab.page, params.violationsTag as AxeTag[]);
-          const dedupedViolations = axeResult.violations.map(violation => ({
-            ...violation,
-            nodes: dedupeAxeNodes(violation.nodes),
-          }));
-          const trimmedViolations = trimAxeResults({ violations: dedupedViolations }, { maxNodesPerViolation: params.maxNodesPerViolation, dedupe: false });
-
-          pageReport.status = 'scanned';
-          pageReport.violations = trimmedViolations;
-          pageReport.summary = summarizeAxeViolations(trimmedViolations);
-
-          for (const violation of dedupedViolations) {
-            const existingSummary = summaryByViolation.get(violation.id);
-            const summary: ViolationSummaryAggregate = existingSummary ?? {
-              id: violation.id,
-              impact: violation.impact,
-              tags: [...violation.tags],
-              help: violation.help,
-              helpUrl: violation.helpUrl,
-              description: violation.description,
-              pagesAffected: new Set<string>(),
-              totalOccurrences: 0,
-              fingerprints: new Set<string>(),
-              sampleNodes: [],
-            };
-            summary.pagesAffected.add(item.url);
-            summary.totalOccurrences += violation.nodes.length;
-
-            for (const node of violation.nodes) {
-              // The fingerprint set is scoped to one violation id, so the
-              // normalized node HTML alone identifies a unique occurrence.
-              const fingerprint = fastFingerprint(normalizeWhitespace(node.html ?? ''));
-              if (summary.fingerprints.has(fingerprint))
-                continue;
-              summary.fingerprints.add(fingerprint);
-              if (summary.sampleNodes.length < 3) {
-                summary.sampleNodes.push({
-                  pageUrl: item.url,
-                  target: [...(node.target ?? [])],
-                  html: node.html ?? '',
-                  failureSummary: node.failureSummary ?? null,
-                });
-              }
-            }
-
-            summaryByViolation.set(violation.id, summary);
-          }
-
+          // Discover before scanning. A scoped scan throws when an
+          // includeSelectors entry is absent from this page, and that must not
+          // silently drop every descendant reachable only through it.
           if (params.strategy === 'links' && item.depth < params.maxDepth) {
             const links = await extractLinks(crawlTab.page);
             for (const link of links)
@@ -451,6 +477,24 @@ const auditSite = defineTabTool({
             const links = await extractNavLinks(crawlTab.page);
             for (const link of links)
               enqueueUrl(link, item.depth + 1, item.url);
+          }
+
+          const axeResult = await runAxeScan(crawlTab.page, {
+            tags: params.violationsTag as AxeTag[],
+            include: params.includeSelectors,
+            exclude: params.excludeSelectors,
+          });
+          const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
+
+          pageReport.status = 'scanned';
+          pageReport.violations = violations.trimmed;
+          pageReport.summary = summarizeAxeViolations(violations.trimmed);
+          aggregateIntoSummary(summaryByViolation, violations.deduped, item.url);
+
+          if (params.includeIncomplete) {
+            const incomplete = prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation);
+            pageReport.incomplete = incomplete.trimmed;
+            aggregateIntoSummary(summaryByIncomplete, incomplete.deduped, item.url);
           }
         } catch (error) {
           erroredPages++;
@@ -477,24 +521,8 @@ const auditSite = defineTabTool({
         await context.selectTab(originalTabIndex);
     }
 
-    const summaryViolations: SummaryViolation[] = [...summaryByViolation.values()].map(summary => ({
-      id: summary.id,
-      impact: summary.impact,
-      tags: summary.tags,
-      help: summary.help,
-      helpUrl: summary.helpUrl,
-      description: summary.description,
-      pagesAffected: [...summary.pagesAffected],
-      totalOccurrences: summary.totalOccurrences,
-      uniqueOccurrences: summary.fingerprints.size,
-      sampleNodes: summary.sampleNodes,
-    })).sort((first, second) => {
-      const firstImpact = impactPriority[first.impact ?? 'unknown'] ?? impactPriority.unknown;
-      const secondImpact = impactPriority[second.impact ?? 'unknown'] ?? impactPriority.unknown;
-      if (firstImpact !== secondImpact)
-        return firstImpact - secondImpact;
-      return second.pagesAffected.length - first.pagesAffected.length;
-    });
+    const summaryViolations = toSortedSummaryViolations(summaryByViolation);
+    const summaryIncomplete = toSortedSummaryViolations(summaryByIncomplete);
 
     const scannedPagesByViolations = sortScannedPagesByViolations(pages);
     const summary: SummaryReport = {
@@ -505,6 +533,7 @@ const auditSite = defineTabTool({
         queuedUrls: visited.size,
       },
       violations: summaryViolations,
+      incomplete: summaryIncomplete,
     };
 
     const report = {
@@ -520,6 +549,9 @@ const auditSite = defineTabTool({
           excludePathPatterns: params.excludePathPatterns,
           ignoreQueryParams: params.ignoreQueryParams,
           violationsTag: params.violationsTag,
+          includeIncomplete: params.includeIncomplete,
+          includeSelectors: params.includeSelectors ?? null,
+          excludeSelectors: params.excludeSelectors ?? null,
           maxNodesPerViolation: params.maxNodesPerViolation,
           waitAfterNavigationMs: params.waitAfterNavigationMs,
         },
@@ -562,6 +594,13 @@ const auditSite = defineTabTool({
         totalOccurrences: violation.totalOccurrences,
         helpUrl: violation.helpUrl,
       })),
+      topIncomplete: summaryIncomplete.slice(0, 5).map(item => ({
+        id: item.id,
+        impact: item.impact ?? null,
+        pagesAffected: item.pagesAffected.length,
+        totalOccurrences: item.totalOccurrences,
+        helpUrl: item.helpUrl,
+      })),
       topPages: scannedPagesByViolations
           .slice(0, 5)
           .map(page => ({
@@ -573,6 +612,7 @@ const auditSite = defineTabTool({
     });
 
     const topViolations = summarizeTopViolations(summaryViolations, 10);
+    const topIncomplete = summarizeTopViolations(summaryIncomplete, 10);
     const topPages = summarizeTopPages(scannedPagesByViolations, 20);
     response.addCode('// Crawled pages in a temporary tab and aggregated Axe violations.');
     response.addResult([
@@ -582,6 +622,11 @@ const auditSite = defineTabTool({
       '',
       'Top violations by pages affected:',
       ...(topViolations.length ? topViolations : ['- None']),
+      ...(params.includeIncomplete ? [
+        '',
+        'Top incomplete (needs review — verify these on the page):',
+        ...(topIncomplete.length ? topIncomplete : ['- None']),
+      ] : []),
       '',
       'Per-page summary (top 20 by violation count):',
       ...(topPages.length ? topPages : ['- None']),

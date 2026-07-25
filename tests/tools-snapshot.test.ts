@@ -18,6 +18,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { JSONSchema7 } from 'json-schema';
 import snapshotTools from '../src/tools/snapshot.js';
 import { toMcpTool } from '../src/mcp/tool.js';
+import * as axe from '../src/tools/axe.js';
 
 describe('Snapshot Tools', () => {
   const snapshotTool = snapshotTools.find(tool => tool.schema.name === 'browser_snapshot')!;
@@ -232,6 +233,96 @@ describe('Snapshot Tools', () => {
 
     expect(response.addError).toHaveBeenCalledWith('Provide either "text" or "regex" to search for.');
     expect(response.addError).toHaveBeenCalledWith('Provide only one of "text" or "regex", not both.');
+  });
+
+  describe('scan_page', () => {
+    const scanPageTool = snapshotTools.find(tool => tool.schema.name === 'scan_page')!;
+
+    function scanResult(violations: any[], incomplete: any[] = []) {
+      return { url: 'https://example.com/', violations, incomplete, passes: [], inapplicable: [] } as any;
+    }
+
+    function scanRule(id: string, nodeCount: number) {
+      return {
+        id,
+        impact: 'serious',
+        tags: ['wcag2aa'],
+        help: `${id} help`,
+        helpUrl: `https://example.com/${id}`,
+        description: `${id} description`,
+        nodes: Array.from({ length: nodeCount }, (_, index) => ({
+          target: [`#n${index}`],
+          html: `<img data-i="${index}">`,
+          failureSummary: `${id} failure`,
+        })),
+      };
+    }
+
+    function scanHarness() {
+      const context = { currentTabOrDie: vi.fn().mockReturnValue({ modalStates: vi.fn(() => []), page: {} }) };
+      const response = { addResult: vi.fn() };
+      const text = () => response.addResult.mock.calls.map(call => call[0]).join('\n');
+      return { context, response, text };
+    }
+
+    it('passes tags and scope selectors through to the axe scan', async () => {
+      const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan').mockResolvedValue(scanResult([]));
+      const { context, response } = scanHarness();
+
+      await scanPageTool.handle(context as any, {
+        violationsTag: ['wcag2aa'],
+        includeIncomplete: true,
+        maxNodesPerViolation: 10,
+        includeSelectors: ['#checkout'],
+        excludeSelectors: ['#cookie-banner'],
+      } as any, response as any);
+
+      expect(runAxeScanSpy.mock.calls[0][1]).toEqual({
+        tags: ['wcag2aa'],
+        include: ['#checkout'],
+        exclude: ['#cookie-banner'],
+      });
+    });
+
+    it('reports the rule id and flags truncated node lists', async () => {
+      vi.spyOn(axe, 'runAxeScan').mockResolvedValue(scanResult([scanRule('image-alt', 3), scanRule('label', 1)]));
+      const { context, response, text } = scanHarness();
+
+      await scanPageTool.handle(context as any, {
+        violationsTag: ['wcag2aa'],
+        includeIncomplete: true,
+        maxNodesPerViolation: 2,
+      } as any, response as any);
+
+      expect(text()).toContain('Violation rule: image-alt (serious) — image-alt help');
+      expect(text()).toContain('Violations (showing 2 of 3 nodes');
+      // An untruncated rule must not carry the notice.
+      expect(text()).toContain('Violation rule: label');
+      expect(text()).not.toContain('showing 1 of 1');
+    });
+
+    it('separates incomplete results from violations and honours includeIncomplete', async () => {
+      vi.spyOn(axe, 'runAxeScan').mockResolvedValue(
+          scanResult([scanRule('image-alt', 1)], [scanRule('color-contrast', 1)])
+      );
+      const included = scanHarness();
+      const params = { violationsTag: ['wcag2aa'], maxNodesPerViolation: 10 };
+
+      await scanPageTool.handle(included.context as any, { ...params, includeIncomplete: true } as any, included.response as any);
+      expect(included.text()).toContain('Incomplete rule: color-contrast');
+      expect(included.text()).toContain('Violation rule: image-alt');
+      expect(included.text()).not.toContain('Violation rule: color-contrast');
+
+      const excluded = scanHarness();
+      await scanPageTool.handle(excluded.context as any, { ...params, includeIncomplete: false } as any, excluded.response as any);
+      expect(excluded.text()).not.toContain('Incomplete rule:');
+      expect(excluded.text()).toContain('Violation rule: image-alt');
+      // A count with no entries below it reads as findings dropped from the
+      // report, so the summary line must drop the count too.
+      expect(included.text()).toContain('Incomplete: 1');
+      expect(excluded.text()).not.toContain('Incomplete:');
+      expect(excluded.text()).toContain('Violations: 1, Passes: 0');
+    });
   });
 });
 

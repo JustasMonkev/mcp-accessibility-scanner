@@ -242,11 +242,30 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 
 **Parameters:**
 - `violationsTag`: Array of WCAG/violation tags to check
+- `includeIncomplete` (default `true`): also report Axe "incomplete" results
+- `maxNodesPerViolation` (default `10`): cap on nodes reported per rule
+- `includeSelectors` / `excludeSelectors`: CSS selectors that scope the scan
 
 **Supported Violation Tags:**
-- WCAG standards: `wcag2a`, `wcag2aa`, `wcag2aaa`, `wcag21a`, `wcag21aa`, `wcag21aaa`, `wcag22a`, `wcag22aa`, `wcag22aaa`
-- Section 508: `section508`
-- Categories: `cat.aria`, `cat.color`, `cat.forms`, `cat.keyboard`, `cat.language`, `cat.name-role-value`, `cat.parsing`, `cat.semantics`, `cat.sensory-and-visual-cues`, `cat.structure`, `cat.tables`, `cat.text-alternatives`, `cat.time-and-media`
+- WCAG standards (in the default set): `wcag2a`, `wcag2aa`, `wcag2aaa`, `wcag21a`, `wcag21aa`, `wcag21aaa`, `wcag22a`, `wcag22aa`, `wcag22aaa`
+- Section 508 (in the default set): `section508`
+- Categories (opt-in): `cat.aria`, `cat.color`, `cat.forms`, `cat.keyboard`, `cat.language`, `cat.name-role-value`, `cat.parsing`, `cat.semantics`, `cat.sensory-and-visual-cues`, `cat.structure`, `cat.tables`, `cat.text-alternatives`, `cat.time-and-media`
+- Non-conformance tags (opt-in): `best-practice`, `experimental`
+
+The default set is the WCAG and Section 508 tags only, so a default report means "this fails a conformance criterion". Category tags are opt-in for that reason: Axe matches requested tags with OR, so asking for `cat.keyboard` also pulls in best-practice rules such as `region` and `skip-link` that carry both tags. No live conformance rule is lost by leaving them out: the only rules reachable *only* through a `cat.*` tag are `duplicate-id` and `duplicate-id-active`, which Axe marks deprecated because WCAG removed SC 4.1.1. Add `best-practice` (landmark structure, heading order, `tabindex` hygiene) or a `cat.*` tag when you want that broader review.
+
+**Scan scoping:**
+`scan_page`, `audit_site`, and `scan_page_matrix` accept `includeSelectors` and `excludeSelectors` to limit what Axe looks at. Use `includeSelectors` to audit one component (`["#checkout-form"]`) and `excludeSelectors` to drop third-party noise that pollutes every report (`["#cookie-banner", "iframe.intercom-frame"]`). Exclusions are applied after inclusions, so you can carve a widget out of an included subtree.
+
+Selectors are resolved before the scan runs:
+- Syntactically invalid CSS fails the scan, naming the selector.
+- An `includeSelectors` entry that matches nothing fails the scan. Axe on its own would accept a partly-matching include set and quietly scan less than you asked for, so the scanner refuses rather than returning a clean-looking report with half the scope missing.
+- An `excludeSelectors` entry that matches nothing is a no-op, not an error -- a crawl legitimately visits pages that lack the excluded widget.
+
+In `audit_site`, selectors apply to every crawled page, so an `includeSelectors` value that is absent from a given page marks *that page* as errored in the report while the crawl continues. Link discovery runs before the scan, so pages reachable only through an errored page are still crawled.
+
+**Incomplete ("needs review") results:**
+Axe returns `incomplete` for checks it cannot decide on its own -- contrast over a background image or gradient, ambiguous labels, elements it could not fully evaluate. `scan_page`, `audit_site`, and `scan_page_matrix` report these in a section separate from violations so you can resolve them by inspecting the page (screenshot, snapshot, `browser_evaluate`). Set `includeIncomplete: false` to suppress them.
 
 ### Audit Tools
 
