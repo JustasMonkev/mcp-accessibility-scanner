@@ -56,6 +56,7 @@ describe('audit_site integration', () => {
 
     let currentUrl = 'about:blank';
     const crawlPage = {
+      context: vi.fn(() => ({ cookies: vi.fn(async () => []) })),
       url: vi.fn(() => currentUrl),
       title: vi.fn(async () => `Title for ${currentUrl}`),
       evaluate: vi.fn(async () => linkMap[currentUrl] ?? []),

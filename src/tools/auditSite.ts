@@ -232,6 +232,19 @@ function normalizeUrl(rawUrl: string, baseUrl: URL, ignoredParams: Set<string>):
   return url;
 }
 
+/**
+ * Cookies the crawled URLs would actually send, keyed by name + domain + path and
+ * mapped to the bare name for reporting. Scoping to the crawl URLs keeps an
+ * unrelated origin's expiring cookie from raising a false alarm, and keying on the
+ * full identity stops a same-named cookie elsewhere from masking a deleted one.
+ * Values are deliberately not compared: a rotating CSRF token is not a lost session.
+ * Ceiling: a session cookie scoped to a path below the crawl URLs is not tracked.
+ */
+async function readCrawlCookies(page: import('playwright').Page, urls: string[]): Promise<Map<string, string>> {
+  const cookies = await page.context().cookies(urls);
+  return new Map(cookies.map(cookie => [`${cookie.name}\n${cookie.domain}\n${cookie.path}`, cookie.name]));
+}
+
 async function extractLinks(page: import('playwright').Page): Promise<string[]> {
   return await page.evaluate(() => {
     return Array.from(document.querySelectorAll('a[href]'))
@@ -435,6 +448,12 @@ const auditSite = defineTabTool({
     });
 
     const crawlTab = await context.newTab();
+    // Cookies the crawl URLs carry before the crawl are the session the caller
+    // signed in with. If one disappears mid-crawl every later page is audited as a
+    // signed-out user, which still looks like a clean run, so record where it happened.
+    const cookieScopeUrls = queue.map(item => item.url);
+    const baselineCookies = await readCrawlCookies(crawlTab.page, cookieScopeUrls);
+    let sessionLoss: { url: string, cookies: string[] } | null = null;
     let processedPages = 0;
     try {
       while (queue.length && pages.length < params.maxPages) {
@@ -463,6 +482,17 @@ const auditSite = defineTabTool({
           await crawlTab.navigate(item.url);
           await crawlTab.waitForTimeout(params.waitAfterNavigationMs);
           pageReport.title = await crawlTab.page.title();
+
+          if (baselineCookies.size && !sessionLoss) {
+            const currentCookies = await readCrawlCookies(crawlTab.page, cookieScopeUrls);
+            const missingCookies = [...baselineCookies]
+                .filter(([identity]) => !currentCookies.has(identity))
+                .map(([, name]) => name);
+            // The page reached after redirects is the one that dropped the cookie,
+            // and the one worth excluding; item.url may only have pointed at it.
+            if (missingCookies.length)
+              sessionLoss = { url: crawlTab.page.url() || item.url, cookies: [...new Set(missingCookies)] };
+          }
 
           // Discover before scanning. A scoped scan throws when an
           // includeSelectors entry is absent from this page, and that must not
@@ -561,6 +591,7 @@ const auditSite = defineTabTool({
       },
       pages,
       summary,
+      sessionLoss,
     };
 
     const reportFileName = sanitizeForFilePath(params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`);
@@ -587,6 +618,7 @@ const auditSite = defineTabTool({
         durationMs: report.metadata.durationMs,
       },
       totals: summary.totals,
+      sessionLoss,
       topViolations: summaryViolations.slice(0, 5).map(violation => ({
         id: violation.id,
         impact: violation.impact ?? null,
@@ -614,8 +646,14 @@ const auditSite = defineTabTool({
     const topViolations = summarizeTopViolations(summaryViolations, 10);
     const topIncomplete = summarizeTopViolations(summaryIncomplete, 10);
     const topPages = summarizeTopPages(scannedPagesByViolations, 20);
+    const sessionWarning = sessionLoss ? [
+      `WARNING: session cookie(s) ${sessionLoss.cookies.join(', ')} disappeared while loading ${sessionLoss.url}.`,
+      'Pages scanned from that point on were audited as a signed-out user. Add that URL to excludePathPatterns, sign in again, and re-run.',
+      '',
+    ] : [];
     response.addCode('// Crawled pages in a temporary tab and aggregated Axe violations.');
     response.addResult([
+      ...sessionWarning,
       `Scanned pages: ${summary.totals.scannedPages}`,
       `Errored pages: ${summary.totals.erroredPages}`,
       `Skipped URLs: ${summary.totals.skippedUrls}`,

@@ -31,6 +31,18 @@ import { outputFile  } from './config.js';
 import type { FullConfig } from './config.js';
 
 export function contextFactory(config: FullConfig): BrowserContextFactory {
+  const factory = createContextFactory(config);
+  // A storage state only lands when the factory creates a fresh context to apply
+  // it to. The persistent profile (launchPersistentContext has no storageState
+  // option) and the CDP modes without --isolated (they reuse the browser's
+  // existing context) would drop it without a word and audit the site as an
+  // anonymous user, which looks exactly like a successful run.
+  if (config.browser.contextOptions?.storageState && !factory.appliesStorageState)
+    throw new Error('Storage state needs a fresh browser context, which the persistent profile mode and CDP sessions attached to an existing context cannot provide. Re-run with --isolated (or set "browser": { "isolated": true } in the config file), or drop the storage state and sign in interactively before auditing.');
+  return factory;
+}
+
+function createContextFactory(config: FullConfig): BrowserContextFactory {
   if (config.browser.remoteEndpoint)
     return new RemoteContextFactory(config);
   if (config.browser.cdpLaunch)
@@ -45,10 +57,17 @@ export function contextFactory(config: FullConfig): BrowserContextFactory {
 export type ClientInfo = { name?: string, version?: string, rootPath?: string };
 
 export interface BrowserContextFactory {
+  /**
+   * True when createContext() applies config.browser.contextOptions (storage state
+   * included) to a fresh context. Omitted counts as false, so a factory that forgets
+   * to declare it rejects a storage state rather than dropping it silently.
+   */
+  readonly appliesStorageState?: boolean;
   createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }>;
 }
 
 abstract class BaseContextFactory implements BrowserContextFactory {
+  abstract readonly appliesStorageState: boolean;
   readonly config: FullConfig;
   private _logName: string;
   protected _browserPromise: Promise<playwright.Browser> | undefined;
@@ -97,6 +116,8 @@ abstract class BaseContextFactory implements BrowserContextFactory {
 }
 
 class IsolatedContextFactory extends BaseContextFactory {
+  readonly appliesStorageState = true;
+
   constructor(config: FullConfig) {
     super('isolated', config);
   }
@@ -122,8 +143,13 @@ class IsolatedContextFactory extends BaseContextFactory {
 }
 
 class CdpContextFactory extends BaseContextFactory {
+  // Only the isolated path creates a context; otherwise the browser's existing
+  // context is reused and no storage state can be applied to it.
+  readonly appliesStorageState: boolean;
+
   constructor(config: FullConfig) {
     super('cdp', config);
+    this.appliesStorageState = !!config.browser.isolated;
   }
 
   override async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
@@ -148,11 +174,13 @@ class CdpContextFactory extends BaseContextFactory {
   }
 
   protected override async _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext> {
-    return this.config.browser.isolated ? await browser.newContext() : browser.contexts()[0];
+    return this.config.browser.isolated ? await browser.newContext(this.config.browser.contextOptions) : browser.contexts()[0];
   }
 }
 
 class RemoteContextFactory extends BaseContextFactory {
+  readonly appliesStorageState = true;
+
   constructor(config: FullConfig) {
     super('remote', config);
   }
@@ -166,15 +194,18 @@ class RemoteContextFactory extends BaseContextFactory {
   }
 
   protected override async _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext> {
-    return browser.newContext();
+    return browser.newContext(this.config.browser.contextOptions);
   }
 }
 
 class CdpLaunchContextFactory implements BrowserContextFactory {
   readonly config: FullConfig;
+  // See CdpContextFactory: only the isolated path creates a context of its own.
+  readonly appliesStorageState: boolean;
 
   constructor(config: FullConfig) {
     this.config = config;
+    this.appliesStorageState = !!config.browser.isolated;
   }
 
   async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
@@ -196,7 +227,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     });
 
     const browser = await this._waitForBrowser(endpoint, clientInfo, childProcess, cdpLaunch.startupTimeoutMs ?? 30000);
-    const browserContext = this.config.browser.isolated ? await browser.newContext() : browser.contexts()[0];
+    const browserContext = this.config.browser.isolated ? await browser.newContext(this.config.browser.contextOptions) : browser.contexts()[0];
     return {
       browserContext,
       close: async () => {
@@ -230,6 +261,8 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
 
 class PersistentContextFactory implements BrowserContextFactory {
   readonly config: FullConfig;
+  // launchPersistentContext() has no storageState option: the profile is the state.
+  readonly appliesStorageState = false;
   readonly name = 'persistent';
   readonly description = 'Create a new persistent browser context';
 
