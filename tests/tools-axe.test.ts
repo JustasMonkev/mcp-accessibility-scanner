@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-const builderCalls: { withTags: string[][]; include: string[]; exclude: string[] } = {
+const builderCalls: { withTags: string[][]; withRules: string[][]; disableRules: string[][]; include: string[]; exclude: string[] } = {
   withTags: [],
+  withRules: [],
+  disableRules: [],
   include: [],
   exclude: [],
 };
@@ -11,6 +13,14 @@ vi.mock('@axe-core/playwright', () => ({
   AxeBuilder: class {
     withTags(tags: string[]) {
       builderCalls.withTags.push(tags);
+      return this;
+    }
+    withRules(rules: string[]) {
+      builderCalls.withRules.push(rules);
+      return this;
+    }
+    disableRules(rules: string[]) {
+      builderCalls.disableRules.push(rules);
       return this;
     }
     include(selector: string) {
@@ -29,10 +39,12 @@ vi.mock('@axe-core/playwright', () => ({
   },
 }));
 
-const { axeTagValues, defaultAxeTags, dedupeAxeNodes, prepareAxeResults, runAxeScan, summarizeAxeViolations, trimAxeResults } = await import('../src/tools/axe.js');
+const { assertRuleOptionsValid, axeTagValues, defaultAxeTags, dedupeAxeNodes, prepareAxeResults, runAxeScan, summarizeAxeViolations, trimAxeResults } = await import('../src/tools/axe.js');
 
 function resetBuilderCalls() {
   builderCalls.withTags = [];
+  builderCalls.withRules = [];
+  builderCalls.disableRules = [];
   builderCalls.include = [];
   builderCalls.exclude = [];
   analyzeResult = { violations: [], incomplete: [], passes: [], inapplicable: [] };
@@ -115,8 +127,99 @@ describe('axe helpers', () => {
     resetBuilderCalls();
     await runAxeScan({} as any);
     expect(builderCalls.withTags).toEqual([[...defaultAxeTags]]);
+    expect(builderCalls.withRules).toEqual([]);
+    expect(builderCalls.disableRules).toEqual([]);
     expect(builderCalls.include).toEqual([]);
     expect(builderCalls.exclude).toEqual([]);
+  });
+
+  it('runs explicit rule ids instead of tags, because axe runOnly holds only one of them', async () => {
+    resetBuilderCalls();
+    await runAxeScan({} as any, { tags: ['wcag2aa'], rules: ['image-alt', 'label'] });
+    expect(builderCalls.withRules).toEqual([['image-alt', 'label']]);
+    // withTags would overwrite the rule list in axe's single runOnly slot.
+    expect(builderCalls.withTags).toEqual([]);
+  });
+
+  it('falls back to tags when the rule list is empty', async () => {
+    resetBuilderCalls();
+    await runAxeScan({} as any, { tags: ['wcag2aa'], rules: [] });
+    expect(builderCalls.withTags).toEqual([['wcag2aa']]);
+    expect(builderCalls.withRules).toEqual([]);
+  });
+
+  it('composes disableRules with tags', async () => {
+    resetBuilderCalls();
+    await runAxeScan({} as any, { tags: ['wcag2aa'], disableRules: ['color-contrast'] });
+    expect(builderCalls.withTags).toEqual([['wcag2aa']]);
+    expect(builderCalls.disableRules).toEqual([['color-contrast']]);
+  });
+
+  it('subtracts disableRules from an explicit rule list rather than relying on axe', async () => {
+    resetBuilderCalls();
+    // axe ignores the per-rule enabled flag once runOnly holds a rule list, so
+    // passing both through would still have run `label`.
+    await runAxeScan({} as any, { rules: ['image-alt', 'label'], disableRules: ['label'] });
+    expect(builderCalls.withRules).toEqual([['image-alt']]);
+    expect(builderCalls.disableRules).toEqual([]);
+  });
+
+  it('refuses a rule list that disableRules empties, instead of silently scanning everything', async () => {
+    resetBuilderCalls();
+    await expect(runAxeScan({} as any, { rules: ['image-alt'], disableRules: ['image-alt'] }))
+        .rejects.toThrow(/disableRules disabled every rule in withRules \(image-alt\)/);
+    expect(builderCalls.withRules).toEqual([]);
+    expect(builderCalls.withTags).toEqual([]);
+  });
+
+  it('rejects an unknown rule id in withRules instead of scanning nothing', async () => {
+    resetBuilderCalls();
+    await expect(runAxeScan({} as any, { rules: ['image-alt', 'image-altt'] }))
+        .rejects.toThrow(/Unknown Axe rule id\(s\) in withRules: image-altt/);
+    expect(builderCalls.withRules).toEqual([]);
+  });
+
+  it('rejects an unknown rule id in disableRules instead of disabling nothing', async () => {
+    resetBuilderCalls();
+    await expect(runAxeScan({} as any, { disableRules: ['colour-contrast'] }))
+        .rejects.toThrow(/Unknown Axe rule id\(s\) in disableRules: colour-contrast/);
+    expect(builderCalls.disableRules).toEqual([]);
+  });
+
+  it('validates rule ids before touching the page, so a bad id cannot cost a scan', async () => {
+    resetBuilderCalls();
+    const page = { evaluate: () => { throw new Error('page should not be touched'); } } as any;
+    await expect(runAxeScan(page, { rules: ['nope'], include: ['#content'] }))
+        .rejects.toThrow(/Unknown Axe rule id/);
+  });
+
+  it('accepts every rule id axe-core actually ships', async () => {
+    resetBuilderCalls();
+    // Guards against the catalogue check drifting from the injected axe build.
+    await runAxeScan({} as any, { rules: ['color-contrast', 'region', 'frame-tested', 'aria-allowed-attr'] });
+    expect(builderCalls.withRules[0]).toHaveLength(4);
+  });
+
+  it('validates rule options without a page, so crawlers can check them before navigating', () => {
+    expect(assertRuleOptionsValid({})).toEqual([]);
+    expect(assertRuleOptionsValid({ disableRules: ['color-contrast'] })).toEqual([]);
+    expect(assertRuleOptionsValid({ rules: ['image-alt', 'label'], disableRules: ['label'] })).toEqual(['image-alt']);
+    expect(() => assertRuleOptionsValid({ rules: ['image-altt'] }))
+        .toThrow(/Unknown Axe rule id\(s\) in withRules: image-altt/);
+    expect(() => assertRuleOptionsValid({ disableRules: ['colour-contrast'] }))
+        .toThrow(/Unknown Axe rule id\(s\) in disableRules: colour-contrast/);
+    expect(() => assertRuleOptionsValid({ rules: ['image-alt'], disableRules: ['image-alt'] }))
+        .toThrow(/disableRules disabled every rule in withRules \(image-alt\)/);
+  });
+
+  it('validates rule ids against the exact axe-core build @axe-core/playwright injects', async () => {
+    // The catalogue check is only meaningful while both resolve to one version,
+    // which is why package.json pins axe-core exactly.
+    const [ownPackage, installedAxeCore] = await Promise.all([
+      import('../package.json', { with: { type: 'json' } }),
+      import('axe-core/package.json', { with: { type: 'json' } }),
+    ]);
+    expect(ownPackage.default.dependencies['axe-core']).toBe(installedAxeCore.default.version);
   });
 
   it('applies include and exclude selectors to the builder', async () => {

@@ -33,6 +33,9 @@ const client = new Client({ name: 'mcp-accessibility-direct-harness', version: '
 const state = {
   toolNames: [],
   fixtureOrigin: '',
+  // Every path the fixture server was asked for, so a test can assert a tool
+  // rejected its arguments without visiting anything.
+  fixtureRequests: [],
 };
 
 class SkipError extends Error {}
@@ -293,6 +296,56 @@ const tests = [
     });
     assertText(leftovers, /"layers":\s*0/);
     assertText(leftovers, /"idInHtml":\s*false/);
+
+    // Rule-level control: two images with no alt (image-alt) plus a form input
+    // with no label (label), so each rule filter has a different rule to move.
+    await navigate([
+      '<title>Rules</title>',
+      '<img src="x"><img src="y">',
+      '<input type="text" name="q">',
+    ].join(''));
+    const ruleArgs = { violationsTag: ['wcag2a', 'wcag2aa'], includeIncomplete: false };
+    const both = await callTool('scan_page', ruleArgs);
+    assertViolationNodeCount(both, 'image-alt', 2);
+    assertViolationNodeCount(both, 'label', 1);
+
+    // withRules overrides violationsTag entirely: axe holds either a rule list
+    // or a tag list, never both.
+    const onlyLabel = await callTool('scan_page', { ...ruleArgs, withRules: ['label'] });
+    assertViolationNodeCount(onlyLabel, 'label', 1);
+    assertViolationNodeCount(onlyLabel, 'image-alt', 0);
+
+    // disableRules subtracts from whatever is selected — tags here...
+    const noImages = await callTool('scan_page', { ...ruleArgs, disableRules: ['image-alt'] });
+    assertViolationNodeCount(noImages, 'image-alt', 0);
+    assertViolationNodeCount(noImages, 'label', 1);
+    // ...and an explicit rule list here. Axe drops the disabled-rule flag once
+    // runOnly holds a rule list, so without the scanner subtracting up front
+    // this would still report image-alt.
+    const listMinusImages = await callTool('scan_page', {
+      ...ruleArgs,
+      withRules: ['image-alt', 'label'],
+      disableRules: ['image-alt'],
+    });
+    assertViolationNodeCount(listMinusImages, 'image-alt', 0);
+    assertViolationNodeCount(listMinusImages, 'label', 1);
+
+    // Emptying the rule list must fail, not fall back to scanning everything.
+    await assertToolError(
+        'scan_page',
+        { ...ruleArgs, withRules: ['image-alt'], disableRules: ['image-alt'] },
+        /disableRules disabled every rule in withRules \(image-alt\)/);
+
+    // A misspelled rule id would otherwise select/disable nothing and return a
+    // clean-looking report, so it must fail by name instead.
+    await assertToolError(
+        'scan_page',
+        { ...ruleArgs, withRules: ['label', 'image-altt'] },
+        /Unknown Axe rule id\(s\) in withRules: image-altt/);
+    await assertToolError(
+        'scan_page',
+        { ...ruleArgs, disableRules: ['colour-contrast'] },
+        /Unknown Axe rule id\(s\) in disableRules: colour-contrast/);
   }),
 
   test('browser_tabs', async () => {
@@ -400,6 +453,27 @@ const tests = [
     });
     if (redirected.structuredContent?.sessionLoss?.url !== `${state.fixtureOrigin}/signed-out`)
       throw new Error(`Expected sessionLoss at /signed-out, got ${JSON.stringify(redirected.structuredContent?.sessionLoss)}`);
+
+    // Rule ids are run-wide input, so a bad one must be rejected before the
+    // crawl starts. Otherwise every supplied URL is visited, errored, and
+    // written up as a completed audit.
+    const requestsBeforeBadRule = state.fixtureRequests.length;
+    await assertToolError(
+        'audit_site',
+        {
+          ...auditSiteDefaults,
+          maxPages: 3,
+          urls: [
+            `${state.fixtureOrigin}/audit-site`,
+            `${state.fixtureOrigin}/secure`,
+            `${state.fixtureOrigin}/secure-2`,
+          ],
+          withRules: ['image-altt'],
+        },
+        /Unknown Axe rule id\(s\) in withRules: image-altt/);
+    const visitedAfterBadRule = state.fixtureRequests.slice(requestsBeforeBadRule);
+    if (visitedAfterBadRule.length)
+      throw new Error(`audit_site visited ${visitedAfterBadRule.length} page(s) before rejecting an invalid rule id: ${visitedAfterBadRule.join(', ')}`);
   }),
 
   test('scan_page_matrix', async () => {
@@ -701,6 +775,7 @@ async function verifyCoverage(testCases, toolNames) {
 
 function startFixtureServer() {
   const server = http.createServer((request, response) => {
+    state.fixtureRequests.push(request.url);
     if (request.url === '/audit-site') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end('<!doctype html><html><head><title>AuditSite</title></head><body><img src="x"><h1>Audit Site</h1></body></html>');
