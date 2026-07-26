@@ -19,24 +19,38 @@ import type { FullConfig } from './config.js';
 
 type RouteHandler = (route: playwright.Route) => void;
 
+// One installation per context, shared by every caller: the storage-state
+// reuse path installs the policy before it reloads pages (Context has not run
+// yet), Context ensures it afterwards, and sibling sessions sharing a reused
+// context must not stack duplicate handlers. Keyed weakly on the context
+// object, and by promise so concurrent callers await one installation instead
+// of racing two; a failed installation is forgotten so the next caller
+// retries. The policy is identical for every caller — it comes from the
+// server-wide config — so "already installed" can never mean "installed with
+// different rules".
+const policyInstallations = new WeakMap<playwright.BrowserContext, Promise<void>>();
+
 /**
- * Installs the configured origin allowlist/blocklist as routes on the context.
- * The single source of the policy's route shape: Context installs it after the
- * factory returns, and the storage-state reuse path mirrors it for the page
- * reloads it performs before that — two hand-maintained copies would drift.
- * Returns an uninstaller that removes exactly the handlers this call added
- * (or null when the config carries no policy). Sessions can share a reused
- * context — and with it, another session's identical long-lived policy routes
- * — so a temporary installation must never remove more than its own handlers:
- * unrouteAll() would strip the sibling's protection along with the temporary
- * routes.
+ * Installs the configured origin allowlist/blocklist as routes on the
+ * context, once — later calls (and concurrent ones) join the first. The
+ * handlers stay for the context's lifetime: they are never uninstalled, so
+ * there is no window between a temporary installation coming off and the
+ * permanent one going in during which a queued request could reach a blocked
+ * origin, and a sibling session's view of the shared context never loses its
+ * protection.
  */
-export async function installNetworkPolicyRoutes(config: FullConfig, context: playwright.BrowserContext): Promise<(() => Promise<void>) | null> {
+export function ensureNetworkPolicyRoutes(config: FullConfig, context: playwright.BrowserContext): Promise<void> {
+  let installation = policyInstallations.get(context);
+  if (!installation) {
+    installation = installRoutes(config, context);
+    policyInstallations.set(context, installation);
+    installation.catch(() => policyInstallations.delete(context));
+  }
+  return installation;
+}
+
+async function installRoutes(config: FullConfig, context: playwright.BrowserContext): Promise<void> {
   const installed: { pattern: string, handler: RouteHandler }[] = [];
-  const uninstall = async () => {
-    for (const { pattern, handler } of installed)
-      await context.unroute(pattern, handler).catch(() => {});
-  };
   const register = async (pattern: string, handler: RouteHandler) => {
     await context.route(pattern, handler);
     installed.push({ pattern, handler });
@@ -55,11 +69,11 @@ export async function installNetworkPolicyRoutes(config: FullConfig, context: pl
     // A partial policy is worse than none: with the allowlist's abort-all
     // route in but its continue routes missing, everything is blocked — and
     // on a reused context the fragment would linger for whoever uses the
-    // context next. Unwind what was registered before surfacing the failure.
-    await uninstall();
+    // context next. Unwind exactly what was registered (never more — a
+    // sibling session may have its own handlers) before surfacing the
+    // failure.
+    for (const { pattern, handler } of installed)
+      await context.unroute(pattern, handler).catch(() => {});
     throw error;
   }
-  if (!installed.length)
-    return null;
-  return uninstall;
 }

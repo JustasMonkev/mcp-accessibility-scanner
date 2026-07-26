@@ -27,7 +27,7 @@ const { startTraceViewerServer } = coreBundle.server;
 import { logUnhandledError, testDebug } from './utils/log.js';
 import { createGuid, createHash } from './utils/guid.js';
 import { outputFile  } from './config.js';
-import { installNetworkPolicyRoutes } from './networkPolicy.js';
+import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
 
 import type { FullConfig } from './config.js';
 
@@ -69,6 +69,28 @@ export function contextFactory(config: FullConfig): BrowserContextFactory {
   return factory;
 }
 
+// The rules addCookies enforces client-side (verified against Playwright
+// 1.61.1: empty or missing domain/path without a url, an expires other than
+// -1 or a positive number, and sameSite outside Strict/Lax/None are all
+// rejected there). Failing them here keeps the failure ahead of the cache
+// clear; anything these checks miss still fails inside setStorageState.
+function assertValidStorageStateCookies(state: { cookies?: unknown[] }): void {
+  for (const value of state.cookies ?? []) {
+    const cookie = value as Record<string, unknown> | null;
+    const problem = !cookie || typeof cookie !== 'object'
+      ? 'a cookie entry is not an object'
+      : !cookie.url && (!cookie.domain || !cookie.path)
+        ? `cookie "${String(cookie.name ?? '')}" should have a url or a domain/path pair`
+        : cookie.expires !== undefined && (typeof cookie.expires !== 'number' || Number.isNaN(cookie.expires) || (cookie.expires !== -1 && cookie.expires <= 0))
+          ? `cookie "${String(cookie.name ?? '')}" should have a valid expires — only -1 or a positive unix timestamp in seconds is allowed`
+          : cookie.sameSite !== undefined && !['Strict', 'Lax', 'None'].includes(cookie.sameSite as string)
+            ? `cookie "${String(cookie.name ?? '')}" has sameSite "${String(cookie.sameSite)}", expected one of Strict|Lax|None`
+            : null;
+    if (problem)
+      throw new Error(`Invalid storage state: ${problem}. Nothing was changed — cookies are validated before the apply, because setStorageState() clears the attached context's HTTP cache and cookie jar before it validates them, and the cache cannot be restored.`);
+  }
+}
+
 /**
  * Lands the configured storage state in a context the browser already had.
  * `setStorageState()` clears the context's cookies, local storage and IndexedDB
@@ -82,6 +104,24 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   const storageState = config.browser.contextOptions?.storageState;
   if (!storageState)
     return;
+  const parsedState = await (async () => {
+    try {
+      return typeof storageState === 'string'
+        ? JSON.parse(await fs.promises.readFile(storageState, 'utf-8'))
+        : storageState;
+    } catch {
+      // An unreadable state file fails inside setStorageState before any
+      // mutation, which is the clean failure already.
+      return null;
+    }
+  })();
+  // Playwright validates cookies only while installing them — after the
+  // attached context's HTTP cache and cookie jar are already cleared — so a
+  // semantically invalid cookie (bad expires, missing domain/path) would
+  // fail the apply with the cache unrestorably gone. Checked up front, with
+  // the same rules addCookies enforces (verified against 1.61.1).
+  if (parsedState)
+    assertValidStorageStateCookies(parsedState);
   // setStorageState needs a temporary page whenever the state carries origins
   // or the context has visited any — and by the time that page creation fails
   // on a target without Target.createTarget, the HTTP cache is already cleared
@@ -89,18 +129,7 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   // rejected before anything is mutated. When neither signal indicates a page
   // will be needed (cookie-only state, no pages open), the probe is skipped so
   // that case keeps working on those targets.
-  const stateHasOrigins = await (async () => {
-    try {
-      const state = typeof storageState === 'string'
-        ? JSON.parse(await fs.promises.readFile(storageState, 'utf-8'))
-        : storageState;
-      return (state?.origins?.length ?? 0) > 0;
-    } catch {
-      // An unreadable state file fails inside setStorageState before any
-      // mutation, which is the clean failure already.
-      return false;
-    }
-  })();
+  const stateHasOrigins = (parsedState?.origins?.length ?? 0) > 0;
   const hasLoadedPages = browserContext.pages().some(page => page.url() && page.url() !== 'about:blank');
   if (stateHasOrigins || hasLoadedPages) {
     try {
@@ -141,42 +170,41 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     await browserContext.setStorageState(storageState);
     // Pages that were already open still render the previous identity's DOM
     // and in-memory state; reload them so what a scan sees matches the state
-    // just installed. Ceiling: per-tab sessionStorage survives a reload — it
-    // sits outside Playwright storage states entirely.
+    // just installed.
     //
-    // These reloads run inside the factory, before Context installs the
+    // These reloads run inside the factory, before Context ensures the
     // configured origin allowlist/blocklist — and the recorded credentials are
-    // already in place by now. Mirror the policy for the duration of the
-    // reloads so the first navigation cannot reach an origin the policy
-    // blocks; the temporary handlers come off again afterwards (only they —
-    // a sibling session sharing this reused context may have its own policy
-    // routes installed) and Context installs its own from the same rules once
-    // the factory returns. Installed after setStorageState() so an abort-all
-    // route cannot interfere with the temporary page Playwright drives to
-    // restore origin storage.
-    const uninstallPolicy = await installNetworkPolicyRoutes(config, browserContext);
-    try {
-      await Promise.all(browserContext.pages().map(async page => {
+    // already in place by now. The policy is installed here (permanently —
+    // page scripts can queue requests that fire after the reload settles, so
+    // removing the handlers before Context re-ensures the same policy would
+    // open a window to a blocked origin; ensureNetworkPolicyRoutes installs
+    // once per context, so Context's later call is a no-op). Installed after
+    // setStorageState() so an abort-all route cannot interfere with the
+    // temporary page Playwright drives to restore origin storage.
+    await ensureNetworkPolicyRoutes(config, browserContext);
+    await Promise.all(browserContext.pages().map(async page => {
+      try {
+        // Per-tab sessionStorage sits outside Playwright storage states and
+        // survives a reload, and an application can rebuild the previous
+        // identity's UI from it — so it is cleared in every frame first.
+        // (Failures fall through to the reload; a page whose frames cannot
+        // even be evaluated is not going to reload successfully either.)
+        await Promise.all(page.frames().map(frame => frame.evaluate(() => sessionStorage.clear()).catch(() => {})));
+        await page.reload();
+      } catch {
+        // A page that cannot be brought onto the installed state — its
+        // origin may be blocked by the policy, or the load simply failed —
+        // must not stay around rendering the previous identity's DOM:
+        // Context adopts every remaining page, and a scan would read the
+        // stale document as the new session's UI. Blank it; if even that
+        // fails, close it.
         try {
-          await page.reload();
+          await page.goto('about:blank');
         } catch {
-          // A page that cannot be brought onto the installed state — its
-          // origin may be blocked by the mirrored policy, or the load simply
-          // failed — must not stay around rendering the previous identity's
-          // DOM: Context adopts every remaining page, and a scan would read
-          // the stale document as the new session's UI. Blank it; if even
-          // that fails, close it.
-          try {
-            await page.goto('about:blank');
-          } catch {
-            await page.close().catch(() => {});
-          }
+          await page.close().catch(() => {});
         }
-      }));
-    } finally {
-      if (uninstallPolicy)
-        await uninstallPolicy();
-    }
+      }
+    }));
   } catch (error) {
     // Prefer the full-state rollback; fall back to cookies-only when its
     // reapplication is itself impossible on this target.
@@ -327,6 +355,16 @@ class CdpContextFactory extends BaseContextFactory {
     super('cdp', config);
   }
 
+  // The CDP connection (and with it every route and page proxy) is shared by
+  // all live sessions of this factory, so nothing may close it while a
+  // sibling session still audits through it — neither a session's own
+  // close() nor the cleanup after another session's failed setup. The
+  // handout count tracks live sessions; the connection closes only when the
+  // last one lets go. (A disconnect from the outside resets _browserPromise
+  // via the 'disconnected' listener; the counter resets with the next
+  // successful obtain.)
+  private _activeSessions = 0;
+
   override async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     testDebug('create browser context (cdp)');
     const browser = await this._obtainBrowser(clientInfo);
@@ -335,15 +373,25 @@ class CdpContextFactory extends BaseContextFactory {
       browserContext = await this._doCreateContext(browser);
     } catch (error) {
       // Without this the CDP connection stays open after e.g. an unreadable
-      // storage-state file, even though no context was ever handed out.
-      await browser.close().catch(logUnhandledError);
+      // storage-state file, even though no context was ever handed out — but
+      // only when no sibling session is still using the shared connection.
+      if (this._activeSessions === 0)
+        await browser.close().catch(logUnhandledError);
       throw error;
     }
+    this._activeSessions++;
+    let released = false;
     return {
       browserContext,
       close: async () => {
-        testDebug('disconnect browser (cdp)');
-        await browser.close().catch(logUnhandledError);
+        if (released)
+          return;
+        released = true;
+        this._activeSessions = Math.max(0, this._activeSessions - 1);
+        if (this._activeSessions === 0) {
+          testDebug('disconnect browser (cdp)');
+          await browser.close().catch(logUnhandledError);
+        }
       }
     };
   }

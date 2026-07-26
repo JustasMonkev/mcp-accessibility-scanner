@@ -491,8 +491,8 @@ describe('browserContextFactory', () => {
     // scan would audit the wrong user unless the page is brought onto the
     // freshly installed state.
     const pages = [
-      { url: () => 'https://app.example/a', reload: vi.fn().mockResolvedValue(undefined) },
-      { url: () => 'https://app.example/b', reload: vi.fn().mockResolvedValue(undefined) },
+      { url: () => 'https://app.example/a', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockResolvedValue(undefined) },
+      { url: () => 'https://app.example/b', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockResolvedValue(undefined) },
     ];
     const browserContext = createMockBrowserContext();
     browserContext.pages.mockReturnValue(pages);
@@ -519,7 +519,7 @@ describe('browserContextFactory', () => {
     // The reloads run inside the factory, before Context installs the origin
     // allowlist/blocklist — with the recorded credentials already applied, the
     // first navigation must not be able to reach a blocked origin.
-    const pages = [{ url: () => 'https://app.example/a', reload: vi.fn().mockResolvedValue(undefined) }];
+    const pages = [{ url: () => 'https://app.example/a', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockResolvedValue(undefined) }];
     const browserContext = createMockBrowserContext();
     browserContext.pages.mockReturnValue(pages);
     const browser = createMockBrowser(browserContext);
@@ -537,25 +537,19 @@ describe('browserContextFactory', () => {
     await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
 
     // Routes go in after the state is applied (so they cannot interfere with
-    // the temporary page Playwright drives), before the reloads, and come off
-    // again afterwards so Context installs the policy cleanly itself.
+    // the temporary page Playwright drives) and before the reloads — and they
+    // STAY: page scripts can queue requests that fire after the reload
+    // settles, so removing the handlers before Context re-ensures the same
+    // policy would open a window to a blocked origin.
     expect(browserContext.route).toHaveBeenCalledWith('*://tracker.example/**', expect.any(Function));
     expect(browserContext.route.mock.invocationCallOrder[0]).toBeGreaterThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
     expect(browserContext.route.mock.invocationCallOrder[0]).toBeLessThan(pages[0].reload.mock.invocationCallOrder[0]);
-    // Only the handlers this apply installed are removed — by identity, so a
-    // sibling session's own policy routes on the shared context survive.
-    // unrouteAll() would strip those too.
+    expect(browserContext.unroute).not.toHaveBeenCalled();
     expect(browserContext.unrouteAll).not.toHaveBeenCalled();
-    expect(browserContext.unroute.mock.calls).toEqual(browserContext.route.mock.calls);
-    expect(browserContext.unroute.mock.invocationCallOrder[0]).toBeGreaterThan(pages[0].reload.mock.invocationCallOrder[0]);
-    for (const [index, [pattern, handler]] of browserContext.unroute.mock.calls.entries()) {
-      expect(pattern).toBe(browserContext.route.mock.calls[index][0]);
-      expect(handler).toBe(browserContext.route.mock.calls[index][1]);
-    }
   });
 
   it('leaves routing untouched around the reloads when no network policy is configured', async () => {
-    const pages = [{ url: () => 'https://app.example/a', reload: vi.fn().mockResolvedValue(undefined) }];
+    const pages = [{ url: () => 'https://app.example/a', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockResolvedValue(undefined) }];
     const browserContext = createMockBrowserContext();
     browserContext.pages.mockReturnValue(pages);
     const browser = createMockBrowser(browserContext);
@@ -606,15 +600,121 @@ describe('browserContextFactory', () => {
     expect(browser.close).toHaveBeenCalledTimes(1);
   });
 
+  it('clears sessionStorage in every frame before reloading a reused page', async () => {
+    // Per-tab sessionStorage sits outside Playwright storage states and
+    // survives a reload; an application can rebuild the previous identity's
+    // UI from it, so it must be gone before the page comes back up.
+    const frames = [
+      { evaluate: vi.fn().mockResolvedValue(undefined) },
+      { evaluate: vi.fn().mockResolvedValue(undefined) },
+    ];
+    const pages = [{ url: () => 'https://app.example/a', frames: vi.fn().mockReturnValue(frames), reload: vi.fn().mockResolvedValue(undefined) }];
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue(pages);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    for (const frame of frames) {
+      expect(frame.evaluate).toHaveBeenCalledTimes(1);
+      expect(frame.evaluate.mock.invocationCallOrder[0]).toBeLessThan(pages[0].reload.mock.invocationCallOrder[0]);
+    }
+  });
+
+  it('keeps the shared CDP connection open until the last session releases it', async () => {
+    // Every session of a non-isolated CDP factory shares one connection; a
+    // sibling closing must not tear down a live audit.
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: { cdpEndpoint: 'http://127.0.0.1:9222' },
+    });
+
+    const factory = contextFactory(config);
+    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    await second.close();
+    expect(browser.close).not.toHaveBeenCalled();
+    // A double release must not steal the remaining session's reference.
+    await second.close();
+    expect(browser.close).not.toHaveBeenCalled();
+    await first.close();
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not close the shared CDP connection when a later session fails setup', async () => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    browser.contexts.mockReturnValueOnce([browserContext]).mockReturnValue([]);
+    browser.newContext.mockRejectedValue(new Error('Target.createBrowserContext: Not supported'));
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: { cdpEndpoint: 'http://127.0.0.1:9222' },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    // The second session's context creation fails; the first session's live
+    // connection must survive that cleanup.
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('Target.createBrowserContext');
+    expect(browser.close).not.toHaveBeenCalled();
+  });
+
+  it('rejects a storage state with cookies Playwright would refuse, before touching the browser', async () => {
+    // Playwright validates cookies only while installing them — after the
+    // attached context's HTTP cache and cookie jar are already cleared — and
+    // the cache cannot be restored by the rollback.
+    const cases = [
+      { cookie: { name: 'sid', value: 'x', domain: '', path: '/' }, problem: /url or a domain\/path pair/ },
+      { cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', expires: -2 }, problem: /valid expires/ },
+      { cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', sameSite: 'Sideways' }, problem: /Strict\|Lax\|None/ },
+    ];
+    for (const { cookie, problem } of cases) {
+      vi.clearAllMocks();
+      const browserContext = createMockBrowserContext();
+      const browser = createMockBrowser(browserContext);
+      connectOverCDP.mockResolvedValue(browser);
+
+      const config = await resolveConfig({
+        browser: {
+          cdpEndpoint: 'http://127.0.0.1:9222',
+          contextOptions: { storageState: { cookies: [cookie], origins: [] } as any },
+        },
+      });
+
+      const factory = contextFactory(config);
+
+      await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+          .rejects.toThrow(problem);
+      expect(browserContext.setStorageState).not.toHaveBeenCalled();
+      expect(browserContext.clearCookies).not.toHaveBeenCalled();
+    }
+  });
+
   it('blanks pages whose reload fails, and closes them when even that fails', async () => {
     // A page that cannot be brought onto the installed state must not stay
     // around rendering the previous identity's DOM — Context adopts every
     // remaining page and a scan would read the stale document as the new
     // session's UI.
     const pages = [
-      { url: () => 'https://app.example/ok', reload: vi.fn().mockResolvedValue(undefined), goto: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined) },
-      { url: () => 'https://blocked.example/a', reload: vi.fn().mockRejectedValue(new Error('net::ERR_BLOCKED_BY_CLIENT')), goto: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined) },
-      { url: () => 'https://dead.example/b', reload: vi.fn().mockRejectedValue(new Error('Target closed')), goto: vi.fn().mockRejectedValue(new Error('Target closed')), close: vi.fn().mockResolvedValue(undefined) },
+      { url: () => 'https://app.example/ok', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockResolvedValue(undefined), goto: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined) },
+      { url: () => 'https://blocked.example/a', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockRejectedValue(new Error('net::ERR_BLOCKED_BY_CLIENT')), goto: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined) },
+      { url: () => 'https://dead.example/b', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockRejectedValue(new Error('Target closed')), goto: vi.fn().mockRejectedValue(new Error('Target closed')), close: vi.fn().mockResolvedValue(undefined) },
     ];
     const browserContext = createMockBrowserContext();
     browserContext.pages.mockReturnValue(pages);
@@ -767,7 +867,7 @@ describe('browserContextFactory', () => {
   });
 
   it('does not reload pages when the apply failed and the original state was rolled back', async () => {
-    const pages = [{ url: () => 'https://app.example/a', reload: vi.fn().mockResolvedValue(undefined) }];
+    const pages = [{ url: () => 'https://app.example/a', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockResolvedValue(undefined) }];
     const browserContext = createMockBrowserContext();
     browserContext.pages.mockReturnValue(pages);
     // Probe page succeeds; the apply itself fails and the rollback runs.

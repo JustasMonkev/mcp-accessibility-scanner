@@ -126,6 +126,31 @@ describe('Context', () => {
       expect(close).toHaveBeenCalledTimes(1);
     });
 
+    it('tolerates tracing already started by a sibling session on a shared context', async () => {
+      // Two sessions sharing a reused context with --save-trace: the second
+      // tracing.start() deterministically rejects with "already started".
+      // Failing setup for that would run cleanup and tear down the shared
+      // connection under the sibling's live audit — the recording is running,
+      // which is what --save-trace asked for.
+      const close = vi.fn().mockResolvedValue(undefined);
+      mockBrowserContext.tracing.start.mockRejectedValue(new Error('Tracing has been already started'));
+      (mockBrowserContextFactory.createContext as any).mockResolvedValue({
+        browserContext: mockBrowserContext,
+        close,
+      });
+      const context = new Context({
+        tools: [],
+        config: { saveTrace: true } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: { rootPath: '/tmp' } as any,
+      });
+
+      await context.newTab();
+
+      expect(close).not.toHaveBeenCalled();
+    });
+
     it('closes the factory-owned context even when stopping tracing fails on shutdown', async () => {
       // This close attempt is the only one — _browserContextPromise is cleared
       // before the trace stop — so a failing tracing.stop() must not skip the

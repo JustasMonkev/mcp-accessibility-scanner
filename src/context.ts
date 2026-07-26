@@ -20,7 +20,7 @@ import type * as playwright from 'playwright';
 import { logUnhandledError } from './utils/log.js';
 import { Tab } from './tab.js';
 import { outputFile } from './config.js';
-import { installNetworkPolicyRoutes } from './networkPolicy.js';
+import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
 
 import type { FullConfig } from './config.js';
 import type { Tool } from './tools/tool.js';
@@ -200,7 +200,7 @@ export class Context {
   }
 
   private async _setupRequestInterception(context: playwright.BrowserContext) {
-    await installNetworkPolicyRoutes(this.config, context);
+    await ensureNetworkPolicyRoutes(this.config, context);
   }
 
   private _ensureBrowserContext() {
@@ -231,12 +231,22 @@ export class Context {
         this._onPageCreated(page);
       browserContext.on('page', page => this._onPageCreated(page));
       if (this.config.saveTrace) {
-        await browserContext.tracing.start({
-          name: 'trace',
-          screenshots: false,
-          snapshots: true,
-          sources: false,
-        });
+        try {
+          await browserContext.tracing.start({
+            name: 'trace',
+            screenshots: false,
+            snapshots: true,
+            sources: false,
+          });
+        } catch (error) {
+          // A sibling session sharing this reused context has already started
+          // tracing — the recording is live, which is what --save-trace asked
+          // for. Failing here would tear down the shared connection under the
+          // sibling's audit. (Shared-context ceiling: there is one recording,
+          // and the first session to close stops it.)
+          if (!(error instanceof Error && error.message.includes('already started')))
+            throw error;
+        }
       }
     } catch (error) {
       await result.close().catch(() => {});
