@@ -7,7 +7,7 @@ description: Self-review a code change against the recurring defect patterns tha
 
 This repo's PRs are reviewed by the OpenAI Codex bot. An analysis of all 179 inline findings it left across ~50 PRs shows the same defect classes recurring again and again. Almost every one of them was detectable from the diff alone — which means you can catch them locally.
 
-Work through the checklist below against your actual diff (`git diff origin/main...HEAD` plus staged/unstaged changes). Don't treat it as a form to tick off: for each section, ask "does my change touch this territory?" — if yes, actively hunt for the failure mode described. Fix what you find, then run the final gate.
+Work through the checklist below against your actual diff — everything that differs from the default branch (`git diff origin/main...HEAD`, or `git diff main...HEAD` in a checkout with no `origin` remote; if neither ref exists, diff against the merge base of whatever ref tracks the default branch) plus any staged and unstaged changes. Don't treat it as a form to tick off: for each section, ask "does my change touch this territory?" — if yes, actively hunt for the failure mode described. Fix what you find, then run the final gate.
 
 For concrete examples of every pattern (real findings with file/PR references), read `references/codex-findings-catalog.md`. Consult it whenever a section below feels abstract or you want to see what the failure looks like in practice.
 

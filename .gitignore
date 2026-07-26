@@ -22,4 +22,6 @@ coverage/
 
 .DS_Store
 .idea/
-.claude/
+# Ignore local Claude state, but track repository-owned skills
+.claude/*
+!.claude/skills/
