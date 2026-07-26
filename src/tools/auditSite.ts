@@ -703,6 +703,9 @@ const auditSite = defineTabTool({
     });
     response.setStructuredContent({
       kind: 'audit_site',
+      // Mirrors the JSON report version: v2 replaced the singular sessionLoss
+      // object with the sessionLosses list on both surfaces.
+      version: 'v2',
       report: {
         path: reportPath,
         uri: reportResourceLink.uri,

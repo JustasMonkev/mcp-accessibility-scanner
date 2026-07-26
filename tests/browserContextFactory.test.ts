@@ -15,6 +15,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { connectOverCDP, spawnMock } = vi.hoisted(() => ({
@@ -279,9 +280,10 @@ describe('browserContextFactory', () => {
 
   // launchPersistentContext() accepts a storageState option and silently ignores
   // it, so the factory must strip it and apply it to the launched context itself.
-  it('applies the storage state to the persistent profile via setStorageState', async () => {
+  it('applies the storage state to a wiped, dedicated persistent profile', async () => {
     const browserContext = createMockBrowserContext();
     (playwright.chromium.launchPersistentContext as any).mockResolvedValue(browserContext);
+    const rmSpy = vi.spyOn(fs.promises, 'rm');
 
     const config = await resolveConfig({
       browser: {
@@ -295,6 +297,29 @@ describe('browserContextFactory', () => {
     expect((playwright.chromium.launchPersistentContext as any).mock.calls[0][1]).not.toHaveProperty('storageState');
     expect(browserContext.setStorageState).toHaveBeenCalledWith('/tmp/auth.json');
     expect(result.browserContext).toBe(browserContext);
+    // setStorageState resets origin storage only for origins in the state, so a
+    // previously used profile could leak a stale signed-in identity into the
+    // audit; the state must land in its own profile, wiped before launch.
+    const userDataDir = (playwright.chromium.launchPersistentContext as any).mock.calls[0][0] as string;
+    expect(userDataDir).toMatch(/-storage-state$/);
+    expect(rmSpy).toHaveBeenCalledWith(userDataDir, { recursive: true, force: true });
+  });
+
+  it('rejects the contradictory --user-data-dir plus --storage-state combination', async () => {
+    // A user-supplied profile carries its own session data and cannot be wiped;
+    // silently keeping it would let its stale origin storage outvote the state.
+    const config = await resolveConfig({
+      browser: {
+        userDataDir: '/home/user/my-profile',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('--storage-state and --user-data-dir contradict each other');
+    expect(playwright.chromium.launchPersistentContext).not.toHaveBeenCalled();
   });
 
   it('closes the launched persistent browser when applying the storage state fails', async () => {

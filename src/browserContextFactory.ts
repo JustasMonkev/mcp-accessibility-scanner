@@ -348,17 +348,31 @@ class PersistentContextFactory implements BrowserContextFactory {
   async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     await injectCdpPort(this.config.browser);
     testDebug('create browser context (persistent)');
-    const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(clientInfo.rootPath);
+    // launchPersistentContext() accepts a storageState option without applying
+    // it (verified against 1.61.1) — the profile is normally the state — so it
+    // is stripped here and applied explicitly after launch.
+    const { storageState, ...contextOptions } = this.config.browser.contextOptions ?? {};
+    // setStorageState() resets cookies globally but origin storage only for
+    // origins in the state or known to the fresh context object, so stale
+    // localStorage/IndexedDB in a previously used profile would survive and
+    // could sign the audit in as the wrong identity. A storage-state session
+    // therefore runs in its own disposable profile, wiped before every launch,
+    // where the state is provably the only session data. A user-supplied
+    // profile cannot be wiped — it is data we do not own — and keeping it
+    // contradicts "start from the recorded state", so that combination errors.
+    if (storageState && this.config.browser.userDataDir)
+      throw new Error('--storage-state and --user-data-dir contradict each other: the profile carries its own session data, and resetting a user-supplied profile to match the recorded state would destroy it. Drop --user-data-dir (a managed, disposable profile is used for storage-state sessions), or drop the storage state and sign in in that profile instead.');
+    const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(clientInfo.rootPath, storageState ? '-storage-state' : '');
+    if (storageState) {
+      await fs.promises.rm(userDataDir, { recursive: true, force: true });
+      await fs.promises.mkdir(userDataDir, { recursive: true });
+    }
     const tracesDir = await startTraceServer(this.config, clientInfo.rootPath);
 
     this._userDataDirs.add(userDataDir);
     testDebug('lock user data dir', userDataDir);
 
     const browserType = playwright[this.config.browser.browserName];
-    // launchPersistentContext() accepts a storageState option without applying
-    // it (verified against 1.61.1) — the profile is normally the state — so it
-    // is stripped here and applied explicitly after launch.
-    const { storageState, ...contextOptions } = this.config.browser.contextOptions ?? {};
     for (let i = 0; i < 5; i++) {
       try {
         const browserContext = await browserType.launchPersistentContext(userDataDir, {
@@ -410,12 +424,14 @@ class PersistentContextFactory implements BrowserContextFactory {
     testDebug('close browser context complete (persistent)');
   }
 
-  private async _createUserDataDir(rootPath: string | undefined) {
+  // The suffix keeps disposable storage-state profiles apart from the regular
+  // persistent profile, so wiping one never destroys an interactive session.
+  private async _createUserDataDir(rootPath: string | undefined, suffix: string) {
     const dir = process.env.PWMCP_PROFILES_DIR_FOR_TEST ?? registryDirectory;
     const browserToken = this.config.browser.launchOptions?.channel ?? this.config.browser?.browserName;
     // Hesitant putting hundreds of files into the user's workspace, so using it for hashing instead.
     const rootPathToken = rootPath ? `-${createHash(rootPath)}` : '';
-    const result = path.join(dir, `mcp-${browserToken}${rootPathToken}`);
+    const result = path.join(dir, `mcp-${browserToken}${rootPathToken}${suffix}`);
     await fs.promises.mkdir(result, { recursive: true });
     return result;
   }
