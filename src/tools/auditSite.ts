@@ -507,6 +507,13 @@ const auditSite = defineTabTool({
     // signed-out user, which still looks like a clean run, so record where it happened.
     const cookieScopeUrls = queue.map(item => item.url);
     const cookieScope = new Set(cookieScopeUrls);
+    // The whole jar is snapshotted once, so a URL discovered mid-crawl can only
+    // add identities that existed when the crawl started. Without this, a cookie
+    // minted by an earlier crawled page would enter the baseline at discovery
+    // and its later removal would be misreported as losing a crawl-start cookie.
+    const initialCookieIdentities = new Set(
+        (await crawlTab.page.context().cookies().catch(() => []))
+            .map(cookie => `${cookie.name}\n${cookie.domain}\n${cookie.path}`));
     const baselineCookies = await readCrawlCookies(crawlTab.page, cookieScopeUrls);
     const sessionLosses: { url: string, cookies: string[] }[] = [];
     let processedPages = 0;
@@ -537,13 +544,19 @@ const auditSite = defineTabTool({
         // a session cookie scoped below the start URL (say /app, discovered from /)
         // is invisible to the start-URL baseline, so deleting it later would
         // otherwise never raise a warning. Read before navigating — the visit
-        // itself may be what drops the cookie.
+        // itself may be what drops the cookie. Only identities from the crawl-start
+        // jar snapshot may join, so the warning's "present when the crawl started"
+        // stays literally true. Ceiling: a crawl-start cookie deleted before its
+        // scope URL is discovered is not seen by this live read and goes
+        // unreported — accepted, because deciding which snapshot cookies apply to
+        // a URL ourselves would reimplement browser cookie matching, and getting
+        // that wrong turns into false session-loss warnings.
         if (!cookieScope.has(item.url)) {
           cookieScope.add(item.url);
           cookieScopeUrls.push(item.url);
           const discovered = await readCrawlCookies(crawlTab.page, [item.url]).catch(() => null);
           for (const [identity, cookie] of discovered ?? []) {
-            if (!baselineCookies.has(identity))
+            if (initialCookieIdentities.has(identity) && !baselineCookies.has(identity))
               baselineCookies.set(identity, cookie);
           }
         }
@@ -603,8 +616,13 @@ const auditSite = defineTabTool({
             const loss = await findCookieLoss(crawlTab.page, cookieScopeUrls, baselineCookies, item.url, urlBeforeNavigation);
             if (loss) {
               sessionLosses.push({ url: loss.url, cookies: loss.cookies });
-              for (const identity of loss.identities)
+              // Removed from the jar snapshot too, or a later-discovered URL
+              // could re-admit an already-reported cookie to the baseline and
+              // report the same loss twice.
+              for (const identity of loss.identities) {
                 baselineCookies.delete(identity);
+                initialCookieIdentities.delete(identity);
+              }
             }
           }
           processedPages++;

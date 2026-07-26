@@ -53,11 +53,17 @@ function createHarness(
   let abortedNavigationClearedCookies = false;
   // Mirrors context.cookies(urls): only cookies whose path covers one of the
   // asked-for URLs are returned, so path-scoped session cookies stay invisible
-  // until a URL below their path is part of the query.
+  // until a URL below their path is part of the query. Path matching is
+  // boundary-aware like the browser's: /app covers /app and /app/x, not
+  // /application.
   const cookiesMock = vi.fn(async (urls?: string[]) =>
     (abortedNavigationClearedCookies ? [] : options?.cookiesForUrl?.(currentUrl) ?? [])
         .map(cookie => ({ domain: 'example.com', path: '/', expires: -1, ...cookie }))
-        .filter(cookie => !urls || urls.some(url => new URL(url).pathname.startsWith(cookie.path))));
+        .filter(cookie => !urls || urls.some(url => {
+          const pathname = new URL(url).pathname;
+          return pathname === cookie.path
+            || pathname.startsWith(cookie.path.endsWith('/') ? cookie.path : `${cookie.path}/`);
+        })));
 
   const crawlPage = {
     context: vi.fn(() => ({ cookies: cookiesMock })),
@@ -1216,5 +1222,39 @@ describe('audit_site tool', () => {
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     expect(report.sessionLosses).toEqual([{ url: 'https://example.com/app/logout', cookies: ['app_sid'] }]);
+  });
+
+  it('does not report a cookie minted mid-crawl as a lost crawl-start cookie', async () => {
+    // `minted` first appears while visiting /, after the crawl-start jar
+    // snapshot. The discovered URLs must not adopt it into the baseline, or its
+    // disappearance on /gone would be misreported as losing a cookie the
+    // caller signed in with.
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/app'],
+      'https://example.com/app': ['https://example.com/gone'],
+      'https://example.com/gone': [],
+    }, {
+      cookiesForUrl: url => url === 'about:blank' || url.endsWith('/gone') ? [] : [{ name: 'minted' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      startUrl: 'https://example.com/',
+      maxPages: 5,
+      maxDepth: 3,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([]);
   });
 });

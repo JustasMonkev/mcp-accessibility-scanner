@@ -403,28 +403,40 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
   // icon-only controls look like text. Walk the subtree instead and skip the
   // usual visually-hidden techniques; the cache keeps nested elements linear.
   const textCache = new Map<Element, string>();
-  const hiddenFromSight = (element: Element) => {
+  // Conditions that hide an element AND everything beneath it: display:none,
+  // full transparency, the sr-only clip patterns, and collapsed boxes. CSS
+  // visibility is deliberately not here — a descendant can restore
+  // visibility:visible under a hidden ancestor and still be rendered, so it is
+  // evaluated per node in sightedText instead.
+  const subtreeHidden = (element: Element) => {
     const style = window.getComputedStyle(element);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')
+    if (style.display === 'none' || style.opacity === '0')
       return true;
     if (style.clip === 'rect(0px, 0px, 0px, 0px)' || style.clipPath.startsWith('inset(50%'))
       return true;
     const rect = element.getBoundingClientRect();
     return rect.width <= 1 || rect.height <= 1;
   };
+  const visibilityHidden = (element: Element) => window.getComputedStyle(element).visibility === 'hidden';
   const sightedText = (element: Element): string => {
     const cached = textCache.get(element);
     if (cached !== undefined)
       return cached;
     let text = '';
+    // An element's own text nodes render only while its computed visibility is
+    // visible; child elements are walked regardless, because unlike the
+    // subtreeHidden conditions, visibility can be restored further down.
+    const ownTextVisible = !visibilityHidden(element);
     // A web component renders its visible label in its shadow root; walking only
     // light-DOM children makes such a host look like an icon-only control.
     const children = element.shadowRoot ? [...element.shadowRoot.childNodes, ...element.childNodes] : element.childNodes;
     for (const child of children) {
-      if (child.nodeType === Node.TEXT_NODE)
-        text += child.nodeValue ?? '';
-      else if (child.nodeType === Node.ELEMENT_NODE && !hiddenFromSight(child as Element))
+      if (child.nodeType === Node.TEXT_NODE) {
+        if (ownTextVisible)
+          text += child.nodeValue ?? '';
+      } else if (child.nodeType === Node.ELEMENT_NODE && !subtreeHidden(child as Element)) {
         text += ` ${sightedText(child as Element)}`;
+      }
     }
     const value = text.replace(/\s+/g, ' ').trim();
     textCache.set(element, value);
@@ -441,11 +453,12 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     // The visibility predicate must include the element itself, not only its
     // descendants: a control hidden with opacity:0 shows no text at all, and
     // treating its child text as visible raises label-in-name mismatches
-    // against a label nobody can see.
-    const text = hiddenFromSight(element)
+    // against a label nobody can see. Button-like inputs render no children,
+    // so for them visibility:hidden is as final as the subtree conditions.
+    const text = subtreeHidden(element)
       ? ''
       : element instanceof HTMLInputElement && buttonInputTypes.includes(element.type)
-        ? element.value.trim()
+        ? (visibilityHidden(element) ? '' : element.value.trim())
         : sightedText(element);
     return {
       tagName: element.tagName.toLowerCase(),

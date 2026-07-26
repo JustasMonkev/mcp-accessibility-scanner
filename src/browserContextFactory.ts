@@ -64,7 +64,7 @@ export function contextFactory(config: FullConfig): BrowserContextFactory {
  * launchPersistentContext() silently ignores a storageState option (verified
  * against Playwright 1.61.1).
  */
-async function applyStorageStateToReusedContext(config: FullConfig, browserContext: playwright.BrowserContext): Promise<void> {
+export async function applyStorageStateToReusedContext(config: FullConfig, browserContext: playwright.BrowserContext): Promise<void> {
   const storageState = config.browser.contextOptions?.storageState;
   if (storageState)
     await browserContext.setStorageState(storageState);

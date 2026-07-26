@@ -581,6 +581,22 @@ describe('collectElementFacts in a real page', () => {
     await page.close();
   });
 
+  it('keeps text from a descendant that restores visibility under a hidden ancestor', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <button id="restored" style="visibility:hidden" aria-label="Submit"><span style="visibility:visible">Send</span></button>
+      <button id="inherited" style="visibility:hidden" aria-label="Submit"><span>Send</span></button>`);
+    const handles = await Promise.all(['#restored', '#inherited'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // visibility, unlike display/opacity/clip, is restorable below a hidden
+    // ancestor: the first span renders, so "Send" really is the visible label;
+    // the second inherits hidden and shows nothing.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
+    await page.close();
+  });
+
   it('resolves link destinations so relative and absolute forms compare equal', async () => {
     const page = await browser!.newPage();
     await page.route('https://example.com/**', route => route.fulfill({
