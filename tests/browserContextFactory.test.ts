@@ -355,6 +355,29 @@ describe('browserContextFactory', () => {
     expect(browser.close).toHaveBeenCalledTimes(1);
   });
 
+  it('explains the Electron limitation when restoring origin storage needs a page the target cannot create', async () => {
+    // Playwright restores localStorage/IndexedDB by opening a temporary page;
+    // Electron CDP targets have no Target.createTarget, so that fails after the
+    // cookies were already applied. The raw protocol error says none of this.
+    const browserContext = createMockBrowserContext();
+    browserContext.setStorageState.mockRejectedValue(new Error('Error setting storage state:\nTarget.createTarget: Not supported'));
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow(/only cookies, or drop the storage state and sign in inside the app/);
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
   it('applies the storage state to the reused context when launching over CDP without isolation', async () => {
     const browserContext = createMockBrowserContext();
     const browser = createMockBrowser(browserContext);

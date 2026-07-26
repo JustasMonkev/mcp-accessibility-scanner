@@ -404,8 +404,8 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
   // usual visually-hidden techniques; the cache keeps nested elements linear.
   const textCache = new Map<Element, string>();
   // Conditions that hide an element AND everything beneath it: display:none,
-  // full transparency, the sr-only clip patterns, and collapsed boxes. CSS
-  // visibility is deliberately not here — a descendant can restore
+  // full transparency, the sr-only clip patterns, and collapsed boxes that
+  // clip. CSS visibility is deliberately not here — a descendant can restore
   // visibility:visible under a hidden ancestor and still be rendered, so it is
   // evaluated per node in sightedText instead.
   const subtreeHidden = (element: Element) => {
@@ -414,8 +414,15 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
       return true;
     if (style.clip === 'rect(0px, 0px, 0px, 0px)' || style.clipPath.startsWith('inset(50%'))
       return true;
+    // display:contents generates no box of its own, but its text and children
+    // render as if lifted into the parent — a 0x0 rect there hides nothing.
+    if (style.display === 'contents')
+      return false;
+    // A collapsed box hides its subtree only when it also clips (the classic
+    // sr-only pattern is 1x1 with overflow:hidden). With visible overflow the
+    // content renders outside the box.
     const rect = element.getBoundingClientRect();
-    return rect.width <= 1 || rect.height <= 1;
+    return (rect.width <= 1 || rect.height <= 1) && style.overflow !== 'visible';
   };
   const visibilityHidden = (element: Element) => window.getComputedStyle(element).visibility === 'hidden';
   const sightedText = (element: Element): string => {

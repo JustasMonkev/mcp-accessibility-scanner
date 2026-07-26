@@ -597,6 +597,23 @@ describe('collectElementFacts in a real page', () => {
     await page.close();
   });
 
+  it('walks content of boxless and collapsed-but-overflowing elements', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div id="contents" style="display:contents">Send</div>
+      <div id="overflowing" style="width:1px;height:1px;overflow:visible">Send</div>
+      <div id="clipped" style="width:1px;height:1px;overflow:hidden">Send</div>`);
+    const handles = await Promise.all(['#contents', '#overflowing', '#clipped'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // display:contents has a 0x0 rect but renders its content in the parent's
+    // box, and a collapsed box with visible overflow paints its text outside
+    // itself; only the clipping collapsed box (the sr-only shape) hides it.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', 'Send', null]);
+    await page.close();
+  });
+
   it('resolves link destinations so relative and absolute forms compare equal', async () => {
     const page = await browser!.newPage();
     await page.route('https://example.com/**', route => route.fulfill({

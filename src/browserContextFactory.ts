@@ -66,8 +66,21 @@ export function contextFactory(config: FullConfig): BrowserContextFactory {
  */
 export async function applyStorageStateToReusedContext(config: FullConfig, browserContext: playwright.BrowserContext): Promise<void> {
   const storageState = config.browser.contextOptions?.storageState;
-  if (storageState)
+  if (!storageState)
+    return;
+  try {
     await browserContext.setStorageState(storageState);
+  } catch (error) {
+    // Restoring origin storage (localStorage/IndexedDB) makes Playwright open a
+    // temporary page; a CDP target that cannot create one — Electron has no
+    // Target.createTarget — fails here even though the cookies were applied.
+    // Cookie-only states need no page and still work on such targets, so name
+    // that remedy instead of surfacing the raw protocol error.
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('Target.createTarget'))
+      throw new Error(`The attached browser cannot open the temporary page Playwright needs to restore localStorage/IndexedDB from the storage state (Electron targets do not support Target.createTarget). Use a storage state that contains only cookies, or drop the storage state and sign in inside the app. Original error: ${message}`);
+    throw error;
+  }
 }
 
 function createContextFactory(config: FullConfig): BrowserContextFactory {

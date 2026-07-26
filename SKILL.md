@@ -57,7 +57,7 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--config <path>` | Path to configuration file |
 | `--user-data-dir <path>` | Browser profile directory |
 | `--isolated` | Keep browser profile in memory only |
-| `--storage-state <path>` | Storage state file for sessions that create their own context (`--isolated`, remote endpoint, CDP + `--isolated`) |
+| `--storage-state <path>` | Storage state file to start the session from; applied in every mode except `--extension` (fresh contexts at creation, reused contexts via `setStorageState()`, which first clears their cookies and storage) |
 | `--executable-path <path>` | Custom browser executable |
 | `--cdp-endpoint <endpoint>` | Connect to existing CDP endpoint |
 | `--cdp-header <header>` | CDP connect header, e.g. `"Authorization: Bearer <token>"`. Repeat the flag for multiple |

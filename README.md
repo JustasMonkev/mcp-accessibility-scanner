@@ -218,7 +218,7 @@ Create a `config.json` file with the following options:
 - `browser.cdpTimeout`: Maximum time in milliseconds to wait when connecting to the CDP endpoint (default: `30000`)
 - `browser.cdpLaunch`: Launch a Chromium-family desktop app with CDP enabled, wait for the endpoint, and manage the child process lifecycle
 - CDP attach modes preserve the target browser's existing default-context settings instead of applying Playwright's defaults.
-- `browser.contextOptions.storageState`: Start each session from a recorded Playwright storage state; needs a mode that creates its own context (`browser.isolated`, `browser.remoteEndpoint`, or a CDP mode with `browser.isolated`) — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
+- `browser.contextOptions.storageState`: Start each session from a recorded Playwright storage state; applied in every mode except `--extension` (fresh contexts receive it at creation, reused contexts via `setStorageState()`) — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
 - `timeouts.settle`: How long to wait after each action for triggered work to settle before responding (default: `500`)

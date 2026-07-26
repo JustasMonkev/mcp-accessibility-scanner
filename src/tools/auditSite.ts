@@ -661,7 +661,9 @@ const auditSite = defineTabTool({
     };
 
     const report = {
-      version: 'v1',
+      // v2: the singular `sessionLoss` object became the `sessionLosses` list,
+      // so a consumer keying its parser on the version has a signal.
+      version: 'v2',
       metadata: {
         startUrl: startUrl.toString(),
         strategy: params.strategy as CrawlStrategy,
