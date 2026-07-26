@@ -28,6 +28,13 @@ import type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotoco
 export type MCPProvider = {
   name: string;
   description: string;
+  /**
+   * Throws when this provider cannot serve the current configuration (e.g. a
+   * storage state the extension provider would silently drop). Runs before the
+   * current client is torn down, so a rejected switch leaves the session on
+   * its previous provider instead of stranding it with none.
+   */
+  validate?(): void;
   connect(): Promise<Transport>;
 };
 
@@ -86,6 +93,7 @@ export class ProxyBackend implements ServerBackend {
       if (!factory)
         throw new Error('Unknown connection method: ' + params.name);
 
+      factory.validate?.();
       await this._setCurrentClient(factory, true);
       return {
         content: [{ type: 'text', text: '### Result\nSuccessfully changed connection method.\n' }],

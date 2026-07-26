@@ -451,7 +451,7 @@ describe('browserContextFactory', () => {
     const factory = contextFactory(config);
 
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow(/only cookies, or drop the storage state and sign in inside the app/);
+        .rejects.toThrow(/Drop the storage state and sign in inside the app instead/);
     expect(browser.close).toHaveBeenCalledTimes(1);
   });
 

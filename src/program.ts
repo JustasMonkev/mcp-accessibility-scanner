@@ -42,11 +42,13 @@ type ProgramContext = {
 async function resolveProgramContext(options: Record<string, unknown>): Promise<ProgramContext> {
   const config = await resolveCLIConfig(options);
   const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath);
-  // These modes run every tool through the extension factory, not the one
-  // contextFactory() builds, so validate the factory that will actually create the
-  // context. Checked first because contextFactory() would otherwise recommend
-  // --isolated, which does not help here.
-  if (options.extension || options.connectTool)
+  // --extension runs every tool through the extension factory, not the one
+  // contextFactory() builds, so validate the factory that will actually create
+  // the context. Checked first because contextFactory() would otherwise
+  // recommend --isolated, which does not help here. --connect-tool is NOT
+  // checked at startup: its default provider applies the storage state fine,
+  // and its optional extension leg validates at switch time instead.
+  if (options.extension)
     assertStorageStateSupported(config, extensionContextFactory, '--extension attaches to the browser you are already running and uses the context it already has; --isolated does not change that. Drop the storage state and sign in in that browser before auditing.');
   const browserContextFactory = contextFactory(config);
   return { config, browserContextFactory, extensionContextFactory };
@@ -152,6 +154,9 @@ configureBaseProgram()
           {
             name: 'extension',
             description: 'Connect to a browser using the Playwright MCP extension',
+            // Runs before the default provider is torn down, so a rejected
+            // switch keeps the session on the provider that works.
+            validate: () => assertStorageStateSupported(config, extensionContextFactory, 'The "extension" method works through the browser you are already running and uses the context it already has. Stay on the "default" method, or restart without the storage state and sign in in that browser.'),
             connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, extensionContextFactory)),
           },
         ];

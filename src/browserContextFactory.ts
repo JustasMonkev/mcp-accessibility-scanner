@@ -102,7 +102,7 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
         : restoredCookies
           ? 'The context\'s original cookies were restored.'
           : 'Restoring the context\'s original cookies also failed; its cookie jar may now hold the recorded state.';
-      throw new Error(`The attached browser cannot open the temporary page Playwright needs to restore localStorage/IndexedDB from the storage state (Electron targets do not support Target.createTarget). Use a storage state that contains only cookies, or drop the storage state and sign in inside the app. ${rollbackNote} Original error: ${message}`);
+      throw new Error(`The attached browser cannot open the temporary page Playwright needs to reset origin storage (Electron targets do not support Target.createTarget). Drop the storage state and sign in inside the app instead — a cookies-only state helps only while the attached target has no pages open, because clearing storage for an already-visited origin needs the same temporary page. ${rollbackNote} Original error: ${message}`);
     }
     if (!restoredFully && restoredCookies)
       throw new Error(`${message} The context's original cookies were restored, but origin storage may retain partially applied state.`);
@@ -392,8 +392,12 @@ class PersistentContextFactory implements BrowserContextFactory {
     // combination errors.
     if (storageState && this.config.browser.userDataDir)
       throw new Error('--storage-state and --user-data-dir contradict each other: the profile carries its own session data, and resetting a user-supplied profile to match the recorded state would destroy it. Drop --user-data-dir (a managed, disposable profile is used for storage-state sessions), or drop the storage state and sign in in that profile instead.');
-    const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(clientInfo.rootPath, storageState ? `-storage-state-${createGuid()}` : '');
+    // Trace setup runs before the disposable profile exists: it can fail (an
+    // unwritable output directory), and nothing after the directory is created
+    // may throw outside the cleanup scope below, or failed starts would leave
+    // stray profiles behind.
     const tracesDir = await startTraceServer(this.config, clientInfo.rootPath);
+    const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(clientInfo.rootPath, storageState ? `-storage-state-${createGuid()}` : '');
 
     this._userDataDirs.add(userDataDir);
     testDebug('lock user data dir', userDataDir);
