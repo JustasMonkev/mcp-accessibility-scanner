@@ -320,6 +320,42 @@ describe('browserContextFactory', () => {
     expect(rmSpy).toHaveBeenCalledWith(secondDir, { recursive: true, force: true });
   });
 
+  it('removes the disposable profile when the browser launch itself fails', async () => {
+    // The guid-suffixed directory is created before launch; a start that never
+    // produces a context must not leave it behind, or every failed start piles
+    // another stray profile into the registry directory.
+    (playwright.chromium.launchPersistentContext as any).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
+    const rmSpy = vi.spyOn(fs.promises, 'rm');
+
+    const config = await resolveConfig({
+      browser: {
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('Browser specified in your config is not installed');
+    const userDataDir = (playwright.chromium.launchPersistentContext as any).mock.calls[0][0] as string;
+    expect(userDataDir).toMatch(/-storage-state-[0-9a-f]+$/);
+    expect(rmSpy).toHaveBeenCalledWith(userDataDir, { recursive: true, force: true });
+  });
+
+  it('keeps the regular persistent profile when a launch without storage state fails', async () => {
+    // The shared interactive profile is durable user data; launch failures must
+    // never delete it — only the disposable storage-state profiles are removed.
+    (playwright.chromium.launchPersistentContext as any).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
+    const rmSpy = vi.spyOn(fs.promises, 'rm');
+
+    const config = await resolveConfig({});
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('Browser specified in your config is not installed');
+    expect(rmSpy).not.toHaveBeenCalled();
+  });
+
   it('rejects the contradictory --user-data-dir plus --storage-state combination', async () => {
     // A user-supplied profile carries its own session data and cannot be wiped;
     // silently keeping it would let its stale origin storage outvote the state.

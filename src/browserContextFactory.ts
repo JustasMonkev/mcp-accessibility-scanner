@@ -386,30 +386,42 @@ class PersistentContextFactory implements BrowserContextFactory {
     testDebug('lock user data dir', userDataDir);
 
     const browserType = playwright[this.config.browser.browserName];
-    for (let i = 0; i < 5; i++) {
-      try {
-        const browserContext = await browserType.launchPersistentContext(userDataDir, {
-          tracesDir,
-          ...this.config.browser.launchOptions,
-          ...contextOptions,
-          handleSIGINT: false,
-          handleSIGTERM: false,
-        });
-        return await this._applyStorageState(browserContext, storageState, userDataDir);
-      } catch (error: any) {
-        if (error instanceof StorageStateError)
+    try {
+      for (let i = 0; i < 5; i++) {
+        try {
+          const browserContext = await browserType.launchPersistentContext(userDataDir, {
+            tracesDir,
+            ...this.config.browser.launchOptions,
+            ...contextOptions,
+            handleSIGINT: false,
+            handleSIGTERM: false,
+          });
+          return await this._applyStorageState(browserContext, storageState, userDataDir);
+        } catch (error: any) {
+          if (error instanceof StorageStateError)
+            throw error;
+          if (error.message.includes('Executable doesn\'t exist'))
+            throw browserNotInstalledError(error);
+          if (error.message.includes('ProcessSingleton') || error.message.includes('Invalid URL')) {
+            // User data directory is already in use, try again.
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            continue;
+          }
           throw error;
-        if (error.message.includes('Executable doesn\'t exist'))
-          throw browserNotInstalledError(error);
-        if (error.message.includes('ProcessSingleton') || error.message.includes('Invalid URL')) {
-          // User data directory is already in use, try again.
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          continue;
         }
-        throw error;
       }
+      throw new Error(`Browser is already in use for ${userDataDir}, use --isolated to run multiple instances of the same browser`);
+    } catch (error) {
+      // The disposable profile belongs to this context alone, so a launch that
+      // never produced a context must not leave it behind — repeated failed
+      // starts would otherwise pile one stray directory into the registry each.
+      // (Already removed on the StorageStateError path; rm is idempotent.)
+      if (storageState) {
+        await fs.promises.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
+        this._userDataDirs.delete(userDataDir);
+      }
+      throw error;
     }
-    throw new Error(`Browser is already in use for ${userDataDir}, use --isolated to run multiple instances of the same browser`);
   }
 
   // Separate from the launch retry loop: its `catch` retries on messages a
