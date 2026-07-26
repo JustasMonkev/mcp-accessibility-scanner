@@ -23,6 +23,7 @@
 - Reuse existing helpers before introducing new abstractions.
 - Prefer targeted validation first, then broader checks if needed.
 - When touching build, lint, or test behavior, run the relevant npm script before finalizing.
+- Before committing or pushing, self-review your diff against `.claude/skills/pre-push-review/SKILL.md` — a checklist of the recurring defect patterns automated PR review keeps finding in this repo.
 - Avoid introducing ignored or generated artifacts into version control; `.gitignore` already excludes `lib/`, `coverage/`, Playwright reports, and similar outputs.
 
 <!-- OPENWIKI:START -->
