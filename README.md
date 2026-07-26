@@ -281,7 +281,7 @@ PLAYWRIGHT_MCP_ISOLATED=true PLAYWRIGHT_MCP_STORAGE_STATE=./auth.json npx mcp-ac
 }
 ```
 
-> **A fresh browser context is required.** Playwright only applies a storage state to a context it creates. That means `--isolated`, the remote-endpoint mode, or either CDP mode combined with `--isolated`. The default persistent-profile mode has no storage-state option at all, and the CDP modes without `--isolated` attach to the browser's existing context, so the server refuses to start with a storage state in those modes rather than silently auditing your site as an anonymous user. `--extension` is refused too, with or without `--isolated`: it always works through the context of the browser you are already running. There, sign in interactively instead — the persistent profile also keeps the session across restarts.
+> **Every mode applies the state — one way or the other.** A fresh browser context (`--isolated`, the remote-endpoint mode, or either CDP mode combined with `--isolated`) is created with the storage state directly. The default persistent-profile mode and the CDP modes without `--isolated` reuse a context the browser already has, so the state is installed into that context with Playwright's `setStorageState()` instead — which, per its documented semantics, first clears the context's existing cookies, local storage and IndexedDB. That reset is exactly what `--storage-state` asks for, but it is worth knowing when pointing a CDP session at a browser whose profile you care about. The one exception is `--extension`, with or without `--isolated`: it works through the browser you are already running, where wiping every origin's cookies to install a recorded state is not an acceptable side effect, so the server refuses to start rather than doing that silently. There, sign in interactively instead — the persistent profile also keeps the session across restarts.
 
 ### Keep the crawl from destroying its own session
 
@@ -295,9 +295,9 @@ PLAYWRIGHT_MCP_ISOLATED=true PLAYWRIGHT_MCP_STORAGE_STATE=./auth.json npx mcp-ac
 
 Note that `excludePathPatterns` replaces the default rather than extending it, so repeat `logout|signout` in your list.
 
-If a session cookie disappears anyway, `audit_site` says so instead of reporting a confident, wrong audit: the result starts with a `WARNING: session cookie(s) … disappeared while loading <url>` line, and both the JSON report and the structured content carry a `sessionLoss` object naming the page that dropped the cookies — the page reached after any redirect, and reported even when that page failed to finish loading. Every page scanned after that point was audited as a signed-out user — exclude the offending URL, sign in again, and re-run.
+If a session cookie disappears anyway, `audit_site` says so instead of reporting a confident, wrong audit: the result starts with a `WARNING: cookie(s) … disappeared while loading <url>` line, and both the JSON report and the structured content carry a `sessionLosses` list naming, for each lost cookie, the page that dropped it — the page reached after any redirect, and reported even when that page failed to finish loading. If one of the lost cookies was the session, every page scanned after that point was audited as a signed-out user — exclude the offending URL, sign in again, and re-run.
 
-The check compares which cookies the crawled URLs carry, not their values, so a rotating CSRF token never reads as a lost session. A cookie the browser deleted at its own stated expiry is ignored for the same reason — Cloudflare's `__cf_bm` lives 30 minutes and would otherwise warn on any longer crawl. Beyond that no attempt is made to tell an authentication cookie from any other: nothing in a cookie marks it as one, so any cookie the crawl started with and later lost is reported.
+The check compares which cookies the crawled URLs carry, not their values, so a rotating CSRF token never reads as a lost session. A cookie the browser deleted at its own stated expiry is ignored for the same reason — Cloudflare's `__cf_bm` lives 30 minutes and would otherwise warn on any longer crawl. Beyond that no attempt is made to tell an authentication cookie from any other: nothing in a cookie marks it as one, so any cookie the crawl started with and later lost is reported. Monitoring does not stop at the first loss — each cookie is reported once, at the URL where it vanished, so an analytics cookie expiring early cannot mask the session cookie being dropped later. URLs discovered mid-crawl join the cookie tracking before they are visited, so a session cookie scoped to a path below the start URL (say `/app`) is watched too.
 
 ## Available Tools
 
@@ -361,7 +361,7 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 - Default strategy: link-based BFS from the current URL
 - Supports `links`, `nav`, `sitemap`, and `provided` URL strategies
 - Always writes a JSON report (default filename: `audit-site-{timestamp}.json`)
-- Warns and records `sessionLoss` if the crawl loses the cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
+- Warns and records `sessionLosses` if the crawl loses cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 
 **Example flow:**
 ```text

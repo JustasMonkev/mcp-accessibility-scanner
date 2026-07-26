@@ -51,9 +51,13 @@ function createHarness(
   const redirectMap = options?.redirectMap ?? {};
 
   let abortedNavigationClearedCookies = false;
-  const cookiesMock = vi.fn(async (_urls?: string[]) =>
+  // Mirrors context.cookies(urls): only cookies whose path covers one of the
+  // asked-for URLs are returned, so path-scoped session cookies stay invisible
+  // until a URL below their path is part of the query.
+  const cookiesMock = vi.fn(async (urls?: string[]) =>
     (abortedNavigationClearedCookies ? [] : options?.cookiesForUrl?.(currentUrl) ?? [])
-        .map(cookie => ({ domain: 'example.com', path: '/', expires: -1, ...cookie })));
+        .map(cookie => ({ domain: 'example.com', path: '/', expires: -1, ...cookie }))
+        .filter(cookie => !urls || urls.some(url => new URL(url).pathname.startsWith(cookie.path))));
 
   const crawlPage = {
     context: vi.fn(() => ({ cookies: cookiesMock })),
@@ -910,8 +914,8 @@ describe('audit_site tool', () => {
     } as any, response);
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
-    expect(report.sessionLoss).toEqual({ url: 'https://example.com/account/close', cookies: ['sid'] });
-    expect(response.result()).toContain('WARNING: session cookie(s) sid disappeared while loading https://example.com/account/close.');
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/account/close', cookies: ['sid'] }]);
+    expect(response.result()).toContain('WARNING: cookie(s) sid present when the crawl started disappeared while loading https://example.com/account/close.');
   });
 
   it('scopes the cookie baseline to the crawled URLs', async () => {
@@ -964,7 +968,7 @@ describe('audit_site tool', () => {
     } as any, response);
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
-    expect(report.sessionLoss).toEqual({ url: 'https://example.com/account/close', cookies: ['sid'] });
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/account/close', cookies: ['sid'] }]);
   });
 
   it('reports the URL reached after a redirect as the page that lost the session', async () => {
@@ -991,7 +995,7 @@ describe('audit_site tool', () => {
     } as any, response);
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
-    expect(report.sessionLoss).toEqual({ url: 'https://example.com/signed-out', cookies: ['sid'] });
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/signed-out', cookies: ['sid'] }]);
     expect(response.result()).toContain('while loading https://example.com/signed-out.');
   });
 
@@ -1019,7 +1023,7 @@ describe('audit_site tool', () => {
     } as any, response);
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
-    expect(report.sessionLoss).toEqual({ url: 'https://example.com/slow-logout', cookies: ['sid'] });
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/slow-logout', cookies: ['sid'] }]);
   });
 
   // An aborted navigation never leaves the previous page, so the URL asked for is the
@@ -1048,7 +1052,7 @@ describe('audit_site tool', () => {
     } as any, response);
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
-    expect(report.sessionLoss).toEqual({ url: 'https://example.com/failing-logout', cookies: ['sid'] });
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/failing-logout', cookies: ['sid'] }]);
   });
 
   it('does not report session loss for a cookie the browser dropped at its own expiry', async () => {
@@ -1077,7 +1081,7 @@ describe('audit_site tool', () => {
     } as any, response);
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
-    expect(report.sessionLoss).toBeNull();
+    expect(report.sessionLosses).toEqual([]);
   });
 
   it('still reports a cookie deleted before its expiry passed', async () => {
@@ -1104,7 +1108,7 @@ describe('audit_site tool', () => {
     } as any, response);
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
-    expect(report.sessionLoss).toEqual({ url: 'https://example.com/profile', cookies: ['sid'] });
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/profile', cookies: ['sid'] }]);
   });
 
   it('does not report session loss when cookies survive the crawl', async () => {
@@ -1130,6 +1134,87 @@ describe('audit_site tool', () => {
     } as any, response);
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
-    expect(report.sessionLoss).toBeNull();
+    expect(report.sessionLosses).toEqual([]);
+  });
+
+  it('keeps monitoring after a cookie loss, so an unrelated one cannot mask the session cookie', async () => {
+    // `metrics` disappears first on /features; if monitoring stopped there, the
+    // real session cookie vanishing later on /account/close would go unreported.
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: url => {
+        if (url.endsWith('/features') || url.endsWith('/pricing'))
+          return [{ name: 'sid' }];
+        if (url.endsWith('/account/close') || url.endsWith('/profile'))
+          return [];
+        return [{ name: 'sid' }, { name: 'metrics' }];
+      },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: [
+        'https://example.com/dashboard',
+        'https://example.com/features',
+        'https://example.com/pricing',
+        'https://example.com/account/close',
+        'https://example.com/profile',
+      ],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    // Each cookie is reported once, at the URL where it vanished.
+    expect(report.sessionLosses).toEqual([
+      { url: 'https://example.com/features', cookies: ['metrics'] },
+      { url: 'https://example.com/account/close', cookies: ['sid'] },
+    ]);
+    expect(response.result()).toContain('cookie(s) metrics present when the crawl started disappeared while loading https://example.com/features.');
+    expect(response.result()).toContain('cookie(s) sid present when the crawl started disappeared while loading https://example.com/account/close.');
+  });
+
+  it('tracks cookies scoped to URLs discovered mid-crawl, not just the start URL', async () => {
+    // app_sid is scoped to /app, so the baseline read against the start URL
+    // cannot see it; it must join tracking when /app is discovered and its loss
+    // on /app/logout must still be reported.
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/app'],
+      'https://example.com/app': ['https://example.com/app/logout'],
+      'https://example.com/app/logout': [],
+    }, {
+      cookiesForUrl: url => url.endsWith('/app/logout')
+        ? []
+        : [{ name: 'app_sid', path: '/app' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      startUrl: 'https://example.com/',
+      maxPages: 5,
+      maxDepth: 3,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/app/logout', cookies: ['app_sid'] }]);
   });
 });

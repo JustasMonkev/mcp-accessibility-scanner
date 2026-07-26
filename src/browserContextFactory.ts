@@ -32,23 +32,42 @@ import type { FullConfig } from './config.js';
 
 /**
  * Throws when a storage state is configured but `factory` will not apply it. A
- * storage state only lands when the factory creates a fresh context to apply it to;
- * a factory that reuses an existing context or an on-disk profile would drop it
- * without a word and audit the site as an anonymous user, which looks exactly like
- * a successful run. Callers pass the remedy that fits the mode they selected — the
- * factory that creates the context is not always the one `contextFactory()` built.
+ * factory that neither creates a fresh context with the state nor applies it to
+ * the context it reuses would drop it without a word and audit the site as an
+ * anonymous user, which looks exactly like a successful run. Every factory in
+ * this file applies it one way or the other; the extension factory cannot — it
+ * works through the user's own running browser, where clearing every origin's
+ * cookies to install the recorded state is not an acceptable side effect.
+ * Callers pass the remedy that fits the mode they selected — the factory that
+ * creates the context is not always the one `contextFactory()` built.
  */
 export function assertStorageStateSupported(config: FullConfig, factory: BrowserContextFactory, remedy: string): void {
   if (config.browser.contextOptions?.storageState && !factory.appliesStorageState)
-    throw new Error(`Storage state needs a fresh browser context, which this mode cannot provide: it reuses a context the browser already has, or an on-disk profile. ${remedy}`);
+    throw new Error(`Storage state cannot be applied in this mode. ${remedy}`);
 }
 
 export function contextFactory(config: FullConfig): BrowserContextFactory {
   const factory = createContextFactory(config);
-  // The persistent profile (launchPersistentContext has no storageState option) and
-  // the CDP modes without --isolated (they reuse the browser's existing context).
-  assertStorageStateSupported(config, factory, 'Re-run with --isolated (or set "browser": { "isolated": true } in the config file), or drop the storage state and sign in interactively before auditing.');
+  // Every built-in factory now applies a storage state; the guard stays so a
+  // future factory that forgets to declare support rejects the option instead
+  // of silently dropping it.
+  assertStorageStateSupported(config, factory, 'Drop the storage state and sign in interactively before auditing.');
   return factory;
+}
+
+/**
+ * Lands the configured storage state in a context the browser already had.
+ * `setStorageState()` clears the context's cookies, local storage and IndexedDB
+ * and installs the recorded state — the documented semantics of the option the
+ * caller asked for, applied to a context `newContext()` never sees: the CDP
+ * modes without --isolated reuse the browser's existing context, and
+ * launchPersistentContext() silently ignores a storageState option (verified
+ * against Playwright 1.61.1).
+ */
+async function applyStorageStateToReusedContext(config: FullConfig, browserContext: playwright.BrowserContext): Promise<void> {
+  const storageState = config.browser.contextOptions?.storageState;
+  if (storageState)
+    await browserContext.setStorageState(storageState);
 }
 
 function createContextFactory(config: FullConfig): BrowserContextFactory {
@@ -67,9 +86,11 @@ export type ClientInfo = { name?: string, version?: string, rootPath?: string };
 
 export interface BrowserContextFactory {
   /**
-   * True when createContext() applies config.browser.contextOptions (storage state
-   * included) to a fresh context. Omitted counts as false, so a factory that forgets
-   * to declare it rejects a storage state rather than dropping it silently.
+   * True when createContext() lands config.browser.contextOptions.storageState in
+   * the returned context — either by creating a fresh context with it or by
+   * applying it to a reused context via setStorageState(). Omitted counts as
+   * false, so a factory that forgets to declare it rejects a storage state rather
+   * than dropping it silently.
    */
   readonly appliesStorageState?: boolean;
   createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }>;
@@ -152,19 +173,26 @@ class IsolatedContextFactory extends BaseContextFactory {
 }
 
 class CdpContextFactory extends BaseContextFactory {
-  // Only the isolated path creates a context; otherwise the browser's existing
-  // context is reused and no storage state can be applied to it.
-  readonly appliesStorageState: boolean;
+  // The isolated path creates a fresh context with the state; the attach path
+  // applies it to the browser's existing context via setStorageState().
+  readonly appliesStorageState = true;
 
   constructor(config: FullConfig) {
     super('cdp', config);
-    this.appliesStorageState = !!config.browser.isolated;
   }
 
   override async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     testDebug('create browser context (cdp)');
     const browser = await this._obtainBrowser(clientInfo);
-    const browserContext = await this._doCreateContext(browser);
+    let browserContext: playwright.BrowserContext;
+    try {
+      browserContext = await this._doCreateContext(browser);
+    } catch (error) {
+      // Without this the CDP connection stays open after e.g. an unreadable
+      // storage-state file, even though no context was ever handed out.
+      await browser.close().catch(logUnhandledError);
+      throw error;
+    }
     return {
       browserContext,
       close: async () => {
@@ -183,7 +211,11 @@ class CdpContextFactory extends BaseContextFactory {
   }
 
   protected override async _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext> {
-    return this.config.browser.isolated ? await browser.newContext(this.config.browser.contextOptions) : browser.contexts()[0];
+    if (this.config.browser.isolated)
+      return await browser.newContext(this.config.browser.contextOptions);
+    const browserContext = browser.contexts()[0];
+    await applyStorageStateToReusedContext(this.config, browserContext);
+    return browserContext;
   }
 }
 
@@ -209,12 +241,11 @@ class RemoteContextFactory extends BaseContextFactory {
 
 class CdpLaunchContextFactory implements BrowserContextFactory {
   readonly config: FullConfig;
-  // See CdpContextFactory: only the isolated path creates a context of its own.
-  readonly appliesStorageState: boolean;
+  // See CdpContextFactory: fresh context when isolated, setStorageState otherwise.
+  readonly appliesStorageState = true;
 
   constructor(config: FullConfig) {
     this.config = config;
-    this.appliesStorageState = !!config.browser.isolated;
   }
 
   async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
@@ -236,7 +267,22 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     });
 
     const browser = await this._waitForBrowser(endpoint, clientInfo, childProcess, cdpLaunch.startupTimeoutMs ?? 30000);
-    const browserContext = this.config.browser.isolated ? await browser.newContext(this.config.browser.contextOptions) : browser.contexts()[0];
+    let browserContext: playwright.BrowserContext;
+    try {
+      if (this.config.browser.isolated) {
+        browserContext = await browser.newContext(this.config.browser.contextOptions);
+      } else {
+        browserContext = browser.contexts()[0];
+        await applyStorageStateToReusedContext(this.config, browserContext);
+      }
+    } catch (error) {
+      // The desktop process is already running by now; failing to obtain a
+      // context (say, an unreadable storage-state file) must not leave it and
+      // the CDP connection behind with nobody holding a close() for them.
+      await browser.close().catch(logUnhandledError);
+      childProcess.kill('SIGTERM');
+      throw error;
+    }
     return {
       browserContext,
       close: async () => {
@@ -268,10 +314,15 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
   }
 }
 
+// Distinguishes a storage-state failure from a launch failure, so the launch
+// retry loop never retries on one (a bad state file fails the same way 5 times).
+class StorageStateError extends Error {}
+
 class PersistentContextFactory implements BrowserContextFactory {
   readonly config: FullConfig;
-  // launchPersistentContext() has no storageState option: the profile is the state.
-  readonly appliesStorageState = false;
+  // launchPersistentContext() silently ignores a storageState option, so the
+  // state is applied to the launched context with setStorageState() instead.
+  readonly appliesStorageState = true;
   readonly name = 'persistent';
   readonly description = 'Create a new persistent browser context';
 
@@ -291,18 +342,23 @@ class PersistentContextFactory implements BrowserContextFactory {
     testDebug('lock user data dir', userDataDir);
 
     const browserType = playwright[this.config.browser.browserName];
+    // launchPersistentContext() accepts a storageState option without applying
+    // it (verified against 1.61.1) — the profile is normally the state — so it
+    // is stripped here and applied explicitly after launch.
+    const { storageState, ...contextOptions } = this.config.browser.contextOptions ?? {};
     for (let i = 0; i < 5; i++) {
       try {
         const browserContext = await browserType.launchPersistentContext(userDataDir, {
           tracesDir,
           ...this.config.browser.launchOptions,
-          ...this.config.browser.contextOptions,
+          ...contextOptions,
           handleSIGINT: false,
           handleSIGTERM: false,
         });
-        const close = () => this._closeBrowserContext(browserContext, userDataDir);
-        return { browserContext, close };
+        return await this._applyStorageState(browserContext, storageState, userDataDir);
       } catch (error: any) {
+        if (error instanceof StorageStateError)
+          throw error;
         if (error.message.includes('Executable doesn\'t exist'))
           throw browserNotInstalledError(error);
         if (error.message.includes('ProcessSingleton') || error.message.includes('Invalid URL')) {
@@ -314,6 +370,23 @@ class PersistentContextFactory implements BrowserContextFactory {
       }
     }
     throw new Error(`Browser is already in use for ${userDataDir}, use --isolated to run multiple instances of the same browser`);
+  }
+
+  // Separate from the launch retry loop: its `catch` retries on messages a
+  // malformed storage-state file could coincidentally match (`Invalid URL`).
+  private async _applyStorageState(browserContext: playwright.BrowserContext, storageState: NonNullable<FullConfig['browser']['contextOptions']>['storageState'], userDataDir: string): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+    if (storageState) {
+      try {
+        await browserContext.setStorageState(storageState);
+      } catch (error) {
+        // Nobody holds a close() for this context yet, so a bad storage-state
+        // file must not leave the launched browser running.
+        await this._closeBrowserContext(browserContext, userDataDir);
+        throw new StorageStateError(error instanceof Error ? error.message : String(error));
+      }
+    }
+    const close = () => this._closeBrowserContext(browserContext, userDataDir);
+    return { browserContext, close };
   }
 
   private async _closeBrowserContext(browserContext: playwright.BrowserContext, userDataDir: string) {

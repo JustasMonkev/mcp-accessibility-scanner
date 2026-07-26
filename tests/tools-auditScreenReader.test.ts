@@ -478,11 +478,25 @@ describe('audit_screen_reader tool measurement', () => {
       staleDelayMs: 5,
     });
 
-    const result = await run(harness, 50);
+    // Nothing resolved means nothing was evaluated: reporting "Findings: 0"
+    // here would present an unaudited page as clean.
+    await expect(run(harness, 50)).rejects.toThrow(/None of the 100 accessibility tree elements could be resolved/);
     expect(harness.concurrency.max).toBe(50);
-    // Unresolvable refs never fill the budget, so measurement stops at the ceiling.
-    expect(result).toContain('Elements analyzed: 100');
-    expect(result).toContain('Findings: 0');
+  });
+
+  it('warns when part of the snapshot went stale instead of silently skipping it', async () => {
+    // A partial rerender: the resolved half is still audited, but the result
+    // must say the other half was never evaluated.
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 10 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      staleRefs: ref => Number(ref.slice(1)) >= 5,
+    });
+
+    const result = await run(harness, 50);
+    expect(result).toContain('Elements analyzed: 10');
+    expect(result).toContain('WARNING: 5 of these went stale before measurement');
+    // The five resolved nameless buttons are still reported.
+    expect(result).toContain('missing-accessible-name | 5');
   });
 });
 
@@ -532,6 +546,38 @@ describe('collectElementFacts in a real page', () => {
 
     // The icon-only host still has no visible label to mismatch against.
     expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
+    await page.close();
+  });
+
+  it('treats aria-hidden values case-insensitively, as ARIA enumerated tokens are', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div aria-hidden="TRUE"><button id="upper">Hidden upper</button></div>
+      <div aria-hidden="true"><button id="lower">Hidden lower</button></div>
+      <div aria-hidden="false"><button id="shown">Shown</button></div>`);
+    const handles = await Promise.all(['#upper', '#lower', '#shown'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // aria-hidden="TRUE" removes the subtree from the accessibility tree exactly
+    // like "true"; a case-sensitive selector reported its content as reachable.
+    expect(facts.map(fact => fact.ariaHidden)).toEqual([true, true, false]);
+    await page.close();
+  });
+
+  it('collects no visible text from an element that is itself hidden from sight', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <button id="ghost" style="opacity:0" aria-label="Submit">Send</button>
+      <button id="gone" style="visibility:hidden" aria-label="Submit">Send</button>
+      <button id="shown" aria-label="Submit">Send</button>`);
+    const handles = await Promise.all(['#ghost', '#gone', '#shown'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // A fully invisible control shows no label at all, so its child text must
+    // not feed a label-in-name mismatch; only #shown really displays "Send".
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, null, 'Send']);
     await page.close();
   });
 

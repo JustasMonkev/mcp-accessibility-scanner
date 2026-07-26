@@ -57,6 +57,7 @@ function createMockBrowserContext() {
     pages: vi.fn().mockReturnValue([]),
     on: vi.fn(),
     route: vi.fn().mockResolvedValue(undefined),
+    setStorageState: vi.fn().mockResolvedValue(undefined),
     tracing: {
       start: vi.fn().mockResolvedValue(undefined),
       stop: vi.fn().mockResolvedValue(undefined),
@@ -276,17 +277,49 @@ describe('browserContextFactory', () => {
         .rejects.toThrow('Browser specified in your config is not installed. Either install it (likely) or change the config.');
   });
 
-  it('rejects a storage state that the persistent profile mode would silently drop', async () => {
+  // launchPersistentContext() accepts a storageState option and silently ignores
+  // it, so the factory must strip it and apply it to the launched context itself.
+  it('applies the storage state to the persistent profile via setStorageState', async () => {
+    const browserContext = createMockBrowserContext();
+    (playwright.chromium.launchPersistentContext as any).mockResolvedValue(browserContext);
+
     const config = await resolveConfig({
       browser: {
         contextOptions: { storageState: '/tmp/auth.json' },
       },
     });
 
-    expect(() => contextFactory(config)).toThrow('Storage state needs a fresh browser context');
+    const factory = contextFactory(config);
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect((playwright.chromium.launchPersistentContext as any).mock.calls[0][1]).not.toHaveProperty('storageState');
+    expect(browserContext.setStorageState).toHaveBeenCalledWith('/tmp/auth.json');
+    expect(result.browserContext).toBe(browserContext);
   });
 
-  it('rejects a storage state when attaching over CDP without isolation', async () => {
+  it('closes the launched persistent browser when applying the storage state fails', async () => {
+    const browserContext = createMockBrowserContext();
+    browserContext.setStorageState.mockRejectedValue(new Error('ENOENT: no such file /tmp/auth.json'));
+    (playwright.chromium.launchPersistentContext as any).mockResolvedValue(browserContext);
+
+    const config = await resolveConfig({
+      browser: {
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('ENOENT');
+    expect(browserContext.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies the storage state to the reused context when attaching over CDP without isolation', async () => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
     const config = await resolveConfig({
       browser: {
         cdpEndpoint: 'http://127.0.0.1:9222',
@@ -294,18 +327,79 @@ describe('browserContextFactory', () => {
       },
     });
 
-    expect(() => contextFactory(config)).toThrow('Storage state needs a fresh browser context');
+    const factory = contextFactory(config);
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(browser.newContext).not.toHaveBeenCalled();
+    expect(browserContext.setStorageState).toHaveBeenCalledWith('/tmp/auth.json');
+    expect(result.browserContext).toBe(browserContext);
   });
 
-  it('rejects a storage state when launching over CDP without isolation', async () => {
+  it('disconnects from the CDP browser when applying the storage state fails on attach', async () => {
+    const browserContext = createMockBrowserContext();
+    browserContext.setStorageState.mockRejectedValue(new Error('ENOENT: no such file /tmp/auth.json'));
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
     const config = await resolveConfig({
       browser: {
-        cdpLaunch: { command: 'open', port: 9222 },
+        cdpEndpoint: 'http://127.0.0.1:9222',
         contextOptions: { storageState: '/tmp/auth.json' },
       },
     });
 
-    expect(() => contextFactory(config)).toThrow('Storage state needs a fresh browser context');
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('ENOENT');
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies the storage state to the reused context when launching over CDP without isolation', async () => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    spawnMock.mockReturnValue(createMockChildProcess());
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 500 },
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(browser.newContext).not.toHaveBeenCalled();
+    expect(browserContext.setStorageState).toHaveBeenCalledWith('/tmp/auth.json');
+    expect(result.browserContext).toBe(browserContext);
+  });
+
+  it('terminates the launched CDP child when obtaining a context fails', async () => {
+    // The desktop process is already running once the CDP connection is up; a
+    // context-creation failure must not leave it running with no close() holder.
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    browser.newContext.mockRejectedValue(new Error('ENOENT: no such file /tmp/auth.json'));
+    const childProcess = createMockChildProcess();
+    spawnMock.mockReturnValue(childProcess);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        isolated: true,
+        cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 500 },
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('ENOENT');
+    expect(browser.close).toHaveBeenCalledTimes(1);
+    expect(childProcess.kill).toHaveBeenCalledWith('SIGTERM');
   });
 
   it('applies the storage state to isolated CDP attach sessions', async () => {
@@ -396,6 +490,6 @@ describe('browserContextFactory', () => {
 
     expect(() => contextFactory(config)).not.toThrow();
     expect(() => assertStorageStateSupported(config, extensionFactory, 'remedy'))
-        .toThrow('Storage state needs a fresh browser context');
+        .toThrow('Storage state cannot be applied in this mode');
   });
 });

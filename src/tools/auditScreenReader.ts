@@ -438,9 +438,15 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
   return elements.map(element => {
     const rect = element.getBoundingClientRect();
     const style = window.getComputedStyle(element);
-    const text = element instanceof HTMLInputElement && buttonInputTypes.includes(element.type)
-      ? element.value.trim()
-      : sightedText(element);
+    // The visibility predicate must include the element itself, not only its
+    // descendants: a control hidden with opacity:0 shows no text at all, and
+    // treating its child text as visible raises label-in-name mismatches
+    // against a label nobody can see.
+    const text = hiddenFromSight(element)
+      ? ''
+      : element instanceof HTMLInputElement && buttonInputTypes.includes(element.type)
+        ? element.value.trim()
+        : sightedText(element);
     return {
       tagName: element.tagName.toLowerCase(),
       selector: `${element.tagName.toLowerCase()}${element.id ? `#${element.id}` : ''}${element.classList[0] ? `.${element.classList[0]}` : ''}`,
@@ -458,8 +464,10 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
       positionFixed: style.position === 'fixed',
       floating: style.float !== 'none',
       // Playwright's snapshot still lists aria-hidden elements, but a screen
-      // reader never reaches them, so nothing about them is a defect.
-      ariaHidden: element.closest('[aria-hidden="true"]') !== null,
+      // reader never reaches them, so nothing about them is a defect. ARIA
+      // enumerated tokens are ASCII case-insensitive, so aria-hidden="TRUE"
+      // hides exactly like "true" and needs the case-insensitive flag.
+      ariaHidden: element.closest('[aria-hidden="true" i]') !== null,
     };
   });
 }
@@ -548,6 +556,14 @@ const auditScreenReader = defineTabTool({
       });
     }
 
+    // A ref goes stale when the page rerenders between ariaSnapshot() and
+    // locator resolution. Such elements have no facts, every check skips them,
+    // and with nothing resolved at all the audit would otherwise report
+    // "Findings: 0" for a page it never actually evaluated.
+    const unresolvedCount = analyzedIndexes.length - resolvedCount;
+    if (analyzedIndexes.length && !resolvedCount)
+      throw new Error(`None of the ${analyzedIndexes.length} accessibility tree elements could be resolved to DOM nodes — the page re-rendered between the snapshot and measurement, so nothing was evaluated. Wait for the page to settle (or trigger the rerender first) and run audit_screen_reader again.`);
+
     const emptyFacts: ElementFacts = {
       tagName: null,
       selector: null,
@@ -622,6 +638,7 @@ const auditScreenReader = defineTabTool({
       summary: {
         elementsTotal: refIndexes.length,
         elementsAnalyzed: analyzedIndexes.length,
+        elementsUnresolved: unresolvedCount,
         elementsTruncated: truncatedElements,
         totalFindings,
         countByCheck: result.countByCheck,
@@ -637,6 +654,11 @@ const auditScreenReader = defineTabTool({
     response.addCode('// Read the accessibility tree with page.ariaSnapshot() and compared names and geometry against reading order.');
     response.addResult([
       `Elements analyzed: ${analyzedIndexes.length}${elementCountSuffix}`,
+      // Unresolved elements were skipped by every check, so a clean result
+      // covering only part of the page must say so rather than read as clean.
+      ...(unresolvedCount > 0
+        ? [`WARNING: ${unresolvedCount} of these went stale before measurement (the page re-rendered mid-audit) and were not evaluated; findings may be incomplete. Re-run once the page is stable.`]
+        : []),
       `Findings: ${totalFindings}`,
       'Check | Findings',
       '--- | ---',

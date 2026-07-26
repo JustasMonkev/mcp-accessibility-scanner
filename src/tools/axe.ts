@@ -72,15 +72,17 @@ export const axeScopeSchemaShape = {
 
 // Shared by every scan tool so rule filtering means the same thing everywhere.
 export const axeRuleSchemaShape = {
-  withRules: z.array(z.string().min(1)).optional().describe('Run only these Axe rule ids, e.g. ["color-contrast", "image-alt"]. Axe can run a rule list or a tag list but never both, so setting withRules ignores violationsTag entirely. Unknown rule ids are rejected rather than silently skipped.'),
+  withRules: z.array(z.string().min(1)).min(1).optional().describe('Run only these Axe rule ids, e.g. ["color-contrast", "image-alt"]. Axe can run a rule list or a tag list but never both, so setting withRules ignores violationsTag entirely. Unknown rule ids are rejected rather than silently skipped, and so is an empty list — omit the option to scan by tags instead.'),
   disableRules: z.array(z.string().min(1)).optional().describe('Axe rule ids to skip, e.g. ["color-contrast"]. Unlike withRules this narrows whatever is already selected, so it applies to violationsTag and withRules alike. Disabling every rule in withRules is an error, not an empty scan. Unknown rule ids are rejected rather than silently skipped.'),
 };
 
 // The rule catalogue comes from the same axe-core build that AxeBuilder injects
 // into the page (it ships `axe.source`), so ids can never drift from what the
 // scan actually supports and no extra injection is needed to check them.
-// package.json pins axe-core to the exact version @axe-core/playwright requires
-// so the two can never resolve to different builds.
+// package.json pins axe-core AND @axe-core/playwright to the same exact
+// release: a ranged wrapper could resolve to a newer version on a clean
+// install and nest its own newer axe-core, so validation would use one rule
+// catalogue while AxeBuilder injects another.
 // Axe does reject unknown ids itself, but only from inside the page after
 // injection, surfacing as an opaque `frame.evaluate` failure; checking up front
 // names the bad id and costs nothing.
@@ -100,6 +102,12 @@ function assertRuleIdsExist(ruleIds: readonly string[], label: 'withRules' | 'di
 // (Scope selectors stay per-page on purpose: a component may legitimately be
 // absent from some pages of a crawl.)
 export function assertRuleOptionsValid(options: Pick<AxeScanOptions, 'rules' | 'disableRules'>): string[] {
+  // An explicitly empty list is a contradiction, not a no-op: the caller asked
+  // to run only the listed rules and listed none. Treating it like an omitted
+  // option would silently fall back to the full tag set and scan far more than
+  // requested — the same trap the disableRules-empties-withRules guard closes.
+  if (options.rules && !options.rules.length)
+    throw new Error('withRules is an empty list, which would silently fall back to scanning the full tag set. Omit withRules to scan by tags, or name at least one rule id.');
   assertRuleIdsExist(options.rules ?? [], 'withRules');
   assertRuleIdsExist(options.disableRules ?? [], 'disableRules');
   if (!options.rules?.length)

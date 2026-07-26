@@ -260,21 +260,25 @@ async function readCrawlCookies(page: import('playwright').Page, urls: string[])
  *
  * A cookie read failure yields no loss: the context is gone, and aborting here would
  * throw away the pages already scanned along with the navigation error for this one.
+ *
+ * The identities of the missing cookies are returned so the caller can drop them
+ * from the baseline: each cookie is reported once, at the URL where it vanished,
+ * and monitoring continues afterwards — an analytics cookie expiring early in the
+ * crawl must not mask the real session cookie being dropped ten pages later.
  */
-async function findSessionLoss(
+async function findCookieLoss(
   page: import('playwright').Page,
   urls: string[],
   baseline: Map<string, { name: string, expires: number }>,
   requestedUrl: string,
   urlBeforeNavigation: string
-): Promise<{ url: string, cookies: string[] } | null> {
+): Promise<{ url: string, cookies: string[], identities: string[] } | null> {
   const current = await readCrawlCookies(page, urls).catch(() => null);
   if (!current)
     return null;
   const now = Date.now();
   const missing = [...baseline]
-      .filter(([identity, cookie]) => !current.has(identity) && !(cookie.expires > 0 && cookie.expires * 1000 <= now))
-      .map(([, cookie]) => cookie.name);
+      .filter(([identity, cookie]) => !current.has(identity) && !(cookie.expires > 0 && cookie.expires * 1000 <= now));
   if (!missing.length)
     return null;
   // The page reached after redirects is the one that dropped the cookie, and the one
@@ -283,7 +287,11 @@ async function findSessionLoss(
   // the URL asked for is the one whose response dropped the cookie.
   const reachedUrl = page.url();
   const url = !reachedUrl || reachedUrl === urlBeforeNavigation ? requestedUrl : reachedUrl;
-  return { url, cookies: [...new Set(missing)] };
+  return {
+    url,
+    cookies: [...new Set(missing.map(([, cookie]) => cookie.name))],
+    identities: missing.map(([identity]) => identity),
+  };
 }
 
 async function extractLinks(page: import('playwright').Page): Promise<string[]> {
@@ -498,8 +506,9 @@ const auditSite = defineTabTool({
     // signed in with. If one disappears mid-crawl every later page is audited as a
     // signed-out user, which still looks like a clean run, so record where it happened.
     const cookieScopeUrls = queue.map(item => item.url);
+    const cookieScope = new Set(cookieScopeUrls);
     const baselineCookies = await readCrawlCookies(crawlTab.page, cookieScopeUrls);
-    let sessionLoss: { url: string, cookies: string[] } | null = null;
+    const sessionLosses: { url: string, cookies: string[] }[] = [];
     let processedPages = 0;
     try {
       while (queue.length && pages.length < params.maxPages) {
@@ -523,6 +532,21 @@ const auditSite = defineTabTool({
           incomplete: [],
         };
         pages.push(pageReport);
+
+        // URLs discovered mid-crawl join cookie tracking before they are visited:
+        // a session cookie scoped below the start URL (say /app, discovered from /)
+        // is invisible to the start-URL baseline, so deleting it later would
+        // otherwise never raise a warning. Read before navigating — the visit
+        // itself may be what drops the cookie.
+        if (!cookieScope.has(item.url)) {
+          cookieScope.add(item.url);
+          cookieScopeUrls.push(item.url);
+          const discovered = await readCrawlCookies(crawlTab.page, [item.url]).catch(() => null);
+          for (const [identity, cookie] of discovered ?? []) {
+            if (!baselineCookies.has(identity))
+              baselineCookies.set(identity, cookie);
+          }
+        }
 
         const urlBeforeNavigation = crawlTab.page.url();
         try {
@@ -572,8 +596,17 @@ const auditSite = defineTabTool({
           // Checked after failed navigations too: a logout URL that clears the cookie
           // and then times out still ended the session, and skipping it pins the
           // warning on the next page that happens to load — an innocent route.
-          if (baselineCookies.size && !sessionLoss)
-            sessionLoss = await findSessionLoss(crawlTab.page, cookieScopeUrls, baselineCookies, item.url, urlBeforeNavigation);
+          // Monitoring never stops at the first loss: reported cookies leave the
+          // baseline, so each later disappearance is still caught and attributed
+          // to its own URL instead of being masked by an earlier, unrelated one.
+          if (baselineCookies.size) {
+            const loss = await findCookieLoss(crawlTab.page, cookieScopeUrls, baselineCookies, item.url, urlBeforeNavigation);
+            if (loss) {
+              sessionLosses.push({ url: loss.url, cookies: loss.cookies });
+              for (const identity of loss.identities)
+                baselineCookies.delete(identity);
+            }
+          }
           processedPages++;
           const message = pageReport.status === 'scanned'
             ? `Scanned page ${processedPages}/${params.maxPages}: ${item.url}`
@@ -636,7 +669,7 @@ const auditSite = defineTabTool({
       },
       pages,
       summary,
-      sessionLoss,
+      sessionLosses,
     };
 
     const reportFileName = sanitizeForFilePath(params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`);
@@ -663,7 +696,7 @@ const auditSite = defineTabTool({
         durationMs: report.metadata.durationMs,
       },
       totals: summary.totals,
-      sessionLoss,
+      sessionLosses,
       topViolations: summaryViolations.slice(0, 5).map(violation => ({
         id: violation.id,
         impact: violation.impact ?? null,
@@ -691,9 +724,9 @@ const auditSite = defineTabTool({
     const topViolations = summarizeTopViolations(summaryViolations, 10);
     const topIncomplete = summarizeTopViolations(summaryIncomplete, 10);
     const topPages = summarizeTopPages(scannedPagesByViolations, 20);
-    const sessionWarning = sessionLoss ? [
-      `WARNING: session cookie(s) ${sessionLoss.cookies.join(', ')} disappeared while loading ${sessionLoss.url}.`,
-      'Pages scanned from that point on were audited as a signed-out user. Add that URL to excludePathPatterns, sign in again, and re-run.',
+    const sessionWarning = sessionLosses.length ? [
+      ...sessionLosses.map(loss => `WARNING: cookie(s) ${loss.cookies.join(', ')} present when the crawl started disappeared while loading ${loss.url}.`),
+      'If one of these was a session cookie, pages scanned after the URL that dropped it were audited as a signed-out user. Add that URL to excludePathPatterns, sign in again, and re-run.',
       '',
     ] : [];
     response.addCode('// Crawled pages in a temporary tab and aggregated Axe violations.');

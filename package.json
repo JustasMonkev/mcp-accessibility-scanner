@@ -42,7 +42,7 @@
 		"test:coverage": "vitest run --coverage"
 	},
 	"dependencies": {
-		"@axe-core/playwright": "^4.12.1",
+		"@axe-core/playwright": "4.12.1",
 		"@cfworker/json-schema": "^4.1.1",
 		"@modelcontextprotocol/sdk": "^1.29.0",
 		"axe-core": "4.12.1",
