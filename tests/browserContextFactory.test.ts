@@ -54,7 +54,10 @@ import { resolveConfig } from '../src/config.js';
 
 function createMockBrowserContext() {
   return {
+    addCookies: vi.fn().mockResolvedValue(undefined),
+    clearCookies: vi.fn().mockResolvedValue(undefined),
     close: vi.fn().mockResolvedValue(undefined),
+    cookies: vi.fn().mockResolvedValue([]),
     pages: vi.fn().mockReturnValue([]),
     on: vi.fn(),
     route: vi.fn().mockResolvedValue(undefined),
@@ -280,7 +283,7 @@ describe('browserContextFactory', () => {
 
   // launchPersistentContext() accepts a storageState option and silently ignores
   // it, so the factory must strip it and apply it to the launched context itself.
-  it('applies the storage state to a wiped, dedicated persistent profile', async () => {
+  it('applies the storage state to a fresh, per-context disposable profile', async () => {
     const browserContext = createMockBrowserContext();
     (playwright.chromium.launchPersistentContext as any).mockResolvedValue(browserContext);
     const rmSpy = vi.spyOn(fs.promises, 'rm');
@@ -299,10 +302,22 @@ describe('browserContextFactory', () => {
     expect(result.browserContext).toBe(browserContext);
     // setStorageState resets origin storage only for origins in the state, so a
     // previously used profile could leak a stale signed-in identity into the
-    // audit; the state must land in its own profile, wiped before launch.
+    // audit; the state must land in its own fresh profile.
     const userDataDir = (playwright.chromium.launchPersistentContext as any).mock.calls[0][0] as string;
-    expect(userDataDir).toMatch(/-storage-state$/);
+    expect(userDataDir).toMatch(/-storage-state-[0-9a-f]+$/);
+
+    // One server can hold several live sessions: a second context must get its
+    // own profile, or its setup would destroy the first one's running browser.
+    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const secondDir = (playwright.chromium.launchPersistentContext as any).mock.calls[1][0] as string;
+    expect(secondDir).not.toBe(userDataDir);
+
+    // The disposable profile is removed with its context; the state file is the
+    // durable copy.
+    await result.close();
     expect(rmSpy).toHaveBeenCalledWith(userDataDir, { recursive: true, force: true });
+    await second.close();
+    expect(rmSpy).toHaveBeenCalledWith(secondDir, { recursive: true, force: true });
   });
 
   it('rejects the contradictory --user-data-dir plus --storage-state combination', async () => {
@@ -401,6 +416,34 @@ describe('browserContextFactory', () => {
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
         .rejects.toThrow(/only cookies, or drop the storage state and sign in inside the app/);
     expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('rolls the attached cookie jar back when applying the storage state fails midway', async () => {
+    // setStorageState replaces the cookies before the origin-restore step that
+    // fails on Electron; without a rollback the running app keeps the recorded
+    // cookies even though the operation reported failure.
+    const originalCookies = [{ name: 'app_session', value: 'original', domain: 'app.example', path: '/', expires: -1, httpOnly: true, secure: false, sameSite: 'Lax' }];
+    const browserContext = createMockBrowserContext();
+    browserContext.cookies.mockResolvedValue(originalCookies);
+    browserContext.setStorageState.mockRejectedValue(new Error('Error setting storage state:\nTarget.createTarget: Not supported'));
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow(/original cookies were restored/);
+    // Snapshot was taken before the apply, and put back afterwards.
+    expect(browserContext.cookies.mock.invocationCallOrder[0]).toBeLessThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
+    expect(browserContext.clearCookies).toHaveBeenCalledTimes(1);
+    expect(browserContext.addCookies).toHaveBeenCalledWith(originalCookies);
   });
 
   it('applies the storage state to the reused context when launching over CDP without isolation', async () => {

@@ -25,7 +25,7 @@ import coreBundle from 'playwright-core/lib/coreBundle';
 const { registryDirectory } = coreBundle.registry;
 const { startTraceViewerServer } = coreBundle.server;
 import { logUnhandledError, testDebug } from './utils/log.js';
-import { createHash } from './utils/guid.js';
+import { createGuid, createHash } from './utils/guid.js';
 import { outputFile  } from './config.js';
 
 import type { FullConfig } from './config.js';
@@ -68,17 +68,31 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   const storageState = config.browser.contextOptions?.storageState;
   if (!storageState)
     return;
+  // setStorageState replaces the cookie jar before it restores origin storage,
+  // so a failure between the two steps would otherwise leave the attached
+  // browser holding the recorded cookies while the operation reports failure.
+  // The jar is snapshotted first and put back on any failure — cookie calls
+  // are pure protocol operations, so the rollback works even on targets where
+  // page creation does not.
+  const originalCookies = await browserContext.cookies();
   try {
     await browserContext.setStorageState(storageState);
   } catch (error) {
+    const restored = await browserContext.clearCookies()
+        .then(() => originalCookies.length ? browserContext.addCookies(originalCookies) : undefined)
+        .then(() => true, () => false);
     // Restoring origin storage (localStorage/IndexedDB) makes Playwright open a
     // temporary page; a CDP target that cannot create one — Electron has no
-    // Target.createTarget — fails here even though the cookies were applied.
-    // Cookie-only states need no page and still work on such targets, so name
-    // that remedy instead of surfacing the raw protocol error.
+    // Target.createTarget — fails here. Cookie-only states need no page and
+    // still work on such targets, so name that remedy instead of surfacing the
+    // raw protocol error.
     const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('Target.createTarget'))
-      throw new Error(`The attached browser cannot open the temporary page Playwright needs to restore localStorage/IndexedDB from the storage state (Electron targets do not support Target.createTarget). Use a storage state that contains only cookies, or drop the storage state and sign in inside the app. Original error: ${message}`);
+    if (message.includes('Target.createTarget')) {
+      const rollbackNote = restored
+        ? 'The context\'s original cookies were restored.'
+        : 'Restoring the context\'s original cookies also failed; its cookie jar may now hold the recorded state.';
+      throw new Error(`The attached browser cannot open the temporary page Playwright needs to restore localStorage/IndexedDB from the storage state (Electron targets do not support Target.createTarget). Use a storage state that contains only cookies, or drop the storage state and sign in inside the app. ${rollbackNote} Original error: ${message}`);
+    }
     throw error;
   }
 }
@@ -356,17 +370,16 @@ class PersistentContextFactory implements BrowserContextFactory {
     // origins in the state or known to the fresh context object, so stale
     // localStorage/IndexedDB in a previously used profile would survive and
     // could sign the audit in as the wrong identity. A storage-state session
-    // therefore runs in its own disposable profile, wiped before every launch,
-    // where the state is provably the only session data. A user-supplied
-    // profile cannot be wiped — it is data we do not own — and keeping it
-    // contradicts "start from the recorded state", so that combination errors.
+    // therefore runs in its own fresh disposable profile — unique per context,
+    // because one server can hold several live sessions and a shared
+    // deterministic directory would let one session's setup destroy another's
+    // running profile — removed again when the context closes. A user-supplied
+    // profile cannot be treated this way — it is data we do not own — and
+    // keeping it contradicts "start from the recorded state", so that
+    // combination errors.
     if (storageState && this.config.browser.userDataDir)
       throw new Error('--storage-state and --user-data-dir contradict each other: the profile carries its own session data, and resetting a user-supplied profile to match the recorded state would destroy it. Drop --user-data-dir (a managed, disposable profile is used for storage-state sessions), or drop the storage state and sign in in that profile instead.');
-    const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(clientInfo.rootPath, storageState ? '-storage-state' : '');
-    if (storageState) {
-      await fs.promises.rm(userDataDir, { recursive: true, force: true });
-      await fs.promises.mkdir(userDataDir, { recursive: true });
-    }
+    const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(clientInfo.rootPath, storageState ? `-storage-state-${createGuid()}` : '');
     const tracesDir = await startTraceServer(this.config, clientInfo.rootPath);
 
     this._userDataDirs.add(userDataDir);
@@ -408,24 +421,30 @@ class PersistentContextFactory implements BrowserContextFactory {
       } catch (error) {
         // Nobody holds a close() for this context yet, so a bad storage-state
         // file must not leave the launched browser running.
-        await this._closeBrowserContext(browserContext, userDataDir);
+        await this._closeBrowserContext(browserContext, userDataDir, true);
         throw new StorageStateError(error instanceof Error ? error.message : String(error));
       }
     }
-    const close = () => this._closeBrowserContext(browserContext, userDataDir);
+    const close = () => this._closeBrowserContext(browserContext, userDataDir, !!storageState);
     return { browserContext, close };
   }
 
-  private async _closeBrowserContext(browserContext: playwright.BrowserContext, userDataDir: string) {
+  private async _closeBrowserContext(browserContext: playwright.BrowserContext, userDataDir: string, disposeUserDataDir = false) {
     testDebug('close browser context (persistent)');
     testDebug('release user data dir', userDataDir);
     await browserContext.close().catch(() => {});
+    // A storage-state profile is unique to this context and holds nothing worth
+    // keeping — the state file is the durable copy — so it is removed rather
+    // than left to pile up next to the regular persistent profile.
+    if (disposeUserDataDir)
+      await fs.promises.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
     this._userDataDirs.delete(userDataDir);
     testDebug('close browser context complete (persistent)');
   }
 
   // The suffix keeps disposable storage-state profiles apart from the regular
-  // persistent profile, so wiping one never destroys an interactive session.
+  // persistent profile (and, carrying a per-context guid, from each other), so
+  // removing one can never destroy an interactive session or a sibling's.
   private async _createUserDataDir(rootPath: string | undefined, suffix: string) {
     const dir = process.env.PWMCP_PROFILES_DIR_FOR_TEST ?? registryDirectory;
     const browserToken = this.config.browser.launchOptions?.channel ?? this.config.browser?.browserName;
