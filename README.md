@@ -255,7 +255,7 @@ This works out of the box in every mode, including the default persistent-profil
 Record a session once with Playwright's codegen, then hand the file to the server:
 
 ```bash
-npx playwright codegen --save-storage=auth.json https://example.com/login
+npx playwright@1.61.1 codegen --save-storage=auth.json https://example.com/login
 ```
 
 Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.

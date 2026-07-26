@@ -273,6 +273,21 @@ describe('axe helpers', () => {
     expect(fs.existsSync(fileURLToPath(new URL('../node_modules/@axe-core/playwright/node_modules/axe-core', import.meta.url)))).toBe(false);
   });
 
+  it('documents the codegen command with the pinned Playwright version', async () => {
+    // The recorded storage state should come from the same Playwright the
+    // server replays it with, and an unpinned npx command resolves whatever is
+    // newest. Fails when the dependency pin moves without the docs.
+    const ownPackage = await import('../package.json', { with: { type: 'json' } });
+    const playwrightPin = ownPackage.default.dependencies.playwright;
+    for (const file of ['../README.md', '../SKILL.md']) {
+      const text = fs.readFileSync(fileURLToPath(new URL(file, import.meta.url)), 'utf-8');
+      const codegenCommands = text.match(/npx playwright\S* codegen/g) ?? [];
+      expect(codegenCommands.length).toBeGreaterThan(0);
+      for (const command of codegenCommands)
+        expect(command).toBe(`npx playwright@${playwrightPin} codegen`);
+    }
+  });
+
   it('applies include and exclude selectors to the builder', async () => {
     resetBuilderCalls();
     await runAxeScan(pageWithSelectorCounts({ '#checkout': 1, '#summary': 2, '#cookie-banner': 1 }), {
