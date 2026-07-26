@@ -709,6 +709,55 @@ describe('browserContextFactory', () => {
     expect(result.browserContext).toBe(browserContext);
   });
 
+  it('creates a fresh context when the attached CDP browser exposes none', async () => {
+    // An attached target can expose zero contexts; dereferencing contexts()[0]
+    // unguarded would hand an undefined context to the caller (or TypeError
+    // inside the storage-state apply). The VS Code path already falls back to
+    // newContext(); the CDP paths do the same.
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    browser.contexts.mockReturnValue([]);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    // The fresh context receives the configured options — storage state
+    // included — directly; the reuse-path apply has nothing to run on.
+    expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({ storageState: '/tmp/auth.json' }));
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+    expect(result.browserContext).toBe(browserContext);
+  });
+
+  it('creates a fresh context when the launched CDP app exposes none', async () => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    browser.contexts.mockReturnValue([]);
+    spawnMock.mockReturnValue(createMockChildProcess());
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 500 },
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({ storageState: '/tmp/auth.json' }));
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+    expect(result.browserContext).toBe(browserContext);
+  });
+
   it('terminates the launched CDP child when obtaining a context fails', async () => {
     // The desktop process is already running once the CDP connection is up; a
     // context-creation failure must not leave it running with no close() holder.

@@ -335,9 +335,14 @@ class CdpContextFactory extends BaseContextFactory {
   protected override async _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext> {
     if (this.config.browser.isolated)
       return await browser.newContext(this.config.browser.contextOptions);
-    const browserContext = browser.contexts()[0];
-    await applyStorageStateToReusedContext(this.config, browserContext);
-    return browserContext;
+    const existing = browser.contexts()[0];
+    // An attached browser can expose no context at all; a fresh one created
+    // with the configured options (storage state included) beats handing an
+    // undefined context to the caller.
+    if (!existing)
+      return await browser.newContext(this.config.browser.contextOptions);
+    await applyStorageStateToReusedContext(this.config, existing);
+    return existing;
   }
 }
 
@@ -394,8 +399,15 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
       if (this.config.browser.isolated) {
         browserContext = await browser.newContext(this.config.browser.contextOptions);
       } else {
-        browserContext = browser.contexts()[0];
-        await applyStorageStateToReusedContext(this.config, browserContext);
+        const existing = browser.contexts()[0];
+        if (existing) {
+          await applyStorageStateToReusedContext(this.config, existing);
+          browserContext = existing;
+        } else {
+          // See CdpContextFactory: a launched app can expose no context yet;
+          // a fresh one with the configured options beats an undefined one.
+          browserContext = await browser.newContext(this.config.browser.contextOptions);
+        }
       }
     } catch (error) {
       // The desktop process is already running by now; failing to obtain a

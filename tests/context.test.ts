@@ -125,6 +125,31 @@ describe('Context', () => {
       await expect(context.newTab()).rejects.toThrow('traces dir is not writable');
       expect(close).toHaveBeenCalledTimes(1);
     });
+
+    it('closes the factory-owned context even when stopping tracing fails on shutdown', async () => {
+      // This close attempt is the only one — _browserContextPromise is cleared
+      // before the trace stop — so a failing tracing.stop() must not skip the
+      // factory's close(), or a storage-state session's disposable profile
+      // leaks with every failed shutdown.
+      const close = vi.fn().mockResolvedValue(undefined);
+      mockBrowserContext.tracing.stop.mockRejectedValue(new Error('browser disconnected'));
+      (mockBrowserContextFactory.createContext as any).mockResolvedValue({
+        browserContext: mockBrowserContext,
+        close,
+      });
+      const context = new Context({
+        tools: [],
+        config: { saveTrace: true } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: { rootPath: '/tmp' } as any,
+      });
+
+      await context.newTab();
+      await context.closeBrowserContext();
+
+      expect(close).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('isRunningTool', () => {

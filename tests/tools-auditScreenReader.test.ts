@@ -570,14 +570,16 @@ describe('collectElementFacts in a real page', () => {
     await page.setContent(`
       <button id="ghost" style="opacity:0" aria-label="Submit">Send</button>
       <button id="gone" style="visibility:hidden" aria-label="Submit">Send</button>
+      <button id="folded" style="visibility:collapse" aria-label="Submit">Send</button>
       <button id="shown" aria-label="Submit">Send</button>`);
-    const handles = await Promise.all(['#ghost', '#gone', '#shown'].map(selector => page.$(selector)));
+    const handles = await Promise.all(['#ghost', '#gone', '#folded', '#shown'].map(selector => page.$(selector)));
 
     const facts = await page.evaluate(collectElementFacts, handles as any);
 
     // A fully invisible control shows no label at all, so its child text must
     // not feed a label-in-name mismatch; only #shown really displays "Send".
-    expect(facts.map(fact => fact.visibleText)).toEqual([null, null, 'Send']);
+    // visibility:collapse renders like hidden outside table rows/columns.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, null, null, 'Send']);
     await page.close();
   });
 
@@ -718,6 +720,26 @@ describe('collectElementFacts in a real page', () => {
     // parent chain. parentElement skips straight to the host, so a walk using
     // it misses the opacity:0 wrapper and reports text nobody can see.
     expect(facts.map(fact => fact.visibleText)).toEqual([null, 'Send']);
+    await page.close();
+  });
+
+  it('treats zero-scale transforms as hidden, but not other transforms', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <button id="scale0" style="transform: scale(0)" aria-label="Submit">Send</button>
+      <button id="scalex0" style="transform: scaleX(0)" aria-label="Submit">Send</button>
+      <button id="rotated" style="transform: rotate(45deg)" aria-label="Submit">Send</button>
+      <div style="transform: scale(0)"><button id="in-scale0" aria-label="Submit">Send</button></div>`);
+    const handles = await Promise.all(['#scale0', '#scalex0', '#rotated', '#in-scale0'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // A singular transform collapses the painted area — overflow included, so
+    // the collapsed-box exception for visible overflow must not apply. A
+    // rotation keeps the full area painted and its label really shows. The
+    // wrapper case needs the ancestor walk: the child's own rect collapses but
+    // its computed transform is none.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, null, 'Send', null]);
     await page.close();
   });
 

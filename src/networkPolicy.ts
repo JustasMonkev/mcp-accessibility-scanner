@@ -33,23 +33,33 @@ type RouteHandler = (route: playwright.Route) => void;
  */
 export async function installNetworkPolicyRoutes(config: FullConfig, context: playwright.BrowserContext): Promise<(() => Promise<void>) | null> {
   const installed: { pattern: string, handler: RouteHandler }[] = [];
+  const uninstall = async () => {
+    for (const { pattern, handler } of installed)
+      await context.unroute(pattern, handler).catch(() => {});
+  };
   const register = async (pattern: string, handler: RouteHandler) => {
     await context.route(pattern, handler);
     installed.push({ pattern, handler });
   };
-  if (config.network?.allowedOrigins?.length) {
-    await register('**', route => route.abort('blockedbyclient'));
-    for (const origin of config.network.allowedOrigins)
-      await register(`*://${origin}/**`, route => route.continue());
-  }
-  if (config.network?.blockedOrigins?.length) {
-    for (const origin of config.network.blockedOrigins)
-      await register(`*://${origin}/**`, route => route.abort('blockedbyclient'));
+  try {
+    if (config.network?.allowedOrigins?.length) {
+      await register('**', route => route.abort('blockedbyclient'));
+      for (const origin of config.network.allowedOrigins)
+        await register(`*://${origin}/**`, route => route.continue());
+    }
+    if (config.network?.blockedOrigins?.length) {
+      for (const origin of config.network.blockedOrigins)
+        await register(`*://${origin}/**`, route => route.abort('blockedbyclient'));
+    }
+  } catch (error) {
+    // A partial policy is worse than none: with the allowlist's abort-all
+    // route in but its continue routes missing, everything is blocked — and
+    // on a reused context the fragment would linger for whoever uses the
+    // context next. Unwind what was registered before surfacing the failure.
+    await uninstall();
+    throw error;
   }
   if (!installed.length)
     return null;
-  return async () => {
-    for (const { pattern, handler } of installed)
-      await context.unroute(pattern, handler).catch(() => {});
-  };
+  return uninstall;
 }

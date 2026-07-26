@@ -427,16 +427,39 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     const left = toPx(args[3] ?? args[1] ?? args[0], rect.width);
     return rect.height - top - bottom <= 0 || rect.width - left - right <= 0;
   };
+  // A transform whose linear part is singular (scale(0), scaleX(0), …)
+  // collapses the painted area to a line or point — overflow included — so
+  // unlike an ordinary collapsed box it hides the subtree even with
+  // overflow: visible. Computed transforms serialize as matrix()/matrix3d();
+  // a NaN determinant (unparseable value) fails the comparison and errs on
+  // the visible side.
+  const transformCollapses = (transform: string): boolean => {
+    const matrix = /^matrix\(([^)]*)\)/.exec(transform);
+    if (matrix) {
+      const v = matrix[1].split(',').map(parseFloat);
+      return v[0] * v[3] - v[1] * v[2] === 0;
+    }
+    const matrix3d = /^matrix3d\(([^)]*)\)/.exec(transform);
+    if (matrix3d) {
+      // The determinant of the x/y linear part: scaleZ(0) alone leaves flat
+      // content rendered, so only the projected plane matters here.
+      const v = matrix3d[1].split(',').map(parseFloat);
+      return v[0] * v[5] - v[1] * v[4] === 0;
+    }
+    return false;
+  };
   const subtreeHidden = (element: Element) => {
     const style = window.getComputedStyle(element);
     if (style.display === 'none' || style.opacity === '0')
       return true;
     // display:contents generates no box of its own, but its text and children
     // render as if lifted into the parent — a 0x0 rect there hides nothing,
-    // and with no box there is nothing for either clip property to clip, so
-    // it is settled before the clip checks.
+    // and with no box there is nothing for either clip property to clip nor a
+    // transform to apply to, so it is settled before those checks.
     if (style.display === 'contents')
       return false;
+    if (transformCollapses(style.transform))
+      return true;
     // The legacy clip property only applies to absolutely positioned boxes; on
     // a static element it is inert and the content renders normally.
     if ((style.position === 'absolute' || style.position === 'fixed') && style.clip === 'rect(0px, 0px, 0px, 0px)')
@@ -449,7 +472,12 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     // content renders outside the box.
     return (rect.width <= 1 || rect.height <= 1) && style.overflow !== 'visible';
   };
-  const visibilityHidden = (element: Element) => window.getComputedStyle(element).visibility === 'hidden';
+  // visibility: collapse renders exactly like hidden outside table
+  // rows/columns (and hides the row either way), so both values count.
+  const visibilityHidden = (element: Element) => {
+    const visibility = window.getComputedStyle(element).visibility;
+    return visibility === 'hidden' || visibility === 'collapse';
+  };
   const parentInComposedTree = (element: Element): Element | null => {
     // A slotted element renders where its assigned <slot> sits, so its
     // flat-tree parent is the slot; parentElement is the light-DOM host and

@@ -180,9 +180,16 @@ export class Context {
     this._browserContextPromise = undefined;
 
     await promise.then(async ({ browserContext, close }) => {
-      if (this.config.saveTrace)
-        await browserContext.tracing.stop();
-      await close();
+      // close() is the factory's only cleanup hook — for storage-state
+      // sessions it also removes the disposable profile — and this close
+      // attempt is the only one (_browserContextPromise is already cleared),
+      // so a failing trace stop must not skip it.
+      try {
+        if (this.config.saveTrace)
+          await browserContext.tracing.stop();
+      } finally {
+        await close();
+      }
     });
   }
 
