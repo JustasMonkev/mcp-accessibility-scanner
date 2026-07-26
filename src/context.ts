@@ -211,20 +211,29 @@ export class Context {
       throw new Error('Another browser context is being closed.');
     // TODO: move to the browser context factory to make it based on isolation mode.
     const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningToolName);
-    const { browserContext } = result;
-    await this._setupRequestInterception(browserContext);
-    if (this.sessionLog)
-      await InputRecorder.create(this, browserContext);
-    for (const page of browserContext.pages())
-      this._onPageCreated(page);
-    browserContext.on('page', page => this._onPageCreated(page));
-    if (this.config.saveTrace) {
-      await browserContext.tracing.start({
-        name: 'trace',
-        screenshots: false,
-        snapshots: true,
-        sources: false,
-      });
+    // The factory handed ownership over with close(); a setup failure past
+    // this point would otherwise discard that callback with the browser still
+    // running — and, for storage-state sessions, the disposable profile
+    // pinned forever.
+    try {
+      const { browserContext } = result;
+      await this._setupRequestInterception(browserContext);
+      if (this.sessionLog)
+        await InputRecorder.create(this, browserContext);
+      for (const page of browserContext.pages())
+        this._onPageCreated(page);
+      browserContext.on('page', page => this._onPageCreated(page));
+      if (this.config.saveTrace) {
+        await browserContext.tracing.start({
+          name: 'trace',
+          screenshots: false,
+          snapshots: true,
+          sources: false,
+        });
+      }
+    } catch (error) {
+      await result.close().catch(() => {});
+      throw error;
     }
     return result;
   }

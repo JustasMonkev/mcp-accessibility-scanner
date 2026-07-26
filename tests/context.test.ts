@@ -102,6 +102,31 @@ describe('Context', () => {
     });
   });
 
+  describe('browser context setup failure', () => {
+    it('closes the factory-owned context when setup after createContext fails', async () => {
+      // The factory hands ownership over with close(); a tracing (or any
+      // post-factory) setup failure must not discard that callback with the
+      // browser still running — for storage-state sessions that would pin the
+      // disposable profile forever.
+      const close = vi.fn().mockResolvedValue(undefined);
+      mockBrowserContext.tracing.start.mockRejectedValue(new Error('traces dir is not writable'));
+      (mockBrowserContextFactory.createContext as any).mockResolvedValue({
+        browserContext: mockBrowserContext,
+        close,
+      });
+      const context = new Context({
+        tools: [],
+        config: { saveTrace: true } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: { rootPath: '/tmp' } as any,
+      });
+
+      await expect(context.newTab()).rejects.toThrow('traces dir is not writable');
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('isRunningTool', () => {
     it('should return false initially', () => {
       const context = new Context({

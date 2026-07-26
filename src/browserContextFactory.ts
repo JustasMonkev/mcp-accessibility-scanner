@@ -123,7 +123,22 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   // forward apply fails before touching any origin, so the cookie snapshot
   // alone is a complete rollback there.
   const originalCookies = await browserContext.cookies();
-  const originalState = await browserContext.storageState({ indexedDB: true }).catch(() => null);
+  // The snapshot doubles as a probe for origins this connection has already
+  // visited while its pages have since closed or gone blank: for those,
+  // storageState() opens the same temporary page the forward apply will need
+  // — the newPage probe above cannot see them — but unlike setStorageState()
+  // it mutates nothing, so a target that cannot create pages (Electron) is
+  // rejected here with everything intact, not after the forward apply has
+  // cleared the HTTP cache. Any other snapshot failure degrades the rollback
+  // to cookies-only, as before.
+  let originalState: Awaited<ReturnType<typeof browserContext.storageState>> | null = null;
+  try {
+    originalState = await browserContext.storageState({ indexedDB: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('Target.createTarget'))
+      throw new Error(`The attached browser cannot open the temporary page Playwright needs to reset origin storage for origins this connection has already visited (Electron targets do not support Target.createTarget). Nothing was changed. Drop the storage state and sign in inside the app instead. Original error: ${message}`);
+  }
   try {
     await browserContext.setStorageState(storageState);
     // Pages that were already open still render the previous identity's DOM
@@ -135,16 +150,18 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     // configured origin allowlist/blocklist — and the recorded credentials are
     // already in place by now. Mirror the policy for the duration of the
     // reloads so the first navigation cannot reach an origin the policy
-    // blocks; the temporary routes come off again afterwards and Context
-    // installs its own from the same rules once the factory returns. Installed
-    // after setStorageState() so an abort-all route cannot interfere with the
-    // temporary page Playwright drives to restore origin storage.
-    const policyInstalled = await installNetworkPolicyRoutes(config, browserContext);
+    // blocks; the temporary handlers come off again afterwards (only they —
+    // a sibling session sharing this reused context may have its own policy
+    // routes installed) and Context installs its own from the same rules once
+    // the factory returns. Installed after setStorageState() so an abort-all
+    // route cannot interfere with the temporary page Playwright drives to
+    // restore origin storage.
+    const uninstallPolicy = await installNetworkPolicyRoutes(config, browserContext);
     try {
       await Promise.all(browserContext.pages().map(page => page.reload().catch(() => {})));
     } finally {
-      if (policyInstalled)
-        await browserContext.unrouteAll().catch(() => {});
+      if (uninstallPolicy)
+        await uninstallPolicy();
     }
   } catch (error) {
     // Prefer the full-state rollback; fall back to cookies-only when the full
@@ -167,7 +184,7 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
         : restoredCookies
           ? 'The context\'s original cookies were restored.'
           : 'Restoring the context\'s original cookies also failed; its cookie jar may now hold the recorded state.';
-      throw new Error(`The attached browser cannot open the temporary page Playwright needs to reset origin storage (Electron targets do not support Target.createTarget). Drop the storage state and sign in inside the app instead — a cookies-only state helps only while the attached target has no pages open, because clearing storage for an already-visited origin needs the same temporary page. ${rollbackNote} Original error: ${message}`);
+      throw new Error(`The attached browser cannot open the temporary page Playwright needs to reset origin storage (Electron targets do not support Target.createTarget). Drop the storage state and sign in inside the app instead — a cookies-only state helps only while the attached target has no pages open and the connection has visited no origin, because clearing storage for an already-visited origin needs the same temporary page. ${rollbackNote} Original error: ${message}`);
     }
     if (!restoredFully && restoredCookies)
       throw new Error(`${message} The context's original cookies were restored, but origin storage may retain partially applied state.`);

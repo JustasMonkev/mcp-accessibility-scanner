@@ -17,26 +17,39 @@
 import type * as playwright from 'playwright';
 import type { FullConfig } from './config.js';
 
+type RouteHandler = (route: playwright.Route) => void;
+
 /**
  * Installs the configured origin allowlist/blocklist as routes on the context.
  * The single source of the policy's route shape: Context installs it after the
  * factory returns, and the storage-state reuse path mirrors it for the page
  * reloads it performs before that — two hand-maintained copies would drift.
- * Returns whether any route was installed, so a caller that installs the
- * policy temporarily knows whether there is anything to remove.
+ * Returns an uninstaller that removes exactly the handlers this call added
+ * (or null when the config carries no policy). Sessions can share a reused
+ * context — and with it, another session's identical long-lived policy routes
+ * — so a temporary installation must never remove more than its own handlers:
+ * unrouteAll() would strip the sibling's protection along with the temporary
+ * routes.
  */
-export async function installNetworkPolicyRoutes(config: FullConfig, context: playwright.BrowserContext): Promise<boolean> {
-  let installed = false;
+export async function installNetworkPolicyRoutes(config: FullConfig, context: playwright.BrowserContext): Promise<(() => Promise<void>) | null> {
+  const installed: { pattern: string, handler: RouteHandler }[] = [];
+  const register = async (pattern: string, handler: RouteHandler) => {
+    await context.route(pattern, handler);
+    installed.push({ pattern, handler });
+  };
   if (config.network?.allowedOrigins?.length) {
-    await context.route('**', route => route.abort('blockedbyclient'));
+    await register('**', route => route.abort('blockedbyclient'));
     for (const origin of config.network.allowedOrigins)
-      await context.route(`*://${origin}/**`, route => route.continue());
-    installed = true;
+      await register(`*://${origin}/**`, route => route.continue());
   }
   if (config.network?.blockedOrigins?.length) {
     for (const origin of config.network.blockedOrigins)
-      await context.route(`*://${origin}/**`, route => route.abort('blockedbyclient'));
-    installed = true;
+      await register(`*://${origin}/**`, route => route.abort('blockedbyclient'));
   }
-  return installed;
+  if (!installed.length)
+    return null;
+  return async () => {
+    for (const { pattern, handler } of installed)
+      await context.unroute(pattern, handler).catch(() => {});
+  };
 }

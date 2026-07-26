@@ -63,6 +63,7 @@ function createMockBrowserContext() {
     pages: vi.fn().mockReturnValue([]),
     on: vi.fn(),
     route: vi.fn().mockResolvedValue(undefined),
+    unroute: vi.fn().mockResolvedValue(undefined),
     unrouteAll: vi.fn().mockResolvedValue(undefined),
     setStorageState: vi.fn().mockResolvedValue(undefined),
     storageState: vi.fn().mockResolvedValue({ cookies: [], origins: [] }),
@@ -541,7 +542,16 @@ describe('browserContextFactory', () => {
     expect(browserContext.route).toHaveBeenCalledWith('*://tracker.example/**', expect.any(Function));
     expect(browserContext.route.mock.invocationCallOrder[0]).toBeGreaterThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
     expect(browserContext.route.mock.invocationCallOrder[0]).toBeLessThan(pages[0].reload.mock.invocationCallOrder[0]);
-    expect(browserContext.unrouteAll.mock.invocationCallOrder[0]).toBeGreaterThan(pages[0].reload.mock.invocationCallOrder[0]);
+    // Only the handlers this apply installed are removed — by identity, so a
+    // sibling session's own policy routes on the shared context survive.
+    // unrouteAll() would strip those too.
+    expect(browserContext.unrouteAll).not.toHaveBeenCalled();
+    expect(browserContext.unroute.mock.calls).toEqual(browserContext.route.mock.calls);
+    expect(browserContext.unroute.mock.invocationCallOrder[0]).toBeGreaterThan(pages[0].reload.mock.invocationCallOrder[0]);
+    for (const [index, [pattern, handler]] of browserContext.unroute.mock.calls.entries()) {
+      expect(pattern).toBe(browserContext.route.mock.calls[index][0]);
+      expect(handler).toBe(browserContext.route.mock.calls[index][1]);
+    }
   });
 
   it('leaves routing untouched around the reloads when no network policy is configured', async () => {
@@ -563,7 +573,37 @@ describe('browserContextFactory', () => {
 
     expect(pages[0].reload).toHaveBeenCalledTimes(1);
     expect(browserContext.route).not.toHaveBeenCalled();
+    expect(browserContext.unroute).not.toHaveBeenCalled();
     expect(browserContext.unrouteAll).not.toHaveBeenCalled();
+  });
+
+  it('rejects the storage state when snapshotting retained origins needs a page the target cannot create', async () => {
+    // A connection can retain visited origins whose pages have since closed:
+    // pages() shows nothing, yet setStorageState() still unions those origins
+    // into its work and would clear the HTTP cache before failing to create
+    // its temporary page on Electron. The origin snapshot needs the same page
+    // and mutates nothing, so its failure must reject the operation while
+    // everything is intact.
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue([]);
+    browserContext.storageState.mockRejectedValue(new Error('Target.createTarget: Not supported'));
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow(/origins this connection has already visited.*Nothing was changed/);
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+    expect(browserContext.clearCookies).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalledTimes(1);
   });
 
   it('does not reload pages when the apply failed and the original state was rolled back', async () => {
