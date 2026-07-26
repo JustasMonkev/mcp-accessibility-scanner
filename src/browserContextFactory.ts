@@ -27,6 +27,7 @@ const { startTraceViewerServer } = coreBundle.server;
 import { logUnhandledError, testDebug } from './utils/log.js';
 import { createGuid, createHash } from './utils/guid.js';
 import { outputFile  } from './config.js';
+import { installNetworkPolicyRoutes } from './networkPolicy.js';
 
 import type { FullConfig } from './config.js';
 
@@ -44,6 +45,19 @@ import type { FullConfig } from './config.js';
 export function assertStorageStateSupported(config: FullConfig, factory: BrowserContextFactory, remedy: string): void {
   if (config.browser.contextOptions?.storageState && !factory.appliesStorageState)
     throw new Error(`Storage state cannot be applied in this mode. ${remedy}`);
+}
+
+/**
+ * Throws when the configured storage state would be installed inside a profile
+ * directory the user supplied. The profile carries its own session data — it is
+ * data this server does not own — and resetting it to the recorded state would
+ * destroy it. Every factory that lands the state in a context backed by
+ * `--user-data-dir` calls this before touching the browser; callers pass the
+ * remedy that fits their mode.
+ */
+export function assertStorageStateDoesNotResetUserProfile(config: FullConfig, remedy: string): void {
+  if (config.browser.contextOptions?.storageState && config.browser.userDataDir)
+    throw new Error(`--storage-state and --user-data-dir contradict each other: the profile carries its own session data, and resetting a user-supplied profile to match the recorded state would destroy it. ${remedy}`);
 }
 
 export function contextFactory(config: FullConfig): BrowserContextFactory {
@@ -116,7 +130,22 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     // and in-memory state; reload them so what a scan sees matches the state
     // just installed. Ceiling: per-tab sessionStorage survives a reload — it
     // sits outside Playwright storage states entirely.
-    await Promise.all(browserContext.pages().map(page => page.reload().catch(() => {})));
+    //
+    // These reloads run inside the factory, before Context installs the
+    // configured origin allowlist/blocklist — and the recorded credentials are
+    // already in place by now. Mirror the policy for the duration of the
+    // reloads so the first navigation cannot reach an origin the policy
+    // blocks; the temporary routes come off again afterwards and Context
+    // installs its own from the same rules once the factory returns. Installed
+    // after setStorageState() so an abort-all route cannot interfere with the
+    // temporary page Playwright drives to restore origin storage.
+    const policyInstalled = await installNetworkPolicyRoutes(config, browserContext);
+    try {
+      await Promise.all(browserContext.pages().map(page => page.reload().catch(() => {})));
+    } finally {
+      if (policyInstalled)
+        await browserContext.unrouteAll().catch(() => {});
+    }
   } catch (error) {
     // Prefer the full-state rollback; fall back to cookies-only when the full
     // snapshot or its reapplication is itself impossible on this target.
@@ -426,8 +455,7 @@ class PersistentContextFactory implements BrowserContextFactory {
     // profile cannot be treated this way — it is data we do not own — and
     // keeping it contradicts "start from the recorded state", so that
     // combination errors.
-    if (storageState && this.config.browser.userDataDir)
-      throw new Error('--storage-state and --user-data-dir contradict each other: the profile carries its own session data, and resetting a user-supplied profile to match the recorded state would destroy it. Drop --user-data-dir (a managed, disposable profile is used for storage-state sessions), or drop the storage state and sign in in that profile instead.');
+    assertStorageStateDoesNotResetUserProfile(this.config, 'Drop --user-data-dir (a managed, disposable profile is used for storage-state sessions), or drop the storage state and sign in in that profile instead.');
     // Trace setup runs before the disposable profile exists: it can fail (an
     // unwritable output directory), and nothing after the directory is created
     // may throw outside the cleanup scope below, or failed starts would leave

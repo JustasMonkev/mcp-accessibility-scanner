@@ -48,8 +48,9 @@ vi.mock('node:child_process', () => ({
 }));
 
 import * as playwright from 'playwright';
-import { assertStorageStateSupported, contextFactory } from '../src/browserContextFactory.js';
+import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported, contextFactory } from '../src/browserContextFactory.js';
 import { ExtensionContextFactory } from '../src/extension/extensionContextFactory.js';
+import { VSCodeBrowserContextFactory } from '../src/vscode/browserContextFactory.js';
 import { resolveConfig } from '../src/config.js';
 
 function createMockBrowserContext() {
@@ -62,6 +63,7 @@ function createMockBrowserContext() {
     pages: vi.fn().mockReturnValue([]),
     on: vi.fn(),
     route: vi.fn().mockResolvedValue(undefined),
+    unrouteAll: vi.fn().mockResolvedValue(undefined),
     setStorageState: vi.fn().mockResolvedValue(undefined),
     storageState: vi.fn().mockResolvedValue({ cookies: [], origins: [] }),
     tracing: {
@@ -512,6 +514,58 @@ describe('browserContextFactory', () => {
     }
   });
 
+  it('mirrors the configured network policy around the reloads of reused pages', async () => {
+    // The reloads run inside the factory, before Context installs the origin
+    // allowlist/blocklist — with the recorded credentials already applied, the
+    // first navigation must not be able to reach a blocked origin.
+    const pages = [{ url: () => 'https://app.example/a', reload: vi.fn().mockResolvedValue(undefined) }];
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue(pages);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+      network: { blockedOrigins: ['tracker.example'] },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    // Routes go in after the state is applied (so they cannot interfere with
+    // the temporary page Playwright drives), before the reloads, and come off
+    // again afterwards so Context installs the policy cleanly itself.
+    expect(browserContext.route).toHaveBeenCalledWith('*://tracker.example/**', expect.any(Function));
+    expect(browserContext.route.mock.invocationCallOrder[0]).toBeGreaterThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
+    expect(browserContext.route.mock.invocationCallOrder[0]).toBeLessThan(pages[0].reload.mock.invocationCallOrder[0]);
+    expect(browserContext.unrouteAll.mock.invocationCallOrder[0]).toBeGreaterThan(pages[0].reload.mock.invocationCallOrder[0]);
+  });
+
+  it('leaves routing untouched around the reloads when no network policy is configured', async () => {
+    const pages = [{ url: () => 'https://app.example/a', reload: vi.fn().mockResolvedValue(undefined) }];
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue(pages);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(pages[0].reload).toHaveBeenCalledTimes(1);
+    expect(browserContext.route).not.toHaveBeenCalled();
+    expect(browserContext.unrouteAll).not.toHaveBeenCalled();
+  });
+
   it('does not reload pages when the apply failed and the original state was rolled back', async () => {
     const pages = [{ url: () => 'https://app.example/a', reload: vi.fn().mockResolvedValue(undefined) }];
     const browserContext = createMockBrowserContext();
@@ -730,5 +784,90 @@ describe('browserContextFactory', () => {
     expect(() => contextFactory(config)).not.toThrow();
     expect(() => assertStorageStateSupported(config, extensionFactory, 'remedy'))
         .toThrow('Storage state cannot be applied in this mode');
+  });
+
+  it('flags the profile conflict only when both a storage state and a user profile are set', async () => {
+    const both = await resolveConfig({
+      browser: { userDataDir: '/home/user/my-profile', contextOptions: { storageState: '/tmp/auth.json' } },
+    });
+    const stateOnly = await resolveConfig({
+      browser: { contextOptions: { storageState: '/tmp/auth.json' } },
+    });
+    const profileOnly = await resolveConfig({
+      browser: { userDataDir: '/home/user/my-profile' },
+    });
+
+    expect(() => assertStorageStateDoesNotResetUserProfile(both, 'Drop one of them.'))
+        .toThrow(/--storage-state and --user-data-dir contradict each other.*Drop one of them\./);
+    expect(() => assertStorageStateDoesNotResetUserProfile(stateOnly, 'remedy')).not.toThrow();
+    expect(() => assertStorageStateDoesNotResetUserProfile(profileOnly, 'remedy')).not.toThrow();
+  });
+});
+
+describe('VSCodeBrowserContextFactory', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function createVSCodePlaywright(browser: any) {
+    return { chromium: { connect: vi.fn().mockResolvedValue(browser) } } as any;
+  }
+
+  it('rejects a storage state aimed at a user-supplied profile before connecting', async () => {
+    // The configured --user-data-dir is forwarded to the extension's launch,
+    // so the reused context lives inside the user's own profile — the same
+    // profile the persistent factory refuses to reset to a recorded state.
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    const vscodePlaywright = createVSCodePlaywright(browser);
+    const config = await resolveConfig({
+      browser: {
+        userDataDir: '/home/user/my-profile',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = new VSCodeBrowserContextFactory(config, vscodePlaywright, 'ws://127.0.0.1:1234/');
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
+        .rejects.toThrow('--storage-state and --user-data-dir contradict each other');
+    expect(vscodePlaywright.chromium.connect).not.toHaveBeenCalled();
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+  });
+
+  it('applies the storage state to the context the extension already holds', async () => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    const vscodePlaywright = createVSCodePlaywright(browser);
+    const config = await resolveConfig({
+      browser: {
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = new VSCodeBrowserContextFactory(config, vscodePlaywright, 'ws://127.0.0.1:1234/');
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
+
+    expect(browser.newContext).not.toHaveBeenCalled();
+    expect(browserContext.setStorageState).toHaveBeenCalledWith('/tmp/auth.json');
+    expect(result.browserContext).toBe(browserContext);
+  });
+
+  it('closes the extension connection when applying the storage state fails', async () => {
+    const browserContext = createMockBrowserContext();
+    browserContext.setStorageState.mockRejectedValue(new Error('ENOENT: no such file /tmp/auth.json'));
+    const browser = createMockBrowser(browserContext);
+    const vscodePlaywright = createVSCodePlaywright(browser);
+    const config = await resolveConfig({
+      browser: {
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = new VSCodeBrowserContextFactory(config, vscodePlaywright, 'ws://127.0.0.1:1234/');
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
+        .rejects.toThrow('ENOENT');
+    expect(browser.close).toHaveBeenCalledTimes(1);
   });
 });

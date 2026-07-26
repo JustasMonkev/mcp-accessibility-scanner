@@ -408,28 +408,56 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
   // clip. CSS visibility is deliberately not here — a descendant can restore
   // visibility:visible under a hidden ancestor and still be rendered, so it is
   // evaluated per node in sightedText instead.
+  // A clip-path inset hides the subtree only when the region it leaves has no
+  // area — the sr-only pattern is inset(50%), every edge pulled past the
+  // midpoint. A partial inset such as inset(50% 0 0 0) keeps half the box
+  // painted, and its computed value still starts with "inset(50%", so the
+  // remaining region is computed from the inset components instead of
+  // pattern-matching the serialized prefix. Non-numeric components (calc())
+  // parse to NaN and fail every comparison, erring on the visible side.
+  const insetClipsEverything = (clipPath: string, rect: DOMRect): boolean => {
+    const args = /^inset\(([^)]*)\)/.exec(clipPath)?.[1].split(' round ')[0].trim().split(/\s+/);
+    if (!args)
+      return false;
+    // Computed clip-path lengths are resolved to px; only percentages remain.
+    const toPx = (value: string, size: number) => value.endsWith('%') ? (parseFloat(value) / 100) * size : parseFloat(value);
+    const top = toPx(args[0], rect.height);
+    const right = toPx(args[1] ?? args[0], rect.width);
+    const bottom = toPx(args[2] ?? args[0], rect.height);
+    const left = toPx(args[3] ?? args[1] ?? args[0], rect.width);
+    return rect.height - top - bottom <= 0 || rect.width - left - right <= 0;
+  };
   const subtreeHidden = (element: Element) => {
     const style = window.getComputedStyle(element);
     if (style.display === 'none' || style.opacity === '0')
       return true;
+    // display:contents generates no box of its own, but its text and children
+    // render as if lifted into the parent — a 0x0 rect there hides nothing,
+    // and with no box there is nothing for either clip property to clip, so
+    // it is settled before the clip checks.
+    if (style.display === 'contents')
+      return false;
     // The legacy clip property only applies to absolutely positioned boxes; on
     // a static element it is inert and the content renders normally.
     if ((style.position === 'absolute' || style.position === 'fixed') && style.clip === 'rect(0px, 0px, 0px, 0px)')
       return true;
-    if (style.clipPath.startsWith('inset(50%'))
+    const rect = element.getBoundingClientRect();
+    if (insetClipsEverything(style.clipPath, rect))
       return true;
-    // display:contents generates no box of its own, but its text and children
-    // render as if lifted into the parent — a 0x0 rect there hides nothing.
-    if (style.display === 'contents')
-      return false;
     // A collapsed box hides its subtree only when it also clips (the classic
     // sr-only pattern is 1x1 with overflow:hidden). With visible overflow the
     // content renders outside the box.
-    const rect = element.getBoundingClientRect();
     return (rect.width <= 1 || rect.height <= 1) && style.overflow !== 'visible';
   };
   const visibilityHidden = (element: Element) => window.getComputedStyle(element).visibility === 'hidden';
   const parentInComposedTree = (element: Element): Element | null => {
+    // A slotted element renders where its assigned <slot> sits, so its
+    // flat-tree parent is the slot; parentElement is the light-DOM host and
+    // following it would skip a hidden wrapper around the slot inside the
+    // shadow tree. (A closed shadow root reports no assignedSlot — there the
+    // host is the closest reachable ancestor.)
+    if (element.assignedSlot)
+      return element.assignedSlot;
     if (element.parentElement)
       return element.parentElement;
     const root = element.getRootNode();

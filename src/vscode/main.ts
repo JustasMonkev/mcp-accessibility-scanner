@@ -17,62 +17,8 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as mcpServer from '../mcp/server.js';
 import { BrowserServerBackend } from '../browserServerBackend.js';
-import { applyStorageStateToReusedContext } from '../browserContextFactory.js';
-import type { BrowserContextFactory, ClientInfo } from '../browserContextFactory.js';
+import { VSCodeBrowserContextFactory } from './browserContextFactory.js';
 import type { FullConfig } from '../config.js';
-import type { BrowserContext } from 'playwright-core';
-
-class VSCodeBrowserContextFactory implements BrowserContextFactory {
-  name = 'vscode';
-  description = 'Connect to a browser running in the Playwright VS Code extension';
-  // A fresh context is created with the state; a reused extension context gets
-  // it applied via setStorageState(), like the other reused-context factories.
-  readonly appliesStorageState = true;
-
-  constructor(private _config: FullConfig, private _playwright: typeof import('playwright'), private _connectionString: string) {}
-
-  async createContext(clientInfo: ClientInfo, abortSignal: AbortSignal): Promise<{ browserContext: BrowserContext; close: () => Promise<void>; }> {
-    let launchOptions: any = this._config.browser.launchOptions;
-    if (this._config.browser.userDataDir) {
-      launchOptions = {
-        ...launchOptions,
-        ...this._config.browser.contextOptions,
-        userDataDir: this._config.browser.userDataDir,
-      };
-    }
-    const connectionString = new URL(this._connectionString);
-    connectionString.searchParams.set('launch-options', JSON.stringify(launchOptions));
-
-    const browserType = this._playwright.chromium; // it could also be firefox or webkit, we just need some browser type to call `connect` on
-    const browser = await browserType.connect(connectionString.toString());
-
-    let context: BrowserContext;
-    try {
-      const existing = browser.contexts()[0];
-      if (existing) {
-        // Without this, a configured storage state would be silently ignored on
-        // the reuse path while newContext() below applies it — authenticated
-        // scans would run anonymously depending on which branch was taken.
-        await applyStorageStateToReusedContext(this._config, existing);
-        context = existing;
-      } else {
-        context = await browser.newContext(this._config.browser.contextOptions);
-      }
-    } catch (error) {
-      // No close() has been handed out yet, so the connection must not outlive
-      // the failure (e.g. an unreadable storage-state file).
-      await browser.close().catch(() => {});
-      throw error;
-    }
-
-    return {
-      browserContext: context,
-      close: async () => {
-        await browser.close();
-      }
-    };
-  }
-}
 
 async function main(config: FullConfig, connectionString: string, lib: string) {
   const playwright = await import(lib).then(mod => mod.default ?? mod);

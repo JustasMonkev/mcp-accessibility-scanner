@@ -629,16 +629,19 @@ describe('collectElementFacts in a real page', () => {
     const page = await browser!.newPage();
     await page.setContent(`
       <div id="contents" style="display:contents">Send</div>
+      <div id="contents-clip" style="display:contents; clip-path: inset(0)">Send</div>
       <div id="overflowing" style="width:1px;height:1px;overflow:visible">Send</div>
       <div id="clipped" style="width:1px;height:1px;overflow:hidden">Send</div>`);
-    const handles = await Promise.all(['#contents', '#overflowing', '#clipped'].map(selector => page.$(selector)));
+    const handles = await Promise.all(['#contents', '#contents-clip', '#overflowing', '#clipped'].map(selector => page.$(selector)));
 
     const facts = await page.evaluate(collectElementFacts, handles as any);
 
     // display:contents has a 0x0 rect but renders its content in the parent's
-    // box, and a collapsed box with visible overflow paints its text outside
-    // itself; only the clipping collapsed box (the sr-only shape) hides it.
-    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', 'Send', null]);
+    // box — with no box there is nothing for a clip-path to clip either, even
+    // one whose inset would swallow the 0x0 rect — and a collapsed box with
+    // visible overflow paints its text outside itself; only the clipping
+    // collapsed box (the sr-only shape) hides it.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', 'Send', 'Send', null]);
     await page.close();
   });
 
@@ -671,6 +674,50 @@ describe('collectElementFacts in a real page', () => {
     // untouched, so neither shows up in the control's own computed style — the
     // ancestors must be walked, or invisible labels feed label-in-name checks.
     expect(facts.map(fact => fact.visibleText)).toEqual([null, null, 'Send']);
+    await page.close();
+  });
+
+  it('hides a clip-path inset only when it leaves no painted area', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div id="sr-only" style="clip-path: inset(50%); width:100px; height:100px">Send</div>
+      <div id="half" style="clip-path: inset(50% 0 0 0); width:100px; height:100px">Send</div>
+      <div id="swallowed" style="clip-path: inset(0 0 100% 0); width:100px; height:100px">Send</div>`);
+    const handles = await Promise.all(['#sr-only', '#half', '#swallowed'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // inset(50% 0 0 0) computes to "inset(50% 0px 0px)" — the same prefix as
+    // the sr-only inset(50%) — yet paints the whole bottom half; only insets
+    // whose remaining region has no area hide the text, whichever edge
+    // combination collapses it.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, 'Send', null]);
+    await page.close();
+  });
+
+  it('walks a slotted element through its slot, catching hidden shadow wrappers', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <ghost-card id="in-hidden-wrapper" role="button" aria-label="Submit"><span>Send</span></ghost-card>
+      <plain-card id="in-visible-wrapper" role="button" aria-label="Submit"><span>Send</span></plain-card>
+      <script>
+        customElements.define('ghost-card', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<div style="opacity:0"><slot></slot></div>'; }
+        });
+        customElements.define('plain-card', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<div><slot></slot></div>'; }
+        });
+      </script>`);
+    const handles = await Promise.all(
+        ['#in-hidden-wrapper span', '#in-visible-wrapper span'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // A slotted element renders where its slot sits: its flat-tree ancestors
+    // are the slot and the shadow-tree wrapper around it, not the host's light
+    // parent chain. parentElement skips straight to the host, so a walk using
+    // it misses the opacity:0 wrapper and reports text nobody can see.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, 'Send']);
     await page.close();
   });
 
