@@ -743,6 +743,51 @@ describe('collectElementFacts in a real page', () => {
     await page.close();
   });
 
+  it('keeps perspective projections visible while flat edge-on planes hide', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <button id="persp" style="transform: perspective(500px) translateX(100px) rotateY(90deg)" aria-label="Submit">Send</button>
+      <button id="edgeon" style="transform: rotateY(90deg)" aria-label="Submit">Send</button>`);
+    const handles = await Promise.all(['#persp', '#edgeon'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // Under perspective an edge-on-but-offset plane still projects to a
+    // quadrilateral with positive area — its matrix3d() x/y part is singular
+    // all the same, so the determinant test alone would wrongly hide it.
+    // Without perspective the projection is orthographic and the edge-on
+    // plane really paints nothing.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
+    await page.close();
+  });
+
+  it('lets an out-of-flow control escape a collapsed clip box that is not its containing block', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div style="position:relative">
+        <div style="width:1px;height:1px;overflow:hidden">
+          <button id="escaped" style="position:absolute;top:0;left:0" aria-label="Submit">Send</button>
+        </div>
+      </div>
+      <div style="position:absolute;width:1px;height:1px;overflow:hidden">
+        <button id="contained" style="position:absolute;top:0;left:0" aria-label="Submit">Send</button>
+      </div>
+      <div style="width:1px;height:1px;overflow:hidden">
+        <button id="inflow" aria-label="Submit">Send</button>
+      </div>`);
+    const handles = await Promise.all(['#escaped', '#contained', '#inflow'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // Overflow clips bind only descendants whose containing block sits at or
+    // below the clipping box: #escaped is positioned by the wrapper OUTSIDE
+    // the 1px box and renders in full, while #contained's containing block IS
+    // the clipping box (sr-only behavior stands) and in-flow #inflow is
+    // clipped by any collapsed ancestor.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null, null]);
+    await page.close();
+  });
+
   it('resolves link destinations so relative and absolute forms compare equal', async () => {
     const page = await browser!.newPage();
     await page.route('https://example.com/**', route => route.fulfill({

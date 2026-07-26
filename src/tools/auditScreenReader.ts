@@ -427,29 +427,38 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     const left = toPx(args[3] ?? args[1] ?? args[0], rect.width);
     return rect.height - top - bottom <= 0 || rect.width - left - right <= 0;
   };
-  // A transform whose linear part is singular (scale(0), scaleX(0), …)
-  // collapses the painted area to a line or point — overflow included — so
-  // unlike an ordinary collapsed box it hides the subtree even with
-  // overflow: visible. Computed transforms serialize as matrix()/matrix3d();
-  // a NaN determinant (unparseable value) fails the comparison and errs on
-  // the visible side.
+  // A transform whose linear part is singular (scale(0), scaleX(0), an
+  // edge-on rotateY(90deg), …) collapses the painted area to a line or point
+  // — overflow included — so unlike an ordinary collapsed box it hides the
+  // subtree even with overflow: visible. Computed transforms serialize as
+  // matrix()/matrix3d(); a NaN determinant (unparseable value) fails the
+  // comparison and errs on the visible side. The epsilon absorbs Blink
+  // serializing cos(90deg) as ~6e-17.
   const transformCollapses = (transform: string): boolean => {
+    const singular = (det: number) => Math.abs(det) < 1e-6;
     const matrix = /^matrix\(([^)]*)\)/.exec(transform);
     if (matrix) {
       const v = matrix[1].split(',').map(parseFloat);
-      return v[0] * v[3] - v[1] * v[2] === 0;
+      return singular(v[0] * v[3] - v[1] * v[2]);
     }
     const matrix3d = /^matrix3d\(([^)]*)\)/.exec(transform);
     if (matrix3d) {
+      const v = matrix3d[1].split(',').map(parseFloat);
+      // Perspective makes the screen projection nonlinear: an edge-on plane
+      // that sits off the perspective origin still projects to a quadrilateral
+      // with positive area, so the linear-part test is sound only for affine
+      // matrices (no perspective components).
+      if (v[3] !== 0 || v[7] !== 0 || v[11] !== 0 || v[15] !== 1)
+        return false;
       // The determinant of the x/y linear part: scaleZ(0) alone leaves flat
       // content rendered, so only the projected plane matters here.
-      const v = matrix3d[1].split(',').map(parseFloat);
-      return v[0] * v[5] - v[1] * v[4] === 0;
+      return singular(v[0] * v[5] - v[1] * v[4]);
     }
     return false;
   };
-  const subtreeHidden = (element: Element) => {
-    const style = window.getComputedStyle(element);
+  // Hiding conditions that ignore box geometry; null means undecided — the
+  // geometric checks (clip-path insets, collapsed clipping boxes) still apply.
+  const nonGeometricHidden = (style: CSSStyleDeclaration): boolean | null => {
     if (style.display === 'none' || style.opacity === '0')
       return true;
     // display:contents generates no box of its own, but its text and children
@@ -464,13 +473,27 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     // a static element it is inert and the content renders normally.
     if ((style.position === 'absolute' || style.position === 'fixed') && style.clip === 'rect(0px, 0px, 0px, 0px)')
       return true;
+    return null;
+  };
+  // A collapsed box hides its subtree only when it also clips (the classic
+  // sr-only pattern is 1x1 with overflow:hidden). With visible overflow the
+  // content renders outside the box.
+  const collapsedClippingBox = (style: CSSStyleDeclaration, rect: DOMRect): boolean =>
+    (rect.width <= 1 || rect.height <= 1) && style.overflow !== 'visible';
+  const subtreeHidden = (element: Element) => {
+    const style = window.getComputedStyle(element);
+    const decided = nonGeometricHidden(style);
+    if (decided !== null)
+      return decided;
     const rect = element.getBoundingClientRect();
     if (insetClipsEverything(style.clipPath, rect))
       return true;
-    // A collapsed box hides its subtree only when it also clips (the classic
-    // sr-only pattern is 1x1 with overflow:hidden). With visible overflow the
-    // content renders outside the box.
-    return (rect.width <= 1 || rect.height <= 1) && style.overflow !== 'visible';
+    // Ceiling: during text descent a collapsed clipping box drops its whole
+    // subtree, including an out-of-flow descendant whose containing block
+    // lies outside the box and therefore escapes the clip. The measured
+    // element itself — where the label checks read from — is protected by
+    // the containing-block-aware ancestor walk below.
+    return collapsedClippingBox(style, rect);
   };
   // visibility: collapse renders exactly like hidden outside table
   // rows/columns (and hides the row either way), so both values count.
@@ -496,10 +519,41 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
   // leaves the descendant's rect untouched. Ancestors of the measured element
   // are walked (through shadow hosts) so a control inside an opacity:0 or
   // sr-only wrapper is not reported as showing text nobody can see.
+  //
+  // Overflow clips bind only descendants whose containing block sits at or
+  // below the clipping box: an absolutely positioned control whose containing
+  // block is a positioned wrapper OUTSIDE a collapsed 1px box renders in full
+  // despite it. While walking up, track whether the content below rides an
+  // out-of-flow position whose containing block has not been reached yet —
+  // collapsed-box clips on the nodes in between do not bind it. Containing
+  // blocks are approximated as any positioned or transformed ancestor (for
+  // position:fixed it is really only transformed ones — erring toward hidden
+  // there). Every other hiding condition applies regardless: display:none by
+  // inheritance, opacity by compositing, clip-path through its stacking
+  // context, and a singular transform because a transformed ancestor is the
+  // containing block anyway.
   const ancestorSubtreeHidden = (element: Element): boolean => {
+    const outOfFlow = (style: CSSStyleDeclaration) => style.position === 'absolute' || style.position === 'fixed';
+    let escapesOverflowClip = outOfFlow(window.getComputedStyle(element));
     for (let node = parentInComposedTree(element); node; node = parentInComposedTree(node)) {
-      if (subtreeHidden(node))
+      const style = window.getComputedStyle(node);
+      const decided = nonGeometricHidden(style);
+      if (decided === true)
         return true;
+      if (decided === null) {
+        const rect = node.getBoundingClientRect();
+        if (insetClipsEverything(style.clipPath, rect))
+          return true;
+        const containingBlock = style.position !== 'static' || style.transform !== 'none';
+        if (collapsedClippingBox(style, rect) && (!escapesOverflowClip || containingBlock))
+          return true;
+        // A boxless (display:contents) node neither carries nor anchors
+        // positioning, so the escape state only moves on box-generating nodes.
+        if (outOfFlow(style))
+          escapesOverflowClip = true;
+        else if (containingBlock)
+          escapesOverflowClip = false;
+      }
     }
     return false;
   };

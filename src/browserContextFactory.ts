@@ -117,11 +117,9 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   // one origin at a time, so a failure partway would otherwise leave the
   // attached browser holding a mixture of old and recorded state while the
   // operation reports failure. Both layers are snapshotted first: the cookie
-  // jar through pure protocol calls that work everywhere, and origin storage
-  // through storageState(), which needs the same temporary page as the restore
-  // — where that page cannot be created (Electron), the origin phase of the
-  // forward apply fails before touching any origin, so the cookie snapshot
-  // alone is a complete rollback there.
+  // jar through pure protocol calls that work everywhere (kept as the
+  // fallback for a restore whose own origin phase fails), and origin storage
+  // through storageState() below.
   const originalCookies = await browserContext.cookies();
   // The snapshot doubles as a probe for origins this connection has already
   // visited while its pages have since closed or gone blank: for those,
@@ -129,16 +127,16 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   // — the newPage probe above cannot see them — but unlike setStorageState()
   // it mutates nothing, so a target that cannot create pages (Electron) is
   // rejected here with everything intact, not after the forward apply has
-  // cleared the HTTP cache. Any other snapshot failure degrades the rollback
-  // to cookies-only, as before.
-  let originalState: Awaited<ReturnType<typeof browserContext.storageState>> | null = null;
-  try {
-    originalState = await browserContext.storageState({ indexedDB: true });
-  } catch (error) {
+  // cleared the HTTP cache. Any other snapshot failure also aborts: without
+  // the full snapshot, a partial forward apply could only be rolled back to
+  // cookies, leaving the attached browser's origin storage part old, part
+  // recorded.
+  const originalState = await browserContext.storageState({ indexedDB: true }).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes('Target.createTarget'))
       throw new Error(`The attached browser cannot open the temporary page Playwright needs to reset origin storage for origins this connection has already visited (Electron targets do not support Target.createTarget). Nothing was changed. Drop the storage state and sign in inside the app instead. Original error: ${message}`);
-  }
+    throw new Error(`Snapshotting the context's current storage for rollback failed, so the storage state was not applied — a partial apply could not have been undone. Nothing was changed. Retry, or use --isolated for a fresh context. Original error: ${message}`);
+  });
   try {
     await browserContext.setStorageState(storageState);
     // Pages that were already open still render the previous identity's DOM
@@ -158,17 +156,31 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     // restore origin storage.
     const uninstallPolicy = await installNetworkPolicyRoutes(config, browserContext);
     try {
-      await Promise.all(browserContext.pages().map(page => page.reload().catch(() => {})));
+      await Promise.all(browserContext.pages().map(async page => {
+        try {
+          await page.reload();
+        } catch {
+          // A page that cannot be brought onto the installed state — its
+          // origin may be blocked by the mirrored policy, or the load simply
+          // failed — must not stay around rendering the previous identity's
+          // DOM: Context adopts every remaining page, and a scan would read
+          // the stale document as the new session's UI. Blank it; if even
+          // that fails, close it.
+          try {
+            await page.goto('about:blank');
+          } catch {
+            await page.close().catch(() => {});
+          }
+        }
+      }));
     } finally {
       if (uninstallPolicy)
         await uninstallPolicy();
     }
   } catch (error) {
-    // Prefer the full-state rollback; fall back to cookies-only when the full
-    // snapshot or its reapplication is itself impossible on this target.
-    const restoredFully = originalState
-      ? await browserContext.setStorageState(originalState).then(() => true, () => false)
-      : false;
+    // Prefer the full-state rollback; fall back to cookies-only when its
+    // reapplication is itself impossible on this target.
+    const restoredFully = await browserContext.setStorageState(originalState).then(() => true, () => false);
     const restoredCookies = restoredFully || await browserContext.clearCookies()
         .then(() => originalCookies.length ? browserContext.addCookies(originalCookies) : undefined)
         .then(() => true, () => false);
@@ -299,6 +311,15 @@ class CdpContextFactory extends BaseContextFactory {
   // applies it to the browser's existing context via setStorageState().
   readonly appliesStorageState = true;
 
+  // One attached browser — and its default context — serves every session
+  // this factory creates. Re-running the global setStorageState() for a
+  // second session would wipe the first session's live cookies and origin
+  // storage mid-audit and reload its pages, so the state is applied once per
+  // context object: later sessions join the live shared state. Keyed weakly —
+  // a reconnect yields a fresh context object, so the slate resets with the
+  // connection — and a failed apply is forgotten so the next session retries.
+  private _storageStateApplied = new WeakMap<playwright.BrowserContext, Promise<void>>();
+
   constructor(config: FullConfig) {
     super('cdp', config);
   }
@@ -341,7 +362,15 @@ class CdpContextFactory extends BaseContextFactory {
     // undefined context to the caller.
     if (!existing)
       return await browser.newContext(this.config.browser.contextOptions);
-    await applyStorageStateToReusedContext(this.config, existing);
+    // The shared promise also serializes two sessions arriving at once: both
+    // await the same application instead of racing two global resets.
+    let applied = this._storageStateApplied.get(existing);
+    if (!applied) {
+      applied = applyStorageStateToReusedContext(this.config, existing);
+      this._storageStateApplied.set(existing, applied);
+      applied.catch(() => this._storageStateApplied.delete(existing));
+    }
+    await applied;
     return existing;
   }
 }

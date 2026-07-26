@@ -606,6 +606,118 @@ describe('browserContextFactory', () => {
     expect(browser.close).toHaveBeenCalledTimes(1);
   });
 
+  it('blanks pages whose reload fails, and closes them when even that fails', async () => {
+    // A page that cannot be brought onto the installed state must not stay
+    // around rendering the previous identity's DOM — Context adopts every
+    // remaining page and a scan would read the stale document as the new
+    // session's UI.
+    const pages = [
+      { url: () => 'https://app.example/ok', reload: vi.fn().mockResolvedValue(undefined), goto: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined) },
+      { url: () => 'https://blocked.example/a', reload: vi.fn().mockRejectedValue(new Error('net::ERR_BLOCKED_BY_CLIENT')), goto: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined) },
+      { url: () => 'https://dead.example/b', reload: vi.fn().mockRejectedValue(new Error('Target closed')), goto: vi.fn().mockRejectedValue(new Error('Target closed')), close: vi.fn().mockResolvedValue(undefined) },
+    ];
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue(pages);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    // Reloaded fine: left alone. Reload failed: blanked. Blanking failed too:
+    // closed, so no stale-identity page survives in any case.
+    expect(pages[0].goto).not.toHaveBeenCalled();
+    expect(pages[0].close).not.toHaveBeenCalled();
+    expect(pages[1].goto).toHaveBeenCalledWith('about:blank');
+    expect(pages[1].close).not.toHaveBeenCalled();
+    expect(pages[2].goto).toHaveBeenCalledWith('about:blank');
+    expect(pages[2].close).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies the storage state once per shared attached context, not once per session', async () => {
+    // One attached browser serves every session of a non-isolated CDP factory;
+    // a second session re-running the global setStorageState() would wipe the
+    // first session's live cookies and origin storage mid-audit.
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(first.browserContext).toBe(second.browserContext);
+    expect(browserContext.setStorageState).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries the shared-context apply for the next session when it failed', async () => {
+    // A failed apply must not poison the shared context forever — the memo is
+    // dropped so the next session gets a fresh attempt.
+    const browserContext = createMockBrowserContext();
+    browserContext.setStorageState
+        .mockRejectedValueOnce(new Error('ENOENT: no such file /tmp/auth.json'))
+        .mockResolvedValueOnce(undefined);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('ENOENT');
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    // Three calls: the failed apply, its full-state rollback, and the second
+    // session's fresh attempt — which must target the configured state again.
+    expect(browserContext.setStorageState).toHaveBeenCalledTimes(3);
+    expect(browserContext.setStorageState.mock.calls[2][0]).toBe('/tmp/auth.json');
+    expect(result.browserContext).toBe(browserContext);
+  });
+
+  it('rejects the storage state when the rollback snapshot fails for any other reason', async () => {
+    // Without the full snapshot, a partial forward apply could only be rolled
+    // back to cookies, leaving origin storage part old, part recorded — so a
+    // snapshot failure aborts before anything is mutated.
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue([]);
+    browserContext.storageState.mockRejectedValue(new Error('Error serializing IndexedDB'));
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow(/rollback failed.*Nothing was changed/);
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+    expect(browserContext.clearCookies).not.toHaveBeenCalled();
+  });
+
   it('does not reload pages when the apply failed and the original state was rolled back', async () => {
     const pages = [{ url: () => 'https://app.example/a', reload: vi.fn().mockResolvedValue(undefined) }];
     const browserContext = createMockBrowserContext();
