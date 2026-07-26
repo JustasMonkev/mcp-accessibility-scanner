@@ -319,6 +319,9 @@ class CdpContextFactory extends BaseContextFactory {
   // a reconnect yields a fresh context object, so the slate resets with the
   // connection — and a failed apply is forgotten so the next session retries.
   private _storageStateApplied = new WeakMap<playwright.BrowserContext, Promise<void>>();
+  // Serializes the no-context fallback the same way: two sessions arriving at
+  // a contextless target must share one created context, not race two.
+  private _fallbackContext = new WeakMap<playwright.Browser, Promise<playwright.BrowserContext>>();
 
   constructor(config: FullConfig) {
     super('cdp', config);
@@ -359,9 +362,22 @@ class CdpContextFactory extends BaseContextFactory {
     const existing = browser.contexts()[0];
     // An attached browser can expose no context at all; a fresh one created
     // with the configured options (storage state included) beats handing an
-    // undefined context to the caller.
-    if (!existing)
-      return await browser.newContext(this.config.browser.contextOptions);
+    // undefined context to the caller. The created context immediately seeds
+    // the applied-state memo — a later session will find it as the browser's
+    // existing context, and must join it rather than reset it — and the
+    // creation itself is memoized so concurrent arrivals share one context.
+    if (!existing) {
+      let creating = this._fallbackContext.get(browser);
+      if (!creating) {
+        creating = browser.newContext(this.config.browser.contextOptions).then(created => {
+          this._storageStateApplied.set(created, Promise.resolve());
+          return created;
+        });
+        this._fallbackContext.set(browser, creating);
+        creating.catch(() => this._fallbackContext.delete(browser));
+      }
+      return await creating;
+    }
     // The shared promise also serializes two sessions arriving at once: both
     // await the same application instead of racing two global resets.
     let applied = this._storageStateApplied.get(existing);

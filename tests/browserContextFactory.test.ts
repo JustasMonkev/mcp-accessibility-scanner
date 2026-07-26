@@ -664,6 +664,54 @@ describe('browserContextFactory', () => {
     expect(browserContext.setStorageState).toHaveBeenCalledTimes(1);
   });
 
+  it('lets a later session join the context the fallback created, without resetting it', async () => {
+    // The context created for a contextless target already carries the state;
+    // a second session finds it as the browser's existing context and must
+    // not run the global reset over the first session's live state.
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    browser.contexts.mockReturnValueOnce([]).mockReturnValue([browserContext]);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(browser.newContext).toHaveBeenCalledTimes(1);
+    expect(first.browserContext).toBe(second.browserContext);
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+  });
+
+  it('shares one fallback context between sessions arriving at a contextless target', async () => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    browser.contexts.mockReturnValue([]);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    const [first, second] = await Promise.all([
+      factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined),
+      factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined),
+    ]);
+
+    expect(browser.newContext).toHaveBeenCalledTimes(1);
+    expect(first.browserContext).toBe(second.browserContext);
+  });
+
   it('retries the shared-context apply for the next session when it failed', async () => {
     // A failed apply must not poison the shared context forever — the memo is
     // dropped so the next session gets a fresh attempt.

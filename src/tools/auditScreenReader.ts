@@ -415,17 +415,25 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
   // remaining region is computed from the inset components instead of
   // pattern-matching the serialized prefix. Non-numeric components (calc())
   // parse to NaN and fail every comparison, erring on the visible side.
-  const insetClipsEverything = (clipPath: string, rect: DOMRect): boolean => {
+  const insetClipsEverything = (clipPath: string, element: Element, rect: DOMRect): boolean => {
     const args = /^inset\(([^)]*)\)/.exec(clipPath)?.[1].split(' round ')[0].trim().split(/\s+/);
     if (!args)
       return false;
+    // clip-path lengths and percentages resolve against the untransformed
+    // reference box (the border box), not the transformed bounding rect — a
+    // rotated element swaps its rect's axes and a pixel inset would be
+    // compared against the wrong dimension. offsetWidth/offsetHeight are that
+    // border box; SVG elements have no offset box, and for them the bounding
+    // rect is the closest stand-in available here.
+    const width = element instanceof HTMLElement ? element.offsetWidth : rect.width;
+    const height = element instanceof HTMLElement ? element.offsetHeight : rect.height;
     // Computed clip-path lengths are resolved to px; only percentages remain.
     const toPx = (value: string, size: number) => value.endsWith('%') ? (parseFloat(value) / 100) * size : parseFloat(value);
-    const top = toPx(args[0], rect.height);
-    const right = toPx(args[1] ?? args[0], rect.width);
-    const bottom = toPx(args[2] ?? args[0], rect.height);
-    const left = toPx(args[3] ?? args[1] ?? args[0], rect.width);
-    return rect.height - top - bottom <= 0 || rect.width - left - right <= 0;
+    const top = toPx(args[0], height);
+    const right = toPx(args[1] ?? args[0], width);
+    const bottom = toPx(args[2] ?? args[0], height);
+    const left = toPx(args[3] ?? args[1] ?? args[0], width);
+    return height - top - bottom <= 0 || width - left - right <= 0;
   };
   // A transform whose linear part is singular (scale(0), scaleX(0), an
   // edge-on rotateY(90deg), …) collapses the painted area to a line or point
@@ -486,7 +494,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     if (decided !== null)
       return decided;
     const rect = element.getBoundingClientRect();
-    if (insetClipsEverything(style.clipPath, rect))
+    if (insetClipsEverything(style.clipPath, element, rect))
       return true;
     // Ceiling: during text descent a collapsed clipping box drops its whole
     // subtree, including an out-of-flow descendant whose containing block
@@ -542,7 +550,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
         return true;
       if (decided === null) {
         const rect = node.getBoundingClientRect();
-        if (insetClipsEverything(style.clipPath, rect))
+        if (insetClipsEverything(style.clipPath, node, rect))
           return true;
         const containingBlock = style.position !== 'static' || style.transform !== 'none';
         if (collapsedClippingBox(style, rect) && (!escapesOverflowClip || containingBlock))

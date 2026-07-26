@@ -743,6 +743,25 @@ describe('collectElementFacts in a real page', () => {
     await page.close();
   });
 
+  it('measures inset clips against the untransformed reference box', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div id="strip" style="width:100px;height:40px;clip-path:inset(0 30px)">Send</div>
+      <div id="rotated-strip" style="width:100px;height:40px;clip-path:inset(0 30px);transform:rotate(90deg)">Send</div>
+      <div id="swallowing" style="width:100px;height:40px;clip-path:inset(0 50px);transform:rotate(90deg)">Send</div>`);
+    const handles = await Promise.all(['#strip', '#rotated-strip', '#swallowing'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // clip-path insets resolve against the untransformed border box: the
+    // rotated strip still paints 40px of the element even though its
+    // transformed bounding rect is only 40px wide — comparing the 30px insets
+    // against that rect wrongly swallowed it. A genuinely swallowing inset
+    // (50px each side of a 100px box) hides rotated or not.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', 'Send', null]);
+    await page.close();
+  });
+
   it('keeps perspective projections visible while flat edge-on planes hide', async () => {
     const page = await browser!.newPage();
     await page.setContent(`
