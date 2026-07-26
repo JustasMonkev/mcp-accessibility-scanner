@@ -642,6 +642,38 @@ describe('collectElementFacts in a real page', () => {
     await page.close();
   });
 
+  it('honours legacy clip only where it applies, on positioned elements', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div id="static-clip" style="clip: rect(0 0 0 0)">Send</div>
+      <div id="positioned-clip" style="position: absolute; clip: rect(0 0 0 0)">Send</div>`);
+    const handles = await Promise.all(['#static-clip', '#positioned-clip'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // clip is inert on statically positioned boxes — that text really renders —
+    // while the classic sr-only shape (absolute + clip) hides everything.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
+    await page.close();
+  });
+
+  it('collects no text from a control hidden by an ancestor its own style cannot see', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div style="opacity:0"><button id="in-opacity" aria-label="Submit">Send</button></div>
+      <div style="position:absolute;width:1px;height:1px;overflow:hidden"><button id="in-sronly" aria-label="Submit">Send</button></div>
+      <div><button id="in-visible" aria-label="Submit">Send</button></div>`);
+    const handles = await Promise.all(['#in-opacity', '#in-sronly', '#in-visible'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // opacity is not inherited and a clipping wrapper leaves the child's rect
+    // untouched, so neither shows up in the control's own computed style — the
+    // ancestors must be walked, or invisible labels feed label-in-name checks.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, null, 'Send']);
+    await page.close();
+  });
+
   it('resolves link destinations so relative and absolute forms compare equal', async () => {
     const page = await browser!.newPage();
     await page.route('https://example.com/**', route => route.fulfill({

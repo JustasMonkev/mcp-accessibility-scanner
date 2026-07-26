@@ -68,6 +68,37 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   const storageState = config.browser.contextOptions?.storageState;
   if (!storageState)
     return;
+  // setStorageState needs a temporary page whenever the state carries origins
+  // or the context has visited any — and by the time that page creation fails
+  // on a target without Target.createTarget, the HTTP cache is already cleared
+  // and cannot be put back. Probe the page creation first, so such targets are
+  // rejected before anything is mutated. When neither signal indicates a page
+  // will be needed (cookie-only state, no pages open), the probe is skipped so
+  // that case keeps working on those targets.
+  const stateHasOrigins = await (async () => {
+    try {
+      const state = typeof storageState === 'string'
+        ? JSON.parse(await fs.promises.readFile(storageState, 'utf-8'))
+        : storageState;
+      return (state?.origins?.length ?? 0) > 0;
+    } catch {
+      // An unreadable state file fails inside setStorageState before any
+      // mutation, which is the clean failure already.
+      return false;
+    }
+  })();
+  const hasLoadedPages = browserContext.pages().some(page => page.url() && page.url() !== 'about:blank');
+  if (stateHasOrigins || hasLoadedPages) {
+    try {
+      const probe = await browserContext.newPage();
+      await probe.close();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('Target.createTarget'))
+        throw new Error(`The attached browser cannot open the temporary page Playwright needs to apply the storage state's origin data (Electron targets do not support Target.createTarget). Nothing was changed. Drop the storage state and sign in inside the app instead. Original error: ${message}`);
+      throw error;
+    }
+  }
   // setStorageState replaces the cookie jar and then rewrites origin storage
   // one origin at a time, so a failure partway would otherwise leave the
   // attached browser holding a mixture of old and recorded state while the
@@ -81,6 +112,11 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   const originalState = await browserContext.storageState({ indexedDB: true }).catch(() => null);
   try {
     await browserContext.setStorageState(storageState);
+    // Pages that were already open still render the previous identity's DOM
+    // and in-memory state; reload them so what a scan sees matches the state
+    // just installed. Ceiling: per-tab sessionStorage survives a reload — it
+    // sits outside Playwright storage states entirely.
+    await Promise.all(browserContext.pages().map(page => page.reload().catch(() => {})));
   } catch (error) {
     // Prefer the full-state rollback; fall back to cookies-only when the full
     // snapshot or its reapplication is itself impossible on this target.

@@ -58,6 +58,7 @@ function createMockBrowserContext() {
     clearCookies: vi.fn().mockResolvedValue(undefined),
     close: vi.fn().mockResolvedValue(undefined),
     cookies: vi.fn().mockResolvedValue([]),
+    newPage: vi.fn().mockResolvedValue({ close: vi.fn().mockResolvedValue(undefined) }),
     pages: vi.fn().mockReturnValue([]),
     on: vi.fn(),
     route: vi.fn().mockResolvedValue(undefined),
@@ -453,6 +454,87 @@ describe('browserContextFactory', () => {
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
         .rejects.toThrow(/Drop the storage state and sign in inside the app instead/);
     expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects the storage state before mutating anything when the needed page cannot be created', async () => {
+    // setStorageState clears the HTTP cache before the page creation that fails
+    // on Electron, and a cache cannot be restored. With a loaded page in the
+    // attached browser (so a temporary page will be needed), the probe must
+    // fail the operation while nothing has been touched yet.
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue([{ url: () => 'https://app.example/dashboard' }]);
+    browserContext.newPage.mockRejectedValue(new Error('Target.createTarget: Not supported'));
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow(/Nothing was changed/);
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+    expect(browserContext.clearCookies).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('reloads already-open pages after installing the storage state, and only then', async () => {
+    // A reused page still renders the previous identity's DOM; an immediate
+    // scan would audit the wrong user unless the page is brought onto the
+    // freshly installed state.
+    const pages = [
+      { url: () => 'https://app.example/a', reload: vi.fn().mockResolvedValue(undefined) },
+      { url: () => 'https://app.example/b', reload: vi.fn().mockResolvedValue(undefined) },
+    ];
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue(pages);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    for (const page of pages) {
+      expect(page.reload).toHaveBeenCalledTimes(1);
+      expect(page.reload.mock.invocationCallOrder[0]).toBeGreaterThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
+    }
+  });
+
+  it('does not reload pages when the apply failed and the original state was rolled back', async () => {
+    const pages = [{ url: () => 'https://app.example/a', reload: vi.fn().mockResolvedValue(undefined) }];
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue(pages);
+    // Probe page succeeds; the apply itself fails and the rollback runs.
+    browserContext.setStorageState
+        .mockRejectedValueOnce(new Error('Error setting storage state:\nnavigation failed'))
+        .mockResolvedValueOnce(undefined);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow();
+    // The pages still match the restored original state, so no reload.
+    expect(pages[0].reload).not.toHaveBeenCalled();
   });
 
   it('restores the full original storage state when a partial apply fails', async () => {

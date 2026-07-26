@@ -412,7 +412,11 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     const style = window.getComputedStyle(element);
     if (style.display === 'none' || style.opacity === '0')
       return true;
-    if (style.clip === 'rect(0px, 0px, 0px, 0px)' || style.clipPath.startsWith('inset(50%'))
+    // The legacy clip property only applies to absolutely positioned boxes; on
+    // a static element it is inert and the content renders normally.
+    if ((style.position === 'absolute' || style.position === 'fixed') && style.clip === 'rect(0px, 0px, 0px, 0px)')
+      return true;
+    if (style.clipPath.startsWith('inset(50%'))
       return true;
     // display:contents generates no box of its own, but its text and children
     // render as if lifted into the parent — a 0x0 rect there hides nothing.
@@ -425,6 +429,24 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     return (rect.width <= 1 || rect.height <= 1) && style.overflow !== 'visible';
   };
   const visibilityHidden = (element: Element) => window.getComputedStyle(element).visibility === 'hidden';
+  const parentInComposedTree = (element: Element): Element | null => {
+    if (element.parentElement)
+      return element.parentElement;
+    const root = element.getRootNode();
+    return root instanceof ShadowRoot ? root.host : null;
+  };
+  // Not every subtree-hiding condition surfaces in a descendant's own computed
+  // style: opacity is not inherited, and a clipping or collapsed ancestor
+  // leaves the descendant's rect untouched. Ancestors of the measured element
+  // are walked (through shadow hosts) so a control inside an opacity:0 or
+  // sr-only wrapper is not reported as showing text nobody can see.
+  const ancestorSubtreeHidden = (element: Element): boolean => {
+    for (let node = parentInComposedTree(element); node; node = parentInComposedTree(node)) {
+      if (subtreeHidden(node))
+        return true;
+    }
+    return false;
+  };
   const sightedText = (element: Element): string => {
     const cached = textCache.get(element);
     if (cached !== undefined)
@@ -470,7 +492,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     // treating its child text as visible raises label-in-name mismatches
     // against a label nobody can see. Button-like inputs render no children,
     // so for them visibility:hidden is as final as the subtree conditions.
-    const text = subtreeHidden(element)
+    const text = subtreeHidden(element) || ancestorSubtreeHidden(element)
       ? ''
       : element instanceof HTMLInputElement && buttonInputTypes.includes(element.type)
         ? (visibilityHidden(element) ? '' : element.value.trim())
