@@ -581,6 +581,34 @@ describe('collectElementFacts in a real page', () => {
     await page.close();
   });
 
+  it('counts only slot-assigned light children of a shadow host as visible', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <my-slotted id="slotted" role="button" aria-label="Cancel"><span>Slotted</span></my-slotted>
+      <my-noslot id="noslot" role="button" aria-label="Cancel"><span>Ghost</span></my-noslot>
+      <my-fallback id="fallback" role="button" aria-label="Cancel"></my-fallback>
+      <script>
+        customElements.define('my-slotted', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<slot></slot>'; }
+        });
+        customElements.define('my-noslot', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<span>Shadow label</span>'; }
+        });
+        customElements.define('my-fallback', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<slot>Fallback</slot>'; }
+        });
+      </script>`);
+    const handles = await Promise.all(['#slotted', '#noslot', '#fallback'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // A shadow tree replaces the host's light children: only slot-assigned
+    // nodes render. "Ghost" has no slot to land in, so it shows nowhere; an
+    // empty slot renders its own fallback content.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Slotted', 'Shadow label', 'Fallback']);
+    await page.close();
+  });
+
   it('keeps text from a descendant that restores visibility under a hidden ancestor', async () => {
     const page = await browser!.newPage();
     await page.setContent(`

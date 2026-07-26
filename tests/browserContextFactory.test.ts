@@ -62,6 +62,7 @@ function createMockBrowserContext() {
     on: vi.fn(),
     route: vi.fn().mockResolvedValue(undefined),
     setStorageState: vi.fn().mockResolvedValue(undefined),
+    storageState: vi.fn().mockResolvedValue({ cookies: [], origins: [] }),
     tracing: {
       start: vi.fn().mockResolvedValue(undefined),
       stop: vi.fn().mockResolvedValue(undefined),
@@ -452,6 +453,35 @@ describe('browserContextFactory', () => {
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
         .rejects.toThrow(/only cookies, or drop the storage state and sign in inside the app/);
     expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores the full original storage state when a partial apply fails', async () => {
+    // A multi-origin apply can fail after earlier origins were already
+    // overwritten; the cookie jar alone is not enough to undo that. The
+    // pre-apply snapshot is replayed through setStorageState itself.
+    const originalState = { cookies: [{ name: 'app_session', value: 'original', domain: 'app.example', path: '/', expires: -1, httpOnly: true, secure: false, sameSite: 'Lax' }], origins: [{ origin: 'https://app.example', localStorage: [{ name: 'token', value: 'original' }] }] };
+    const browserContext = createMockBrowserContext();
+    browserContext.storageState.mockResolvedValue(originalState);
+    browserContext.setStorageState
+        .mockRejectedValueOnce(new Error('Error setting storage state:\nTarget.createTarget: Not supported'))
+        .mockResolvedValueOnce(undefined);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow(/original storage state was restored/);
+    expect(browserContext.setStorageState).toHaveBeenNthCalledWith(2, originalState);
+    // The full-state rollback covered the cookies too.
+    expect(browserContext.clearCookies).not.toHaveBeenCalled();
   });
 
   it('rolls the attached cookie jar back when applying the storage state fails midway', async () => {

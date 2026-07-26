@@ -68,17 +68,26 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   const storageState = config.browser.contextOptions?.storageState;
   if (!storageState)
     return;
-  // setStorageState replaces the cookie jar before it restores origin storage,
-  // so a failure between the two steps would otherwise leave the attached
-  // browser holding the recorded cookies while the operation reports failure.
-  // The jar is snapshotted first and put back on any failure — cookie calls
-  // are pure protocol operations, so the rollback works even on targets where
-  // page creation does not.
+  // setStorageState replaces the cookie jar and then rewrites origin storage
+  // one origin at a time, so a failure partway would otherwise leave the
+  // attached browser holding a mixture of old and recorded state while the
+  // operation reports failure. Both layers are snapshotted first: the cookie
+  // jar through pure protocol calls that work everywhere, and origin storage
+  // through storageState(), which needs the same temporary page as the restore
+  // — where that page cannot be created (Electron), the origin phase of the
+  // forward apply fails before touching any origin, so the cookie snapshot
+  // alone is a complete rollback there.
   const originalCookies = await browserContext.cookies();
+  const originalState = await browserContext.storageState({ indexedDB: true }).catch(() => null);
   try {
     await browserContext.setStorageState(storageState);
   } catch (error) {
-    const restored = await browserContext.clearCookies()
+    // Prefer the full-state rollback; fall back to cookies-only when the full
+    // snapshot or its reapplication is itself impossible on this target.
+    const restoredFully = originalState
+      ? await browserContext.setStorageState(originalState).then(() => true, () => false)
+      : false;
+    const restoredCookies = restoredFully || await browserContext.clearCookies()
         .then(() => originalCookies.length ? browserContext.addCookies(originalCookies) : undefined)
         .then(() => true, () => false);
     // Restoring origin storage (localStorage/IndexedDB) makes Playwright open a
@@ -88,11 +97,15 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     // raw protocol error.
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes('Target.createTarget')) {
-      const rollbackNote = restored
-        ? 'The context\'s original cookies were restored.'
-        : 'Restoring the context\'s original cookies also failed; its cookie jar may now hold the recorded state.';
+      const rollbackNote = restoredFully
+        ? 'The context\'s original storage state was restored.'
+        : restoredCookies
+          ? 'The context\'s original cookies were restored.'
+          : 'Restoring the context\'s original cookies also failed; its cookie jar may now hold the recorded state.';
       throw new Error(`The attached browser cannot open the temporary page Playwright needs to restore localStorage/IndexedDB from the storage state (Electron targets do not support Target.createTarget). Use a storage state that contains only cookies, or drop the storage state and sign in inside the app. ${rollbackNote} Original error: ${message}`);
     }
+    if (!restoredFully && restoredCookies)
+      throw new Error(`${message} The context's original cookies were restored, but origin storage may retain partially applied state.`);
     throw error;
   }
 }

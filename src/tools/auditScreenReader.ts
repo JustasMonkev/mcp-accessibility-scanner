@@ -435,8 +435,16 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     // subtreeHidden conditions, visibility can be restored further down.
     const ownTextVisible = !visibilityHidden(element);
     // A web component renders its visible label in its shadow root; walking only
-    // light-DOM children makes such a host look like an icon-only control.
-    const children = element.shadowRoot ? [...element.shadowRoot.childNodes, ...element.childNodes] : element.childNodes;
+    // light-DOM children makes such a host look like an icon-only control. The
+    // shadow tree replaces the host's light children entirely — light nodes
+    // render only where a <slot> assigns them, so slots contribute their
+    // assigned nodes (or their own fallback content when nothing is assigned)
+    // and unassigned light children contribute nothing.
+    const children = element.shadowRoot
+      ? element.shadowRoot.childNodes
+      : element instanceof HTMLSlotElement
+        ? element.assignedNodes({ flatten: true })
+        : element.childNodes;
     for (const child of children) {
       if (child.nodeType === Node.TEXT_NODE) {
         if (ownTextVisible)
