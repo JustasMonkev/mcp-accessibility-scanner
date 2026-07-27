@@ -472,7 +472,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
   // (scale(0.0001): det 1e-8 against components of 1e-4). Computed
   // transforms serialize as matrix()/matrix3d(); a NaN determinant
   // (unparseable value) fails the comparison and errs on the visible side.
-  const transformCollapses = (transform: string): boolean => {
+  const transformCollapses = (element: Element, transform: string): boolean => {
     const singular = (a: number, b: number, c: number, d: number) => {
       const det = a * d - b * c;
       const component = Math.max(Math.abs(a), Math.abs(b), Math.abs(c), Math.abs(d));
@@ -494,13 +494,21 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
         return false;
       // The determinant of the x/y linear part: scaleZ(0) alone leaves flat
       // content rendered, so only the projected plane matters here.
-      return singular(v[0], v[1], v[4], v[5]);
+      if (!singular(v[0], v[1], v[4], v[5]))
+        return false;
+      // A parent's perspective property is not serialized into this matrix.
+      // It can give an otherwise edge-on child positive painted area.
+      for (let node = parentInComposedTree(element); node; node = parentInComposedTree(node)) {
+        if (window.getComputedStyle(node).perspective !== 'none')
+          return false;
+      }
+      return true;
     }
     return false;
   };
   // Hiding conditions that ignore box geometry; null means undecided — the
   // geometric checks (clip-path insets, collapsed clipping boxes) still apply.
-  const nonGeometricHidden = (style: CSSStyleDeclaration): boolean | null => {
+  const nonGeometricHidden = (element: Element, style: CSSStyleDeclaration): boolean | null => {
     if (style.display === 'none' || style.opacity === '0')
       return true;
     // display:contents generates no box of its own, but its text and children
@@ -509,7 +517,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     // transform to apply to, so it is settled before those checks.
     if (style.display === 'contents')
       return false;
-    if (transformCollapses(style.transform))
+    if (transformCollapses(element, style.transform))
       return true;
     // The legacy clip property only applies to absolutely positioned boxes; on
     // a static element it is inert and the content renders normally.
@@ -524,7 +532,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     (rect.width <= 1 || rect.height <= 1) && style.overflow !== 'visible';
   const subtreeHidden = (element: Element) => {
     const style = window.getComputedStyle(element);
-    const decided = nonGeometricHidden(style);
+    const decided = nonGeometricHidden(element, style);
     if (decided !== null)
       return decided;
     const rect = element.getBoundingClientRect();
@@ -543,7 +551,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     const visibility = window.getComputedStyle(element).visibility;
     return visibility === 'hidden' || visibility === 'collapse';
   };
-  const parentInComposedTree = (element: Element): Element | null => {
+  function parentInComposedTree(element: Element): Element | null {
     // A slotted element renders where its assigned <slot> sits, so its
     // flat-tree parent is the slot; parentElement is the light-DOM host and
     // following it would skip a hidden wrapper around the slot inside the
@@ -555,7 +563,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
       return element.parentElement;
     const root = element.getRootNode();
     return root instanceof ShadowRoot ? root.host : null;
-  };
+  }
   // Not every subtree-hiding condition surfaces in a descendant's own computed
   // style: opacity is not inherited, and a clipping or collapsed ancestor
   // leaves the descendant's rect untouched. Ancestors of the measured element
@@ -579,7 +587,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     let escapesOverflowClip = outOfFlow(window.getComputedStyle(element));
     for (let node = parentInComposedTree(element); node; node = parentInComposedTree(node)) {
       const style = window.getComputedStyle(node);
-      const decided = nonGeometricHidden(style);
+      const decided = nonGeometricHidden(node, style);
       if (decided === true)
         return true;
       if (decided === null) {
@@ -637,7 +645,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
         continue;
       const childElement = child as Element;
       const style = window.getComputedStyle(childElement);
-      const decided = nonGeometricHidden(style);
+      const decided = nonGeometricHidden(childElement, style);
       if (decided === true)
         continue;
       let childState = clipState;

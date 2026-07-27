@@ -1224,6 +1224,37 @@ describe('audit_site tool', () => {
     expect(report.sessionLosses).toEqual([{ url: 'https://example.com/app/logout', cookies: ['app_sid'] }]);
   });
 
+  it('preserves a discovered trailing slash when scoping cookies', async () => {
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/app/'],
+      'https://example.com/app/': ['https://example.com/app/logout'],
+      'https://example.com/app/logout': [],
+    }, {
+      redirectMap: { 'https://example.com/app': 'https://example.com/app/' },
+      cookiesForUrl: url => url.endsWith('/app/logout')
+        ? []
+        : [{ name: 'app_sid', path: '/app/' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      startUrl: 'https://example.com/',
+      maxPages: 5,
+      maxDepth: 3,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/app/logout', cookies: ['app_sid'] }]);
+  });
+
   it('does not report a cookie minted mid-crawl as a lost crawl-start cookie', async () => {
     // `minted` first appears while visiting /, after the crawl-start jar
     // snapshot. The discovered URLs must not adopt it into the baseline, or its

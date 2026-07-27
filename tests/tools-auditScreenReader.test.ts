@@ -816,6 +816,16 @@ describe('collectElementFacts in a real page', () => {
     expect(visibleText).toEqual(['Send', null]);
   });
 
+  it('keeps edge-on transforms visible when an ancestor supplies perspective', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="perspective:500px;perspective-origin:0 0">
+        <button id="projected" style="margin-left:100px;transform:rotateY(90deg)" aria-label="Submit">Send</button>
+      </div>`,
+    ['#projected']);
+
+    expect(visibleText).toEqual(['Send']);
+  });
+
   it('keeps near-singular transforms visible when a descendant can counter them', async () => {
     const visibleText = await measureVisibleText(`
       <div style="transform: scale(0.0001)"><button id="counter" style="transform: scale(10000)" aria-label="Submit">Send</button></div>

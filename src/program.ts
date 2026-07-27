@@ -49,14 +49,14 @@ async function resolveProgramContext(options: Record<string, unknown>): Promise<
   if (options.extension)
     assertStorageStateSupported(config, extensionContextFactory, '--extension attaches to the browser you are already running and uses the context it already has; --isolated does not change that. Drop the storage state and sign in in that browser before auditing.');
   const browserContextFactory = contextFactory(config);
-  // --connect-tool with a persistent default provider must reject the
-  // profile conflict at startup: the factory itself only rejects the
+  // Provider-switching modes with a persistent default provider must reject
+  // the profile conflict at startup: the factory itself only rejects the
   // combination lazily, on its first browser operation, while the extension
   // provider refuses the storage state at switch time — so the server would
   // start advertising two providers and neither could ever create a context.
   // (Other default providers ignore --user-data-dir, and the extension leg
   // alone validates at switch time instead.)
-  if (options.connectTool && browserContextFactory instanceof PersistentContextFactory)
+  if ((options.connectTool || options.vscode) && browserContextFactory instanceof PersistentContextFactory)
     assertStorageStateDoesNotResetUserProfile(config, persistentProfileConflictRemedy);
   return { config, browserContextFactory, extensionContextFactory };
 }

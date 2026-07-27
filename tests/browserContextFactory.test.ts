@@ -363,7 +363,7 @@ describe('browserContextFactory', () => {
     expect(rmSpy).toHaveBeenCalledWith(secondDir, { recursive: true, force: true });
   });
 
-  it('replaces persistent startup pages after the storage state lands', async () => {
+  it('parks persistent startup pages before the storage state lands', async () => {
     // browser.launchOptions.args can carry a URL, so a page may load before
     // setStorageState() runs and render the anonymous identity — Context
     // would adopt that DOM and a scan could audit the wrong user despite
@@ -384,6 +384,7 @@ describe('browserContextFactory', () => {
     await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
 
     expect(startup.close).toHaveBeenCalledTimes(1);
+    expect(startup.close.mock.invocationCallOrder[0]).toBeLessThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
     const replacement = fresh.find(page => page.goto.mock.calls.length)!;
     expect(replacement.goto).toHaveBeenCalledWith('https://app.example/dashboard');
     expect(replacement.goto.mock.invocationCallOrder[0]).toBeGreaterThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
@@ -982,6 +983,43 @@ describe('browserContextFactory', () => {
         .rejects.toThrow(/origins entry .* is not an absolute http\(s\) URL/);
     expect(browserContext.setStorageState).not.toHaveBeenCalled();
     expect(browserContext.newPage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: 'zero IndexedDB version',
+      database: { name: 'auth', version: 0, stores: [] },
+      problem: /positive integer version/,
+    },
+    {
+      label: 'auto-incrementing store with an array key path',
+      database: { name: 'auth', version: 1, stores: [{ name: 'tokens', autoIncrement: true, keyPathArray: ['tenant', 'id'], records: [], indexes: [] }] },
+      problem: /cannot combine autoIncrement with an empty or array key path/,
+    },
+    {
+      label: 'multi-entry index with an array key path',
+      database: { name: 'auth', version: 1, stores: [{ name: 'tokens', autoIncrement: false, records: [], indexes: [{ name: 'by_scope', keyPathArray: ['tenant', 'scope'], multiEntry: true, unique: false }] }] },
+      problem: /cannot combine multiEntry with an array key path/,
+    },
+  ])('rejects a storage state with a $label before touching the browser', async ({ database, problem }) => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: { cookies: [], origins: [{ origin: 'https://app.example', localStorage: [], indexedDB: [database] }] } as any },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow(problem);
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+    expect(browserContext.storageState).not.toHaveBeenCalled();
+    expect(browserContext.cookies).not.toHaveBeenCalled();
   });
 
   it('closes a page outright when no replacement tab can be created', async () => {

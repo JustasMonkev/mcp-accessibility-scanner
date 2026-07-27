@@ -21,6 +21,7 @@ type CrawlStrategy = 'links' | 'nav' | 'sitemap' | 'provided';
 
 type CrawlItem = {
   url: string;
+  cookieUrl: string;
   depth: number;
   discoveredFrom: string | null;
 };
@@ -468,8 +469,11 @@ const auditSite = defineTabTool({
         return;
       }
 
+      const cookieUrl = new URL(rawUrl, startUrl);
+      cookieUrl.hash = '';
       queue.push({
         url: normalizedUrlString,
+        cookieUrl: cookieUrl.toString(),
         depth,
         discoveredFrom,
       });
@@ -505,7 +509,7 @@ const auditSite = defineTabTool({
     // Cookies the crawl URLs carry before the crawl are the session the caller
     // signed in with. If one disappears mid-crawl every later page is audited as a
     // signed-out user, which still looks like a clean run, so record where it happened.
-    const cookieScopeUrls = queue.map(item => item.url);
+    const cookieScopeUrls = queue.map(item => item.cookieUrl);
     const cookieScope = new Set(cookieScopeUrls);
     // The whole jar is snapshotted once, so a URL discovered mid-crawl can only
     // add identities that existed when the crawl started. Without this, a cookie
@@ -551,10 +555,10 @@ const auditSite = defineTabTool({
         // unreported — accepted, because deciding which snapshot cookies apply to
         // a URL ourselves would reimplement browser cookie matching, and getting
         // that wrong turns into false session-loss warnings.
-        if (!cookieScope.has(item.url)) {
-          cookieScope.add(item.url);
-          cookieScopeUrls.push(item.url);
-          const discovered = await readCrawlCookies(crawlTab.page, [item.url]).catch(() => null);
+        if (!cookieScope.has(item.cookieUrl)) {
+          cookieScope.add(item.cookieUrl);
+          cookieScopeUrls.push(item.cookieUrl);
+          const discovered = await readCrawlCookies(crawlTab.page, [item.cookieUrl]).catch(() => null);
           for (const [identity, cookie] of discovered ?? []) {
             if (initialCookieIdentities.has(identity) && !baselineCookies.has(identity))
               baselineCookies.set(identity, cookie);

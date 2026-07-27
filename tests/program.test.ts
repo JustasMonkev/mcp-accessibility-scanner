@@ -113,6 +113,17 @@ describe('CLI command dispatch contract', () => {
     });
   });
 
+  describe('--vscode with a profile-conflicting storage state', () => {
+    it('rejects at startup instead of advertising two unusable providers', async () => {
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-vscode-'));
+      const stateFile = path.join(stateDir, 'auth.json');
+      fs.writeFileSync(stateFile, JSON.stringify({ cookies: [], origins: [] }));
+      const profileDir = path.join(stateDir, 'profile');
+      const { stderr } = await collectOutput(['--vscode', '--storage-state', stateFile, '--user-data-dir', profileDir]);
+      expect(stderr).toContain('--storage-state and --user-data-dir contradict each other');
+    });
+  });
+
   describe('subcommand --help flags', () => {
     it('list-tools accepts --help', () => {
       const output = runCLI('list-tools --help');

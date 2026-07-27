@@ -127,6 +127,44 @@ function assertValidStorageState(state: { cookies?: unknown[], origins?: unknown
         : null;
     if (problem)
       throw new Error(`Invalid storage state: ${problem}. Nothing was changed — the state is validated before the apply, because setStorageState() clears the attached context's HTTP cache and cookie jar before it validates, and the cache cannot be restored.`);
+
+    const databaseNames = new Set<string>();
+    for (const value of Array.isArray(entry?.indexedDB) ? entry.indexedDB : []) {
+      const database = value as Record<string, unknown>;
+      const stores = Array.isArray(database.stores) ? database.stores as Record<string, unknown>[] : [];
+      let indexedDBProblem = !Number.isSafeInteger(database.version) || (database.version as number) <= 0
+        ? `IndexedDB database "${String(database.name ?? '')}" should have a positive integer version`
+        : databaseNames.has(String(database.name))
+          ? `IndexedDB database name "${String(database.name)}" is duplicated`
+          : null;
+      databaseNames.add(String(database.name));
+      const storeNames = new Set<string>();
+      for (const store of stores) {
+        const storeName = String(store.name);
+        indexedDBProblem ??= storeNames.has(storeName)
+          ? `IndexedDB object store name "${storeName}" is duplicated in database "${String(database.name)}"`
+          : store.autoIncrement && (store.keyPath === '' || Array.isArray(store.keyPathArray))
+            ? `IndexedDB object store "${storeName}" cannot combine autoIncrement with an empty or array key path`
+            : Array.isArray(store.keyPathArray) && !store.keyPathArray.length
+              ? `IndexedDB object store "${storeName}" should not have an empty array key path`
+              : null;
+        storeNames.add(storeName);
+        const indexNames = new Set<string>();
+        for (const index of Array.isArray(store.indexes) ? store.indexes as Record<string, unknown>[] : []) {
+          const indexName = String(index.name);
+          indexedDBProblem ??= indexNames.has(indexName)
+            ? `IndexedDB index name "${indexName}" is duplicated in object store "${storeName}"`
+            : index.multiEntry && Array.isArray(index.keyPathArray)
+              ? `IndexedDB index "${indexName}" cannot combine multiEntry with an array key path`
+              : Array.isArray(index.keyPathArray) && !index.keyPathArray.length
+                ? `IndexedDB index "${indexName}" should not have an empty array key path`
+                : null;
+          indexNames.add(indexName);
+        }
+      }
+      if (indexedDBProblem)
+        throw new Error(`Invalid storage state: ${indexedDBProblem}. Nothing was changed — the state is validated before the apply, because setStorageState() clears the attached context's HTTP cache and cookie jar before it validates, and the cache cannot be restored.`);
+    }
   }
 }
 
@@ -777,19 +815,13 @@ export class PersistentContextFactory implements BrowserContextFactory {
   private async _applyStorageState(browserContext: playwright.BrowserContext, storageState: NonNullable<FullConfig['browser']['contextOptions']>['storageState'], userDataDir: string): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     if (storageState) {
       try {
+        // Startup pages can keep persisting their anonymous identity while the
+        // state lands. Park them on blank replacements before the apply, then
+        // navigate the replacements only after the recorded state is installed.
+        const replaced = await replaceOpenPagesWithBlankTabs(browserContext);
         await browserContext.setStorageState(storageState);
-        // A non-blank startup page (browser.launchOptions.args can carry a
-        // URL) loaded before the state landed and renders the anonymous
-        // identity — Context would adopt that DOM and a scan could audit the
-        // wrong user despite --storage-state. The same replacement the
-        // reused-context apply uses brings every open page onto the state,
-        // with the origin policy installed first: these navigations run with
-        // the recorded credentials in place, ahead of Context's own (no-op,
-        // once-per-context) ensure. (Park-first is not needed here: the
-        // disposable profile carries no previous identity a startup page
-        // could write back.)
         await ensureNetworkPolicyRoutes(this.config, browserContext);
-        await navigateReplacementPages(await replaceOpenPagesWithBlankTabs(browserContext));
+        await navigateReplacementPages(replaced);
       } catch (error) {
         // Nobody holds a close() for this context yet, so a bad storage-state
         // file must not leave the launched browser running.
