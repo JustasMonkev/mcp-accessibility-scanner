@@ -70,6 +70,7 @@ export class Context {
   private _closeBrowserContextPromise: Promise<void> | undefined;
   private _runningToolName: string | undefined;
   private _abortController = new AbortController();
+  private _removePageObserver: (() => void) | undefined;
 
   constructor(options: ContextOptions) {
     this.tools = options.tools;
@@ -180,6 +181,7 @@ export class Context {
     this._browserContextPromise = undefined;
 
     await promise.then(async ({ browserContext, close }) => {
+      this._detachFromBrowserContext();
       // close() is the factory's only cleanup hook — for storage-state
       // sessions it also removes the disposable profile — and this close
       // attempt is the only one (_browserContextPromise is already cleared),
@@ -187,6 +189,13 @@ export class Context {
       try {
         if (this.config.saveTrace)
           await browserContext.tracing.stop();
+      } catch (error) {
+        // The symmetric race to the tolerated "already started" on setup: on
+        // a shared context the sibling that closed first already stopped the
+        // one recording, which is an expected shutdown, not an error worth
+        // logging. Anything else still surfaces.
+        if (!(error instanceof Error && /already stopped|Must start tracing before stopping/i.test(error.message)))
+          throw error;
       } finally {
         await close();
       }
@@ -201,6 +210,19 @@ export class Context {
 
   private async _setupRequestInterception(context: playwright.BrowserContext) {
     await ensureNetworkPolicyRoutes(this.config, context);
+  }
+
+  // The browser context can outlive this session (non-isolated CDP siblings
+  // share it), so the session's observers must not: a leftover 'page'
+  // listener would keep creating tabs inside a disposed Context, and the tab
+  // wrappers' own page listeners would pile up with session churn.
+  private _detachFromBrowserContext() {
+    this._removePageObserver?.();
+    this._removePageObserver = undefined;
+    for (const tab of this._tabs)
+      tab.dispose();
+    this._tabs = [];
+    this._currentTab = undefined;
   }
 
   private _ensureBrowserContext() {
@@ -229,7 +251,9 @@ export class Context {
         await InputRecorder.create(this, browserContext);
       for (const page of browserContext.pages())
         this._onPageCreated(page);
-      browserContext.on('page', page => this._onPageCreated(page));
+      const onPage = (page: playwright.Page) => this._onPageCreated(page);
+      browserContext.on('page', onPage);
+      this._removePageObserver = () => browserContext.off('page', onPage);
       if (this.config.saveTrace) {
         try {
           await browserContext.tracing.start({
@@ -249,6 +273,9 @@ export class Context {
         }
       }
     } catch (error) {
+      // The shared context may survive this close (siblings hold it), so the
+      // observers registered above must come off explicitly.
+      this._detachFromBrowserContext();
       await result.close().catch(() => {});
       throw error;
     }

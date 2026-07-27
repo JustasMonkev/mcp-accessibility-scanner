@@ -55,26 +55,35 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _downloads: { download: playwright.Download, finished: boolean, outputFile: string }[] = [];
   private _defaultTimeout: number;
 
+  private _pageListeners: { event: string, listener: (...args: any[]) => void }[] = [];
+
   constructor(context: Context, page: playwright.Page, onPageClose: (tab: Tab) => void) {
     super();
     this.context = context;
     this.page = page;
     this._onPageClose = onPageClose;
     this._defaultTimeout = context.config.timeouts.defaultTimeout ?? 6000;
-    page.on('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
-    page.on('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
-    page.on('request', request => this._requests.set(request, null));
-    page.on('response', response => this._handleResponse(response));
-    page.on('close', () => this._onClose());
-    page.on('filechooser', chooser => {
+    // Registered through a tracked list so dispose() can take them off again:
+    // on a shared (non-isolated CDP) context the page outlives the session,
+    // and listeners left behind would pile up with session churn.
+    const listen = (event: string, listener: (...args: any[]) => void) => {
+      page.on(event as any, listener);
+      this._pageListeners.push({ event, listener });
+    };
+    listen('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
+    listen('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
+    listen('request', request => this._requests.set(request, null));
+    listen('response', response => this._handleResponse(response));
+    listen('close', () => this._onClose());
+    listen('filechooser', chooser => {
       this.setModalState({
         type: 'fileChooser',
         description: 'File chooser',
         fileChooser: chooser,
       });
     });
-    page.on('dialog', dialog => this._dialogShown(dialog));
-    page.on('download', download => {
+    listen('dialog', dialog => this._dialogShown(dialog));
+    listen('download', download => {
       void this._downloadStarted(download);
     });
     page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? 30000);
@@ -84,6 +93,16 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   static forPage(page: playwright.Page): Tab | undefined {
     return _pageTabMap.get(page);
+  }
+
+  // Detaches this wrapper from its page without closing the page: the page
+  // can belong to a shared context that outlives the session.
+  dispose() {
+    for (const { event, listener } of this._pageListeners)
+      this.page.off(event as any, listener);
+    this._pageListeners = [];
+    if (_pageTabMap.get(this.page) === this)
+      _pageTabMap.delete(this.page);
   }
 
   modalStates(): ModalState[] {

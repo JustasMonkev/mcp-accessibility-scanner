@@ -177,6 +177,46 @@ describe('Context', () => {
     });
   });
 
+  describe('shared context observers', () => {
+    function createMockPage() {
+      const page = new EventEmitter() as any;
+      page.setDefaultNavigationTimeout = vi.fn();
+      page.setDefaultTimeout = vi.fn();
+      page.url = () => 'about:blank';
+      return page;
+    }
+
+    it('removes its page observers and tab wrappers from the context on close', async () => {
+      // A non-isolated CDP context is shared and survives this session's
+      // close; the session's 'page' listener and its tabs' page listeners
+      // must not — they would keep creating tabs inside a disposed Context
+      // and pile up with session churn.
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: { rootPath: '/tmp' } as any,
+      });
+      await context.newTab();
+
+      const page = createMockPage();
+      mockBrowserContext.emit('page', page);
+      expect(context.tabs()).toHaveLength(1);
+      expect(page.listenerCount('console')).toBeGreaterThan(0);
+
+      await context.closeBrowserContext();
+
+      expect(context.tabs()).toHaveLength(0);
+      expect(page.listenerCount('console')).toBe(0);
+      expect(mockBrowserContext.listenerCount('page')).toBe(0);
+      // A page opened by a sibling after this session closed must not
+      // resurrect tabs inside the disposed session.
+      mockBrowserContext.emit('page', createMockPage());
+      expect(context.tabs()).toHaveLength(0);
+    });
+  });
+
   describe('isRunningTool', () => {
     it('should return false initially', () => {
       const context = new Context({

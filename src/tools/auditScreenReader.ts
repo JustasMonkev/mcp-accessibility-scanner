@@ -634,8 +634,17 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
       // Playwright's snapshot still lists aria-hidden elements, but a screen
       // reader never reaches them, so nothing about them is a defect. ARIA
       // enumerated tokens are ASCII case-insensitive, so aria-hidden="TRUE"
-      // hides exactly like "true" and needs the case-insensitive flag.
-      ariaHidden: element.closest('[aria-hidden="true" i]') !== null,
+      // hides exactly like "true". closest() stops at the shadow boundary,
+      // so the composed-tree walker is used instead — a host (or a host's
+      // ancestor) carrying aria-hidden removes its whole shadow tree from
+      // the accessibility tree too.
+      ariaHidden: (() => {
+        for (let node: Element | null = element; node; node = parentInComposedTree(node)) {
+          if (node.getAttribute('aria-hidden')?.toLowerCase() === 'true')
+            return true;
+        }
+        return false;
+      })(),
     };
   });
 }

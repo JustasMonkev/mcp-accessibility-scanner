@@ -507,6 +507,17 @@ describe('collectElementFacts in a real page', () => {
     browser ??= await chromium.launch();
   });
 
+  // Shared scaffold for the pure visible-text measurements; tests asserting
+  // other facts (ariaHidden, href) keep their own setup.
+  async function measureVisibleText(html: string, selectors: string[]) {
+    const page = await browser!.newPage();
+    await page.setContent(html);
+    const handles = await Promise.all(selectors.map(selector => page.$(selector)));
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+    await page.close();
+    return facts.map(fact => fact.visibleText);
+  }
+
   it('takes the visible label of button-like inputs from value', async () => {
     const page = await browser!.newPage();
     await page.setContent(`
@@ -744,45 +755,36 @@ describe('collectElementFacts in a real page', () => {
   });
 
   it('measures inset clips against the untransformed reference box', async () => {
-    const page = await browser!.newPage();
-    await page.setContent(`
+    const visibleText = await measureVisibleText(`
       <div id="strip" style="width:100px;height:40px;clip-path:inset(0 30px)">Send</div>
       <div id="rotated-strip" style="width:100px;height:40px;clip-path:inset(0 30px);transform:rotate(90deg)">Send</div>
-      <div id="swallowing" style="width:100px;height:40px;clip-path:inset(0 50px);transform:rotate(90deg)">Send</div>`);
-    const handles = await Promise.all(['#strip', '#rotated-strip', '#swallowing'].map(selector => page.$(selector)));
-
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+      <div id="swallowing" style="width:100px;height:40px;clip-path:inset(0 50px);transform:rotate(90deg)">Send</div>`,
+    ['#strip', '#rotated-strip', '#swallowing']);
 
     // clip-path insets resolve against the untransformed border box: the
     // rotated strip still paints 40px of the element even though its
     // transformed bounding rect is only 40px wide — comparing the 30px insets
     // against that rect wrongly swallowed it. A genuinely swallowing inset
     // (50px each side of a 100px box) hides rotated or not.
-    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', 'Send', null]);
-    await page.close();
+    expect(visibleText).toEqual(['Send', 'Send', null]);
   });
 
   it('keeps perspective projections visible while flat edge-on planes hide', async () => {
-    const page = await browser!.newPage();
-    await page.setContent(`
+    const visibleText = await measureVisibleText(`
       <button id="persp" style="transform: perspective(500px) translateX(100px) rotateY(90deg)" aria-label="Submit">Send</button>
-      <button id="edgeon" style="transform: rotateY(90deg)" aria-label="Submit">Send</button>`);
-    const handles = await Promise.all(['#persp', '#edgeon'].map(selector => page.$(selector)));
-
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+      <button id="edgeon" style="transform: rotateY(90deg)" aria-label="Submit">Send</button>`,
+    ['#persp', '#edgeon']);
 
     // Under perspective an edge-on-but-offset plane still projects to a
     // quadrilateral with positive area — its matrix3d() x/y part is singular
     // all the same, so the determinant test alone would wrongly hide it.
     // Without perspective the projection is orthographic and the edge-on
     // plane really paints nothing.
-    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
-    await page.close();
+    expect(visibleText).toEqual(['Send', null]);
   });
 
   it('lets an out-of-flow control escape a collapsed clip box that is not its containing block', async () => {
-    const page = await browser!.newPage();
-    await page.setContent(`
+    const visibleText = await measureVisibleText(`
       <div style="position:relative">
         <div style="width:1px;height:1px;overflow:hidden">
           <button id="escaped" style="position:absolute;top:0;left:0" aria-label="Submit">Send</button>
@@ -793,17 +795,41 @@ describe('collectElementFacts in a real page', () => {
       </div>
       <div style="width:1px;height:1px;overflow:hidden">
         <button id="inflow" aria-label="Submit">Send</button>
-      </div>`);
-    const handles = await Promise.all(['#escaped', '#contained', '#inflow'].map(selector => page.$(selector)));
-
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+      </div>`,
+    ['#escaped', '#contained', '#inflow']);
 
     // Overflow clips bind only descendants whose containing block sits at or
     // below the clipping box: #escaped is positioned by the wrapper OUTSIDE
     // the 1px box and renders in full, while #contained's containing block IS
     // the clipping box (sr-only behavior stands) and in-flow #inflow is
     // clipped by any collapsed ancestor.
-    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null, null]);
+    expect(visibleText).toEqual(['Send', null, null]);
+  });
+
+  it('treats aria-hidden on a shadow host as hiding the host\'s shadow content', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <hidden-card id="hidden-host" aria-hidden="true"></hidden-card>
+      <plain-host id="shown-host"></plain-host>
+      <script>
+        customElements.define('hidden-card', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<button id="in-hidden">Send</button>'; }
+        });
+        customElements.define('plain-host', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<button id="in-shown">Send</button>'; }
+        });
+      </script>`);
+    const handles = await Promise.all([
+      page.$('#hidden-host button'),
+      page.$('#shown-host button'),
+    ]);
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // closest() stops at the shadow boundary, so an aria-hidden host used to
+    // leave its shadow content marked reachable; the composed-tree walk sees
+    // through the boundary like the visibility checks do.
+    expect(facts.map(fact => fact.ariaHidden)).toEqual([true, false]);
     await page.close();
   });
 

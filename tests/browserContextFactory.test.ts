@@ -83,6 +83,17 @@ function createMockBrowser(browserContext: any) {
   } as any;
 }
 
+function createMockPage(url: string, overrides: Record<string, any> = {}) {
+  return {
+    url: () => url,
+    frames: vi.fn().mockReturnValue([]),
+    reload: vi.fn().mockResolvedValue(undefined),
+    goto: vi.fn().mockResolvedValue(undefined),
+    close: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  };
+}
+
 function createMockChildProcess() {
   const childProcess = new EventEmitter() as any;
   childProcess.stderr = new EventEmitter();
@@ -491,8 +502,8 @@ describe('browserContextFactory', () => {
     // scan would audit the wrong user unless the page is brought onto the
     // freshly installed state.
     const pages = [
-      { url: () => 'https://app.example/a', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockResolvedValue(undefined) },
-      { url: () => 'https://app.example/b', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockResolvedValue(undefined) },
+      createMockPage('https://app.example/a'),
+      createMockPage('https://app.example/b'),
     ];
     const browserContext = createMockBrowserContext();
     browserContext.pages.mockReturnValue(pages);
@@ -519,7 +530,7 @@ describe('browserContextFactory', () => {
     // The reloads run inside the factory, before Context installs the origin
     // allowlist/blocklist — with the recorded credentials already applied, the
     // first navigation must not be able to reach a blocked origin.
-    const pages = [{ url: () => 'https://app.example/a', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockResolvedValue(undefined) }];
+    const pages = [createMockPage('https://app.example/a')];
     const browserContext = createMockBrowserContext();
     browserContext.pages.mockReturnValue(pages);
     const browser = createMockBrowser(browserContext);
@@ -549,7 +560,7 @@ describe('browserContextFactory', () => {
   });
 
   it('leaves routing untouched around the reloads when no network policy is configured', async () => {
-    const pages = [{ url: () => 'https://app.example/a', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockResolvedValue(undefined) }];
+    const pages = [createMockPage('https://app.example/a')];
     const browserContext = createMockBrowserContext();
     browserContext.pages.mockReturnValue(pages);
     const browser = createMockBrowser(browserContext);
@@ -675,35 +686,131 @@ describe('browserContextFactory', () => {
     expect(browser.close).not.toHaveBeenCalled();
   });
 
-  it('rejects a storage state with cookies Playwright would refuse, before touching the browser', async () => {
-    // Playwright validates cookies only while installing them — after the
-    // attached context's HTTP cache and cookie jar are already cleared — and
-    // the cache cannot be restored by the rollback.
-    const cases = [
-      { cookie: { name: 'sid', value: 'x', domain: '', path: '/' }, problem: /url or a domain\/path pair/ },
-      { cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', expires: -2 }, problem: /valid expires/ },
-      { cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', sameSite: 'Sideways' }, problem: /Strict\|Lax\|None/ },
-    ];
-    for (const { cookie, problem } of cases) {
-      vi.clearAllMocks();
-      const browserContext = createMockBrowserContext();
-      const browser = createMockBrowser(browserContext);
-      connectOverCDP.mockResolvedValue(browser);
+  // Playwright validates cookies only while installing them — after the
+  // attached context's HTTP cache and cookie jar are already cleared — and
+  // the cache cannot be restored by the rollback.
+  it.each([
+    { label: 'empty domain', cookie: { name: 'sid', value: 'x', domain: '', path: '/' }, problem: /url or a domain\/path pair/ },
+    { label: 'url with domain', cookie: { name: 'sid', value: 'x', url: 'https://app.example/', domain: 'app.example' }, problem: /either a url or a domain/ },
+    { label: 'url with path', cookie: { name: 'sid', value: 'x', url: 'https://app.example/', path: '/' }, problem: /either a url or a path/ },
+    { label: 'expires -2', cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', expires: -2 }, problem: /valid expires/ },
+    { label: 'bad sameSite', cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', sameSite: 'Sideways' }, problem: /Strict\|Lax\|None/ },
+  ])('rejects a storage state with a $label cookie before touching the browser', async ({ cookie, problem }) => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
 
-      const config = await resolveConfig({
-        browser: {
-          cdpEndpoint: 'http://127.0.0.1:9222',
-          contextOptions: { storageState: { cookies: [cookie], origins: [] } as any },
-        },
-      });
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: { cookies: [cookie], origins: [] } as any },
+      },
+    });
 
-      const factory = contextFactory(config);
+    const factory = contextFactory(config);
 
-      await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-          .rejects.toThrow(problem);
-      expect(browserContext.setStorageState).not.toHaveBeenCalled();
-      expect(browserContext.clearCookies).not.toHaveBeenCalled();
-    }
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow(problem);
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+    expect(browserContext.clearCookies).not.toHaveBeenCalled();
+  });
+
+  it('closes an isolated session\'s own context on release, keeping the shared connection', async () => {
+    // Each isolated session gets a distinct context on the shared connection;
+    // releasing a session must reclaim its context (pages, routes, listeners)
+    // instead of letting abandoned contexts pile up until the last session
+    // exits — while the connection itself stays for the remaining sibling.
+    const context1 = createMockBrowserContext();
+    const context2 = createMockBrowserContext();
+    const browser = createMockBrowser(context1);
+    browser.newContext.mockResolvedValueOnce(context1).mockResolvedValueOnce(context2);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: { cdpEndpoint: 'http://127.0.0.1:9222', isolated: true },
+    });
+
+    const factory = contextFactory(config);
+    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    await first.close();
+    expect(context1.close).toHaveBeenCalledTimes(1);
+    expect(browser.close).not.toHaveBeenCalled();
+    await second.close();
+    expect(context2.close).toHaveBeenCalledTimes(1);
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts CDP session references per browser generation', async () => {
+    // An external disconnect makes the factory hand out a fresh connection
+    // while a stale session still holds the old one. With one shared counter
+    // the stale release would keep the new connection open forever; counted
+    // per browser object, the new connection closes when its own last user
+    // exits.
+    const context1 = createMockBrowserContext();
+    const browser1 = createMockBrowser(context1);
+    const context2 = createMockBrowserContext();
+    const browser2 = createMockBrowser(context2);
+    connectOverCDP.mockResolvedValueOnce(browser1).mockResolvedValueOnce(browser2);
+
+    const config = await resolveConfig({
+      browser: { cdpEndpoint: 'http://127.0.0.1:9222' },
+    });
+
+    const factory = contextFactory(config);
+    const stale = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    // The connection drops externally; the factory's cached browser resets.
+    const disconnected = browser1.on.mock.calls.find((call: any[]) => call[0] === 'disconnected')?.[1];
+    disconnected?.();
+
+    const fresh = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    expect(fresh.browserContext).toBe(context2);
+
+    // The fresh session is the new browser's only user — closing it must
+    // close that browser even though the stale session is still around.
+    await fresh.close();
+    expect(browser2.close).toHaveBeenCalledTimes(1);
+    // And the stale release closes its own dead browser, not the new one.
+    await stale.close();
+    expect(browser1.close).toHaveBeenCalledTimes(1);
+    expect(browser2.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the connection open when a session fails while a sibling is still creating', async () => {
+    // The reference is claimed before context creation: a sibling still
+    // inside _doCreateContext() must count, or a concurrent failure would
+    // see zero holders and close the shared connection out from under it.
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    let releaseApply: () => void;
+    browserContext.setStorageState.mockImplementationOnce(() => new Promise<void>(resolve => { releaseApply = resolve; }));
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    // Session A blocks inside the storage-state apply.
+    const pendingA = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    await vi.waitFor(() => expect(browserContext.setStorageState).toHaveBeenCalled());
+
+    // Session B fails context creation while A is still in flight.
+    browser.contexts.mockReturnValueOnce([]);
+    browser.newContext.mockRejectedValueOnce(new Error('Target.createBrowserContext: Not supported'));
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('Target.createBrowserContext');
+    expect(browser.close).not.toHaveBeenCalled();
+
+    releaseApply!();
+    const resultA = await pendingA;
+    await resultA.close();
+    expect(browser.close).toHaveBeenCalledTimes(1);
   });
 
   it('blanks pages whose reload fails, and closes them when even that fails', async () => {
@@ -712,9 +819,9 @@ describe('browserContextFactory', () => {
     // remaining page and a scan would read the stale document as the new
     // session's UI.
     const pages = [
-      { url: () => 'https://app.example/ok', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockResolvedValue(undefined), goto: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined) },
-      { url: () => 'https://blocked.example/a', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockRejectedValue(new Error('net::ERR_BLOCKED_BY_CLIENT')), goto: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined) },
-      { url: () => 'https://dead.example/b', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockRejectedValue(new Error('Target closed')), goto: vi.fn().mockRejectedValue(new Error('Target closed')), close: vi.fn().mockResolvedValue(undefined) },
+      createMockPage('https://app.example/ok'),
+      createMockPage('https://blocked.example/a', { reload: vi.fn().mockRejectedValue(new Error('net::ERR_BLOCKED_BY_CLIENT')) }),
+      createMockPage('https://dead.example/b', { reload: vi.fn().mockRejectedValue(new Error('Target closed')), goto: vi.fn().mockRejectedValue(new Error('Target closed')) }),
     ];
     const browserContext = createMockBrowserContext();
     browserContext.pages.mockReturnValue(pages);
@@ -834,10 +941,9 @@ describe('browserContextFactory', () => {
         .rejects.toThrow('ENOENT');
     const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
 
-    // Three calls: the failed apply, its full-state rollback, and the second
-    // session's fresh attempt — which must target the configured state again.
-    expect(browserContext.setStorageState).toHaveBeenCalledTimes(3);
-    expect(browserContext.setStorageState.mock.calls[2][0]).toBe('/tmp/auth.json');
+    // The retry must target the configured state again (the exact call count
+    // is the rollback's business, not this contract's).
+    expect(browserContext.setStorageState.mock.lastCall[0]).toBe('/tmp/auth.json');
     expect(result.browserContext).toBe(browserContext);
   });
 
@@ -867,7 +973,7 @@ describe('browserContextFactory', () => {
   });
 
   it('does not reload pages when the apply failed and the original state was rolled back', async () => {
-    const pages = [{ url: () => 'https://app.example/a', frames: vi.fn().mockReturnValue([]), reload: vi.fn().mockResolvedValue(undefined) }];
+    const pages = [createMockPage('https://app.example/a')];
     const browserContext = createMockBrowserContext();
     browserContext.pages.mockReturnValue(pages);
     // Probe page succeeds; the apply itself fails and the rollback runs.

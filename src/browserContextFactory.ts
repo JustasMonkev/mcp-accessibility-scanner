@@ -70,10 +70,11 @@ export function contextFactory(config: FullConfig): BrowserContextFactory {
 }
 
 // The rules addCookies enforces client-side (verified against Playwright
-// 1.61.1: empty or missing domain/path without a url, an expires other than
-// -1 or a positive number, and sameSite outside Strict/Lax/None are all
-// rejected there). Failing them here keeps the failure ahead of the cache
-// clear; anything these checks miss still fails inside setStorageState.
+// 1.61.1: empty or missing domain/path without a url, a url combined with a
+// domain or a path, an expires other than -1 or a positive number, and
+// sameSite outside Strict/Lax/None are all rejected there). Failing them
+// here keeps the failure ahead of the cache clear; anything these checks
+// miss still fails inside setStorageState.
 function assertValidStorageStateCookies(state: { cookies?: unknown[] }): void {
   for (const value of state.cookies ?? []) {
     const cookie = value as Record<string, unknown> | null;
@@ -81,11 +82,15 @@ function assertValidStorageStateCookies(state: { cookies?: unknown[] }): void {
       ? 'a cookie entry is not an object'
       : !cookie.url && (!cookie.domain || !cookie.path)
         ? `cookie "${String(cookie.name ?? '')}" should have a url or a domain/path pair`
-        : cookie.expires !== undefined && (typeof cookie.expires !== 'number' || Number.isNaN(cookie.expires) || (cookie.expires !== -1 && cookie.expires <= 0))
-          ? `cookie "${String(cookie.name ?? '')}" should have a valid expires — only -1 or a positive unix timestamp in seconds is allowed`
-          : cookie.sameSite !== undefined && !['Strict', 'Lax', 'None'].includes(cookie.sameSite as string)
-            ? `cookie "${String(cookie.name ?? '')}" has sameSite "${String(cookie.sameSite)}", expected one of Strict|Lax|None`
-            : null;
+        : cookie.url && cookie.domain
+          ? `cookie "${String(cookie.name ?? '')}" should have either a url or a domain, not both`
+          : cookie.url && cookie.path
+            ? `cookie "${String(cookie.name ?? '')}" should have either a url or a path, not both`
+            : cookie.expires !== undefined && (typeof cookie.expires !== 'number' || Number.isNaN(cookie.expires) || (cookie.expires !== -1 && cookie.expires <= 0))
+              ? `cookie "${String(cookie.name ?? '')}" should have a valid expires — only -1 or a positive unix timestamp in seconds is allowed`
+              : cookie.sameSite !== undefined && !['Strict', 'Lax', 'None'].includes(cookie.sameSite as string)
+                ? `cookie "${String(cookie.name ?? '')}" has sameSite "${String(cookie.sameSite)}", expected one of Strict|Lax|None`
+                : null;
     if (problem)
       throw new Error(`Invalid storage state: ${problem}. Nothing was changed — cookies are validated before the apply, because setStorageState() clears the attached context's HTTP cache and cookie jar before it validates them, and the cache cannot be restored.`);
   }
@@ -359,15 +364,26 @@ class CdpContextFactory extends BaseContextFactory {
   // all live sessions of this factory, so nothing may close it while a
   // sibling session still audits through it — neither a session's own
   // close() nor the cleanup after another session's failed setup. The
-  // handout count tracks live sessions; the connection closes only when the
-  // last one lets go. (A disconnect from the outside resets _browserPromise
-  // via the 'disconnected' listener; the counter resets with the next
-  // successful obtain.)
-  private _activeSessions = 0;
+  // handout count is kept per browser object, not per factory: an external
+  // disconnect makes _obtainBrowser hand out a fresh browser while stale
+  // sessions still hold references to the old one, and a shared counter
+  // would let a stale release keep the new connection open forever (its last
+  // real user would only ever bring the count down to the stale remainder).
+  // The reference is claimed before context creation, so a sibling still
+  // inside _doCreateContext() counts and a concurrent failure cannot close
+  // the connection out from under it.
+  private _sessionCounts = new WeakMap<playwright.Browser, number>();
+
+  private _releaseBrowser(browser: playwright.Browser): boolean {
+    const remaining = Math.max(0, (this._sessionCounts.get(browser) ?? 1) - 1);
+    this._sessionCounts.set(browser, remaining);
+    return remaining === 0;
+  }
 
   override async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     testDebug('create browser context (cdp)');
     const browser = await this._obtainBrowser(clientInfo);
+    this._sessionCounts.set(browser, (this._sessionCounts.get(browser) ?? 0) + 1);
     let browserContext: playwright.BrowserContext;
     try {
       browserContext = await this._doCreateContext(browser);
@@ -375,11 +391,10 @@ class CdpContextFactory extends BaseContextFactory {
       // Without this the CDP connection stays open after e.g. an unreadable
       // storage-state file, even though no context was ever handed out — but
       // only when no sibling session is still using the shared connection.
-      if (this._activeSessions === 0)
+      if (this._releaseBrowser(browser))
         await browser.close().catch(logUnhandledError);
       throw error;
     }
-    this._activeSessions++;
     let released = false;
     return {
       browserContext,
@@ -387,8 +402,14 @@ class CdpContextFactory extends BaseContextFactory {
         if (released)
           return;
         released = true;
-        this._activeSessions = Math.max(0, this._activeSessions - 1);
-        if (this._activeSessions === 0) {
+        // An isolated session's context belongs to it alone — close it now,
+        // or abandoned contexts (with their pages, routes and listeners)
+        // pile up on a long-lived shared connection until the last session
+        // exits. The non-isolated context is the browser's own and shared;
+        // it stays.
+        if (this.config.browser.isolated)
+          await browserContext.close().catch(logUnhandledError);
+        if (this._releaseBrowser(browser)) {
           testDebug('disconnect browser (cdp)');
           await browser.close().catch(logUnhandledError);
         }
