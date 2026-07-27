@@ -90,18 +90,6 @@ describe('Tab', () => {
     });
   });
 
-  describe('forPage', () => {
-    it('should retrieve tab for page', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      expect(Tab.forPage(mockPage as any)).toBe(tab);
-    });
-
-    it('should return undefined for unknown page', () => {
-      const otherPage = {} as any;
-      expect(Tab.forPage(otherPage)).toBeUndefined();
-    });
-  });
-
   describe('modalStates', () => {
     it('should return empty array initially', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);

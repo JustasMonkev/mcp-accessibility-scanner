@@ -88,11 +88,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     });
     page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? 30000);
     page.setDefaultTimeout(this._defaultTimeout);
-    _pageTabMap.set(page, this);
-  }
-
-  static forPage(page: playwright.Page): Tab | undefined {
-    return _pageTabMap.get(page);
   }
 
   // Detaches this wrapper from its page without closing the page: the page
@@ -101,8 +96,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     for (const { event, listener } of this._pageListeners)
       this.page.off(event as any, listener);
     this._pageListeners = [];
-    if (_pageTabMap.get(this.page) === this)
-      _pageTabMap.delete(this.page);
   }
 
   modalStates(): ModalState[] {
@@ -397,5 +390,3 @@ export function renderModalStates(context: Context, modalStates: ModalState[]): 
   }
   return result;
 }
-
-const _pageTabMap = new WeakMap<playwright.Page, Tab>();

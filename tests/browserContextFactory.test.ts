@@ -16,6 +16,8 @@
 
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { connectOverCDP, spawnMock } = vi.hoisted(() => ({
@@ -62,6 +64,7 @@ function createMockBrowserContext() {
     newPage: vi.fn().mockResolvedValue({ close: vi.fn().mockResolvedValue(undefined) }),
     pages: vi.fn().mockReturnValue([]),
     on: vi.fn(),
+    off: vi.fn(),
     route: vi.fn().mockResolvedValue(undefined),
     unroute: vi.fn().mockResolvedValue(undefined),
     unrouteAll: vi.fn().mockResolvedValue(undefined),
@@ -524,6 +527,91 @@ describe('browserContextFactory', () => {
       expect(page.reload).toHaveBeenCalledTimes(1);
       expect(page.reload.mock.invocationCallOrder[0]).toBeGreaterThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
     }
+  });
+
+  it('applies the validated parse of a storage-state file, not a re-read of the path', async () => {
+    // Handing the path to setStorageState() would make Playwright read the
+    // file a second time — a file replaced between the validating read and the
+    // apply would skip the cookie/origin validation and the page-creation
+    // probe, then fail after the unrestorable cache clear.
+    const state = { cookies: [{ name: 'app_session', value: 'recorded', domain: 'app.example', path: '/' }], origins: [] };
+    const stateFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-state-')), 'auth.json');
+    fs.writeFileSync(stateFile, JSON.stringify(state));
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: stateFile },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(browserContext.setStorageState).toHaveBeenCalledWith(state);
+    expect(browserContext.setStorageState).not.toHaveBeenCalledWith(stateFile);
+  });
+
+  it('resets a page that opens while the existing pages are clearing and reloading', async () => {
+    // A still-old document can open a popup from a timer during the refresh
+    // window, and a same-origin popup clones its opener's previous-identity
+    // sessionStorage at creation — a single pages() snapshot would hand it to
+    // Context unreset.
+    const popup = createMockPage('https://app.example/popup');
+    const opener = createMockPage('https://app.example/a');
+    const pagesList: any[] = [opener];
+    opener.reload.mockImplementation(async () => {
+      if (!pagesList.includes(popup))
+        pagesList.push(popup);
+    });
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockImplementation(() => [...pagesList]);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(opener.reload).toHaveBeenCalledTimes(1);
+    expect(popup.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('resets a page the sweep only learns about from the page event', async () => {
+    // Playwright surfaces a new page in pages() asynchronously; a popup whose
+    // creation raced the sweep's last pages() call is only visible through the
+    // temporary 'page' listener — and the listener comes off before handoff.
+    const popup = createMockPage('https://app.example/popup');
+    const opener = createMockPage('https://app.example/a');
+    const listeners = new Map<string, (page: any) => void>();
+    const browserContext = createMockBrowserContext();
+    browserContext.on.mockImplementation((event: string, listener: (page: any) => void) => listeners.set(event, listener));
+    browserContext.pages.mockReturnValue([opener]);
+    opener.reload.mockImplementation(async () => listeners.get('page')?.(popup));
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(popup.reload).toHaveBeenCalledTimes(1);
+    expect(browserContext.off).toHaveBeenCalledWith('page', listeners.get('page'));
   });
 
   it('mirrors the configured network policy around the reloads of reused pages', async () => {

@@ -255,6 +255,120 @@ describe('Context', () => {
       expect(log1.logUserAction).toHaveBeenCalledTimes(1);
       expect(log2.logUserAction).not.toHaveBeenCalled();
     });
+
+    it('keeps the surviving session logging on a page a departed sibling also wrapped', async () => {
+      // Both sessions wrap the same shared page; the departing one used to
+      // delete the global page→tab entry it had overwritten, leaving the
+      // survivor's recorder events without a tab to log against.
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const log1 = { logUserAction: vi.fn() };
+      const log2 = { logUserAction: vi.fn() };
+      const makeContext = (sessionLog: any) => new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog,
+        clientInfo: { rootPath: '/tmp' } as any,
+      });
+      const context1 = makeContext(log1);
+      await context1.newTab();
+      const context2 = makeContext(log2);
+      await context2.newTab();
+
+      const page = new EventEmitter() as any;
+      page.setDefaultNavigationTimeout = vi.fn();
+      page.setDefaultTimeout = vi.fn();
+      page.url = () => 'about:blank';
+      mockBrowserContext.emit('page', page);
+
+      await context2.closeBrowserContext();
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+      sink.actionAdded(page, { action: { name: 'click' } }, 'await page.click();');
+
+      expect(log1.logUserAction).toHaveBeenCalledTimes(1);
+      expect(log2.logUserAction).not.toHaveBeenCalled();
+    });
+
+    it('suppresses recorder events for every session while a sibling runs a tool', async () => {
+      // The recorder cannot attribute a DOM event to the session that caused
+      // it, so a tool call in one session must not be recorded as another
+      // session's user action.
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const log1 = { logUserAction: vi.fn() };
+      const log2 = { logUserAction: vi.fn() };
+      const makeContext = (sessionLog: any) => new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog,
+        clientInfo: { rootPath: '/tmp' } as any,
+      });
+      const context1 = makeContext(log1);
+      await context1.newTab();
+      const context2 = makeContext(log2);
+      await context2.newTab();
+
+      const page = new EventEmitter() as any;
+      page.setDefaultNavigationTimeout = vi.fn();
+      page.setDefaultTimeout = vi.fn();
+      page.url = () => 'about:blank';
+      mockBrowserContext.emit('page', page);
+
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+      context1.setRunningTool('browser_click');
+      sink.actionAdded(page, { action: { name: 'click' } }, 'await page.click();');
+      expect(log1.logUserAction).not.toHaveBeenCalled();
+      expect(log2.logUserAction).not.toHaveBeenCalled();
+
+      context1.setRunningTool(undefined);
+      sink.actionAdded(page, { action: { name: 'click' } }, 'await page.click();');
+      expect(log1.logUserAction).toHaveBeenCalledTimes(1);
+      expect(log2.logUserAction).toHaveBeenCalledTimes(1);
+    });
+
+    it('makes a joining session wait for the in-flight recorder enablement and share its failure', async () => {
+      // The first session stores the hub before _enableRecorder resolves; a
+      // session joining meanwhile must not report recording ready while the
+      // one enablement is still in flight — and must fail with it, not run
+      // unrecorded.
+      let rejectEnable: (error: Error) => void;
+      mockBrowserContext._enableRecorder = vi.fn().mockImplementation(() => new Promise((_, reject) => { rejectEnable = reject; }));
+      const makeContext = () => new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: { logUserAction: vi.fn() } as any,
+        clientInfo: { rootPath: '/tmp' } as any,
+      });
+      const pending1 = makeContext().newTab();
+      const pending2 = makeContext().newTab();
+
+      await vi.waitFor(() => expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(1));
+      rejectEnable!(new Error('recorder unavailable'));
+
+      await expect(pending1).rejects.toThrow('recorder unavailable');
+      await expect(pending2).rejects.toThrow('recorder unavailable');
+    });
+
+    it('retries recorder enablement after a failed one instead of caching the dead hub', async () => {
+      // A failed _enableRecorder left the hub cached: every later session
+      // skipped enablement and silently produced no user-action recording.
+      mockBrowserContext._enableRecorder = vi.fn()
+          .mockRejectedValueOnce(new Error('recorder unavailable'))
+          .mockResolvedValueOnce(undefined);
+      const makeContext = () => new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: { logUserAction: vi.fn() } as any,
+        clientInfo: { rootPath: '/tmp' } as any,
+      });
+      await expect(makeContext().newTab()).rejects.toThrow('recorder unavailable');
+
+      await makeContext().newTab();
+
+      expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('isRunningTool', () => {

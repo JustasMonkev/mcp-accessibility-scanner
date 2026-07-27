@@ -206,7 +206,13 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     throw new Error(`Snapshotting the context's current storage for rollback failed, so the storage state was not applied — a partial apply could not have been undone. Nothing was changed. Retry, or use --isolated for a fresh context. Original error: ${message}`);
   });
   try {
-    await browserContext.setStorageState(storageState);
+    // The state validated above is the state applied: handing the path back
+    // to Playwright would re-read the file here, and a file replaced since
+    // that read would skip the cookie/origin validation and the page-creation
+    // probe only to fail after the cache clear those exist to prevent. The
+    // unreadable-file case (null) still passes the path through so it fails
+    // with Playwright's own read error before any mutation.
+    await browserContext.setStorageState(parsedState ?? storageState);
     // Pages that were already open still render the previous identity's DOM
     // and in-memory state; reload them so what a scan sees matches the state
     // just installed.
@@ -221,7 +227,7 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     // setStorageState() so an abort-all route cannot interfere with the
     // temporary page Playwright drives to restore origin storage.
     await ensureNetworkPolicyRoutes(config, browserContext);
-    await Promise.all(browserContext.pages().map(async page => {
+    const resetPage = async (page: playwright.Page) => {
       // Per-tab sessionStorage sits outside Playwright storage states and
       // survives a reload, and an application can rebuild the previous
       // identity's UI from it — so it is cleared in every frame first. A
@@ -249,7 +255,32 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
           await page.close().catch(() => {});
         }
       }
-    }));
+    };
+    // A still-old document can open a page while the ones above are clearing
+    // and reloading — a popup from a timer, say — and a same-origin popup
+    // clones its opener's previous-identity sessionStorage at creation. A
+    // single pages() snapshot would hand such a page to Context unreset, so
+    // the sweep repeats until no unseen page remains; the temporary 'page'
+    // listener catches pages whose creation the next pages() call cannot see
+    // yet. (A popup that a freshly reloaded document opens inside this window
+    // is reset too — that loses moments of new-state sessionStorage, never
+    // leaks the old identity.)
+    const seen = new Set<playwright.Page>();
+    const arrivals: playwright.Page[] = [];
+    const onPage = (page: playwright.Page) => arrivals.push(page);
+    browserContext.on('page', onPage);
+    try {
+      while (true) {
+        const pending = [...browserContext.pages(), ...arrivals.splice(0)].filter(page => !seen.has(page));
+        if (!pending.length)
+          break;
+        for (const page of pending)
+          seen.add(page);
+        await Promise.all(pending.map(resetPage));
+      }
+    } finally {
+      browserContext.off('page', onPage);
+    }
   } catch (error) {
     // Prefer the full-state rollback; fall back to cookies-only when its
     // reapplication is itself impossible on this target.

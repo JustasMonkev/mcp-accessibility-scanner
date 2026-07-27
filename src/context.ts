@@ -96,6 +96,15 @@ export class Context {
     return this._currentTab;
   }
 
+  // Resolves within this session's own wrappers: on a shared (non-isolated
+  // CDP) context, several sessions wrap the same page, and an event belongs
+  // to whichever session is asking — a global page→tab map would hand every
+  // session the last writer's wrapper and lose the entry when that session
+  // closes.
+  tabForPage(page: playwright.Page): Tab | undefined {
+    return this._tabs.find(tab => tab.page === page);
+  }
+
   currentTabOrDie(): Tab {
     if (!this._currentTab)
       throw new Error('No open pages available. Use the "browser_navigate" tool to navigate to a page first.');
@@ -292,10 +301,15 @@ export class Context {
 // session's callbacks, and a departing session would leave the sink pointing
 // at its disposed Context. The recorder is therefore enabled once per context
 // object with a dispatching sink, and sessions register and deregister their
-// own recorders with it. (Ceiling: the recorder itself stays enabled on the
-// shared context once any session wanted it — with no registered recorders
-// the events just fall on an empty set.)
-const recorderHubs = new WeakMap<playwright.BrowserContext, Set<InputRecorder>>();
+// own recorders with it. The hub carries the enablement promise: a session
+// joining while (or after) another session's _enableRecorder call is in
+// flight must not report recording as ready before it is, and a failed
+// enablement evicts the hub so the next session retries instead of silently
+// recording nothing. (Ceiling: the recorder itself stays enabled on the
+// shared context once any session got it — with no registered recorders the
+// events just fall on an empty set.)
+type RecorderHub = { recorders: Set<InputRecorder>, ready: Promise<void> };
+const recorderHubs = new WeakMap<playwright.BrowserContext, RecorderHub>();
 
 export class InputRecorder {
   private _context: Context;
@@ -309,59 +323,76 @@ export class InputRecorder {
   static async create(context: Context, browserContext: playwright.BrowserContext) {
     const recorder = new InputRecorder(context, browserContext);
     let hub = recorderHubs.get(browserContext);
-    if (hub) {
-      hub.add(recorder);
-      return recorder;
+    if (!hub) {
+      const recorders = new Set<InputRecorder>();
+      const dispatch = (handle: (recorder: InputRecorder) => void) => {
+        // A tool call drives the page through Playwright, and the recorder
+        // cannot attribute a DOM event to the session that caused it — so
+        // while any session sharing this context runs a tool, the events are
+        // automation for every session's log, not user actions. (A real user
+        // action racing a sibling's tool call is suppressed with them — the
+        // same trade-off a single session already accepts for its own runs.)
+        for (const registered of recorders) {
+          if (registered._context.isRunningTool())
+            return;
+        }
+        for (const registered of recorders)
+          handle(registered);
+      };
+      const created: RecorderHub = {
+        recorders,
+        ready: (browserContext as any)._enableRecorder({
+          mode: 'recording',
+          recorderMode: 'api',
+        }, {
+          actionAdded: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
+            dispatch(registered => registered._actionAdded(page, data, code));
+          },
+          actionUpdated: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
+            dispatch(registered => registered._actionUpdated(page, data, code));
+          },
+          signalAdded: (page: playwright.Page, data: actions.SignalInContext) => {
+            dispatch(registered => registered._signalAdded(page, data));
+          },
+        }),
+      };
+      created.ready.catch(() => {
+        if (recorderHubs.get(browserContext) === created)
+          recorderHubs.delete(browserContext);
+      });
+      recorderHubs.set(browserContext, created);
+      hub = created;
     }
-    hub = new Set([recorder]);
-    recorderHubs.set(browserContext, hub);
-    const dispatch = (handle: (recorder: InputRecorder) => void) => {
-      for (const registered of recorderHubs.get(browserContext) ?? [])
-        handle(registered);
-    };
-    await (browserContext as any)._enableRecorder({
-      mode: 'recording',
-      recorderMode: 'api',
-    }, {
-      actionAdded: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
-        dispatch(registered => registered._actionAdded(page, data, code));
-      },
-      actionUpdated: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
-        dispatch(registered => registered._actionUpdated(page, data, code));
-      },
-      signalAdded: (page: playwright.Page, data: actions.SignalInContext) => {
-        dispatch(registered => registered._signalAdded(page, data));
-      },
-    });
+    hub.recorders.add(recorder);
+    try {
+      await hub.ready;
+    } catch (error) {
+      hub.recorders.delete(recorder);
+      throw error;
+    }
     return recorder;
   }
 
   dispose() {
-    recorderHubs.get(this._browserContext)?.delete(this);
+    recorderHubs.get(this._browserContext)?.recorders.delete(this);
   }
 
   private _actionAdded(page: playwright.Page, data: actions.ActionInContext, code: string) {
-    if (this._context.isRunningTool())
-      return;
-    const tab = Tab.forPage(page);
+    const tab = this._context.tabForPage(page);
     if (tab)
       this._context.sessionLog!.logUserAction(data.action, tab, code, false);
   }
 
   private _actionUpdated(page: playwright.Page, data: actions.ActionInContext, code: string) {
-    if (this._context.isRunningTool())
-      return;
-    const tab = Tab.forPage(page);
+    const tab = this._context.tabForPage(page);
     if (tab)
       this._context.sessionLog!.logUserAction(data.action, tab, code, true);
   }
 
   private _signalAdded(page: playwright.Page, data: actions.SignalInContext) {
-    if (this._context.isRunningTool())
-      return;
     if (data.signal.name !== 'navigation')
       return;
-    const tab = Tab.forPage(page);
+    const tab = this._context.tabForPage(page);
     const navigateAction: actions.Action = {
       name: 'navigate',
       url: data.signal.url,
