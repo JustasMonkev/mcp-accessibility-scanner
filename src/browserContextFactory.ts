@@ -131,6 +131,80 @@ function assertValidStorageState(state: { cookies?: unknown[], origins?: unknown
 }
 
 /**
+ * Brings every open page of `browserContext` onto the storage state that was
+ * just installed, by replacing each page with a fresh tab navigated to the
+ * same URL. Replacement, not an in-page sessionStorage clear plus reload: the
+ * old document's scripts keep running between an evaluated clear and the
+ * navigation that would follow it, and a timer persisting the previous
+ * identity can write it back into that window — sessionStorage survives the
+ * reload, and the audit reads the old user again. A fresh tab starts with
+ * empty sessionStorage for every origin (only window.open clones the
+ * opener's copy, verified against Playwright 1.61.1 Chromium), and the old
+ * document is closed before the replacement navigates, so nothing of the
+ * previous identity can be written back. The replacement tab is created
+ * before the old page closes — closing a browser's last tab can take the
+ * whole (attached, user-owned) browser down with it.
+ */
+async function resetOpenPagesOntoInstalledState(browserContext: playwright.BrowserContext): Promise<void> {
+  const seen = new Set<playwright.Page>();
+  const arrivals: playwright.Page[] = [];
+  const onPage = (page: playwright.Page) => arrivals.push(page);
+  const resetPage = async (page: playwright.Page) => {
+    const url = page.url();
+    let fresh: playwright.Page;
+    try {
+      fresh = await browserContext.newPage();
+    } catch {
+      // Without a replacement tab (Electron targets cannot create pages),
+      // closing is the only way to keep the previous identity's DOM and
+      // sessionStorage out of the audit.
+      await page.close().catch(() => {});
+      return;
+    }
+    // The replacement never needs resetting itself — it must not be swept up
+    // by the loop below when it surfaces through pages() or the listener.
+    seen.add(fresh);
+    await page.close().catch(() => {});
+    if (url && url !== 'about:blank') {
+      try {
+        await fresh.goto(url);
+      } catch {
+        // The origin may be blocked by the just-installed policy, or the
+        // load simply failed. The fresh tab carries no old identity, so a
+        // blank replacement is safe to hand to Context; close it only if
+        // even blanking fails.
+        try {
+          await fresh.goto('about:blank');
+        } catch {
+          await fresh.close().catch(() => {});
+        }
+      }
+    }
+  };
+  // A still-old document can open a page while the ones above are being
+  // replaced — a popup from a timer, say — and a same-origin popup clones
+  // its opener's previous-identity sessionStorage at creation. A single
+  // pages() snapshot would hand such a page to Context unreset, so the sweep
+  // repeats until no unseen page remains; the temporary 'page' listener
+  // catches pages whose creation the next pages() call cannot see yet. The
+  // Set dedupes a page that arrives through both — two concurrent
+  // replacements of one page would race each other's close and navigation.
+  browserContext.on('page', onPage);
+  try {
+    while (true) {
+      const pending = [...new Set([...browserContext.pages(), ...arrivals.splice(0)])].filter(page => !seen.has(page));
+      if (!pending.length)
+        break;
+      for (const page of pending)
+        seen.add(page);
+      await Promise.all(pending.map(resetPage));
+    }
+  } finally {
+    browserContext.off('page', onPage);
+  }
+}
+
+/**
  * Lands the configured storage state in a context the browser already had.
  * `setStorageState()` clears the context's cookies, local storage and IndexedDB
  * and installs the recorded state — the documented semantics of the option the
@@ -148,10 +222,13 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
       return typeof storageState === 'string'
         ? JSON.parse(await fs.promises.readFile(storageState, 'utf-8'))
         : storageState;
-    } catch {
-      // An unreadable state file fails inside setStorageState before any
-      // mutation, which is the clean failure already.
-      return null;
+    } catch (error) {
+      // Letting setStorageState() discover the bad file would fail inside
+      // the apply block, whose catch answers every failure with a rollback —
+      // and the rollback's own setStorageState() clears the attached
+      // context's HTTP cache. A config error that changed nothing must not
+      // cost the running application its cache.
+      throw new Error(`The storage state file could not be read or parsed: ${error instanceof Error ? error.message : String(error)}. Nothing was changed.`);
     }
   })();
   // Playwright validates cookies only while installing them — after the
@@ -159,8 +236,7 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   // semantically invalid cookie (bad expires, missing domain/path) would
   // fail the apply with the cache unrestorably gone. Checked up front, with
   // the same rules addCookies enforces (verified against 1.61.1).
-  if (parsedState)
-    assertValidStorageState(parsedState);
+  assertValidStorageState(parsedState);
   // setStorageState needs a temporary page whenever the state carries origins
   // or the context has visited any — and by the time that page creation fails
   // on a target without Target.createTarget, the HTTP cache is already cleared
@@ -168,7 +244,7 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   // rejected before anything is mutated. When neither signal indicates a page
   // will be needed (cookie-only state, no pages open), the probe is skipped so
   // that case keeps working on those targets.
-  const stateHasOrigins = (parsedState?.origins?.length ?? 0) > 0;
+  const stateHasOrigins = (parsedState.origins?.length ?? 0) > 0;
   const hasLoadedPages = browserContext.pages().some(page => page.url() && page.url() !== 'about:blank');
   if (stateHasOrigins || hasLoadedPages) {
     try {
@@ -209,78 +285,24 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     // The state validated above is the state applied: handing the path back
     // to Playwright would re-read the file here, and a file replaced since
     // that read would skip the cookie/origin validation and the page-creation
-    // probe only to fail after the cache clear those exist to prevent. The
-    // unreadable-file case (null) still passes the path through so it fails
-    // with Playwright's own read error before any mutation.
-    await browserContext.setStorageState(parsedState ?? storageState);
+    // probe only to fail after the cache clear those exist to prevent.
+    await browserContext.setStorageState(parsedState);
     // Pages that were already open still render the previous identity's DOM
-    // and in-memory state; reload them so what a scan sees matches the state
+    // and in-memory state; replace them so what a scan sees matches the state
     // just installed.
     //
-    // These reloads run inside the factory, before Context ensures the
-    // configured origin allowlist/blocklist — and the recorded credentials are
-    // already in place by now. The policy is installed here (permanently —
-    // page scripts can queue requests that fire after the reload settles, so
-    // removing the handlers before Context re-ensures the same policy would
-    // open a window to a blocked origin; ensureNetworkPolicyRoutes installs
-    // once per context, so Context's later call is a no-op). Installed after
-    // setStorageState() so an abort-all route cannot interfere with the
-    // temporary page Playwright drives to restore origin storage.
+    // The replacement navigations run inside the factory, before Context
+    // ensures the configured origin allowlist/blocklist — and the recorded
+    // credentials are already in place by now. The policy is installed here
+    // (permanently — page scripts can queue requests that fire after the
+    // navigation settles, so removing the handlers before Context re-ensures
+    // the same policy would open a window to a blocked origin;
+    // ensureNetworkPolicyRoutes installs once per context, so Context's later
+    // call is a no-op). Installed after setStorageState() so an abort-all
+    // route cannot interfere with the temporary page Playwright drives to
+    // restore origin storage.
     await ensureNetworkPolicyRoutes(config, browserContext);
-    const resetPage = async (page: playwright.Page) => {
-      // Per-tab sessionStorage sits outside Playwright storage states and
-      // survives a reload, and an application can rebuild the previous
-      // identity's UI from it — so it is cleared in every frame first. A
-      // frame that cannot be cleared (mid-navigation, dying) leaves the
-      // tab's previous-identity sessionStorage in place, and blanking would
-      // only hide it until the next same-origin navigation resurrects it —
-      // such a page is closed outright.
-      const cleared = await Promise.all(page.frames().map(frame => frame.evaluate(() => sessionStorage.clear()).then(() => true, () => false)));
-      if (!cleared.every(Boolean)) {
-        await page.close().catch(() => {});
-        return;
-      }
-      try {
-        await page.reload();
-      } catch {
-        // A page that cannot be brought onto the installed state — its
-        // origin may be blocked by the policy, or the load simply failed —
-        // must not stay around rendering the previous identity's DOM:
-        // Context adopts every remaining page, and a scan would read the
-        // stale document as the new session's UI. Blank it (its
-        // sessionStorage is already cleared); if even that fails, close it.
-        try {
-          await page.goto('about:blank');
-        } catch {
-          await page.close().catch(() => {});
-        }
-      }
-    };
-    // A still-old document can open a page while the ones above are clearing
-    // and reloading — a popup from a timer, say — and a same-origin popup
-    // clones its opener's previous-identity sessionStorage at creation. A
-    // single pages() snapshot would hand such a page to Context unreset, so
-    // the sweep repeats until no unseen page remains; the temporary 'page'
-    // listener catches pages whose creation the next pages() call cannot see
-    // yet. (A popup that a freshly reloaded document opens inside this window
-    // is reset too — that loses moments of new-state sessionStorage, never
-    // leaks the old identity.)
-    const seen = new Set<playwright.Page>();
-    const arrivals: playwright.Page[] = [];
-    const onPage = (page: playwright.Page) => arrivals.push(page);
-    browserContext.on('page', onPage);
-    try {
-      while (true) {
-        const pending = [...browserContext.pages(), ...arrivals.splice(0)].filter(page => !seen.has(page));
-        if (!pending.length)
-          break;
-        for (const page of pending)
-          seen.add(page);
-        await Promise.all(pending.map(resetPage));
-      }
-    } finally {
-      browserContext.off('page', onPage);
-    }
+    await resetOpenPagesOntoInstalledState(browserContext);
   } catch (error) {
     // Prefer the full-state rollback; fall back to cookies-only when its
     // reapplication is itself impossible on this target.
@@ -730,6 +752,16 @@ class PersistentContextFactory implements BrowserContextFactory {
     if (storageState) {
       try {
         await browserContext.setStorageState(storageState);
+        // A non-blank startup page (browser.launchOptions.args can carry a
+        // URL) loaded before the state landed and renders the anonymous
+        // identity — Context would adopt that DOM and a scan could audit the
+        // wrong user despite --storage-state. The same replacement the
+        // reused-context apply uses brings every open page onto the state,
+        // with the origin policy installed first: these navigations run with
+        // the recorded credentials in place, ahead of Context's own (no-op,
+        // once-per-context) ensure.
+        await ensureNetworkPolicyRoutes(this.config, browserContext);
+        await resetOpenPagesOntoInstalledState(browserContext);
       } catch (error) {
         // Nobody holds a close() for this context yet, so a bad storage-state
         // file must not leave the launched browser running.
