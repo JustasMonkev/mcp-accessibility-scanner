@@ -151,6 +151,33 @@ describe('Context', () => {
       expect(close).not.toHaveBeenCalled();
     });
 
+    it('keeps a shared trace running until the final session closes', async () => {
+      const first = new Context({
+        tools: [],
+        config: { saveTrace: true } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: { rootPath: '/tmp' } as any,
+      });
+      const second = new Context({
+        tools: [],
+        config: { saveTrace: true } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: { rootPath: '/tmp' } as any,
+      });
+
+      await first.newTab();
+      await second.newTab();
+      expect(mockBrowserContext.tracing.start).toHaveBeenCalledTimes(1);
+
+      await first.closeBrowserContext();
+      expect(mockBrowserContext.tracing.stop).not.toHaveBeenCalled();
+
+      await second.closeBrowserContext();
+      expect(mockBrowserContext.tracing.stop).toHaveBeenCalledTimes(1);
+    });
+
     it('closes the factory-owned context even when stopping tracing fails on shutdown', async () => {
       // This close attempt is the only one — _browserContextPromise is cleared
       // before the trace stop — so a failing tracing.stop() must not skip the

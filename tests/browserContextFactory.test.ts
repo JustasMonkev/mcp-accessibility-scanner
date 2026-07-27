@@ -825,6 +825,33 @@ describe('browserContextFactory', () => {
     expect(browserContext.unrouteAll).not.toHaveBeenCalled();
   });
 
+  it('does not navigate rollback replacements when network policy setup fails', async () => {
+    const page = createMockPage('https://blocked.example/account');
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue([page]);
+    browserContext.route.mockRejectedValue(new Error('Routing unsupported'));
+    const fresh = collectFreshPages(browserContext);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: writeStateFile() },
+      },
+      network: { blockedOrigins: ['blocked.example'] },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('Routing unsupported');
+    const replacement = fresh.at(-1);
+    expect(replacement.goto).not.toHaveBeenCalled();
+    expect(replacement.close).toHaveBeenCalledTimes(1);
+    expect(browserContext.setStorageState).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects the storage state when snapshotting retained origins needs a page the target cannot create', async () => {
     // A connection can retain visited origins whose pages have since closed:
     // pages() shows nothing, yet setStorageState() still unions those origins
@@ -1001,6 +1028,11 @@ describe('browserContextFactory', () => {
       database: { name: 'auth', version: 1, stores: [{ name: 'tokens', autoIncrement: false, records: [], indexes: [{ name: 'by_scope', keyPathArray: ['tenant', 'scope'], multiEntry: true, unique: false }] }] },
       problem: /cannot combine multiEntry with an array key path/,
     },
+    {
+      label: 'duplicate external IndexedDB record keys',
+      database: { name: 'auth', version: 1, stores: [{ name: 'tokens', autoIncrement: false, records: [{ key: 1, value: 'first' }, { key: 1, value: 'second' }], indexes: [] }] },
+      problem: /duplicate record key 1/,
+    },
   ])('rejects a storage state with a $label before touching the browser', async ({ database, problem }) => {
     const browserContext = createMockBrowserContext();
     const browser = createMockBrowser(browserContext);
@@ -1047,6 +1079,31 @@ describe('browserContextFactory', () => {
     expect(pages[0].close).toHaveBeenCalledTimes(1);
     expect(pages[0].reload).not.toHaveBeenCalled();
     expect(pages[0].goto).not.toHaveBeenCalled();
+  });
+
+  it('rejects before applying the state when an old page cannot be closed', async () => {
+    const page = createMockPage('https://app.example/dashboard', {
+      close: vi.fn().mockRejectedValue(new Error('Target refused to close')),
+    });
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue([page]);
+    const fresh = collectFreshPages(browserContext);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: writeStateFile() },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow('Target refused to close');
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+    expect(fresh.at(-1).close).toHaveBeenCalledTimes(1);
   });
 
   it('evicts a fallback context from the memo when it closes', async () => {

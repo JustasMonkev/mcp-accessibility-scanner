@@ -94,6 +94,14 @@ const cookieUrlProblem = (url: unknown): string | null => {
   return null;
 };
 
+const isValidIndexedDBKey = (value: unknown): boolean =>
+  typeof value === 'string'
+  || (typeof value === 'number' && Number.isFinite(value))
+  || (value instanceof Date && Number.isFinite(value.getTime()))
+  || value instanceof ArrayBuffer
+  || ArrayBuffer.isView(value)
+  || (Array.isArray(value) && value.every(isValidIndexedDBKey));
+
 function assertValidStorageState(state: { cookies?: unknown[], origins?: unknown[] }): void {
   for (const value of state.cookies ?? []) {
     const cookie = value as Record<string, unknown> | null;
@@ -149,6 +157,26 @@ function assertValidStorageState(state: { cookies?: unknown[], origins?: unknown
               ? `IndexedDB object store "${storeName}" should not have an empty array key path`
               : null;
         storeNames.add(storeName);
+        const recordKeys = new Set<string>();
+        const hasInlineKey = store.keyPath !== undefined || store.keyPathArray !== undefined;
+        for (const value of Array.isArray(store.records) ? store.records : []) {
+          const record = value as Record<string, unknown>;
+          const hasExternalKey = (record.key !== undefined && record.key !== null)
+            || (record.keyEncoded !== undefined && record.keyEncoded !== null);
+          const key = record.key ?? record.keyEncoded;
+          const serializedKey = hasExternalKey ? JSON.stringify(key) ?? String(key) : '';
+          indexedDBProblem ??= record.key !== undefined && record.key !== null && !isValidIndexedDBKey(record.key)
+            ? `IndexedDB object store "${storeName}" has an invalid external record key`
+            : hasInlineKey && hasExternalKey
+            ? `IndexedDB object store "${storeName}" has an inline key path but record also supplies an external key`
+            : !hasInlineKey && !store.autoIncrement && !hasExternalKey
+              ? `IndexedDB object store "${storeName}" requires an external key for every record`
+              : hasExternalKey && recordKeys.has(serializedKey)
+                ? `IndexedDB object store "${storeName}" has duplicate record key ${serializedKey}`
+                : null;
+          if (hasExternalKey)
+            recordKeys.add(serializedKey);
+        }
         const indexNames = new Set<string>();
         for (const index of Array.isArray(store.indexes) ? store.indexes as Record<string, unknown>[] : []) {
           const indexName = String(index.name);
@@ -196,13 +224,18 @@ async function replaceOpenPagesWithBlankTabs(browserContext: playwright.BrowserC
       // Without a replacement tab (Electron targets cannot create pages),
       // closing is the only way to keep the previous identity's DOM and
       // sessionStorage out of the audit.
-      await page.close().catch(() => {});
+      await page.close();
       return;
     }
     // The replacement never needs replacing itself — it must not be swept up
     // by the loop below when it surfaces through pages() or the listener.
     seen.add(fresh);
-    await page.close().catch(() => {});
+    try {
+      await page.close();
+    } catch (error) {
+      await fresh.close().catch(() => {});
+      throw error;
+    }
     replaced.push({ page: fresh, url });
   };
   // A still-old document can open a page while the ones above are being
@@ -341,6 +374,8 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   // the replacements are navigated to the pages they replaced only once the
   // recorded state is in place.
   const replaced = await replaceOpenPagesWithBlankTabs(browserContext);
+  const policyRequired = !!(config.network?.allowedOrigins?.length || config.network?.blockedOrigins?.length);
+  let replacementNavigationSafe = !policyRequired;
   try {
     // The state validated above is the state applied: handing the path back
     // to Playwright would re-read the file here, and a file replaced since
@@ -358,6 +393,7 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     // route cannot interfere with the temporary page Playwright drives to
     // restore origin storage.
     await ensureNetworkPolicyRoutes(config, browserContext);
+    replacementNavigationSafe = true;
     await navigateReplacementPages(replaced);
   } catch (error) {
     // Prefer the full-state rollback; fall back to cookies-only when its
@@ -366,10 +402,13 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     const restoredCookies = restoredFully || await browserContext.clearCookies()
         .then(() => originalCookies.length ? browserContext.addCookies(originalCookies) : undefined)
         .then(() => true, () => false);
-    // The old pages were closed before the apply and cannot be handed back,
-    // but with the original state restored the parked tabs are navigated to
-    // the pages they replaced rather than left blank.
-    await navigateReplacementPages(replaced);
+    // The old pages were closed before the apply and cannot be handed back.
+    // Navigate their replacements only when no policy was required or its
+    // installation succeeded; otherwise restored credentials stay offline.
+    if (replacementNavigationSafe)
+      await navigateReplacementPages(replaced);
+    else
+      await Promise.all(replaced.map(({ page }) => page.close().catch(() => {})));
     // Restoring origin storage (localStorage/IndexedDB) makes Playwright open a
     // temporary page; a CDP target that cannot create one — Electron has no
     // Target.createTarget — fails here. Cookie-only states need no page and

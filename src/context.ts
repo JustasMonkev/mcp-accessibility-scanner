@@ -48,6 +48,48 @@ class ContextRegistry {
 
 const contextRegistry = new ContextRegistry();
 
+type TraceHub = { users: number, ready: Promise<void> };
+const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
+
+async function acquireTrace(browserContext: playwright.BrowserContext): Promise<void> {
+  let hub = traceHubs.get(browserContext);
+  if (!hub) {
+    const created: TraceHub = {
+      users: 0,
+      ready: browserContext.tracing.start({
+        name: 'trace',
+        screenshots: false,
+        snapshots: true,
+        sources: false,
+      }).catch(error => {
+        if (!(error instanceof Error && error.message.includes('already started')))
+          throw error;
+      }),
+    };
+    traceHubs.set(browserContext, created);
+    created.ready.catch(() => {
+      if (traceHubs.get(browserContext) === created)
+        traceHubs.delete(browserContext);
+    });
+    hub = created;
+  }
+  hub.users++;
+  try {
+    await hub.ready;
+  } catch (error) {
+    hub.users--;
+    throw error;
+  }
+}
+
+async function releaseTrace(browserContext: playwright.BrowserContext): Promise<void> {
+  const hub = traceHubs.get(browserContext);
+  if (!hub || --hub.users)
+    return;
+  traceHubs.delete(browserContext);
+  await browserContext.tracing.stop();
+}
+
 type ContextOptions = {
   tools: Tool[];
   config: FullConfig;
@@ -198,7 +240,7 @@ export class Context {
       // so a failing trace stop must not skip it.
       try {
         if (this.config.saveTrace)
-          await browserContext.tracing.stop();
+          await releaseTrace(browserContext);
       } catch (error) {
         // The symmetric race to the tolerated "already started" on setup: on
         // a shared context the sibling that closed first already stopped the
@@ -266,24 +308,8 @@ export class Context {
       const onPage = (page: playwright.Page) => this._onPageCreated(page);
       browserContext.on('page', onPage);
       this._removePageObserver = () => browserContext.off('page', onPage);
-      if (this.config.saveTrace) {
-        try {
-          await browserContext.tracing.start({
-            name: 'trace',
-            screenshots: false,
-            snapshots: true,
-            sources: false,
-          });
-        } catch (error) {
-          // A sibling session sharing this reused context has already started
-          // tracing — the recording is live, which is what --save-trace asked
-          // for. Failing here would tear down the shared connection under the
-          // sibling's audit. (Shared-context ceiling: there is one recording,
-          // and the first session to close stops it.)
-          if (!(error instanceof Error && error.message.includes('already started')))
-            throw error;
-        }
-      }
+      if (this.config.saveTrace)
+        await acquireTrace(browserContext);
     } catch (error) {
       // The shared context may survive this close (siblings hold it), so the
       // observers registered above must come off explicitly.
