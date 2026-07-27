@@ -599,12 +599,14 @@ describe('browserContextFactory', () => {
     expect(browser.close).toHaveBeenCalledTimes(1);
   });
 
-  it('replaces already-open pages after installing the storage state, and only then', async () => {
-    // A reused page still renders the previous identity's DOM; an immediate
-    // scan would audit the wrong user unless the page is brought onto the
-    // freshly installed state — and the old document must close, not reload
-    // in place, so its scripts cannot write the previous identity back into
-    // sessionStorage between a clear and the navigation.
+  it('closes already-open pages before installing the storage state, and navigates their replacements only after', async () => {
+    // A reused page still renders the previous identity's DOM, and its scripts
+    // keep running: a page that periodically persists authentication into
+    // cookies or localStorage would overwrite the freshly installed state if
+    // it were still alive during setStorageState() — and replacing its tab
+    // afterwards cannot undo writes already made into context-wide storage.
+    // The old documents therefore close (their replacements parked on blank)
+    // BEFORE the state lands; only the replacement navigations run after.
     const pages = [
       createMockPage('https://app.example/a'),
       createMockPage('https://app.example/b'),
@@ -628,6 +630,7 @@ describe('browserContextFactory', () => {
     for (const page of pages) {
       expect(page.close).toHaveBeenCalledTimes(1);
       expect(page.reload).not.toHaveBeenCalled();
+      expect(page.close.mock.invocationCallOrder[0]).toBeLessThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
     }
     const replacements = fresh.filter(page => page.goto.mock.calls.length);
     expect(replacements.flatMap(page => page.goto.mock.calls.map((call: any[]) => call[0])).sort()).toEqual(['https://app.example/a', 'https://app.example/b']);
@@ -1308,10 +1311,15 @@ describe('browserContextFactory', () => {
     expect(browserContext.clearCookies).not.toHaveBeenCalled();
   });
 
-  it('does not replace pages when the apply failed and the original state was rolled back', async () => {
+  it('navigates the replacement tabs back to the original pages when the apply fails and the original state was rolled back', async () => {
+    // The old documents close before the apply (a live one could rewrite the
+    // freshly installed state), so a failed apply cannot hand them back — but
+    // with the original state rolled back, the blank replacement tabs are
+    // returned to the pages they replaced rather than left empty.
     const pages = [createMockPage('https://app.example/a')];
     const browserContext = createMockBrowserContext();
     browserContext.pages.mockReturnValue(pages);
+    const fresh = collectFreshPages(browserContext);
     // Probe page succeeds; the apply itself fails and the rollback runs.
     browserContext.setStorageState
         .mockRejectedValueOnce(new Error('Error setting storage state:\nnavigation failed'))
@@ -1329,10 +1337,14 @@ describe('browserContextFactory', () => {
     const factory = contextFactory(config);
 
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow();
-    // The pages still match the restored original state, so they stay: no
-    // close, no replacement (the single newPage call is the probe).
-    expect(pages[0].close).not.toHaveBeenCalled();
-    expect(browserContext.newPage).toHaveBeenCalledTimes(1);
+    // Closed before the apply, like on the success path.
+    expect(pages[0].close).toHaveBeenCalledTimes(1);
+    expect(pages[0].close.mock.invocationCallOrder[0]).toBeLessThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
+    // The replacement tab returns to the original page, after the rollback
+    // (the second setStorageState call) restored the state it renders.
+    const replacement = fresh.find(page => page.goto.mock.calls.length)!;
+    expect(replacement.goto.mock.calls.map((call: any[]) => call[0])).toContain('https://app.example/a');
+    expect(replacement.goto.mock.invocationCallOrder[0]).toBeGreaterThan(browserContext.setStorageState.mock.invocationCallOrder[1]);
   });
 
   it('restores the full original storage state when a partial apply fails', async () => {

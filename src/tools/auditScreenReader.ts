@@ -457,19 +457,31 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     const left = toPx(args[3] ?? args[1] ?? args[0], width);
     return height - top - bottom <= 0 || width - left - right <= 0;
   };
-  // A transform whose linear part is singular (scale(0), scaleX(0), an
-  // edge-on rotateY(90deg), …) collapses the painted area to a line or point
-  // — overflow included — so unlike an ordinary collapsed box it hides the
-  // subtree even with overflow: visible. Computed transforms serialize as
-  // matrix()/matrix3d(); a NaN determinant (unparseable value) fails the
-  // comparison and errs on the visible side. The epsilon absorbs Blink
-  // serializing cos(90deg) as ~6e-17.
+  // A transform whose linear part is singular in exact arithmetic (scale(0),
+  // scaleX(0), an edge-on rotateY(90deg), …) collapses the painted area to a
+  // line or point — overflow included — so unlike an ordinary collapsed box
+  // it hides the subtree even with overflow: visible; a composed singular
+  // matrix stays singular, so no descendant transform can counter it. A
+  // merely small determinant is not the same thing: a parent scaled by
+  // 0.0001 (det 1e-8) is countered by a descendant scaled by 10000, which
+  // renders a full-size label the audit must not prune. The two are told
+  // apart relative to the components: float noise on an exact-zero
+  // determinant is tiny next to the components' magnitude (Blink serializes
+  // cos(90deg) as ~6e-17 beside a sin of exactly 1), while a genuine small
+  // determinant sits on the order of its own components squared
+  // (scale(0.0001): det 1e-8 against components of 1e-4). Computed
+  // transforms serialize as matrix()/matrix3d(); a NaN determinant
+  // (unparseable value) fails the comparison and errs on the visible side.
   const transformCollapses = (transform: string): boolean => {
-    const singular = (det: number) => Math.abs(det) < 1e-6;
+    const singular = (a: number, b: number, c: number, d: number) => {
+      const det = a * d - b * c;
+      const component = Math.max(Math.abs(a), Math.abs(b), Math.abs(c), Math.abs(d));
+      return Math.abs(det) <= 1e-12 * component * component;
+    };
     const matrix = /^matrix\(([^)]*)\)/.exec(transform);
     if (matrix) {
       const v = matrix[1].split(',').map(parseFloat);
-      return singular(v[0] * v[3] - v[1] * v[2]);
+      return singular(v[0], v[1], v[2], v[3]);
     }
     const matrix3d = /^matrix3d\(([^)]*)\)/.exec(transform);
     if (matrix3d) {
@@ -482,7 +494,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
         return false;
       // The determinant of the x/y linear part: scaleZ(0) alone leaves flat
       // content rendered, so only the projected plane matters here.
-      return singular(v[0] * v[5] - v[1] * v[4]);
+      return singular(v[0], v[1], v[4], v[5]);
     }
     return false;
   };

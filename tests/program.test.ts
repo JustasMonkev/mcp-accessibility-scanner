@@ -16,6 +16,8 @@
 
 import { beforeAll, describe, it, expect } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const rootDir = path.resolve(__dirname, '..');
@@ -93,6 +95,21 @@ describe('CLI command dispatch contract', () => {
       // and aborts; the repeatable single-value option leaves it as the command.
       const output = runCLI('--cdp-header X-Test:1 list-tools');
       expect(output).toContain('browser_navigate');
+    });
+  });
+
+  describe('--connect-tool with a profile-conflicting storage state', () => {
+    it('rejects at startup instead of advertising two unusable providers', async () => {
+      // The persistent default provider rejects --storage-state combined with
+      // --user-data-dir only on its first browser operation, and the extension
+      // provider refuses a storage state at switch time — starting the server
+      // would advertise two providers and neither could create a context.
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-connect-tool-'));
+      const stateFile = path.join(stateDir, 'auth.json');
+      fs.writeFileSync(stateFile, JSON.stringify({ cookies: [], origins: [] }));
+      const profileDir = path.join(stateDir, 'profile');
+      const { stderr } = await collectOutput(['--connect-tool', '--storage-state', stateFile, '--user-data-dir', profileDir]);
+      expect(stderr).toContain('--storage-state and --user-data-dir contradict each other');
     });
   });
 

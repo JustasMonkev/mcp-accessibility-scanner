@@ -21,7 +21,7 @@ import * as mcpServer from './mcp/server.js';
 import { commaSeparatedList, resolveCLIConfig, semicolonSeparatedList } from './config.js';
 import { packageJSON } from './utils/package.js';
 import { Context } from './context.js';
-import { assertStorageStateSupported, contextFactory } from './browserContextFactory.js';
+import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported, contextFactory, PersistentContextFactory, persistentProfileConflictRemedy } from './browserContextFactory.js';
 import { ProxyBackend } from './mcp/proxyBackend.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
@@ -45,12 +45,19 @@ async function resolveProgramContext(options: Record<string, unknown>): Promise<
   // --extension runs every tool through the extension factory, not the one
   // contextFactory() builds, so validate the factory that will actually create
   // the context. Checked first because contextFactory() would otherwise
-  // recommend --isolated, which does not help here. --connect-tool is NOT
-  // checked at startup: its default provider applies the storage state fine,
-  // and its optional extension leg validates at switch time instead.
+  // recommend --isolated, which does not help here.
   if (options.extension)
     assertStorageStateSupported(config, extensionContextFactory, '--extension attaches to the browser you are already running and uses the context it already has; --isolated does not change that. Drop the storage state and sign in in that browser before auditing.');
   const browserContextFactory = contextFactory(config);
+  // --connect-tool with a persistent default provider must reject the
+  // profile conflict at startup: the factory itself only rejects the
+  // combination lazily, on its first browser operation, while the extension
+  // provider refuses the storage state at switch time — so the server would
+  // start advertising two providers and neither could ever create a context.
+  // (Other default providers ignore --user-data-dir, and the extension leg
+  // alone validates at switch time instead.)
+  if (options.connectTool && browserContextFactory instanceof PersistentContextFactory)
+    assertStorageStateDoesNotResetUserProfile(config, persistentProfileConflictRemedy);
   return { config, browserContextFactory, extensionContextFactory };
 }
 

@@ -816,6 +816,19 @@ describe('collectElementFacts in a real page', () => {
     expect(visibleText).toEqual(['Send', null]);
   });
 
+  it('keeps near-singular transforms visible when a descendant can counter them', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="transform: scale(0.0001)"><button id="counter" style="transform: scale(10000)" aria-label="Submit">Send</button></div>
+      <div style="transform: scale(0)"><button id="zero" style="transform: scale(10000)" aria-label="Submit">Send</button></div>`,
+    ['#counter', '#zero']);
+
+    // A determinant of 1e-8 is small but not singular: the counter-scaled
+    // button composes back to identity and paints at full size, so the label
+    // really shows. Only the exact-zero parent — singular under every
+    // descendant transform — hides its subtree.
+    expect(visibleText).toEqual(['Send', null]);
+  });
+
   it('lets an out-of-flow control escape a collapsed clip box that is not its containing block', async () => {
     const visibleText = await measureVisibleText(`
       <div style="position:relative">

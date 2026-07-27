@@ -131,25 +131,25 @@ function assertValidStorageState(state: { cookies?: unknown[], origins?: unknown
 }
 
 /**
- * Brings every open page of `browserContext` onto the storage state that was
- * just installed, by replacing each page with a fresh tab navigated to the
- * same URL. Replacement, not an in-page sessionStorage clear plus reload: the
- * old document's scripts keep running between an evaluated clear and the
+ * Replaces every open page of `browserContext` with a blank fresh tab and
+ * returns the fresh tabs paired with the URL each replaced page showed.
+ * Replacement, not an in-page sessionStorage clear plus reload: the old
+ * document's scripts keep running between an evaluated clear and the
  * navigation that would follow it, and a timer persisting the previous
  * identity can write it back into that window — sessionStorage survives the
  * reload, and the audit reads the old user again. A fresh tab starts with
  * empty sessionStorage for every origin (only window.open clones the
- * opener's copy, verified against Playwright 1.61.1 Chromium), and the old
- * document is closed before the replacement navigates, so nothing of the
- * previous identity can be written back. The replacement tab is created
- * before the old page closes — closing a browser's last tab can take the
- * whole (attached, user-owned) browser down with it.
+ * opener's copy, verified against Playwright 1.61.1 Chromium). The
+ * replacement tab is created before the old page closes — closing a
+ * browser's last tab can take the whole (attached, user-owned) browser down
+ * with it.
  */
-async function resetOpenPagesOntoInstalledState(browserContext: playwright.BrowserContext): Promise<void> {
+async function replaceOpenPagesWithBlankTabs(browserContext: playwright.BrowserContext): Promise<{ page: playwright.Page, url: string }[]> {
   const seen = new Set<playwright.Page>();
   const arrivals: playwright.Page[] = [];
   const onPage = (page: playwright.Page) => arrivals.push(page);
-  const resetPage = async (page: playwright.Page) => {
+  const replaced: { page: playwright.Page, url: string }[] = [];
+  const replacePage = async (page: playwright.Page) => {
     const url = page.url();
     let fresh: playwright.Page;
     try {
@@ -161,25 +161,11 @@ async function resetOpenPagesOntoInstalledState(browserContext: playwright.Brows
       await page.close().catch(() => {});
       return;
     }
-    // The replacement never needs resetting itself — it must not be swept up
+    // The replacement never needs replacing itself — it must not be swept up
     // by the loop below when it surfaces through pages() or the listener.
     seen.add(fresh);
     await page.close().catch(() => {});
-    if (url && url !== 'about:blank') {
-      try {
-        await fresh.goto(url);
-      } catch {
-        // The origin may be blocked by the just-installed policy, or the
-        // load simply failed. The fresh tab carries no old identity, so a
-        // blank replacement is safe to hand to Context; close it only if
-        // even blanking fails.
-        try {
-          await fresh.goto('about:blank');
-        } catch {
-          await fresh.close().catch(() => {});
-        }
-      }
-    }
+    replaced.push({ page: fresh, url });
   };
   // A still-old document can open a page while the ones above are being
   // replaced — a popup from a timer, say — and a same-origin popup clones
@@ -188,7 +174,7 @@ async function resetOpenPagesOntoInstalledState(browserContext: playwright.Brows
   // repeats until no unseen page remains; the temporary 'page' listener
   // catches pages whose creation the next pages() call cannot see yet. The
   // Set dedupes a page that arrives through both — two concurrent
-  // replacements of one page would race each other's close and navigation.
+  // replacements of one page would race each other's close.
   browserContext.on('page', onPage);
   try {
     while (true) {
@@ -197,11 +183,36 @@ async function resetOpenPagesOntoInstalledState(browserContext: playwright.Brows
         break;
       for (const page of pending)
         seen.add(page);
-      await Promise.all(pending.map(resetPage));
+      await Promise.all(pending.map(replacePage));
     }
   } finally {
     browserContext.off('page', onPage);
   }
+  return replaced;
+}
+
+/**
+ * Navigates each replacement tab to the URL its replaced page showed, bringing
+ * what a scan sees onto the state the context now holds. A tab that cannot
+ * load its page — the origin may be blocked by the just-installed policy, or
+ * the load simply failed — is blanked instead (the fresh tab carries no old
+ * identity, so a blank one is safe to hand to Context), and closed only when
+ * even blanking fails.
+ */
+async function navigateReplacementPages(replaced: { page: playwright.Page, url: string }[]): Promise<void> {
+  await Promise.all(replaced.map(async ({ page, url }) => {
+    if (!url || url === 'about:blank')
+      return;
+    try {
+      await page.goto(url);
+    } catch {
+      try {
+        await page.goto('about:blank');
+      } catch {
+        await page.close().catch(() => {});
+      }
+    }
+  }));
 }
 
 /**
@@ -281,16 +292,23 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
       throw new Error(`The attached browser cannot open the temporary page Playwright needs to reset origin storage for origins this connection has already visited (Electron targets do not support Target.createTarget). Nothing was changed. Drop the storage state and sign in inside the app instead. Original error: ${message}`);
     throw new Error(`Snapshotting the context's current storage for rollback failed, so the storage state was not applied — a partial apply could not have been undone. Nothing was changed. Retry, or use --isolated for a fresh context. Original error: ${message}`);
   });
+  // Pages that were already open still render the previous identity — and
+  // their scripts keep running: a page that periodically persists
+  // authentication into cookies or localStorage would overwrite the state
+  // being installed if it were still alive during setStorageState(), and
+  // replacing its tab afterwards cannot undo writes already made into
+  // context-wide storage. Every open page is therefore replaced with a blank
+  // fresh tab FIRST — the old document closes before the state lands, and
+  // only blank replacements (which run no scripts) survive the apply — and
+  // the replacements are navigated to the pages they replaced only once the
+  // recorded state is in place.
+  const replaced = await replaceOpenPagesWithBlankTabs(browserContext);
   try {
     // The state validated above is the state applied: handing the path back
     // to Playwright would re-read the file here, and a file replaced since
     // that read would skip the cookie/origin validation and the page-creation
     // probe only to fail after the cache clear those exist to prevent.
     await browserContext.setStorageState(parsedState);
-    // Pages that were already open still render the previous identity's DOM
-    // and in-memory state; replace them so what a scan sees matches the state
-    // just installed.
-    //
     // The replacement navigations run inside the factory, before Context
     // ensures the configured origin allowlist/blocklist — and the recorded
     // credentials are already in place by now. The policy is installed here
@@ -302,7 +320,7 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     // route cannot interfere with the temporary page Playwright drives to
     // restore origin storage.
     await ensureNetworkPolicyRoutes(config, browserContext);
-    await resetOpenPagesOntoInstalledState(browserContext);
+    await navigateReplacementPages(replaced);
   } catch (error) {
     // Prefer the full-state rollback; fall back to cookies-only when its
     // reapplication is itself impossible on this target.
@@ -310,6 +328,10 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     const restoredCookies = restoredFully || await browserContext.clearCookies()
         .then(() => originalCookies.length ? browserContext.addCookies(originalCookies) : undefined)
         .then(() => true, () => false);
+    // The old pages were closed before the apply and cannot be handed back,
+    // but with the original state restored the parked tabs are navigated to
+    // the pages they replaced rather than left blank.
+    await navigateReplacementPages(replaced);
     // Restoring origin storage (localStorage/IndexedDB) makes Playwright open a
     // temporary page; a CDP target that cannot create one — Electron has no
     // Target.createTarget — fails here. Cookie-only states need no page and
@@ -664,7 +686,11 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
 // retry loop never retries on one (a bad state file fails the same way 5 times).
 class StorageStateError extends Error {}
 
-class PersistentContextFactory implements BrowserContextFactory {
+// Shared with the --connect-tool startup validation in program.ts, so the
+// lazy rejection here and the eager one there never drift apart.
+export const persistentProfileConflictRemedy = 'Drop --user-data-dir (a managed, disposable profile is used for storage-state sessions), or drop the storage state and sign in in that profile instead.';
+
+export class PersistentContextFactory implements BrowserContextFactory {
   readonly config: FullConfig;
   // launchPersistentContext() silently ignores a storageState option, so the
   // state is applied to the launched context with setStorageState() instead.
@@ -696,7 +722,7 @@ class PersistentContextFactory implements BrowserContextFactory {
     // profile cannot be treated this way — it is data we do not own — and
     // keeping it contradicts "start from the recorded state", so that
     // combination errors.
-    assertStorageStateDoesNotResetUserProfile(this.config, 'Drop --user-data-dir (a managed, disposable profile is used for storage-state sessions), or drop the storage state and sign in in that profile instead.');
+    assertStorageStateDoesNotResetUserProfile(this.config, persistentProfileConflictRemedy);
     // Trace setup runs before the disposable profile exists: it can fail (an
     // unwritable output directory), and nothing after the directory is created
     // may throw outside the cleanup scope below, or failed starts would leave
@@ -759,9 +785,11 @@ class PersistentContextFactory implements BrowserContextFactory {
         // reused-context apply uses brings every open page onto the state,
         // with the origin policy installed first: these navigations run with
         // the recorded credentials in place, ahead of Context's own (no-op,
-        // once-per-context) ensure.
+        // once-per-context) ensure. (Park-first is not needed here: the
+        // disposable profile carries no previous identity a startup page
+        // could write back.)
         await ensureNetworkPolicyRoutes(this.config, browserContext);
-        await resetOpenPagesOntoInstalledState(browserContext);
+        await navigateReplacementPages(await replaceOpenPagesWithBlankTabs(browserContext));
       } catch (error) {
         // Nobody holds a close() for this context yet, so a bad storage-state
         // file must not leave the launched browser running.
