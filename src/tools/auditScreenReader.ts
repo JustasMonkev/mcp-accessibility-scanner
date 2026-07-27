@@ -587,15 +587,23 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     }
     return false;
   };
-  const sightedText = (element: Element): string => {
-    const cached = textCache.get(element);
+  // clipState mirrors the ancestor walk's containing-block model during the
+  // descent: 'none' collects normally; 'escapable' means a collapsed static
+  // clip box is above — its in-flow content is clipped (text suppressed), but
+  // an absolutely/fixed positioned descendant whose containing block sits
+  // outside the box escapes and collects normally again. Meeting a containing
+  // block (positioned or transformed) while suppressed binds everything below
+  // it inside the clip, so that branch prunes. A positioned collapsed box (the
+  // classic sr-only shape) is its own containing block and prunes outright.
+  const sightedText = (element: Element, clipState: 'none' | 'escapable' = 'none'): string => {
+    const cached = clipState === 'none' ? textCache.get(element) : undefined;
     if (cached !== undefined)
       return cached;
     let text = '';
     // An element's own text nodes render only while its computed visibility is
     // visible; child elements are walked regardless, because unlike the
     // subtreeHidden conditions, visibility can be restored further down.
-    const ownTextVisible = !visibilityHidden(element);
+    const ownTextVisible = clipState === 'none' && !visibilityHidden(element);
     // A web component renders its visible label in its shadow root; walking only
     // light-DOM children makes such a host look like an icon-only control. The
     // shadow tree replaces the host's light children entirely — light nodes
@@ -611,12 +619,41 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
       if (child.nodeType === Node.TEXT_NODE) {
         if (ownTextVisible)
           text += child.nodeValue ?? '';
-      } else if (child.nodeType === Node.ELEMENT_NODE && !subtreeHidden(child as Element)) {
-        text += ` ${sightedText(child as Element)}`;
+        continue;
       }
+      if (child.nodeType !== Node.ELEMENT_NODE)
+        continue;
+      const childElement = child as Element;
+      const style = window.getComputedStyle(childElement);
+      const decided = nonGeometricHidden(style);
+      if (decided === true)
+        continue;
+      let childState = clipState;
+      if (decided === null) {
+        const rect = childElement.getBoundingClientRect();
+        if (insetClipsEverything(style.clipPath, childElement, rect, style))
+          continue;
+        const outOfFlow = style.position === 'absolute' || style.position === 'fixed';
+        const containingBlock = style.position !== 'static' || style.transform !== 'none';
+        if (clipState === 'escapable') {
+          if (outOfFlow)
+            childState = 'none';
+          else if (containingBlock)
+            continue;
+        }
+        if (childState === 'none' && collapsedClippingBox(style, rect)) {
+          if (containingBlock)
+            continue;
+          childState = 'escapable';
+        }
+      }
+      const childText = sightedText(childElement, childState);
+      if (childText)
+        text += ` ${childText}`;
     }
     const value = text.replace(/\s+/g, ' ').trim();
-    textCache.set(element, value);
+    if (clipState === 'none')
+      textCache.set(element, value);
     return value;
   };
 

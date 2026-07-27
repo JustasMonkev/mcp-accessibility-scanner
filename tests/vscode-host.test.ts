@@ -46,4 +46,36 @@ describe('VSCodeProxyBackend', () => {
     expect(close).toHaveBeenCalledTimes(1);
     expect((backend as any)._backendContext.notifyToolListChanged).toHaveBeenCalledTimes(1);
   });
+
+  it('rejects a profile-conflicted browser_connect without tearing down the working provider', async () => {
+    // The child's factory would only surface the --storage-state plus
+    // --user-data-dir contradiction on its first browser operation — after
+    // the working provider was already closed, stranding the session on a
+    // provider that can never create a context.
+    const config = {
+      browser: {
+        userDataDir: '/home/user/my-profile',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    };
+    const backend = new VSCodeProxyBackend(config as any, vi.fn(async () => ({ id: 'default-transport' } as any)));
+
+    const close = vi.fn(async () => undefined);
+    const callTool = vi.fn(async () => ({ content: [] }));
+    (backend as any)._currentClient = {
+      listTools: vi.fn(async () => ({ tools: [{ name: 'scan_page' }] })),
+      callTool,
+      close,
+    };
+
+    const result = await backend.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' });
+
+    expect(result.isError).toBe(true);
+    expect(String((result.content as any[])[0].text)).toContain('contradict each other');
+    // The working provider was neither closed nor replaced: regular tools
+    // still route to it.
+    expect(close).not.toHaveBeenCalled();
+    await backend.callTool('scan_page', {});
+    expect(callTool).toHaveBeenCalledTimes(1);
+  });
 });

@@ -19,6 +19,11 @@ import type { BrowserContextFactory, ClientInfo } from '../browserContextFactory
 import type { FullConfig } from '../config.js';
 import type { BrowserContext } from 'playwright-core';
 
+// Shared with the host's browser_connect validation so the two never drift:
+// the host checks the combination before tearing down the working provider,
+// and the factory keeps the same check as the last line of defense.
+export const vscodeProfileConflictRemedy = 'Drop --user-data-dir (the state is applied inside the extension\'s own browser profile), or drop the storage state and sign in in that profile instead.';
+
 export class VSCodeBrowserContextFactory implements BrowserContextFactory {
   name = 'vscode';
   description = 'Connect to a browser running in the Playwright VS Code extension';
@@ -35,7 +40,7 @@ export class VSCodeBrowserContextFactory implements BrowserContextFactory {
     // profile's cookies and origin storage, which the persistent factory
     // already refuses to do. Checked before connecting, so the contradiction
     // fails fast without ever reaching the browser.
-    assertStorageStateDoesNotResetUserProfile(this._config, 'Drop --user-data-dir (the state is applied inside the extension\'s own browser profile), or drop the storage state and sign in in that profile instead.');
+    assertStorageStateDoesNotResetUserProfile(this._config, vscodeProfileConflictRemedy);
     let launchOptions: any = this._config.browser.launchOptions;
     if (this._config.browser.userDataDir) {
       launchOptions = {

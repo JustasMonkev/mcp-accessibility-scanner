@@ -71,11 +71,30 @@ export function contextFactory(config: FullConfig): BrowserContextFactory {
 
 // The rules addCookies enforces client-side (verified against Playwright
 // 1.61.1: empty or missing domain/path without a url, a url combined with a
-// domain or a path, an expires other than -1 or a positive number, and
-// sameSite outside Strict/Lax/None are all rejected there). Failing them
-// here keeps the failure ahead of the cache clear; anything these checks
-// miss still fails inside setStorageState.
-function assertValidStorageStateCookies(state: { cookies?: unknown[] }): void {
+// domain or a path, about:blank/data:/unparseable urls, an expires other
+// than -1 or a positive number up to Playwright's ceiling, and sameSite
+// outside Strict/Lax/None are all rejected there — non-http(s) url schemes
+// and malformed origin strings fail browser-side during the apply). Failing
+// them here keeps the failure ahead of the cache clear; anything these
+// checks miss still fails inside setStorageState.
+const cookieUrlProblem = (url: unknown): string | null => {
+  if (typeof url !== 'string')
+    return 'is not a string';
+  if (url === 'about:blank')
+    return 'cannot be about:blank';
+  if (url.startsWith('data:'))
+    return 'cannot be a data: URL';
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+      return `must be an http(s) URL, not ${parsed.protocol}`;
+  } catch {
+    return 'is not a valid absolute URL';
+  }
+  return null;
+};
+
+function assertValidStorageState(state: { cookies?: unknown[], origins?: unknown[] }): void {
   for (const value of state.cookies ?? []) {
     const cookie = value as Record<string, unknown> | null;
     const problem = !cookie || typeof cookie !== 'object'
@@ -86,13 +105,28 @@ function assertValidStorageStateCookies(state: { cookies?: unknown[] }): void {
           ? `cookie "${String(cookie.name ?? '')}" should have either a url or a domain, not both`
           : cookie.url && cookie.path
             ? `cookie "${String(cookie.name ?? '')}" should have either a url or a path, not both`
-            : cookie.expires !== undefined && (typeof cookie.expires !== 'number' || Number.isNaN(cookie.expires) || (cookie.expires !== -1 && (cookie.expires <= 0 || cookie.expires > 253402300799)))
-              ? `cookie "${String(cookie.name ?? '')}" should have a valid expires — only -1 or a positive unix timestamp in seconds up to 253402300799 (9999-12-31T23:59:59Z, Playwright's own ceiling) is allowed`
-              : cookie.sameSite !== undefined && !['Strict', 'Lax', 'None'].includes(cookie.sameSite as string)
-                ? `cookie "${String(cookie.name ?? '')}" has sameSite "${String(cookie.sameSite)}", expected one of Strict|Lax|None`
-                : null;
+            : cookie.url !== undefined && cookieUrlProblem(cookie.url)
+              ? `cookie "${String(cookie.name ?? '')}" has a url that ${cookieUrlProblem(cookie.url)}`
+              : cookie.expires !== undefined && (typeof cookie.expires !== 'number' || Number.isNaN(cookie.expires) || (cookie.expires !== -1 && (cookie.expires <= 0 || cookie.expires > 253402300799)))
+                ? `cookie "${String(cookie.name ?? '')}" should have a valid expires — only -1 or a positive unix timestamp in seconds up to 253402300799 (9999-12-31T23:59:59Z, Playwright's own ceiling) is allowed`
+                : cookie.sameSite !== undefined && !['Strict', 'Lax', 'None'].includes(cookie.sameSite as string)
+                  ? `cookie "${String(cookie.name ?? '')}" has sameSite "${String(cookie.sameSite)}", expected one of Strict|Lax|None`
+                  : null;
     if (problem)
-      throw new Error(`Invalid storage state: ${problem}. Nothing was changed — cookies are validated before the apply, because setStorageState() clears the attached context's HTTP cache and cookie jar before it validates them, and the cache cannot be restored.`);
+      throw new Error(`Invalid storage state: ${problem}. Nothing was changed — the state is validated before the apply, because setStorageState() clears the attached context's HTTP cache and cookie jar before it validates, and the cache cannot be restored.`);
+  }
+  for (const value of state.origins ?? []) {
+    const entry = value as Record<string, unknown> | null;
+    // Restoring an origin's storage navigates Playwright's temporary page to
+    // it — a malformed or non-http(s) origin fails that navigation after the
+    // clear.
+    const problem = !entry || typeof entry !== 'object'
+      ? 'an origins entry is not an object'
+      : typeof entry.origin !== 'string' || cookieUrlProblem(entry.origin)
+        ? `origins entry "${String(entry?.origin ?? '')}" is not an absolute http(s) URL`
+        : null;
+    if (problem)
+      throw new Error(`Invalid storage state: ${problem}. Nothing was changed — the state is validated before the apply, because setStorageState() clears the attached context's HTTP cache and cookie jar before it validates, and the cache cannot be restored.`);
   }
 }
 
@@ -126,7 +160,7 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
   // fail the apply with the cache unrestorably gone. Checked up front, with
   // the same rules addCookies enforces (verified against 1.61.1).
   if (parsedState)
-    assertValidStorageStateCookies(parsedState);
+    assertValidStorageState(parsedState);
   // setStorageState needs a temporary page whenever the state carries origins
   // or the context has visited any — and by the time that page creation fails
   // on a target without Target.createTarget, the HTTP cache is already cleared
@@ -188,21 +222,27 @@ export async function applyStorageStateToReusedContext(config: FullConfig, brows
     // temporary page Playwright drives to restore origin storage.
     await ensureNetworkPolicyRoutes(config, browserContext);
     await Promise.all(browserContext.pages().map(async page => {
+      // Per-tab sessionStorage sits outside Playwright storage states and
+      // survives a reload, and an application can rebuild the previous
+      // identity's UI from it — so it is cleared in every frame first. A
+      // frame that cannot be cleared (mid-navigation, dying) leaves the
+      // tab's previous-identity sessionStorage in place, and blanking would
+      // only hide it until the next same-origin navigation resurrects it —
+      // such a page is closed outright.
+      const cleared = await Promise.all(page.frames().map(frame => frame.evaluate(() => sessionStorage.clear()).then(() => true, () => false)));
+      if (!cleared.every(Boolean)) {
+        await page.close().catch(() => {});
+        return;
+      }
       try {
-        // Per-tab sessionStorage sits outside Playwright storage states and
-        // survives a reload, and an application can rebuild the previous
-        // identity's UI from it — so it is cleared in every frame first.
-        // (Failures fall through to the reload; a page whose frames cannot
-        // even be evaluated is not going to reload successfully either.)
-        await Promise.all(page.frames().map(frame => frame.evaluate(() => sessionStorage.clear()).catch(() => {})));
         await page.reload();
       } catch {
         // A page that cannot be brought onto the installed state — its
         // origin may be blocked by the policy, or the load simply failed —
         // must not stay around rendering the previous identity's DOM:
         // Context adopts every remaining page, and a scan would read the
-        // stale document as the new session's UI. Blank it; if even that
-        // fails, close it.
+        // stale document as the new session's UI. Blank it (its
+        // sessionStorage is already cleared); if even that fails, close it.
         try {
           await page.goto('about:blank');
         } catch {
@@ -440,6 +480,11 @@ class CdpContextFactory extends BaseContextFactory {
       if (!creating) {
         creating = browser.newContext(this.config.browser.contextOptions).then(created => {
           this._storageStateApplied.set(created, Promise.resolve());
+          // Evict on close, or a context closed externally (while the
+          // connection lives on) would keep being handed out of this memo to
+          // every later session — contexts() no longer lists it, so only the
+          // memo would remember it, forever.
+          created.on('close', () => this._fallbackContext.delete(browser));
           return created;
         });
         this._fallbackContext.set(browser, creating);

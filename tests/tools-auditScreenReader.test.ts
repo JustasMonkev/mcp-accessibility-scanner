@@ -769,6 +769,23 @@ describe('collectElementFacts in a real page', () => {
     expect(visibleText).toEqual(['Send', 'Send', null]);
   });
 
+  it('collects labels that escape a collapsed clip box during text descent', async () => {
+    const visibleText = await measureVisibleText(`
+      <button id="btn-escape" style="position:relative" aria-label="Submit"><span style="display:block;width:1px;height:1px;overflow:hidden"><span style="position:absolute;top:0;left:0">Send</span></span></button>
+      <button id="btn-sronly" aria-label="Submit"><span style="display:block;position:absolute;width:1px;height:1px;overflow:hidden">Send</span></button>
+      <button id="btn-bound" style="position:relative" aria-label="Submit"><span style="display:block;width:1px;height:1px;overflow:hidden"><span style="position:relative;display:block"><span style="position:absolute;top:0;left:0">Send</span></span></span></button>`,
+    ['#btn-escape', '#btn-sronly', '#btn-bound']);
+
+    // The descent mirrors the ancestor walk's containing-block model: the
+    // first label rides an absolutely positioned span whose containing block
+    // (the relative button) sits outside the collapsed clip box, so it paints
+    // and belongs in the button's visible text. The sr-only shape (the clip
+    // box is positioned, so it is its own containing block) and the bound
+    // case (a relative wrapper inside the clip box anchors the escapee)
+    // genuinely paint nothing.
+    expect(visibleText).toEqual(['Send', null, null]);
+  });
+
   it('measures inset clips against the geometry box the clip-path names', async () => {
     const visibleText = await measureVisibleText(`
       <div id="content-swallowed" style="width:100px;padding:50px;clip-path:inset(0 60px) content-box">Send</div>

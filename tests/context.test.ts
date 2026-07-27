@@ -217,6 +217,46 @@ describe('Context', () => {
     });
   });
 
+  describe('shared context recorder', () => {
+    it('multiplexes recorder events so a departing session does not silence the survivor', async () => {
+      // Playwright's _enableRecorder supports one sink per context; a second
+      // session used to replace the first session's callbacks, and a closing
+      // session left the sink pointing at its disposed Context.
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const log1 = { logUserAction: vi.fn() };
+      const log2 = { logUserAction: vi.fn() };
+      const makeContext = (sessionLog: any) => new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog,
+        clientInfo: { rootPath: '/tmp' } as any,
+      });
+      const context1 = makeContext(log1);
+      await context1.newTab();
+
+      // A page owned by session 1 arrives before session 2 joins.
+      const page = new EventEmitter() as any;
+      page.setDefaultNavigationTimeout = vi.fn();
+      page.setDefaultTimeout = vi.fn();
+      page.url = () => 'about:blank';
+      mockBrowserContext.emit('page', page);
+
+      const context2 = makeContext(log2);
+      await context2.newTab();
+
+      expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(1);
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+
+      // Session 2 leaves; the shared context (and session 1) live on.
+      await context2.closeBrowserContext();
+      sink.actionAdded(page, { action: { name: 'click' } }, 'await page.click();');
+
+      expect(log1.logUserAction).toHaveBeenCalledTimes(1);
+      expect(log2.logUserAction).not.toHaveBeenCalled();
+    });
+  });
+
   describe('isRunningTool', () => {
     it('should return false initially', () => {
       const context = new Context({

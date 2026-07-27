@@ -696,6 +696,10 @@ describe('browserContextFactory', () => {
     { label: 'expires -2', cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', expires: -2 }, problem: /valid expires/ },
     { label: 'expires past the ceiling', cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', expires: 253402300800 }, problem: /valid expires/ },
     { label: 'bad sameSite', cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', sameSite: 'Sideways' }, problem: /Strict\|Lax\|None/ },
+    { label: 'url about:blank', cookie: { name: 'sid', value: 'x', url: 'about:blank' }, problem: /cannot be about:blank/ },
+    { label: 'data: url', cookie: { name: 'sid', value: 'x', url: 'data:text/html,x' }, problem: /cannot be a data: URL/ },
+    { label: 'unparseable url', cookie: { name: 'sid', value: 'x', url: 'not a url' }, problem: /not a valid absolute URL/ },
+    { label: 'non-http url', cookie: { name: 'sid', value: 'x', url: 'ws://app.example/' }, problem: /must be an http\(s\) URL/ },
   ])('rejects a storage state with a $label cookie before touching the browser', async ({ cookie, problem }) => {
     const browserContext = createMockBrowserContext();
     const browser = createMockBrowser(browserContext);
@@ -714,6 +718,82 @@ describe('browserContextFactory', () => {
         .rejects.toThrow(problem);
     expect(browserContext.setStorageState).not.toHaveBeenCalled();
     expect(browserContext.clearCookies).not.toHaveBeenCalled();
+  });
+
+  it('rejects a storage state whose origins entry is not an http(s) URL, before touching the browser', async () => {
+    // Restoring an origin's storage navigates Playwright's temporary page to
+    // it — a malformed origin fails that navigation after the cache clear.
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: { cookies: [], origins: [{ origin: 'not a url', localStorage: [] }] } as any },
+      },
+    });
+
+    const factory = contextFactory(config);
+
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+        .rejects.toThrow(/origins entry .* is not an absolute http\(s\) URL/);
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+    expect(browserContext.newPage).not.toHaveBeenCalled();
+  });
+
+  it('closes a page whose sessionStorage cannot be cleared instead of reloading it', async () => {
+    // A frame that cannot be cleared (mid-navigation, dying) leaves the
+    // previous identity's per-tab storage in place, and blanking would only
+    // hide it until the next same-origin navigation resurrects it.
+    const badFrame = { evaluate: vi.fn().mockRejectedValue(new Error('Execution context was destroyed')) };
+    const pages = [createMockPage('https://app.example/a', { frames: vi.fn().mockReturnValue([badFrame]) })];
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue(pages);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        contextOptions: { storageState: '/tmp/auth.json' },
+      },
+    });
+
+    const factory = contextFactory(config);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(pages[0].close).toHaveBeenCalledTimes(1);
+    expect(pages[0].reload).not.toHaveBeenCalled();
+    expect(pages[0].goto).not.toHaveBeenCalled();
+  });
+
+  it('evicts a fallback context from the memo when it closes', async () => {
+    // A context closed externally (while the connection lives on) no longer
+    // appears in contexts(); only the memo would remember it, and every later
+    // session would receive the dead context.
+    const context1 = createMockBrowserContext();
+    const context2 = createMockBrowserContext();
+    const browser = createMockBrowser(context1);
+    browser.contexts.mockReturnValue([]);
+    browser.newContext.mockResolvedValueOnce(context1).mockResolvedValueOnce(context2);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: { cdpEndpoint: 'http://127.0.0.1:9222' },
+    });
+
+    const factory = contextFactory(config);
+    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    expect(first.browserContext).toBe(context1);
+
+    // The created context closes externally; the memo must let go of it.
+    const onClose = context1.on.mock.calls.find((call: any[]) => call[0] === 'close')?.[1];
+    onClose?.();
+
+    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    expect(browser.newContext).toHaveBeenCalledTimes(2);
+    expect(second.browserContext).toBe(context2);
   });
 
   it('closes an isolated session\'s own context on release, keeping the shared connection', async () => {
