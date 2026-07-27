@@ -769,6 +769,22 @@ describe('collectElementFacts in a real page', () => {
     expect(visibleText).toEqual(['Send', 'Send', null]);
   });
 
+  it('measures inset clips against the geometry box the clip-path names', async () => {
+    const visibleText = await measureVisibleText(`
+      <div id="content-swallowed" style="width:100px;padding:50px;clip-path:inset(0 60px) content-box">Send</div>
+      <div id="content-partial" style="width:100px;padding:50px;clip-path:inset(0 30px) content-box">Send</div>
+      <div id="margin-partial" style="width:100px;height:40px;margin:50px;clip-path:inset(0 60px) margin-box">Send</div>
+      <div id="padding-partial" style="width:100px;padding:50px;border:10px solid;clip-path:inset(0 90px) padding-box">Send</div>`,
+    ['#content-swallowed', '#content-partial', '#margin-partial', '#padding-partial']);
+
+    // A geometry-box suffix changes what the insets resolve against:
+    // inset(0 60px) content-box on a 100px content box (200px border box)
+    // paints nothing — measured against the border box it would look like an
+    // 80px strip — while the same insets against the 200px margin box, and
+    // 90px insets against the 200px padding box, leave painted slivers.
+    expect(visibleText).toEqual([null, 'Send', 'Send', 'Send']);
+  });
+
   it('keeps perspective projections visible while flat edge-on planes hide', async () => {
     const visibleText = await measureVisibleText(`
       <button id="persp" style="transform: perspective(500px) translateX(100px) rotateY(90deg)" aria-label="Submit">Send</button>

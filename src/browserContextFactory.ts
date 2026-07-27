@@ -86,8 +86,8 @@ function assertValidStorageStateCookies(state: { cookies?: unknown[] }): void {
           ? `cookie "${String(cookie.name ?? '')}" should have either a url or a domain, not both`
           : cookie.url && cookie.path
             ? `cookie "${String(cookie.name ?? '')}" should have either a url or a path, not both`
-            : cookie.expires !== undefined && (typeof cookie.expires !== 'number' || Number.isNaN(cookie.expires) || (cookie.expires !== -1 && cookie.expires <= 0))
-              ? `cookie "${String(cookie.name ?? '')}" should have a valid expires — only -1 or a positive unix timestamp in seconds is allowed`
+            : cookie.expires !== undefined && (typeof cookie.expires !== 'number' || Number.isNaN(cookie.expires) || (cookie.expires !== -1 && (cookie.expires <= 0 || cookie.expires > 253402300799)))
+              ? `cookie "${String(cookie.name ?? '')}" should have a valid expires — only -1 or a positive unix timestamp in seconds up to 253402300799 (9999-12-31T23:59:59Z, Playwright's own ceiling) is allowed`
               : cookie.sameSite !== undefined && !['Strict', 'Lax', 'None'].includes(cookie.sameSite as string)
                 ? `cookie "${String(cookie.name ?? '')}" has sameSite "${String(cookie.sameSite)}", expected one of Strict|Lax|None`
                 : null;

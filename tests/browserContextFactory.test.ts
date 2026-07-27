@@ -694,6 +694,7 @@ describe('browserContextFactory', () => {
     { label: 'url with domain', cookie: { name: 'sid', value: 'x', url: 'https://app.example/', domain: 'app.example' }, problem: /either a url or a domain/ },
     { label: 'url with path', cookie: { name: 'sid', value: 'x', url: 'https://app.example/', path: '/' }, problem: /either a url or a path/ },
     { label: 'expires -2', cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', expires: -2 }, problem: /valid expires/ },
+    { label: 'expires past the ceiling', cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', expires: 253402300800 }, problem: /valid expires/ },
     { label: 'bad sameSite', cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', sameSite: 'Sideways' }, problem: /Strict\|Lax\|None/ },
   ])('rejects a storage state with a $label cookie before touching the browser', async ({ cookie, problem }) => {
     const browserContext = createMockBrowserContext();

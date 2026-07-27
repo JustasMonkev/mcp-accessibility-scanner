@@ -415,18 +415,40 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
   // remaining region is computed from the inset components instead of
   // pattern-matching the serialized prefix. Non-numeric components (calc())
   // parse to NaN and fail every comparison, erring on the visible side.
-  const insetClipsEverything = (clipPath: string, element: Element, rect: DOMRect): boolean => {
-    const args = /^inset\(([^)]*)\)/.exec(clipPath)?.[1].split(' round ')[0].trim().split(/\s+/);
-    if (!args)
+  const insetClipsEverything = (clipPath: string, element: Element, rect: DOMRect, style: CSSStyleDeclaration): boolean => {
+    const match = /^inset\(([^)]*)\)(?:\s+([a-z-]+))?/.exec(clipPath);
+    if (!match)
       return false;
+    const args = match[1].split(' round ')[0].trim().split(/\s+/);
     // clip-path lengths and percentages resolve against the untransformed
-    // reference box (the border box), not the transformed bounding rect — a
-    // rotated element swaps its rect's axes and a pixel inset would be
-    // compared against the wrong dimension. offsetWidth/offsetHeight are that
-    // border box; SVG elements have no offset box, and for them the bounding
-    // rect is the closest stand-in available here.
-    const width = element instanceof HTMLElement ? element.offsetWidth : rect.width;
-    const height = element instanceof HTMLElement ? element.offsetHeight : rect.height;
+    // reference box, not the transformed bounding rect — a rotated element
+    // swaps its rect's axes and a pixel inset would be compared against the
+    // wrong dimension. The reference box is the geometry-box suffix when one
+    // is given (border-box is the default): offsetWidth/offsetHeight for the
+    // border box, clientWidth/clientHeight for the padding box (scrollbars
+    // shave it — a rare sliver of over-hiding), those minus paddings for the
+    // content box, offsets plus margins for the margin box. SVG geometry
+    // boxes (fill/stroke/view) have no offset box, and for them — as for SVG
+    // elements generally — the bounding rect is the closest stand-in here.
+    const px = (value: string) => parseFloat(value) || 0;
+    const box = match[2] ?? 'border-box';
+    let width = rect.width;
+    let height = rect.height;
+    if (element instanceof HTMLElement) {
+      if (box === 'border-box') {
+        width = element.offsetWidth;
+        height = element.offsetHeight;
+      } else if (box === 'margin-box') {
+        width = element.offsetWidth + px(style.marginLeft) + px(style.marginRight);
+        height = element.offsetHeight + px(style.marginTop) + px(style.marginBottom);
+      } else if (box === 'padding-box') {
+        width = element.clientWidth;
+        height = element.clientHeight;
+      } else if (box === 'content-box') {
+        width = element.clientWidth - px(style.paddingLeft) - px(style.paddingRight);
+        height = element.clientHeight - px(style.paddingTop) - px(style.paddingBottom);
+      }
+    }
     // Computed clip-path lengths are resolved to px; only percentages remain.
     const toPx = (value: string, size: number) => value.endsWith('%') ? (parseFloat(value) / 100) * size : parseFloat(value);
     const top = toPx(args[0], height);
@@ -494,7 +516,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     if (decided !== null)
       return decided;
     const rect = element.getBoundingClientRect();
-    if (insetClipsEverything(style.clipPath, element, rect))
+    if (insetClipsEverything(style.clipPath, element, rect, style))
       return true;
     // Ceiling: during text descent a collapsed clipping box drops its whole
     // subtree, including an out-of-flow descendant whose containing block
@@ -550,7 +572,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
         return true;
       if (decided === null) {
         const rect = node.getBoundingClientRect();
-        if (insetClipsEverything(style.clipPath, node, rect))
+        if (insetClipsEverything(style.clipPath, node, rect, style))
           return true;
         const containingBlock = style.position !== 'static' || style.transform !== 'none';
         if (collapsedClippingBox(style, rect) && (!escapesOverflowClip || containingBlock))
