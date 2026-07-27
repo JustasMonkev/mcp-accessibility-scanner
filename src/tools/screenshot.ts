@@ -54,7 +54,7 @@ const screenshot = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    const extension = path.extname(params.filename ?? '').toLowerCase();
+    const extension = (path.extname(params.filename ?? '') || path.basename(params.filename ?? '')).toLowerCase();
     const fileType = params.type ?? ({ '.jpg': 'jpeg', '.jpeg': 'jpeg', '.webp': 'webp' } as const)[extension as '.jpg' | '.jpeg' | '.webp'] ?? 'png';
     const fileName = await tab.context.outputFile(params.filename ?? `page-${new Date().toISOString()}.${fileType}`);
     const options: playwright.PageScreenshotOptions = {

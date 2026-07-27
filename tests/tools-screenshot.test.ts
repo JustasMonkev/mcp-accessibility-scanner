@@ -83,10 +83,13 @@ describe('Screenshot Tools', () => {
   });
 
   it('should infer the type from the filename', async () => {
-    const params = screenshotTool.schema.inputSchema.parse({ filename: 'page.WEBP' });
-    await screenshotTool.handle(mockContext, params, response);
+    for (const [filename, type] of [['page.WEBP', 'webp'], ['.webp', 'webp'], ['.jpeg', 'jpeg'], ['.jpg', 'jpeg']] as const) {
+      mockPage.screenshot.mockClear();
+      const params = screenshotTool.schema.inputSchema.parse({ filename });
+      await screenshotTool.handle(mockContext, params, new Response(mockContext, 'browser_take_screenshot', {}));
 
-    expect(mockPage.screenshot).toHaveBeenCalledWith(expect.objectContaining({ type: 'webp' }));
+      expect(mockPage.screenshot).toHaveBeenCalledWith(expect.objectContaining({ type }));
+    }
   });
 
   it('should only set quality for jpeg screenshots', async () => {
