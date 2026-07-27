@@ -21,7 +21,7 @@ import * as mcpServer from './mcp/server.js';
 import { commaSeparatedList, resolveCLIConfig, semicolonSeparatedList } from './config.js';
 import { packageJSON } from './utils/package.js';
 import { Context } from './context.js';
-import { assertStorageStateSupported, contextFactory } from './browserContextFactory.js';
+import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported, contextFactory, PersistentContextFactory, persistentProfileConflictRemedy } from './browserContextFactory.js';
 import { ProxyBackend } from './mcp/proxyBackend.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
@@ -42,13 +42,22 @@ type ProgramContext = {
 async function resolveProgramContext(options: Record<string, unknown>): Promise<ProgramContext> {
   const config = await resolveCLIConfig(options);
   const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath);
-  // These modes run every tool through the extension factory, not the one
-  // contextFactory() builds, so validate the factory that will actually create the
-  // context. Checked first because contextFactory() would otherwise recommend
-  // --isolated, which does not help here.
-  if (options.extension || options.connectTool)
+  // --extension runs every tool through the extension factory, not the one
+  // contextFactory() builds, so validate the factory that will actually create
+  // the context. Checked first because contextFactory() would otherwise
+  // recommend --isolated, which does not help here.
+  if (options.extension)
     assertStorageStateSupported(config, extensionContextFactory, '--extension attaches to the browser you are already running and uses the context it already has; --isolated does not change that. Drop the storage state and sign in in that browser before auditing.');
   const browserContextFactory = contextFactory(config);
+  // Provider-switching modes with a persistent default provider must reject
+  // the profile conflict at startup: the factory itself only rejects the
+  // combination lazily, on its first browser operation, while the extension
+  // provider refuses the storage state at switch time — so the server would
+  // start advertising two providers and neither could ever create a context.
+  // (Other default providers ignore --user-data-dir, and the extension leg
+  // alone validates at switch time instead.)
+  if ((options.connectTool || options.vscode) && browserContextFactory instanceof PersistentContextFactory)
+    assertStorageStateDoesNotResetUserProfile(config, persistentProfileConflictRemedy);
   return { config, browserContextFactory, extensionContextFactory };
 }
 
@@ -105,7 +114,7 @@ function configureBaseProgram() {
       .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128" or "socks5://myproxy:8080"')
       .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')
       .option('--save-trace', 'Whether to save the Playwright Trace of the session into the output directory.')
-      .option('--storage-state <path>', 'path to the storage state file for isolated sessions.')
+      .option('--storage-state <path>', 'path to the storage state file to start the session from; applied in every mode except --extension (reused contexts receive it via setStorageState, which first clears their cookies and storage).')
       .option('--user-agent <ua string>', 'specify user agent string')
       .option('--user-data-dir <path>', 'path to the user data directory. If not specified, a temporary directory will be created.')
       .option('--viewport-size <size>', 'specify browser viewport size in pixels, for example "1280, 720"')
@@ -152,6 +161,9 @@ configureBaseProgram()
           {
             name: 'extension',
             description: 'Connect to a browser using the Playwright MCP extension',
+            // Runs before the default provider is torn down, so a rejected
+            // switch keeps the session on the provider that works.
+            validate: () => assertStorageStateSupported(config, extensionContextFactory, 'The "extension" method works through the browser you are already running and uses the context it already has. Stay on the "default" method, or restart without the storage state and sign in in that browser.'),
             connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, extensionContextFactory)),
           },
         ];

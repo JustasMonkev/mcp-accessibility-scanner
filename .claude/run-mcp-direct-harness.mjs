@@ -438,9 +438,9 @@ const tests = [
         `${state.fixtureOrigin}/secure-2`,
       ],
     });
-    assertText(lost, /WARNING: session cookie\(s\) mcp_session disappeared/);
-    if (lost.structuredContent?.sessionLoss?.url !== `${state.fixtureOrigin}/account/close`)
-      throw new Error(`Expected sessionLoss at /account/close, got ${JSON.stringify(lost.structuredContent?.sessionLoss)}`);
+    assertText(lost, /WARNING: cookie\(s\) mcp_session present when the crawl started disappeared/);
+    if (lost.structuredContent?.sessionLosses?.[0]?.url !== `${state.fixtureOrigin}/account/close`)
+      throw new Error(`Expected a session loss at /account/close, got ${JSON.stringify(lost.structuredContent?.sessionLosses)}`);
 
     // A redirecting logout must be reported at the page reached, not requested.
     await callTool('browser_navigate', { url: `${state.fixtureOrigin}/login` });
@@ -452,8 +452,8 @@ const tests = [
         `${state.fixtureOrigin}/goodbye`,
       ],
     });
-    if (redirected.structuredContent?.sessionLoss?.url !== `${state.fixtureOrigin}/signed-out`)
-      throw new Error(`Expected sessionLoss at /signed-out, got ${JSON.stringify(redirected.structuredContent?.sessionLoss)}`);
+    if (redirected.structuredContent?.sessionLosses?.[0]?.url !== `${state.fixtureOrigin}/signed-out`)
+      throw new Error(`Expected a session loss at /signed-out, got ${JSON.stringify(redirected.structuredContent?.sessionLosses)}`);
 
     // A logout URL that clears the cookie and then fails to load still ended the
     // session: the warning must name it, not the next page that happened to load.
@@ -467,8 +467,8 @@ const tests = [
         `${state.fixtureOrigin}/secure-2`,
       ],
     });
-    if (failed.structuredContent?.sessionLoss?.url !== `${state.fixtureOrigin}/session/revoke`)
-      throw new Error(`Expected sessionLoss at /session/revoke, got ${JSON.stringify(failed.structuredContent?.sessionLoss)}`);
+    if (failed.structuredContent?.sessionLosses?.[0]?.url !== `${state.fixtureOrigin}/session/revoke`)
+      throw new Error(`Expected a session loss at /session/revoke, got ${JSON.stringify(failed.structuredContent?.sessionLosses)}`);
     // Only /secure loads: /session/revoke throws, and Chromium's error page for it
     // interrupts /secure-2. Nothing after /secure is scanned, so a check that only
     // ran on successful navigations would have reported no session loss at all.

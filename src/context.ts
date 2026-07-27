@@ -20,6 +20,7 @@ import type * as playwright from 'playwright';
 import { logUnhandledError } from './utils/log.js';
 import { Tab } from './tab.js';
 import { outputFile } from './config.js';
+import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
 
 import type { FullConfig } from './config.js';
 import type { Tool } from './tools/tool.js';
@@ -47,6 +48,45 @@ class ContextRegistry {
 
 const contextRegistry = new ContextRegistry();
 
+type TraceHub = { users: number, ready: Promise<void> };
+const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
+
+async function acquireTrace(browserContext: playwright.BrowserContext): Promise<void> {
+  let hub = traceHubs.get(browserContext);
+  if (!hub) {
+    const created: TraceHub = {
+      users: 0,
+      ready: browserContext.tracing.start({
+        name: 'trace',
+        screenshots: false,
+        snapshots: true,
+        sources: false,
+      }),
+    };
+    traceHubs.set(browserContext, created);
+    created.ready.catch(() => {
+      if (traceHubs.get(browserContext) === created)
+        traceHubs.delete(browserContext);
+    });
+    hub = created;
+  }
+  hub.users++;
+  try {
+    await hub.ready;
+  } catch (error) {
+    hub.users--;
+    throw error;
+  }
+}
+
+async function releaseTrace(browserContext: playwright.BrowserContext): Promise<void> {
+  const hub = traceHubs.get(browserContext);
+  if (!hub || --hub.users)
+    return;
+  traceHubs.delete(browserContext);
+  await browserContext.tracing.stop();
+}
+
 type ContextOptions = {
   tools: Tool[];
   config: FullConfig;
@@ -69,6 +109,8 @@ export class Context {
   private _closeBrowserContextPromise: Promise<void> | undefined;
   private _runningToolName: string | undefined;
   private _abortController = new AbortController();
+  private _removePageObserver: (() => void) | undefined;
+  private _inputRecorder: InputRecorder | undefined;
 
   constructor(options: ContextOptions) {
     this.tools = options.tools;
@@ -91,6 +133,15 @@ export class Context {
 
   currentTab(): Tab | undefined {
     return this._currentTab;
+  }
+
+  // Resolves within this session's own wrappers: on a shared (non-isolated
+  // CDP) context, several sessions wrap the same page, and an event belongs
+  // to whichever session is asking — a global page→tab map would hand every
+  // session the last writer's wrapper and lose the entry when that session
+  // closes.
+  tabForPage(page: playwright.Page): Tab | undefined {
+    return this._tabs.find(tab => tab.page === page);
   }
 
   currentTabOrDie(): Tab {
@@ -179,9 +230,24 @@ export class Context {
     this._browserContextPromise = undefined;
 
     await promise.then(async ({ browserContext, close }) => {
-      if (this.config.saveTrace)
-        await browserContext.tracing.stop();
-      await close();
+      this._detachFromBrowserContext();
+      // close() is the factory's only cleanup hook — for storage-state
+      // sessions it also removes the disposable profile — and this close
+      // attempt is the only one (_browserContextPromise is already cleared),
+      // so a failing trace stop must not skip it.
+      try {
+        if (this.config.saveTrace)
+          await releaseTrace(browserContext);
+      } catch (error) {
+        // The symmetric race to the tolerated "already started" on setup: on
+        // a shared context the sibling that closed first already stopped the
+        // one recording, which is an expected shutdown, not an error worth
+        // logging. Anything else still surfaces.
+        if (!(error instanceof Error && /already stopped|Must start tracing before stopping/i.test(error.message)))
+          throw error;
+      } finally {
+        await close();
+      }
     });
   }
 
@@ -192,17 +258,22 @@ export class Context {
   }
 
   private async _setupRequestInterception(context: playwright.BrowserContext) {
-    if (this.config.network?.allowedOrigins?.length) {
-      await context.route('**', route => route.abort('blockedbyclient'));
+    await ensureNetworkPolicyRoutes(this.config, context);
+  }
 
-      for (const origin of this.config.network.allowedOrigins)
-        await context.route(`*://${origin}/**`, route => route.continue());
-    }
-
-    if (this.config.network?.blockedOrigins?.length) {
-      for (const origin of this.config.network.blockedOrigins)
-        await context.route(`*://${origin}/**`, route => route.abort('blockedbyclient'));
-    }
+  // The browser context can outlive this session (non-isolated CDP siblings
+  // share it), so the session's observers must not: a leftover 'page'
+  // listener would keep creating tabs inside a disposed Context, and the tab
+  // wrappers' own page listeners would pile up with session churn.
+  private _detachFromBrowserContext() {
+    this._removePageObserver?.();
+    this._removePageObserver = undefined;
+    this._inputRecorder?.dispose();
+    this._inputRecorder = undefined;
+    for (const tab of this._tabs)
+      tab.dispose();
+    this._tabs = [];
+    this._currentTab = undefined;
   }
 
   private _ensureBrowserContext() {
@@ -220,24 +291,48 @@ export class Context {
       throw new Error('Another browser context is being closed.');
     // TODO: move to the browser context factory to make it based on isolation mode.
     const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningToolName);
-    const { browserContext } = result;
-    await this._setupRequestInterception(browserContext);
-    if (this.sessionLog)
-      await InputRecorder.create(this, browserContext);
-    for (const page of browserContext.pages())
-      this._onPageCreated(page);
-    browserContext.on('page', page => this._onPageCreated(page));
-    if (this.config.saveTrace) {
-      await browserContext.tracing.start({
-        name: 'trace',
-        screenshots: false,
-        snapshots: true,
-        sources: false,
-      });
+    // The factory handed ownership over with close(); a setup failure past
+    // this point would otherwise discard that callback with the browser still
+    // running — and, for storage-state sessions, the disposable profile
+    // pinned forever.
+    try {
+      const { browserContext } = result;
+      await this._setupRequestInterception(browserContext);
+      if (this.sessionLog)
+        this._inputRecorder = await InputRecorder.create(this, browserContext);
+      for (const page of browserContext.pages())
+        this._onPageCreated(page);
+      const onPage = (page: playwright.Page) => this._onPageCreated(page);
+      browserContext.on('page', onPage);
+      this._removePageObserver = () => browserContext.off('page', onPage);
+      if (this.config.saveTrace)
+        await acquireTrace(browserContext);
+    } catch (error) {
+      // The shared context may survive this close (siblings hold it), so the
+      // observers registered above must come off explicitly.
+      this._detachFromBrowserContext();
+      await result.close().catch(() => {});
+      throw error;
     }
     return result;
   }
 }
+
+// Playwright's _enableRecorder supports a single event sink per browser
+// context, and a shared (non-isolated CDP) context can serve several sessions
+// at once — a second _enableRecorder call would silently replace the first
+// session's callbacks, and a departing session would leave the sink pointing
+// at its disposed Context. The recorder is therefore enabled once per context
+// object with a dispatching sink, and sessions register and deregister their
+// own recorders with it. The hub carries the enablement promise: a session
+// joining while (or after) another session's _enableRecorder call is in
+// flight must not report recording as ready before it is, and a failed
+// enablement evicts the hub so the next session retries instead of silently
+// recording nothing. (Ceiling: the recorder itself stays enabled on the
+// shared context once any session got it — with no registered recorders the
+// events just fall on an empty set.)
+type RecorderHub = { recorders: Set<InputRecorder>, ready: Promise<void> };
+const recorderHubs = new WeakMap<playwright.BrowserContext, RecorderHub>();
 
 export class InputRecorder {
   private _context: Context;
@@ -250,44 +345,83 @@ export class InputRecorder {
 
   static async create(context: Context, browserContext: playwright.BrowserContext) {
     const recorder = new InputRecorder(context, browserContext);
-    await recorder._initialize();
+    let hub = recorderHubs.get(browserContext);
+    if (!hub) {
+      const recorders = new Set<InputRecorder>();
+      const dispatch = (handle: (recorder: InputRecorder) => void) => {
+        // A tool call drives the page through Playwright, and the recorder
+        // cannot attribute a DOM event to the session that caused it — so
+        // while any session sharing this context runs a tool, the events are
+        // automation for every session's log, not user actions. (A real user
+        // action racing a sibling's tool call is suppressed with them — the
+        // same trade-off a single session already accepts for its own runs.)
+        for (const registered of recorders) {
+          if (registered._context.isRunningTool())
+            return;
+        }
+        for (const registered of recorders)
+          handle(registered);
+      };
+      const created: RecorderHub = {
+        recorders,
+        ready: (browserContext as any)._enableRecorder({
+          mode: 'recording',
+          recorderMode: 'api',
+        }, {
+          actionAdded: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
+            dispatch(registered => registered._actionAdded(page, data, code));
+          },
+          actionUpdated: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
+            dispatch(registered => registered._actionUpdated(page, data, code));
+          },
+          signalAdded: (page: playwright.Page, data: actions.SignalInContext) => {
+            dispatch(registered => registered._signalAdded(page, data));
+          },
+        }),
+      };
+      created.ready.catch(() => {
+        if (recorderHubs.get(browserContext) === created)
+          recorderHubs.delete(browserContext);
+      });
+      recorderHubs.set(browserContext, created);
+      hub = created;
+    }
+    hub.recorders.add(recorder);
+    try {
+      await hub.ready;
+    } catch (error) {
+      hub.recorders.delete(recorder);
+      throw error;
+    }
     return recorder;
   }
 
-  private async _initialize() {
-    const sessionLog = this._context.sessionLog!;
-    await (this._browserContext as any)._enableRecorder({
-      mode: 'recording',
-      recorderMode: 'api',
-    }, {
-      actionAdded: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
-        if (this._context.isRunningTool())
-          return;
-        const tab = Tab.forPage(page);
-        if (tab)
-          sessionLog.logUserAction(data.action, tab, code, false);
-      },
-      actionUpdated: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
-        if (this._context.isRunningTool())
-          return;
-        const tab = Tab.forPage(page);
-        if (tab)
-          sessionLog.logUserAction(data.action, tab, code, true);
-      },
-      signalAdded: (page: playwright.Page, data: actions.SignalInContext) => {
-        if (this._context.isRunningTool())
-          return;
-        if (data.signal.name !== 'navigation')
-          return;
-        const tab = Tab.forPage(page);
-        const navigateAction: actions.Action = {
-          name: 'navigate',
-          url: data.signal.url,
-          signals: [],
-        };
-        if (tab)
-          sessionLog.logUserAction(navigateAction, tab, `await page.goto('${data.signal.url}');`, false);
-      },
-    });
+  dispose() {
+    recorderHubs.get(this._browserContext)?.recorders.delete(this);
+  }
+
+  private _actionAdded(page: playwright.Page, data: actions.ActionInContext, code: string) {
+    const tab = this._context.tabForPage(page);
+    if (tab)
+      this._context.sessionLog!.logUserAction(data.action, tab, code, false);
+  }
+
+  private _actionUpdated(page: playwright.Page, data: actions.ActionInContext, code: string) {
+    const tab = this._context.tabForPage(page);
+    if (tab)
+      this._context.sessionLog!.logUserAction(data.action, tab, code, true);
+  }
+
+  private _signalAdded(page: playwright.Page, data: actions.SignalInContext) {
+    if (data.signal.name !== 'navigation')
+      return;
+    const tab = this._context.tabForPage(page);
+    const navigateAction: actions.Action = {
+      name: 'navigate',
+      url: data.signal.url,
+      signals: [],
+    };
+    if (tab)
+      this._context.sessionLog!.logUserAction(navigateAction, tab, `await page.goto('${data.signal.url}');`, false);
   }
 }

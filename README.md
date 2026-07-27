@@ -218,7 +218,7 @@ Create a `config.json` file with the following options:
 - `browser.cdpTimeout`: Maximum time in milliseconds to wait when connecting to the CDP endpoint (default: `30000`)
 - `browser.cdpLaunch`: Launch a Chromium-family desktop app with CDP enabled, wait for the endpoint, and manage the child process lifecycle
 - CDP attach modes preserve the target browser's existing default-context settings instead of applying Playwright's defaults.
-- `browser.contextOptions.storageState`: Start each session from a recorded Playwright storage state; needs a mode that creates its own context (`browser.isolated`, `browser.remoteEndpoint`, or a CDP mode with `browser.isolated`) — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
+- `browser.contextOptions.storageState`: Start each session from a recorded Playwright storage state; applied in every mode except `--extension` (fresh contexts receive it at creation, reused contexts via `setStorageState()`). Sessions that share one reused context (non-isolated CDP modes) get the state applied once per context — a session joining a live context inherits its current state, not a fresh copy of the file; see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
 - `timeouts.settle`: How long to wait after each action for triggered work to settle before responding (default: `500`)
@@ -255,7 +255,7 @@ This works out of the box in every mode, including the default persistent-profil
 Record a session once with Playwright's codegen, then hand the file to the server:
 
 ```bash
-npx playwright codegen --save-storage=auth.json https://example.com/login
+npx playwright@1.61.1 codegen --save-storage=auth.json https://example.com/login
 ```
 
 Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.
@@ -281,7 +281,12 @@ PLAYWRIGHT_MCP_ISOLATED=true PLAYWRIGHT_MCP_STORAGE_STATE=./auth.json npx mcp-ac
 }
 ```
 
-> **A fresh browser context is required.** Playwright only applies a storage state to a context it creates. That means `--isolated`, the remote-endpoint mode, or either CDP mode combined with `--isolated`. The default persistent-profile mode has no storage-state option at all, and the CDP modes without `--isolated` attach to the browser's existing context, so the server refuses to start with a storage state in those modes rather than silently auditing your site as an anonymous user. `--extension` is refused too, with or without `--isolated`: it always works through the context of the browser you are already running. There, sign in interactively instead — the persistent profile also keeps the session across restarts.
+> **Every supported mode handles the state — by applying it or refusing it.**
+>
+> - **Fresh-context modes** (`--isolated`, the remote-endpoint mode, or either CDP mode combined with `--isolated`): the context is created with the storage state directly.
+> - **Default persistent-profile mode with `--storage-state`**: the session runs in a fresh, disposable profile — unique to that session and removed when it closes — built from the state, so the recorded state is provably the only session data (without `--storage-state` the regular persistent profile is used and survives restarts, as before). Any page the launch opened (for example from a URL in `browser.launchOptions.args`) is parked on a blank replacement before the state lands, then the replacement is navigated to the same URL, so a still-running anonymous page cannot overwrite the recorded identity and a scan never reads its DOM. This also means `--storage-state` cannot be combined with `--user-data-dir` (a user-supplied profile carries its own session and will not be wiped; the server refuses the combination).
+> - **CDP modes without `--isolated`**: the state is installed into the browser's existing context with Playwright's `setStorageState()`. Cookies are fully reset; origin storage (localStorage/IndexedDB) is reset for the origins recorded in the state *plus* any origins the Playwright connection has already seen — including pages open in the attached browser at connect time, whose storage can therefore be cleared even when the state omits them. Only origins from the profile's earlier history that this connection never saw survive untouched — cut in both directions, so treat an attached browser's storage as neither fully preserved nor fully reset, and add `--isolated` when you need a clean, fully-defined session. Pages already open in the attached browser are replaced with fresh tabs navigated to the same URLs so a scan never sees the previous identity's UI — and the old pages close *before* the state is installed, because a still-running page could otherwise persist the previous identity back into the freshly applied cookies or localStorage, which no later tab replacement could undo. A fresh tab also starts with empty per-tab `sessionStorage` (which sits outside Playwright storage states and would survive an in-place reload, where the old page's own scripts could even write the previous identity back between a clear and the reload), a replacement that fails to load is left blank or closed rather than left on a stale document, and these navigations run under a configured `--allowed-origins`/`--blocked-origins` policy just like every later navigation. The state is applied once per shared context: concurrent MCP sessions attached without `--isolated` share the browser's context, so a session joining while another is active inherits that context's live state (including anything the first session changed or cleared) rather than a fresh copy of the recorded file — add `--isolated` when every session must start from the recorded baseline.
+> - **`--extension`** (with or without `--isolated`) is the one exception: it works through the browser you are already running, where wiping cookies to install a recorded state is not an acceptable side effect, so the server refuses to start rather than doing that silently. There, sign in interactively instead — the persistent profile also keeps the session across restarts.
 
 ### Keep the crawl from destroying its own session
 
@@ -295,9 +300,9 @@ PLAYWRIGHT_MCP_ISOLATED=true PLAYWRIGHT_MCP_STORAGE_STATE=./auth.json npx mcp-ac
 
 Note that `excludePathPatterns` replaces the default rather than extending it, so repeat `logout|signout` in your list.
 
-If a session cookie disappears anyway, `audit_site` says so instead of reporting a confident, wrong audit: the result starts with a `WARNING: session cookie(s) … disappeared while loading <url>` line, and both the JSON report and the structured content carry a `sessionLoss` object naming the page that dropped the cookies — the page reached after any redirect, and reported even when that page failed to finish loading. Every page scanned after that point was audited as a signed-out user — exclude the offending URL, sign in again, and re-run.
+If a session cookie disappears anyway, `audit_site` says so instead of reporting a confident, wrong audit: the result starts with a `WARNING: cookie(s) … disappeared while loading <url>` line, and both the JSON report and the structured content carry a `sessionLosses` list naming, for each lost cookie, the page that dropped it — the page reached after any redirect, and reported even when that page failed to finish loading. If one of the lost cookies was the session, every page scanned after that point was audited as a signed-out user — exclude the offending URL, sign in again, and re-run.
 
-The check compares which cookies the crawled URLs carry, not their values, so a rotating CSRF token never reads as a lost session. A cookie the browser deleted at its own stated expiry is ignored for the same reason — Cloudflare's `__cf_bm` lives 30 minutes and would otherwise warn on any longer crawl. Beyond that no attempt is made to tell an authentication cookie from any other: nothing in a cookie marks it as one, so any cookie the crawl started with and later lost is reported.
+The check compares which cookies the crawled URLs carry, not their values, so a rotating CSRF token never reads as a lost session. A cookie the browser deleted at its own stated expiry is ignored for the same reason — Cloudflare's `__cf_bm` lives 30 minutes and would otherwise warn on any longer crawl. Beyond that no attempt is made to tell an authentication cookie from any other: nothing in a cookie marks it as one, so any cookie the crawl started with and later lost is reported. Monitoring does not stop at the first loss — each cookie is reported once, at the URL where it vanished, so an analytics cookie expiring early cannot mask the session cookie being dropped later. URLs discovered mid-crawl join the cookie tracking before they are visited, so a session cookie scoped to a path below the start URL (say `/app`) is watched too.
 
 ## Available Tools
 
@@ -347,6 +352,7 @@ In `audit_site`, selectors apply to every crawled page, so an `includeSelectors`
 
 - **`withRules` overrides `violationsTag`.** Axe can run either a rule list or a tag list, never both, so when `withRules` is set the tags are ignored entirely -- `withRules: ["image-alt"]` runs exactly that one rule regardless of `violationsTag`. Rule ids are the more specific request, so they win.
 - **`disableRules` subtracts from whatever is selected.** It applies to `violationsTag` and `withRules` alike. (Axe itself ignores disabled rules once you give it an explicit rule list; the scanner subtracts them up front so the two options mean the same thing together as apart.) Disabling every rule in `withRules` is an error rather than an empty scan.
+- **An explicitly empty `withRules` is an error too.** `withRules: []` selects no rules, and silently falling back to the tag set would run a different scan than the one requested — omit the option to scan by tags instead. Clients that build the list dynamically should drop the key when the list comes out empty.
 - **Unknown rule ids fail the scan, naming the id.** Both options are checked against Axe's rule catalogue before the browser is touched, so a typo is reported as `Unknown Axe rule id(s) in withRules: image-altt` rather than surfacing later as an `frame.evaluate` failure from inside the page. Rule ids apply to a whole run, so `audit_site` and `scan_page_matrix` check them once before they touch the page -- a bad id fails the call outright instead of crawling every URL, or reloading and re-emulating the page, before rejecting the argument.
 
 `audit_site` and `scan_page_matrix` record both values in their JSON report metadata, so a stored report can be told apart from a full scan.
@@ -361,7 +367,7 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 - Default strategy: link-based BFS from the current URL
 - Supports `links`, `nav`, `sitemap`, and `provided` URL strategies
 - Always writes a JSON report (default filename: `audit-site-{timestamp}.json`)
-- Warns and records `sessionLoss` if the crawl loses the cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
+- Warns and records `sessionLosses` if the crawl loses cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 
 **Example flow:**
 ```text

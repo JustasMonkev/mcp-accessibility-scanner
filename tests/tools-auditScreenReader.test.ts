@@ -478,11 +478,25 @@ describe('audit_screen_reader tool measurement', () => {
       staleDelayMs: 5,
     });
 
-    const result = await run(harness, 50);
+    // Nothing resolved means nothing was evaluated: reporting "Findings: 0"
+    // here would present an unaudited page as clean.
+    await expect(run(harness, 50)).rejects.toThrow(/None of the 100 accessibility tree elements could be resolved/);
     expect(harness.concurrency.max).toBe(50);
-    // Unresolvable refs never fill the budget, so measurement stops at the ceiling.
-    expect(result).toContain('Elements analyzed: 100');
-    expect(result).toContain('Findings: 0');
+  });
+
+  it('warns when part of the snapshot went stale instead of silently skipping it', async () => {
+    // A partial rerender: the resolved half is still audited, but the result
+    // must say the other half was never evaluated.
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 10 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      staleRefs: ref => Number(ref.slice(1)) >= 5,
+    });
+
+    const result = await run(harness, 50);
+    expect(result).toContain('Elements analyzed: 10');
+    expect(result).toContain('WARNING: 5 of these went stale before measurement');
+    // The five resolved nameless buttons are still reported.
+    expect(result).toContain('missing-accessible-name | 5');
   });
 });
 
@@ -492,6 +506,17 @@ describe('collectElementFacts in a real page', () => {
   beforeEach(async () => {
     browser ??= await chromium.launch();
   });
+
+  // Shared scaffold for the pure visible-text measurements; tests asserting
+  // other facts (ariaHidden, href) keep their own setup.
+  async function measureVisibleText(html: string, selectors: string[]) {
+    const page = await browser!.newPage();
+    await page.setContent(html);
+    const handles = await Promise.all(selectors.map(selector => page.$(selector)));
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+    await page.close();
+    return facts.map(fact => fact.visibleText);
+  }
 
   it('takes the visible label of button-like inputs from value', async () => {
     const page = await browser!.newPage();
@@ -532,6 +557,358 @@ describe('collectElementFacts in a real page', () => {
 
     // The icon-only host still has no visible label to mismatch against.
     expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
+    await page.close();
+  });
+
+  it('treats aria-hidden values case-insensitively, as ARIA enumerated tokens are', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div aria-hidden="TRUE"><button id="upper">Hidden upper</button></div>
+      <div aria-hidden="true"><button id="lower">Hidden lower</button></div>
+      <div aria-hidden="false"><button id="shown">Shown</button></div>`);
+    const handles = await Promise.all(['#upper', '#lower', '#shown'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // aria-hidden="TRUE" removes the subtree from the accessibility tree exactly
+    // like "true"; a case-sensitive selector reported its content as reachable.
+    expect(facts.map(fact => fact.ariaHidden)).toEqual([true, true, false]);
+    await page.close();
+  });
+
+  it('collects no visible text from an element that is itself hidden from sight', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <button id="ghost" style="opacity:0" aria-label="Submit">Send</button>
+      <button id="gone" style="visibility:hidden" aria-label="Submit">Send</button>
+      <button id="folded" style="visibility:collapse" aria-label="Submit">Send</button>
+      <button id="shown" aria-label="Submit">Send</button>`);
+    const handles = await Promise.all(['#ghost', '#gone', '#folded', '#shown'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // A fully invisible control shows no label at all, so its child text must
+    // not feed a label-in-name mismatch; only #shown really displays "Send".
+    // visibility:collapse renders like hidden outside table rows/columns.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, null, null, 'Send']);
+    await page.close();
+  });
+
+  it('counts only slot-assigned light children of a shadow host as visible', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <my-slotted id="slotted" role="button" aria-label="Cancel"><span>Slotted</span></my-slotted>
+      <my-noslot id="noslot" role="button" aria-label="Cancel"><span>Ghost</span></my-noslot>
+      <my-fallback id="fallback" role="button" aria-label="Cancel"></my-fallback>
+      <script>
+        customElements.define('my-slotted', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<slot></slot>'; }
+        });
+        customElements.define('my-noslot', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<span>Shadow label</span>'; }
+        });
+        customElements.define('my-fallback', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<slot>Fallback</slot>'; }
+        });
+      </script>`);
+    const handles = await Promise.all(['#slotted', '#noslot', '#fallback'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // A shadow tree replaces the host's light children: only slot-assigned
+    // nodes render. "Ghost" has no slot to land in, so it shows nowhere; an
+    // empty slot renders its own fallback content.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Slotted', 'Shadow label', 'Fallback']);
+    await page.close();
+  });
+
+  it('keeps text from a descendant that restores visibility under a hidden ancestor', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <button id="restored" style="visibility:hidden" aria-label="Submit"><span style="visibility:visible">Send</span></button>
+      <button id="inherited" style="visibility:hidden" aria-label="Submit"><span>Send</span></button>`);
+    const handles = await Promise.all(['#restored', '#inherited'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // visibility, unlike display/opacity/clip, is restorable below a hidden
+    // ancestor: the first span renders, so "Send" really is the visible label;
+    // the second inherits hidden and shows nothing.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
+    await page.close();
+  });
+
+  it('walks content of boxless and collapsed-but-overflowing elements', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div id="contents" style="display:contents">Send</div>
+      <div id="contents-clip" style="display:contents; clip-path: inset(0)">Send</div>
+      <div id="overflowing" style="width:1px;height:1px;overflow:visible">Send</div>
+      <div id="clipped" style="width:1px;height:1px;overflow:hidden">Send</div>`);
+    const handles = await Promise.all(['#contents', '#contents-clip', '#overflowing', '#clipped'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // display:contents has a 0x0 rect but renders its content in the parent's
+    // box — with no box there is nothing for a clip-path to clip either, even
+    // one whose inset would swallow the 0x0 rect — and a collapsed box with
+    // visible overflow paints its text outside itself; only the clipping
+    // collapsed box (the sr-only shape) hides it.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', 'Send', 'Send', null]);
+    await page.close();
+  });
+
+  it('honours legacy clip only where it applies, on positioned elements', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div id="static-clip" style="clip: rect(0 0 0 0)">Send</div>
+      <div id="positioned-clip" style="position: absolute; clip: rect(0 0 0 0)">Send</div>`);
+    const handles = await Promise.all(['#static-clip', '#positioned-clip'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // clip is inert on statically positioned boxes — that text really renders —
+    // while the classic sr-only shape (absolute + clip) hides everything.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
+    await page.close();
+  });
+
+  it('collects no text from a control hidden by an ancestor its own style cannot see', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div style="opacity:0"><button id="in-opacity" aria-label="Submit">Send</button></div>
+      <div style="position:absolute;width:1px;height:1px;overflow:hidden"><button id="in-sronly" aria-label="Submit">Send</button></div>
+      <div><button id="in-visible" aria-label="Submit">Send</button></div>`);
+    const handles = await Promise.all(['#in-opacity', '#in-sronly', '#in-visible'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // opacity is not inherited and a clipping wrapper leaves the child's rect
+    // untouched, so neither shows up in the control's own computed style — the
+    // ancestors must be walked, or invisible labels feed label-in-name checks.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, null, 'Send']);
+    await page.close();
+  });
+
+  it('hides a clip-path inset only when it leaves no painted area', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div id="sr-only" style="clip-path: inset(50%); width:100px; height:100px">Send</div>
+      <div id="half" style="clip-path: inset(50% 0 0 0); width:100px; height:100px">Send</div>
+      <div id="swallowed" style="clip-path: inset(0 0 100% 0); width:100px; height:100px">Send</div>`);
+    const handles = await Promise.all(['#sr-only', '#half', '#swallowed'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // inset(50% 0 0 0) computes to "inset(50% 0px 0px)" — the same prefix as
+    // the sr-only inset(50%) — yet paints the whole bottom half; only insets
+    // whose remaining region has no area hide the text, whichever edge
+    // combination collapses it.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, 'Send', null]);
+    await page.close();
+  });
+
+  it('walks a slotted element through its slot, catching hidden shadow wrappers', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <ghost-card id="in-hidden-wrapper" role="button" aria-label="Submit"><span>Send</span></ghost-card>
+      <plain-card id="in-visible-wrapper" role="button" aria-label="Submit"><span>Send</span></plain-card>
+      <script>
+        customElements.define('ghost-card', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<div style="opacity:0"><slot></slot></div>'; }
+        });
+        customElements.define('plain-card', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<div><slot></slot></div>'; }
+        });
+      </script>`);
+    const handles = await Promise.all(
+        ['#in-hidden-wrapper span', '#in-visible-wrapper span'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // A slotted element renders where its slot sits: its flat-tree ancestors
+    // are the slot and the shadow-tree wrapper around it, not the host's light
+    // parent chain. parentElement skips straight to the host, so a walk using
+    // it misses the opacity:0 wrapper and reports text nobody can see.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, 'Send']);
+    await page.close();
+  });
+
+  it('treats zero-scale transforms as hidden, but not other transforms', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <button id="scale0" style="transform: scale(0)" aria-label="Submit">Send</button>
+      <button id="scalex0" style="transform: scaleX(0)" aria-label="Submit">Send</button>
+      <button id="rotated" style="transform: rotate(45deg)" aria-label="Submit">Send</button>
+      <div style="transform: scale(0)"><button id="in-scale0" aria-label="Submit">Send</button></div>`);
+    const handles = await Promise.all(['#scale0', '#scalex0', '#rotated', '#in-scale0'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // A singular transform collapses the painted area — overflow included, so
+    // the collapsed-box exception for visible overflow must not apply. A
+    // rotation keeps the full area painted and its label really shows. The
+    // wrapper case needs the ancestor walk: the child's own rect collapses but
+    // its computed transform is none.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, null, 'Send', null]);
+    await page.close();
+  });
+
+  it('measures inset clips against the untransformed reference box', async () => {
+    const visibleText = await measureVisibleText(`
+      <div id="strip" style="width:100px;height:40px;clip-path:inset(0 30px)">Send</div>
+      <div id="rotated-strip" style="width:100px;height:40px;clip-path:inset(0 30px);transform:rotate(90deg)">Send</div>
+      <div id="swallowing" style="width:100px;height:40px;clip-path:inset(0 50px);transform:rotate(90deg)">Send</div>`,
+    ['#strip', '#rotated-strip', '#swallowing']);
+
+    // clip-path insets resolve against the untransformed border box: the
+    // rotated strip still paints 40px of the element even though its
+    // transformed bounding rect is only 40px wide — comparing the 30px insets
+    // against that rect wrongly swallowed it. A genuinely swallowing inset
+    // (50px each side of a 100px box) hides rotated or not.
+    expect(visibleText).toEqual(['Send', 'Send', null]);
+  });
+
+  it('collects labels that escape a collapsed clip box during text descent', async () => {
+    const visibleText = await measureVisibleText(`
+      <button id="btn-escape" style="position:relative" aria-label="Submit"><span style="display:block;width:1px;height:1px;overflow:hidden"><span style="position:absolute;top:0;left:0">Send</span></span></button>
+      <button id="btn-sronly" aria-label="Submit"><span style="display:block;position:absolute;width:1px;height:1px;overflow:hidden">Send</span></button>
+      <button id="btn-bound" style="position:relative" aria-label="Submit"><span style="display:block;width:1px;height:1px;overflow:hidden"><span style="position:relative;display:block"><span style="position:absolute;top:0;left:0">Send</span></span></span></button>`,
+    ['#btn-escape', '#btn-sronly', '#btn-bound']);
+
+    // The descent mirrors the ancestor walk's containing-block model: the
+    // first label rides an absolutely positioned span whose containing block
+    // (the relative button) sits outside the collapsed clip box, so it paints
+    // and belongs in the button's visible text. The sr-only shape (the clip
+    // box is positioned, so it is its own containing block) and the bound
+    // case (a relative wrapper inside the clip box anchors the escapee)
+    // genuinely paint nothing.
+    expect(visibleText).toEqual(['Send', null, null]);
+  });
+
+  it('measures inset clips against the geometry box the clip-path names', async () => {
+    const visibleText = await measureVisibleText(`
+      <div id="content-swallowed" style="width:100px;padding:50px;clip-path:inset(0 60px) content-box">Send</div>
+      <div id="content-partial" style="width:100px;padding:50px;clip-path:inset(0 30px) content-box">Send</div>
+      <div id="margin-partial" style="width:100px;height:40px;margin:50px;clip-path:inset(0 60px) margin-box">Send</div>
+      <div id="padding-partial" style="width:100px;padding:50px;border:10px solid;clip-path:inset(0 90px) padding-box">Send</div>`,
+    ['#content-swallowed', '#content-partial', '#margin-partial', '#padding-partial']);
+
+    // A geometry-box suffix changes what the insets resolve against:
+    // inset(0 60px) content-box on a 100px content box (200px border box)
+    // paints nothing — measured against the border box it would look like an
+    // 80px strip — while the same insets against the 200px margin box, and
+    // 90px insets against the 200px padding box, leave painted slivers.
+    expect(visibleText).toEqual([null, 'Send', 'Send', 'Send']);
+  });
+
+  it('keeps perspective projections visible while flat edge-on planes hide', async () => {
+    const visibleText = await measureVisibleText(`
+      <button id="persp" style="transform: perspective(500px) translateX(100px) rotateY(90deg)" aria-label="Submit">Send</button>
+      <button id="edgeon" style="transform: rotateY(90deg)" aria-label="Submit">Send</button>`,
+    ['#persp', '#edgeon']);
+
+    // Under perspective an edge-on-but-offset plane still projects to a
+    // quadrilateral with positive area — its matrix3d() x/y part is singular
+    // all the same, so the determinant test alone would wrongly hide it.
+    // Without perspective the projection is orthographic and the edge-on
+    // plane really paints nothing.
+    expect(visibleText).toEqual(['Send', null]);
+  });
+
+  it('keeps edge-on transforms visible when an ancestor supplies perspective', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="perspective:500px;perspective-origin:0 0">
+        <button id="projected" style="margin-left:100px;transform:rotateY(90deg)" aria-label="Submit">Send</button>
+      </div>`,
+    ['#projected']);
+
+    expect(visibleText).toEqual(['Send']);
+  });
+
+  it('keeps near-singular transforms visible when a descendant can counter them', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="transform: scale(0.0001)"><button id="counter" style="transform: scale(10000)" aria-label="Submit">Send</button></div>
+      <div style="transform: scale(0)"><button id="zero" style="transform: scale(10000)" aria-label="Submit">Send</button></div>`,
+    ['#counter', '#zero']);
+
+    // A determinant of 1e-8 is small but not singular: the counter-scaled
+    // button composes back to identity and paints at full size, so the label
+    // really shows. Only the exact-zero parent — singular under every
+    // descendant transform — hides its subtree.
+    expect(visibleText).toEqual(['Send', null]);
+  });
+
+  it('keeps counter-rotated descendants visible in preserved 3-D', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="transform-style:preserve-3d;transform:rotateY(90deg)">
+        <button id="counter-rotated" style="transform:rotateY(-90deg)" aria-label="Submit">Send</button>
+      </div>`,
+    ['#counter-rotated']);
+
+    expect(visibleText).toEqual(['Send']);
+  });
+
+  it('lets an out-of-flow control escape a collapsed clip box that is not its containing block', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="position:relative">
+        <div style="width:1px;height:1px;overflow:hidden">
+          <button id="escaped" style="position:absolute;top:0;left:0" aria-label="Submit">Send</button>
+        </div>
+      </div>
+      <div style="position:absolute;width:1px;height:1px;overflow:hidden">
+        <button id="contained" style="position:absolute;top:0;left:0" aria-label="Submit">Send</button>
+      </div>
+      <div style="width:1px;height:1px;overflow:hidden">
+        <button id="inflow" aria-label="Submit">Send</button>
+      </div>`,
+    ['#escaped', '#contained', '#inflow']);
+
+    // Overflow clips bind only descendants whose containing block sits at or
+    // below the clipping box: #escaped is positioned by the wrapper OUTSIDE
+    // the 1px box and renders in full, while #contained's containing block IS
+    // the clipping box (sr-only behavior stands) and in-flow #inflow is
+    // clipped by any collapsed ancestor.
+    expect(visibleText).toEqual(['Send', null, null]);
+  });
+
+  it('does not bind fixed controls to merely positioned clip ancestors', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="position:relative;width:1px;height:1px;overflow:hidden">
+        <button id="fixed" style="position:fixed;top:20px;left:20px" aria-label="Submit">Send</button>
+      </div>
+      <div style="transform:translateZ(0);width:1px;height:1px;overflow:hidden">
+        <button id="bound-fixed" style="position:fixed;top:20px;left:20px" aria-label="Submit">Send</button>
+      </div>`,
+    ['#fixed', '#bound-fixed']);
+
+    expect(visibleText).toEqual(['Send', null]);
+  });
+
+  it('treats aria-hidden on a shadow host as hiding the host\'s shadow content', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <hidden-card id="hidden-host" aria-hidden="true"></hidden-card>
+      <plain-host id="shown-host"></plain-host>
+      <script>
+        customElements.define('hidden-card', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<button id="in-hidden">Send</button>'; }
+        });
+        customElements.define('plain-host', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<button id="in-shown">Send</button>'; }
+        });
+      </script>`);
+    const handles = await Promise.all([
+      page.$('#hidden-host button'),
+      page.$('#shown-host button'),
+    ]);
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // closest() stops at the shadow boundary, so an aria-hidden host used to
+    // leave its shadow content marked reachable; the composed-tree walk sees
+    // through the boundary like the visibility checks do.
+    expect(facts.map(fact => fact.ariaHidden)).toEqual([true, false]);
     await page.close();
   });
 

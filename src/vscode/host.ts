@@ -29,7 +29,8 @@ import { packageJSON } from '../utils/package.js';
 
 import type { FullConfig } from '../config.js';
 import { BrowserServerBackend } from '../browserServerBackend.js';
-import { contextFactory } from '../browserContextFactory.js';
+import { assertStorageStateDoesNotResetUserProfile, contextFactory } from '../browserContextFactory.js';
+import { vscodeProfileConflictRemedy } from './browserContextFactory.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { ClientVersion, ServerBackend, ServerBackendContext } from '../mcp/server.js';
 import type { Root, Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -89,6 +90,20 @@ export class VSCodeProxyBackend implements ServerBackend {
       await this._setCurrentClient(transport, true);
       return {
         content: [{ type: 'text', text: '### Result\nSuccessfully disconnected.\n' }],
+      };
+    }
+
+    // The child's factory would only surface this on the first browser
+    // operation — after the working provider has already been torn down,
+    // leaving the session attached to a provider that can never create a
+    // context. Validated here instead, so a rejected switch keeps the
+    // session on the previous provider.
+    try {
+      assertStorageStateDoesNotResetUserProfile(this._config, vscodeProfileConflictRemedy);
+    } catch (error) {
+      return {
+        content: [{ type: 'text', text: `### Result\n${error instanceof Error ? error.message : String(error)}\n` }],
+        isError: true,
       };
     }
 

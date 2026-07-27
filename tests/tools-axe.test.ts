@@ -1,4 +1,7 @@
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 const builderCalls: { withTags: string[][]; withRules: string[][]; disableRules: string[][]; include: string[]; exclude: string[] } = {
   withTags: [],
@@ -39,7 +42,7 @@ vi.mock('@axe-core/playwright', () => ({
   },
 }));
 
-const { assertRuleOptionsValid, axeTagValues, defaultAxeTags, dedupeAxeNodes, prepareAxeResults, runAxeScan, summarizeAxeViolations, trimAxeResults } = await import('../src/tools/axe.js');
+const { assertRuleOptionsValid, axeRuleSchemaShape, axeTagValues, defaultAxeTags, dedupeAxeNodes, prepareAxeResults, runAxeScan, summarizeAxeViolations, trimAxeResults } = await import('../src/tools/axe.js');
 
 function resetBuilderCalls() {
   builderCalls.withTags = [];
@@ -162,11 +165,23 @@ describe('axe helpers', () => {
     expect(builderCalls.withTags).toEqual([]);
   });
 
-  it('falls back to tags when the rule list is empty', async () => {
+  it('rejects an explicitly empty rule list instead of silently scanning the full tag set', async () => {
     resetBuilderCalls();
-    await runAxeScan({} as any, { tags: ['wcag2aa'], rules: [] });
-    expect(builderCalls.withTags).toEqual([['wcag2aa']]);
+    // "Run only these rules: none" is a contradiction; falling back to tags
+    // would scan far more than the caller asked for.
+    await expect(runAxeScan({} as any, { tags: ['wcag2aa'], rules: [] }))
+        .rejects.toThrow(/withRules is an empty list/);
+    expect(builderCalls.withTags).toEqual([]);
     expect(builderCalls.withRules).toEqual([]);
+  });
+
+  it('rejects an empty withRules list at the schema layer too', () => {
+    const schema = z.object(axeRuleSchemaShape);
+    expect(schema.safeParse({ withRules: [] }).success).toBe(false);
+    expect(schema.safeParse({}).success).toBe(true);
+    expect(schema.safeParse({ withRules: ['image-alt'] }).success).toBe(true);
+    // An empty disableRules means "disable nothing", which is harmless.
+    expect(schema.safeParse({ disableRules: [] }).success).toBe(true);
   });
 
   it('composes disableRules with tags', async () => {
@@ -223,6 +238,7 @@ describe('axe helpers', () => {
 
   it('validates rule options without a page, so crawlers can check them before navigating', () => {
     expect(assertRuleOptionsValid({})).toEqual([]);
+    expect(() => assertRuleOptionsValid({ rules: [] })).toThrow(/withRules is an empty list/);
     expect(assertRuleOptionsValid({ disableRules: ['color-contrast'] })).toEqual([]);
     expect(assertRuleOptionsValid({ rules: ['image-alt', 'label'], disableRules: ['label'] })).toEqual(['image-alt']);
     expect(() => assertRuleOptionsValid({ rules: ['image-altt'] }))
@@ -241,6 +257,35 @@ describe('axe helpers', () => {
       import('axe-core/package.json', { with: { type: 'json' } }),
     ]);
     expect(ownPackage.default.dependencies['axe-core']).toBe(installedAxeCore.default.version);
+  });
+
+  it('pins @axe-core/playwright exactly so a newer wrapper cannot nest a different axe-core', async () => {
+    // A ranged wrapper could resolve to a newer release on a clean install and
+    // bring its own nested axe-core; validation would then use one catalogue
+    // while AxeBuilder injects another. The exact pin makes the two axe-core
+    // requirements (ours and the wrapper's) meet in a single resolved copy.
+    const ownPackage = await import('../package.json', { with: { type: 'json' } });
+    // The wrapper's exports map hides its package.json from import(), so read it.
+    const installedWrapper = JSON.parse(fs.readFileSync(
+        fileURLToPath(new URL('../node_modules/@axe-core/playwright/package.json', import.meta.url)), 'utf-8'));
+    expect(ownPackage.default.dependencies['@axe-core/playwright']).toBe(installedWrapper.version);
+    // The proof that nothing nested: the wrapper has no private axe-core copy.
+    expect(fs.existsSync(fileURLToPath(new URL('../node_modules/@axe-core/playwright/node_modules/axe-core', import.meta.url)))).toBe(false);
+  });
+
+  it('documents the codegen command with the pinned Playwright version', async () => {
+    // The recorded storage state should come from the same Playwright the
+    // server replays it with, and an unpinned npx command resolves whatever is
+    // newest. Fails when the dependency pin moves without the docs.
+    const ownPackage = await import('../package.json', { with: { type: 'json' } });
+    const playwrightPin = ownPackage.default.dependencies.playwright;
+    for (const file of ['../README.md', '../SKILL.md']) {
+      const text = fs.readFileSync(fileURLToPath(new URL(file, import.meta.url)), 'utf-8');
+      const codegenCommands = text.match(/npx playwright\S* codegen/g) ?? [];
+      expect(codegenCommands.length).toBeGreaterThan(0);
+      for (const command of codegenCommands)
+        expect(command).toBe(`npx playwright@${playwrightPin} codegen`);
+    }
   });
 
   it('applies include and exclude selectors to the builder', async () => {

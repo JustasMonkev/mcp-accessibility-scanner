@@ -135,4 +135,43 @@ describe('ProxyBackend', () => {
 
     expect((backend as any)._backendContext.notifyToolListChanged).not.toHaveBeenCalled();
   });
+
+  it('keeps the current provider connected when a switch fails validation', async () => {
+    // validate() runs before the current client is torn down: a provider that
+    // cannot serve the configuration (extension + storage state) must reject
+    // the switch without stranding the session with no provider at all.
+    const extensionConnect = vi.fn(async () => ({ id: 'extension-transport' }));
+    const backend = new ProxyBackend([
+      {
+        name: 'default',
+        description: 'Default provider',
+        connect: vi.fn(async () => ({ id: 'default-transport' })),
+      },
+      {
+        name: 'extension',
+        description: 'Extension provider',
+        validate: () => {
+          throw new Error('Storage state cannot be applied in this mode. Stay on the "default" method.');
+        },
+        connect: extensionConnect,
+      },
+    ] as any);
+
+    const currentClient = {
+      callTool: vi.fn(async () => ({ content: [{ type: 'text', text: 'ok' }] })),
+      close: vi.fn(async () => undefined),
+    };
+    (backend as any)._currentClient = currentClient;
+
+    const result = await backend.callTool('browser_connect', { name: 'extension' });
+
+    expect(result.isError).toBe(true);
+    expect(result.content?.[0]).toMatchObject({ type: 'text', text: expect.stringContaining('Storage state cannot be applied') });
+    // The doomed switch never began: nothing was closed, nothing connected.
+    expect(currentClient.close).not.toHaveBeenCalled();
+    expect(extensionConnect).not.toHaveBeenCalled();
+    // The session still serves tools through the previous provider.
+    await backend.callTool('scan_page', {});
+    expect(currentClient.callTool).toHaveBeenCalled();
+  });
 });
