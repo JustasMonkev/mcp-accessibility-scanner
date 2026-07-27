@@ -61,9 +61,6 @@ async function acquireTrace(browserContext: playwright.BrowserContext): Promise<
         screenshots: false,
         snapshots: true,
         sources: false,
-      }).catch(error => {
-        if (!(error instanceof Error && error.message.includes('already started')))
-          throw error;
       }),
     };
     traceHubs.set(browserContext, created);

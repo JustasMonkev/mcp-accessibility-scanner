@@ -1033,6 +1033,11 @@ describe('browserContextFactory', () => {
       database: { name: 'auth', version: 1, stores: [{ name: 'tokens', autoIncrement: false, records: [{ key: 1, value: 'first' }, { key: 1, value: 'second' }], indexes: [] }] },
       problem: /duplicate record key 1/,
     },
+    {
+      label: 'malformed IndexedDB key path',
+      database: { name: 'auth', version: 1, stores: [{ name: 'tokens', autoIncrement: false, keyPath: 'a..b', records: [], indexes: [] }] },
+      problem: /invalid key path/,
+    },
   ])('rejects a storage state with a $label before touching the browser', async ({ database, problem }) => {
     const browserContext = createMockBrowserContext();
     const browser = createMockBrowser(browserContext);

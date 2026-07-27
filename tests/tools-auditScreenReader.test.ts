@@ -839,6 +839,16 @@ describe('collectElementFacts in a real page', () => {
     expect(visibleText).toEqual(['Send', null]);
   });
 
+  it('keeps counter-rotated descendants visible in preserved 3-D', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="transform-style:preserve-3d;transform:rotateY(90deg)">
+        <button id="counter-rotated" style="transform:rotateY(-90deg)" aria-label="Submit">Send</button>
+      </div>`,
+    ['#counter-rotated']);
+
+    expect(visibleText).toEqual(['Send']);
+  });
+
   it('lets an out-of-flow control escape a collapsed clip box that is not its containing block', async () => {
     const visibleText = await measureVisibleText(`
       <div style="position:relative">
@@ -860,6 +870,19 @@ describe('collectElementFacts in a real page', () => {
     // the clipping box (sr-only behavior stands) and in-flow #inflow is
     // clipped by any collapsed ancestor.
     expect(visibleText).toEqual(['Send', null, null]);
+  });
+
+  it('does not bind fixed controls to merely positioned clip ancestors', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="position:relative;width:1px;height:1px;overflow:hidden">
+        <button id="fixed" style="position:fixed;top:20px;left:20px" aria-label="Submit">Send</button>
+      </div>
+      <div style="transform:translateZ(0);width:1px;height:1px;overflow:hidden">
+        <button id="bound-fixed" style="position:fixed;top:20px;left:20px" aria-label="Submit">Send</button>
+      </div>`,
+    ['#fixed', '#bound-fixed']);
+
+    expect(visibleText).toEqual(['Send', null]);
   });
 
   it('treats aria-hidden on a shadow host as hiding the host\'s shadow content', async () => {

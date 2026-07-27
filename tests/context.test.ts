@@ -126,12 +126,7 @@ describe('Context', () => {
       expect(close).toHaveBeenCalledTimes(1);
     });
 
-    it('tolerates tracing already started by a sibling session on a shared context', async () => {
-      // Two sessions sharing a reused context with --save-trace: the second
-      // tracing.start() deterministically rejects with "already started".
-      // Failing setup for that would run cleanup and tear down the shared
-      // connection under the sibling's live audit — the recording is running,
-      // which is what --save-trace asked for.
+    it('does not take ownership of a trace started outside this server', async () => {
       const close = vi.fn().mockResolvedValue(undefined);
       mockBrowserContext.tracing.start.mockRejectedValue(new Error('Tracing has been already started'));
       (mockBrowserContextFactory.createContext as any).mockResolvedValue({
@@ -146,9 +141,10 @@ describe('Context', () => {
         clientInfo: { rootPath: '/tmp' } as any,
       });
 
-      await context.newTab();
+      await expect(context.newTab()).rejects.toThrow('already started');
 
-      expect(close).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(mockBrowserContext.tracing.stop).not.toHaveBeenCalled();
     });
 
     it('keeps a shared trace running until the final session closes', async () => {

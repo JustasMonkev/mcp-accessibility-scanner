@@ -102,6 +102,12 @@ const isValidIndexedDBKey = (value: unknown): boolean =>
   || ArrayBuffer.isView(value)
   || (Array.isArray(value) && value.every(isValidIndexedDBKey));
 
+const indexedDBIdentifier = /^[$_\p{ID_Start}][$\u200C\u200D\p{ID_Continue}]*$/u;
+const isValidIndexedDBKeyPath = (value: unknown): boolean =>
+  typeof value === 'string' && (value === '' || value.split('.').every(part => indexedDBIdentifier.test(part)));
+const isValidIndexedDBKeyPathArray = (value: unknown): boolean =>
+  Array.isArray(value) && !!value.length && value.every(isValidIndexedDBKeyPath);
+
 function assertValidStorageState(state: { cookies?: unknown[], origins?: unknown[] }): void {
   for (const value of state.cookies ?? []) {
     const cookie = value as Record<string, unknown> | null;
@@ -151,10 +157,12 @@ function assertValidStorageState(state: { cookies?: unknown[], origins?: unknown
         const storeName = String(store.name);
         indexedDBProblem ??= storeNames.has(storeName)
           ? `IndexedDB object store name "${storeName}" is duplicated in database "${String(database.name)}"`
-          : store.autoIncrement && (store.keyPath === '' || Array.isArray(store.keyPathArray))
+          : store.keyPath !== undefined && !isValidIndexedDBKeyPath(store.keyPath)
+            ? `IndexedDB object store "${storeName}" has an invalid key path`
+            : store.keyPathArray !== undefined && !isValidIndexedDBKeyPathArray(store.keyPathArray)
+              ? `IndexedDB object store "${storeName}" has an invalid array key path`
+              : store.autoIncrement && (store.keyPath === '' || Array.isArray(store.keyPathArray))
             ? `IndexedDB object store "${storeName}" cannot combine autoIncrement with an empty or array key path`
-            : Array.isArray(store.keyPathArray) && !store.keyPathArray.length
-              ? `IndexedDB object store "${storeName}" should not have an empty array key path`
               : null;
         storeNames.add(storeName);
         const recordKeys = new Set<string>();
@@ -182,10 +190,12 @@ function assertValidStorageState(state: { cookies?: unknown[], origins?: unknown
           const indexName = String(index.name);
           indexedDBProblem ??= indexNames.has(indexName)
             ? `IndexedDB index name "${indexName}" is duplicated in object store "${storeName}"`
-            : index.multiEntry && Array.isArray(index.keyPathArray)
+            : index.keyPath !== undefined && !isValidIndexedDBKeyPath(index.keyPath)
+              ? `IndexedDB index "${indexName}" has an invalid key path`
+              : index.keyPathArray !== undefined && !isValidIndexedDBKeyPathArray(index.keyPathArray)
+                ? `IndexedDB index "${indexName}" has an invalid array key path`
+                : index.multiEntry && Array.isArray(index.keyPathArray)
               ? `IndexedDB index "${indexName}" cannot combine multiEntry with an array key path`
-              : Array.isArray(index.keyPathArray) && !index.keyPathArray.length
-                ? `IndexedDB index "${indexName}" should not have an empty array key path`
                 : null;
           indexNames.add(indexName);
         }

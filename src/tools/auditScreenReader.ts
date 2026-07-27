@@ -497,9 +497,11 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
       if (!singular(v[0], v[1], v[4], v[5]))
         return false;
       // A parent's perspective property is not serialized into this matrix.
-      // It can give an otherwise edge-on child positive painted area.
+      // It can give an otherwise edge-on child positive painted area. A
+      // preserve-3d ancestor can likewise let a descendant counter-rotate.
       for (let node = parentInComposedTree(element); node; node = parentInComposedTree(node)) {
-        if (window.getComputedStyle(node).perspective !== 'none')
+        const style = window.getComputedStyle(node);
+        if (style.perspective !== 'none' || style.transformStyle === 'preserve-3d')
           return false;
       }
       return true;
@@ -517,7 +519,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
     // transform to apply to, so it is settled before those checks.
     if (style.display === 'contents')
       return false;
-    if (transformCollapses(element, style.transform))
+    if (style.transformStyle !== 'preserve-3d' && transformCollapses(element, style.transform))
       return true;
     // The legacy clip property only applies to absolutely positioned boxes; on
     // a static element it is inert and the content renders normally.
@@ -576,15 +578,17 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
   // despite it. While walking up, track whether the content below rides an
   // out-of-flow position whose containing block has not been reached yet —
   // collapsed-box clips on the nodes in between do not bind it. Containing
-  // blocks are approximated as any positioned or transformed ancestor (for
-  // position:fixed it is really only transformed ones — erring toward hidden
-  // there). Every other hiding condition applies regardless: display:none by
+  // blocks are approximated as any positioned or transformed ancestor for
+  // absolute descendants, but only transformed/projected/filtered ancestors
+  // for fixed ones.
+  // Every other hiding condition applies regardless: display:none by
   // inheritance, opacity by compositing, clip-path through its stacking
   // context, and a singular transform because a transformed ancestor is the
   // containing block anyway.
   const ancestorSubtreeHidden = (element: Element): boolean => {
-    const outOfFlow = (style: CSSStyleDeclaration) => style.position === 'absolute' || style.position === 'fixed';
-    let escapesOverflowClip = outOfFlow(window.getComputedStyle(element));
+    const outOfFlow = (style: CSSStyleDeclaration): 'absolute' | 'fixed' | null =>
+      style.position === 'absolute' || style.position === 'fixed' ? style.position : null;
+    let escapingPosition = outOfFlow(window.getComputedStyle(element));
     for (let node = parentInComposedTree(element); node; node = parentInComposedTree(node)) {
       const style = window.getComputedStyle(node);
       const decided = nonGeometricHidden(node, style);
@@ -595,14 +599,16 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
         if (insetClipsEverything(style.clipPath, node, rect, style))
           return true;
         const containingBlock = style.position !== 'static' || style.transform !== 'none';
-        if (collapsedClippingBox(style, rect) && (!escapesOverflowClip || containingBlock))
+        const fixedContainingBlock = style.transform !== 'none' || style.perspective !== 'none' || style.filter !== 'none';
+        const bindsEscape = escapingPosition === 'fixed' ? fixedContainingBlock : containingBlock;
+        if (collapsedClippingBox(style, rect) && (!escapingPosition || bindsEscape))
           return true;
         // A boxless (display:contents) node neither carries nor anchors
         // positioning, so the escape state only moves on box-generating nodes.
         if (outOfFlow(style))
-          escapesOverflowClip = true;
-        else if (containingBlock)
-          escapesOverflowClip = false;
+          escapingPosition = outOfFlow(style);
+        else if (bindsEscape)
+          escapingPosition = null;
       }
     }
     return false;
