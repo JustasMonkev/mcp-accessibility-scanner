@@ -120,6 +120,98 @@ describe('Tab', () => {
     });
   });
 
+  describe('out-of-band dialog close', () => {
+    const makeDialog = (message = 'Hello') => ({
+      type: () => 'alert',
+      message: () => message,
+    }) as any;
+
+    it('sets a dialog modal state when a dialog opens', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.emit('dialog', makeDialog());
+      expect(tab.modalStates()).toHaveLength(1);
+      expect(tab.modalStates()[0].type).toBe('dialog');
+    });
+
+    it('clears the dialog modal state when the dialog closes out of band', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const dialog = makeDialog();
+      mockPage.emit('dialog', dialog);
+      expect(tab.modalStates()).toHaveLength(1);
+
+      mockPage.emit('dialogclosed', dialog);
+      expect(tab.modalStates()).toEqual([]);
+    });
+
+    it('unblocks snapshots after the dialog closes out of band', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const dialog = makeDialog();
+      mockPage.emit('dialog', dialog);
+
+      const blocked = await tab.captureSnapshot();
+      expect(blocked.ariaSnapshot).toBe('');
+      expect(blocked.modalStates).toHaveLength(1);
+
+      mockPage.emit('dialogclosed', dialog);
+
+      const unblocked = await tab.captureSnapshot();
+      expect(unblocked.ariaSnapshot).toBe('button "Submit" [ref=1]');
+      expect(unblocked.modalStates).toEqual([]);
+    });
+
+    it('only clears the state of the dialog that actually closed', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const first = makeDialog('first');
+      const second = makeDialog('second');
+      mockPage.emit('dialog', first);
+      mockPage.emit('dialog', second);
+      expect(tab.modalStates()).toHaveLength(2);
+
+      mockPage.emit('dialogclosed', first);
+      expect(tab.modalStates()).toHaveLength(1);
+      expect(tab.modalStates()[0].description).toContain('second');
+    });
+
+    it('ignores a close event for a dialog it never tracked', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tracked = makeDialog();
+      mockPage.emit('dialog', tracked);
+
+      mockPage.emit('dialogclosed', makeDialog('untracked'));
+      expect(tab.modalStates()).toHaveLength(1);
+    });
+
+    it('leaves non-dialog modal states alone', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.emit('filechooser', {});
+      const dialog = makeDialog();
+      mockPage.emit('dialog', dialog);
+
+      mockPage.emit('dialogclosed', dialog);
+      expect(tab.modalStates()).toHaveLength(1);
+      expect(tab.modalStates()[0].type).toBe('fileChooser');
+    });
+
+    it('is a no-op when no modal states exist', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      expect(() => mockPage.emit('dialogclosed', makeDialog())).not.toThrow();
+      expect(tab.modalStates()).toEqual([]);
+    });
+
+    it('stops listening after dispose', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const dialog = makeDialog();
+      mockPage.emit('dialog', dialog);
+      expect(mockPage.listenerCount('dialogclosed')).toBe(1);
+
+      tab.dispose();
+      expect(mockPage.listenerCount('dialogclosed')).toBe(0);
+
+      mockPage.emit('dialogclosed', dialog);
+      expect(tab.modalStates()).toHaveLength(1);
+    });
+  });
+
   describe('isCurrentTab', () => {
     it('should return true when tab is current', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);

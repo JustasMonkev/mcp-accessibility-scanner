@@ -255,7 +255,7 @@ This works out of the box in every mode, including the default persistent-profil
 Record a session once with Playwright's codegen, then hand the file to the server:
 
 ```bash
-npx playwright@1.61.1 codegen --save-storage=auth.json https://example.com/login
+npx playwright@1.62.0 codegen --save-storage=auth.json https://example.com/login
 ```
 
 Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.
@@ -571,6 +571,7 @@ Wait for text to appear/disappear or time to pass.
 #### `browser_handle_dialog`
 Handle browser dialogs (alerts, confirms, prompts).
 - Parameters: `accept` (boolean), `promptText` (optional)
+- If the dialog was already closed outside the session (e.g. dismissed manually in a headed browser), the call succeeds, reports the dialog as already closed, and clears its leftover state instead of failing.
 
 #### `browser_file_upload`
 Upload files to the page.
