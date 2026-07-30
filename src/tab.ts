@@ -83,6 +83,12 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       });
     });
     listen('dialog', dialog => this._dialogShown(dialog));
+    // Fires on Playwright >= 1.63 when a dialog is closed out of band (e.g.
+    // dismissed manually in headed mode or via a CDP side-channel); inert on
+    // the pinned 1.61.1, which never emits it. Without this, a stale dialog
+    // modal state blocks every snapshot-bearing tool until the user re-issues
+    // browser_handle_dialog for a dialog that is already gone.
+    listen('dialogclosed', dialog => this._dialogClosed(dialog));
     listen('download', download => {
       void this._downloadStarted(download);
     });
@@ -121,6 +127,12 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       description: `"${dialog.type()}" dialog with message "${dialog.message()}"`,
       dialog,
     });
+  }
+
+  private _dialogClosed(dialog: playwright.Dialog) {
+    const state = this._modalStates.find(state => state.type === 'dialog' && state.dialog === dialog);
+    if (state)
+      this.clearModalState(state);
   }
 
   private async _downloadStarted(download: playwright.Download) {
