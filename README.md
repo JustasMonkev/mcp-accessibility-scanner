@@ -571,6 +571,7 @@ Wait for text to appear/disappear or time to pass.
 #### `browser_handle_dialog`
 Handle browser dialogs (alerts, confirms, prompts).
 - Parameters: `accept` (boolean), `promptText` (optional)
+- If the dialog was already closed outside the session (e.g. dismissed manually in a headed browser), the call succeeds, reports the dialog as already closed, and clears its leftover state instead of failing.
 
 #### `browser_file_upload`
 Upload files to the page.

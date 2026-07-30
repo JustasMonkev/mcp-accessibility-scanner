@@ -85,9 +85,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     listen('dialog', dialog => this._dialogShown(dialog));
     // Fires on Playwright >= 1.63 when a dialog is closed out of band (e.g.
     // dismissed manually in headed mode or via a CDP side-channel); inert on
-    // the pinned 1.62.0, which never emits it. Without this, a stale dialog
+    // the pinned 1.62.0, which never emits it. Until then a stale dialog
     // modal state blocks every snapshot-bearing tool until the user re-issues
-    // browser_handle_dialog for a dialog that is already gone.
+    // browser_handle_dialog, whose already-closed fallback (tools/dialogs.ts)
+    // recovers the session on the pinned version.
     listen('dialogclosed', dialog => this._dialogClosed(dialog));
     listen('download', download => {
       void this._downloadStarted(download);
