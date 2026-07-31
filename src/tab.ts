@@ -243,6 +243,14 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this._requests;
   }
 
+  // Playwright resolves `Request.allHeaders()` and `Response.body()` with no
+  // timeout of their own, so a still-streaming response would hang a tool call
+  // until the page closed. Callers outside this class need the same bound the
+  // page-state reads above use.
+  async withPageStateTimeout<T>(promise: Promise<T>, description: string): Promise<T> {
+    return this._withPageStateTimeout(promise, description);
+  }
+
   async captureSnapshot(): Promise<TabSnapshot> {
     let tabSnapshot: TabSnapshot | undefined;
     const modalStates = await this._raceAgainstModalStates(async () => {

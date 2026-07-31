@@ -39,6 +39,11 @@ const evaluate = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
+    // Half a pair used to fall back to page scope, so `element.textContent`
+    // with only a `ref` failed with a bare `element is not defined`.
+    if (!!params.ref !== !!params.element)
+      throw new Error('Provide both "element" and "ref" to evaluate against an element, or neither to evaluate against the page.');
+
     response.setIncludeSnapshot();
 
     const onElement = !!(params.ref && params.element);
@@ -68,20 +73,43 @@ const evaluate = defineTabTool({
 /**
  * `evaluate()` needs a function, but callers routinely pass a bare expression
  * such as `document.title`. Wrap anything that is not already a function form.
+ *
+ * The decision is made from the source form and never from the runtime type of
+ * the result: `window.open` is an expression that happens to evaluate to a
+ * function, and it must be returned rather than called.
  */
 export function toFunctionSource(source: string, onElement: boolean): string {
   if (isFunctionSource(source))
     return source;
+  // A trailing `;` would turn the expression into a statement.
+  const expression = source.replace(/\s*;+\s*$/, '');
+  if (!expression.trim())
+    throw new Error('The "function" argument is empty. Pass a function such as `() => document.title`, or an expression such as `document.title`.');
   // The parentheses keep an object literal such as `{ a: 1 }` from parsing as a
-  // block, and keep a comma expression from splitting into two arguments.
-  return onElement ? `(element) => (${source})` : `() => (${source})`;
+  // block and a comma expression from splitting into two arguments; the
+  // newlines keep a trailing `// comment` from swallowing the closing paren.
+  return onElement ? `(element) => (\n${expression}\n)` : `() => (\n${expression}\n)`;
 }
 
 function isFunctionSource(source: string): boolean {
-  const body = source.slice(skipLeadingTrivia(source));
-  if (/^(async\b\s*)?function\b/.test(body))
-    return true;
-  return hasArrowHead(body);
+  let body = source.slice(skipTrivia(source, 0));
+  for (;;) {
+    if (/^function\b/.test(body.slice(skipAsyncKeyword(body))))
+      return true;
+    if (hasArrowHead(body))
+      return true;
+    // `(() => 1)` and `(function () {})` are function literals inside grouping
+    // parentheses. Look inside before concluding this is an expression.
+    const inner = stripEnclosingParens(body);
+    if (inner === null)
+      return false;
+    body = inner.slice(skipTrivia(inner, 0));
+  }
+}
+
+function skipAsyncKeyword(source: string): number {
+  const keyword = /^async\b/.exec(source)?.[0];
+  return keyword ? skipTrivia(source, keyword.length) : 0;
 }
 
 /**
@@ -89,34 +117,69 @@ function isFunctionSource(source: string): boolean {
  * without matching a parenthesised expression such as `(a + b)`.
  */
 function hasArrowHead(source: string): boolean {
-  let offset = /^async\b\s*/.exec(source)?.[0].length ?? 0;
+  let offset = skipAsyncKeyword(source);
   if (source[offset] === '(') {
     const end = matchingParen(source, offset);
+    // The scanner does not model every parameter-list construct (regex literals
+    // and nested template substitutions among them). When the match cannot be
+    // found, treat the source as a function: passing a function through is the
+    // behaviour that predates expression support, and a wrongly wrapped
+    // function silently returns `undefined`, while a wrongly passed-through
+    // expression fails loudly.
     if (end === -1)
-      return false;
+      return true;
     offset = end + 1;
   } else {
-    const identifier = /^[A-Za-z_$][\w$]*/.exec(source.slice(offset))?.[0];
+    const identifier = /^[\p{ID_Start}$_][\p{ID_Continue}$]*/u.exec(source.slice(offset))?.[0];
     if (!identifier)
       return false;
     offset += identifier.length;
   }
-  offset += skipLeadingTrivia(source.slice(offset));
-  return source.startsWith('=>', offset);
+  return source.startsWith('=>', skipTrivia(source, offset));
+}
+
+function stripEnclosingParens(source: string): string | null {
+  if (source[0] !== '(')
+    return null;
+  const end = matchingParen(source, 0);
+  // Only a group that wraps the whole source: `(a) => a` closes early and its
+  // parentheses are a parameter list, not a group.
+  if (end === -1 || skipTrivia(source, end + 1) !== source.length)
+    return null;
+  return source.slice(1, end);
 }
 
 function matchingParen(source: string, start: number): number {
+  return matchingDelimiter(source, start, '(', ')');
+}
+
+/**
+ * Finds the delimiter closing the one at `start`, stepping over comments,
+ * strings, template substitutions and regular expression literals so that a
+ * bracket inside any of them is not counted.
+ */
+function matchingDelimiter(source: string, start: number, open: string, close: string): number {
   let depth = 0;
   for (let offset = start; offset < source.length; offset++) {
     const char = source[offset];
-    if (char === '"' || char === '\'' || char === '`') {
+    if (char === '/' && (source[offset + 1] === '/' || source[offset + 1] === '*')) {
+      const end = skipTrivia(source, offset);
+      if (end === offset)
+        return -1;
+      offset = end - 1;
+    } else if (char === '"' || char === '\'' || char === '`') {
       const end = endOfString(source, offset);
       if (end === -1)
         return -1;
       offset = end;
-    } else if (char === '(') {
+    } else if (char === '/' && startsRegex(source, offset)) {
+      const end = endOfRegex(source, offset);
+      if (end === -1)
+        return -1;
+      offset = end;
+    } else if (char === open) {
       depth++;
-    } else if (char === ')') {
+    } else if (char === close) {
       depth--;
       if (!depth)
         return offset;
@@ -128,16 +191,50 @@ function matchingParen(source: string, start: number): number {
 function endOfString(source: string, start: number): number {
   const quote = source[start];
   for (let offset = start + 1; offset < source.length; offset++) {
-    if (source[offset] === '\\')
+    const char = source[offset];
+    if (char === '\\') {
       offset++;
-    else if (source[offset] === quote)
+    } else if (quote === '`' && char === '$' && source[offset + 1] === '{') {
+      // A substitution can hold anything, including another template.
+      const end = matchingDelimiter(source, offset + 1, '{', '}');
+      if (end === -1)
+        return -1;
+      offset = end;
+    } else if (char === quote) {
+      return offset;
+    }
+  }
+  return -1;
+}
+
+// A slash directly after a value is division; anywhere else it opens a regular
+// expression. Parameter defaults are the case that matters here: `(a = /)/)`.
+function startsRegex(source: string, offset: number): boolean {
+  let index = offset - 1;
+  while (index >= 0 && /\s/.test(source[index]))
+    index--;
+  return index < 0 || !/[\w$)\]]/.test(source[index]);
+}
+
+function endOfRegex(source: string, start: number): number {
+  let inCharacterClass = false;
+  for (let offset = start + 1; offset < source.length; offset++) {
+    const char = source[offset];
+    if (char === '\\')
+      offset++;
+    else if (char === '\n')
+      return -1;
+    else if (inCharacterClass)
+      inCharacterClass = char !== ']';
+    else if (char === '[')
+      inCharacterClass = true;
+    else if (char === '/')
       return offset;
   }
   return -1;
 }
 
-function skipLeadingTrivia(source: string): number {
-  let offset = 0;
+function skipTrivia(source: string, offset: number): number {
   for (;;) {
     while (offset < source.length && /\s/.test(source[offset]))
       offset++;

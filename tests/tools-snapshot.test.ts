@@ -770,6 +770,17 @@ describe('browser_drop', () => {
     }
   });
 
+  it('should refuse to drop while a modal state is pending', async () => {
+    const harness = dropHarness();
+    harness.tab.modalStates = vi.fn().mockReturnValue([{ type: 'dialog', description: 'alert' }]);
+    harness.tab.modalStatesMarkdown = vi.fn().mockReturnValue(['- alert']);
+
+    await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', data: { 'text/plain': 'hi' } }, harness.response as any);
+
+    expect(harness.drop).not.toHaveBeenCalled();
+    expect(harness.response.addError).toHaveBeenCalledWith(expect.stringContaining('does not handle the modal state'));
+  });
+
   it('should settle the page through waitForCompletion', async () => {
     const harness = dropHarness();
 
@@ -847,6 +858,9 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('browser_drop in a re
   it('fails when the target rejects the payload', async () => {
     const rejecting = `<div id="zone" style="width:200px;height:100px">no drops</div>`;
 
-    await expect(runDrop(rejecting, { data: { 'text/plain': 'hello' } })).rejects.toThrow();
+    // Assert the specific rejection, so a setup failure inside runDrop cannot
+    // masquerade as the behaviour under test.
+    await expect(runDrop(rejecting, { data: { 'text/plain': 'hello' } }))
+        .rejects.toThrow(/did not call preventDefault/);
   });
 });

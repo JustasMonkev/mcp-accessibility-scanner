@@ -509,6 +509,7 @@ Simulate an external drag and drop of files or clipboard-like data onto an eleme
 - Parameters: `element`, `ref`, `paths` (optional array of absolute file paths), `data` (optional map of mime type to value, e.g. `{"text/plain": "hello"}`)
 - At least one of `paths` or `data` is required.
 - Fails if the target's `dragover` handler does not accept the payload.
+- `paths` are read from the filesystem of the machine running the server, exactly as `browser_file_upload` does, and a relative path resolves against the server's working directory. Unlike `browser_file_upload` this needs no file chooser to be open, so any page with a `dragover` handler is a valid target — treat it as a tool that can hand local file contents to the page.
 
 #### `browser_select_option`
 Select an option in a dropdown.
@@ -525,7 +526,9 @@ Press a key on the keyboard.
 #### `browser_evaluate`
 Evaluate a JavaScript expression on the page, or on a specific element when a `ref` is provided. The function's return value is serialized back as the result.
 - Parameters: `function` (e.g., `() => document.title` or `(element) => element.textContent`), `element` (optional), `ref` (optional)
-- A bare expression is also accepted and is wrapped automatically: `document.title` behaves like `() => document.title`, and `element.textContent` behaves like `(element) => element.textContent` when a `ref` is provided.
+- `element` and `ref` must be supplied together, or not at all; supplying one without the other is rejected.
+- A bare expression is also accepted and is wrapped automatically: `document.title` behaves like `() => document.title`, and, when `element` and `ref` are both given, `element.textContent` behaves like `(element) => element.textContent`. The parameter is always named `element`.
+- Whether the input is a function or an expression is decided from its source form, never from what it evaluates to, so an expression such as `window.open` is returned rather than called.
 
 ### Screenshot & Visual Tools
 
@@ -568,13 +571,18 @@ Large `data:` URL payloads in console messages are truncated to their media type
 #### `browser_network_requests`
 Returns all network requests since loading the page, numbered so a single one can be inspected with `browser_network_request`.
 Large `data:` URL payloads in request URLs are truncated to their media type prefix.
+When there is at least one request, a closing line points at `browser_network_request`.
 
 #### `browser_network_request`
-Returns the request headers, response headers and response body of one request from the `browser_network_requests` listing.
+Returns the request headers, request body, response headers and response body of one request from the `browser_network_requests` listing.
 - Parameters: `index` (the number shown in the listing, starting at 1)
-- The listing is reset on navigation, so re-run `browser_network_requests` before using an index from an earlier page.
-- Binary request and response bodies are reported as `<binary data, N bytes, mime/type>` rather than dumped; textual bodies over 20000 characters are truncated with a trailing note.
-- Credential-bearing headers (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`) are reported as `<redacted, N characters>`, so their presence and size stay visible but the secret never reaches the transcript. All other headers are reported in full.
+- The listing is cleared by `browser_navigate` and when the tab closes; other navigations (link clicks, form submits, `history` calls) leave it in place and keep appending. Re-run `browser_network_requests` to get current indexes.
+- Credential-bearing headers (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`) are reported as `<redacted, N characters>`, so their presence and size stay visible but the secret never reaches the transcript. All other headers are reported in full, one line each.
+- Binary request and response bodies are reported as `<binary data, N bytes, mime/type>` rather than dumped. The type decides: `text/*`, `+json`/`+xml` suffixes and known textual types are text; `image/`, `audio/`, `video/`, `font/`, `model/` and known binary types are binary; anything else (`multipart/form-data`, custom types, a missing type) is decided by inspecting the bytes.
+- Textual bodies are decoded using the charset in `content-type`, and are truncated at 20000 characters with a trailing note. The cap applies to the request body and the response body separately, so one call can return up to two truncated bodies.
+- Bodies are wrapped in a code fence, so page-controlled content cannot forge the report's own section headings.
+- A request that failed after its response arrived reports both the status and the failure.
+- Sections that could not be read are reported in place (`<headers unavailable: ...>`, `<body unavailable: ...>`) rather than failing the whole call; reads are bounded by the default timeout, so a still-streaming response cannot hang the tool.
 
 ### Utility Tools
 

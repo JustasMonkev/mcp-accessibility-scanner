@@ -105,8 +105,8 @@ describe('browser_evaluate tool', () => {
   it('wraps a bare page expression into a function', async () => {
     await evaluateTool.handle(mockContext, { function: 'document.title' }, response);
 
-    expect(pageEvaluate.mock.calls[0][0].toString()).toBe('() => (document.title)');
-    expect(response.code()).toContain('() => (document.title)');
+    expect(pageEvaluate.mock.calls[0][0].toString()).toBe('() => (\ndocument.title\n)');
+    expect(response.code()).toContain('document.title');
   });
 
   it('wraps a bare element expression so it can reference element', async () => {
@@ -122,13 +122,13 @@ describe('browser_evaluate tool', () => {
         response
     );
 
-    expect(locatorEvaluate.mock.calls[0][0].toString()).toBe('(element) => (element.textContent)');
+    expect(locatorEvaluate.mock.calls[0][0].toString()).toBe('(element) => (\nelement.textContent\n)');
   });
 
   it('wraps an object literal expression without it parsing as a block', async () => {
     await evaluateTool.handle(mockContext, { function: '{ title: document.title }' }, response);
 
-    expect(pageEvaluate.mock.calls[0][0].toString()).toBe('() => ({ title: document.title })');
+    expect(pageEvaluate.mock.calls[0][0].toString()).toBe('() => (\n{ title: document.title }\n)');
   });
 });
 
@@ -152,6 +152,30 @@ describe('toFunctionSource', () => {
     '/* pick the title */ () => document.title',
     '({ a = (1, 2) }) => a',
     '(a = ") => x") => a',
+    // Function literals inside grouping parentheses: wrapping these would make
+    // the tool return a function value, which serializes to `undefined`.
+    '(() => document.title)',
+    '( () => document.title )',
+    '((element) => element.textContent)',
+    '(function () { return document.title; })',
+    '(async () => document.title)',
+    '((() => 1))',
+    '(\n  () => document.title\n)',
+    '(() => document.title) // trailing',
+    // Comments the scanner has to step over rather than count as parentheses.
+    'async /*c*/ () => document.title',
+    'async\n// why\n() => 1',
+    '(a /* ) */) => document.title',
+    "(a /* don't */) => document.title",
+    '(\n  a, // one )\n  b\n) => document.title',
+    'async /*c*/ function () { return 1; }',
+    // Parameter lists whose brackets hide inside a regex or a nested template.
+    '(a = /[)]/) => document.title',
+    '(a = `${`)`}`) => document.title',
+    // Non-ASCII parameter names are still parameter names.
+    'é => document.title',
+    'ünnamed => document.title',
+    '_ => 1',
   ];
 
   for (const source of functionSources) {
@@ -176,8 +200,63 @@ describe('toFunctionSource', () => {
 
   for (const source of expressionSources) {
     it(`wraps the expression ${JSON.stringify(source)}`, () => {
-      expect(toFunctionSource(source, false)).toBe(`() => (${source})`);
-      expect(toFunctionSource(source, true)).toBe(`(element) => (${source})`);
+      expect(toFunctionSource(source, false)).toBe(`() => (\n${source}\n)`);
+      expect(toFunctionSource(source, true)).toBe(`(element) => (\n${source}\n)`);
     });
   }
+
+  it('drops a trailing semicolon so the expression stays an expression', () => {
+    expect(toFunctionSource('document.title;', false)).toBe('() => (\ndocument.title\n)');
+    expect(toFunctionSource('document.title ; ', false)).toBe('() => (\ndocument.title\n)');
+  });
+
+  it('keeps a trailing line comment from swallowing the closing paren', () => {
+    const wrapped = toFunctionSource('document.title // the title', false);
+
+    expect(wrapped).toBe('() => (\ndocument.title // the title\n)');
+    expect(() => new Function(`return ${wrapped}`)).not.toThrow();
+  });
+
+  it('rejects an empty expression instead of emitting broken source', () => {
+    for (const empty of ['', '   ', '\n', ';', ' ;; '])
+      expect(() => toFunctionSource(empty, false)).toThrow(/empty/);
+  });
+
+  it('produces parseable source for every wrapped expression', () => {
+    for (const source of expressionSources) {
+      for (const onElement of [false, true])
+        expect(() => new Function(`return ${toFunctionSource(source, onElement)}`)).not.toThrow();
+    }
+  });
+});
+
+describe('browser_evaluate element pairing', () => {
+  function harness() {
+    const tab = {
+      modalStates: vi.fn().mockReturnValue([]),
+      page: { evaluate: vi.fn().mockResolvedValue('page-scope') },
+      refLocator: vi.fn(),
+      waitForCompletion: vi.fn(async (callback: () => Promise<void>) => await callback()),
+    };
+    return { tab, context: { currentTabOrDie: () => tab } as any };
+  }
+
+  it('rejects a ref without an element instead of silently using page scope', async () => {
+    const { tab, context } = harness();
+    const response = new Response(context, 'browser_evaluate', {});
+
+    await expect(evaluateTool.handle(context, { function: 'element.textContent', ref: 'e1' }, response))
+        .rejects.toThrow(/Provide both "element" and "ref"/);
+
+    expect(tab.page.evaluate).not.toHaveBeenCalled();
+    expect(tab.refLocator).not.toHaveBeenCalled();
+  });
+
+  it('rejects an element without a ref', async () => {
+    const { context } = harness();
+    const response = new Response(context, 'browser_evaluate', {});
+
+    await expect(evaluateTool.handle(context, { function: 'element.id', element: 'the button' }, response))
+        .rejects.toThrow(/Provide both "element" and "ref"/);
+  });
 });

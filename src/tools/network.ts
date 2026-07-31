@@ -19,6 +19,7 @@ import { defineTabTool } from './tool.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 
 import type * as playwright from 'playwright';
+import type { Tab } from '../tab.js';
 
 // Bodies land in the model's context verbatim, so cap what a single detail call
 // can contribute. Anything longer is reported as truncated rather than dropped.
@@ -67,7 +68,7 @@ const requestDetails = defineTabTool({
     }
 
     const [req, res] = entry;
-    for (const line of await renderRequestDetails(params.index, req, res))
+    for (const line of await renderRequestDetails(tab, params.index, req, res))
       response.addResult(line);
   },
 });
@@ -80,40 +81,58 @@ function renderRequest(index: number, request: playwright.Request, response: pla
   return result.join(' ');
 }
 
-async function renderRequestDetails(index: number, request: playwright.Request, response: playwright.Response | null): Promise<string[]> {
-  const requestHeaders = await request.allHeaders();
+async function renderRequestDetails(tab: Tab, index: number, request: playwright.Request, response: playwright.Response | null): Promise<string[]> {
+  const requestHeaders = await readHeaders(tab, () => request.allHeaders(), 'reading the request headers');
   const result: string[] = [
     `### [${index}] [${request.method().toUpperCase()}] ${truncateDataUrls(request.url())}`,
     '',
     '#### Request headers',
-    ...renderHeaders(requestHeaders),
+    ...renderHeaderSection(requestHeaders),
   ];
 
   // `postData()` decodes as UTF-8, which mangles file uploads and protobuf
   // payloads, so go through the buffer and let the same binary check decide.
   const postData = request.postDataBuffer();
   if (postData?.length)
-    result.push('', '#### Request body', ...renderBody(postData, mimeTypeOf(requestHeaders)));
+    result.push('', '#### Request body', ...renderBody(postData, contentTypeOf(requestHeaders)));
 
+  // Playwright records a failure on the request even when a response already
+  // arrived — a connection reset mid-body is a 200 that never completed.
+  const failure = request.failure();
   if (!response) {
-    const failure = request.failure();
     result.push('', '#### Response', failure ? `The request failed: ${failure.errorText}` : 'The request has not completed yet.');
     return result;
   }
 
-  const responseHeaders = await response.allHeaders();
+  const responseHeaders = await readHeaders(tab, () => response.allHeaders(), 'reading the response headers');
   result.push(
       '',
       '#### Response',
       `[${response.status()}] ${response.statusText()}`,
+      ...(failure ? [`The transfer then failed: ${failure.errorText}`] : []),
       '',
       '#### Response headers',
-      ...renderHeaders(responseHeaders),
+      ...renderHeaderSection(responseHeaders),
       '',
       '#### Response body',
-      ...await renderResponseBody(response, mimeTypeOf(responseHeaders)),
+      ...await renderResponseBody(tab, response, contentTypeOf(responseHeaders)),
   );
   return result;
+}
+
+type HeaderRead = { headers: Record<string, string> } | { error: string };
+
+async function readHeaders(tab: Tab, read: () => Promise<Record<string, string>>, description: string): Promise<HeaderRead> {
+  try {
+    return { headers: await tab.withPageStateTimeout(read(), description) };
+  } catch (error) {
+    // Losing the headers must not discard the status and URL already gathered.
+    return { error: errorMessage(error) };
+  }
+}
+
+function renderHeaderSection(read: HeaderRead): string[] {
+  return 'error' in read ? [`<headers unavailable: ${read.error}>`] : renderHeaders(read.headers);
 }
 
 // Credentials must never reach the model's context: this tool is the first one
@@ -134,45 +153,87 @@ function renderHeaders(headers: Record<string, string>): string[] {
     return ['<none>'];
   return names.map(name => {
     const value = headers[name];
-    return sensitiveHeaderNames.has(name.toLowerCase())
-      ? `${name}: <redacted, ${value.length} characters>`
-      : `${name}: ${truncateDataUrls(value)}`;
+    if (sensitiveHeaderNames.has(name.toLowerCase()))
+      return `${name}: <redacted, ${value.length} characters>`;
+    // `allHeaders()` joins repeated headers (`set-cookie` especially) with a
+    // newline; keep one line per header so `name: value` stays parseable.
+    return `${name}: ${truncateDataUrls(value).replace(/\r?\n/g, '\\n')}`;
   });
 }
 
-function mimeTypeOf(headers: Record<string, string>): string {
-  // `allHeaders()` lower-cases the names and joins repeats with a comma; only
-  // the first media type matters for deciding how to render the payload.
-  return (headers['content-type'] ?? '').split(';')[0].split(',')[0].trim().toLowerCase();
+type ContentType = { mimeType: string, charset: string };
+
+function contentTypeOf(read: HeaderRead): ContentType {
+  const raw = 'error' in read ? '' : (read.headers['content-type'] ?? '');
+  // `allHeaders()` joins a repeated header with a comma, so only the first
+  // media type and its parameters describe the payload.
+  const [mimeType, ...parameters] = raw.split(',')[0].split(';');
+  const charset = parameters
+      .map(parameter => parameter.trim())
+      .find(parameter => parameter.toLowerCase().startsWith('charset='))
+      ?.slice('charset='.length);
+  return { mimeType: unquote(mimeType.trim().toLowerCase()), charset: unquote(charset?.trim() ?? '') };
 }
 
-async function renderResponseBody(response: playwright.Response, mimeType: string): Promise<string[]> {
+function unquote(value: string): string {
+  return value.replace(/^"(.*)"$/, '$1');
+}
+
+async function renderResponseBody(tab: Tab, response: playwright.Response, contentType: ContentType): Promise<string[]> {
   let body: Buffer;
   try {
-    body = await response.body();
+    body = await tab.withPageStateTimeout(response.body(), 'reading the response body');
   } catch (error) {
-    // Redirects and responses whose body the browser never retained reject
-    // here; the rest of the report is still worth showing.
-    return [`<body unavailable: ${error instanceof Error ? error.message : String(error)}>`];
+    // Redirects, responses whose body the browser never retained, and bodies
+    // still streaming all end up here; the rest of the report is worth showing.
+    return [`<body unavailable: ${errorMessage(error)}>`];
   }
-  return renderBody(body, mimeType);
+  return renderBody(body, contentType);
 }
 
-function renderBody(body: Buffer, mimeType: string): string[] {
+// A body large enough to matter is decoded only up to the cap: a 100MB response
+// must not become a 200MB string, and `toString` throws outright past ~512MB.
+const maxBodyBytes = maxBodyLength * 4;
+
+function renderBody(body: Buffer, contentType: ContentType): string[] {
   if (!body.length)
     return ['<empty>'];
-  if (!isTextualMimeType(mimeType, body))
-    return [`<binary data, ${body.length} bytes${mimeType ? `, ${mimeType}` : ''}>`];
-  return renderText(body.toString('utf8'));
+  if (!isTextualMimeType(contentType.mimeType, body))
+    return [`<binary data, ${body.length} bytes${contentType.mimeType ? `, ${contentType.mimeType}` : ''}>`];
+
+  // Collapse data: URLs before measuring — doing it after would let the
+  // replacement text push the rendered body back over the cap.
+  const text = truncateDataUrls(decodeText(body.subarray(0, maxBodyBytes), contentType.charset));
+  if (body.length <= maxBodyBytes && text.length <= maxBodyLength)
+    return fence(text);
+
+  const shown = sliceWholeCharacters(text, maxBodyLength);
+  return [...fence(shown), `<truncated, showing the first ${shown.length} characters of a ${body.length}-byte body>`];
 }
 
-function renderText(text: string): string[] {
-  if (text.length <= maxBodyLength)
-    return [truncateDataUrls(text)];
-  return [
-    truncateDataUrls(sliceWholeCharacters(text, maxBodyLength)),
-    `<truncated, showing the first ${maxBodyLength} of ${text.length} characters>`,
-  ];
+function decodeText(body: Buffer, charset: string): string {
+  if (!charset || /^utf-?8$/i.test(charset))
+    return body.toString('utf8');
+  try {
+    // Legacy pages really do serve windows-1252 and shift_jis; decoding those
+    // as UTF-8 turns the body into replacement characters.
+    return new TextDecoder(charset).decode(body);
+  } catch {
+    return body.toString('utf8');
+  }
+}
+
+// The body is page-controlled. Fencing it stops a response from forging the
+// `####` sections around it, and the fence is grown past any run of backticks
+// inside so the block still terminates where it should.
+function fence(text: string): string[] {
+  const longestRun = Math.max(0, ...[...text.matchAll(/`+/g)].map(match => match[0].length));
+  const delimiter = '`'.repeat(Math.max(3, longestRun + 1));
+  return [delimiter, text, delimiter];
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 // Never cut between the halves of a surrogate pair -- a lone half renders as a
@@ -187,14 +248,21 @@ function isHighSurrogate(code: number): boolean {
 }
 
 const textualMimeTypes = new Set([
+  'application/csv',
   'application/ecmascript',
   'application/graphql',
   'application/javascript',
   'application/json',
+  'application/ndjson',
+  'application/sql',
   'application/x-ecmascript',
   'application/x-javascript',
+  'application/x-ndjson',
+  'application/x-sh',
   'application/x-www-form-urlencoded',
+  'application/x-yaml',
   'application/xml',
+  'application/yaml',
 ]);
 
 const binaryMimePrefixes = ['audio/', 'font/', 'image/', 'model/', 'video/'];
