@@ -67,77 +67,102 @@ const requestDetails = defineTabTool({
       return;
     }
 
-    const [req, res] = entry;
-    for (const line of await renderRequestDetails(tab, params.index, req, res))
+    // Every read that can block lives here, bounded by the tab's page-state
+    // timeout; the rendering below is pure so it can be tested with plain data.
+    const [request, res] = entry;
+    const details: RequestDetails = {
+      index: params.index,
+      request,
+      requestHeaders: await read(tab, () => request.allHeaders(), 'reading the request headers'),
+      response: res,
+      responseHeaders: res ? await read(tab, () => res.allHeaders(), 'reading the response headers') : undefined,
+      responseBody: res ? await read(tab, () => res.body(), 'reading the response body') : undefined,
+    };
+    for (const line of renderRequestDetails(details))
       response.addResult(line);
   },
 });
 
-function renderRequest(index: number, request: playwright.Request, response: playwright.Response | null) {
-  const result: string[] = [];
-  result.push(`[${index}] [${request.method().toUpperCase()}] ${truncateDataUrls(request.url())}`);
-  if (response)
-    result.push(`=> [${response.status()}] ${response.statusText()}`);
-  return result.join(' ');
+function requestLine(index: number, request: playwright.Request): string {
+  return `[${index}] [${request.method().toUpperCase()}] ${truncateDataUrls(request.url())}`;
 }
 
-async function renderRequestDetails(tab: Tab, index: number, request: playwright.Request, response: playwright.Response | null): Promise<string[]> {
-  const requestHeaders = await readHeaders(tab, () => request.allHeaders(), 'reading the request headers');
-  const result: string[] = [
-    `### [${index}] [${request.method().toUpperCase()}] ${truncateDataUrls(request.url())}`,
-    '',
-    '#### Request headers',
-    ...renderHeaderSection(requestHeaders),
+function renderRequest(index: number, request: playwright.Request, response: playwright.Response | null) {
+  const line = requestLine(index, request);
+  return response ? `${line} => [${response.status()}] ${response.statusText()}` : line;
+}
+
+function section(title: string, lines: string[]): string[] {
+  return ['', `#### ${title}`, ...lines];
+}
+
+type Read<T> = { value: T } | { error: string };
+
+type RequestDetails = {
+  index: number,
+  request: playwright.Request,
+  requestHeaders: Read<Record<string, string>>,
+  response: playwright.Response | null,
+  responseHeaders?: Read<Record<string, string>>,
+  responseBody?: Read<Buffer>,
+};
+
+function renderRequestDetails(details: RequestDetails): string[] {
+  const { index, request, response } = details;
+  const requestHeaders = headersOf(details.requestHeaders);
+  const result = [
+    `### ${requestLine(index, request)}`,
+    ...section('Request headers', renderHeaderSection(details.requestHeaders)),
   ];
 
   // `postData()` decodes as UTF-8, which mangles file uploads and protobuf
   // payloads, so go through the buffer and let the same binary check decide.
   const postData = request.postDataBuffer();
   if (postData?.length)
-    result.push('', '#### Request body', ...renderBody(postData, contentTypeOf(requestHeaders)));
+    result.push(...section('Request body', renderBody(postData, contentTypeOf(requestHeaders))));
 
   // Playwright records a failure on the request even when a response already
   // arrived — a connection reset mid-body is a 200 that never completed.
   const failure = request.failure();
-  if (!response) {
-    result.push('', '#### Response', failure ? `The request failed: ${failure.errorText}` : 'The request has not completed yet.');
-    return result;
-  }
+  if (!response)
+    return [...result, ...section('Response', [failure ? `The request failed: ${failure.errorText}` : 'The request has not completed yet.'])];
 
-  const responseHeaders = await readHeaders(tab, () => response.allHeaders(), 'reading the response headers');
+  const responseHeaders = headersOf(details.responseHeaders);
   result.push(
-      '',
-      '#### Response',
-      `[${response.status()}] ${response.statusText()}`,
-      ...(failure ? [`The transfer then failed: ${failure.errorText}`] : []),
-      '',
-      '#### Response headers',
-      ...renderHeaderSection(responseHeaders),
-      '',
-      '#### Response body',
-      ...await renderResponseBody(tab, response, contentTypeOf(responseHeaders)),
+      ...section('Response', [
+        `[${response.status()}] ${response.statusText()}`,
+        ...(failure ? [`The transfer then failed: ${failure.errorText}`] : []),
+      ]),
+      ...section('Response headers', renderHeaderSection(details.responseHeaders)),
+      ...section('Response body', renderResponseBody(details.responseBody, contentTypeOf(responseHeaders))),
   );
   return result;
 }
 
-type HeaderRead = { headers: Record<string, string> } | { error: string };
-
-async function readHeaders(tab: Tab, read: () => Promise<Record<string, string>>, description: string): Promise<HeaderRead> {
+// A failed read must not discard what the rest of the report already has.
+async function read<T>(tab: Tab, fetch: () => Promise<T>, description: string): Promise<Read<T>> {
   try {
-    return { headers: await tab.withPageStateTimeout(read(), description) };
+    return { value: await tab.withPageStateTimeout(fetch(), description) };
   } catch (error) {
-    // Losing the headers must not discard the status and URL already gathered.
-    return { error: errorMessage(error) };
+    return { error: error instanceof Error ? error.message : String(error) };
   }
 }
 
-function renderHeaderSection(read: HeaderRead): string[] {
-  return 'error' in read ? [`<headers unavailable: ${read.error}>`] : renderHeaders(read.headers);
+function headersOf(read: Read<Record<string, string>> | undefined): Record<string, string> {
+  return read && 'value' in read ? read.value : {};
+}
+
+function renderHeaderSection(read: Read<Record<string, string>> | undefined): string[] {
+  if (!read)
+    return ['<none>'];
+  return 'error' in read ? [`<headers unavailable: ${read.error}>`] : renderHeaders(read.value);
 }
 
 // Credentials must never reach the model's context: this tool is the first one
 // here to surface raw headers, and a session cookie copied into a transcript is
 // as good as leaked. The length keeps the header's presence debuggable.
+const newlines = /\r?\n/g;
+
 const sensitiveHeaderNames = new Set([
   'authorization',
   'cookie',
@@ -157,38 +182,28 @@ function renderHeaders(headers: Record<string, string>): string[] {
       return `${name}: <redacted, ${value.length} characters>`;
     // `allHeaders()` joins repeated headers (`set-cookie` especially) with a
     // newline; keep one line per header so `name: value` stays parseable.
-    return `${name}: ${truncateDataUrls(value).replace(/\r?\n/g, '\\n')}`;
+    return `${name}: ${truncateDataUrls(value).replace(newlines, '\\n')}`;
   });
 }
 
 type ContentType = { mimeType: string, charset: string };
 
-function contentTypeOf(read: HeaderRead): ContentType {
-  const raw = 'error' in read ? '' : (read.headers['content-type'] ?? '');
+function contentTypeOf(headers: Record<string, string>): ContentType {
   // `allHeaders()` joins a repeated header with a comma, so only the first
   // media type and its parameters describe the payload.
-  const [mimeType, ...parameters] = raw.split(',')[0].split(';');
-  const charset = parameters
-      .map(parameter => parameter.trim())
-      .find(parameter => parameter.toLowerCase().startsWith('charset='))
-      ?.slice('charset='.length);
-  return { mimeType: unquote(mimeType.trim().toLowerCase()), charset: unquote(charset?.trim() ?? '') };
+  const first = (headers['content-type'] ?? '').split(',')[0];
+  return {
+    mimeType: first.split(';')[0].trim().toLowerCase(),
+    charset: /;\s*charset\s*=\s*"?([^";]*)/i.exec(first)?.[1].trim() ?? '',
+  };
 }
 
-function unquote(value: string): string {
-  return value.replace(/^"(.*)"$/, '$1');
-}
-
-async function renderResponseBody(tab: Tab, response: playwright.Response, contentType: ContentType): Promise<string[]> {
-  let body: Buffer;
-  try {
-    body = await tab.withPageStateTimeout(response.body(), 'reading the response body');
-  } catch (error) {
-    // Redirects, responses whose body the browser never retained, and bodies
-    // still streaming all end up here; the rest of the report is worth showing.
-    return [`<body unavailable: ${errorMessage(error)}>`];
-  }
-  return renderBody(body, contentType);
+function renderResponseBody(read: Read<Buffer> | undefined, contentType: ContentType): string[] {
+  if (!read)
+    return ['<empty>'];
+  // Redirects, responses whose body the browser never retained, and bodies
+  // still streaming all fail the read; the rest of the report is worth showing.
+  return 'error' in read ? [`<body unavailable: ${read.error}>`] : renderBody(read.value, contentType);
 }
 
 // A body large enough to matter is decoded only up to the cap: a 100MB response
@@ -227,24 +242,16 @@ function decodeText(body: Buffer, charset: string): string {
 // `####` sections around it, and the fence is grown past any run of backticks
 // inside so the block still terminates where it should.
 function fence(text: string): string[] {
-  const longestRun = Math.max(0, ...[...text.matchAll(/`+/g)].map(match => match[0].length));
-  const delimiter = '`'.repeat(Math.max(3, longestRun + 1));
+  const delimiter = '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map(match => match[0].length + 1)));
   return [delimiter, text, delimiter];
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 // Never cut between the halves of a surrogate pair -- a lone half renders as a
 // replacement character and can corrupt the JSON the response is packed into.
 function sliceWholeCharacters(text: string, length: number): string {
-  const end = isHighSurrogate(text.charCodeAt(length - 1)) ? length - 1 : length;
-  return text.slice(0, end);
-}
-
-function isHighSurrogate(code: number): boolean {
-  return code >= 0xd800 && code <= 0xdbff;
+  const last = text.charCodeAt(length - 1);
+  const isHighSurrogate = last >= 0xd800 && last <= 0xdbff;
+  return text.slice(0, isHighSurrogate ? length - 1 : length);
 }
 
 const textualMimeTypes = new Set([

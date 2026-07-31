@@ -707,6 +707,10 @@ function findResponse() {
   };
 }
 
+function dropResponse() {
+  return { setIncludeSnapshot: vi.fn(), addCode: vi.fn(), addResult: vi.fn(), addError: vi.fn() };
+}
+
 describe('browser_drop', () => {
   const dropTool = snapshotTools.find(tool => tool.schema.name === 'browser_drop')!;
 
@@ -718,8 +722,7 @@ describe('browser_drop', () => {
       refLocator: vi.fn().mockResolvedValue(locator),
       waitForCompletion: vi.fn(async (callback: () => Promise<void>) => await callback()),
     };
-    const response = { setIncludeSnapshot: vi.fn(), addCode: vi.fn(), addResult: vi.fn(), addError: vi.fn() };
-    return { drop, tab, response, context: { currentTabOrDie: () => tab } };
+    return { drop, tab, response: dropResponse(), context: { currentTabOrDie: () => tab } };
   }
 
   it('should expose a destructive tool with optional paths and data', () => {
@@ -759,15 +762,16 @@ describe('browser_drop', () => {
     expect(harness.drop).toHaveBeenCalledWith({ files: ['/tmp/a.txt'], data: { 'text/plain': 'hello' } });
   });
 
-  it('should reject a drop with no payload', async () => {
+  it('should reject a drop with no payload at the schema', () => {
+    const schema = dropTool.schema.inputSchema;
+
     for (const params of [{}, { paths: [] }, { data: {} }, { paths: [], data: {} }]) {
-      const harness = dropHarness();
-
-      await expect(dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', ...params }, harness.response as any))
-          .rejects.toThrow('Provide "paths", "data" or both');
-
-      expect(harness.drop).not.toHaveBeenCalled();
+      const parsed = schema.safeParse({ element: 'Dropzone', ref: 'e1', ...params });
+      expect(parsed.success).toBe(false);
+      expect(parsed.error!.issues.some(issue => issue.message.includes('Provide "paths", "data" or both'))).toBe(true);
     }
+    expect(schema.safeParse({ element: 'Dropzone', ref: 'e1', paths: ['/tmp/a.txt'] }).success).toBe(true);
+    expect(schema.safeParse({ element: 'Dropzone', ref: 'e1', data: { 'text/plain': 'x' } }).success).toBe(true);
   });
 
   it('should refuse to drop while a modal state is pending', async () => {
@@ -830,7 +834,7 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('browser_drop in a re
       refLocator: async () => page.locator('#zone'),
       waitForCompletion: async (callback: () => Promise<void>) => await callback(),
     };
-    const response = { setIncludeSnapshot: vi.fn(), addCode: vi.fn(), addResult: vi.fn(), addError: vi.fn() };
+    const response = dropResponse();
     try {
       await dropTool.handle({ currentTabOrDie: () => tab } as any, { element: 'Dropzone', ref: 'e1', ...params } as any, response as any);
       return { dropped: await page.evaluate(() => (window as any).dropped), code: response.addCode.mock.calls.map(call => call[0]).join('\n') };

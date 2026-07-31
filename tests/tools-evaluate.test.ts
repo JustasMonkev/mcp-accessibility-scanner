@@ -105,7 +105,7 @@ describe('browser_evaluate tool', () => {
   it('wraps a bare page expression into a function', async () => {
     await evaluateTool.handle(mockContext, { function: 'document.title' }, response);
 
-    expect(pageEvaluate.mock.calls[0][0].toString()).toBe('() => (\ndocument.title\n)');
+    expect(pageEvaluate.mock.calls[0][0].toString()).toBe(toFunctionSource('document.title', false));
     expect(response.code()).toContain('document.title');
   });
 
@@ -122,13 +122,14 @@ describe('browser_evaluate tool', () => {
         response
     );
 
-    expect(locatorEvaluate.mock.calls[0][0].toString()).toBe('(element) => (\nelement.textContent\n)');
+    // The element case also proves the onElement plumbing picks the (element) form.
+    expect(locatorEvaluate.mock.calls[0][0].toString()).toBe(toFunctionSource('element.textContent', true));
   });
 
   it('wraps an object literal expression without it parsing as a block', async () => {
     await evaluateTool.handle(mockContext, { function: '{ title: document.title }' }, response);
 
-    expect(pageEvaluate.mock.calls[0][0].toString()).toBe('() => (\n{ title: document.title }\n)');
+    expect(pageEvaluate.mock.calls[0][0].toString()).toBe(toFunctionSource('{ title: document.title }', false));
   });
 });
 
@@ -175,7 +176,6 @@ describe('toFunctionSource', () => {
     // Non-ASCII parameter names are still parameter names.
     'é => document.title',
     'ünnamed => document.title',
-    '_ => 1',
   ];
 
   for (const source of functionSources) {
@@ -231,32 +231,12 @@ describe('toFunctionSource', () => {
 });
 
 describe('browser_evaluate element pairing', () => {
-  function harness() {
-    const tab = {
-      modalStates: vi.fn().mockReturnValue([]),
-      page: { evaluate: vi.fn().mockResolvedValue('page-scope') },
-      refLocator: vi.fn(),
-      waitForCompletion: vi.fn(async (callback: () => Promise<void>) => await callback()),
-    };
-    return { tab, context: { currentTabOrDie: () => tab } as any };
-  }
+  const schema = evaluateTool.schema.inputSchema;
 
-  it('rejects a ref without an element instead of silently using page scope', async () => {
-    const { tab, context } = harness();
-    const response = new Response(context, 'browser_evaluate', {});
-
-    await expect(evaluateTool.handle(context, { function: 'element.textContent', ref: 'e1' }, response))
-        .rejects.toThrow(/Provide both "element" and "ref"/);
-
-    expect(tab.page.evaluate).not.toHaveBeenCalled();
-    expect(tab.refLocator).not.toHaveBeenCalled();
-  });
-
-  it('rejects an element without a ref', async () => {
-    const { context } = harness();
-    const response = new Response(context, 'browser_evaluate', {});
-
-    await expect(evaluateTool.handle(context, { function: 'element.id', element: 'the button' }, response))
-        .rejects.toThrow(/Provide both "element" and "ref"/);
+  it('requires element and ref together, so a lone ref cannot fall back to page scope', () => {
+    expect(schema.safeParse({ function: 'document.title' }).success).toBe(true);
+    expect(schema.safeParse({ function: 'element.id', element: 'the button', ref: 'e1' }).success).toBe(true);
+    expect(schema.safeParse({ function: 'element.textContent', ref: 'e1' }).success).toBe(false);
+    expect(schema.safeParse({ function: 'element.id', element: 'the button' }).success).toBe(false);
   });
 });

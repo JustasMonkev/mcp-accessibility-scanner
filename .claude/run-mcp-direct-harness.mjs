@@ -72,7 +72,6 @@ const tests = [
     assertText(await callTool('browser_evaluate', { function: 'element.textContent', element: 'Answer heading', ref }), /OK/);
   }),
 
-
   test('browser_resize', async () => {
     await navigate('<title>Resize</title><h1>Resize</h1>');
     await callTool('browser_resize', { width: 640, height: 480 });

@@ -537,6 +537,9 @@ const drag = defineTabTool({
 const dropSchema = elementSchema.extend({
   paths: z.array(z.string()).optional().describe('The absolute paths of the files to drop onto the element. Can be a single file or multiple files.'),
   data: z.record(z.string(), z.string()).optional().describe('Clipboard-like payload to drop onto the element, as a map of mime type to value, for example { "text/plain": "hello", "text/uri-list": "https://example.com" }'),
+}).superRefine((params, context) => {
+  if (!params.paths?.length && !Object.keys(params.data ?? {}).length)
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Provide "paths", "data" or both to describe what to drop onto the element.' });
 });
 
 const drop = defineTabTool({
@@ -552,13 +555,12 @@ const drop = defineTabTool({
   handle: async (tab, params, response) => {
     response.setIncludeSnapshot();
 
+    // The schema guarantees at least one of them is non-empty.
     const payload: { files?: string[], data?: Record<string, string> } = {};
     if (params.paths?.length)
       payload.files = params.paths;
-    if (params.data && Object.keys(params.data).length)
+    if (Object.keys(params.data ?? {}).length)
       payload.data = params.data;
-    if (!payload.files && !payload.data)
-      throw new Error('Provide "paths", "data" or both to describe what to drop onto the element.');
 
     const locator = await tab.refLocator(params);
     response.addCode(`await page.${await generateLocator(locator)}.drop(${JSON.stringify(payload)});`);
