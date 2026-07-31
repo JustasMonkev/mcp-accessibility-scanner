@@ -74,4 +74,33 @@ describe('Screenshot Tools', () => {
 
     expect(mockPage.screenshot).toHaveBeenCalledWith(expect.objectContaining({ scale: 'device' }));
   });
+
+  it('should default the image format to png', () => {
+    const params = screenshotTool.schema.inputSchema.parse({});
+    expect(params.type).toBe('png');
+  });
+
+  it('should accept webp as an image format', () => {
+    const params = screenshotTool.schema.inputSchema.parse({ type: 'webp' });
+    expect(params.type).toBe('webp');
+  });
+
+  it('should reject an unsupported image format', () => {
+    expect(() => screenshotTool.schema.inputSchema.parse({ type: 'gif' })).toThrow();
+  });
+
+  it('should pass the webp type and a lossy quality through to page.screenshot', async () => {
+    const params = screenshotTool.schema.inputSchema.parse({ type: 'webp' });
+    await screenshotTool.handle(mockContext, params, response);
+
+    expect(mockPage.screenshot).toHaveBeenCalledWith(expect.objectContaining({ type: 'webp', quality: 90 }));
+  });
+
+  it('should return the webp screenshot with an image/webp content type', async () => {
+    const params = screenshotTool.schema.inputSchema.parse({ type: 'webp' });
+    await screenshotTool.handle(mockContext, params, response);
+
+    const image = response.images().find(i => i.contentType === 'image/webp');
+    expect(image).toBeDefined();
+  });
 });
