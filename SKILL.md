@@ -195,7 +195,7 @@ These tools are always available and work in the interactive REPL.
 | `browser_close` | Close the page |
 | `browser_resize` | Resize window: `{"width": 1280, "height": 720}` |
 | `browser_snapshot` | Capture accessibility snapshot |
-| `browser_take_screenshot` | Take screenshot (png/jpeg, fullPage option) |
+| `browser_take_screenshot` | Take screenshot (png/jpeg/webp, fullPage option) |
 | `browser_wait_for` | Wait for text/time: `{"text": "loaded"}` or `{"time": 5}` |
 
 ### Interaction
