@@ -207,11 +207,12 @@ These tools are always available and work in the interactive REPL.
 | `browser_press_key` | Press key: `{"key": "Enter"}` |
 | `browser_hover` | Hover over element |
 | `browser_drag` | Drag between elements |
+| `browser_drop` | Drop external files or data onto an element: `{"element": "Dropzone", "ref": "e7", "paths": ["/path/to/file"]}` (paths are read on the server host) |
 | `browser_select_option` | Select dropdown option |
 | `browser_fill_form` | Fill multiple form fields at once |
 | `browser_file_upload` | Upload files: `{"paths": ["/path/to/file"]}` |
 | `browser_handle_dialog` | Handle browser dialog: `{"accept": true}` |
-| `browser_evaluate` | Run JavaScript on page |
+| `browser_evaluate` | Run JavaScript on page: a function or a bare expression such as `{"function": "document.title"}` |
 
 ### Tabs & Config
 
@@ -226,7 +227,8 @@ These tools are always available and work in the interactive REPL.
 | Tool | Description |
 |------|-------------|
 | `browser_console_messages` | Get all console messages |
-| `browser_network_requests` | Get all network requests |
+| `browser_network_requests` | Get all network requests, numbered |
+| `browser_network_request` | Get headers and bodies of one request: `{"index": 3}` (credential headers redacted, binary bodies summarised) |
 
 ### Optional Tools (require `--caps`)
 

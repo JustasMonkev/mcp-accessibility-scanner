@@ -706,3 +706,165 @@ function findResponse() {
     addError: vi.fn(),
   };
 }
+
+function dropResponse() {
+  return { setIncludeSnapshot: vi.fn(), addCode: vi.fn(), addResult: vi.fn(), addError: vi.fn() };
+}
+
+describe('browser_drop', () => {
+  const dropTool = snapshotTools.find(tool => tool.schema.name === 'browser_drop')!;
+
+  function dropHarness() {
+    const drop = vi.fn().mockResolvedValue(undefined);
+    const locator = { drop, normalize: async () => ({ toString: () => `getByTestId('zone')` }) };
+    const tab = {
+      modalStates: vi.fn().mockReturnValue([]),
+      refLocator: vi.fn().mockResolvedValue(locator),
+      waitForCompletion: vi.fn(async (callback: () => Promise<void>) => await callback()),
+    };
+    return { drop, tab, response: dropResponse(), context: { currentTabOrDie: () => tab } };
+  }
+
+  it('should expose a destructive tool with optional paths and data', () => {
+    const jsonSchema = toMcpTool(dropTool.schema).inputSchema as JSONSchema7;
+
+    expect(dropTool.schema.type).toBe('destructive');
+    expect(dropTool.capability).toBe('core');
+    expect((jsonSchema.required ?? []).sort()).toEqual(['element', 'ref']);
+    expect((jsonSchema.properties?.paths as JSONSchema7).type).toBe('array');
+    expect((jsonSchema.properties?.data as JSONSchema7).type).toBe('object');
+  });
+
+  it('should drop files onto the element', async () => {
+    const harness = dropHarness();
+
+    await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', paths: ['/tmp/a.txt'] }, harness.response as any);
+
+    expect(harness.tab.refLocator).toHaveBeenCalledWith(expect.objectContaining({ ref: 'e1', element: 'Dropzone' }));
+    expect(harness.drop).toHaveBeenCalledWith({ files: ['/tmp/a.txt'] });
+    expect(harness.response.setIncludeSnapshot).toHaveBeenCalled();
+    expect(harness.response.addCode).toHaveBeenCalledWith(`await page.getByTestId('zone').drop({"files":["/tmp/a.txt"]});`);
+  });
+
+  it('should drop clipboard-like data onto the element', async () => {
+    const harness = dropHarness();
+
+    await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', data: { 'text/plain': 'hello' } }, harness.response as any);
+
+    expect(harness.drop).toHaveBeenCalledWith({ data: { 'text/plain': 'hello' } });
+  });
+
+  it('should drop files and data together', async () => {
+    const harness = dropHarness();
+
+    await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', paths: ['/tmp/a.txt'], data: { 'text/plain': 'hello' } }, harness.response as any);
+
+    expect(harness.drop).toHaveBeenCalledWith({ files: ['/tmp/a.txt'], data: { 'text/plain': 'hello' } });
+  });
+
+  it('should reject a drop with no payload at the schema', () => {
+    const schema = dropTool.schema.inputSchema;
+
+    for (const params of [{}, { paths: [] }, { data: {} }, { paths: [], data: {} }]) {
+      const parsed = schema.safeParse({ element: 'Dropzone', ref: 'e1', ...params });
+      expect(parsed.success).toBe(false);
+      expect(parsed.error!.issues.some(issue => issue.message.includes('Provide "paths", "data" or both'))).toBe(true);
+    }
+    expect(schema.safeParse({ element: 'Dropzone', ref: 'e1', paths: ['/tmp/a.txt'] }).success).toBe(true);
+    expect(schema.safeParse({ element: 'Dropzone', ref: 'e1', data: { 'text/plain': 'x' } }).success).toBe(true);
+  });
+
+  it('should refuse to drop while a modal state is pending', async () => {
+    const harness = dropHarness();
+    harness.tab.modalStates = vi.fn().mockReturnValue([{ type: 'dialog', description: 'alert' }]);
+    harness.tab.modalStatesMarkdown = vi.fn().mockReturnValue(['- alert']);
+
+    await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', data: { 'text/plain': 'hi' } }, harness.response as any);
+
+    expect(harness.drop).not.toHaveBeenCalled();
+    expect(harness.response.addError).toHaveBeenCalledWith(expect.stringContaining('does not handle the modal state'));
+  });
+
+  it('should settle the page through waitForCompletion', async () => {
+    const harness = dropHarness();
+
+    await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', data: { 'text/plain': 'hi' } }, harness.response as any);
+
+    expect(harness.tab.waitForCompletion).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe.skipIf(!fs.existsSync(chromium.executablePath()))('browser_drop in a real browser', () => {
+  const dropTool = snapshotTools.find(tool => tool.schema.name === 'browser_drop')!;
+  let browser: Browser;
+  let scratchDir: string;
+
+  const dropzone = `
+    <div id="zone" style="width:200px;height:100px">drop here</div>
+    <script>
+      window.dropped = null;
+      const zone = document.getElementById('zone');
+      zone.addEventListener('dragover', event => event.preventDefault());
+      zone.addEventListener('drop', event => {
+        event.preventDefault();
+        window.dropped = {
+          text: event.dataTransfer.getData('text/plain'),
+          uri: event.dataTransfer.getData('text/uri-list'),
+          files: [...event.dataTransfer.files].map(file => ({ name: file.name, type: file.type })),
+        };
+      });
+    </script>`;
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    scratchDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-a11y-drop-'));
+  });
+
+  afterAll(async () => {
+    await browser?.close();
+    await fs.promises.rm(scratchDir, { recursive: true, force: true });
+  });
+
+  async function runDrop(html: string, params: Record<string, unknown>) {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.setContent(html);
+    const tab = {
+      modalStates: () => [],
+      refLocator: async () => page.locator('#zone'),
+      waitForCompletion: async (callback: () => Promise<void>) => await callback(),
+    };
+    const response = dropResponse();
+    try {
+      await dropTool.handle({ currentTabOrDie: () => tab } as any, { element: 'Dropzone', ref: 'e1', ...params } as any, response as any);
+      return { dropped: await page.evaluate(() => (window as any).dropped), code: response.addCode.mock.calls.map(call => call[0]).join('\n') };
+    } finally {
+      await context.close();
+    }
+  }
+
+  it('drops clipboard-like data onto a real drop zone', async () => {
+    const { dropped, code } = await runDrop(dropzone, { data: { 'text/plain': 'hello world', 'text/uri-list': 'https://example.com' } });
+
+    expect(dropped).toMatchObject({ text: 'hello world', uri: 'https://example.com' });
+    expect(code).toContain('.drop(');
+  });
+
+  it('drops a real file onto a real drop zone', async () => {
+    const filePath = path.join(scratchDir, 'note.txt');
+    await fs.promises.writeFile(filePath, 'hello');
+
+    const { dropped } = await runDrop(dropzone, { paths: [filePath] });
+
+    expect(dropped.files).toEqual([{ name: 'note.txt', type: 'text/plain' }]);
+  });
+
+  it('fails when the target rejects the payload', async () => {
+    const rejecting = `<div id="zone" style="width:200px;height:100px">no drops</div>`;
+
+    // Assert the specific rejection, so a setup failure inside runDrop cannot
+    // masquerade as the behaviour under test.
+    await expect(runDrop(rejecting, { data: { 'text/plain': 'hello' } }))
+        .rejects.toThrow(/did not call preventDefault/);
+  });
+});
