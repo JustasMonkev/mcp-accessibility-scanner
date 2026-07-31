@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import networkTools from '../src/tools/network.js';
+import networkTools, { maxBodyLength } from '../src/tools/network.js';
 import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
 import type { Tab } from '../src/tab.js';
@@ -162,6 +162,273 @@ describe('Network Tools', () => {
 
       expect(response.result()).toContain('https://api.example/upload?src=data%3Atext%2Fhtml%3Bbase64%2C...&id=123');
       expect(response.result()).not.toContain(payload);
+    });
+
+    it('should number the requests and point at the detail tool', async () => {
+      await networkTool.handle(mockContext, {}, response);
+
+      const result = response.result();
+      expect(result).toContain('[1] [GET] https://api.example.com/data => [200] OK');
+      expect(result).toContain('[2] [POST] https://api.example.com/user => [201] Created');
+      expect(result).toContain('[3] [GET] https://api.example.com/missing');
+      expect(result).toContain('browser_network_request');
+    });
+
+    it('should not advertise the detail tool when there are no requests', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(new Map());
+
+      await networkTool.handle(mockContext, {}, response);
+
+      expect(response.result()).toBe('');
+    });
+  });
+
+  describe('browser_network_request tool', () => {
+    const detailTool = networkTools.find(t => t.schema.name === 'browser_network_request')!;
+
+    function detailedRequests(overrides: {
+      request?: Record<string, unknown>,
+      response?: Record<string, unknown> | null,
+    } = {}) {
+      const request = {
+        url: () => 'https://api.example.com/data',
+        method: () => 'GET',
+        allHeaders: async () => ({ 'accept': 'application/json', 'x-trace': 'abc' }),
+        postData: () => null,
+        failure: () => null,
+        ...overrides.request,
+      };
+      const res = overrides.response === null ? null : {
+        status: () => 200,
+        statusText: () => 'OK',
+        allHeaders: async () => ({ 'content-type': 'application/json; charset=utf-8' }),
+        headerValue: async (name: string) => (name === 'content-type' ? 'application/json; charset=utf-8' : null),
+        body: async () => Buffer.from('{"ok":true}'),
+        ...overrides.response,
+      };
+      return new Map([[request, res]]);
+    }
+
+    it('should exist with the expected schema', () => {
+      expect(detailTool).toBeDefined();
+      expect(detailTool.schema.title).toBe('Get network request details');
+      expect(detailTool.schema.type).toBe('readOnly');
+    });
+
+    it('should report request headers, response headers and the response body', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests());
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      const result = response.result();
+      expect(result).toContain('### [1] [GET] https://api.example.com/data');
+      expect(result).toContain('#### Request headers');
+      expect(result).toContain('accept: application/json');
+      expect(result).toContain('x-trace: abc');
+      expect(result).toContain('#### Response\n[200] OK');
+      expect(result).toContain('#### Response headers');
+      expect(result).toContain('content-type: application/json; charset=utf-8');
+      expect(result).toContain('#### Response body\n{"ok":true}');
+      expect(response.isError()).toBeFalsy();
+    });
+
+    it('should sort headers by name', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        request: { allHeaders: async () => ({ 'zulu': '1', 'alpha': '2' }) },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      const result = response.result();
+      expect(result.indexOf('alpha: 2')).toBeLessThan(result.indexOf('zulu: 1'));
+    });
+
+    it('should include the request body when there is post data', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        request: { method: () => 'POST', postData: () => '{"name":"ada"}' },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain('#### Request body\n{"name":"ada"}');
+    });
+
+    it('should omit the request body section when there is no post data', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests());
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).not.toContain('#### Request body');
+    });
+
+    it('should render a placeholder for binary response bodies', async () => {
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        response: {
+          headerValue: async () => 'image/png',
+          body: async () => bytes,
+        },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain(`<binary data, ${bytes.length} bytes, image/png>`);
+    });
+
+    it('should render svg and other +xml bodies as text', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        response: {
+          headerValue: async () => 'image/svg+xml',
+          body: async () => Buffer.from('<svg></svg>'),
+        },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain('<svg></svg>');
+    });
+
+    it('should sniff a missing content type and treat NUL bytes as binary', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        response: {
+          headerValue: async () => null,
+          body: async () => Buffer.from([0x61, 0x00, 0x62]),
+        },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain('<binary data, 3 bytes>');
+    });
+
+    it('should treat a missing content type without NUL bytes as text', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        response: {
+          headerValue: async () => null,
+          body: async () => Buffer.from('plain text'),
+        },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain('plain text');
+    });
+
+    it('should truncate long textual bodies', async () => {
+      const body = 'a'.repeat(maxBodyLength + 25);
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        response: { body: async () => Buffer.from(body) },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      const result = response.result();
+      expect(result).toContain(`<truncated, showing the first ${maxBodyLength} of ${body.length} characters>`);
+      expect(result).not.toContain(body);
+    });
+
+    it('should leave a body of exactly the cap untruncated', async () => {
+      const body = 'a'.repeat(maxBodyLength);
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        response: { body: async () => Buffer.from(body) },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain(body);
+      expect(response.result()).not.toContain('<truncated');
+    });
+
+    it('should truncate a body one character over the cap', async () => {
+      const body = 'a'.repeat(maxBodyLength + 1);
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        response: { body: async () => Buffer.from(body) },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain(`<truncated, showing the first ${maxBodyLength} of ${maxBodyLength + 1} characters>`);
+    });
+
+    it('should reject a non-positive or fractional index at the schema', () => {
+      const schema = detailTool.schema.inputSchema;
+
+      expect(schema.safeParse({ index: 1 }).success).toBe(true);
+      expect(schema.safeParse({ index: 0 }).success).toBe(false);
+      expect(schema.safeParse({ index: -1 }).success).toBe(false);
+      expect(schema.safeParse({ index: 1.5 }).success).toBe(false);
+    });
+
+    it('should truncate data URLs inside the response body', async () => {
+      const payload = Buffer.from('<p>hello</p>').toString('base64');
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        response: { body: async () => Buffer.from(`{"src":"data:text/html;base64,${payload}"}`) },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain('data:text/html;base64,...');
+      expect(response.result()).not.toContain(payload);
+    });
+
+    it('should report an empty response body', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        response: { body: async () => Buffer.alloc(0) },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain('#### Response body\n<empty>');
+    });
+
+    it('should keep the report when the body cannot be read', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        response: { body: async () => { throw new Error('Response body is unavailable for redirect responses'); } },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      const result = response.result();
+      expect(result).toContain('#### Response headers');
+      expect(result).toContain('<body unavailable: Response body is unavailable for redirect responses>');
+      expect(response.isError()).toBeFalsy();
+    });
+
+    it('should report a request that failed', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        request: { failure: () => ({ errorText: 'net::ERR_CONNECTION_REFUSED' }) },
+        response: null,
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain('The request failed: net::ERR_CONNECTION_REFUSED');
+    });
+
+    it('should report a request that is still in flight', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({ response: null }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain('The request has not completed yet.');
+    });
+
+    it('should error on an out of range index', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests());
+
+      await detailTool.handle(mockContext, { index: 4 }, response);
+
+      expect(response.isError()).toBe(true);
+      expect(response.result()).toContain('numbered 1 to 1');
+    });
+
+    it('should error when nothing has been recorded', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(new Map());
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.isError()).toBe(true);
+      expect(response.result()).toContain('No network requests have been recorded');
     });
   });
 

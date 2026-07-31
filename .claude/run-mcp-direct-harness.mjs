@@ -62,10 +62,16 @@ const tests = [
   }),
 
   test('browser_evaluate', async () => {
-    await navigate('<title>Evaluate</title><h1 id="answer">OK</h1>');
+    const snapshot = await navigate('<title>Evaluate</title><h1 id="answer">OK</h1>');
     const result = await callTool('browser_evaluate', { function: '() => 2 + 2' });
     assertText(result, /\b4\b/);
+    // Bare expressions are wrapped into a function, on the page and on an element.
+    assertText(await callTool('browser_evaluate', { function: 'document.title' }), /Evaluate/);
+    assertText(await callTool('browser_evaluate', { function: '{ id: document.getElementById("answer").id }' }), /"id":\s*"answer"/);
+    const ref = refFor(snapshot, 'OK');
+    assertText(await callTool('browser_evaluate', { function: 'element.textContent', element: 'Answer heading', ref }), /OK/);
   }),
+
 
   test('browser_resize', async () => {
     await navigate('<title>Resize</title><h1>Resize</h1>');
@@ -154,6 +160,26 @@ const tests = [
     await callTool('browser_navigate', { url: `${state.fixtureOrigin}/network-json` });
     const result = await callTool('browser_network_requests', {});
     assertText(result, /network-json/);
+    assertText(result, /^\[1\] \[GET\]/m);
+  }),
+
+  test('browser_network_request', async () => {
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/network-json` });
+    const list = await callTool('browser_network_requests', {});
+    const result = await callTool('browser_network_request', { index: indexFor(resultText(list), /\/network-json/) });
+    assertText(result, /#### Request headers/);
+    assertText(result, /x-mcp-fixture: network-json/);
+    assertText(result, /#### Response\n\[200\] OK/);
+    assertText(result, /\{"ok":true\}/);
+
+    // An out-of-range index reports the usable range instead of a stack trace.
+    await assertToolError('browser_network_request', { index: 999 }, /No network request with index 999/);
+
+    // A real binary payload must be summarised, never rendered as text.
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/network-png` });
+    const pngList = await callTool('browser_network_requests', {});
+    const png = await callTool('browser_network_request', { index: indexFor(resultText(pngList), /\/network-png\.png/) });
+    assertText(png, /<binary data, \d+ bytes, image\/png>/);
   }),
 
   test('browser_take_screenshot', async () => {
@@ -189,6 +215,26 @@ const tests = [
       endElement: 'Drop target',
       endRef,
     });
+  }),
+
+  test('browser_drop', async () => {
+    const snapshot = await navigate([
+      '<title>Drop</title>',
+      '<div role="region" aria-label="Drop zone" style="width:160px;height:60px;background:#cfa" ',
+      'ondragover="event.preventDefault()" ',
+      'ondrop="event.preventDefault();document.body.dataset.dropped=event.dataTransfer.getData(\'text/plain\')">Drop here</div>',
+    ].join(''));
+    const ref = refFor(snapshot, 'Drop zone');
+    await callTool('browser_drop', {
+      element: 'Drop zone',
+      ref,
+      data: { 'text/plain': 'dropped-payload' },
+    });
+    const result = await callTool('browser_evaluate', { function: '() => document.body.dataset.dropped' });
+    assertText(result, /dropped-payload/);
+
+    // Neither paths nor data means there is nothing to drop.
+    await assertToolError('browser_drop', { element: 'Drop zone', ref }, /Provide "paths", "data" or both/);
   }),
 
   test('browser_hover', async () => {
@@ -871,6 +917,16 @@ function refFor(snapshotText, label) {
   return match[1];
 }
 
+// Picks the number browser_network_requests printed for the first request whose
+// line matches, so browser_network_request can be called with a real index.
+function indexFor(listText, pattern) {
+  const line = listText.split('\n').find(candidate => /^\[\d+\] /.test(candidate) && pattern.test(candidate));
+  const match = line?.match(/^\[(\d+)\]/);
+  if (!match)
+    throw new Error(`Could not find a request matching ${pattern} in listing:\n${listText.slice(0, 4000)}`);
+  return Number(match[1]);
+}
+
 function appendSummary(tool, status, detail, logPath) {
   const cleanDetail = String(detail || '').replace(/\s+/g, ' ').slice(0, 300);
   fs.appendFileSync(summaryPath, `${tool}\t${status}\t${cleanDetail}\t${logPath}\n`);
@@ -967,6 +1023,18 @@ function startFixtureServer() {
         'x-mcp-fixture': 'network-json',
       });
       response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (request.url === '/network-png') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Network PNG</title></head><body><img src="/network-png.png" alt="pixel"></body></html>');
+      return;
+    }
+    if (request.url === '/network-png.png') {
+      response.writeHead(200, { 'content-type': 'image/png' });
+      // A 1x1 transparent PNG: real binary bytes, so the tool must not try to
+      // render it as text.
+      response.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
       return;
     }
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });

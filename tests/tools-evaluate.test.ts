@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import evaluateTools from '../src/tools/evaluate.js';
+import evaluateTools, { toFunctionSource } from '../src/tools/evaluate.js';
 import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
 import type { Tab } from '../src/tab.js';
@@ -101,4 +101,83 @@ describe('browser_evaluate tool', () => {
     expect(locatorEvaluate.mock.calls[0][0].toString()).toBe('(el) => el.textContent');
     expect(response.result()).toContain('hello');
   });
+
+  it('wraps a bare page expression into a function', async () => {
+    await evaluateTool.handle(mockContext, { function: 'document.title' }, response);
+
+    expect(pageEvaluate.mock.calls[0][0].toString()).toBe('() => (document.title)');
+    expect(response.code()).toContain('() => (document.title)');
+  });
+
+  it('wraps a bare element expression so it can reference element', async () => {
+    const locatorEvaluate = vi.fn().mockResolvedValue('hello');
+    mockTab.refLocator.mockResolvedValue({
+      evaluate: locatorEvaluate,
+      _resolveSelector: async () => ({ resolvedSelector: 'internal:role=button' }),
+    });
+
+    await evaluateTool.handle(
+        mockContext,
+        { function: 'element.textContent', element: 'the button', ref: 'e1' },
+        response
+    );
+
+    expect(locatorEvaluate.mock.calls[0][0].toString()).toBe('(element) => (element.textContent)');
+  });
+
+  it('wraps an object literal expression without it parsing as a block', async () => {
+    await evaluateTool.handle(mockContext, { function: '{ title: document.title }' }, response);
+
+    expect(pageEvaluate.mock.calls[0][0].toString()).toBe('() => ({ title: document.title })');
+  });
+});
+
+describe('toFunctionSource', () => {
+  const functionSources = [
+    '() => 2 + 2',
+    '() => { return 2 + 2; }',
+    '(element) => element.textContent',
+    '(a, b) => a + b',
+    'element => element.textContent',
+    '_ => 1',
+    '$el => $el.id',
+    'async () => await fetch("/x")',
+    'async (element) => element.id',
+    'async(element) => element.id',
+    'function () { return 1; }',
+    'function named() { return 1; }',
+    'async function () { return 1; }',
+    '  \n () => 1',
+    '// pick the title\n() => document.title',
+    '/* pick the title */ () => document.title',
+    '({ a = (1, 2) }) => a',
+    '(a = ") => x") => a',
+  ];
+
+  for (const source of functionSources) {
+    it(`leaves the function form ${JSON.stringify(source)} untouched`, () => {
+      expect(toFunctionSource(source, false)).toBe(source);
+      expect(toFunctionSource(source, true)).toBe(source);
+    });
+  }
+
+  const expressionSources = [
+    'document.title',
+    '2 + 2',
+    'window.location.href',
+    '(a + b)',
+    '(1, 2)',
+    '{ a: 1 }',
+    'functionally.named.thing',
+    'asyncThing.value',
+    'async',
+    'document.querySelectorAll("a").length',
+  ];
+
+  for (const source of expressionSources) {
+    it(`wraps the expression ${JSON.stringify(source)}`, () => {
+      expect(toFunctionSource(source, false)).toBe(`() => (${source})`);
+      expect(toFunctionSource(source, true)).toBe(`(element) => (${source})`);
+    });
+  }
 });

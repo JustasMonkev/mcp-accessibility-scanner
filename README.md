@@ -504,6 +504,12 @@ Hover over element on page.
 Perform drag and drop between two elements.
 - Parameters: `startElement`, `startRef`, `endElement`, `endRef`
 
+#### `browser_drop`
+Simulate an external drag and drop of files or clipboard-like data onto an element, for testing drop zones that never see a drag start inside the page.
+- Parameters: `element`, `ref`, `paths` (optional array of absolute file paths), `data` (optional map of mime type to value, e.g. `{"text/plain": "hello"}`)
+- At least one of `paths` or `data` is required.
+- Fails if the target's `dragover` handler does not accept the payload.
+
 #### `browser_select_option`
 Select an option in a dropdown.
 - Parameters: `element`, `ref`, `values` (array)
@@ -519,6 +525,7 @@ Press a key on the keyboard.
 #### `browser_evaluate`
 Evaluate a JavaScript expression on the page, or on a specific element when a `ref` is provided. The function's return value is serialized back as the result.
 - Parameters: `function` (e.g., `() => document.title` or `(element) => element.textContent`), `element` (optional), `ref` (optional)
+- A bare expression is also accepted and is wrapped automatically: `document.title` behaves like `() => document.title`, and `element.textContent` behaves like `(element) => element.textContent` when a `ref` is provided.
 
 ### Screenshot & Visual Tools
 
@@ -559,8 +566,15 @@ Returns all console messages from the page.
 Large `data:` URL payloads in console messages are truncated to their media type prefix.
 
 #### `browser_network_requests`
-Returns all network requests since loading the page.
+Returns all network requests since loading the page, numbered so a single one can be inspected with `browser_network_request`.
 Large `data:` URL payloads in request URLs are truncated to their media type prefix.
+
+#### `browser_network_request`
+Returns the request headers, response headers and response body of one request from the `browser_network_requests` listing.
+- Parameters: `index` (the number shown in the listing, starting at 1)
+- The listing is reset on navigation, so re-run `browser_network_requests` before using an index from an earlier page.
+- Binary response bodies are reported as `<binary data, N bytes, mime/type>` rather than dumped; textual bodies over 20000 characters are truncated with a trailing note.
+- Headers are reported verbatim, including `cookie` and `authorization`.
 
 ### Utility Tools
 
