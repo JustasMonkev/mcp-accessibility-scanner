@@ -573,8 +573,8 @@ Large `data:` URL payloads in request URLs are truncated to their media type pre
 Returns the request headers, response headers and response body of one request from the `browser_network_requests` listing.
 - Parameters: `index` (the number shown in the listing, starting at 1)
 - The listing is reset on navigation, so re-run `browser_network_requests` before using an index from an earlier page.
-- Binary response bodies are reported as `<binary data, N bytes, mime/type>` rather than dumped; textual bodies over 20000 characters are truncated with a trailing note.
-- Headers are reported verbatim, including `cookie` and `authorization`.
+- Binary request and response bodies are reported as `<binary data, N bytes, mime/type>` rather than dumped; textual bodies over 20000 characters are truncated with a trailing note.
+- Credential-bearing headers (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`) are reported as `<redacted, N characters>`, so their presence and size stay visible but the secret never reaches the transcript. All other headers are reported in full.
 
 ### Utility Tools
 

@@ -175,6 +175,15 @@ const tests = [
     // An out-of-range index reports the usable range instead of a stack trace.
     await assertToolError('browser_network_request', { index: 999 }, /No network request with index 999/);
 
+    // Real Chromium header names must hit the redaction set: sign in so the
+    // next request carries a session cookie, then prove it is not echoed back.
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/login` });
+    await callTool('browser_navigate', { url: `${state.fixtureOrigin}/secure` });
+    const secureList = await callTool('browser_network_requests', {});
+    const secure = await callTool('browser_network_request', { index: indexFor(resultText(secureList), /\/secure/) });
+    assertText(secure, /cookie: <redacted, \d+ characters>/);
+    assertNoText(secure, /mcp_session=granted/);
+
     // A real binary payload must be summarised, never rendered as text.
     await callTool('browser_navigate', { url: `${state.fixtureOrigin}/network-png` });
     const pngList = await callTool('browser_network_requests', {});

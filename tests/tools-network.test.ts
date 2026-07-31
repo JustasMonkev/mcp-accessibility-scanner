@@ -194,7 +194,7 @@ describe('Network Tools', () => {
         url: () => 'https://api.example.com/data',
         method: () => 'GET',
         allHeaders: async () => ({ 'accept': 'application/json', 'x-trace': 'abc' }),
-        postData: () => null,
+        postDataBuffer: () => null,
         failure: () => null,
         ...overrides.request,
       };
@@ -202,7 +202,6 @@ describe('Network Tools', () => {
         status: () => 200,
         statusText: () => 'OK',
         allHeaders: async () => ({ 'content-type': 'application/json; charset=utf-8' }),
-        headerValue: async (name: string) => (name === 'content-type' ? 'application/json; charset=utf-8' : null),
         body: async () => Buffer.from('{"ok":true}'),
         ...overrides.response,
       };
@@ -232,6 +231,113 @@ describe('Network Tools', () => {
       expect(response.isError()).toBeFalsy();
     });
 
+    it('should redact credential-bearing headers', async () => {
+      const secrets = {
+        'authorization': 'Bearer sk-secret-token-value',
+        'cookie': 'session=abc123; theme=dark',
+        'proxy-authorization': 'Basic dXNlcjpwYXNz',
+        'x-api-key': 'key-12345',
+        'x-auth-token': 'token-67890',
+      };
+      const setCookie = 'session=xyz789; HttpOnly';
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        request: { allHeaders: async () => ({ ...secrets, 'accept': 'application/json' }) },
+        response: { allHeaders: async () => ({ 'content-type': 'application/json', 'set-cookie': setCookie }) },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      const result = response.result();
+      for (const [name, value] of Object.entries(secrets)) {
+        expect(result).not.toContain(value);
+        expect(result).toContain(`${name}: <redacted, ${value.length} characters>`);
+      }
+      expect(result).not.toContain(setCookie);
+      expect(result).toContain(`set-cookie: <redacted, ${setCookie.length} characters>`);
+      // Non-sensitive headers are still reported in full.
+      expect(result).toContain('accept: application/json');
+    });
+
+    it('should redact sensitive headers regardless of name casing', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        request: { allHeaders: async () => ({ 'Authorization': 'Bearer leaky', 'Cookie': 'session=leaky' }) },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).not.toContain('leaky');
+    });
+
+    it('should summarise a binary request body instead of decoding it as text', async () => {
+      const upload = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0xfe]);
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        request: {
+          method: () => 'POST',
+          allHeaders: async () => ({ 'content-type': 'image/png' }),
+          postDataBuffer: () => upload,
+        },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain(`#### Request body\n<binary data, ${upload.length} bytes, image/png>`);
+      expect(response.result()).not.toContain('�');
+    });
+
+    it('should render a multipart upload as text until a part turns binary', async () => {
+      const textual = detailedRequests({
+        request: {
+          method: () => 'POST',
+          allHeaders: async () => ({ 'content-type': 'multipart/form-data; boundary=----abc' }),
+          postDataBuffer: () => Buffer.from('------abc\r\nContent-Disposition: form-data; name="a"\r\n\r\nvalue\r\n'),
+        },
+      });
+      mockTab.requests = vi.fn().mockReturnValue(textual);
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+      expect(response.result()).toContain('name="a"');
+
+      const binary = detailedRequests({
+        request: {
+          method: () => 'POST',
+          allHeaders: async () => ({ 'content-type': 'multipart/form-data; boundary=----abc' }),
+          postDataBuffer: () => Buffer.from([0x2d, 0x2d, 0x61, 0x00, 0x01, 0x02]),
+        },
+      });
+      const second = new Response(mockContext, 'test_tool', {});
+      mockTab.requests = vi.fn().mockReturnValue(binary);
+
+      await detailTool.handle(mockContext, { index: 1 }, second);
+      expect(second.result()).toContain('<binary data, 6 bytes, multipart/form-data>');
+    });
+
+    it('should treat a content type with no space after the semicolon as text', async () => {
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        response: {
+          allHeaders: async () => ({ 'content-type': 'application/json;charset=utf-8' }),
+          body: async () => Buffer.from('{"ok":true}'),
+        },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      expect(response.result()).toContain('{"ok":true}');
+    });
+
+    it('should not split a surrogate pair when truncating', async () => {
+      // The cap lands exactly between the two halves of the final emoji.
+      const body = 'a'.repeat(maxBodyLength - 1) + '\u{1f600}';
+      mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
+        response: { body: async () => Buffer.from(body) },
+      }));
+
+      await detailTool.handle(mockContext, { index: 1 }, response);
+
+      const result = response.result();
+      expect(result).not.toContain('\ud83d');
+      expect(result).toContain(`<truncated, showing the first ${maxBodyLength} of ${body.length} characters>`);
+    });
+
     it('should sort headers by name', async () => {
       mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
         request: { allHeaders: async () => ({ 'zulu': '1', 'alpha': '2' }) },
@@ -245,7 +351,7 @@ describe('Network Tools', () => {
 
     it('should include the request body when there is post data', async () => {
       mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
-        request: { method: () => 'POST', postData: () => '{"name":"ada"}' },
+        request: { method: () => 'POST', postDataBuffer: () => Buffer.from('{"name":"ada"}') },
       }));
 
       await detailTool.handle(mockContext, { index: 1 }, response);
@@ -265,7 +371,7 @@ describe('Network Tools', () => {
       const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
       mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
         response: {
-          headerValue: async () => 'image/png',
+          allHeaders: async () => ({ 'content-type': 'image/png' }),
           body: async () => bytes,
         },
       }));
@@ -278,7 +384,7 @@ describe('Network Tools', () => {
     it('should render svg and other +xml bodies as text', async () => {
       mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
         response: {
-          headerValue: async () => 'image/svg+xml',
+          allHeaders: async () => ({ 'content-type': 'image/svg+xml' }),
           body: async () => Buffer.from('<svg></svg>'),
         },
       }));
@@ -291,7 +397,7 @@ describe('Network Tools', () => {
     it('should sniff a missing content type and treat NUL bytes as binary', async () => {
       mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
         response: {
-          headerValue: async () => null,
+          allHeaders: async () => ({}),
           body: async () => Buffer.from([0x61, 0x00, 0x62]),
         },
       }));
@@ -304,7 +410,7 @@ describe('Network Tools', () => {
     it('should treat a missing content type without NUL bytes as text', async () => {
       mockTab.requests = vi.fn().mockReturnValue(detailedRequests({
         response: {
-          headerValue: async () => null,
+          allHeaders: async () => ({}),
           body: async () => Buffer.from('plain text'),
         },
       }));

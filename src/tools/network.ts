@@ -81,16 +81,19 @@ function renderRequest(index: number, request: playwright.Request, response: pla
 }
 
 async function renderRequestDetails(index: number, request: playwright.Request, response: playwright.Response | null): Promise<string[]> {
+  const requestHeaders = await request.allHeaders();
   const result: string[] = [
     `### [${index}] [${request.method().toUpperCase()}] ${truncateDataUrls(request.url())}`,
     '',
     '#### Request headers',
-    ...renderHeaders(await request.allHeaders()),
+    ...renderHeaders(requestHeaders),
   ];
 
-  const postData = request.postData();
-  if (postData)
-    result.push('', '#### Request body', ...renderText(postData));
+  // `postData()` decodes as UTF-8, which mangles file uploads and protobuf
+  // payloads, so go through the buffer and let the same binary check decide.
+  const postData = request.postDataBuffer();
+  if (postData?.length)
+    result.push('', '#### Request body', ...renderBody(postData, mimeTypeOf(requestHeaders)));
 
   if (!response) {
     const failure = request.failure();
@@ -98,28 +101,52 @@ async function renderRequestDetails(index: number, request: playwright.Request, 
     return result;
   }
 
+  const responseHeaders = await response.allHeaders();
   result.push(
       '',
       '#### Response',
       `[${response.status()}] ${response.statusText()}`,
       '',
       '#### Response headers',
-      ...renderHeaders(await response.allHeaders()),
+      ...renderHeaders(responseHeaders),
       '',
       '#### Response body',
-      ...await renderResponseBody(response),
+      ...await renderResponseBody(response, mimeTypeOf(responseHeaders)),
   );
   return result;
 }
+
+// Credentials must never reach the model's context: this tool is the first one
+// here to surface raw headers, and a session cookie copied into a transcript is
+// as good as leaked. The length keeps the header's presence debuggable.
+const sensitiveHeaderNames = new Set([
+  'authorization',
+  'cookie',
+  'proxy-authorization',
+  'set-cookie',
+  'x-api-key',
+  'x-auth-token',
+]);
 
 function renderHeaders(headers: Record<string, string>): string[] {
   const names = Object.keys(headers).sort();
   if (!names.length)
     return ['<none>'];
-  return names.map(name => `${name}: ${truncateDataUrls(headers[name])}`);
+  return names.map(name => {
+    const value = headers[name];
+    return sensitiveHeaderNames.has(name.toLowerCase())
+      ? `${name}: <redacted, ${value.length} characters>`
+      : `${name}: ${truncateDataUrls(value)}`;
+  });
 }
 
-async function renderResponseBody(response: playwright.Response): Promise<string[]> {
+function mimeTypeOf(headers: Record<string, string>): string {
+  // `allHeaders()` lower-cases the names and joins repeats with a comma; only
+  // the first media type matters for deciding how to render the payload.
+  return (headers['content-type'] ?? '').split(';')[0].split(',')[0].trim().toLowerCase();
+}
+
+async function renderResponseBody(response: playwright.Response, mimeType: string): Promise<string[]> {
   let body: Buffer;
   try {
     body = await response.body();
@@ -128,14 +155,14 @@ async function renderResponseBody(response: playwright.Response): Promise<string
     // here; the rest of the report is still worth showing.
     return [`<body unavailable: ${error instanceof Error ? error.message : String(error)}>`];
   }
+  return renderBody(body, mimeType);
+}
 
+function renderBody(body: Buffer, mimeType: string): string[] {
   if (!body.length)
     return ['<empty>'];
-
-  const mimeType = ((await response.headerValue('content-type')) ?? '').split(';')[0].trim().toLowerCase();
   if (!isTextualMimeType(mimeType, body))
     return [`<binary data, ${body.length} bytes${mimeType ? `, ${mimeType}` : ''}>`];
-
   return renderText(body.toString('utf8'));
 }
 
@@ -143,9 +170,20 @@ function renderText(text: string): string[] {
   if (text.length <= maxBodyLength)
     return [truncateDataUrls(text)];
   return [
-    truncateDataUrls(text.slice(0, maxBodyLength)),
+    truncateDataUrls(sliceWholeCharacters(text, maxBodyLength)),
     `<truncated, showing the first ${maxBodyLength} of ${text.length} characters>`,
   ];
+}
+
+// Never cut between the halves of a surrogate pair -- a lone half renders as a
+// replacement character and can corrupt the JSON the response is packed into.
+function sliceWholeCharacters(text: string, length: number): string {
+  const end = isHighSurrogate(text.charCodeAt(length - 1)) ? length - 1 : length;
+  return text.slice(0, end);
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
 }
 
 const textualMimeTypes = new Set([
@@ -159,15 +197,34 @@ const textualMimeTypes = new Set([
   'application/xml',
 ]);
 
+const binaryMimePrefixes = ['audio/', 'font/', 'image/', 'model/', 'video/'];
+
+const binaryMimeTypes = new Set([
+  'application/grpc',
+  'application/gzip',
+  'application/octet-stream',
+  'application/pdf',
+  'application/protobuf',
+  'application/wasm',
+  'application/x-gzip',
+  'application/x-protobuf',
+  'application/x-tar',
+  'application/zip',
+]);
+
 function isTextualMimeType(mimeType: string, body: Buffer): boolean {
-  if (!mimeType)
-    return !looksBinary(body);
   if (mimeType.startsWith('text/'))
     return true;
   // Structured syntax suffixes: `image/svg+xml`, `application/ld+json`, ...
   if (mimeType.endsWith('+json') || mimeType.endsWith('+xml') || mimeType.endsWith('+text'))
     return true;
-  return textualMimeTypes.has(mimeType);
+  if (textualMimeTypes.has(mimeType))
+    return true;
+  if (binaryMimeTypes.has(mimeType) || binaryMimePrefixes.some(prefix => mimeType.startsWith(prefix)))
+    return false;
+  // Absent or unrecognised type -- `multipart/form-data` posts are the common
+  // case, and those are text until a file part makes them otherwise.
+  return !looksBinary(body);
 }
 
 function looksBinary(body: Buffer): boolean {
