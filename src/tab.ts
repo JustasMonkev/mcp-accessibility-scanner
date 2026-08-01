@@ -73,6 +73,15 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       page.on(event as any, listener);
       this._pageListeners.push({ event, listener });
     };
+    // Every document swap invalidates the cached snapshot, whoever caused it:
+    // goBack(), page.reload() from scan_page_matrix, a meta refresh, or the page
+    // assigning location itself. Tab.navigate() is only one of those routes, and
+    // a ref resolved against the page the user has left would target the wrong
+    // document.
+    listen('framenavigated', (frame: playwright.Frame) => {
+      if (!frame.parentFrame())
+        this._lastAriaSnapshot = undefined;
+    });
     listen('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
     listen('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
     listen('request', request => this._requests.set(request, null));

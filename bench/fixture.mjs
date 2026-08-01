@@ -18,10 +18,15 @@ function heavyPage() {
     // A mix of named and unnamed controls so axe finds real violations and the
     // aria snapshot has interactive refs to click.
     const missingAlt = random() < 0.2;
+    // Every fifth button is genuinely unnamed - no label, and an aria-hidden
+    // glyph for its only content - so the scan really does report button-name.
+    const unnamed = index % 5 === 0;
     rows.push([
       '<li class="row">',
       `<a href="/page-${index % 12}.html">${label} link</a>`,
-      `<button id="btn-${index}" ${index % 5 === 0 ? '' : `aria-label="Action ${index}"`}>Go ${index}</button>`,
+      unnamed
+        ? `<button id="btn-${index}"><span aria-hidden="true">&#9654;</span></button>`
+        : `<button id="btn-${index}" aria-label="Action ${index}">Go ${index}</button>`,
       `<img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" ${missingAlt ? '' : `alt="Thumb ${index}"`}>`,
       `<span class="muted" style="color:#bbb;background:#fff">Low contrast text ${index}</span>`,
       '</li>',
@@ -53,7 +58,7 @@ function smallPage(index) {
     `<a href="/page-${(index + 1) % 12}.html">Next page</a>`,
     `<a href="/page-${(index + 2) % 12}.html">Skip ahead</a>`,
     `<img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">`,
-    '<button>Unlabelled</button>',
+    '<button><span aria-hidden="true">&#9654;</span></button>',
     '</main></body></html>',
   ].join('');
 }

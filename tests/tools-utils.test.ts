@@ -143,11 +143,30 @@ describe('Tool Utils', () => {
     it('should skip the settle delay when the action started nothing', async () => {
       // No request and no navigation means nothing is in flight to settle, and
       // the fixed wait would be pure latency on every click and keypress.
+      mockTab.context.config.timeouts.settle = 5;
       const callback = vi.fn().mockResolvedValue('result');
 
       await waitForCompletion(mockTab, callback);
 
       expect(mockTab.waitForTimeout).not.toHaveBeenCalled();
+    });
+
+    it('should settle for work the action scheduled rather than started', async () => {
+      // A click handler whose fetch fires from a timer has issued no request by
+      // the time its own promise resolves; the quiet window still catches it.
+      mockTab.context.config.timeouts.settle = 25;
+      const request = { url: 'https://api.example.com' };
+      const callback = vi.fn().mockImplementation(() => {
+        setTimeout(() => {
+          mockPage.emit('request', request);
+          mockPage.emit('requestfinished', request);
+        }, 5);
+        return Promise.resolve('result');
+      });
+
+      await waitForCompletion(mockTab, callback);
+
+      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
     });
 
     it('should settle after a main-frame navigation', async () => {

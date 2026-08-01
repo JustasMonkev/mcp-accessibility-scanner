@@ -172,12 +172,11 @@ async function assertScopeSelectorsResolve(
 // cross-origin frame answer; without it those frames go unscanned.
 const axeConfigureSource = `;axe.configure({ allowedOrigins: ['<unsafe_all_origins>'], branding: { application: 'playwright' } });`;
 
-// Injection is ~70ms of parsing per frame, so a frame that already holds this
-// exact build is left alone: matrix scans and repeat scans of one page reuse it.
+// Injected fresh for every scan rather than reused when `window.axe` already
+// looks right: that global belongs to the page, which may have installed its own
+// axe or reconfigured ours since, and a scan must run this server's build and
+// configuration. Re-injection costs ~70ms per frame against a multi-second scan.
 async function injectAxe(frame: playwright.Frame): Promise<void> {
-  const injected = await frame.evaluate(() => (window as any).axe?.version).catch(() => undefined);
-  if (injected === axe.version)
-    return;
   await frame.evaluate(axe.source);
   await frame.evaluate(axeConfigureSource);
 }

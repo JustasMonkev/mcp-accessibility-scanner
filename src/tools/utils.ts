@@ -21,6 +21,12 @@ const { asLocator } = coreBundle.iso;
 import type * as playwright from 'playwright';
 import type { Tab } from '../tab.js';
 
+// How long an action that finished quietly is watched for work it scheduled
+// rather than started - a click handler whose fetch fires from a timer has
+// issued nothing by the time its own promise resolves. Capped by the settle
+// delay it defers to, so lowering that lowers this with it.
+const quietWindowMs = 100;
+
 export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>): Promise<R> {
   const settleMs = tab.context.config.timeouts.settle ?? 500;
   const requests = new Set<playwright.Request>();
@@ -28,10 +34,14 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
   let frameNavigated = false;
   let waitCallback: () => void = () => {};
   const waitBarrier = new Promise<void>(f => { waitCallback = f; });
+  // Resolves on the first sign of page work, whenever it arrives.
+  let signalCallback: () => void = () => {};
+  const firstSignal = new Promise<void>(f => { signalCallback = f; });
 
   const requestListener = (request: playwright.Request) => {
     requestSeen = true;
     requests.add(request);
+    signalCallback();
   };
   const requestFinishedListener = (request: playwright.Request) => {
     requests.delete(request);
@@ -43,6 +53,7 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
     if (frame.parentFrame())
       return;
     frameNavigated = true;
+    signalCallback();
     dispose();
     clearTimeout(timeout);
     void tab.waitForLoadState('load').then(waitCallback);
@@ -67,19 +78,39 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
 
   try {
     const result = await callback();
+    // Nothing has happened yet, which is not the same as nothing being about to:
+    // watch briefly for work the action scheduled instead of started.
+    if (!requestSeen && !frameNavigated)
+      await raceTimeout(firstSignal, Math.min(quietWindowMs, settleMs));
     if (!requests.size && !frameNavigated)
       waitCallback();
     await waitBarrier;
-    // The settle delay covers work the page kicked off and finished reporting -
-    // a response still being rendered, a navigation still painting. An action
-    // that issued no request and navigated nowhere started none of that, and its
-    // own promise has already resolved, so there is nothing left to wait out.
-    // Skipping it is worth ~500ms on every click, keypress and form fill.
+    // The settle delay covers work the page reported and is still finishing -
+    // a response being rendered, a navigation still painting. An action that
+    // issued no request and navigated nowhere within the window above started
+    // none of that, so there is nothing left to wait out. Skipping it is worth
+    // ~500ms on every click, keypress and form fill.
     if (requestSeen || frameNavigated)
       await tab.waitForTimeout(settleMs);
     return result;
   } finally {
     dispose();
+  }
+}
+
+// Resolves with `promise` or when the timeout elapses, whichever comes first.
+// Both branches resolve, so the losing one leaves nothing unhandled behind.
+async function raceTimeout(promise: Promise<void>, timeoutMs: number): Promise<void> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<void>(resolve => {
+        timeoutId = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

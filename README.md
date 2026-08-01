@@ -221,13 +221,13 @@ Create a `config.json` file with the following options:
 - `browser.contextOptions.storageState`: Start each session from a recorded Playwright storage state; applied in every mode except `--extension` (fresh contexts receive it at creation, reused contexts via `setStorageState()`). Sessions that share one reused context (non-isolated CDP modes) get the state applied once per context — a session joining a live context inherits its current state, not a fresh copy of the file; see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
-- `timeouts.settle`: How long to wait after an action that started network work or navigated, for that work to settle before responding (default: `500`). An action that issued no request and navigated nowhere has nothing in flight and does not wait at all.
+- `timeouts.settle`: How long to wait after an action that started network work or navigated, for that work to settle before responding (default: `500`). An action that finishes quietly is watched for up to 100ms (or the settle delay, whichever is shorter) in case it scheduled work rather than starting it; if nothing appears in that window, the response goes out without the settle delay.
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
-Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies only after actions that actually started something: a click that fired a request or navigated waits it out, a click that only changed local DOM state responds immediately.
+Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies after actions that actually started something: a click that fires a request or navigates waits it out, while a click that only changed local DOM state responds without it. Work the action scheduled on a timer still counts — a short window after the action catches it before the response is built.
 
 #### HTTP Heartbeat
 

@@ -711,8 +711,10 @@ describe('audit_site tool', () => {
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     const crawledUrls = report.pages.map((page: any) => page.url);
     expect(crawledUrls).toEqual(['https://example.com/a', 'https://example.com/b']);
-    // The page is still read for its title; what must not happen is link
-    // discovery, which is what a non-empty selector argument would mean.
+    // The page is still read for its title - `every` alone would also pass if
+    // that read disappeared - and what must not happen is link discovery, which
+    // is what a non-empty selector argument would mean.
+    expect(crawlTab.page.evaluate.mock.calls.length).toBeGreaterThan(0);
     expect(crawlTab.page.evaluate.mock.calls.every((call: unknown[]) => !call[1])).toBe(true);
   });
 

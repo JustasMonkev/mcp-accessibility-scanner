@@ -84,7 +84,9 @@ const scenarios = [
     run: state => call('browser_click', { element: 'Submit search button', ref: state.ref }),
   },
   {
-    name: 'browser_type (ref + snapshot)',
+    // browser_type only asks for a snapshot on its `slowly` and `submit` paths,
+    // so a plain fill is what this measures: ref resolution plus the settle.
+    name: 'browser_type (ref, fill only)',
     setup: async () => {
       const snapshot = await call('browser_navigate', { url: `${origin}/heavy.html` });
       return { ref: refFor(snapshot, 'Search') };
@@ -311,11 +313,21 @@ function parseArgs(argv) {
     else if (arg === '--executable-path')
       parsed.executablePath = argv[++index];
     else if (arg === '--iterations')
-      parsed.iterations = Number(argv[++index]);
+      parsed.iterations = wholeNumber(argv[++index], arg, 1);
     else if (arg === '--warmups')
-      parsed.warmups = Number(argv[++index]);
+      parsed.warmups = wholeNumber(argv[++index], arg, 0);
     else
       throw new Error(`Unknown argument: ${arg}`);
   }
+  return parsed;
+}
+
+// A missing or non-numeric count would otherwise reach the sampling loop as NaN,
+// collect no samples, and crash while formatting undefined statistics - after
+// the fixture server and the browser have already started.
+function wholeNumber(value, flag, minimum) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < minimum)
+    throw new Error(`${flag} needs an integer >= ${minimum}, got: ${value ?? '(nothing)'}`);
   return parsed;
 }

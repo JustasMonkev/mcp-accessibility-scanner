@@ -470,6 +470,30 @@ describe('Tab', () => {
       // Two captures: the first one described a page that is gone.
       expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(2);
     });
+
+    it('stops trusting the cached snapshot after any main-frame navigation', async () => {
+      // goBack(), page.reload() and a page-driven location change never reach
+      // Tab.navigate(), so the cache is keyed on the navigation event itself.
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the cached snapshot when only a sub-frame navigates', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+
+      mockPage.emit('framenavigated', { parentFrame: () => ({}) });
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('consoleMessages', () => {
