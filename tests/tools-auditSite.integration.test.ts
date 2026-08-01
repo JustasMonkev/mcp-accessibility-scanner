@@ -31,6 +31,7 @@ function createAxeResult(url: string, violations: any[]) {
     incomplete: [],
     passes: [],
     inapplicable: [],
+    unscannedFrames: [],
   } as any;
 }
 

@@ -37,6 +37,9 @@ type PageReport = {
   summary: ReturnType<typeof summarizeAxeViolations> | null;
   violations: AxeViolation[];
   incomplete: AxeViolation[];
+  // Frames Axe never reached on this page, so a page with no violations is
+  // distinguishable from a page that was only partly scanned.
+  unscannedFrames: string[];
 };
 
 type SummaryViolation = {
@@ -543,6 +546,7 @@ const auditSite = defineTabTool({
           summary: null,
           violations: [],
           incomplete: [],
+          unscannedFrames: [],
         };
         pages.push(pageReport);
 
@@ -596,6 +600,7 @@ const auditSite = defineTabTool({
           const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
 
           pageReport.status = 'scanned';
+          pageReport.unscannedFrames = axeResult.unscannedFrames;
           pageReport.violations = violations.trimmed;
           pageReport.summary = summarizeAxeViolations(violations.trimmed);
           aggregateIntoSummary(summaryByViolation, violations.deduped, item.url);
@@ -652,6 +657,9 @@ const auditSite = defineTabTool({
     const summaryViolations = toSortedSummaryViolations(summaryByViolation);
     const summaryIncomplete = toSortedSummaryViolations(summaryByIncomplete);
 
+    // A partly-scanned page reports fewer violations, and a reader counting them
+    // must know which pages those numbers are incomplete for.
+    const pagesWithUnscannedFrames = pages.filter(page => page.unscannedFrames.length);
     const scannedPagesByViolations = sortScannedPagesByViolations(pages);
     const summary: SummaryReport = {
       totals: {
@@ -724,6 +732,10 @@ const auditSite = defineTabTool({
       },
       totals: summary.totals,
       sessionLosses,
+      pagesWithUnscannedFrames: pagesWithUnscannedFrames.map(page => ({
+        url: page.url,
+        unscannedFrames: page.unscannedFrames,
+      })),
       topViolations: summaryViolations.slice(0, 5).map(violation => ({
         id: violation.id,
         impact: violation.impact ?? null,
@@ -751,6 +763,11 @@ const auditSite = defineTabTool({
     const topViolations = summarizeTopViolations(summaryViolations, 10);
     const topIncomplete = summarizeTopViolations(summaryIncomplete, 10);
     const topPages = summarizeTopPages(scannedPagesByViolations, 20);
+    const frameWarning = pagesWithUnscannedFrames.length ? [
+      `WARNING: Axe could not be installed in frames on ${pagesWithUnscannedFrames.length} page(s); their contents were not scanned and contribute no findings below.`,
+      ...pagesWithUnscannedFrames.slice(0, 10).map(page => `- ${page.url}: ${page.unscannedFrames.join(', ')}`),
+      '',
+    ] : [];
     const sessionWarning = sessionLosses.length ? [
       ...sessionLosses.map(loss => `WARNING: cookie(s) ${loss.cookies.join(', ')} present when the crawl started disappeared while loading ${loss.url}.`),
       'If one of these was a session cookie, pages scanned after the URL that dropped it were audited as a signed-out user. Add that URL to excludePathPatterns, sign in again, and re-run.',
@@ -758,6 +775,7 @@ const auditSite = defineTabTool({
     ] : [];
     response.addCode('// Crawled pages in a temporary tab and aggregated Axe violations.');
     response.addResult([
+      ...frameWarning,
       ...sessionWarning,
       `Scanned pages: ${summary.totals.scannedPages}`,
       `Errored pages: ${summary.totals.erroredPages}`,

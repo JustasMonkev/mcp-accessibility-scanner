@@ -29,6 +29,7 @@ function createAxeResult(url: string, violationIds: string[], incompleteIds: str
     incomplete: incompleteIds.map(id => createViolation(id)),
     passes: [],
     inapplicable: [],
+    unscannedFrames: [],
   } as any;
 }
 

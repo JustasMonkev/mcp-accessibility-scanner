@@ -23,6 +23,9 @@ describe('Tab', () => {
   let mockContext: Context;
   let mockPage: any;
   let onPageClose: any;
+  // What an aria-ref locator resolves to; 0 stands for a ref whose element has
+  // left the page since the snapshot that issued it.
+  let locatorCount: number;
 
   beforeEach(() => {
     mockPage = new EventEmitter();
@@ -35,8 +38,10 @@ describe('Tab', () => {
     mockPage.setDefaultTimeout = vi.fn();
     mockPage.goBack = vi.fn().mockResolvedValue(null);
     mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+    locatorCount = 1;
     mockPage.locator = vi.fn().mockReturnValue({
       describe: vi.fn().mockReturnValue({}),
+      count: vi.fn(async () => locatorCount),
     });
 
     mockContext = {
@@ -443,6 +448,22 @@ describe('Tab', () => {
       // The ref came from that snapshot, so re-reading the page adds nothing.
       expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
+    });
+
+    it('re-captures when a cached ref no longer resolves to an element', async () => {
+      // The element was removed after the snapshot went out: the ref is still in
+      // the cached text, but it matches nothing, and handing back that locator
+      // would fail as an action timeout instead of a useful message.
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+      locatorCount = 0;
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=2]');
+
+      await expect(
+          tab.refLocators([{ element: 'Submit', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
     });
 
     it('re-reads the page for a ref the last snapshot does not hold', async () => {

@@ -62,6 +62,10 @@ export type AxeScanResult = {
   // Only the rule count of these is ever reported, so only the ids survive.
   passes: { id: string }[];
   inapplicable: { id: string }[];
+  // Child frames Axe could not be installed in, and whose contents therefore
+  // contributed nothing to the results above. Empty on a scan that covered
+  // everything, so an empty violation list means something only when this is.
+  unscannedFrames: string[];
 };
 
 export type AxeScanOptions = {
@@ -181,25 +185,36 @@ async function injectAxe(frame: playwright.Frame): Promise<void> {
   await frame.evaluate(axeConfigureSource);
 }
 
-// A child frame that never answers must not hang the scan: it goes unscanned
-// instead, which is what a failed injection has always meant here.
+// A child frame that never answers must not hang the scan. It goes unscanned
+// instead - but not silently: a frame Axe never reached contributes no
+// violations, and an unreported one turns into a clean-looking report.
 const childFrameInjectionTimeoutMs = 1000;
 
-function injectAxeIntoFrames(page: playwright.Page): Promise<unknown> {
+// Returns the URLs of the child frames Axe could not be installed in, so the
+// caller can say what the scan did not cover. Frames without an http(s) URL are
+// left out: about:blank and friends hold nothing a scan would have reported.
+async function injectAxeIntoFrames(page: playwright.Page): Promise<string[]> {
   const mainFrame = page.mainFrame();
-  return Promise.all(page.frames().map(frame => {
-    if (frame === mainFrame)
-      return injectAxe(frame);
+  const results = await Promise.all(page.frames().map(async frame => {
+    if (frame === mainFrame) {
+      await injectAxe(frame);
+      return null;
+    }
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     // Both branches resolve: a rejected loser of the race would surface as an
     // unhandled rejection once the winner has already been awaited.
-    return Promise.race([
-      injectAxe(frame).catch(() => {}),
-      new Promise<void>(resolve => {
-        timeoutId = setTimeout(resolve, childFrameInjectionTimeoutMs);
+    const injected = await Promise.race([
+      injectAxe(frame).then(() => true, () => false),
+      new Promise<boolean>(resolve => {
+        timeoutId = setTimeout(() => resolve(false), childFrameInjectionTimeoutMs);
       }),
     ]).finally(() => clearTimeout(timeoutId));
+    if (injected)
+      return null;
+    const url = frame.url();
+    return /^https?:/i.test(url) ? url : null;
   }));
+  return [...new Set(results.filter((url): url is string => url !== null))];
 }
 
 // Runs in the page. Keeps axe's own result shape minus the parts nothing reads:
@@ -248,8 +263,22 @@ export async function runAxeScan(page: playwright.Page, options: AxeScanOptions 
   // this component minus the widget" needs.
   const context = include.length || exclude.length ? { include: [...include], exclude: [...exclude] } : null;
 
-  await injectAxeIntoFrames(page);
-  return await page.evaluate(runAxeInPage, { context, options: axeOptions }) as AxeScanResult;
+  const unscannedFrames = await injectAxeIntoFrames(page);
+  const results = await page.evaluate(runAxeInPage, { context, options: axeOptions }) as AxeScanResult;
+  return { ...results, unscannedFrames };
+}
+
+// A scan that could not reach a frame covered less than it looks like it did,
+// so every tool that reports results says so in the same words.
+export function unscannedFrameLines(unscannedFrames: string[]): string[] {
+  if (!unscannedFrames.length)
+    return [];
+  return [
+    '',
+    `WARNING: Axe could not be installed in ${unscannedFrames.length} frame(s), whose contents were not scanned and contribute no findings above:`,
+    ...unscannedFrames.map(url => `- ${url}`),
+    'A frame that is still loading may succeed on a re-run; one that consistently fails must be audited on its own.',
+  ];
 }
 
 export function dedupeAxeNodes(nodes: AxeNode[]): AxeNode[] {

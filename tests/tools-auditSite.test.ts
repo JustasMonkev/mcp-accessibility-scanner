@@ -29,6 +29,7 @@ function createAxeResult(url: string, violations: any[], incomplete: any[] = [])
     incomplete,
     passes: [],
     inapplicable: [],
+    unscannedFrames: [],
   } as any;
 }
 

@@ -14,11 +14,17 @@ type ScanCall = { context: unknown; options: any };
 let lastScan: ScanCall | undefined;
 let scanResult: any;
 
-function pageWithSelectorCounts(countBySelector: Record<string, number> = {}) {
-  const frame = {
+function makeFrame(countBySelector: Record<string, number>, url = 'https://example.com/', injectable = true) {
+  return {
+    url: () => url,
     evaluate: async (script: unknown, arg?: unknown) => {
-      // Injection: the version probe, then the axe source as a string.
-      if (typeof script === 'string' || arg === undefined)
+      // Injection: the axe source and its configuration, both plain strings.
+      if (typeof script === 'string') {
+        if (!injectable)
+          throw new Error('Execution context was destroyed');
+        return undefined;
+      }
+      if (arg === undefined)
         return undefined;
       if (Array.isArray(arg))
         return arg.map(selector => countBySelector[selector as string] ?? 0);
@@ -28,9 +34,13 @@ function pageWithSelectorCounts(countBySelector: Record<string, number> = {}) {
       return scanResult;
     },
   };
+}
+
+function pageWithSelectorCounts(countBySelector: Record<string, number> = {}, childFrames: any[] = []) {
+  const frame = makeFrame(countBySelector);
   return {
     ...frame,
-    frames: () => [frame],
+    frames: () => [frame, ...childFrames],
     mainFrame: () => frame,
   } as any;
 }
@@ -281,6 +291,33 @@ describe('axe helpers', () => {
     // A crawl legitimately hits pages without the excluded widget.
     await runAxeScan(pageWithSelectorCounts({ '#cookie-banner': 0 }), { exclude: ['#cookie-banner'] });
     expect(lastScan?.context).toEqual({ include: [], exclude: ['#cookie-banner'] });
+  });
+
+  it('reports a child frame Axe could not be installed in, rather than scanning around it', async () => {
+    resetScan();
+    // A frame that navigates mid-injection contributes no violations, and a
+    // report that stays silent about it reads as a clean scan of the whole page.
+    const broken = makeFrame({}, 'https://example.com/widget', false);
+    const result = await runAxeScan(pageWithSelectorCounts({}, [broken]));
+
+    expect(result.unscannedFrames).toEqual(['https://example.com/widget']);
+  });
+
+  it('does not report frames that hold nothing a scan would have covered', async () => {
+    resetScan();
+    // about:blank and friends have no content to miss.
+    const blank = makeFrame({}, 'about:blank', false);
+    const result = await runAxeScan(pageWithSelectorCounts({}, [blank]));
+
+    expect(result.unscannedFrames).toEqual([]);
+  });
+
+  it('reports no unscanned frames when every injection succeeds', async () => {
+    resetScan();
+    const healthy = makeFrame({}, 'https://example.com/widget', true);
+    const result = await runAxeScan(pageWithSelectorCounts({}, [healthy]));
+
+    expect(result.unscannedFrames).toEqual([]);
   });
 
   it('rethrows scan failures untouched', async () => {

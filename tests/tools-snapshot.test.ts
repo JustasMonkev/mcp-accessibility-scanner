@@ -244,7 +244,7 @@ describe('Snapshot Tools', () => {
     const scanPageTool = snapshotTools.find(tool => tool.schema.name === 'scan_page')!;
 
     function scanResult(violations: any[], incomplete: any[] = []) {
-      return { url: 'https://example.com/', violations, incomplete, passes: [], inapplicable: [] } as any;
+      return { url: 'https://example.com/', violations, incomplete, passes: [], inapplicable: [], unscannedFrames: [] } as any;
     }
 
     function scanRule(id: string, nodeCount: number) {
@@ -475,7 +475,7 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('scan_page annotated 
     const page = await context.newPage();
     await page.setContent(html);
     vi.spyOn(axe, 'runAxeScan').mockResolvedValue({
-      url: 'https://example.com/', violations, incomplete: [], passes: [], inapplicable: [],
+      url: 'https://example.com/', violations, incomplete: [], passes: [], inapplicable: [], unscannedFrames: [],
     } as any);
     const screenshot = page.screenshot.bind(page);
     let drawn: any;
@@ -656,6 +656,7 @@ function scanHarness(options: { violations?: any[], markedNodes?: number, screen
     incomplete: [],
     passes: [],
     inapplicable: [],
+    unscannedFrames: [],
   } as any);
 
   const evaluate = vi.fn(async () => {

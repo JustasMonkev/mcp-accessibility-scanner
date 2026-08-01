@@ -30,6 +30,9 @@ type VariantResult = {
   summary: ReturnType<typeof summarizeAxeViolations>;
   violations: AxeViolation[];
   incomplete: AxeViolation[];
+  // Frames Axe never reached for this variant, so a variant that looks clean is
+  // distinguishable from one that was only partly scanned.
+  unscannedFrames: string[];
   nodeCountByRuleId: Record<string, number>;
   diffFromBaseline: {
     newViolationIds: string[];
@@ -203,6 +206,7 @@ const scanPageMatrix = defineTabTool({
             zoomPercent: variant.zoomPercent ?? null,
           },
           summary: summarizeAxeViolations(violations.trimmed),
+          unscannedFrames: axeResult.unscannedFrames,
           violations: violations.trimmed,
           incomplete: params.includeIncomplete
             ? prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation).trimmed
@@ -298,7 +302,13 @@ const scanPageMatrix = defineTabTool({
       })),
     });
 
+    const variantsWithUnscannedFrames = variantResults.filter(result => result.unscannedFrames.length);
     const lines = [
+      ...(variantsWithUnscannedFrames.length ? [
+        `WARNING: Axe could not be installed in frames on ${variantsWithUnscannedFrames.length} variant(s); their contents were not scanned and contribute no findings below.`,
+        ...variantsWithUnscannedFrames.map(result => `- ${result.name}: ${result.unscannedFrames.join(', ')}`),
+        '',
+      ] : []),
       'Variant | Violations | Nodes | Incomplete | Top new vs baseline',
       '--- | --- | --- | --- | ---',
       ...variantResults.map(result => {
