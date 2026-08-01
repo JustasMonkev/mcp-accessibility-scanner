@@ -50,8 +50,8 @@
 		"debug": "^4.4.3",
 		"dotenv": "^17.4.2",
 		"mime": "^4.1.0",
-		"playwright": "1.62.0",
-		"playwright-core": "1.62.0",
+		"playwright": "1.62.1",
+		"playwright-core": "1.62.1",
 		"re2": "^1.24.1",
 		"ws": "^8.21.1",
 		"zod": "^4.4.3"
