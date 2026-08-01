@@ -24,11 +24,15 @@ import type { Tab } from '../tab.js';
 export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>): Promise<R> {
   const settleMs = tab.context.config.timeouts.settle ?? 500;
   const requests = new Set<playwright.Request>();
+  let requestSeen = false;
   let frameNavigated = false;
   let waitCallback: () => void = () => {};
   const waitBarrier = new Promise<void>(f => { waitCallback = f; });
 
-  const requestListener = (request: playwright.Request) => requests.add(request);
+  const requestListener = (request: playwright.Request) => {
+    requestSeen = true;
+    requests.add(request);
+  };
   const requestFinishedListener = (request: playwright.Request) => {
     requests.delete(request);
     if (!requests.size)
@@ -66,7 +70,13 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
     if (!requests.size && !frameNavigated)
       waitCallback();
     await waitBarrier;
-    await tab.waitForTimeout(settleMs);
+    // The settle delay covers work the page kicked off and finished reporting -
+    // a response still being rendered, a navigation still painting. An action
+    // that issued no request and navigated nowhere started none of that, and its
+    // own promise has already resolved, so there is nothing left to wait out.
+    // Skipping it is worth ~500ms on every click, keypress and form fill.
+    if (requestSeen || frameNavigated)
+      await tab.waitForTimeout(settleMs);
     return result;
   } finally {
     dispose();

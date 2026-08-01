@@ -14,7 +14,6 @@ import {
   summarizeAxeViolations,
   type AxeTag,
   type AxeViolation,
-  type TrimmedAxeViolation
 } from './axe.js';
 
 type CrawlStrategy = 'links' | 'nav' | 'sitemap' | 'provided';
@@ -36,8 +35,8 @@ type PageReport = {
   status: PageScanStatus;
   error: string | null;
   summary: ReturnType<typeof summarizeAxeViolations> | null;
-  violations: TrimmedAxeViolation[];
-  incomplete: TrimmedAxeViolation[];
+  violations: AxeViolation[];
+  incomplete: AxeViolation[];
 };
 
 type SummaryViolation = {
@@ -295,22 +294,25 @@ async function findCookieLoss(
   };
 }
 
-async function extractLinks(page: import('playwright').Page): Promise<string[]> {
-  return await page.evaluate(() => {
-    return Array.from(document.querySelectorAll('a[href]'))
-        .map(anchor => (anchor as HTMLAnchorElement).href)
-        .filter(Boolean);
-  });
+/**
+ * Title and outgoing links in one round trip: both are wanted for every crawled
+ * page, and a second evaluate per page is pure latency on a 200-page crawl.
+ * `linkSelector` is empty when this page contributes no links (depth exhausted,
+ * or a strategy that only reads the entry page).
+ */
+async function readPage(page: import('playwright').Page, linkSelector: string): Promise<{ title: string, links: string[] }> {
+  return await page.evaluate(selector => ({
+    title: document.title,
+    links: selector
+      ? Array.from(document.querySelectorAll(selector))
+          .map(anchor => (anchor as HTMLAnchorElement).href)
+          .filter(Boolean)
+      : [],
+  }), linkSelector);
 }
 
-async function extractNavLinks(page: import('playwright').Page): Promise<string[]> {
-  return await page.evaluate(() => {
-    const selectors = 'nav a[href], header a[href], [role="navigation"] a[href]';
-    return Array.from(document.querySelectorAll(selectors))
-        .map(anchor => (anchor as HTMLAnchorElement).href)
-        .filter(Boolean);
-  });
-}
+const allLinksSelector = 'a[href]';
+const navLinksSelector = 'nav a[href], header a[href], [role="navigation"] a[href]';
 
 async function extractSitemapUrls(page: import('playwright').Page, sitemapUrl: string): Promise<string[]> {
   const response = await page.request.get(sitemapUrl, { timeout: 15000 });
@@ -569,22 +571,20 @@ const auditSite = defineTabTool({
         try {
           await crawlTab.navigate(item.url);
           await crawlTab.waitForTimeout(params.waitAfterNavigationMs);
-          pageReport.title = await crawlTab.page.title();
 
           // Discover before scanning. A scoped scan throws when an
           // includeSelectors entry is absent from this page, and that must not
           // silently drop every descendant reachable only through it.
-          if (params.strategy === 'links' && item.depth < params.maxDepth) {
-            const links = await extractLinks(crawlTab.page);
-            for (const link of links)
-              enqueueUrl(link, item.depth + 1, item.url);
-          }
+          let linkSelector = '';
+          if (params.strategy === 'links' && item.depth < params.maxDepth)
+            linkSelector = allLinksSelector;
+          else if (params.strategy === 'nav' && item.depth === 0)
+            linkSelector = navLinksSelector;
 
-          if (params.strategy === 'nav' && item.depth === 0) {
-            const links = await extractNavLinks(crawlTab.page);
-            for (const link of links)
-              enqueueUrl(link, item.depth + 1, item.url);
-          }
+          const { title, links } = await readPage(crawlTab.page, linkSelector);
+          pageReport.title = title;
+          for (const link of links)
+            enqueueUrl(link, item.depth + 1, item.url);
 
           const axeResult = await runAxeScan(crawlTab.page, {
             tags: params.violationsTag as AxeTag[],

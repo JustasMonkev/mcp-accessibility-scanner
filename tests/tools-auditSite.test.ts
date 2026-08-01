@@ -69,12 +69,15 @@ function createHarness(
     context: vi.fn(() => ({ cookies: cookiesMock })),
     url: vi.fn(() => currentUrl),
     title: vi.fn(async () => `Title for ${currentUrl}`),
-    evaluate: vi.fn(async (callback: () => unknown) => {
-      const callbackText = String(callback);
-      const isNavExtraction = /role=.*navigation.*a\[href\]/.test(callbackText);
-      if (isNavExtraction)
-        return navLinkMap[currentUrl] ?? [];
-      return linkMap[currentUrl] ?? [];
+    // Mirrors readPage(): one evaluate per crawled page returning the title and,
+    // when a link selector is passed, the links that selector would collect.
+    evaluate: vi.fn(async (_callback: unknown, selector?: string) => {
+      const links = !selector
+        ? []
+        : /navigation/.test(selector)
+          ? navLinkMap[currentUrl] ?? []
+          : linkMap[currentUrl] ?? [];
+      return { title: `Title for ${currentUrl}`, links };
     }),
   };
 
@@ -708,7 +711,9 @@ describe('audit_site tool', () => {
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     const crawledUrls = report.pages.map((page: any) => page.url);
     expect(crawledUrls).toEqual(['https://example.com/a', 'https://example.com/b']);
-    expect(crawlTab.page.evaluate).not.toHaveBeenCalled();
+    // The page is still read for its title; what must not happen is link
+    // discovery, which is what a non-empty selector argument would mean.
+    expect(crawlTab.page.evaluate.mock.calls.every((call: unknown[]) => !call[1])).toBe(true);
   });
 
   it('supports sitemap strategy by parsing loc entries', async () => {

@@ -221,13 +221,13 @@ Create a `config.json` file with the following options:
 - `browser.contextOptions.storageState`: Start each session from a recorded Playwright storage state; applied in every mode except `--extension` (fresh contexts receive it at creation, reused contexts via `setStorageState()`). Sessions that share one reused context (non-isolated CDP modes) get the state applied once per context — a session joining a live context inherits its current state, not a fresh copy of the file; see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
-- `timeouts.settle`: How long to wait after each action for triggered work to settle before responding (default: `500`)
+- `timeouts.settle`: How long to wait after an action that started network work or navigated, for that work to settle before responding (default: `500`). An action that issued no request and navigated nowhere has nothing in flight and does not wait at all.
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
-Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay.
+Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies only after actions that actually started something: a click that fired a request or navigated waits it out, a click that only changed local DOM state responds immediately.
 
 #### HTTP Heartbeat
 
@@ -692,6 +692,30 @@ Clone and set up the project:
 git clone https://github.com/JustasMonkev/mcp-accessibility-scanner.git
 cd mcp-accessibility-scanner
 npm install
+```
+
+### Benchmarking tool latency
+
+`bench/mcp-bench.mjs` measures what a client actually waits for: it serves a fixed
+synthetic site, speaks MCP to the built server over stdio, and times real
+`tools/call` round trips for navigation, interaction, snapshots and every audit
+tool. Build first — it runs the compiled server from `lib/`.
+
+```bash
+npm run build
+npm run bench -- --out after.json --label after
+```
+
+Useful flags: `--iterations <n>` and `--warmups <n>` (defaults 5 and 1),
+`--browser`/`--executable-path` when the browser lives outside Playwright's own
+download directory, and `--server <path/to/cli.js>` plus `--lib <path/to/lib>` to
+point at a different build — that is how a revision is compared with another:
+
+```bash
+git worktree add /tmp/baseline main && (cd /tmp/baseline && npm install && npm run build)
+npm run bench -- --server /tmp/baseline/cli.js --lib /tmp/baseline/lib --out before.json --label before
+npm run bench -- --out after.json --label after
+npm run bench:compare -- before.json after.json
 ```
 
 ## License

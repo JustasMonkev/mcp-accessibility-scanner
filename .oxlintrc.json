@@ -237,7 +237,8 @@
         "tests/tools-axe.test.ts",
         "tests/tools-scanPageMatrix.test.ts",
         "tests/tools-auditKeyboard.test.ts",
-        "tests/tools-auditSite.integration.test.ts"
+        "tests/tools-auditSite.integration.test.ts",
+        "bench/**"
       ],
       "rules": {
         "notice/notice": "off"

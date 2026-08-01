@@ -17,6 +17,7 @@
 - Test: `npm test`
 - Coverage: `npm run test:coverage`
 - Docker smoke test: `npm run test:docker`
+- Tool latency benchmark: `npm run bench` (see the Benchmarking section of `README.md`; build first, and compare revisions with `npm run bench:compare`)
 - TypeScript config is driven by `tsconfig.json` and `tsconfig.all.json`.
 - Accessibility behavior centers around Axe + Playwright integrations in `src/tools/axe.ts`, `src/tools/auditSite.ts`, `src/tools/auditKeyboard.ts`, and related helpers.
 - Keep output and report paths compatible with the current README and CLI expectations.

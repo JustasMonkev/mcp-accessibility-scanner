@@ -431,6 +431,45 @@ describe('Tab', () => {
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=2');
       expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
     });
+
+    it('resolves refs against the snapshot already returned to the caller', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      // The ref came from that snapshot, so re-reading the page adds nothing.
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+      expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
+    });
+
+    it('re-reads the page for a ref the last snapshot does not hold', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1] button "Added" [ref=2]');
+
+      await tab.refLocators([{ element: 'Added', ref: '2' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+      expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=2');
+    });
+
+    it('stops trusting the cached snapshot once the tab navigates', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      await tab.navigate('https://example.com/next');
+
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      // Two captures: the first one described a page that is gone.
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('consoleMessages', () => {

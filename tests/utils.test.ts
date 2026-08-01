@@ -125,6 +125,17 @@ describe('Utils', () => {
       expect(result).not.toContain('<text>');
     });
 
+    it('should truncate data URLs whatever the case of the scheme', () => {
+      expect(truncateDataUrls('- /url: DATA:TEXT/HTML;BASE64,PHAgLz4=')).toBe('- /url: DATA:TEXT/HTML;BASE64,...');
+      expect(truncateDataUrls('?src=Data%3Atext/html;base64%2CPHAgLz4=')).toBe('?src=Data%3Atext/html;base64%2C...');
+    });
+
+    it('should keep offsets correct when text before the URL lower-cases to a different length', () => {
+      // "İ".toLowerCase() is two code units, so matching against a lower-cased
+      // copy of the text would shift every later offset by one.
+      expect(truncateDataUrls('İ data:text/html;base64,PHAgLz4=')).toBe('İ data:text/html;base64,...');
+    });
+
     it('should truncate data URLs embedded in query strings', () => {
       const payload = Buffer.from('<p>hello</p>').toString('base64');
       const text = `https://api.example/upload?src=data:text/html;base64,${payload}&id=123`;

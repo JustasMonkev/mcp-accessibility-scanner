@@ -32,6 +32,10 @@ import type { ServerBackend } from './mcp/server.js';
 
 export class BrowserServerBackend implements ServerBackend {
   private _tools: Tool[];
+  private _toolsByName: Map<string, Tool>;
+  // Converting the zod schemas to JSON schema costs a few milliseconds for the
+  // whole set and never changes, so it is done once per server.
+  private _mcpTools: mcpServer.Tool[] | undefined;
   private _context: Context | undefined;
   private _sessionLog: SessionLog | undefined;
   private _config: FullConfig;
@@ -41,6 +45,7 @@ export class BrowserServerBackend implements ServerBackend {
     this._config = config;
     this._browserContextFactory = factory;
     this._tools = filteredTools(config);
+    this._toolsByName = new Map(this._tools.map(tool => [tool.schema.name, tool]));
   }
 
   async initialize(_context: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion, roots: mcpServer.Root[]): Promise<void> {
@@ -61,11 +66,12 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   async listTools(): Promise<mcpServer.Tool[]> {
-    return this._tools.map(tool => toMcpTool(tool.schema));
+    this._mcpTools ??= this._tools.map(tool => toMcpTool(tool.schema));
+    return this._mcpTools;
   }
 
   async callTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext) {
-    const tool = this._tools.find(tool => tool.schema.name === name);
+    const tool = this._toolsByName.get(name);
     if (!tool)
       throw new McpError(ErrorCode.InvalidParams, `Tool "${name}" not found`);
     let parsedArguments: Record<string, any>;

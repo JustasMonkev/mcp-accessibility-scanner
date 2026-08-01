@@ -101,8 +101,8 @@ describe('Tool Utils', () => {
 
       await waitForCompletion(mockTab, callback);
 
-      // Should not wait for load state for sub-frames
-      expect(mockTab.waitForTimeout).toHaveBeenCalled();
+      // Should not wait for the load state of a sub-frame navigation.
+      expect(mockTab.waitForLoadState).not.toHaveBeenCalled();
     });
 
     it('should timeout after 10 seconds', async () => {
@@ -126,9 +126,36 @@ describe('Tool Utils', () => {
       vi.useRealTimers();
     });
 
-    it('should use the configured settle delay after completion', async () => {
-      const callback = vi.fn().mockResolvedValue('result');
+    it('should use the configured settle delay after a request', async () => {
       mockTab.context.config.timeouts.settle = 25;
+      const callback = vi.fn().mockImplementation(() => {
+        const request = { url: 'https://api.example.com' };
+        mockPage.emit('request', request);
+        mockPage.emit('requestfinished', request);
+        return Promise.resolve('result');
+      });
+
+      await waitForCompletion(mockTab, callback);
+
+      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
+    });
+
+    it('should skip the settle delay when the action started nothing', async () => {
+      // No request and no navigation means nothing is in flight to settle, and
+      // the fixed wait would be pure latency on every click and keypress.
+      const callback = vi.fn().mockResolvedValue('result');
+
+      await waitForCompletion(mockTab, callback);
+
+      expect(mockTab.waitForTimeout).not.toHaveBeenCalled();
+    });
+
+    it('should settle after a main-frame navigation', async () => {
+      mockTab.context.config.timeouts.settle = 25;
+      const callback = vi.fn().mockImplementation(() => {
+        mockPage.emit('framenavigated', { parentFrame: () => null });
+        return Promise.resolve('result');
+      });
 
       await waitForCompletion(mockTab, callback);
 

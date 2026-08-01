@@ -1,65 +1,43 @@
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-const builderCalls: { withTags: string[][]; withRules: string[][]; disableRules: string[][]; include: string[]; exclude: string[] } = {
-  withTags: [],
-  withRules: [],
-  disableRules: [],
-  include: [],
-  exclude: [],
-};
-let analyzeResult: any = { violations: [], incomplete: [], passes: [], inapplicable: [] };
+import { assertRuleOptionsValid, axeRuleSchemaShape, axeTagValues, defaultAxeTags, dedupeAxeNodes, prepareAxeResults, runAxeScan, summarizeAxeViolations, trimAxeResults } from '../src/tools/axe.js';
 
-vi.mock('@axe-core/playwright', () => ({
-  AxeBuilder: class {
-    withTags(tags: string[]) {
-      builderCalls.withTags.push(tags);
-      return this;
-    }
-    withRules(rules: string[]) {
-      builderCalls.withRules.push(rules);
-      return this;
-    }
-    disableRules(rules: string[]) {
-      builderCalls.disableRules.push(rules);
-      return this;
-    }
-    include(selector: string) {
-      builderCalls.include.push(selector);
-      return this;
-    }
-    exclude(selector: string) {
-      builderCalls.exclude.push(selector);
-      return this;
-    }
-    async analyze() {
-      if (analyzeResult instanceof Error)
-        throw analyzeResult;
-      return analyzeResult;
-    }
-  },
-}));
+// The scan drives the page itself: axe-core is injected into every frame, then
+// run in the main one. The fake page records what the run was asked to do, and
+// answers the scope check with the match count each selector should resolve to
+// (-1 for CSS the browser rejects).
+type ScanCall = { context: unknown; options: any };
 
-const { assertRuleOptionsValid, axeRuleSchemaShape, axeTagValues, defaultAxeTags, dedupeAxeNodes, prepareAxeResults, runAxeScan, summarizeAxeViolations, trimAxeResults } = await import('../src/tools/axe.js');
+let lastScan: ScanCall | undefined;
+let scanResult: any;
 
-function resetBuilderCalls() {
-  builderCalls.withTags = [];
-  builderCalls.withRules = [];
-  builderCalls.disableRules = [];
-  builderCalls.include = [];
-  builderCalls.exclude = [];
-  analyzeResult = { violations: [], incomplete: [], passes: [], inapplicable: [] };
+function pageWithSelectorCounts(countBySelector: Record<string, number> = {}) {
+  const frame = {
+    evaluate: async (script: unknown, arg?: unknown) => {
+      // Injection: the version probe, then the axe source as a string.
+      if (typeof script === 'string' || arg === undefined)
+        return undefined;
+      if (Array.isArray(arg))
+        return arg.map(selector => countBySelector[selector as string] ?? 0);
+      lastScan = arg as ScanCall;
+      if (scanResult instanceof Error)
+        throw scanResult;
+      return scanResult;
+    },
+  };
+  return {
+    ...frame,
+    frames: () => [frame],
+    mainFrame: () => frame,
+  } as any;
 }
 
-// Stands in for page.evaluate(selectors => …): returns the match count each
-// selector should resolve to, or -1 for CSS the browser rejects.
-function pageWithSelectorCounts(countBySelector: Record<string, number>) {
-  return {
-    evaluate: async (_fn: unknown, selectors: string[]) =>
-      selectors.map(selector => countBySelector[selector] ?? 0),
-  } as any;
+function resetScan() {
+  lastScan = undefined;
+  scanResult = { url: 'https://example.com', violations: [], incomplete: [], passes: [], inapplicable: [] };
 }
 
 function node(target: string, html: string) {
@@ -148,31 +126,26 @@ describe('axe helpers', () => {
   });
 
   it('scans with the default tag set and no scope when given no options', async () => {
-    resetBuilderCalls();
-    await runAxeScan({} as any);
-    expect(builderCalls.withTags).toEqual([[...defaultAxeTags]]);
-    expect(builderCalls.withRules).toEqual([]);
-    expect(builderCalls.disableRules).toEqual([]);
-    expect(builderCalls.include).toEqual([]);
-    expect(builderCalls.exclude).toEqual([]);
+    resetScan();
+    await runAxeScan(pageWithSelectorCounts());
+    expect(lastScan?.options).toEqual({ runOnly: { type: 'tag', values: [...defaultAxeTags] } });
+    expect(lastScan?.context).toBeNull();
   });
 
   it('runs explicit rule ids instead of tags, because axe runOnly holds only one of them', async () => {
-    resetBuilderCalls();
-    await runAxeScan({} as any, { tags: ['wcag2aa'], rules: ['image-alt', 'label'] });
-    expect(builderCalls.withRules).toEqual([['image-alt', 'label']]);
-    // withTags would overwrite the rule list in axe's single runOnly slot.
-    expect(builderCalls.withTags).toEqual([]);
+    resetScan();
+    await runAxeScan(pageWithSelectorCounts(), { tags: ['wcag2aa'], rules: ['image-alt', 'label'] });
+    // A tag list would overwrite the rule list in axe's single runOnly slot.
+    expect(lastScan?.options).toEqual({ runOnly: { type: 'rule', values: ['image-alt', 'label'] } });
   });
 
   it('rejects an explicitly empty rule list instead of silently scanning the full tag set', async () => {
-    resetBuilderCalls();
+    resetScan();
     // "Run only these rules: none" is a contradiction; falling back to tags
     // would scan far more than the caller asked for.
-    await expect(runAxeScan({} as any, { tags: ['wcag2aa'], rules: [] }))
+    await expect(runAxeScan(pageWithSelectorCounts(), { tags: ['wcag2aa'], rules: [] }))
         .rejects.toThrow(/withRules is an empty list/);
-    expect(builderCalls.withTags).toEqual([]);
-    expect(builderCalls.withRules).toEqual([]);
+    expect(lastScan).toBeUndefined();
   });
 
   it('rejects an empty withRules list at the schema layer too', () => {
@@ -185,55 +158,55 @@ describe('axe helpers', () => {
   });
 
   it('composes disableRules with tags', async () => {
-    resetBuilderCalls();
-    await runAxeScan({} as any, { tags: ['wcag2aa'], disableRules: ['color-contrast'] });
-    expect(builderCalls.withTags).toEqual([['wcag2aa']]);
-    expect(builderCalls.disableRules).toEqual([['color-contrast']]);
+    resetScan();
+    await runAxeScan(pageWithSelectorCounts(), { tags: ['wcag2aa'], disableRules: ['color-contrast'] });
+    expect(lastScan?.options).toEqual({
+      runOnly: { type: 'tag', values: ['wcag2aa'] },
+      rules: { 'color-contrast': { enabled: false } },
+    });
   });
 
   it('subtracts disableRules from an explicit rule list rather than relying on axe', async () => {
-    resetBuilderCalls();
+    resetScan();
     // axe ignores the per-rule enabled flag once runOnly holds a rule list, so
     // passing both through would still have run `label`.
-    await runAxeScan({} as any, { rules: ['image-alt', 'label'], disableRules: ['label'] });
-    expect(builderCalls.withRules).toEqual([['image-alt']]);
-    expect(builderCalls.disableRules).toEqual([]);
+    await runAxeScan(pageWithSelectorCounts(), { rules: ['image-alt', 'label'], disableRules: ['label'] });
+    expect(lastScan?.options).toEqual({ runOnly: { type: 'rule', values: ['image-alt'] } });
   });
 
   it('refuses a rule list that disableRules empties, instead of silently scanning everything', async () => {
-    resetBuilderCalls();
-    await expect(runAxeScan({} as any, { rules: ['image-alt'], disableRules: ['image-alt'] }))
+    resetScan();
+    await expect(runAxeScan(pageWithSelectorCounts(), { rules: ['image-alt'], disableRules: ['image-alt'] }))
         .rejects.toThrow(/disableRules disabled every rule in withRules \(image-alt\)/);
-    expect(builderCalls.withRules).toEqual([]);
-    expect(builderCalls.withTags).toEqual([]);
+    expect(lastScan).toBeUndefined();
   });
 
   it('rejects an unknown rule id in withRules instead of scanning nothing', async () => {
-    resetBuilderCalls();
-    await expect(runAxeScan({} as any, { rules: ['image-alt', 'image-altt'] }))
+    resetScan();
+    await expect(runAxeScan(pageWithSelectorCounts(), { rules: ['image-alt', 'image-altt'] }))
         .rejects.toThrow(/Unknown Axe rule id\(s\) in withRules: image-altt/);
-    expect(builderCalls.withRules).toEqual([]);
+    expect(lastScan).toBeUndefined();
   });
 
   it('rejects an unknown rule id in disableRules instead of disabling nothing', async () => {
-    resetBuilderCalls();
-    await expect(runAxeScan({} as any, { disableRules: ['colour-contrast'] }))
+    resetScan();
+    await expect(runAxeScan(pageWithSelectorCounts(), { disableRules: ['colour-contrast'] }))
         .rejects.toThrow(/Unknown Axe rule id\(s\) in disableRules: colour-contrast/);
-    expect(builderCalls.disableRules).toEqual([]);
+    expect(lastScan).toBeUndefined();
   });
 
   it('validates rule ids before touching the page, so a bad id cannot cost a scan', async () => {
-    resetBuilderCalls();
+    resetScan();
     const page = { evaluate: () => { throw new Error('page should not be touched'); } } as any;
     await expect(runAxeScan(page, { rules: ['nope'], include: ['#content'] }))
         .rejects.toThrow(/Unknown Axe rule id/);
   });
 
   it('accepts every rule id axe-core actually ships', async () => {
-    resetBuilderCalls();
+    resetScan();
     // Guards against the catalogue check drifting from the injected axe build.
-    await runAxeScan({} as any, { rules: ['color-contrast', 'region', 'frame-tested', 'aria-allowed-attr'] });
-    expect(builderCalls.withRules[0]).toHaveLength(4);
+    await runAxeScan(pageWithSelectorCounts(), { rules: ['color-contrast', 'region', 'frame-tested', 'aria-allowed-attr'] });
+    expect(lastScan?.options.runOnly.values).toHaveLength(4);
   });
 
   it('validates rule options without a page, so crawlers can check them before navigating', () => {
@@ -249,28 +222,14 @@ describe('axe helpers', () => {
         .toThrow(/disableRules disabled every rule in withRules \(image-alt\)/);
   });
 
-  it('validates rule ids against the exact axe-core build @axe-core/playwright injects', async () => {
-    // The catalogue check is only meaningful while both resolve to one version,
-    // which is why package.json pins axe-core exactly.
+  it('validates rule ids against the exact axe-core build it injects', async () => {
+    // The rule catalogue and the injected source are the same module, and the
+    // exact pin keeps a lockfile-less install from resolving a different one.
     const [ownPackage, installedAxeCore] = await Promise.all([
       import('../package.json', { with: { type: 'json' } }),
       import('axe-core/package.json', { with: { type: 'json' } }),
     ]);
     expect(ownPackage.default.dependencies['axe-core']).toBe(installedAxeCore.default.version);
-  });
-
-  it('pins @axe-core/playwright exactly so a newer wrapper cannot nest a different axe-core', async () => {
-    // A ranged wrapper could resolve to a newer release on a clean install and
-    // bring its own nested axe-core; validation would then use one catalogue
-    // while AxeBuilder injects another. The exact pin makes the two axe-core
-    // requirements (ours and the wrapper's) meet in a single resolved copy.
-    const ownPackage = await import('../package.json', { with: { type: 'json' } });
-    // The wrapper's exports map hides its package.json from import(), so read it.
-    const installedWrapper = JSON.parse(fs.readFileSync(
-        fileURLToPath(new URL('../node_modules/@axe-core/playwright/package.json', import.meta.url)), 'utf-8'));
-    expect(ownPackage.default.dependencies['@axe-core/playwright']).toBe(installedWrapper.version);
-    // The proof that nothing nested: the wrapper has no private axe-core copy.
-    expect(fs.existsSync(fileURLToPath(new URL('../node_modules/@axe-core/playwright/node_modules/axe-core', import.meta.url)))).toBe(false);
   });
 
   it('documents the codegen command with the pinned Playwright version', async () => {
@@ -288,30 +247,29 @@ describe('axe helpers', () => {
     }
   });
 
-  it('applies include and exclude selectors to the builder', async () => {
-    resetBuilderCalls();
+  it('applies include and exclude selectors as the scan context', async () => {
+    resetScan();
     await runAxeScan(pageWithSelectorCounts({ '#checkout': 1, '#summary': 2, '#cookie-banner': 1 }), {
       tags: ['wcag2aa'],
       include: ['#checkout', '#summary'],
       exclude: ['#cookie-banner'],
     });
-    expect(builderCalls.withTags).toEqual([['wcag2aa']]);
-    expect(builderCalls.include).toEqual(['#checkout', '#summary']);
-    expect(builderCalls.exclude).toEqual(['#cookie-banner']);
+    expect(lastScan?.options).toEqual({ runOnly: { type: 'tag', values: ['wcag2aa'] } });
+    expect(lastScan?.context).toEqual({ include: ['#checkout', '#summary'], exclude: ['#cookie-banner'] });
   });
 
   it('fails instead of silently narrowing when one of several include selectors matches nothing', async () => {
-    resetBuilderCalls();
+    resetScan();
     // Axe itself only errors when the whole include set is empty, so this is
     // the case that would otherwise produce a clean but half-scoped report.
     await expect(runAxeScan(pageWithSelectorCounts({ '#checkout': 1, '#billing-summry': 0 }), {
       include: ['#checkout', '#billing-summry'],
     })).rejects.toThrow(/No elements matched includeSelectors: #billing-summry/);
-    expect(builderCalls.include).toEqual([]);
+    expect(lastScan).toBeUndefined();
   });
 
   it('rejects CSS the browser cannot parse, for includes and excludes alike', async () => {
-    resetBuilderCalls();
+    resetScan();
     await expect(runAxeScan(pageWithSelectorCounts({ '#ok': 1, ':::bad': -1 }), {
       include: ['#ok'],
       exclude: [':::bad'],
@@ -319,17 +277,17 @@ describe('axe helpers', () => {
   });
 
   it('allows an exclude selector that matches nothing on this page', async () => {
-    resetBuilderCalls();
+    resetScan();
     // A crawl legitimately hits pages without the excluded widget.
     await runAxeScan(pageWithSelectorCounts({ '#cookie-banner': 0 }), { exclude: ['#cookie-banner'] });
-    expect(builderCalls.exclude).toEqual(['#cookie-banner']);
+    expect(lastScan?.context).toEqual({ include: [], exclude: ['#cookie-banner'] });
   });
 
   it('rethrows scan failures untouched', async () => {
-    resetBuilderCalls();
-    const failure = new Error('axe injection failed');
-    analyzeResult = failure;
-    await expect(runAxeScan({} as any)).rejects.toBe(failure);
+    resetScan();
+    const failure = new Error('axe run failed');
+    scanResult = failure;
+    await expect(runAxeScan(pageWithSelectorCounts())).rejects.toBe(failure);
   });
 
   it('summarizes counts by impact and rule id', () => {

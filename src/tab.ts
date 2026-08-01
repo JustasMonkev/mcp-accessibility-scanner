@@ -54,6 +54,9 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _modalStates: ModalState[] = [];
   private _downloads: { download: playwright.Download, finished: boolean, outputFile: string }[] = [];
   private _defaultTimeout: number;
+  // The aria snapshot last handed to the caller; the refs in it are the refs the
+  // next tool call will name. Cleared whenever the page it described is gone.
+  private _lastAriaSnapshot: string | undefined;
 
   private _pageListeners: { event: string, listener: (...args: any[]) => void }[] = [];
 
@@ -152,6 +155,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this._recentConsoleMessages.length = 0;
     this._requests.clear();
     this._mainDocumentStatus = undefined;
+    this._lastAriaSnapshot = undefined;
   }
 
   private _handleConsoleMessage(message: ConsoleMessage) {
@@ -256,10 +260,13 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     const modalStates = await this._raceAgainstModalStates(async () => {
       const [snapshot, title] = await Promise.all([
         this._withPageStateTimeout(
-            this.page.ariaSnapshot({ mode: 'ai' }),
+            this._captureAriaSnapshot(),
             'capturing page accessibility snapshot',
         ).catch(error => {
           logUnhandledError(error);
+          // Nothing describes the page any more, and the refs of an older
+          // snapshot must not be trusted against it.
+          this._lastAriaSnapshot = undefined;
           return `# Page snapshot unavailable: ${formatPageStateError(error)}`;
         }),
         this._withPageStateTimeout(
@@ -348,12 +355,25 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   async refLocators(params: { element: string, ref: string }[]): Promise<playwright.Locator[]> {
-    const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
+    // The refs a caller passes come from the snapshot the last tool call
+    // returned, which is the one cached here — so the common case needs no page
+    // round trip at all. A ref that is missing from it still costs one fresh
+    // capture, both to catch a ref that appeared since and to keep the "capture
+    // a new snapshot" error accurate.
+    let snapshot = this._lastAriaSnapshot;
+    if (!snapshot || params.some(param => !snapshot!.includes(`[ref=${param.ref}]`)))
+      snapshot = await this._captureAriaSnapshot();
     return params.map(param => {
       if (!snapshot.includes(`[ref=${param.ref}]`))
         throw new Error(`Ref ${param.ref} not found in the current page snapshot. Try capturing new snapshot.`);
       return this.page.locator(`aria-ref=${param.ref}`).describe(param.element);
     });
+  }
+
+  private async _captureAriaSnapshot(): Promise<string> {
+    const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
+    this._lastAriaSnapshot = snapshot;
+    return snapshot;
   }
 
   async waitForTimeout(time: number) {
@@ -406,7 +426,7 @@ export function renderModalStates(context: Context, modalStates: ModalState[]): 
   if (modalStates.length === 0)
     result.push('- There is no modal state present');
   for (const state of modalStates) {
-    const tool = context.tools.filter(tool => 'clearsModalState' in tool).find(tool => tool.clearsModalState === state.type);
+    const tool = context.tools.find(tool => tool.clearsModalState === state.type);
     result.push(`- [${truncateDataUrls(state.description)}]: can be handled by the "${tool?.schema.name}" tool`);
   }
   return result;

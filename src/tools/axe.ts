@@ -1,6 +1,4 @@
-import { AxeBuilder } from '@axe-core/playwright';
 import axe from 'axe-core';
-import type { AxeResults } from 'axe-core';
 import { z } from 'zod';
 
 import type * as playwright from 'playwright';
@@ -36,24 +34,34 @@ export type AxeTag = (typeof axeTagValues)[number];
 export const defaultAxeTags: readonly AxeTag[] = axeTagValues.filter(
     tag => tag.startsWith('wcag') || tag === 'section508'
 );
-export type AxeScanResult = AxeResults;
-export type AxeViolation = AxeScanResult['violations'][number];
-export type AxeNode = AxeViolation['nodes'][number];
-
-export type TrimmedAxeNode = {
-  target: AxeNode['target'];
+// The scan result carries only what the reporting tools read. Axe's own result
+// object additionally holds the per-node check arrays and the full node list of
+// every passing rule, which together are ~85% of a content-heavy page's result
+// and are dropped inside the page rather than serialized across the CDP
+// connection and thrown away here.
+export type AxeNode = {
+  target: axe.NodeResult['target'];
   html: string;
   failureSummary: string | null;
 };
 
-export type TrimmedAxeViolation = {
+export type AxeViolation = {
   id: string;
-  impact: AxeViolation['impact'];
+  impact: axe.ImpactValue | null | undefined;
   tags: string[];
   help: string;
   helpUrl: string;
   description: string;
-  nodes: TrimmedAxeNode[];
+  nodes: AxeNode[];
+};
+
+export type AxeScanResult = {
+  url: string;
+  violations: AxeViolation[];
+  incomplete: AxeViolation[];
+  // Only the rule count of these is ever reported, so only the ids survive.
+  passes: { id: string }[];
+  inapplicable: { id: string }[];
 };
 
 export type AxeScanOptions = {
@@ -76,13 +84,9 @@ export const axeRuleSchemaShape = {
   disableRules: z.array(z.string().min(1)).optional().describe('Axe rule ids to skip, e.g. ["color-contrast"]. Unlike withRules this narrows whatever is already selected, so it applies to violationsTag and withRules alike. Disabling every rule in withRules is an error, not an empty scan. Unknown rule ids are rejected rather than silently skipped.'),
 };
 
-// The rule catalogue comes from the same axe-core build that AxeBuilder injects
-// into the page (it ships `axe.source`), so ids can never drift from what the
-// scan actually supports and no extra injection is needed to check them.
-// package.json pins axe-core AND @axe-core/playwright to the same exact
-// release: a ranged wrapper could resolve to a newer version on a clean
-// install and nest its own newer axe-core, so validation would use one rule
-// catalogue while AxeBuilder injects another.
+// The rule catalogue comes from the very axe-core build injected into the page
+// (`axe.source` below), so ids can never drift from what the scan supports and
+// no extra injection is needed to check them.
 // Axe does reject unknown ids itself, but only from inside the page after
 // injection, surfacing as an opaque `frame.evaluate` failure; checking up front
 // names the bad id and costs nothing.
@@ -131,56 +135,122 @@ export function assertRuleOptionsValid(options: Pick<AxeScanOptions, 'rules' | '
 // quietly covers less than asked is worse than one that fails loudly.
 async function assertScopeSelectorsResolve(
   page: playwright.Page,
-  selectors: readonly string[],
-  label: 'includeSelectors' | 'excludeSelectors'
+  include: readonly string[],
+  exclude: readonly string[]
 ) {
-  if (!selectors.length)
+  if (!include.length && !exclude.length)
     return;
+  // One round trip for both lists: the includes come first, so the counts split
+  // back apart at `include.length`.
+  const selectors = [...include, ...exclude];
   const counts = await page.evaluate(list => list.map(selector => {
     try {
       return document.querySelectorAll(selector).length;
     } catch {
       return -1;
     }
-  }), [...selectors]);
+  }), selectors);
 
-  const invalid = selectors.filter((_, index) => counts[index] === -1);
-  if (invalid.length)
-    throw new Error(`Invalid CSS in ${label}: ${invalid.join(', ')}`);
+  for (const [label, list, offset] of [
+    ['includeSelectors', include, 0],
+    ['excludeSelectors', exclude, include.length],
+  ] as const) {
+    const invalid = list.filter((_, index) => counts[offset + index] === -1);
+    if (invalid.length)
+      throw new Error(`Invalid CSS in ${label}: ${invalid.join(', ')}`);
+  }
 
   // An unmatched exclude only leaves extra content in scope, and a crawl may
   // legitimately hit pages without the excluded widget, so it is not an error.
-  if (label === 'excludeSelectors')
-    return;
-  const unmatched = selectors.filter((_, index) => counts[index] === 0);
+  const unmatched = include.filter((_, index) => counts[index] === 0);
   if (unmatched.length)
-    throw new Error(`No elements matched ${label}: ${unmatched.join(', ')}. The scan would have silently covered less of the page than requested.`);
+    throw new Error(`No elements matched includeSelectors: ${unmatched.join(', ')}. The scan would have silently covered less of the page than requested.`);
+}
+
+// Axe's frame support needs its own copy in every frame, and the copy talks to
+// the top-level run over postMessage. `<unsafe_all_origins>` is what lets a
+// cross-origin frame answer; without it those frames go unscanned.
+const axeConfigureSource = `;axe.configure({ allowedOrigins: ['<unsafe_all_origins>'], branding: { application: 'playwright' } });`;
+
+// Injection is ~70ms of parsing per frame, so a frame that already holds this
+// exact build is left alone: matrix scans and repeat scans of one page reuse it.
+async function injectAxe(frame: playwright.Frame): Promise<void> {
+  const injected = await frame.evaluate(() => (window as any).axe?.version).catch(() => undefined);
+  if (injected === axe.version)
+    return;
+  await frame.evaluate(axe.source);
+  await frame.evaluate(axeConfigureSource);
+}
+
+// A child frame that never answers must not hang the scan: it goes unscanned
+// instead, which is what a failed injection has always meant here.
+const childFrameInjectionTimeoutMs = 1000;
+
+function injectAxeIntoFrames(page: playwright.Page): Promise<unknown> {
+  const mainFrame = page.mainFrame();
+  return Promise.all(page.frames().map(frame => {
+    if (frame === mainFrame)
+      return injectAxe(frame);
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    // Both branches resolve: a rejected loser of the race would surface as an
+    // unhandled rejection once the winner has already been awaited.
+    return Promise.race([
+      injectAxe(frame).catch(() => {}),
+      new Promise<void>(resolve => {
+        timeoutId = setTimeout(resolve, childFrameInjectionTimeoutMs);
+      }),
+    ]).finally(() => clearTimeout(timeoutId));
+  }));
+}
+
+// Runs in the page. Keeps axe's own result shape minus the parts nothing reads:
+// per-node check arrays, and the node lists of passing/inapplicable rules.
+async function runAxeInPage({ context, options }: { context: unknown, options: unknown }) {
+  const results = await (window as any).axe.run(context ?? document, options);
+  const findings = (rules: any[]) => rules.map(rule => ({
+    id: rule.id,
+    impact: rule.impact,
+    tags: rule.tags,
+    help: rule.help,
+    helpUrl: rule.helpUrl,
+    description: rule.description,
+    nodes: rule.nodes.map((node: any) => ({
+      target: node.target,
+      html: node.html,
+      failureSummary: node.failureSummary ?? null,
+    })),
+  }));
+  return {
+    url: results.url,
+    violations: findings(results.violations),
+    incomplete: findings(results.incomplete),
+    passes: results.passes.map((rule: any) => ({ id: rule.id })),
+    inapplicable: results.inapplicable.map((rule: any) => ({ id: rule.id })),
+  };
 }
 
 export async function runAxeScan(page: playwright.Page, options: AxeScanOptions = {}): Promise<AxeScanResult> {
   const rules = assertRuleOptionsValid(options);
-  await assertScopeSelectorsResolve(page, options.include ?? [], 'includeSelectors');
-  await assertScopeSelectorsResolve(page, options.exclude ?? [], 'excludeSelectors');
+  const include = options.include ?? [];
+  const exclude = options.exclude ?? [];
+  await assertScopeSelectorsResolve(page, include, exclude);
 
-  const builder = new AxeBuilder({ page });
-  // withRules and withTags both overwrite axe's single `runOnly` slot, so only
-  // one may be called. Explicit rule ids are the more specific request, so they
-  // win over tags.
-  if (rules.length) {
-    builder.withRules(rules);
-  } else {
-    builder.withTags([...(options.tags ?? defaultAxeTags)]);
-    if (options.disableRules?.length)
-      builder.disableRules([...options.disableRules]);
-  }
-  // include/exclude are cumulative in AxeBuilder; exclude wins over include for
-  // overlapping subtrees, which is what "scan this component minus the widget"
-  // needs.
-  for (const selector of options.include ?? [])
-    builder.include(selector);
-  for (const selector of options.exclude ?? [])
-    builder.exclude(selector);
-  return await builder.analyze();
+  // `runOnly` holds either a rule list or a tag list, never both. Explicit rule
+  // ids are the more specific request, so they win over tags — and the per-rule
+  // `enabled` flag disableRules would set is ignored on that branch, which is
+  // why assertRuleOptionsValid already subtracted them from the list.
+  const axeOptions: Record<string, unknown> = rules.length
+    ? { runOnly: { type: 'rule', values: rules } }
+    : { runOnly: { type: 'tag', values: [...(options.tags ?? defaultAxeTags)] } };
+  if (!rules.length && options.disableRules?.length)
+    axeOptions.rules = Object.fromEntries(options.disableRules.map(rule => [rule, { enabled: false }]));
+
+  // exclude wins over include for overlapping subtrees, which is what "scan
+  // this component minus the widget" needs.
+  const context = include.length || exclude.length ? { include: [...include], exclude: [...exclude] } : null;
+
+  await injectAxeIntoFrames(page);
+  return await page.evaluate(runAxeInPage, { context, options: axeOptions }) as AxeScanResult;
 }
 
 export function dedupeAxeNodes(nodes: AxeNode[]): AxeNode[] {
@@ -199,27 +269,14 @@ export function dedupeAxeNodes(nodes: AxeNode[]): AxeNode[] {
 export function trimAxeResults(
   violations: AxeViolation[],
   options: { maxNodesPerViolation: number; dedupe?: boolean }
-): TrimmedAxeViolation[] {
+): AxeViolation[] {
   // Callers that already deduped node lists can pass `dedupe: false` to skip a
   // redundant second dedup pass over potentially large node sets.
   const shouldDedupe = options.dedupe ?? true;
-  return violations.map(violation => {
-    const sourceNodes = shouldDedupe ? dedupeAxeNodes(violation.nodes) : violation.nodes;
-    const nodes = sourceNodes.slice(0, options.maxNodesPerViolation).map(node => ({
-      target: [...(node.target ?? [])],
-      html: node.html ?? '',
-      failureSummary: node.failureSummary ?? null,
-    }));
-    return {
-      id: violation.id,
-      impact: violation.impact,
-      tags: [...violation.tags],
-      help: violation.help,
-      helpUrl: violation.helpUrl,
-      description: violation.description,
-      nodes,
-    };
-  });
+  return violations.map(violation => ({
+    ...violation,
+    nodes: (shouldDedupe ? dedupeAxeNodes(violation.nodes) : violation.nodes).slice(0, options.maxNodesPerViolation),
+  }));
 }
 
 // Dedupe once and reuse: callers need the deduped nodes for per-rule counting
@@ -227,7 +284,7 @@ export function trimAxeResults(
 export function prepareAxeResults(
   violations: AxeViolation[],
   maxNodesPerViolation: number
-): { deduped: AxeViolation[]; trimmed: TrimmedAxeViolation[] } {
+): { deduped: AxeViolation[]; trimmed: AxeViolation[] } {
   const deduped = violations.map(violation => ({
     ...violation,
     nodes: dedupeAxeNodes(violation.nodes),
@@ -235,7 +292,7 @@ export function prepareAxeResults(
   return { deduped, trimmed: trimAxeResults(deduped, { maxNodesPerViolation, dedupe: false }) };
 }
 
-export function summarizeAxeViolations(violations: TrimmedAxeViolation[]) {
+export function summarizeAxeViolations(violations: AxeViolation[]) {
   const byImpact: Record<string, number> = {};
   const byRuleId: Record<string, number> = {};
   let totalNodes = 0;

@@ -157,13 +157,17 @@ export class Response {
     // All the async snapshotting post-action is happening here.
     // Everything below should race against modal states.
     const currentTab = this._context.currentTab();
-    if (this._includeSnapshot && currentTab)
-      this._tabSnapshot = await currentTab.captureSnapshot();
-
+    // The snapshot of the current tab and the titles of the others are
+    // independent page reads, so they go out together rather than one after the
+    // other. Only the current tab's snapshot also refreshes its title.
     const tabsToUpdate = this._includeTabs
       ? this._context.tabs().filter(tab => !this._includeSnapshot || tab !== currentTab)
       : currentTab && !this._includeSnapshot ? [currentTab] : [];
-    await Promise.allSettled(tabsToUpdate.map(tab => tab.updateTitle()));
+    const [snapshot] = await Promise.all([
+      this._includeSnapshot && currentTab ? currentTab.captureSnapshot() : undefined,
+      Promise.allSettled(tabsToUpdate.map(tab => tab.updateTitle())),
+    ]);
+    this._tabSnapshot = snapshot;
   }
 
   tabSnapshot(): TabSnapshot | undefined {
