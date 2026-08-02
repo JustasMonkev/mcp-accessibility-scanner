@@ -38,6 +38,7 @@ if (!!options.server !== !!options.lib)
 
 const serverEntry = options.server ? path.resolve(options.server) : path.join(projectRoot, 'cli.js');
 const libRoot = options.lib ? path.resolve(options.lib) : path.join(projectRoot, 'lib');
+const reportPath = options.out ? writableReportPath(options.out) : undefined;
 const iterations = options.iterations ?? 5;
 const warmups = options.warmups ?? 1;
 
@@ -190,8 +191,8 @@ const report = {
   totalMedianMs: results.filter(entry => !entry.micro).reduce((sum, entry) => sum + entry.median, 0),
 };
 
-if (options.out) {
-  fs.writeFileSync(path.resolve(options.out), `${JSON.stringify(report, null, 2)}\n`);
+if (reportPath) {
+  fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   process.stderr.write(`\nWrote ${options.out}\n`);
 }
 process.stderr.write(`\nTotal median tool latency: ${report.totalMedianMs.toFixed(1)} ms\n`);
@@ -361,4 +362,18 @@ function wholeNumber(value, flag, minimum) {
   if (!Number.isInteger(parsed) || parsed < minimum)
     throw new Error(`${flag} needs an integer >= ${minimum}, got: ${value ?? '(nothing)'}`);
   return parsed;
+}
+
+function writableReportPath(value) {
+  const resolved = path.resolve(value);
+  const parent = path.dirname(resolved);
+  if (!fs.statSync(parent).isDirectory())
+    throw new Error(`--out parent must be a directory: ${parent}`);
+  fs.accessSync(parent, fs.constants.W_OK);
+  if (fs.existsSync(resolved)) {
+    if (!fs.statSync(resolved).isFile())
+      throw new Error(`--out must name a file: ${resolved}`);
+    fs.accessSync(resolved, fs.constants.W_OK);
+  }
+  return resolved;
 }

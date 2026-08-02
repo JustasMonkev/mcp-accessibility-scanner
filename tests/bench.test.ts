@@ -86,3 +86,33 @@ it.each(['--out', '--server', '--lib'])('rejects a blank %s value', flag => {
   expect(result.status).not.toBe(0);
   expect(result.stderr).toContain('needs a value');
 });
+
+it('rejects an invalid report directory before starting the benchmark', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-bench-test-'));
+  temporaryDirectories.push(directory);
+  const result = spawnSync(process.execPath, [
+    'bench/mcp-bench.mjs', '--out', path.join(directory, 'missing', 'report.json'),
+  ], {
+    cwd: path.resolve(import.meta.dirname, '..'),
+    encoding: 'utf8',
+  });
+
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain('ENOENT');
+});
+
+it('rejects a report path whose parent is a file', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-bench-test-'));
+  temporaryDirectories.push(directory);
+  const parent = path.join(directory, 'file');
+  fs.writeFileSync(parent, 'not a directory');
+  const result = spawnSync(process.execPath, [
+    'bench/mcp-bench.mjs', '--out', path.join(parent, 'report.json'),
+  ], {
+    cwd: path.resolve(import.meta.dirname, '..'),
+    encoding: 'utf8',
+  });
+
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain('--out parent must be a directory');
+});
