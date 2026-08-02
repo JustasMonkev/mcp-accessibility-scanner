@@ -183,19 +183,19 @@ async function assertScopeSelectorsResolve(
 // distinctive enough that an accidental collision does not happen; a page
 // deliberately evading its own audit is out of scope.
 const axeReadyMarker = '__mcpAccessibilityScannerAxeReady';
+let axeReadySequence = 0;
 
 // Axe's frame support needs its own copy in every frame, and the copy talks to
 // the top-level run over postMessage. `<unsafe_all_origins>` is what lets a
 // cross-origin frame answer; without it those frames go unscanned.
-const axeConfigureSource = `;axe.configure({ allowedOrigins: ['<unsafe_all_origins>'], branding: { application: 'playwright' } }); window['${axeReadyMarker}'] = axe.version;`;
+const axeConfigureSource = `;axe.configure({ allowedOrigins: ['<unsafe_all_origins>'], branding: { application: 'playwright' } });`;
 
 // Injected fresh for every scan rather than reused when `window.axe` already
 // looks right: that global belongs to the page, which may have installed its own
 // axe or reconfigured ours since, and a scan must run this server's build and
 // configuration. Re-injection costs ~70ms per frame against a multi-second scan.
-async function injectAxe(frame: playwright.Frame): Promise<void> {
-  await frame.evaluate(axe.source);
-  await frame.evaluate(axeConfigureSource);
+async function injectAxe(frame: playwright.Frame, source: string): Promise<void> {
+  await frame.evaluate(source);
 }
 
 // A child frame that never answers must not hang the scan. It goes unscanned
@@ -265,12 +265,11 @@ function describeFrame(frame: playwright.Frame): string {
 // Whether this frame currently holds the Axe this server injected and
 // configured. A frame that navigated after its injection - or that appeared
 // since, or that carries only the page's own axe - answers no.
-async function hasAxe(frame: playwright.Frame): Promise<boolean> {
-  const ready = await withFrameTimeout(
-      frame.evaluate(marker => (window as any)[marker], axeReadyMarker),
-      undefined,
+async function hasAxe(frame: playwright.Frame, token: string): Promise<boolean> {
+  return withFrameTimeout(
+      frame.evaluate(({ marker, token }) => (window as any)[marker] === token, { marker: axeReadyMarker, token }),
+      false,
   );
-  return ready === axe.version;
 }
 
 // A frame the caller scoped out of the scan is not a coverage gap: its contents
@@ -390,11 +389,13 @@ async function injectAxeIntoFrames(
   include: readonly string[],
   exclude: readonly string[]
 ): Promise<string[]> {
+  const token = `${axe.version}:${++axeReadySequence}`;
+  const source = `${axe.source}${axeConfigureSource}window[${JSON.stringify(axeReadyMarker)}]=${JSON.stringify(token)};`;
   const mainFrame = page.mainFrame();
-  await injectAxe(mainFrame);
+  await injectAxe(mainFrame, source);
   await withConcurrency(
       page.frames().filter(frame => frame !== mainFrame),
-      frame => withFrameTimeout(injectAxe(frame), undefined),
+      frame => withFrameTimeout(injectAxe(frame, source), undefined),
   );
 
   // Coverage is decided here rather than from the injection results: a frame
@@ -407,7 +408,7 @@ async function injectAxeIntoFrames(
   // still missed. The window is microseconds rather than the length of the
   // slowest injection, but it cannot be closed from outside the page.
   const children = page.frames().filter(frame => frame !== mainFrame);
-  const covered = await Promise.all(children.map(hasAxe));
+  const covered = await Promise.all(children.map(frame => hasAxe(frame, token)));
   const withoutAxe = new Set(children.filter((_, index) => !covered[index]));
 
   // A frame whose own injection succeeded is still unreachable when an ancestor

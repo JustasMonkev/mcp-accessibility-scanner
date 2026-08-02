@@ -3,8 +3,6 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import axeCore from 'axe-core';
-
 import { assertRuleOptionsValid, axeRuleSchemaShape, axeTagValues, defaultAxeTags, dedupeAxeNodes, prepareAxeResults, runAxeScan, summarizeAxeViolations, trimAxeResults } from '../src/tools/axe.js';
 
 // The scan drives the page itself: axe-core is injected into every frame, then
@@ -12,8 +10,6 @@ import { assertRuleOptionsValid, axeRuleSchemaShape, axeTagValues, defaultAxeTag
 // answers the scope check with the match count each selector should resolve to
 // (-1 for CSS the browser rejects).
 type ScanCall = { context: unknown; options: any };
-
-const axeVersion = axeCore.version;
 
 let lastScan: ScanCall | undefined;
 let scanResult: any;
@@ -28,6 +24,7 @@ function makeFrame(
   keepsAxe = true,
   scope: FrameScope = { included: true, excluded: false }
 ) {
+  let readyToken: string | undefined;
   return {
     url: () => url,
     name: () => name,
@@ -44,12 +41,14 @@ function makeFrame(
       if (typeof script === 'string') {
         if (!injectable)
           throw new Error('Execution context was destroyed');
+        const match = /window\["__mcpAccessibilityScannerAxeReady"\]=("[^"]+")/.exec(script);
+        readyToken = match ? JSON.parse(match[1]) : undefined;
         return undefined;
       }
       // The post-injection coverage probe reads the marker this server sets
       // when it configures its own injection.
-      if (typeof arg === 'string')
-        return injectable && keepsAxe ? axeVersion : undefined;
+      if (arg && typeof arg === 'object' && 'token' in arg)
+        return injectable && keepsAxe && readyToken === arg.token;
       if (Array.isArray(arg))
         return arg.map(selector => countBySelector[selector as string] ?? 0);
       lastScan = arg as ScanCall;
@@ -373,6 +372,22 @@ describe('axe helpers', () => {
     const result = await runAxeScan(pageWithSelectorCounts({}, [navigated]));
 
     expect(result.unscannedFrames).toEqual(['https://example.com/widget']);
+  });
+
+  it('does not accept a readiness marker left by an earlier scan', async () => {
+    resetScan();
+    const stale = makeFrame({}, 'https://example.com/widget');
+    const evaluate = stale.evaluate;
+    let injections = 0;
+    stale.evaluate = async (script: unknown, arg?: unknown) => {
+      if (typeof script === 'string' && ++injections === 2)
+        return new Promise(() => {});
+      return evaluate(script, arg);
+    };
+    const page = pageWithSelectorCounts({}, [stale]);
+
+    expect((await runAxeScan(page)).unscannedFrames).toEqual([]);
+    expect((await runAxeScan(page)).unscannedFrames).toEqual(['https://example.com/widget']);
   });
 
   it('reports a frame carrying only the page own Axe, not this injection', async () => {

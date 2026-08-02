@@ -716,8 +716,8 @@ npm run bench -- --out after.json --label after
 
 Useful flags: `--iterations <n>` and `--warmups <n>` (defaults 5 and 1),
 `--browser`/`--executable-path` when the browser lives outside Playwright's own
-download directory, and `--server <path/to/cli.js>` plus `--lib <path/to/lib>` to
-point at a different build — that is how a revision is compared with another:
+download directory, and `--server <path/to/cli.js>` plus `--lib <path/to/lib>`
+(supplied together) to point at a different build — that is how revisions compare:
 
 ```bash
 git worktree add /tmp/baseline main && (cd /tmp/baseline && npm install && npm run build)

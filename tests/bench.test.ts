@@ -17,7 +17,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { afterEach, expect, it } from 'vitest';
 
 const temporaryDirectories: string[] = [];
@@ -52,4 +52,14 @@ it('compares totals over only the shared end-to-end scenarios', () => {
   expect(output).toContain('| 20.0');
   expect(output).not.toContain('110.0');
   expect(output).not.toContain('1020.0');
+});
+
+it.each(['--server', '--lib'])('rejects an unpaired %s override', flag => {
+  const result = spawnSync(process.execPath, ['bench/mcp-bench.mjs', flag, '/tmp/revision'], {
+    cwd: path.resolve(import.meta.dirname, '..'),
+    encoding: 'utf8',
+  });
+
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain('--server and --lib must be provided together.');
 });

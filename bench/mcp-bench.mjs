@@ -33,6 +33,8 @@ if (options.compare) {
   await new Promise(resolve => process.stdout.write('', resolve));
   process.exit(0);
 }
+if (!!options.server !== !!options.lib)
+  throw new Error('--server and --lib must be provided together.');
 
 const serverEntry = options.server ? path.resolve(options.server) : path.join(projectRoot, 'cli.js');
 const libRoot = options.lib ? path.resolve(options.lib) : path.join(projectRoot, 'lib');
