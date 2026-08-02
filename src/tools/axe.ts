@@ -250,6 +250,44 @@ async function hasAxe(frame: playwright.Frame): Promise<boolean> {
   return ready === axe.version;
 }
 
+// A frame the caller scoped out of the scan is not a coverage gap: its contents
+// were never going to be reported. Answered from the iframe element in its
+// parent document, so an `excludeSelectors: ["iframe.chat-widget"]` entry - the
+// documented recipe for dropping a flaky third-party widget - does not produce a
+// warning about the very frame it removed.
+//
+// Only a positive determination suppresses the warning. An unreachable frame
+// element, an unresolvable selector or a nested frame whose exclusion lives in a
+// grandparent document all fall through to reporting, so no genuine gap is
+// hidden by a check that could not answer.
+async function isFrameInScope(
+  frame: playwright.Frame,
+  include: readonly string[],
+  exclude: readonly string[]
+): Promise<boolean> {
+  if (!include.length && !exclude.length)
+    return true;
+  const element = await frame.frameElement().catch(() => null);
+  if (!element)
+    return true;
+  try {
+    return await withFrameTimeout(element.evaluate((node, scope) => {
+      const matchesAny = (selectors: string[]) => selectors.some(selector => {
+        try {
+          return !!(node as Element).closest(selector);
+        } catch {
+          return false;
+        }
+      });
+      if (scope.exclude.length && matchesAny(scope.exclude))
+        return false;
+      return scope.include.length ? matchesAny(scope.include) : true;
+    }, { include: [...include], exclude: [...exclude] }), true);
+  } finally {
+    await element.dispose().catch(() => {});
+  }
+}
+
 // Returns an identifier for every child frame Axe could not be installed in, so
 // the caller can say what the scan did not cover. Every failure is reported
 // whatever the URL scheme: injection into an empty about:blank frame succeeds,
@@ -257,7 +295,11 @@ async function hasAxe(frame: playwright.Frame): Promise<boolean> {
 //
 // Duplicates are kept: two unnamed about:blank frames that both fail are two
 // documents that went unscanned, and collapsing them would under-count.
-async function injectAxeIntoFrames(page: playwright.Page): Promise<string[]> {
+async function injectAxeIntoFrames(
+  page: playwright.Page,
+  include: readonly string[],
+  exclude: readonly string[]
+): Promise<string[]> {
   const mainFrame = page.mainFrame();
   await Promise.all(page.frames().map(async frame => {
     if (frame === mainFrame) {
@@ -278,7 +320,11 @@ async function injectAxeIntoFrames(page: playwright.Page): Promise<string[]> {
   // slowest injection, but it cannot be closed from outside the page.
   const children = page.frames().filter(frame => frame !== mainFrame);
   const covered = await Promise.all(children.map(hasAxe));
-  return children.filter((_, index) => !covered[index]).map(describeFrame);
+  const missed = children.filter((_, index) => !covered[index]);
+  // Runs only for frames that failed, which is normally none, so a scoped scan
+  // of a healthy page pays nothing for this.
+  const inScope = await Promise.all(missed.map(frame => isFrameInScope(frame, include, exclude)));
+  return missed.filter((_, index) => inScope[index]).map(describeFrame);
 }
 
 // Runs in the page. Keeps axe's own result shape minus the parts nothing reads:
@@ -327,7 +373,7 @@ export async function runAxeScan(page: playwright.Page, options: AxeScanOptions 
   // this component minus the widget" needs.
   const context = include.length || exclude.length ? { include: [...include], exclude: [...exclude] } : null;
 
-  const unscannedFrames = await injectAxeIntoFrames(page);
+  const unscannedFrames = await injectAxeIntoFrames(page, include, exclude);
   const results = await page.evaluate(runAxeInPage, { context, options: axeOptions }) as AxeScanResult;
   return { ...results, unscannedFrames };
 }

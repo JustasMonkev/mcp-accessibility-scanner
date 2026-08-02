@@ -18,10 +18,15 @@ const axeVersion = axeCore.version;
 let lastScan: ScanCall | undefined;
 let scanResult: any;
 
-function makeFrame(countBySelector: Record<string, number>, url = 'https://example.com/', injectable = true, name = '', keepsAxe = true) {
+function makeFrame(countBySelector: Record<string, number>, url = 'https://example.com/', injectable = true, name = '', keepsAxe = true, inScope = true) {
   return {
     url: () => url,
     name: () => name,
+    // The scope check reads the owning iframe element in the parent document.
+    frameElement: async () => ({
+      evaluate: async () => inScope,
+      dispose: async () => undefined,
+    }),
     evaluate: async (script: unknown, arg?: unknown) => {
       // Injection: the axe source and its configuration, both plain strings.
       if (typeof script === 'string') {
@@ -398,6 +403,31 @@ describe('axe helpers', () => {
     const result = await runAxeScan(pageWithSelectorCounts({}, [dataFrame]));
 
     expect(result.unscannedFrames).toEqual(['data:text/html;base64,...']);
+  });
+
+  it('does not warn about a frame the caller scoped out of the scan', async () => {
+    resetScan();
+    // excludeSelectors: ["iframe.chat-widget"] is the documented way to drop a
+    // flaky third-party widget. Warning that the widget went unscanned would be
+    // a false alarm about content the caller removed on purpose.
+    const excluded = makeFrame({ '#main': 1, 'iframe.chat-widget': 1 }, 'https://widget.example/', false, '', true, false);
+    const result = await runAxeScan(
+        pageWithSelectorCounts({ '#main': 1, 'iframe.chat-widget': 1 }, [excluded]),
+        { exclude: ['iframe.chat-widget'] },
+    );
+
+    expect(result.unscannedFrames).toEqual([]);
+  });
+
+  it('still warns about an in-scope frame when a scope is set', async () => {
+    resetScan();
+    const inScope = makeFrame({ '#main': 1 }, 'https://widget.example/', false, '', true, true);
+    const result = await runAxeScan(
+        pageWithSelectorCounts({ '#main': 1 }, [inScope]),
+        { include: ['#main'] },
+    );
+
+    expect(result.unscannedFrames).toEqual(['https://widget.example/']);
   });
 
   it('rethrows scan failures untouched', async () => {

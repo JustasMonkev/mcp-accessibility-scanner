@@ -43,7 +43,11 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
     requests.add(request);
     signalCallback();
   };
-  const requestFinishedListener = (request: playwright.Request) => {
+  // A request that fails - offline, blocked by CORS, aborted - emits
+  // `requestfailed` and never `requestfinished`. Without the same removal path
+  // it would sit in the set until the 10s timeout below, turning a click that
+  // fired one doomed fetch into a ten-second tool call.
+  const requestSettledListener = (request: playwright.Request) => {
     requests.delete(request);
     if (!requests.size)
       waitCallback();
@@ -65,13 +69,15 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
   };
 
   tab.page.on('request', requestListener);
-  tab.page.on('requestfinished', requestFinishedListener);
+  tab.page.on('requestfinished', requestSettledListener);
+  tab.page.on('requestfailed', requestSettledListener);
   tab.page.on('framenavigated', frameNavigateListener);
   const timeout = setTimeout(onTimeout, 10000);
 
   const dispose = () => {
     tab.page.off('request', requestListener);
-    tab.page.off('requestfinished', requestFinishedListener);
+    tab.page.off('requestfinished', requestSettledListener);
+    tab.page.off('requestfailed', requestSettledListener);
     tab.page.off('framenavigated', frameNavigateListener);
     clearTimeout(timeout);
   };
