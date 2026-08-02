@@ -57,6 +57,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   // The aria snapshot last handed to the caller; the refs in it are the refs the
   // next tool call will name. Cleared whenever the page it described is gone.
   private _lastAriaSnapshot: string | undefined;
+  private _omittedRefNames = new Map<string, string>();
 
   private _pageListeners: { event: string, listener: (...args: any[]) => void }[] = [];
 
@@ -366,14 +367,12 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   async refLocators(params: { element: string, ref: string }[]): Promise<playwright.Locator[]> {
     // The refs a caller passes come from the snapshot the last tool call
     // returned, which is the one cached here, so the common case needs no fresh
-    // capture. Playwright keeps a ref bound to the element it was issued for -
-    // a DOM change never moves it to a different one - so the only thing the
-    // cached text cannot tell us is whether that element is still in the page.
-    // A resolve check answers that for ~1.5ms against ~37ms for a snapshot, and
-    // keeps a stale ref failing fast with the message below rather than as an
-    // action timeout.
+    // capture. Playwright keeps a ref bound to the element it was issued for,
+    // but that element can change its accessible role or name while staying
+    // connected. Re-checking only the referenced nodes is still cheaper than a
+    // full-page snapshot and prevents an old ref from targeting repurposed UI.
     const cached = this._lastAriaSnapshot;
-    const snapshot = cached && params.every(param => cached.includes(`[ref=${param.ref}]`)) && await this._refsResolve(params)
+    const snapshot = cached && await this._refsMatchSnapshot(params, cached)
       ? cached
       : await this._captureAriaSnapshot();
     return params.map(param => {
@@ -383,25 +382,43 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     });
   }
 
-  // Whether every ref still resolves to a live element. A ref whose element was
-  // removed or replaced resolves to nothing, which sends the caller down the
-  // fresh-capture path instead of handing back a locator that cannot match.
-  //
-  // Bounded like every other page-state read here: `count()` uses Playwright's
-  // no-timeout query path, so an unresponsive renderer would hang the tool call
-  // on what is meant to be a cheap check. A check that cannot answer in time
-  // counts as unresolved and falls through to a fresh capture.
-  private async _refsResolve(params: { ref: string }[]): Promise<boolean> {
-    const counts = await Promise.all(params.map(param =>
-      this._withPageStateTimeout(
-          callOnPageNoTrace(this.page, page => page.locator(`aria-ref=${param.ref}`).count()),
-          'resolving element references',
-      ).catch(() => 0)));
-    return counts.every(count => count > 0);
+  private async _refsMatchSnapshot(params: { ref: string }[], snapshot: string): Promise<boolean> {
+    const matches = await Promise.all(params.map(async param => {
+      const cached = snapshot.split('\n').find(line => line.includes(`[ref=${param.ref}]`));
+      if (!cached)
+        return false;
+      let line = cached.trim();
+      const quoted = /^- '((?:[^']|'')*)'(.*)$/.exec(line);
+      if (quoted)
+        line = `- ${quoted[1].replace(/''/g, "'")}${quoted[2]}`;
+      const match = line.match(/^-?\s*([\w-]+)(?:\s+"((?:[^"\\]|\\.)*)")?/);
+      if (!match)
+        return false;
+      const role = match[1];
+      const name = this._omittedRefNames.get(param.ref) ?? (match[2] ? JSON.parse(`"${match[2]}"`) : '');
+      const locator = this.page.locator(`aria-ref=${param.ref}`) as playwright.Locator & {
+        _expect(expression: string, options: object): Promise<{ matches: boolean, received?: { value?: unknown } }>;
+      };
+      const expectedText = (string: string, normalizeWhiteSpace = false) => [{ string, normalizeWhiteSpace }];
+      const timeout = Math.min(this._pageStateTimeoutMs(), 1000);
+      const [roleResult, nameResult] = await Promise.all([
+        locator._expect('to.have.role', { expectedText: expectedText(role), isNot: false, timeout }),
+        locator._expect('to.have.accessible.name', { expectedText: expectedText(name, true), isNot: false, timeout }),
+      ]).catch(() => [{ matches: false, received: undefined }, { matches: false, received: undefined }]);
+      const syntheticRoleMatches = (role === 'generic' || role === 'iframe') && roleResult.received?.value === '';
+      if (!match[2] && typeof nameResult.received?.value === 'string' && nameResult.received.value.length > 900)
+        this._omittedRefNames.set(param.ref, nameResult.received.value);
+      return (roleResult.matches || syntheticRoleMatches) && nameResult.matches;
+    }));
+    return matches.every(Boolean);
   }
 
   private async _captureAriaSnapshot(): Promise<string> {
     const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
+    for (const ref of this._omittedRefNames.keys()) {
+      if (!snapshot.includes(`[ref=${ref}]`))
+        this._omittedRefNames.delete(ref);
+    }
     this._lastAriaSnapshot = snapshot;
     return snapshot;
   }
