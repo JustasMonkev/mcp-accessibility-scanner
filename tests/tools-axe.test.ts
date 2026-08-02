@@ -14,9 +14,10 @@ type ScanCall = { context: unknown; options: any };
 let lastScan: ScanCall | undefined;
 let scanResult: any;
 
-function makeFrame(countBySelector: Record<string, number>, url = 'https://example.com/', injectable = true) {
+function makeFrame(countBySelector: Record<string, number>, url = 'https://example.com/', injectable = true, name = '') {
   return {
     url: () => url,
+    name: () => name,
     evaluate: async (script: unknown, arg?: unknown) => {
       // Injection: the axe source and its configuration, both plain strings.
       if (typeof script === 'string') {
@@ -303,13 +304,23 @@ describe('axe helpers', () => {
     expect(result.unscannedFrames).toEqual(['https://example.com/widget']);
   });
 
-  it('does not report frames that hold nothing a scan would have covered', async () => {
+  it('reports a failed frame whatever its URL scheme', async () => {
     resetScan();
-    // about:blank and friends have no content to miss.
-    const blank = makeFrame({}, 'about:blank', false);
-    const result = await runAxeScan(pageWithSelectorCounts({}, [blank]));
+    // A srcdoc or scripted about:blank frame reports "about:blank" while holding
+    // a whole document, and injection into a genuinely empty one succeeds - so a
+    // frame that failed is worth reporting regardless of scheme.
+    const srcdoc = makeFrame({}, 'about:blank', false, 'promo');
+    const result = await runAxeScan(pageWithSelectorCounts({}, [srcdoc]));
 
-    expect(result.unscannedFrames).toEqual([]);
+    expect(result.unscannedFrames).toEqual(['about:blank (name="promo")']);
+  });
+
+  it('falls back to the URL alone for an unnamed failed frame', async () => {
+    resetScan();
+    const unnamed = makeFrame({}, '', false);
+    const result = await runAxeScan(pageWithSelectorCounts({}, [unnamed]));
+
+    expect(result.unscannedFrames).toEqual(['about:blank']);
   });
 
   it('reports no unscanned frames when every injection succeeds', async () => {

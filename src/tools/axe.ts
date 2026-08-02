@@ -190,9 +190,19 @@ async function injectAxe(frame: playwright.Frame): Promise<void> {
 // violations, and an unreported one turns into a clean-looking report.
 const childFrameInjectionTimeoutMs = 1000;
 
-// Returns the URLs of the child frames Axe could not be installed in, so the
-// caller can say what the scan did not cover. Frames without an http(s) URL are
-// left out: about:blank and friends hold nothing a scan would have reported.
+// Identifies a frame for the coverage warning. The URL alone is not enough for
+// a srcdoc or scripted about:blank frame - both report "about:blank" while
+// holding a whole document - so the frame's name comes along when it has one.
+function describeFrame(frame: playwright.Frame): string {
+  const url = frame.url() || 'about:blank';
+  const name = frame.name();
+  return name ? `${url} (name="${name}")` : url;
+}
+
+// Returns an identifier for every child frame Axe could not be installed in, so
+// the caller can say what the scan did not cover. Every failure is reported
+// whatever the URL scheme: injection into an empty about:blank frame succeeds,
+// so a frame that reaches here failed for a reason worth knowing about.
 async function injectAxeIntoFrames(page: playwright.Page): Promise<string[]> {
   const mainFrame = page.mainFrame();
   const results = await Promise.all(page.frames().map(async frame => {
@@ -209,12 +219,9 @@ async function injectAxeIntoFrames(page: playwright.Page): Promise<string[]> {
         timeoutId = setTimeout(() => resolve(false), childFrameInjectionTimeoutMs);
       }),
     ]).finally(() => clearTimeout(timeoutId));
-    if (injected)
-      return null;
-    const url = frame.url();
-    return /^https?:/i.test(url) ? url : null;
+    return injected ? null : describeFrame(frame);
   }));
-  return [...new Set(results.filter((url): url is string => url !== null))];
+  return [...new Set(results.filter((frame): frame is string => frame !== null))];
 }
 
 // Runs in the page. Keeps axe's own result shape minus the parts nothing reads:

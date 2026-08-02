@@ -295,6 +295,9 @@ const scanPageMatrix = defineTabTool({
         // includeIncomplete, so a 0 here is indistinguishable from a variant
         // with no needs-review findings. Matches the "-" in the markdown table.
         totalIncomplete: params.includeIncomplete ? result.incomplete.length : null,
+        // Without this a client reading only structured output cannot tell a
+        // partly-scanned variant from a clean one.
+        unscannedFrames: result.unscannedFrames,
         newViolationIds: result.diffFromBaseline.newViolationIds,
         resolvedViolationIds: result.diffFromBaseline.resolvedViolationIds,
         changedRuleIds: Object.keys(result.diffFromBaseline.changedCounts),

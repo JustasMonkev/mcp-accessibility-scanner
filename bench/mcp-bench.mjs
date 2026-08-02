@@ -145,27 +145,32 @@ const scenarios = [
 ];
 
 const results = [];
-for (const scenario of scenarios) {
-  const samples = [];
-  let state;
-  for (let index = 0; index < warmups + iterations; index++) {
-    state = scenario.setup ? await scenario.setup() : undefined;
-    const startedAt = performance.now();
-    await scenario.run(state);
-    const elapsed = performance.now() - startedAt;
-    if (index >= warmups)
-      samples.push(elapsed);
+try {
+  for (const scenario of scenarios) {
+    const samples = [];
+    let state;
+    for (let index = 0; index < warmups + iterations; index++) {
+      state = scenario.setup ? await scenario.setup() : undefined;
+      const startedAt = performance.now();
+      await scenario.run(state);
+      const elapsed = performance.now() - startedAt;
+      if (index >= warmups)
+        samples.push(elapsed);
+    }
+    const stats = summarize(samples);
+    results.push({ name: scenario.name, ...stats });
+    process.stderr.write(`${scenario.name.padEnd(34)} median ${stats.median.toFixed(1).padStart(9)} ms   mean ${stats.mean.toFixed(1).padStart(9)} ms\n`);
   }
-  const stats = summarize(samples);
-  results.push({ name: scenario.name, ...stats });
-  process.stderr.write(`${scenario.name.padEnd(34)} median ${stats.median.toFixed(1).padStart(9)} ms   mean ${stats.mean.toFixed(1).padStart(9)} ms\n`);
+
+  results.push(...await runMicroBenchmarks());
+} finally {
+  // A scenario that throws must not leave the server process, the browser it
+  // launched, or the temporary report directory behind: a few failed runs would
+  // otherwise pile up orphaned Chromiums.
+  await client.close().catch(() => {});
+  await new Promise(resolve => server.close(resolve));
+  fs.rmSync(outputDir, { recursive: true, force: true });
 }
-
-results.push(...await runMicroBenchmarks());
-
-await client.close().catch(() => {});
-await new Promise(resolve => server.close(resolve));
-fs.rmSync(outputDir, { recursive: true, force: true });
 
 const report = {
   label: options.label ?? 'run',
