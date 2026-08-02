@@ -42,6 +42,8 @@ export type TabSnapshot = {
   downloads: { download: playwright.Download, finished: boolean, outputFile: string }[];
 };
 
+class StaleAriaSnapshotError extends Error {}
+
 export class Tab extends EventEmitter<TabEventsInterface> {
   readonly context: Context;
   readonly page: playwright.Page;
@@ -58,6 +60,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   // next tool call will name. Cleared whenever the page it described is gone.
   private _lastAriaSnapshot: string | undefined;
   private _ariaSnapshotGeneration = 0;
+  private _pageGeneration = 0;
 
   private _pageListeners: { event: string, listener: (...args: any[]) => void }[] = [];
 
@@ -80,8 +83,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     // a ref resolved against the page the user has left would target the wrong
     // document.
     listen('framenavigated', (frame: playwright.Frame) => {
-      if (!frame.parentFrame())
+      if (!frame.parentFrame()) {
+        ++this._pageGeneration;
         this._invalidateAriaSnapshot();
+      }
     });
     listen('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
     listen('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
@@ -165,6 +170,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this._recentConsoleMessages.length = 0;
     this._requests.clear();
     this._mainDocumentStatus = undefined;
+    ++this._pageGeneration;
     this._invalidateAriaSnapshot();
   }
 
@@ -272,16 +278,22 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   async captureSnapshot(): Promise<TabSnapshot> {
     let tabSnapshot: TabSnapshot | undefined;
+    const capture = { valid: true };
+    const snapshotGeneration = this._ariaSnapshotGeneration;
     const modalStates = await this._raceAgainstModalStates(async () => {
       const [snapshot, title] = await Promise.all([
         this._withPageStateTimeout(
-            this._captureAriaSnapshot(),
+            this._captureAriaSnapshot(capture),
             'capturing page accessibility snapshot',
         ).catch(error => {
-          logUnhandledError(error);
           // Nothing describes the page any more, and the refs of an older
           // snapshot must not be trusted against it.
-          this._invalidateAriaSnapshot();
+          if (!(error instanceof StaleAriaSnapshotError)) {
+            capture.valid = false;
+            logUnhandledError(error);
+            if (snapshotGeneration === this._ariaSnapshotGeneration)
+              this._invalidateAriaSnapshot();
+          }
           return `# Page snapshot unavailable: ${formatPageStateError(error)}`;
         }),
         this._withPageStateTimeout(
@@ -308,8 +320,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       tabSnapshot.consoleMessages = this._recentConsoleMessages;
       this._recentConsoleMessages = [];
     }
-    if (!tabSnapshot)
+    if (!tabSnapshot) {
+      capture.valid = false;
       this._invalidateAriaSnapshot();
+    }
     return tabSnapshot ?? {
       url: this.page.url(),
       title: '',
@@ -406,11 +420,13 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return matches.every(Boolean);
   }
 
-  private async _captureAriaSnapshot(): Promise<string> {
-    const generation = this._ariaSnapshotGeneration;
+  private async _captureAriaSnapshot(capture = { valid: true }): Promise<string> {
+    const pageGeneration = this._pageGeneration;
     const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
-    if (generation === this._ariaSnapshotGeneration)
-      this._lastAriaSnapshot = snapshot;
+    if (!capture.valid || pageGeneration !== this._pageGeneration)
+      throw new StaleAriaSnapshotError('Page changed while capturing accessibility snapshot.');
+    ++this._ariaSnapshotGeneration;
+    this._lastAriaSnapshot = snapshot;
     return snapshot;
   }
 

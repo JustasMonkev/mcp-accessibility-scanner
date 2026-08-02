@@ -35,12 +35,20 @@ it('compares totals over only the shared end-to-end scenarios', () => {
   fs.writeFileSync(before, JSON.stringify({
     label: 'before',
     totalMedianMs: 110,
-    scenarios: [{ name: 'shared', median: 10 }, { name: 'removed', median: 100 }],
+    scenarios: [
+      { name: 'shared', median: 10 },
+      { name: 'removed', median: 100 },
+      { name: 'micro-shared', median: 1000, micro: true },
+    ],
   }));
   fs.writeFileSync(after, JSON.stringify({
     label: 'after',
     totalMedianMs: 1020,
-    scenarios: [{ name: 'shared', median: 20 }, { name: 'added', median: 1000 }],
+    scenarios: [
+      { name: 'shared', median: 20 },
+      { name: 'added', median: 1000 },
+      { name: 'micro-shared', median: 2000, micro: true },
+    ],
   }));
 
   const output = execFileSync(process.execPath, ['bench/mcp-bench.mjs', '--compare', before, after], {
@@ -48,8 +56,13 @@ it('compares totals over only the shared end-to-end scenarios', () => {
     encoding: 'utf8',
   });
 
-  expect(output).toContain('| TOTAL (end-to-end tool calls) | 10.0');
-  expect(output).toContain('| 20.0');
+  const totalRow = output.split('\n').find(line => line.includes('TOTAL (end-to-end tool calls)'));
+  expect(totalRow?.split('|').map(cell => cell.trim())).toEqual([
+    '', 'TOTAL (end-to-end tool calls)', '10.0', '20.0', '+100.0%', '0.50x', '',
+  ]);
+  expect(output).toMatch(/^\| shared\s+\|/m);
+  expect(output).not.toMatch(/^\| added\s+\|/m);
+  expect(output).not.toMatch(/^\| removed\s+\|/m);
   expect(output).not.toContain('110.0');
   expect(output).not.toContain('1020.0');
 });

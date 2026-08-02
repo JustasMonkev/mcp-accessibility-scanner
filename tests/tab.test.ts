@@ -413,6 +413,80 @@ describe('Tab', () => {
       expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
     });
 
+    it('does not return an accessibility snapshot captured before navigation', async () => {
+      let resolveSnapshot!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(resolve => { resolveSnapshot = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const snapshotPromise = tab.captureSnapshot();
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      resolveSnapshot('button "Old page" [ref=1]');
+      const snapshot = await snapshotPromise;
+
+      expect(snapshot.ariaSnapshot).toContain('Page snapshot unavailable');
+      expect(snapshot.ariaSnapshot).not.toContain('Old page');
+    });
+
+    it('does not invalidate a newer overlapping snapshot when an old capture resolves', async () => {
+      let resolveOld!: (snapshot: string) => void;
+      let resolveFresh!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn()
+          .mockReturnValueOnce(new Promise(resolve => { resolveOld = resolve; }))
+          .mockReturnValueOnce(new Promise(resolve => { resolveFresh = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const oldCapture = tab.captureSnapshot();
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      const freshCapture = tab.captureSnapshot();
+      resolveFresh('button "Fresh page" [ref=2]');
+      expect((await freshCapture).ariaSnapshot).toContain('Fresh page');
+      resolveOld('button "Old page" [ref=1]');
+      expect((await oldCapture).ariaSnapshot).toContain('Page snapshot unavailable');
+
+      locatorSnapshot = 'button "Fresh page" [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=3]');
+      await tab.refLocators([{ element: 'Fresh page', ref: '2' }]);
+      expect(mockPage.ariaSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('does not invalidate a newer overlapping snapshot when an old capture times out', async () => {
+      vi.useFakeTimers();
+      mockContext.config.timeouts.defaultTimeout = 25;
+      mockPage.ariaSnapshot = vi.fn()
+          .mockReturnValueOnce(new Promise(() => {}))
+          .mockResolvedValueOnce('button "Fresh page" [ref=2]');
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const oldCapture = tab.captureSnapshot();
+      const freshCapture = tab.captureSnapshot();
+      expect((await freshCapture).ariaSnapshot).toContain('Fresh page');
+      await vi.advanceTimersByTimeAsync(25);
+      expect((await oldCapture).ariaSnapshot).toContain('Page snapshot unavailable');
+
+      locatorSnapshot = 'button "Fresh page" [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=3]');
+      await tab.refLocators([{ element: 'Fresh page', ref: '2' }]);
+      expect(mockPage.ariaSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('does not cache a snapshot completed after a modal interrupts capture', async () => {
+      let resolveSnapshot!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(resolve => { resolveSnapshot = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const pending = tab.captureSnapshot();
+      const modal = { type: 'dialog', description: 'Dialog', dialog: {} } as any;
+      tab.setModalState(modal);
+      expect((await pending).ariaSnapshot).toBe('');
+      tab.clearModalState(modal);
+      resolveSnapshot('button "Unseen" [ref=2]');
+      await Promise.resolve();
+
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Current" [ref=3]');
+      await expect(tab.refLocators([{ element: 'Unseen', ref: '2' }])).rejects.toThrow('Ref 2 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
     it('caches overlapping snapshots in completion order', async () => {
       let resolveFirst!: (snapshot: string) => void;
       let resolveSecond!: (snapshot: string) => void;
