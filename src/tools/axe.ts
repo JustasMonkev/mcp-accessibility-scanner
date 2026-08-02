@@ -1,7 +1,7 @@
 import axe from 'axe-core';
 import { z } from 'zod';
 
-import { truncateDataUrl, truncateDataUrls } from '../utils/dataUrl.js';
+import { truncateDataUrls } from '../utils/dataUrl.js';
 
 import type * as playwright from 'playwright';
 
@@ -257,7 +257,7 @@ const maxFrameNameLength = 80;
 // too, and this string ends up in tool text, structured content and JSON
 // reports alike.
 function describeFrame(frame: playwright.Frame): string {
-  const url = truncateDataUrl(frame.url()) || 'about:blank';
+  const url = truncateDataUrls(frame.url()) || 'about:blank';
   const name = truncateDataUrls(frame.name().replace(/\s+/g, ' ').trim()).slice(0, maxFrameNameLength);
   return name ? `${url} (name="${name}")` : url;
 }
@@ -292,8 +292,6 @@ async function isFrameInScope(
   include: readonly string[],
   exclude: readonly string[]
 ): Promise<boolean> {
-  if (!include.length && !exclude.length)
-    return true;
   let includeMatched = !include.length;
   for (let current = frame; current.parentFrame(); current = current.parentFrame()!) {
     // Bounded like every other child-frame read: `frameElement()` takes no
@@ -306,7 +304,7 @@ async function isFrameInScope(
       void elementPromise.then(late => late?.dispose().catch(() => {}));
       return true;
     }
-    let matches: { included: boolean, excluded: boolean } | null;
+    let matches: { included: boolean, excluded: boolean, hidden: boolean } | null;
     try {
       matches = await withFrameTimeout(element.evaluate((node, scope) => {
         const matchesAny = (selectors: string[]) => selectors.some(selector => {
@@ -326,13 +324,30 @@ async function isFrameInScope(
             return false;
           }
         });
-        return { included: matchesAny(scope.include), excluded: matchesAny(scope.exclude) };
+        let hidden = false;
+        for (let current: Element | null = node as Element; current;) {
+          const ariaHidden = current.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true';
+          const displayNone = getComputedStyle(current).display === 'none';
+          if (ariaHidden || displayNone || (current as HTMLElement).hidden) {
+            hidden = true;
+            break;
+          }
+          const root = current.getRootNode();
+          current = current.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+        }
+        const visibility = getComputedStyle(node as Element).visibility;
+        hidden ||= visibility === 'hidden' || visibility === 'collapse';
+        return { included: matchesAny(scope.include), excluded: matchesAny(scope.exclude), hidden };
       }, { include: [...include], exclude: [...exclude] }), null);
     } finally {
       await element.dispose().catch(() => {});
     }
     if (!matches)
       return true;
+    // Axe does not traverse a frame hidden from the accessibility tree, so a
+    // failed injection there is not missing coverage.
+    if (matches.hidden)
+      return false;
     // Exclude wins wherever it matches: it drops the whole subtree under it.
     if (matches.excluded)
       return false;

@@ -393,6 +393,47 @@ describe('Tab', () => {
       expect(snapshot.ariaSnapshot).toContain('capturing page accessibility snapshot');
     });
 
+    it('does not cache an accessibility snapshot that resolves after its timeout', async () => {
+      vi.useFakeTimers();
+      mockContext.config.timeouts.defaultTimeout = 25;
+      let resolveSnapshot!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(resolve => { resolveSnapshot = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const snapshotPromise = tab.captureSnapshot();
+      await vi.advanceTimersByTimeAsync(25);
+      await snapshotPromise;
+      resolveSnapshot('button "Submit" [ref=1]');
+      await Promise.resolve();
+
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=2]');
+      await expect(
+          tab.refLocators([{ element: 'Submit', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('caches overlapping snapshots in completion order', async () => {
+      let resolveFirst!: (snapshot: string) => void;
+      let resolveSecond!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn()
+          .mockReturnValueOnce(new Promise(resolve => { resolveFirst = resolve; }))
+          .mockReturnValueOnce(new Promise(resolve => { resolveSecond = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const first = tab.captureSnapshot();
+      const second = tab.captureSnapshot();
+      resolveSecond('button "B" [ref=2]');
+      await second;
+      resolveFirst('button "A" [ref=1]');
+      await first;
+
+      locatorSnapshot = 'button "A" [ref=1]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=3]');
+      await tab.refLocators([{ element: 'A', ref: '1' }]);
+      expect(mockPage.ariaSnapshot).not.toHaveBeenCalled();
+    });
+
     it('keeps data URL payloads in captured accessibility snapshots for session logs', async () => {
       const payload = '<svg viewBox="0 0 10 10"><text>Hello</text></svg>';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- link "Example" [ref=e1]:\n  - /url: data:image/svg+xml,${payload}`);

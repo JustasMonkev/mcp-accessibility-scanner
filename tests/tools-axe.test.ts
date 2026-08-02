@@ -18,7 +18,7 @@ const axeVersion = axeCore.version;
 let lastScan: ScanCall | undefined;
 let scanResult: any;
 
-type FrameScope = { included: boolean, excluded: boolean };
+type FrameScope = { included: boolean, excluded: boolean, hidden?: boolean };
 
 function makeFrame(
   countBySelector: Record<string, number>,
@@ -424,6 +424,27 @@ describe('axe helpers', () => {
     const result = await runAxeScan(pageWithSelectorCounts({}, [dataFrame]));
 
     expect(result.unscannedFrames).toEqual(['data:text/html;base64,...']);
+  });
+
+  it('truncates a data URL embedded in a failed frame URL', async () => {
+    resetScan();
+    const payload = 'A'.repeat(5000);
+    const frame = makeFrame({}, `https://example.com/frame?src=data:text/html;base64,${payload}`, false);
+    const result = await runAxeScan(pageWithSelectorCounts({}, [frame]));
+
+    expect(result.unscannedFrames).toEqual(['https://example.com/frame?src=data:text/html;base64,...']);
+  });
+
+  it('does not warn about a failed frame hidden from the accessibility tree', async () => {
+    resetScan();
+    const hidden = makeFrame({}, 'https://example.com/hidden', false, '', true, {
+      included: true,
+      excluded: false,
+      hidden: true,
+    });
+    const result = await runAxeScan(pageWithSelectorCounts({}, [hidden]));
+
+    expect(result.unscannedFrames).toEqual([]);
   });
 
   it('does not warn about a frame the caller scoped out of the scan', async () => {

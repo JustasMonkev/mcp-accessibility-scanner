@@ -57,6 +57,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   // The aria snapshot last handed to the caller; the refs in it are the refs the
   // next tool call will name. Cleared whenever the page it described is gone.
   private _lastAriaSnapshot: string | undefined;
+  private _ariaSnapshotGeneration = 0;
 
   private _pageListeners: { event: string, listener: (...args: any[]) => void }[] = [];
 
@@ -80,7 +81,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     // document.
     listen('framenavigated', (frame: playwright.Frame) => {
       if (!frame.parentFrame())
-        this._lastAriaSnapshot = undefined;
+        this._invalidateAriaSnapshot();
     });
     listen('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
     listen('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
@@ -164,6 +165,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this._recentConsoleMessages.length = 0;
     this._requests.clear();
     this._mainDocumentStatus = undefined;
+    this._invalidateAriaSnapshot();
+  }
+
+  private _invalidateAriaSnapshot() {
+    ++this._ariaSnapshotGeneration;
     this._lastAriaSnapshot = undefined;
   }
 
@@ -275,7 +281,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
           logUnhandledError(error);
           // Nothing describes the page any more, and the refs of an older
           // snapshot must not be trusted against it.
-          this._lastAriaSnapshot = undefined;
+          this._invalidateAriaSnapshot();
           return `# Page snapshot unavailable: ${formatPageStateError(error)}`;
         }),
         this._withPageStateTimeout(
@@ -302,6 +308,8 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       tabSnapshot.consoleMessages = this._recentConsoleMessages;
       this._recentConsoleMessages = [];
     }
+    if (!tabSnapshot)
+      this._invalidateAriaSnapshot();
     return tabSnapshot ?? {
       url: this.page.url(),
       title: '',
@@ -399,8 +407,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   private async _captureAriaSnapshot(): Promise<string> {
+    const generation = this._ariaSnapshotGeneration;
     const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
-    this._lastAriaSnapshot = snapshot;
+    if (generation === this._ariaSnapshotGeneration)
+      this._lastAriaSnapshot = snapshot;
     return snapshot;
   }
 
