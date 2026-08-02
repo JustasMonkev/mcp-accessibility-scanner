@@ -18,13 +18,25 @@ const axeVersion = axeCore.version;
 let lastScan: ScanCall | undefined;
 let scanResult: any;
 
-function makeFrame(countBySelector: Record<string, number>, url = 'https://example.com/', injectable = true, name = '', keepsAxe = true, inScope = true) {
+type FrameScope = { included: boolean, excluded: boolean };
+
+function makeFrame(
+  countBySelector: Record<string, number>,
+  url = 'https://example.com/',
+  injectable = true,
+  name = '',
+  keepsAxe = true,
+  scope: FrameScope = { included: true, excluded: false }
+) {
   return {
     url: () => url,
     name: () => name,
-    // The scope check reads the owning iframe element in the parent document.
+    // Set by pageWithSelectorCounts, or by hand to build a nested frame chain.
+    parentFrame: () => null as any,
+    // The scope check reads the owning iframe element in the parent document,
+    // walking up one document per ancestor frame.
     frameElement: async () => ({
-      evaluate: async () => inScope,
+      evaluate: async () => scope,
       dispose: async () => undefined,
     }),
     evaluate: async (script: unknown, arg?: unknown) => {
@@ -50,11 +62,20 @@ function makeFrame(countBySelector: Record<string, number>, url = 'https://examp
 
 function pageWithSelectorCounts(countBySelector: Record<string, number> = {}, childFrames: any[] = []) {
   const frame = makeFrame(countBySelector);
-  return {
+  const page = {
     ...frame,
     frames: () => [frame, ...childFrames],
     mainFrame: () => frame,
   } as any;
+  // The main frame has no parent; a child hangs off it unless a test already
+  // placed it deeper in a chain of its own.
+  page.parentFrame = () => null;
+  frame.parentFrame = () => null;
+  for (const child of childFrames) {
+    if (!child.parentFrame())
+      child.parentFrame = () => frame;
+  }
+  return page;
 }
 
 function resetScan() {
@@ -410,7 +431,7 @@ describe('axe helpers', () => {
     // excludeSelectors: ["iframe.chat-widget"] is the documented way to drop a
     // flaky third-party widget. Warning that the widget went unscanned would be
     // a false alarm about content the caller removed on purpose.
-    const excluded = makeFrame({ '#main': 1, 'iframe.chat-widget': 1 }, 'https://widget.example/', false, '', true, false);
+    const excluded = makeFrame({ '#main': 1, 'iframe.chat-widget': 1 }, 'https://widget.example/', false, '', true, { included: false, excluded: true });
     const result = await runAxeScan(
         pageWithSelectorCounts({ '#main': 1, 'iframe.chat-widget': 1 }, [excluded]),
         { exclude: ['iframe.chat-widget'] },
@@ -421,13 +442,46 @@ describe('axe helpers', () => {
 
   it('still warns about an in-scope frame when a scope is set', async () => {
     resetScan();
-    const inScope = makeFrame({ '#main': 1 }, 'https://widget.example/', false, '', true, true);
+    const inScope = makeFrame({ '#main': 1 }, 'https://widget.example/', false, '', true, { included: true, excluded: false });
     const result = await runAxeScan(
         pageWithSelectorCounts({ '#main': 1 }, [inScope]),
         { include: ['#main'] },
     );
 
     expect(result.unscannedFrames).toEqual(['https://widget.example/']);
+  });
+
+  it('keeps a nested frame in scope when the include names an ancestor frame', async () => {
+    resetScan();
+    // #main holds iframe A, which holds iframe B. B's own iframe element lives
+    // in A's document, where `closest('#main')` cannot reach - but Axe's context
+    // descends into B all the same, so a failed B is a real coverage gap.
+    const outer = makeFrame({ '#main': 1 }, 'https://example.com/outer', true, '', true, { included: true, excluded: false });
+    const nested = makeFrame({ '#main': 1 }, 'https://example.com/nested', false, '', true, { included: false, excluded: false });
+    nested.parentFrame = () => outer as any;
+
+    const result = await runAxeScan(
+        pageWithSelectorCounts({ '#main': 1 }, [outer, nested]),
+        { include: ['#main'] },
+    );
+
+    expect(result.unscannedFrames).toEqual(['https://example.com/nested']);
+  });
+
+  it('drops a nested frame when an ancestor frame is excluded', async () => {
+    resetScan();
+    // The mirror case: excluding the outer frame removes everything below it,
+    // so warning about the nested document would be the same false alarm.
+    const outer = makeFrame({ 'iframe.widget': 1 }, 'https://example.com/outer', true, '', true, { included: false, excluded: true });
+    const nested = makeFrame({ 'iframe.widget': 1 }, 'https://example.com/nested', false, '', true, { included: false, excluded: false });
+    nested.parentFrame = () => outer as any;
+
+    const result = await runAxeScan(
+        pageWithSelectorCounts({ 'iframe.widget': 1 }, [outer, nested]),
+        { exclude: ['iframe.widget'] },
+    );
+
+    expect(result.unscannedFrames).toEqual([]);
   });
 
   it('rethrows scan failures untouched', async () => {

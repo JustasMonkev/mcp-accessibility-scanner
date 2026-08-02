@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { z } from 'zod';
+import type * as playwright from 'playwright';
 import { defineTabTool } from './tool.js';
 import { sanitizeForFilePath } from '../utils/fileUtils.js';
 import {
@@ -94,12 +95,39 @@ const scanPageMatrixSchema = z.object({
   ...axeRuleSchemaShape,
 });
 
-function normalizeMedia(variantMedia: z.output<typeof variantSchema>['media'] | undefined) {
+type MediaState = VariantResult['applied']['media'];
+
+// Playwright has no getter for a page's media emulation, and passing null to
+// emulateMedia resets a feature to the browser default rather than to whatever
+// the context was created with: a context made with `colorScheme: 'dark'` reads
+// light again after a null. So the effective state is measured from the page
+// before the first variant and used both as the per-variant fallback and to put
+// the page back afterwards - the same way the viewport and zoom already are.
+async function readPageState(page: playwright.Page): Promise<{ zoom: string, media: MediaState }> {
+  return await page.evaluate(() => ({
+    zoom: document.documentElement.style.zoom || '',
+    media: {
+      colorScheme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' as const : 'light' as const,
+      forcedColors: matchMedia('(forced-colors: active)').matches ? 'active' as const : 'none' as const,
+      reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduce' as const : 'no-preference' as const,
+      // `less` and `custom` are values emulateMedia cannot express. Leaving the
+      // feature un-emulated reproduces them exactly, naming a value cannot.
+      contrast: matchMedia('(prefers-contrast: more)').matches
+        ? 'more' as const
+        : matchMedia('(prefers-contrast: no-preference)').matches ? 'no-preference' as const : null,
+    },
+  }));
+}
+
+// An unset property means "whatever this page had before the scan started", not
+// "the browser default" - undoing the previous variant must not also undo the
+// media emulation the session was configured with.
+function normalizeMedia(variantMedia: z.output<typeof variantSchema>['media'] | undefined, original: MediaState): MediaState {
   return {
-    colorScheme: variantMedia?.colorScheme ?? null,
-    forcedColors: variantMedia?.forcedColors ?? null,
-    contrast: variantMedia?.contrast ?? null,
-    reducedMotion: variantMedia?.reducedMotion ?? null,
+    colorScheme: variantMedia?.colorScheme ?? original.colorScheme,
+    forcedColors: variantMedia?.forcedColors ?? original.forcedColors,
+    contrast: variantMedia?.contrast ?? original.contrast,
+    reducedMotion: variantMedia?.reducedMotion ?? original.reducedMotion,
   };
 }
 
@@ -155,7 +183,7 @@ const scanPageMatrix = defineTabTool({
       width: window.innerWidth,
       height: window.innerHeight,
     }));
-    const originalZoom = await tab.page.evaluate(() => document.documentElement.style.zoom || '');
+    const { zoom: originalZoom, media: originalMedia } = await readPageState(tab.page);
 
     const variantResults: VariantResult[] = [];
     try {
@@ -167,13 +195,18 @@ const scanPageMatrix = defineTabTool({
         // would overwrite a zoom applied alongside it, and the variant would be
         // scanned - and reported - at a zoom it never actually had.
         await tab.page.setViewportSize(variant.viewport ?? originalViewport);
-        await tab.page.emulateMedia(normalizeMedia(variant.media));
+        await tab.page.emulateMedia(normalizeMedia(variant.media, originalMedia));
+
+        // Before the zoom, not after it. Viewport and media emulation survive a
+        // reload, but the zoom is an inline style on documentElement and the new
+        // document does not have it - applying it first would scan the variant
+        // unzoomed while `applied.zoomPercent` still claimed the requested zoom.
+        if (params.reloadBetweenVariants)
+          await tab.page.reload({ waitUntil: 'domcontentloaded' });
+
         await tab.page.evaluate(zoom => {
           document.documentElement.style.zoom = zoom;
         }, variant.zoomPercent !== undefined ? `${variant.zoomPercent}%` : originalZoom);
-
-        if (params.reloadBetweenVariants)
-          await tab.page.reload({ waitUntil: 'domcontentloaded' });
 
         await tab.waitForTimeout(params.waitAfterApplyMs);
 
@@ -191,7 +224,7 @@ const scanPageMatrix = defineTabTool({
           name: variant.name,
           applied: {
             viewport: variant.viewport ?? null,
-            media: normalizeMedia(variant.media),
+            media: normalizeMedia(variant.media, originalMedia),
             zoomPercent: variant.zoomPercent ?? null,
           },
           summary: summarizeAxeViolations(violations.trimmed),
@@ -221,12 +254,7 @@ const scanPageMatrix = defineTabTool({
     } finally {
       // Same ordering as the apply path, and for the same reason.
       await tab.page.setViewportSize(originalViewport);
-      await tab.page.emulateMedia({
-        colorScheme: null,
-        forcedColors: null,
-        contrast: null,
-        reducedMotion: null,
-      });
+      await tab.page.emulateMedia(originalMedia);
       await tab.page.evaluate(zoom => {
         document.documentElement.style.zoom = zoom;
       }, originalZoom);

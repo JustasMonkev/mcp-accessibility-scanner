@@ -256,10 +256,14 @@ async function hasAxe(frame: playwright.Frame): Promise<boolean> {
 // documented recipe for dropping a flaky third-party widget - does not produce a
 // warning about the very frame it removed.
 //
+// The whole ancestor chain is walked, not just the immediate parent document,
+// because `closest()` stops at a frame boundary while an Axe context does not:
+// `includeSelectors: ["#main"]` covers an iframe nested inside an iframe inside
+// `#main`, and an exclude naming an outer frame drops everything below it.
+//
 // Only a positive determination suppresses the warning. An unreachable frame
-// element, an unresolvable selector or a nested frame whose exclusion lives in a
-// grandparent document all fall through to reporting, so no genuine gap is
-// hidden by a check that could not answer.
+// element or a probe that cannot answer in time falls through to reporting, so
+// no genuine gap is hidden by a check that failed to resolve.
 async function isFrameInScope(
   frame: playwright.Frame,
   include: readonly string[],
@@ -267,25 +271,34 @@ async function isFrameInScope(
 ): Promise<boolean> {
   if (!include.length && !exclude.length)
     return true;
-  const element = await frame.frameElement().catch(() => null);
-  if (!element)
-    return true;
-  try {
-    return await withFrameTimeout(element.evaluate((node, scope) => {
-      const matchesAny = (selectors: string[]) => selectors.some(selector => {
-        try {
-          return !!(node as Element).closest(selector);
-        } catch {
-          return false;
-        }
-      });
-      if (scope.exclude.length && matchesAny(scope.exclude))
-        return false;
-      return scope.include.length ? matchesAny(scope.include) : true;
-    }, { include: [...include], exclude: [...exclude] }), true);
-  } finally {
-    await element.dispose().catch(() => {});
+  let includeMatched = !include.length;
+  for (let current = frame; current.parentFrame(); current = current.parentFrame()!) {
+    const element = await current.frameElement().catch(() => null);
+    if (!element)
+      return true;
+    let matches: { included: boolean, excluded: boolean } | null;
+    try {
+      matches = await withFrameTimeout(element.evaluate((node, scope) => {
+        const matchesAny = (selectors: string[]) => selectors.some(selector => {
+          try {
+            return !!(node as Element).closest(selector);
+          } catch {
+            return false;
+          }
+        });
+        return { included: matchesAny(scope.include), excluded: matchesAny(scope.exclude) };
+      }, { include: [...include], exclude: [...exclude] }), null);
+    } finally {
+      await element.dispose().catch(() => {});
+    }
+    if (!matches)
+      return true;
+    // Exclude wins wherever it matches: it drops the whole subtree under it.
+    if (matches.excluded)
+      return false;
+    includeMatched ||= matches.included;
   }
+  return includeMatched;
 }
 
 // Returns an identifier for every child frame Axe could not be installed in, so
