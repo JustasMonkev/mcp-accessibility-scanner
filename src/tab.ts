@@ -404,6 +404,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   private async _refsMatchSnapshot(params: { ref: string }[], snapshot: string): Promise<boolean> {
+    const pageGeneration = this._pageGeneration;
     const lines = snapshot.split('\n');
     const timeout = Math.min(this._pageStateTimeoutMs(), 1000);
     const matches = await Promise.all(params.map(async param => {
@@ -417,7 +418,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       // omitted from rendering, so a semantic change still changes this line.
       return current.split('\n', 1)[0]?.trim() === cached.trim();
     }));
-    return matches.every(Boolean);
+    return pageGeneration === this._pageGeneration && matches.every(Boolean);
   }
 
   private async _captureAriaSnapshot(capture = { valid: true }): Promise<string> {

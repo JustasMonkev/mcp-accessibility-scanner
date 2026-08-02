@@ -595,6 +595,24 @@ describe('Tab', () => {
       expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
     });
 
+    it('re-captures when the page navigates during cached ref validation', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      await tab.captureSnapshot();
+      let resolveValidation!: (snapshot: string) => void;
+      mockPage.locator = vi.fn().mockReturnValue({
+        ariaSnapshot: vi.fn().mockReturnValue(new Promise(resolve => { resolveValidation = resolve; })),
+        describe: vi.fn().mockReturnValue({}),
+      });
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "New page" [ref=2]');
+
+      const locators = tab.refLocators([{ element: 'Submit', ref: '1' }]);
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      resolveValidation('button "Submit" [ref=1]');
+
+      await expect(locators).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
     it('does not accept a generated locator that only partially matches the old name', async () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Save" [ref=1]');
