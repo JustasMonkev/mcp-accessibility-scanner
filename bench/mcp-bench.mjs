@@ -55,7 +55,6 @@ const transport = new StdioClientTransport({
   cwd: projectRoot,
 });
 const client = new Client({ name: 'mcp-bench', version: '1.0.0' });
-await client.connect(transport);
 
 /**
  * Scenarios run in declaration order; `setup` is excluded from the timing so a
@@ -146,6 +145,10 @@ const scenarios = [
 
 const results = [];
 try {
+  // Inside the guard: a missing or unbuilt --server rejects here, and the temp
+  // output directory has already been created.
+  await client.connect(transport);
+
   for (const scenario of scenarios) {
     const samples = [];
     let state;
@@ -301,26 +304,34 @@ function format(value) {
 
 function parseArgs(argv) {
   const parsed = {};
+  // Every flag takes a value, and a missing one must fail here rather than as a
+  // silently skipped report after a full benchmark run.
+  const value = (index, flag) => {
+    const next = argv[index];
+    if (next === undefined || next.startsWith('--'))
+      throw new Error(`${flag} needs a value, got: ${next ?? '(nothing)'}`);
+    return next;
+  };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === '--compare')
-      parsed.compare = [argv[++index], argv[++index]];
+      parsed.compare = [value(++index, arg), value(++index, arg)];
     else if (arg === '--out')
-      parsed.out = argv[++index];
+      parsed.out = value(++index, arg);
     else if (arg === '--label')
-      parsed.label = argv[++index];
+      parsed.label = value(++index, arg);
     else if (arg === '--server')
-      parsed.server = argv[++index];
+      parsed.server = value(++index, arg);
     else if (arg === '--lib')
-      parsed.lib = argv[++index];
+      parsed.lib = value(++index, arg);
     else if (arg === '--browser')
-      parsed.browser = argv[++index];
+      parsed.browser = value(++index, arg);
     else if (arg === '--executable-path')
-      parsed.executablePath = argv[++index];
+      parsed.executablePath = value(++index, arg);
     else if (arg === '--iterations')
-      parsed.iterations = wholeNumber(argv[++index], arg, 1);
+      parsed.iterations = wholeNumber(value(++index, arg), arg, 1);
     else if (arg === '--warmups')
-      parsed.warmups = wholeNumber(argv[++index], arg, 0);
+      parsed.warmups = wholeNumber(value(++index, arg), arg, 0);
     else
       throw new Error(`Unknown argument: ${arg}`);
   }

@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import axeCore from 'axe-core';
+
 import { assertRuleOptionsValid, axeRuleSchemaShape, axeTagValues, defaultAxeTags, dedupeAxeNodes, prepareAxeResults, runAxeScan, summarizeAxeViolations, trimAxeResults } from '../src/tools/axe.js';
 
 // The scan drives the page itself: axe-core is injected into every frame, then
@@ -11,10 +13,12 @@ import { assertRuleOptionsValid, axeRuleSchemaShape, axeTagValues, defaultAxeTag
 // (-1 for CSS the browser rejects).
 type ScanCall = { context: unknown; options: any };
 
+const axeVersion = axeCore.version;
+
 let lastScan: ScanCall | undefined;
 let scanResult: any;
 
-function makeFrame(countBySelector: Record<string, number>, url = 'https://example.com/', injectable = true, name = '') {
+function makeFrame(countBySelector: Record<string, number>, url = 'https://example.com/', injectable = true, name = '', keepsAxe = true) {
   return {
     url: () => url,
     name: () => name,
@@ -25,8 +29,10 @@ function makeFrame(countBySelector: Record<string, number>, url = 'https://examp
           throw new Error('Execution context was destroyed');
         return undefined;
       }
+      // The post-injection coverage probe: a frame that took the injection
+      // reports the version, one that did not reports nothing.
       if (arg === undefined)
-        return undefined;
+        return injectable && keepsAxe ? axeVersion : undefined;
       if (Array.isArray(arg))
         return arg.map(selector => countBySelector[selector as string] ?? 0);
       lastScan = arg as ScanCall;
@@ -329,6 +335,40 @@ describe('axe helpers', () => {
     const result = await runAxeScan(pageWithSelectorCounts({}, [healthy]));
 
     expect(result.unscannedFrames).toEqual([]);
+  });
+
+  it('reports a frame that took the injection and then navigated away from it', async () => {
+    resetScan();
+    // A frame that navigates while a slower sibling is still injecting has a new
+    // document with no Axe in it, so the run below silently skips it. The
+    // coverage check runs against the frames as they are, not against what the
+    // injection returned.
+    const navigated = makeFrame({}, 'https://example.com/widget', true, '', false);
+    const result = await runAxeScan(pageWithSelectorCounts({}, [navigated]));
+
+    expect(result.unscannedFrames).toEqual(['https://example.com/widget']);
+  });
+
+  it('counts every failed frame, even when they describe identically', async () => {
+    resetScan();
+    // Two unnamed about:blank frames are two documents that went unscanned;
+    // collapsing them would under-count the coverage gap.
+    const first = makeFrame({}, 'about:blank', false);
+    const second = makeFrame({}, 'about:blank', false);
+    const result = await runAxeScan(pageWithSelectorCounts({}, [first, second]));
+
+    expect(result.unscannedFrames).toEqual(['about:blank', 'about:blank']);
+  });
+
+  it('truncates a data URL frame rather than echoing the whole document', async () => {
+    resetScan();
+    // A data: frame's URL is its document, and this string reaches tool text,
+    // structured content and the JSON reports.
+    const payload = 'A'.repeat(5000);
+    const dataFrame = makeFrame({}, `data:text/html;base64,${payload}`, false);
+    const result = await runAxeScan(pageWithSelectorCounts({}, [dataFrame]));
+
+    expect(result.unscannedFrames).toEqual(['data:text/html;base64,...']);
   });
 
   it('rethrows scan failures untouched', async () => {

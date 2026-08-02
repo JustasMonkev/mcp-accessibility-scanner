@@ -107,19 +107,6 @@ function safeIsoTimestampForFileName() {
   return sanitizeForFilePath(new Date().toISOString());
 }
 
-/**
- * Viewport, media and zoom are independent, so they are applied together rather
- * than in three sequential round trips. Every one of them is awaited even after
- * one fails, so a second failure cannot surface as an unhandled rejection once
- * the first has already propagated.
- */
-async function applyTogether(operations: Promise<unknown>[]): Promise<void> {
-  const results = await Promise.allSettled(operations);
-  const failure = results.find(result => result.status === 'rejected');
-  if (failure)
-    throw failure.reason;
-}
-
 function countNodesByRule(violations: { id: string; nodes: unknown[] }[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const violation of violations)
@@ -175,13 +162,15 @@ const scanPageMatrix = defineTabTool({
       for (const variant of variants) {
         // Apply each property once per variant: the variant value when set,
         // otherwise the original page state (undoing the previous variant).
-        await applyTogether([
-          tab.page.setViewportSize(variant.viewport ?? originalViewport),
-          tab.page.emulateMedia(normalizeMedia(variant.media)),
-          tab.page.evaluate(zoom => {
-            document.documentElement.style.zoom = zoom;
-          }, variant.zoomPercent !== undefined ? `${variant.zoomPercent}%` : originalZoom),
-        ]);
+        // Strictly in this order, not in parallel: a page that reacts to a
+        // viewport or media change by writing document.documentElement.style.zoom
+        // would overwrite a zoom applied alongside it, and the variant would be
+        // scanned - and reported - at a zoom it never actually had.
+        await tab.page.setViewportSize(variant.viewport ?? originalViewport);
+        await tab.page.emulateMedia(normalizeMedia(variant.media));
+        await tab.page.evaluate(zoom => {
+          document.documentElement.style.zoom = zoom;
+        }, variant.zoomPercent !== undefined ? `${variant.zoomPercent}%` : originalZoom);
 
         if (params.reloadBetweenVariants)
           await tab.page.reload({ waitUntil: 'domcontentloaded' });
@@ -230,18 +219,17 @@ const scanPageMatrix = defineTabTool({
       for (const result of variantResults)
         result.diffFromBaseline = computeDiffFromBaseline(baselineCounts, result.nodeCountByRuleId);
     } finally {
-      await applyTogether([
-        tab.page.setViewportSize(originalViewport),
-        tab.page.emulateMedia({
-          colorScheme: null,
-          forcedColors: null,
-          contrast: null,
-          reducedMotion: null,
-        }),
-        tab.page.evaluate(zoom => {
-          document.documentElement.style.zoom = zoom;
-        }, originalZoom),
-      ]);
+      // Same ordering as the apply path, and for the same reason.
+      await tab.page.setViewportSize(originalViewport);
+      await tab.page.emulateMedia({
+        colorScheme: null,
+        forcedColors: null,
+        contrast: null,
+        reducedMotion: null,
+      });
+      await tab.page.evaluate(zoom => {
+        document.documentElement.style.zoom = zoom;
+      }, originalZoom);
     }
 
     const report = {

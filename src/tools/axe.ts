@@ -1,6 +1,8 @@
 import axe from 'axe-core';
 import { z } from 'zod';
 
+import { truncateDataUrl } from '../utils/dataUrl.js';
+
 import type * as playwright from 'playwright';
 
 export const axeTagValues = [
@@ -193,35 +195,57 @@ const childFrameInjectionTimeoutMs = 1000;
 // Identifies a frame for the coverage warning. The URL alone is not enough for
 // a srcdoc or scripted about:blank frame - both report "about:blank" while
 // holding a whole document - so the frame's name comes along when it has one.
+// The URL is truncated: a data: frame's URL is the document, and this string
+// ends up in tool text, structured content and JSON reports alike.
 function describeFrame(frame: playwright.Frame): string {
-  const url = frame.url() || 'about:blank';
+  const url = truncateDataUrl(frame.url()) || 'about:blank';
   const name = frame.name();
   return name ? `${url} (name="${name}")` : url;
+}
+
+// Whether this frame currently holds the Axe build about to be run. A frame that
+// navigated after its injection - or that appeared since - answers no.
+async function hasAxe(frame: playwright.Frame): Promise<boolean> {
+  return await frame.evaluate(() => (window as any).axe?.version).catch(() => undefined) === axe.version;
 }
 
 // Returns an identifier for every child frame Axe could not be installed in, so
 // the caller can say what the scan did not cover. Every failure is reported
 // whatever the URL scheme: injection into an empty about:blank frame succeeds,
 // so a frame that reaches here failed for a reason worth knowing about.
+//
+// Duplicates are kept: two unnamed about:blank frames that both fail are two
+// documents that went unscanned, and collapsing them would under-count.
 async function injectAxeIntoFrames(page: playwright.Page): Promise<string[]> {
   const mainFrame = page.mainFrame();
-  const results = await Promise.all(page.frames().map(async frame => {
+  await Promise.all(page.frames().map(async frame => {
     if (frame === mainFrame) {
       await injectAxe(frame);
-      return null;
+      return;
     }
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     // Both branches resolve: a rejected loser of the race would surface as an
     // unhandled rejection once the winner has already been awaited.
-    const injected = await Promise.race([
-      injectAxe(frame).then(() => true, () => false),
-      new Promise<boolean>(resolve => {
-        timeoutId = setTimeout(() => resolve(false), childFrameInjectionTimeoutMs);
+    await Promise.race([
+      injectAxe(frame).catch(() => {}),
+      new Promise<void>(resolve => {
+        timeoutId = setTimeout(resolve, childFrameInjectionTimeoutMs);
       }),
     ]).finally(() => clearTimeout(timeoutId));
-    return injected ? null : describeFrame(frame);
   }));
-  return [...new Set(results.filter((frame): frame is string => frame !== null))];
+
+  // Coverage is decided here rather than from the injection results: a frame
+  // that navigated while a slower sibling was still injecting has a new document
+  // without Axe, and one that appeared since was never injected at all. Both
+  // would otherwise contribute nothing to a report that still looked complete.
+  // The frame list is re-read for the same reason.
+  //
+  // Ceiling: a frame that navigates between this check and the run below is
+  // still missed. The window is microseconds rather than the length of the
+  // slowest injection, but it cannot be closed from outside the page.
+  const children = page.frames().filter(frame => frame !== mainFrame);
+  const covered = await Promise.all(children.map(hasAxe));
+  return children.filter((_, index) => !covered[index]).map(describeFrame);
 }
 
 // Runs in the page. Keeps axe's own result shape minus the parts nothing reads:
