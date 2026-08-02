@@ -27,6 +27,10 @@ const options = parseArgs(process.argv.slice(2));
 
 if (options.compare) {
   compare(options.compare[0], options.compare[1]);
+  // process.exit() drops whatever is still buffered, and stdout is only
+  // synchronous on a TTY - piped into anything that applies backpressure, the
+  // tail of the table is simply lost. Wait for the writes to drain first.
+  await new Promise(resolve => process.stdout.write('', resolve));
   process.exit(0);
 }
 

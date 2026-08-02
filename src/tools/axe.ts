@@ -273,9 +273,16 @@ async function isFrameInScope(
     return true;
   let includeMatched = !include.length;
   for (let current = frame; current.parentFrame(); current = current.parentFrame()!) {
-    const element = await current.frameElement().catch(() => null);
-    if (!element)
+    // Bounded like every other child-frame read: `frameElement()` takes no
+    // timeout of its own, so an unresponsive parent renderer would hang the
+    // scan here - on the very check that exists to report unresponsive frames.
+    const elementPromise = current.frameElement().catch(() => null);
+    const element = await withFrameTimeout(elementPromise, null);
+    if (!element) {
+      // The lookup may still land after the bound; do not leak that handle.
+      void elementPromise.then(late => late?.dispose().catch(() => {}));
       return true;
+    }
     let matches: { included: boolean, excluded: boolean } | null;
     try {
       matches = await withFrameTimeout(element.evaluate((node, scope) => {

@@ -311,6 +311,65 @@ describe('scan_page_matrix tool', () => {
     expect(report.variants[0].applied.media.colorScheme).toBe('dark');
   });
 
+  it('reports no baseline delta when the two scans covered different documents', async () => {
+    // A rule missing from a variant whose iframe went unscanned has not been
+    // "resolved" - the document it lives in was never looked at. Reporting that
+    // as a delta states an accessibility outcome the run cannot support.
+    const { context, response } = createMatrixHarness('/tmp/scan-partial-delta.json');
+    vi.spyOn(axe, 'runAxeScan')
+        .mockResolvedValueOnce(createAxeResult('https://example.com/page', ['color-contrast', 'label']))
+        .mockResolvedValueOnce({
+          ...createAxeResult('https://example.com/page', ['color-contrast']),
+          unscannedFrames: ['https://widget.example/'],
+        } as any);
+
+    await tool.handle(context as any, {
+      variants: [{ name: 'baseline' }, { name: 'mobile', viewport: { width: 375, height: 812 } }],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterApplyMs: 0,
+      reloadBetweenVariants: false,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    // The baseline itself was fully covered, so it still compares with itself.
+    expect(report.variants[0].diffFromBaseline).not.toBeNull();
+    // "label" is absent from the variant only because a frame went unscanned.
+    expect(report.variants[1].diffFromBaseline).toBeNull();
+
+    const structured = response.structuredContent() as any;
+    // null, not [] - an empty list would read as "compared, nothing changed".
+    expect(structured.variants[1].resolvedViolationIds).toBeNull();
+    expect(structured.variants[1].newViolationIds).toBeNull();
+    expect(structured.variants[1].changedRuleIds).toBeNull();
+    expect(response.result()).toContain('n/a (partial scan)');
+  });
+
+  it('leaves an unnameable color scheme un-emulated rather than pinning it light', async () => {
+    // If neither media query matches, the page is in a state emulateMedia
+    // cannot name. Recording it as "light" would emulate a preference the page
+    // never had, and leave it emulated after the tool returned.
+    const { context, mockPage, response } = createMatrixHarness('/tmp/scan-unnamed-scheme.json');
+    mockPage.evaluate = vi.fn()
+        .mockResolvedValueOnce(pageState('', { colorScheme: null }))
+        .mockResolvedValue(undefined) as any;
+
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+
+    await tool.handle(context as any, {
+      variants: [{ name: 'baseline' }],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterApplyMs: 0,
+      reloadBetweenVariants: false,
+    } as any, response);
+
+    expect(mockPage.emulateMedia.mock.calls[0][0].colorScheme).toBeNull();
+    expect(mockPage.emulateMedia.mock.calls.at(-1)?.[0].colorScheme).toBeNull();
+  });
+
   it('applies zoom after a reload, not before it', async () => {
     // Zoom is an inline style on documentElement, so a reload discards it while
     // the viewport and media emulation survive. Applying it first would scan the

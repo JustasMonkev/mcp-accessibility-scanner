@@ -35,11 +35,14 @@ type VariantResult = {
   // distinguishable from one that was only partly scanned.
   unscannedFrames: string[];
   nodeCountByRuleId: Record<string, number>;
+  // null when this variant or the baseline left frames unscanned: the two runs
+  // then covered different documents, and a delta between them would report a
+  // coverage artefact as a fixed or newly introduced violation.
   diffFromBaseline: {
     newViolationIds: string[];
     resolvedViolationIds: string[];
     changedCounts: Record<string, { baseline: number; variant: number }>;
-  };
+  } | null;
 };
 
 const variantSchema = z.object({
@@ -107,7 +110,12 @@ async function readPageState(page: playwright.Page): Promise<{ zoom: string, med
   return await page.evaluate(() => ({
     zoom: document.documentElement.style.zoom || '',
     media: {
-      colorScheme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' as const : 'light' as const,
+      // Neither query matching is a third state, not light. Pinning it to light
+      // would emulate a preference the page never had, so it is left
+      // un-emulated - the same treatment the unrepresentable contrast values get.
+      colorScheme: matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark' as const
+        : matchMedia('(prefers-color-scheme: light)').matches ? 'light' as const : null,
       forcedColors: matchMedia('(forced-colors: active)').matches ? 'active' as const : 'none' as const,
       reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduce' as const : 'no-preference' as const,
       // `less` and `custom` are values emulateMedia cannot express. Leaving the
@@ -234,11 +242,7 @@ const scanPageMatrix = defineTabTool({
             ? prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation).trimmed
             : [],
           nodeCountByRuleId,
-          diffFromBaseline: {
-            newViolationIds: [],
-            resolvedViolationIds: [],
-            changedCounts: {},
-          },
+          diffFromBaseline: null,
         });
 
         await response.reportProgress({
@@ -248,9 +252,20 @@ const scanPageMatrix = defineTabTool({
         });
       }
 
-      const baselineCounts = variantResults[0]?.nodeCountByRuleId ?? {};
-      for (const result of variantResults)
-        result.diffFromBaseline = computeDiffFromBaseline(baselineCounts, result.nodeCountByRuleId);
+      const baseline = variantResults[0];
+      const baselineCounts = baseline?.nodeCountByRuleId ?? {};
+      for (const result of variantResults) {
+        // Only comparable when both sides scanned the same documents. With a
+        // frame missed on either side, a rule absent from one run may simply
+        // live in the document that went unscanned, and calling that "resolved"
+        // - or its reappearance "new" - states an accessibility outcome the run
+        // cannot support. The warning already says coverage differs; the
+        // numbers must not quietly contradict it.
+        const comparable = !result.unscannedFrames.length && !baseline?.unscannedFrames.length;
+        result.diffFromBaseline = comparable
+          ? computeDiffFromBaseline(baselineCounts, result.nodeCountByRuleId)
+          : null;
+      }
     } finally {
       // Same ordering as the apply path, and for the same reason.
       await tab.page.setViewportSize(originalViewport);
@@ -314,9 +329,12 @@ const scanPageMatrix = defineTabTool({
         // Without this a client reading only structured output cannot tell a
         // partly-scanned variant from a clean one.
         unscannedFrames: result.unscannedFrames,
-        newViolationIds: result.diffFromBaseline.newViolationIds,
-        resolvedViolationIds: result.diffFromBaseline.resolvedViolationIds,
-        changedRuleIds: Object.keys(result.diffFromBaseline.changedCounts),
+        // null, not [], when the coverage differs from the baseline's: an empty
+        // list reads as "nothing changed", which is the one thing an incomplete
+        // pair of scans cannot establish.
+        newViolationIds: result.diffFromBaseline?.newViolationIds ?? null,
+        resolvedViolationIds: result.diffFromBaseline?.resolvedViolationIds ?? null,
+        changedRuleIds: result.diffFromBaseline ? Object.keys(result.diffFromBaseline.changedCounts) : null,
         reportUri: reportResourceLink.uri,
       })),
     });
@@ -326,12 +344,17 @@ const scanPageMatrix = defineTabTool({
       ...(variantsWithUnscannedFrames.length ? [
         `WARNING: Axe could not be installed in frames on ${variantsWithUnscannedFrames.length} variant(s); their contents were not scanned and contribute no findings below.`,
         ...variantsWithUnscannedFrames.map(result => `- ${result.name}: ${result.unscannedFrames.join(', ')}`),
+        'Baseline deltas are reported as "n/a" wherever the two scans did not cover the same documents.',
         '',
       ] : []),
       'Variant | Violations | Nodes | Incomplete | Top new vs baseline',
       '--- | --- | --- | --- | ---',
       ...variantResults.map(result => {
-        const topNew = result.diffFromBaseline.newViolationIds.slice(0, 5).join(', ') || '-';
+        // "n/a" rather than "-": "-" means "compared, nothing new", which is a
+        // claim a pair of scans with differing coverage cannot make.
+        const topNew = result.diffFromBaseline
+          ? result.diffFromBaseline.newViolationIds.slice(0, 5).join(', ') || '-'
+          : 'n/a (partial scan)';
         // "-" rather than 0: with collection off, 0 is indistinguishable from
         // "no needs-review findings". audit_site omits its section for the same
         // reason.
