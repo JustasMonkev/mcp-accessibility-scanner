@@ -279,7 +279,8 @@ const scanPageMatrix = defineTabTool({
     }
 
     const report = {
-      version: 'v1',
+      // v2 allows diffFromBaseline to be null when scan coverage differs.
+      version: 'v2',
       metadata: {
         url: tab.page.url(),
         baselineVariant: variantResults[0]?.name ?? 'baseline',

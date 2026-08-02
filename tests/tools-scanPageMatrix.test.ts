@@ -333,6 +333,7 @@ describe('scan_page_matrix tool', () => {
     } as any, response);
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.version).toBe('v2');
     // The baseline itself was fully covered, so it still compares with itself.
     expect(report.variants[0].diffFromBaseline).not.toBeNull();
     // "label" is absent from the variant only because a frame went unscanned.

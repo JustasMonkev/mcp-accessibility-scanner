@@ -388,6 +388,7 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 - Default variants: baseline, mobile, desktop, forced-colors, reduced-motion, zoom-200
 - Supports custom variants and optional reload between variants
 - Always writes a JSON report (default filename: `scan-matrix-{timestamp}.json`)
+- JSON report schema `v2` sets `diffFromBaseline` to `null` when either scan left frames unscanned, because their coverage is not comparable
 
 **Example flow:**
 ```text
