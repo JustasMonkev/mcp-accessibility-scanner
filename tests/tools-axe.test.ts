@@ -589,6 +589,15 @@ describe('axe helpers', () => {
     expect(result.unscannedFrames).toEqual(['https://example.com/frame?src=data:text/html;base64,...']);
   });
 
+  it('caps an ordinary failed frame URL', async () => {
+    resetScan();
+    const frame = makeFrame({}, `https://example.com/frame?value=${'A'.repeat(5000)}`, false);
+    const [url] = (await runAxeScan(pageWithSelectorCounts({}, [frame]))).unscannedFrames;
+
+    expect(url).toHaveLength(2048);
+    expect(url).toMatch(/^https:\/\/example\.com\/frame\?value=A+\.\.\.$/);
+  });
+
   it('does not warn about a failed frame hidden from the accessibility tree', async () => {
     resetScan();
     const hidden = makeFrame({}, 'https://example.com/hidden', false, '', true, {

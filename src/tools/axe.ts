@@ -255,6 +255,7 @@ async function withConcurrency<T, R>(items: readonly T[], run: (item: T) => Prom
 // A frame name is author-controlled and unbounded, so it is normalized and
 // capped before going anywhere near a report.
 const maxFrameNameLength = 80;
+const maxFrameUrlLength = 2048;
 
 // Identifies a frame for the coverage warning. The URL alone is not enough for
 // a srcdoc or scripted about:blank frame - both report "about:blank" while
@@ -263,7 +264,8 @@ const maxFrameNameLength = 80;
 // too, and this string ends up in tool text, structured content and JSON
 // reports alike.
 function describeFrame(frame: playwright.Frame): string {
-  const url = truncateDataUrls(frame.url()) || 'about:blank';
+  const rawUrl = truncateDataUrls(frame.url()) || 'about:blank';
+  const url = rawUrl.length > maxFrameUrlLength ? `${rawUrl.slice(0, maxFrameUrlLength - 3)}...` : rawUrl;
   const name = truncateDataUrls(frame.name().replace(/\s+/g, ' ').trim()).slice(0, maxFrameNameLength);
   return name ? `${url} (name="${name}")` : url;
 }
