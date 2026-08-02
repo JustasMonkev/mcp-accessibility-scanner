@@ -345,7 +345,7 @@ async function isFrameInScope(
         for (let current: Element | null = node as Element; current;) {
           const parent = current.parentElement;
           const style = getComputedStyle(current);
-          const ariaHidden = current.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true';
+          const ariaHidden = current.getAttribute('aria-hidden') === 'true';
           const closedDetails = parent?.localName === 'details' && !parent.hasAttribute('open') &&
             (current.localName !== 'summary' || [...parent.children].find(child => child.localName === 'summary') !== current);
           const contentHidden = current !== node && style.getPropertyValue('content-visibility') === 'hidden';
