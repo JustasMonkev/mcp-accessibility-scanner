@@ -180,6 +180,24 @@ describe('Tool Utils', () => {
 
       expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
     });
+
+    it('should settle after a sub-frame navigation that issued no request', async () => {
+      // Swapping an iframe's srcdoc or pointing it at a data: URL replaces a
+      // document without touching the network, so nothing else here marks it as
+      // page work. Skipping the settle would capture the old frame while the
+      // replacement is still initializing.
+      mockTab.context.config.timeouts.settle = 25;
+      const callback = vi.fn().mockImplementation(() => {
+        mockPage.emit('framenavigated', { parentFrame: () => ({}) });
+        return Promise.resolve('result');
+      });
+
+      await waitForCompletion(mockTab, callback);
+
+      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
+      // Still no top-level load state: a sub-frame navigation never produces one.
+      expect(mockTab.waitForLoadState).not.toHaveBeenCalled();
+    });
   });
 
   describe('generateLocator', () => {

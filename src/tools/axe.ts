@@ -281,7 +281,17 @@ async function isFrameInScope(
       matches = await withFrameTimeout(element.evaluate((node, scope) => {
         const matchesAny = (selectors: string[]) => selectors.some(selector => {
           try {
-            return !!(node as Element).closest(selector);
+            // `closest()` stops at a shadow boundary as well as a frame one, so
+            // the walk steps onto the host and carries on: an iframe inside a
+            // shadow root is still inside whatever contains that host, and Axe
+            // descends into shadow content just the same.
+            for (let current: Element | null = node as Element; current;) {
+              if (current.closest(selector))
+                return true;
+              const root = current.getRootNode();
+              current = root instanceof ShadowRoot ? root.host : null;
+            }
+            return false;
           } catch {
             return false;
           }
@@ -333,7 +343,19 @@ async function injectAxeIntoFrames(
   // slowest injection, but it cannot be closed from outside the page.
   const children = page.frames().filter(frame => frame !== mainFrame);
   const covered = await Promise.all(children.map(hasAxe));
-  const missed = children.filter((_, index) => !covered[index]);
+  const withoutAxe = new Set(children.filter((_, index) => !covered[index]));
+
+  // A frame whose own injection succeeded is still unreachable when an ancestor
+  // has no Axe: the top-level run reaches a nested document only by relaying
+  // through the frames above it, and a frame without Axe relays nothing. Both
+  // documents go unscanned, so both are reported rather than only the outer one.
+  const missed = children.filter(frame => {
+    for (let current: playwright.Frame | null = frame; current && current !== mainFrame; current = current.parentFrame()) {
+      if (withoutAxe.has(current))
+        return true;
+    }
+    return false;
+  });
   // Runs only for frames that failed, which is normally none, so a scoped scan
   // of a healthy page pays nothing for this.
   const inScope = await Promise.all(missed.map(frame => isFrameInScope(frame, include, exclude)));

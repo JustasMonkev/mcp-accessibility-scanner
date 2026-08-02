@@ -32,6 +32,7 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
   const requests = new Set<playwright.Request>();
   let requestSeen = false;
   let frameNavigated = false;
+  let subframeNavigated = false;
   let waitCallback: () => void = () => {};
   const waitBarrier = new Promise<void>(f => { waitCallback = f; });
   // Resolves on the first sign of page work, whenever it arrives.
@@ -54,10 +55,18 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
   };
 
   const frameNavigateListener = (frame: playwright.Frame) => {
-    if (frame.parentFrame())
-      return;
-    frameNavigated = true;
     signalCallback();
+    if (frame.parentFrame()) {
+      // A child frame swapping documents is page work too, and it can issue no
+      // request at all - a srcdoc or data: URL is served without touching the
+      // network. Skipping the settle would then capture the response while the
+      // replacement document is still initializing. It is tracked separately
+      // from a main-frame navigation because it must not gate the barrier on a
+      // top-level load state that this navigation will never produce.
+      subframeNavigated = true;
+      return;
+    }
+    frameNavigated = true;
     dispose();
     clearTimeout(timeout);
     void tab.waitForLoadState('load').then(waitCallback);
@@ -96,7 +105,7 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
     // issued no request and navigated nowhere within the window above started
     // none of that, so there is nothing left to wait out. Skipping it is worth
     // ~500ms on every click, keypress and form fill.
-    if (requestSeen || frameNavigated)
+    if (requestSeen || frameNavigated || subframeNavigated)
       await tab.waitForTimeout(settleMs);
     return result;
   } finally {

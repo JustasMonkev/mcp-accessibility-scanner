@@ -227,7 +227,7 @@ Create a `config.json` file with the following options:
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
-Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies after actions that actually started something: a click that fires a request or navigates waits it out, while a click that only changed local DOM state responds without it. Work the action scheduled on a timer still counts — a short window after the action catches it before the response is built.
+Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies after actions that actually started something: a click that fires a request or navigates — including one that only swaps an iframe's document, which a `srcdoc` or `data:` URL does without touching the network — waits it out, while a click that only changed local DOM state responds without it. Work the action scheduled on a timer still counts — a short window after the action catches it before the response is built.
 
 #### HTTP Heartbeat
 
@@ -363,7 +363,9 @@ Axe returns `incomplete` for checks it cannot decide on its own -- contrast over
 **Frames that could not be scanned:**
 Axe is installed into every frame of the page before the scan runs. A frame that navigates mid-injection, or whose renderer does not answer within a second, is left out -- and its contents then contribute no findings. Rather than let that pass as a clean result, all three scan tools print a `WARNING: Axe could not be installed in N frame(s)` block listing the frame URLs, and `audit_site` and `scan_page_matrix` also record them per page and per variant in their JSON reports (`unscannedFrames`) and in `structuredContent`. A frame that was still loading usually succeeds on a re-run; one that fails consistently has to be audited on its own.
 
-A frame you scoped out yourself is not reported: with `excludeSelectors: ["iframe.intercom-frame"]` that widget failing to load is the outcome you asked for, not a gap. Scope is resolved through the whole frame chain, so an `includeSelectors` entry naming an ancestor still covers frames nested several levels below it, and excluding an outer frame silences everything inside it. Anything the check cannot resolve is reported rather than hidden.
+A nested frame is reported when any frame above it went unscanned, even if its own injection succeeded: Axe reaches a nested document only by relaying through the frames above it, so an outer frame without Axe takes everything below it out of the scan.
+
+A frame you scoped out yourself is not reported: with `excludeSelectors: ["iframe.intercom-frame"]` that widget failing to load is the outcome you asked for, not a gap. Scope is resolved through the whole frame chain and across shadow boundaries, so an `includeSelectors` entry naming an ancestor still covers frames nested several levels below it or inside a shadow root, and excluding an outer frame or a shadow host silences everything inside it. Anything the check cannot resolve is reported rather than hidden.
 
 ### Audit Tools
 

@@ -468,6 +468,23 @@ describe('axe helpers', () => {
     expect(result.unscannedFrames).toEqual(['https://example.com/nested']);
   });
 
+  it('reports a nested frame whose ancestor never got Axe', async () => {
+    resetScan();
+    // The nested frame took the injection fine, but the top-level run reaches it
+    // only by relaying through the outer frame, and a frame without Axe relays
+    // nothing. Both documents go unscanned, so both have to be listed.
+    const outer = makeFrame({}, 'https://example.com/outer', false);
+    const nested = makeFrame({}, 'https://example.com/nested', true);
+    nested.parentFrame = () => outer as any;
+
+    const result = await runAxeScan(pageWithSelectorCounts({}, [outer, nested]));
+
+    expect(result.unscannedFrames).toEqual([
+      'https://example.com/outer',
+      'https://example.com/nested',
+    ]);
+  });
+
   it('drops a nested frame when an ancestor frame is excluded', async () => {
     resetScan();
     // The mirror case: excluding the outer frame removes everything below it,
