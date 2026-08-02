@@ -23,6 +23,7 @@ describe('Tab', () => {
   let mockContext: Context;
   let mockPage: any;
   let onPageClose: any;
+  let locatorSnapshot: string | undefined;
 
   beforeEach(() => {
     mockPage = new EventEmitter();
@@ -35,8 +36,14 @@ describe('Tab', () => {
     mockPage.setDefaultTimeout = vi.fn();
     mockPage.goBack = vi.fn().mockResolvedValue(null);
     mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+    locatorSnapshot = 'button "Submit" [ref=1]';
     mockPage.locator = vi.fn().mockReturnValue({
       describe: vi.fn().mockReturnValue({}),
+      ariaSnapshot: vi.fn(async () => {
+        if (locatorSnapshot === undefined)
+          throw new Error('Element not found');
+        return locatorSnapshot;
+      }),
     });
 
     mockContext = {
@@ -386,6 +393,121 @@ describe('Tab', () => {
       expect(snapshot.ariaSnapshot).toContain('capturing page accessibility snapshot');
     });
 
+    it('does not cache an accessibility snapshot that resolves after its timeout', async () => {
+      vi.useFakeTimers();
+      mockContext.config.timeouts.defaultTimeout = 25;
+      let resolveSnapshot!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(resolve => { resolveSnapshot = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const snapshotPromise = tab.captureSnapshot();
+      await vi.advanceTimersByTimeAsync(25);
+      await snapshotPromise;
+      resolveSnapshot('button "Submit" [ref=1]');
+      await Promise.resolve();
+
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=2]');
+      await expect(
+          tab.refLocators([{ element: 'Submit', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not return an accessibility snapshot captured before navigation', async () => {
+      let resolveSnapshot!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(resolve => { resolveSnapshot = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const snapshotPromise = tab.captureSnapshot();
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      resolveSnapshot('button "Old page" [ref=1]');
+      const snapshot = await snapshotPromise;
+
+      expect(snapshot.ariaSnapshot).toContain('Page snapshot unavailable');
+      expect(snapshot.ariaSnapshot).not.toContain('Old page');
+    });
+
+    it('does not invalidate a newer overlapping snapshot when an old capture resolves', async () => {
+      let resolveOld!: (snapshot: string) => void;
+      let resolveFresh!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn()
+          .mockReturnValueOnce(new Promise(resolve => { resolveOld = resolve; }))
+          .mockReturnValueOnce(new Promise(resolve => { resolveFresh = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const oldCapture = tab.captureSnapshot();
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      const freshCapture = tab.captureSnapshot();
+      resolveFresh('button "Fresh page" [ref=2]');
+      expect((await freshCapture).ariaSnapshot).toContain('Fresh page');
+      resolveOld('button "Old page" [ref=1]');
+      expect((await oldCapture).ariaSnapshot).toContain('Page snapshot unavailable');
+
+      locatorSnapshot = 'button "Fresh page" [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=3]');
+      await tab.refLocators([{ element: 'Fresh page', ref: '2' }]);
+      expect(mockPage.ariaSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('does not invalidate a newer overlapping snapshot when an old capture times out', async () => {
+      vi.useFakeTimers();
+      mockContext.config.timeouts.defaultTimeout = 25;
+      mockPage.ariaSnapshot = vi.fn()
+          .mockReturnValueOnce(new Promise(() => {}))
+          .mockResolvedValueOnce('button "Fresh page" [ref=2]');
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const oldCapture = tab.captureSnapshot();
+      const freshCapture = tab.captureSnapshot();
+      expect((await freshCapture).ariaSnapshot).toContain('Fresh page');
+      await vi.advanceTimersByTimeAsync(25);
+      expect((await oldCapture).ariaSnapshot).toContain('Page snapshot unavailable');
+
+      locatorSnapshot = 'button "Fresh page" [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=3]');
+      await tab.refLocators([{ element: 'Fresh page', ref: '2' }]);
+      expect(mockPage.ariaSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('does not cache a snapshot completed after a modal interrupts capture', async () => {
+      let resolveSnapshot!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(resolve => { resolveSnapshot = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const pending = tab.captureSnapshot();
+      const modal = { type: 'dialog', description: 'Dialog', dialog: {} } as any;
+      tab.setModalState(modal);
+      expect((await pending).ariaSnapshot).toBe('');
+      tab.clearModalState(modal);
+      resolveSnapshot('button "Unseen" [ref=2]');
+      await Promise.resolve();
+
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Current" [ref=3]');
+      await expect(tab.refLocators([{ element: 'Unseen', ref: '2' }])).rejects.toThrow('Ref 2 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('caches overlapping snapshots in completion order', async () => {
+      let resolveFirst!: (snapshot: string) => void;
+      let resolveSecond!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn()
+          .mockReturnValueOnce(new Promise(resolve => { resolveFirst = resolve; }))
+          .mockReturnValueOnce(new Promise(resolve => { resolveSecond = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const first = tab.captureSnapshot();
+      const second = tab.captureSnapshot();
+      resolveSecond('button "B" [ref=2]');
+      await second;
+      resolveFirst('button "A" [ref=1]');
+      await first;
+
+      locatorSnapshot = 'button "A" [ref=1]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=3]');
+      await tab.refLocators([{ element: 'A', ref: '1' }]);
+      expect(mockPage.ariaSnapshot).not.toHaveBeenCalled();
+    });
+
     it('keeps data URL payloads in captured accessibility snapshots for session logs', async () => {
       const payload = '<svg viewBox="0 0 10 10"><text>Hello</text></svg>';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- link "Example" [ref=e1]:\n  - /url: data:image/svg+xml,${payload}`);
@@ -430,6 +552,174 @@ describe('Tab', () => {
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=2');
       expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+    });
+
+    it('resolves refs against the snapshot already returned to the caller', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      // The ref came from that snapshot, so re-reading the page adds nothing.
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+      expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
+    });
+
+    it('re-captures when a cached ref no longer resolves to an element', async () => {
+      // The element was removed after the snapshot went out: the ref is still in
+      // the cached text, but it matches nothing, and handing back that locator
+      // would fail as an action timeout instead of a useful message.
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+      locatorSnapshot = undefined;
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=2]');
+
+      await expect(
+          tab.refLocators([{ element: 'Submit', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-captures when a cached ref has different accessible semantics', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      await tab.captureSnapshot();
+      locatorSnapshot = 'button "Delete" [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Delete" [ref=2]');
+
+      await expect(
+          tab.refLocators([{ element: 'Submit', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-captures when the page navigates during cached ref validation', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      await tab.captureSnapshot();
+      let resolveValidation!: (snapshot: string) => void;
+      mockPage.locator = vi.fn().mockReturnValue({
+        ariaSnapshot: vi.fn().mockReturnValue(new Promise(resolve => { resolveValidation = resolve; })),
+        describe: vi.fn().mockReturnValue({}),
+      });
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "New page" [ref=2]');
+
+      const locators = tab.refLocators([{ element: 'Submit', ref: '1' }]);
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      resolveValidation('button "Submit" [ref=1]');
+
+      await expect(locators).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not accept a generated locator that only partially matches the old name', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Save" [ref=1]');
+      await tab.captureSnapshot();
+      locatorSnapshot = 'button "Save 2" [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Save 2" [ref=2]');
+
+      await expect(
+          tab.refLocators([{ element: 'Save', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('revalidates YAML-quoted snapshot entries without a full-page capture', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      locatorSnapshot = `- 'button "Warning: Delete" [ref=1]'`;
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- 'button "Warning: Delete" [ref=1]'`);
+      await tab.captureSnapshot();
+
+      await tab.refLocators([{ element: 'Delete', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('accepts Playwright synthetic roles when the public ARIA role is empty', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      locatorSnapshot = 'generic [ref=1]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('generic [ref=1]');
+      await tab.captureSnapshot();
+
+      await tab.refLocators([{ element: 'Target', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('reuses a cached ref whose long name is omitted from the snapshot', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      locatorSnapshot = 'button [ref=1]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button [ref=1]');
+      await tab.captureSnapshot();
+
+      await tab.refLocators([{ element: 'Long name', ref: '1' }]);
+      await tab.refLocators([{ element: 'Long name', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-captures when an omitted long name changes the Playwright ref', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button [ref=1]');
+      await tab.captureSnapshot();
+      locatorSnapshot = 'button [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button [ref=2]');
+
+      await expect(
+          tab.refLocators([{ element: 'Long name', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
+    });
+
+    it('re-reads the page for a ref the last snapshot does not hold', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1] button "Added" [ref=2]');
+
+      await tab.refLocators([{ element: 'Added', ref: '2' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+      expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=2');
+    });
+
+    it('stops trusting the cached snapshot once the tab navigates', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      await tab.navigate('https://example.com/next');
+
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      // Two captures: the first one described a page that is gone.
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops trusting the cached snapshot after any main-frame navigation', async () => {
+      // goBack(), page.reload() and a page-driven location change never reach
+      // Tab.navigate(), so the cache is keyed on the navigation event itself.
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the cached snapshot when only a sub-frame navigates', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+
+      mockPage.emit('framenavigated', { parentFrame: () => ({}) });
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
     });
   });
 

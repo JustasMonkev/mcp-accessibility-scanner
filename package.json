@@ -37,12 +37,13 @@
 		"test:docker": "bash ./tests/docker-smoke.sh",
 		"test:mcp": "node .claude/run-mcp-direct-harness.mjs",
 		"test:mcp:install": "node .claude/run-mcp-direct-harness.mjs --include-install",
+		"bench": "node bench/mcp-bench.mjs",
+		"bench:compare": "node bench/mcp-bench.mjs --compare",
 		"test:watch": "vitest",
 		"test:ui": "vitest --ui",
 		"test:coverage": "vitest run --coverage"
 	},
 	"dependencies": {
-		"@axe-core/playwright": "4.12.1",
 		"@cfworker/json-schema": "^4.1.1",
 		"@modelcontextprotocol/sdk": "^1.29.0",
 		"axe-core": "4.12.1",

@@ -57,6 +57,7 @@ describe('Tool Utils', () => {
   beforeEach(() => {
     mockPage = new EventEmitter();
     mockPage.url = () => 'https://example.com';
+    mockPage.isClosed = vi.fn().mockReturnValue(false);
     mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
     mockPage.evaluate = vi.fn().mockResolvedValue(undefined);
     mockPage._wrapApiCall = vi.fn().mockImplementation(cb => cb());
@@ -101,8 +102,8 @@ describe('Tool Utils', () => {
 
       await waitForCompletion(mockTab, callback);
 
-      // Should not wait for load state for sub-frames
-      expect(mockTab.waitForTimeout).toHaveBeenCalled();
+      // Should not wait for the load state of a sub-frame navigation.
+      expect(mockTab.waitForLoadState).not.toHaveBeenCalled();
     });
 
     it('should timeout after 10 seconds', async () => {
@@ -126,13 +127,94 @@ describe('Tool Utils', () => {
       vi.useRealTimers();
     });
 
-    it('should use the configured settle delay after completion', async () => {
-      const callback = vi.fn().mockResolvedValue('result');
+    it('should use the configured settle delay after a request', async () => {
       mockTab.context.config.timeouts.settle = 25;
+      const callback = vi.fn().mockImplementation(() => {
+        const request = { url: 'https://api.example.com' };
+        mockPage.emit('request', request);
+        mockPage.emit('requestfinished', request);
+        return Promise.resolve('result');
+      });
 
       await waitForCompletion(mockTab, callback);
 
       expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
+    });
+
+    it('should preserve the settle delay for delayed DOM-only work', async () => {
+      // A timer can update the DOM without a request or navigation signal.
+      mockTab.context.config.timeouts.settle = 5;
+      const callback = vi.fn().mockResolvedValue('result');
+
+      await waitForCompletion(mockTab, callback);
+
+      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(5);
+    });
+
+    it('should not fail when the action closes its page before settling', async () => {
+      mockTab.waitForTimeout = vi.fn().mockImplementation(async () => {
+        mockPage.isClosed.mockReturnValue(true);
+        throw new Error('page._wrapApiCall: Target page, context or browser has been closed');
+      });
+
+      await expect(waitForCompletion(mockTab, vi.fn().mockResolvedValue('result'))).resolves.toBe('result');
+    });
+
+    it('should not hide an unrelated settle error when the page also closes', async () => {
+      mockTab.waitForTimeout = vi.fn().mockImplementation(async () => {
+        mockPage.isClosed.mockReturnValue(true);
+        throw new Error('Protocol failure');
+      });
+
+      await expect(waitForCompletion(mockTab, vi.fn().mockResolvedValue('result'))).rejects.toThrow('Protocol failure');
+    });
+
+    it('should settle for work the action scheduled rather than started', async () => {
+      // A click handler whose fetch fires from a timer has issued no request by
+      // the time its own promise resolves; the quiet window still catches it.
+      mockTab.context.config.timeouts.settle = 25;
+      const request = { url: 'https://api.example.com' };
+      const callback = vi.fn().mockImplementation(() => {
+        setTimeout(() => {
+          mockPage.emit('request', request);
+          mockPage.emit('requestfinished', request);
+        }, 5);
+        return Promise.resolve('result');
+      });
+
+      await waitForCompletion(mockTab, callback);
+
+      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
+    });
+
+    it('should settle after a main-frame navigation', async () => {
+      mockTab.context.config.timeouts.settle = 25;
+      const callback = vi.fn().mockImplementation(() => {
+        mockPage.emit('framenavigated', { parentFrame: () => null });
+        return Promise.resolve('result');
+      });
+
+      await waitForCompletion(mockTab, callback);
+
+      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
+    });
+
+    it('should settle after a sub-frame navigation that issued no request', async () => {
+      // Swapping an iframe's srcdoc or pointing it at a data: URL replaces a
+      // document without touching the network, so nothing else here marks it as
+      // page work. Skipping the settle would capture the old frame while the
+      // replacement is still initializing.
+      mockTab.context.config.timeouts.settle = 25;
+      const callback = vi.fn().mockImplementation(() => {
+        mockPage.emit('framenavigated', { parentFrame: () => ({}) });
+        return Promise.resolve('result');
+      });
+
+      await waitForCompletion(mockTab, callback);
+
+      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
+      // Still no top-level load state: a sub-frame navigation never produces one.
+      expect(mockTab.waitForLoadState).not.toHaveBeenCalled();
     });
   });
 

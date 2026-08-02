@@ -244,7 +244,7 @@ describe('Snapshot Tools', () => {
     const scanPageTool = snapshotTools.find(tool => tool.schema.name === 'scan_page')!;
 
     function scanResult(violations: any[], incomplete: any[] = []) {
-      return { url: 'https://example.com/', violations, incomplete, passes: [], inapplicable: [] } as any;
+      return { url: 'https://example.com/', violations, incomplete, passes: [], inapplicable: [], unscannedFrames: [] } as any;
     }
 
     function scanRule(id: string, nodeCount: number) {
@@ -291,6 +291,39 @@ describe('Snapshot Tools', () => {
         include: ['#checkout'],
         exclude: ['#cookie-banner'],
       });
+    });
+
+    it('warns about frames the scan could not reach, naming them', async () => {
+      // A frame Axe never reached contributes no violations, so a silent result
+      // reads as a clean page rather than a partly-scanned one.
+      vi.spyOn(axe, 'runAxeScan').mockResolvedValue({
+        ...scanResult([]),
+        unscannedFrames: ['https://widget.example/embed', 'about:blank (name="promo")'],
+      });
+      const { context, response, text } = scanHarness();
+
+      await scanPageTool.handle(context as any, {
+        violationsTag: ['wcag2aa'],
+        includeIncomplete: true,
+        maxNodesPerViolation: 10,
+      } as any, response as any);
+
+      expect(text()).toContain('WARNING: Axe could not be installed in 2 frame(s)');
+      expect(text()).toContain('- https://widget.example/embed');
+      expect(text()).toContain('- about:blank (name="promo")');
+    });
+
+    it('says nothing about frames when the scan covered all of them', async () => {
+      vi.spyOn(axe, 'runAxeScan').mockResolvedValue(scanResult([]));
+      const { context, response, text } = scanHarness();
+
+      await scanPageTool.handle(context as any, {
+        violationsTag: ['wcag2aa'],
+        includeIncomplete: true,
+        maxNodesPerViolation: 10,
+      } as any, response as any);
+
+      expect(text()).not.toContain('could not be installed');
     });
 
     it('reports the rule id and flags truncated node lists', async () => {
@@ -475,7 +508,7 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('scan_page annotated 
     const page = await context.newPage();
     await page.setContent(html);
     vi.spyOn(axe, 'runAxeScan').mockResolvedValue({
-      url: 'https://example.com/', violations, incomplete: [], passes: [], inapplicable: [],
+      url: 'https://example.com/', violations, incomplete: [], passes: [], inapplicable: [], unscannedFrames: [],
     } as any);
     const screenshot = page.screenshot.bind(page);
     let drawn: any;
@@ -656,6 +689,7 @@ function scanHarness(options: { violations?: any[], markedNodes?: number, screen
     incomplete: [],
     passes: [],
     inapplicable: [],
+    unscannedFrames: [],
   } as any);
 
   const evaluate = vi.fn(async () => {

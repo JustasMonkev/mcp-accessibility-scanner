@@ -29,6 +29,7 @@ function createAxeResult(url: string, violations: any[], incomplete: any[] = [])
     incomplete,
     passes: [],
     inapplicable: [],
+    unscannedFrames: [],
   } as any;
 }
 
@@ -69,12 +70,15 @@ function createHarness(
     context: vi.fn(() => ({ cookies: cookiesMock })),
     url: vi.fn(() => currentUrl),
     title: vi.fn(async () => `Title for ${currentUrl}`),
-    evaluate: vi.fn(async (callback: () => unknown) => {
-      const callbackText = String(callback);
-      const isNavExtraction = /role=.*navigation.*a\[href\]/.test(callbackText);
-      if (isNavExtraction)
-        return navLinkMap[currentUrl] ?? [];
-      return linkMap[currentUrl] ?? [];
+    // Mirrors readPage(): one evaluate per crawled page returning the title and,
+    // when a link selector is passed, the links that selector would collect.
+    evaluate: vi.fn(async (_callback: unknown, selector?: string) => {
+      const links = !selector
+        ? []
+        : /navigation/.test(selector)
+          ? navLinkMap[currentUrl] ?? []
+          : linkMap[currentUrl] ?? [];
+      return { title: `Title for ${currentUrl}`, links };
     }),
   };
 
@@ -172,6 +176,66 @@ describe('audit_site tool', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
+  });
+
+  it('warns about pages whose frames the scan could not reach', async () => {
+    // A page scanned with a frame missing reports fewer violations, so a reader
+    // counting them has to know which pages those numbers are incomplete for.
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/embedded'],
+      'https://example.com/embedded': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => ({
+      ...createAxeResult(page.url(), []),
+      unscannedFrames: page.url() === 'https://example.com/embedded' ? ['https://widget.example/embed'] : [],
+    }));
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 5,
+      maxDepth: 1,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(response.result()).toContain('WARNING: Axe could not be installed in frames on 1 page(s)');
+    expect(response.result()).toContain('- https://example.com/embedded: https://widget.example/embed');
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    const embedded = report.pages.find((page: any) => page.url === 'https://example.com/embedded');
+    expect(embedded.unscannedFrames).toEqual(['https://widget.example/embed']);
+    // A client reading only structured output must be able to tell the same.
+    expect(response.structuredContent()!.pagesWithUnscannedFrames).toEqual([
+      { url: 'https://example.com/embedded', unscannedFrames: ['https://widget.example/embed'] },
+    ]);
+  });
+
+  it('says nothing about frames when every page was scanned in full', async () => {
+    const { context, response } = createHarness({ 'https://example.com/': [] });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 1,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(response.result()).not.toContain('could not be installed');
+    expect(response.structuredContent()!.pagesWithUnscannedFrames).toEqual([]);
   });
 
   it('passes tags, rule filters and scope selectors through to the axe scan', async () => {
@@ -708,7 +772,11 @@ describe('audit_site tool', () => {
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     const crawledUrls = report.pages.map((page: any) => page.url);
     expect(crawledUrls).toEqual(['https://example.com/a', 'https://example.com/b']);
-    expect(crawlTab.page.evaluate).not.toHaveBeenCalled();
+    // The page is still read for its title - `every` alone would also pass if
+    // that read disappeared - and what must not happen is link discovery, which
+    // is what a non-empty selector argument would mean.
+    expect(crawlTab.page.evaluate.mock.calls.length).toBeGreaterThan(0);
+    expect(crawlTab.page.evaluate.mock.calls.every((call: unknown[]) => !call[1])).toBe(true);
   });
 
   it('supports sitemap strategy by parsing loc entries', async () => {

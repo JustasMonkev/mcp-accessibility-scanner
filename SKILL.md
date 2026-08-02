@@ -93,7 +93,7 @@ Scan the current page for accessibility violations using Axe.
 {"violationsTag": ["wcag2aa", "wcag21aa", "wcag22aa"]}
 ```
 
-For Electron CDP targets, `scan_page` may currently fail with `Target.createTarget: Not supported`. If that happens, keep using the CLI session, select the live app tab with `browser_tabs`, and run Axe through `browser_evaluate` by injecting the local `node_modules/axe-core/axe.min.js` bundle.
+The scan injects Axe into the frames that are already open and runs it there; it no longer opens a helper page, which is what used to fail on Electron CDP targets with `Target.createTarget: Not supported`. If a scan still fails on such a target, keep using the CLI session, select the live app tab with `browser_tabs`, and run Axe through `browser_evaluate` by injecting the local `node_modules/axe-core/axe.min.js` bundle.
 
 ### audit_site
 
@@ -311,7 +311,7 @@ Typical REPL flow:
 > browser_evaluate {"function":"() => document.querySelector('SELECTOR_FOR_NEXT_STEP')?.click()"}
 ```
 
-If `scan_page {}` fails on the Electron target, use this Axe fallback from the same REPL session:
+If `scan_page {}` still fails on the Electron target, use this Axe fallback from the same REPL session:
 
 ```json
 {

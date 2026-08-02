@@ -29,17 +29,15 @@ export function truncateDataUrl(url: string): string {
 }
 
 export function truncateDataUrls(text: string): string {
+  // Snapshots are routinely hundreds of KB and usually hold no data URL at all,
+  // so nothing is copied or rebuilt until the first one is actually found.
+  let start = findDataUrlStart(text, 0);
+  if (start === -1)
+    return text;
+
   let result = '';
   let offset = 0;
-  const lowerText = text.toLowerCase();
-
-  while (offset < text.length) {
-    const start = findDataUrlStart(text, lowerText, offset);
-    if (start === -1) {
-      result += text.slice(offset);
-      break;
-    }
-
+  while (start !== -1) {
     result += text.slice(offset, start);
 
     const match = parseDataUrl(text, start);
@@ -47,15 +45,14 @@ export function truncateDataUrls(text: string): string {
       const prefixLength = dataUrlPrefixLengthAt(text, start);
       result += text.slice(start, start + prefixLength);
       offset = start + prefixLength;
-      continue;
+    } else {
+      result += `${match.displayPrefix}...`;
+      offset = findDataUrlEnd(text, match);
     }
-
-    const end = findDataUrlEnd(text, match);
-    result += `${match.displayPrefix}...`;
-    offset = end;
+    start = findDataUrlStart(text, offset);
   }
 
-  return result;
+  return result + text.slice(offset);
 }
 
 type DataUrlMatch = {
@@ -66,24 +63,17 @@ type DataUrlMatch = {
   quote: '"' | '\'' | undefined;
 };
 
-function findDataUrlStart(text: string, lowerText: string, offset: number): number {
-  let start = nextDataUrlPrefix(lowerText, offset);
-  while (start !== -1) {
-    if (isDataUrlStartBoundary(text, start))
-      return start;
-    start = nextDataUrlPrefix(lowerText, start + dataUrlPrefixLengthAt(lowerText, start));
+// Matches either prefix case-insensitively without lower-casing a copy of the
+// whole text, which on a large snapshot costs more than the scan itself.
+const dataUrlPrefixPattern = /data(?::|%3a)/gi;
+
+function findDataUrlStart(text: string, offset: number): number {
+  dataUrlPrefixPattern.lastIndex = offset;
+  for (let match = dataUrlPrefixPattern.exec(text); match; match = dataUrlPrefixPattern.exec(text)) {
+    if (isDataUrlStartBoundary(text, match.index))
+      return match.index;
   }
   return -1;
-}
-
-function nextDataUrlPrefix(lowerText: string, offset: number): number {
-  const literalStart = lowerText.indexOf(dataUrlPrefix, offset);
-  const encodedStart = lowerText.indexOf(encodedDataUrlPrefix, offset);
-  if (literalStart === -1)
-    return encodedStart;
-  if (encodedStart === -1)
-    return literalStart;
-  return Math.min(literalStart, encodedStart);
 }
 
 function dataUrlPrefixLengthAt(text: string, start: number): number {
@@ -204,8 +194,20 @@ function isLineBreak(char: string): boolean {
   return char === '\n' || char === '\r';
 }
 
+// Runs once per character of a base64 payload, which is the longest run in any
+// snapshot, so it stays a plain switch rather than a regex plus an array scan.
 function isBase64PayloadTerminator(char: string): boolean {
-  return /\s/.test(char) || ['"', '\'', '<', '>', ')', ']', '}', '`', ':'].includes(char);
+  switch (char) {
+    case '"': case '\'': case '<': case '>':
+    case ')': case ']': case '}': case '`': case ':':
+      return true;
+    default:
+      return isWhitespace(char);
+  }
+}
+
+function isWhitespace(char: string): boolean {
+  return /\s/.test(char);
 }
 
 function isQueryParamBoundary(text: string, match: DataUrlMatch, ampersand: number): boolean {
@@ -216,14 +218,14 @@ function isQueryParamBoundary(text: string, match: DataUrlMatch, ampersand: numb
 
 function isRawPayloadCompleteBefore(text: string, payloadStart: number, end: number): boolean {
   let position = end - 1;
-  while (position >= payloadStart && /\s/.test(text[position]))
+  while (position >= payloadStart && isWhitespace(text[position]))
     position--;
   return text[position] === '>' || (position >= payloadStart + 2 && startsWithIgnoreCase(text, position - 2, '%3e'));
 }
 
 function isRawPayloadSuffixBoundary(text: string, match: DataUrlMatch, position: number): boolean {
   const char = text[position];
-  if (/\s/.test(char))
+  if (isWhitespace(char))
     return !isRawMarkupPayload(text, match.payloadStart) || isRawPayloadCompleteBefore(text, match.payloadStart, position);
   if (isRawPayloadWrapperBoundary(text, match, position))
     return true;
@@ -250,7 +252,7 @@ function looksLikeSourceLocationSuffix(text: string, colon: number): boolean {
     return false;
   while (position < text.length && /\d/.test(text[position]))
     position++;
-  return position === text.length || isLineBreak(text[position]) || /\s/.test(text[position]);
+  return position === text.length || isLineBreak(text[position]) || isWhitespace(text[position]);
 }
 
 function looksLikeQueryParam(text: string, offset: number): boolean {
@@ -260,7 +262,7 @@ function looksLikeQueryParam(text: string, offset: number): boolean {
     const char = text[position];
     if (char === '=')
       return position > offset;
-    if (isLineBreak(char) || /\s/.test(char) || ['&', '#', '"', '\'', '<', '>', ')', '}', '`'].includes(char))
+    if (isLineBreak(char) || isWhitespace(char) || ['&', '#', '"', '\'', '<', '>', ')', '}', '`'].includes(char))
       return false;
   }
   return false;
@@ -292,7 +294,7 @@ function isRawPayloadBoundarySuffix(text: string, offset: number): boolean {
   if (offset >= text.length)
     return true;
   const char = text[offset];
-  return isLineBreak(char) || /\s/.test(char) || ['"', '\'', ')', ']', '}', '`'].includes(char) || (char === '&' && looksLikeQueryParam(text, offset + 1));
+  return isLineBreak(char) || isWhitespace(char) || ['"', '\'', ')', ']', '}', '`'].includes(char) || (char === '&' && looksLikeQueryParam(text, offset + 1));
 }
 
 function isEncodedPayloadTerminator(text: string, position: number): boolean {
@@ -310,6 +312,18 @@ function percentEncodedCharAt(text: string, position: number): string | undefine
   return String.fromCharCode(Number.parseInt(text.slice(position + 1, position + 3), 16));
 }
 
+// `value` is always lower-case ASCII here, so a char-code compare answers this
+// without allocating the slice these hot per-character scans would otherwise make.
 function startsWithIgnoreCase(text: string, position: number, value: string): boolean {
-  return text.slice(position, position + value.length).toLowerCase() === value;
+  if (position < 0 || position + value.length > text.length)
+    return false;
+  for (let index = 0; index < value.length; index++) {
+    const char = text.charCodeAt(position + index);
+    const expected = value.charCodeAt(index);
+    // Fold upper-case ASCII only; folding by bit would also equate control
+    // characters with punctuation.
+    if (char !== expected && !(char >= 65 && char <= 90 && char + 32 === expected))
+      return false;
+  }
+  return true;
 }

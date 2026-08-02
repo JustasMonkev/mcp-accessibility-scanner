@@ -20,7 +20,7 @@ import { z } from 'zod';
 import { defineTabTool, defineTool } from './tool.js';
 import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
-import { axeRuleSchemaShape, axeScopeSchemaShape, axeTagValues, dedupeAxeNodes, defaultAxeTags, prepareAxeResults, runAxeScan } from './axe.js';
+import { axeRuleSchemaShape, axeScopeSchemaShape, axeTagValues, dedupeAxeNodes, defaultAxeTags, prepareAxeResults, runAxeScan, unscannedFrameLines } from './axe.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 import { sanitizeForFilePath } from '../utils/fileUtils.js';
 
@@ -102,6 +102,7 @@ const scanPage = defineTool({
       `URL: ${results.url}`,
       '',
       `Violations: ${results.violations.length}, ${incompleteCount}Passes: ${results.passes.length}, Inapplicable: ${results.inapplicable.length}`,
+      ...unscannedFrameLines(results.unscannedFrames),
       ...annotationLines,
     ].join('\n'));
 

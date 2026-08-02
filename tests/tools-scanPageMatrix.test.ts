@@ -4,6 +4,21 @@ import scanPageMatrixTools from '../src/tools/scanPageMatrix.js';
 import { Response } from '../src/response.js';
 import * as axe from '../src/tools/axe.js';
 
+// The page's media emulation as an unconfigured browser reports it. Variants
+// fall back to this rather than to null, so emulation the session was created
+// with survives both the scan and the restore.
+const defaultMedia = {
+  colorScheme: 'light',
+  forcedColors: 'none',
+  contrast: 'no-preference',
+  reducedMotion: 'no-preference',
+};
+
+// What the single setup evaluate returns: the page's zoom and media state.
+function pageState(zoom = '', media: Record<string, unknown> = {}) {
+  return { zoom, media: { ...defaultMedia, ...media } };
+}
+
 function createViolation(id: string) {
   return {
     id,
@@ -29,6 +44,7 @@ function createAxeResult(url: string, violationIds: string[], incompleteIds: str
     incomplete: incompleteIds.map(id => createViolation(id)),
     passes: [],
     inapplicable: [],
+    unscannedFrames: [],
   } as any;
 }
 
@@ -38,7 +54,7 @@ function createMatrixHarness(outputFile: string) {
     viewportSize: vi.fn(() => ({ width: 1024, height: 768 })),
     setViewportSize: vi.fn(async () => undefined),
     emulateMedia: vi.fn(async () => undefined),
-    evaluate: vi.fn().mockResolvedValueOnce('').mockResolvedValue(undefined),
+    evaluate: vi.fn().mockResolvedValueOnce(pageState('')).mockResolvedValue(undefined),
     reload: vi.fn(async () => undefined),
   };
   const mockTab = {
@@ -154,7 +170,7 @@ describe('scan_page_matrix tool', () => {
 
   it('runs variants in baseline-first order and computes baseline diffs', async () => {
     const evaluateMock = vi.fn()
-        .mockResolvedValueOnce('')
+        .mockResolvedValueOnce(pageState(''))
         .mockResolvedValue(undefined);
 
     const mockPage = {
@@ -214,7 +230,7 @@ describe('scan_page_matrix tool', () => {
 
   it('restores viewport, media emulation, and zoom in finally', async () => {
     const evaluateMock = vi.fn()
-        .mockResolvedValueOnce('150%')
+        .mockResolvedValueOnce(pageState('150%'))
         .mockResolvedValue(undefined);
 
     const mockPage = {
@@ -257,18 +273,164 @@ describe('scan_page_matrix tool', () => {
     const lastEvaluateCall = mockPage.evaluate.mock.calls.at(-1);
 
     expect(lastViewportCall?.[0]).toEqual({ width: 1280, height: 720 });
-    expect(lastMediaCall?.[0]).toEqual({
-      colorScheme: null,
-      forcedColors: null,
-      contrast: null,
-      reducedMotion: null,
-    });
+    expect(lastMediaCall?.[0]).toEqual(defaultMedia);
     expect(lastEvaluateCall?.[1]).toBe('150%');
+  });
+
+  it('keeps the session’s own media emulation across the scan', async () => {
+    // A context created with colorScheme "dark" is the state this page is meant
+    // to be audited in. Passing null for the properties a variant leaves unset
+    // resets them to the browser default instead, so the baseline would be
+    // scanned light and the page would stay light after the tool returned.
+    const configured = { colorScheme: 'dark', reducedMotion: 'reduce' };
+    const { context, mockPage, response } = createMatrixHarness('/tmp/scan-configured-media.json');
+    mockPage.evaluate = vi.fn()
+        .mockResolvedValueOnce(pageState('', configured))
+        .mockResolvedValue(undefined) as any;
+
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+
+    await tool.handle(context as any, {
+      variants: [{ name: 'baseline' }, { name: 'forced-colors', media: { forcedColors: 'active' } }],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterApplyMs: 0,
+      reloadBetweenVariants: false,
+    } as any, response);
+
+    const media = { ...defaultMedia, ...configured };
+    // The baseline variant sets nothing of its own, so it runs as configured.
+    expect(mockPage.emulateMedia.mock.calls[0][0]).toEqual(media);
+    // A variant overrides only the property it names.
+    expect(mockPage.emulateMedia.mock.calls[1][0]).toEqual({ ...media, forcedColors: 'active' });
+    // And the page is handed back in the state it arrived in.
+    expect(mockPage.emulateMedia.mock.calls.at(-1)?.[0]).toEqual(media);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.variants[0].applied.media.colorScheme).toBe('dark');
+  });
+
+  it('reports no baseline delta when the two scans covered different documents', async () => {
+    // A rule missing from a variant whose iframe went unscanned has not been
+    // "resolved" - the document it lives in was never looked at. Reporting that
+    // as a delta states an accessibility outcome the run cannot support.
+    const { context, response } = createMatrixHarness('/tmp/scan-partial-delta.json');
+    vi.spyOn(axe, 'runAxeScan')
+        .mockResolvedValueOnce(createAxeResult('https://example.com/page', ['color-contrast', 'label']))
+        .mockResolvedValueOnce({
+          ...createAxeResult('https://example.com/page', ['color-contrast']),
+          unscannedFrames: ['https://widget.example/'],
+        } as any);
+
+    await tool.handle(context as any, {
+      variants: [{ name: 'baseline' }, { name: 'mobile', viewport: { width: 375, height: 812 } }],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterApplyMs: 0,
+      reloadBetweenVariants: false,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.version).toBe('v2');
+    // The baseline itself was fully covered, so it still compares with itself.
+    expect(report.variants[0].diffFromBaseline).not.toBeNull();
+    // "label" is absent from the variant only because a frame went unscanned.
+    expect(report.variants[1].diffFromBaseline).toBeNull();
+
+    const structured = response.structuredContent() as any;
+    expect(structured.version).toBe('v2');
+    // null, not [] - an empty list would read as "compared, nothing changed".
+    expect(structured.variants[1].resolvedViolationIds).toBeNull();
+    expect(structured.variants[1].newViolationIds).toBeNull();
+    expect(structured.variants[1].changedRuleIds).toBeNull();
+    expect(response.result()).toContain('n/a (coverage differs)');
+  });
+
+  it('reports no delta on a complete variant when the baseline is the incomplete one', async () => {
+    // The mirror of the case above. A fully scanned variant still cannot be
+    // compared against a baseline that missed a frame, and the reason must not
+    // read as though this variant were the partial one - the gap is upstream.
+    const { context, response } = createMatrixHarness('/tmp/scan-partial-baseline.json');
+    vi.spyOn(axe, 'runAxeScan')
+        .mockResolvedValueOnce({
+          ...createAxeResult('https://example.com/page', ['color-contrast']),
+          unscannedFrames: ['https://widget.example/'],
+        } as any)
+        .mockResolvedValueOnce(createAxeResult('https://example.com/page', ['color-contrast']));
+
+    await tool.handle(context as any, {
+      variants: [{ name: 'baseline' }, { name: 'mobile', viewport: { width: 375, height: 812 } }],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterApplyMs: 0,
+      reloadBetweenVariants: false,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    // Neither row is comparable: the baseline is the one with the gap.
+    expect(report.variants[0].diffFromBaseline).toBeNull();
+    expect(report.variants[1].diffFromBaseline).toBeNull();
+    expect(report.variants[1].unscannedFrames).toEqual([]);
+
+    const structured = response.structuredContent() as any;
+    expect(structured.variants[1].newViolationIds).toBeNull();
+    // The wording must not blame the variant for the baseline's missing frame.
+    expect(response.result()).not.toContain('partial scan');
+    expect(response.result()).toContain('n/a (coverage differs)');
+  });
+
+  it('leaves an unnameable color scheme un-emulated rather than pinning it light', async () => {
+    // If neither media query matches, the page is in a state emulateMedia
+    // cannot name. Recording it as "light" would emulate a preference the page
+    // never had, and leave it emulated after the tool returned.
+    const { context, mockPage, response } = createMatrixHarness('/tmp/scan-unnamed-scheme.json');
+    mockPage.evaluate = vi.fn()
+        .mockResolvedValueOnce(pageState('', { colorScheme: null }))
+        .mockResolvedValue(undefined) as any;
+
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+
+    await tool.handle(context as any, {
+      variants: [{ name: 'baseline' }],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterApplyMs: 0,
+      reloadBetweenVariants: false,
+    } as any, response);
+
+    expect(mockPage.emulateMedia.mock.calls[0][0].colorScheme).toBeNull();
+    expect(mockPage.emulateMedia.mock.calls.at(-1)?.[0].colorScheme).toBeNull();
+  });
+
+  it('applies zoom after a reload, not before it', async () => {
+    // Zoom is an inline style on documentElement, so a reload discards it while
+    // the viewport and media emulation survive. Applying it first would scan the
+    // variant unzoomed while applied.zoomPercent still claimed 200.
+    const { context, mockPage, response } = createMatrixHarness('/tmp/scan-reload-zoom.json');
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+
+    await tool.handle(context as any, {
+      variants: [{ name: 'zoom-200', zoomPercent: 200 }],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterApplyMs: 0,
+      reloadBetweenVariants: true,
+    } as any, response);
+
+    const zoomCallIndex = mockPage.evaluate.mock.calls.findIndex(call => call[1] === '200%');
+    expect(zoomCallIndex).toBeGreaterThan(-1);
+    expect(mockPage.evaluate.mock.invocationCallOrder[zoomCallIndex])
+        .toBeGreaterThan(mockPage.reload.mock.invocationCallOrder[0]);
   });
 
   it('runs only custom variants and treats first variant as baseline', async () => {
     const evaluateMock = vi.fn()
-        .mockResolvedValueOnce('')
+        .mockResolvedValueOnce(pageState(''))
         .mockResolvedValue(undefined);
 
     const mockPage = {
@@ -319,7 +481,7 @@ describe('scan_page_matrix tool', () => {
 
   it('records forced-colors/contrast media and zoomPercent metadata in report', async () => {
     const evaluateMock = vi.fn()
-        .mockResolvedValueOnce('')
+        .mockResolvedValueOnce(pageState(''))
         .mockResolvedValue(undefined);
 
     const mockPage = {
@@ -369,7 +531,7 @@ describe('scan_page_matrix tool', () => {
 
   it('reloads page between variants when reloadBetweenVariants=true', async () => {
     const evaluateMock = vi.fn()
-        .mockResolvedValueOnce('')
+        .mockResolvedValueOnce(pageState(''))
         .mockResolvedValue(undefined);
 
     const mockPage = {
@@ -413,7 +575,7 @@ describe('scan_page_matrix tool', () => {
 
   it('restores page state even when axe scan fails mid-run', async () => {
     const evaluateMock = vi.fn()
-        .mockResolvedValueOnce('125%')
+        .mockResolvedValueOnce(pageState('125%'))
         .mockResolvedValue(undefined);
 
     const mockPage = {
@@ -456,18 +618,13 @@ describe('scan_page_matrix tool', () => {
     const lastMediaCall = mockPage.emulateMedia.mock.calls.at(-1);
     const lastEvaluateCall = mockPage.evaluate.mock.calls.at(-1);
     expect(lastViewportCall?.[0]).toEqual({ width: 1440, height: 900 });
-    expect(lastMediaCall?.[0]).toEqual({
-      colorScheme: null,
-      forcedColors: null,
-      contrast: null,
-      reducedMotion: null,
-    });
+    expect(lastMediaCall?.[0]).toEqual(defaultMedia);
     expect(lastEvaluateCall?.[1]).toBe('125%');
   });
 
   it('writes report using custom reportFile name', async () => {
     const evaluateMock = vi.fn()
-        .mockResolvedValueOnce('')
+        .mockResolvedValueOnce(pageState(''))
         .mockResolvedValue(undefined);
 
     const mockPage = {
@@ -512,7 +669,7 @@ describe('scan_page_matrix tool', () => {
   it('emits progress notifications as variants finish', async () => {
     const sendNotification = vi.fn(async () => undefined);
     const evaluateMock = vi.fn()
-        .mockResolvedValueOnce('')
+        .mockResolvedValueOnce(pageState(''))
         .mockResolvedValue(undefined);
 
     const mockPage = {

@@ -21,23 +21,46 @@ const { asLocator } = coreBundle.iso;
 import type * as playwright from 'playwright';
 import type { Tab } from '../tab.js';
 
+// How long an action that finished quietly is watched for work it scheduled
+// rather than started - a click handler whose fetch fires from a timer has
+// issued nothing by the time its own promise resolves. Capped by the settle
+// delay it defers to, so lowering that lowers this with it.
+const quietWindowMs = 100;
+
 export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>): Promise<R> {
   const settleMs = tab.context.config.timeouts.settle ?? 500;
   const requests = new Set<playwright.Request>();
+  let requestSeen = false;
   let frameNavigated = false;
   let waitCallback: () => void = () => {};
   const waitBarrier = new Promise<void>(f => { waitCallback = f; });
+  // Resolves on the first sign of page work, whenever it arrives.
+  let signalCallback: () => void = () => {};
+  const firstSignal = new Promise<void>(f => { signalCallback = f; });
 
-  const requestListener = (request: playwright.Request) => requests.add(request);
-  const requestFinishedListener = (request: playwright.Request) => {
+  const requestListener = (request: playwright.Request) => {
+    requestSeen = true;
+    requests.add(request);
+    signalCallback();
+  };
+  // A request that fails - offline, blocked by CORS, aborted - emits
+  // `requestfailed` and never `requestfinished`. Without the same removal path
+  // it would sit in the set until the 10s timeout below, turning a click that
+  // fired one doomed fetch into a ten-second tool call.
+  const requestSettledListener = (request: playwright.Request) => {
     requests.delete(request);
     if (!requests.size)
       waitCallback();
   };
 
   const frameNavigateListener = (frame: playwright.Frame) => {
-    if (frame.parentFrame())
+    signalCallback();
+    if (frame.parentFrame()) {
+      // A child frame swapping documents is page work too, and it can issue no
+      // request at all. It must not gate the barrier on a top-level load state
+      // that this navigation will never produce.
       return;
+    }
     frameNavigated = true;
     dispose();
     clearTimeout(timeout);
@@ -50,26 +73,59 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
   };
 
   tab.page.on('request', requestListener);
-  tab.page.on('requestfinished', requestFinishedListener);
+  tab.page.on('requestfinished', requestSettledListener);
+  tab.page.on('requestfailed', requestSettledListener);
   tab.page.on('framenavigated', frameNavigateListener);
   const timeout = setTimeout(onTimeout, 10000);
 
   const dispose = () => {
     tab.page.off('request', requestListener);
-    tab.page.off('requestfinished', requestFinishedListener);
+    tab.page.off('requestfinished', requestSettledListener);
+    tab.page.off('requestfailed', requestSettledListener);
     tab.page.off('framenavigated', frameNavigateListener);
     clearTimeout(timeout);
   };
 
   try {
     const result = await callback();
+    // Nothing has happened yet, which is not the same as nothing being about to:
+    // watch briefly for work the action scheduled instead of started.
+    if (!requestSeen && !frameNavigated)
+      await raceTimeout(firstSignal, Math.min(quietWindowMs, settleMs));
     if (!requests.size && !frameNavigated)
       waitCallback();
     await waitBarrier;
-    await tab.waitForTimeout(settleMs);
+    // Timers can schedule DOM-only work without producing any observable page
+    // signal. Preserve the configured settle delay so the returned snapshot
+    // includes those updates too.
+    if (!tab.page.isClosed()) {
+      try {
+        await tab.waitForTimeout(settleMs);
+      } catch (error) {
+        const targetClosed = error instanceof Error && /Target (?:page, context or browser has been closed|page closed|closed)/i.test(error.message);
+        if (!tab.page.isClosed() || !targetClosed)
+          throw error;
+      }
+    }
     return result;
   } finally {
     dispose();
+  }
+}
+
+// Resolves with `promise` or when the timeout elapses, whichever comes first.
+// Both branches resolve, so the losing one leaves nothing unhandled behind.
+async function raceTimeout(promise: Promise<void>, timeoutMs: number): Promise<void> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<void>(resolve => {
+        timeoutId = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

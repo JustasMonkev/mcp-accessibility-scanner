@@ -221,13 +221,13 @@ Create a `config.json` file with the following options:
 - `browser.contextOptions.storageState`: Start each session from a recorded Playwright storage state; applied in every mode except `--extension` (fresh contexts receive it at creation, reused contexts via `setStorageState()`). Sessions that share one reused context (non-isolated CDP modes) get the state applied once per context — a session joining a live context inherits its current state, not a fresh copy of the file; see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
-- `timeouts.settle`: How long to wait after each action for triggered work to settle before responding (default: `500`)
+- `timeouts.settle`: How long to wait after every action before responding (default: `500`). An action that finishes quietly is first watched for up to 100ms (or the settle delay, whichever is shorter) so scheduled network work can still be awaited before the settle delay.
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
-Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay.
+Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies after every action so delayed DOM-only updates are included in the response; a short observation window also catches scheduled requests and waits for them before that delay.
 
 #### HTTP Heartbeat
 
@@ -360,6 +360,13 @@ In `audit_site`, selectors apply to every crawled page, so an `includeSelectors`
 **Incomplete ("needs review") results:**
 Axe returns `incomplete` for checks it cannot decide on its own -- contrast over a background image or gradient, ambiguous labels, elements it could not fully evaluate. `scan_page`, `audit_site`, and `scan_page_matrix` report these in a section separate from violations so you can resolve them by inspecting the page (screenshot, snapshot, `browser_evaluate`). Set `includeIncomplete: false` to suppress them.
 
+**Frames that could not be scanned:**
+Axe is installed into every frame of the page before the scan runs. A frame that navigates mid-injection, or whose renderer does not answer within a second, is left out -- and its contents then contribute no findings. Rather than let that pass as a clean result, all three scan tools print a `WARNING: Axe could not be installed in N frame(s)` block listing the frame URLs, and `audit_site` and `scan_page_matrix` also record them per page and per variant in their JSON reports (`unscannedFrames`) and in `structuredContent`. A frame that was still loading usually succeeds on a re-run; one that fails consistently has to be audited on its own.
+
+A nested frame is reported when any frame above it went unscanned, even if its own injection succeeded: Axe reaches a nested document only by relaying through the frames above it, so an outer frame without Axe takes everything below it out of the scan.
+
+A frame you scoped out yourself is not reported: with `excludeSelectors: ["iframe.intercom-frame"]` that widget failing to load is the outcome you asked for, not a gap. Scope is resolved through the whole frame chain and across shadow boundaries, so an `includeSelectors` entry naming an ancestor still covers frames nested several levels below it or inside a shadow root, and excluding an outer frame or a shadow host silences everything inside it. Anything the check cannot resolve is reported rather than hidden.
+
 ### Audit Tools
 
 #### `audit_site`
@@ -381,6 +388,7 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 - Default variants: baseline, mobile, desktop, forced-colors, reduced-motion, zoom-200
 - Supports custom variants and optional reload between variants
 - Always writes a JSON report (default filename: `scan-matrix-{timestamp}.json`)
+- JSON report and structured result schema `v2` set baseline deltas to `null` when either scan left frames unscanned, because their coverage is not comparable
 
 **Example flow:**
 ```text
@@ -693,6 +701,33 @@ git clone https://github.com/JustasMonkev/mcp-accessibility-scanner.git
 cd mcp-accessibility-scanner
 npm install
 ```
+
+### Benchmarking tool latency
+
+`bench/mcp-bench.mjs` measures what a client actually waits for: it serves a fixed
+synthetic site, speaks MCP to the built server over stdio, and times real
+`tools/call` round trips for navigation, interaction, snapshots and every audit
+tool. Build first — it runs the compiled server from `lib/`.
+
+```bash
+npm run build
+npm run bench -- --out after.json --label after
+```
+
+Useful flags: `--iterations <n>` and `--warmups <n>` (defaults 5 and 1),
+`--browser`/`--executable-path` when the browser lives outside Playwright's own
+download directory, and `--server <path/to/cli.js>` plus `--lib <path/to/lib>`
+(supplied together) to point at a different build — that is how revisions compare:
+
+```bash
+git worktree add /tmp/baseline main && (cd /tmp/baseline && npm install && npm run build)
+npm run bench -- --server /tmp/baseline/cli.js --lib /tmp/baseline/lib --out before.json --label before
+npm run bench -- --out after.json --label after
+npm run bench:compare -- before.json after.json
+```
+
+The comparison total uses only end-to-end scenarios present in both reports,
+so adding or removing a scenario does not distort the reported speedup.
 
 ## License
 

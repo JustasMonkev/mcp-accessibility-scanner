@@ -42,6 +42,8 @@ export type TabSnapshot = {
   downloads: { download: playwright.Download, finished: boolean, outputFile: string }[];
 };
 
+class StaleAriaSnapshotError extends Error {}
+
 export class Tab extends EventEmitter<TabEventsInterface> {
   readonly context: Context;
   readonly page: playwright.Page;
@@ -54,6 +56,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _modalStates: ModalState[] = [];
   private _downloads: { download: playwright.Download, finished: boolean, outputFile: string }[] = [];
   private _defaultTimeout: number;
+  // The aria snapshot last handed to the caller; the refs in it are the refs the
+  // next tool call will name. Cleared whenever the page it described is gone.
+  private _lastAriaSnapshot: string | undefined;
+  private _ariaSnapshotGeneration = 0;
+  private _pageGeneration = 0;
 
   private _pageListeners: { event: string, listener: (...args: any[]) => void }[] = [];
 
@@ -70,6 +77,17 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       page.on(event as any, listener);
       this._pageListeners.push({ event, listener });
     };
+    // Every document swap invalidates the cached snapshot, whoever caused it:
+    // goBack(), page.reload() from scan_page_matrix, a meta refresh, or the page
+    // assigning location itself. Tab.navigate() is only one of those routes, and
+    // a ref resolved against the page the user has left would target the wrong
+    // document.
+    listen('framenavigated', (frame: playwright.Frame) => {
+      if (!frame.parentFrame()) {
+        ++this._pageGeneration;
+        this._invalidateAriaSnapshot();
+      }
+    });
     listen('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
     listen('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
     listen('request', request => this._requests.set(request, null));
@@ -152,6 +170,13 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this._recentConsoleMessages.length = 0;
     this._requests.clear();
     this._mainDocumentStatus = undefined;
+    ++this._pageGeneration;
+    this._invalidateAriaSnapshot();
+  }
+
+  private _invalidateAriaSnapshot() {
+    ++this._ariaSnapshotGeneration;
+    this._lastAriaSnapshot = undefined;
   }
 
   private _handleConsoleMessage(message: ConsoleMessage) {
@@ -253,13 +278,22 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   async captureSnapshot(): Promise<TabSnapshot> {
     let tabSnapshot: TabSnapshot | undefined;
+    const capture = { valid: true };
+    const snapshotGeneration = this._ariaSnapshotGeneration;
     const modalStates = await this._raceAgainstModalStates(async () => {
       const [snapshot, title] = await Promise.all([
         this._withPageStateTimeout(
-            this.page.ariaSnapshot({ mode: 'ai' }),
+            this._captureAriaSnapshot(capture),
             'capturing page accessibility snapshot',
         ).catch(error => {
-          logUnhandledError(error);
+          // Nothing describes the page any more, and the refs of an older
+          // snapshot must not be trusted against it.
+          if (!(error instanceof StaleAriaSnapshotError)) {
+            capture.valid = false;
+            logUnhandledError(error);
+            if (snapshotGeneration === this._ariaSnapshotGeneration)
+              this._invalidateAriaSnapshot();
+          }
           return `# Page snapshot unavailable: ${formatPageStateError(error)}`;
         }),
         this._withPageStateTimeout(
@@ -285,6 +319,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       // Assign console message late so that we did not lose any to modal state.
       tabSnapshot.consoleMessages = this._recentConsoleMessages;
       this._recentConsoleMessages = [];
+    }
+    if (!tabSnapshot) {
+      capture.valid = false;
+      this._invalidateAriaSnapshot();
     }
     return tabSnapshot ?? {
       url: this.page.url(),
@@ -348,12 +386,49 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   async refLocators(params: { element: string, ref: string }[]): Promise<playwright.Locator[]> {
-    const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
+    // The refs a caller passes come from the snapshot the last tool call
+    // returned, which is the one cached here, so the common case needs no fresh
+    // capture. Playwright keeps a ref bound to the element it was issued for,
+    // but that element can change its accessible role or name while staying
+    // connected. Re-checking only the referenced nodes is still cheaper than a
+    // full-page snapshot and prevents an old ref from targeting repurposed UI.
+    const cached = this._lastAriaSnapshot;
+    const snapshot = cached && await this._refsMatchSnapshot(params, cached)
+      ? cached
+      : await this._captureAriaSnapshot();
     return params.map(param => {
       if (!snapshot.includes(`[ref=${param.ref}]`))
         throw new Error(`Ref ${param.ref} not found in the current page snapshot. Try capturing new snapshot.`);
       return this.page.locator(`aria-ref=${param.ref}`).describe(param.element);
     });
+  }
+
+  private async _refsMatchSnapshot(params: { ref: string }[], snapshot: string): Promise<boolean> {
+    const pageGeneration = this._pageGeneration;
+    const lines = snapshot.split('\n');
+    const timeout = Math.min(this._pageStateTimeoutMs(), 1000);
+    const matches = await Promise.all(params.map(async param => {
+      const cached = lines.find(line => line.includes(`[ref=${param.ref}]`));
+      if (!cached)
+        return false;
+      const current = await this.page.locator(`aria-ref=${param.ref}`)
+          .ariaSnapshot({ mode: 'ai', depth: 1, timeout })
+          .catch(() => '');
+      // Refs are assigned from the full role and name before long names are
+      // omitted from rendering, so a semantic change still changes this line.
+      return current.split('\n', 1)[0]?.trim() === cached.trim();
+    }));
+    return pageGeneration === this._pageGeneration && matches.every(Boolean);
+  }
+
+  private async _captureAriaSnapshot(capture = { valid: true }): Promise<string> {
+    const pageGeneration = this._pageGeneration;
+    const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
+    if (!capture.valid || pageGeneration !== this._pageGeneration)
+      throw new StaleAriaSnapshotError('Page changed while capturing accessibility snapshot.');
+    ++this._ariaSnapshotGeneration;
+    this._lastAriaSnapshot = snapshot;
+    return snapshot;
   }
 
   async waitForTimeout(time: number) {
@@ -406,7 +481,7 @@ export function renderModalStates(context: Context, modalStates: ModalState[]): 
   if (modalStates.length === 0)
     result.push('- There is no modal state present');
   for (const state of modalStates) {
-    const tool = context.tools.filter(tool => 'clearsModalState' in tool).find(tool => tool.clearsModalState === state.type);
+    const tool = context.tools.find(tool => tool.clearsModalState === state.type);
     result.push(`- [${truncateDataUrls(state.description)}]: can be handled by the "${tool?.schema.name}" tool`);
   }
   return result;

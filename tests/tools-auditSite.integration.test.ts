@@ -31,6 +31,7 @@ function createAxeResult(url: string, violations: any[]) {
     incomplete: [],
     passes: [],
     inapplicable: [],
+    unscannedFrames: [],
   } as any;
 }
 
@@ -59,7 +60,10 @@ describe('audit_site integration', () => {
       context: vi.fn(() => ({ cookies: vi.fn(async () => []) })),
       url: vi.fn(() => currentUrl),
       title: vi.fn(async () => `Title for ${currentUrl}`),
-      evaluate: vi.fn(async () => linkMap[currentUrl] ?? []),
+      evaluate: vi.fn(async (_callback: unknown, selector?: string) => ({
+        title: `Title for ${currentUrl}`,
+        links: selector ? linkMap[currentUrl] ?? [] : [],
+      })),
     };
 
     const crawlTab: any = {
