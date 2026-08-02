@@ -293,6 +293,39 @@ describe('Snapshot Tools', () => {
       });
     });
 
+    it('warns about frames the scan could not reach, naming them', async () => {
+      // A frame Axe never reached contributes no violations, so a silent result
+      // reads as a clean page rather than a partly-scanned one.
+      vi.spyOn(axe, 'runAxeScan').mockResolvedValue({
+        ...scanResult([]),
+        unscannedFrames: ['https://widget.example/embed', 'about:blank (name="promo")'],
+      });
+      const { context, response, text } = scanHarness();
+
+      await scanPageTool.handle(context as any, {
+        violationsTag: ['wcag2aa'],
+        includeIncomplete: true,
+        maxNodesPerViolation: 10,
+      } as any, response as any);
+
+      expect(text()).toContain('WARNING: Axe could not be installed in 2 frame(s)');
+      expect(text()).toContain('- https://widget.example/embed');
+      expect(text()).toContain('- about:blank (name="promo")');
+    });
+
+    it('says nothing about frames when the scan covered all of them', async () => {
+      vi.spyOn(axe, 'runAxeScan').mockResolvedValue(scanResult([]));
+      const { context, response, text } = scanHarness();
+
+      await scanPageTool.handle(context as any, {
+        violationsTag: ['wcag2aa'],
+        includeIncomplete: true,
+        maxNodesPerViolation: 10,
+      } as any, response as any);
+
+      expect(text()).not.toContain('could not be installed');
+    });
+
     it('reports the rule id and flags truncated node lists', async () => {
       vi.spyOn(axe, 'runAxeScan').mockResolvedValue(scanResult([scanRule('image-alt', 3), scanRule('label', 1)]));
       const { context, response, text } = scanHarness();

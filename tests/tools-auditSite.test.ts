@@ -178,6 +178,66 @@ describe('audit_site tool', () => {
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
   });
 
+  it('warns about pages whose frames the scan could not reach', async () => {
+    // A page scanned with a frame missing reports fewer violations, so a reader
+    // counting them has to know which pages those numbers are incomplete for.
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/embedded'],
+      'https://example.com/embedded': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => ({
+      ...createAxeResult(page.url(), []),
+      unscannedFrames: page.url() === 'https://example.com/embedded' ? ['https://widget.example/embed'] : [],
+    }));
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 5,
+      maxDepth: 1,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(response.result()).toContain('WARNING: Axe could not be installed in frames on 1 page(s)');
+    expect(response.result()).toContain('- https://example.com/embedded: https://widget.example/embed');
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    const embedded = report.pages.find((page: any) => page.url === 'https://example.com/embedded');
+    expect(embedded.unscannedFrames).toEqual(['https://widget.example/embed']);
+    // A client reading only structured output must be able to tell the same.
+    expect(response.structuredContent()!.pagesWithUnscannedFrames).toEqual([
+      { url: 'https://example.com/embedded', unscannedFrames: ['https://widget.example/embed'] },
+    ]);
+  });
+
+  it('says nothing about frames when every page was scanned in full', async () => {
+    const { context, response } = createHarness({ 'https://example.com/': [] });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 1,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(response.result()).not.toContain('could not be installed');
+    expect(response.structuredContent()!.pagesWithUnscannedFrames).toEqual([]);
+  });
+
   it('passes tags, rule filters and scope selectors through to the axe scan', async () => {
     const { context, response } = createHarness({ 'https://example.com/': [] });
     const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan')
