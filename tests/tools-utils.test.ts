@@ -57,6 +57,7 @@ describe('Tool Utils', () => {
   beforeEach(() => {
     mockPage = new EventEmitter();
     mockPage.url = () => 'https://example.com';
+    mockPage.isClosed = vi.fn().mockReturnValue(false);
     mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
     mockPage.evaluate = vi.fn().mockResolvedValue(undefined);
     mockPage._wrapApiCall = vi.fn().mockImplementation(cb => cb());
@@ -140,15 +141,32 @@ describe('Tool Utils', () => {
       expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
     });
 
-    it('should skip the settle delay when the action started nothing', async () => {
-      // No request and no navigation means nothing is in flight to settle, and
-      // the fixed wait would be pure latency on every click and keypress.
+    it('should preserve the settle delay for delayed DOM-only work', async () => {
+      // A timer can update the DOM without a request or navigation signal.
       mockTab.context.config.timeouts.settle = 5;
       const callback = vi.fn().mockResolvedValue('result');
 
       await waitForCompletion(mockTab, callback);
 
-      expect(mockTab.waitForTimeout).not.toHaveBeenCalled();
+      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(5);
+    });
+
+    it('should not fail when the action closes its page before settling', async () => {
+      mockTab.waitForTimeout = vi.fn().mockImplementation(async () => {
+        mockPage.isClosed.mockReturnValue(true);
+        throw new Error('page._wrapApiCall: Target page, context or browser has been closed');
+      });
+
+      await expect(waitForCompletion(mockTab, vi.fn().mockResolvedValue('result'))).resolves.toBe('result');
+    });
+
+    it('should not hide an unrelated settle error when the page also closes', async () => {
+      mockTab.waitForTimeout = vi.fn().mockImplementation(async () => {
+        mockPage.isClosed.mockReturnValue(true);
+        throw new Error('Protocol failure');
+      });
+
+      await expect(waitForCompletion(mockTab, vi.fn().mockResolvedValue('result'))).rejects.toThrow('Protocol failure');
     });
 
     it('should settle for work the action scheduled rather than started', async () => {

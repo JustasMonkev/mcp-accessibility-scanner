@@ -230,9 +230,10 @@ async function runMicroBenchmarks() {
 
 function summarize(samples) {
   const sorted = [...samples].sort((first, second) => first - second);
+  const middle = Math.floor(sorted.length / 2);
   return {
     samples: samples.length,
-    median: sorted[Math.floor((sorted.length - 1) / 2)],
+    median: sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2,
     mean: samples.reduce((sum, value) => sum + value, 0) / samples.length,
     min: sorted[0],
     max: sorted[sorted.length - 1],

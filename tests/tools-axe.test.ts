@@ -14,7 +14,7 @@ type ScanCall = { context: unknown; options: any };
 let lastScan: ScanCall | undefined;
 let scanResult: any;
 
-type FrameScope = { included: boolean, excluded: boolean, hidden?: boolean };
+type FrameScope = { included: boolean, excluded: boolean, hidden?: boolean, reachable?: boolean };
 
 function makeFrame(
   countBySelector: Record<string, number>,
@@ -33,7 +33,7 @@ function makeFrame(
     // The scope check reads the owning iframe element in the parent document,
     // walking up one document per ancestor frame.
     frameElement: async () => ({
-      evaluate: async () => scope,
+      evaluate: async (_script: unknown, arg?: unknown) => arg === undefined ? scope.reachable ?? true : scope,
       dispose: async () => undefined,
     }),
     evaluate: async (script: unknown, arg?: unknown) => {
@@ -362,6 +362,18 @@ describe('axe helpers', () => {
     expect(result.unscannedFrames).toEqual([]);
   });
 
+  it('reports an injected frame that Axe cannot reach through a closed shadow root', async () => {
+    resetScan();
+    const closedShadow = makeFrame({}, 'https://example.com/closed-shadow', true, '', true, {
+      included: true,
+      excluded: false,
+      reachable: false,
+    });
+    const result = await runAxeScan(pageWithSelectorCounts({}, [closedShadow]));
+
+    expect(result.unscannedFrames).toEqual(['https://example.com/closed-shadow']);
+  });
+
   it('reports a frame that took the injection and then navigated away from it', async () => {
     resetScan();
     // A frame that navigates while a slower sibling is still injecting has a new
@@ -460,6 +472,30 @@ describe('axe helpers', () => {
     const result = await runAxeScan(pageWithSelectorCounts({}, [hidden]));
 
     expect(result.unscannedFrames).toEqual([]);
+  });
+
+  it('warns about a failed hidden-until-found frame that Axe still traverses', async () => {
+    resetScan();
+    const untilFound = makeFrame({}, 'https://example.com/until-found', false, '', true, {
+      included: true,
+      excluded: false,
+      hidden: false,
+    });
+    const result = await runAxeScan(pageWithSelectorCounts({}, [untilFound]));
+
+    expect(result.unscannedFrames).toEqual(['https://example.com/until-found']);
+  });
+
+  it('warns about a failed slotted frame inside a shadow-root modal', async () => {
+    resetScan();
+    const slotted = makeFrame({}, 'https://example.com/slotted-modal', false, '', true, {
+      included: true,
+      excluded: false,
+      hidden: false,
+    });
+    const result = await runAxeScan(pageWithSelectorCounts({}, [slotted]));
+
+    expect(result.unscannedFrames).toEqual(['https://example.com/slotted-modal']);
   });
 
   it('does not warn about a frame the caller scoped out of the scan', async () => {

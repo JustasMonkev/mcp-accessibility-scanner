@@ -32,7 +32,6 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
   const requests = new Set<playwright.Request>();
   let requestSeen = false;
   let frameNavigated = false;
-  let subframeNavigated = false;
   let waitCallback: () => void = () => {};
   const waitBarrier = new Promise<void>(f => { waitCallback = f; });
   // Resolves on the first sign of page work, whenever it arrives.
@@ -58,12 +57,8 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
     signalCallback();
     if (frame.parentFrame()) {
       // A child frame swapping documents is page work too, and it can issue no
-      // request at all - a srcdoc or data: URL is served without touching the
-      // network. Skipping the settle would then capture the response while the
-      // replacement document is still initializing. It is tracked separately
-      // from a main-frame navigation because it must not gate the barrier on a
-      // top-level load state that this navigation will never produce.
-      subframeNavigated = true;
+      // request at all. It must not gate the barrier on a top-level load state
+      // that this navigation will never produce.
       return;
     }
     frameNavigated = true;
@@ -100,13 +95,18 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
     if (!requests.size && !frameNavigated)
       waitCallback();
     await waitBarrier;
-    // The settle delay covers work the page reported and is still finishing -
-    // a response being rendered, a navigation still painting. An action that
-    // issued no request and navigated nowhere within the window above started
-    // none of that, so there is nothing left to wait out. Skipping it is worth
-    // ~500ms on every click, keypress and form fill.
-    if (requestSeen || frameNavigated || subframeNavigated)
-      await tab.waitForTimeout(settleMs);
+    // Timers can schedule DOM-only work without producing any observable page
+    // signal. Preserve the configured settle delay so the returned snapshot
+    // includes those updates too.
+    if (!tab.page.isClosed()) {
+      try {
+        await tab.waitForTimeout(settleMs);
+      } catch (error) {
+        const targetClosed = error instanceof Error && /Target (?:page, context or browser has been closed|page closed|closed)/i.test(error.message);
+        if (!tab.page.isClosed() || !targetClosed)
+          throw error;
+      }
+    }
     return result;
   } finally {
     dispose();

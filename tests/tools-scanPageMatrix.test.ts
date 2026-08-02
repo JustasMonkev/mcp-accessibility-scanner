@@ -340,6 +340,7 @@ describe('scan_page_matrix tool', () => {
     expect(report.variants[1].diffFromBaseline).toBeNull();
 
     const structured = response.structuredContent() as any;
+    expect(structured.version).toBe('v2');
     // null, not [] - an empty list would read as "compared, nothing changed".
     expect(structured.variants[1].resolvedViolationIds).toBeNull();
     expect(structured.variants[1].newViolationIds).toBeNull();

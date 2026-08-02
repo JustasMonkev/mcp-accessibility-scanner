@@ -306,17 +306,16 @@ async function isFrameInScope(
     let matches: { included: boolean, excluded: boolean, hidden: boolean } | null;
     try {
       matches = await withFrameTimeout(element.evaluate((node, scope) => {
+        const composedParent = (element: Element) => {
+          const root = element.getRootNode();
+          return element.assignedSlot ?? element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+        };
         const matchesAny = (selectors: string[]) => selectors.some(selector => {
           try {
-            // `closest()` stops at a shadow boundary as well as a frame one, so
-            // the walk steps onto the host and carries on: an iframe inside a
-            // shadow root is still inside whatever contains that host, and Axe
-            // descends into shadow content just the same.
             for (let current: Element | null = node as Element; current;) {
-              if (current.closest(selector))
+              if (current.matches(selector))
                 return true;
-              const root = current.getRootNode();
-              current = root instanceof ShadowRoot ? root.host : null;
+              current = composedParent(current);
             }
             return false;
           } catch {
@@ -336,8 +335,7 @@ async function isFrameInScope(
           for (let current: Element | null = node as Element; current;) {
             if (current === modal)
               return true;
-            const root = current.getRootNode();
-            current = current.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+            current = composedParent(current);
           }
           return false;
         });
@@ -349,12 +347,12 @@ async function isFrameInScope(
           const closedDetails = parent?.localName === 'details' && !parent.hasAttribute('open') &&
             (current.localName !== 'summary' || [...parent.children].find(child => child.localName === 'summary') !== current);
           const contentHidden = current !== node && style.getPropertyValue('content-visibility') === 'hidden';
-          if (ariaHidden || style.display === 'none' || current.hasAttribute('inert') || closedDetails || contentHidden || (current as HTMLElement).hidden) {
+          const hiddenAttribute = current.hasAttribute('hidden') && current.getAttribute('hidden')?.trim().toLowerCase() !== 'until-found';
+          if (ariaHidden || style.display === 'none' || current.hasAttribute('inert') || closedDetails || contentHidden || hiddenAttribute) {
             hidden = true;
             break;
           }
-          const root = current.getRootNode();
-          current = current.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+          current = composedParent(current);
         }
         const visibility = getComputedStyle(node as Element).visibility;
         hidden ||= visibility === 'hidden' || visibility === 'collapse';
@@ -408,7 +406,7 @@ async function injectAxeIntoFrames(
   // still missed. The window is microseconds rather than the length of the
   // slowest injection, but it cannot be closed from outside the page.
   const children = page.frames().filter(frame => frame !== mainFrame);
-  const covered = await Promise.all(children.map(frame => hasAxe(frame, token)));
+  const covered = await Promise.all(children.map(frame => hasReachableAxe(frame, token)));
   const withoutAxe = new Set(children.filter((_, index) => !covered[index]));
 
   // A frame whose own injection succeeded is still unreachable when an ancestor
@@ -426,6 +424,31 @@ async function injectAxeIntoFrames(
   // of a healthy page pays nothing for this.
   const inScope = await Promise.all(missed.map(frame => isFrameInScope(frame, include, exclude)));
   return missed.filter((_, index) => inScope[index]).map(describeFrame);
+}
+
+async function hasReachableAxe(frame: playwright.Frame, token: string): Promise<boolean> {
+  if (!await hasAxe(frame, token))
+    return false;
+  const elementPromise = frame.frameElement().catch(() => null);
+  const element = await withFrameTimeout(elementPromise, null);
+  if (!element) {
+    void elementPromise.then(late => late?.dispose().catch(() => {}));
+    return false;
+  }
+  try {
+    return await withFrameTimeout(element.evaluate(node => {
+      for (let current = node as Element; ;) {
+        const root = current.getRootNode();
+        if (!(root instanceof ShadowRoot))
+          return true;
+        if (root.host.shadowRoot !== root)
+          return false;
+        current = root.host;
+      }
+    }), false);
+  } finally {
+    await element.dispose().catch(() => {});
+  }
 }
 
 // Runs in the page. Keeps axe's own result shape minus the parts nothing reads:

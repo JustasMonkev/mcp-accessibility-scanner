@@ -311,6 +311,7 @@ const scanPageMatrix = defineTabTool({
     });
     response.setStructuredContent({
       kind: 'scan_page_matrix',
+      version: 'v2',
       report: {
         path: reportPath,
         uri: reportResourceLink.uri,
