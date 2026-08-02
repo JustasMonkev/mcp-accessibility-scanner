@@ -23,8 +23,7 @@ describe('Tab', () => {
   let mockContext: Context;
   let mockPage: any;
   let onPageClose: any;
-  let locatorRole: string | undefined;
-  let locatorName: string;
+  let locatorSnapshot: string | undefined;
 
   beforeEach(() => {
     mockPage = new EventEmitter();
@@ -37,16 +36,13 @@ describe('Tab', () => {
     mockPage.setDefaultTimeout = vi.fn();
     mockPage.goBack = vi.fn().mockResolvedValue(null);
     mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
-    locatorRole = 'button';
-    locatorName = 'Submit';
+    locatorSnapshot = 'button "Submit" [ref=1]';
     mockPage.locator = vi.fn().mockReturnValue({
       describe: vi.fn().mockReturnValue({}),
-      _expect: vi.fn(async (expression, options) => {
-        if (locatorRole === undefined)
+      ariaSnapshot: vi.fn(async () => {
+        if (locatorSnapshot === undefined)
           throw new Error('Element not found');
-        const expected = options.expectedText[0].string;
-        const value = expression === 'to.have.role' ? locatorRole : locatorName;
-        return { matches: expected === value, received: { value } };
+        return locatorSnapshot;
       }),
     });
 
@@ -463,7 +459,7 @@ describe('Tab', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
       await tab.captureSnapshot();
-      locatorRole = undefined;
+      locatorSnapshot = undefined;
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=2]');
 
       await expect(
@@ -475,7 +471,7 @@ describe('Tab', () => {
     it('re-captures when a cached ref has different accessible semantics', async () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
       await tab.captureSnapshot();
-      locatorName = 'Delete';
+      locatorSnapshot = 'button "Delete" [ref=2]';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Delete" [ref=2]');
 
       await expect(
@@ -488,7 +484,7 @@ describe('Tab', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Save" [ref=1]');
       await tab.captureSnapshot();
-      locatorName = 'Save 2';
+      locatorSnapshot = 'button "Save 2" [ref=2]';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Save 2" [ref=2]');
 
       await expect(
@@ -499,7 +495,7 @@ describe('Tab', () => {
 
     it('revalidates YAML-quoted snapshot entries without a full-page capture', async () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      locatorName = 'Warning: Delete';
+      locatorSnapshot = `- 'button "Warning: Delete" [ref=1]'`;
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- 'button "Warning: Delete" [ref=1]'`);
       await tab.captureSnapshot();
 
@@ -510,8 +506,7 @@ describe('Tab', () => {
 
     it('accepts Playwright synthetic roles when the public ARIA role is empty', async () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      locatorRole = '';
-      locatorName = '';
+      locatorSnapshot = 'generic [ref=1]';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('generic [ref=1]');
       await tab.captureSnapshot();
 
@@ -520,18 +515,28 @@ describe('Tab', () => {
       expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
     });
 
-    it('caches an unchanged accessible name omitted from the snapshot', async () => {
+    it('reuses a cached ref whose long name is omitted from the snapshot', async () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      locatorName = 'x'.repeat(901);
+      locatorSnapshot = 'button [ref=1]';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button [ref=1]');
       await tab.captureSnapshot();
 
       await tab.refLocators([{ element: 'Long name', ref: '1' }]);
       await tab.refLocators([{ element: 'Long name', ref: '1' }]);
 
-      // The first lookup confirms that the fresh snapshot kept the same ref;
-      // subsequent lookups compare the remembered full name directly.
-      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(2);
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-captures when an omitted long name changes the Playwright ref', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button [ref=1]');
+      await tab.captureSnapshot();
+      locatorSnapshot = 'button [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button [ref=2]');
+
+      await expect(
+          tab.refLocators([{ element: 'Long name', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
     });
 
     it('re-reads the page for a ref the last snapshot does not hold', async () => {

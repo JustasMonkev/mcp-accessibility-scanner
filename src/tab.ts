@@ -57,7 +57,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   // The aria snapshot last handed to the caller; the refs in it are the refs the
   // next tool call will name. Cleared whenever the page it described is gone.
   private _lastAriaSnapshot: string | undefined;
-  private _omittedRefNames = new Map<string, string>();
 
   private _pageListeners: { event: string, listener: (...args: any[]) => void }[] = [];
 
@@ -383,42 +382,24 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   private async _refsMatchSnapshot(params: { ref: string }[], snapshot: string): Promise<boolean> {
+    const lines = snapshot.split('\n');
+    const timeout = Math.min(this._pageStateTimeoutMs(), 1000);
     const matches = await Promise.all(params.map(async param => {
-      const cached = snapshot.split('\n').find(line => line.includes(`[ref=${param.ref}]`));
+      const cached = lines.find(line => line.includes(`[ref=${param.ref}]`));
       if (!cached)
         return false;
-      let line = cached.trim();
-      const quoted = /^- '((?:[^']|'')*)'(.*)$/.exec(line);
-      if (quoted)
-        line = `- ${quoted[1].replace(/''/g, "'")}${quoted[2]}`;
-      const match = line.match(/^-?\s*([\w-]+)(?:\s+"((?:[^"\\]|\\.)*)")?/);
-      if (!match)
-        return false;
-      const role = match[1];
-      const name = this._omittedRefNames.get(param.ref) ?? (match[2] ? JSON.parse(`"${match[2]}"`) : '');
-      const locator = this.page.locator(`aria-ref=${param.ref}`) as playwright.Locator & {
-        _expect(expression: string, options: object): Promise<{ matches: boolean, received?: { value?: unknown } }>;
-      };
-      const expectedText = (string: string, normalizeWhiteSpace = false) => [{ string, normalizeWhiteSpace }];
-      const timeout = Math.min(this._pageStateTimeoutMs(), 1000);
-      const [roleResult, nameResult] = await Promise.all([
-        locator._expect('to.have.role', { expectedText: expectedText(role), isNot: false, timeout }),
-        locator._expect('to.have.accessible.name', { expectedText: expectedText(name, true), isNot: false, timeout }),
-      ]).catch(() => [{ matches: false, received: undefined }, { matches: false, received: undefined }]);
-      const syntheticRoleMatches = (role === 'generic' || role === 'iframe') && roleResult.received?.value === '';
-      if (!match[2] && typeof nameResult.received?.value === 'string' && nameResult.received.value.length > 900)
-        this._omittedRefNames.set(param.ref, nameResult.received.value);
-      return (roleResult.matches || syntheticRoleMatches) && nameResult.matches;
+      const current = await this.page.locator(`aria-ref=${param.ref}`)
+          .ariaSnapshot({ mode: 'ai', depth: 1, timeout })
+          .catch(() => '');
+      // Refs are assigned from the full role and name before long names are
+      // omitted from rendering, so a semantic change still changes this line.
+      return current.split('\n', 1)[0]?.trim() === cached.trim();
     }));
     return matches.every(Boolean);
   }
 
   private async _captureAriaSnapshot(): Promise<string> {
     const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
-    for (const ref of this._omittedRefNames.keys()) {
-      if (!snapshot.includes(`[ref=${ref}]`))
-        this._omittedRefNames.delete(ref);
-    }
     this._lastAriaSnapshot = snapshot;
     return snapshot;
   }
