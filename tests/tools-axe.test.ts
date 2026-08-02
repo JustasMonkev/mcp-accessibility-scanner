@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -386,6 +387,126 @@ describe('axe helpers', () => {
     expect(result.unscannedFrames).toEqual(['https://example.com/widget']);
   });
 
+  it('rechecks a frame that navigates during its reachability probe', async () => {
+    resetScan();
+    const navigated = makeFrame({}, 'https://example.com/widget');
+    const evaluate = navigated.evaluate;
+    let navigatedAway = false;
+    navigated.evaluate = async (script: unknown, arg?: unknown) =>
+      arg && typeof arg === 'object' && 'token' in arg && navigatedAway ? false : evaluate(script, arg);
+    navigated.frameElement = async () => ({
+      evaluate: async () => {
+        navigatedAway = true;
+        return true;
+      },
+      dispose: async () => undefined,
+    });
+
+    expect((await runAxeScan(pageWithSelectorCounts({}, [navigated]))).unscannedFrames)
+        .toEqual(['https://example.com/widget']);
+  });
+
+  it('does not report a failed frame that detached during coverage checks', async () => {
+    resetScan();
+    const detached = makeFrame({}, 'https://example.com/widget', false);
+    const page = pageWithSelectorCounts({}, [detached]);
+    const mainFrame = page.mainFrame();
+    let reads = 0;
+    page.frames = () => ++reads < 3 ? [mainFrame, detached] : [mainFrame];
+
+    expect((await runAxeScan(page)).unscannedFrames).toEqual([]);
+  });
+
+  it('reports a replacement frame that attaches during coverage checks', async () => {
+    resetScan();
+    const detached = makeFrame({}, 'https://example.com/old', false);
+    const replacement = makeFrame({}, 'https://example.com/replacement', false);
+    const page = pageWithSelectorCounts({}, [detached]);
+    const mainFrame = page.mainFrame();
+    replacement.parentFrame = () => mainFrame;
+    let reads = 0;
+    page.frames = () => ++reads < 4 ? [mainFrame, detached] : [mainFrame, replacement];
+
+    expect((await runAxeScan(page)).unscannedFrames).toEqual(['https://example.com/replacement']);
+  });
+
+  it('does not report an excluded replacement frame that attaches during coverage checks', async () => {
+    resetScan();
+    const detached = makeFrame({}, 'https://example.com/old', false);
+    const replacement = makeFrame({}, 'https://example.com/replacement', false, '', true, {
+      included: true,
+      excluded: true,
+    });
+    const page = pageWithSelectorCounts({}, [detached]);
+    const mainFrame = page.mainFrame();
+    replacement.parentFrame = () => mainFrame;
+    let reads = 0;
+    page.frames = () => ++reads < 4 ? [mainFrame, detached] : [mainFrame, replacement];
+
+    expect((await runAxeScan(page)).unscannedFrames).toEqual([]);
+  });
+
+  it('fails instead of reporting complete coverage when frames keep changing', async () => {
+    resetScan();
+    const frames = Array.from({ length: 9 }, (_, index) => makeFrame({}, `https://example.com/${index}`, false));
+    const page = pageWithSelectorCounts({}, [frames[0]]);
+    const mainFrame = page.mainFrame();
+    frames.forEach(frame => frame.parentFrame = () => mainFrame);
+    let reads = 0;
+    page.frames = () => [mainFrame, frames[Math.min(reads++, frames.length - 1)]];
+
+    await expect(runAxeScan(page)).rejects.toThrow(/frame tree kept changing/);
+  });
+
+  it('fails when frame replacements repeat the same transition', async () => {
+    resetScan();
+    const frames = [makeFrame({}, 'https://example.com/a', false), makeFrame({}, 'https://example.com/b', false)];
+    const page = pageWithSelectorCounts({}, frames);
+    const mainFrame = page.mainFrame();
+    frames.forEach(frame => frame.parentFrame = () => mainFrame);
+    const snapshots = [frames[0], frames[0], frames[0], frames[1], frames[1], frames[0], frames[0], frames[1], frames[1]];
+    let reads = 0;
+    page.frames = () => [mainFrame, snapshots[Math.min(reads++, snapshots.length - 1)]];
+
+    await expect(runAxeScan(page)).rejects.toThrow(/frame tree kept changing/);
+  });
+
+  it('limits concurrent coverage and scope probes', async () => {
+    resetScan();
+    let activeCoverage = 0;
+    let activeScope = 0;
+    let maxCoverage = 0;
+    let maxScope = 0;
+    const pause = () => new Promise(resolve => setTimeout(resolve, 5));
+    const frames = Array.from({ length: 8 }, (_, index) => {
+      const frame = makeFrame({}, `https://example.com/${index}`);
+      const evaluate = frame.evaluate;
+      frame.evaluate = async (script: unknown, arg?: unknown) => {
+        if (arg && typeof arg === 'object' && 'token' in arg) {
+          maxCoverage = Math.max(maxCoverage, ++activeCoverage);
+          await pause();
+          activeCoverage--;
+        }
+        return evaluate(script, arg);
+      };
+      frame.frameElement = async () => ({
+        evaluate: async (_script: unknown, arg?: unknown) => {
+          if (arg === undefined)
+            return false;
+          maxScope = Math.max(maxScope, ++activeScope);
+          await pause();
+          activeScope--;
+          return { included: true, excluded: false, hidden: false };
+        },
+        dispose: async () => undefined,
+      });
+      return frame;
+    });
+
+    expect((await runAxeScan(pageWithSelectorCounts({}, frames))).unscannedFrames).toHaveLength(frames.length);
+    expect({ maxCoverage, maxScope }).toEqual({ maxCoverage: 4, maxScope: 4 });
+  });
+
   it('does not accept a readiness marker left by an earlier scan', async () => {
     resetScan();
     const stale = makeFrame({}, 'https://example.com/widget');
@@ -590,5 +711,30 @@ describe('axe helpers', () => {
       byImpact: { serious: 3 },
       byRuleId: { 'rule-a': 1, 'rule-b': 2 },
     });
+  });
+});
+
+describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage in a real browser', () => {
+  it('reports a hidden iframe made visible by author CSS', async () => {
+    const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<div id="host"></div>');
+      const loaded = page.waitForEvent('framenavigated', frame => frame.url() === 'about:srcdoc');
+      await page.evaluate(() => {
+        const root = document.querySelector('#host')!.attachShadow({ mode: 'closed' });
+        const style = document.createElement('style');
+        style.textContent = 'iframe[hidden]{display:block}';
+        const frame = document.createElement('iframe');
+        frame.hidden = true;
+        frame.srcdoc = '<button>inside</button>';
+        root.append(style, frame);
+      });
+      await loaded;
+
+      expect((await runAxeScan(page)).unscannedFrames).toEqual(['about:srcdoc']);
+    } finally {
+      await browser.close();
+    }
   });
 });

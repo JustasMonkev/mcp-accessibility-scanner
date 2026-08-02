@@ -237,15 +237,19 @@ async function withFrameTimeout<T>(work: Promise<T>, fallback: T): Promise<T> {
 // every one of them; through the pool, none, at every size tried.
 const frameInjectionConcurrency = 4;
 
-async function withConcurrency<T>(items: readonly T[], run: (item: T) => Promise<unknown>): Promise<void> {
+async function withConcurrency<T, R>(items: readonly T[], run: (item: T) => Promise<R>): Promise<R[]> {
   let next = 0;
+  const results: R[] = [];
   await Promise.all(Array.from(
       { length: Math.min(frameInjectionConcurrency, items.length) },
       async () => {
-        while (next < items.length)
-          await run(items[next++]);
+        while (next < items.length) {
+          const index = next++;
+          results[index] = await run(items[index]);
+        }
       },
   ));
+  return results;
 }
 
 // A frame name is author-controlled and unbounded, so it is normalized and
@@ -349,8 +353,7 @@ async function isFrameInScope(
           const closedDetails = parent?.localName === 'details' && !parent.hasAttribute('open') &&
             (current.localName !== 'summary' || [...parent.children].find(child => child.localName === 'summary') !== current);
           const contentHidden = current !== node && style.getPropertyValue('content-visibility') === 'hidden';
-          const hiddenAttribute = current.hasAttribute('hidden') && current.getAttribute('hidden')?.trim().toLowerCase() !== 'until-found';
-          if (ariaHidden || style.display === 'none' || current.hasAttribute('inert') || closedDetails || contentHidden || hiddenAttribute) {
+          if (ariaHidden || style.display === 'none' || current.hasAttribute('inert') || closedDetails || contentHidden) {
             hidden = true;
             break;
           }
@@ -407,25 +410,48 @@ async function injectAxeIntoFrames(
   // Ceiling: a frame that navigates between this check and the run below is
   // still missed. The window is microseconds rather than the length of the
   // slowest injection, but it cannot be closed from outside the page.
-  const children = page.frames().filter(frame => frame !== mainFrame);
-  const covered = await Promise.all(children.map(frame => hasReachableAxe(frame, token)));
-  const withoutAxe = new Set(children.filter((_, index) => !covered[index]));
+  const frameIds = new Map<playwright.Frame, number>();
+  const frameId = (frame: playwright.Frame) => {
+    if (!frameIds.has(frame))
+      frameIds.set(frame, frameIds.size);
+    return frameIds.get(frame)!;
+  };
+  let previousSignature: string | undefined;
+  for (let round = 0; round < 4; round++) {
+    const children = page.frames().filter(frame => frame !== mainFrame);
+    const covered = await withConcurrency(children, frame => hasReachableAxe(frame, token));
+    const withoutAxe = new Set(children.filter((_, index) => !covered[index]));
 
-  // A frame whose own injection succeeded is still unreachable when an ancestor
-  // has no Axe: the top-level run reaches a nested document only by relaying
-  // through the frames above it, and a frame without Axe relays nothing. Both
-  // documents go unscanned, so both are reported rather than only the outer one.
-  const missed = children.filter(frame => {
-    for (let current: playwright.Frame | null = frame; current && current !== mainFrame; current = current.parentFrame()) {
-      if (withoutAxe.has(current))
-        return true;
+    // A frame whose own injection succeeded is still unreachable when an ancestor
+    // has no Axe: the top-level run reaches a nested document only by relaying
+    // through the frames above it, and a frame without Axe relays nothing.
+    const missed = children.filter(frame => {
+      for (let current: playwright.Frame | null = frame; current && current !== mainFrame; current = current.parentFrame()) {
+        if (withoutAxe.has(current))
+          return true;
+      }
+      return false;
+    });
+    const matches = await withConcurrency(missed, frame => isFrameInScope(frame, include, exclude));
+    const inScope = new Map(missed.map((frame, index) => [frame, matches[index]]));
+    const latest = page.frames().filter(frame => frame !== mainFrame);
+    const attached = new Set(latest);
+    const signature = `${children.map((frame, index) => `${frameId(frame)}:${covered[index] ? 1 : 0}:${inScope.get(frame) ? 1 : 0}`).join(',')}>${latest.map(frameId).join(',')}`;
+    const reported = missed.filter(frame => attached.has(frame) && inScope.get(frame)).map(describeFrame);
+
+    const unchanged = children.length === latest.length && children.every((frame, index) => frame === latest[index]);
+    if (!unchanged) {
+      previousSignature = undefined;
+      continue;
     }
-    return false;
-  });
-  // Runs only for frames that failed, which is normally none, so a scoped scan
-  // of a healthy page pays nothing for this.
-  const inScope = await Promise.all(missed.map(frame => isFrameInScope(frame, include, exclude)));
-  return missed.filter((_, index) => inScope[index]).map(describeFrame);
+    // A healthy, unchanged frame tree had no slow scope probes to race with.
+    if (!missed.length)
+      return [];
+    if (signature === previousSignature)
+      return reported;
+    previousSignature = signature;
+  }
+  throw new Error('The frame tree kept changing while Axe coverage was checked. Retry the scan once the page settles.');
 }
 
 async function hasReachableAxe(frame: playwright.Frame, token: string): Promise<boolean> {
@@ -437,8 +463,9 @@ async function hasReachableAxe(frame: playwright.Frame, token: string): Promise<
     void elementPromise.then(late => late?.dispose().catch(() => {}));
     return false;
   }
+  let reachable: boolean;
   try {
-    return await withFrameTimeout(element.evaluate(node => {
+    reachable = await withFrameTimeout(element.evaluate(node => {
       for (let current = node as Element; ;) {
         const root = current.getRootNode();
         if (!(root instanceof ShadowRoot))
@@ -451,6 +478,7 @@ async function hasReachableAxe(frame: playwright.Frame, token: string): Promise<
   } finally {
     await element.dispose().catch(() => {});
   }
+  return reachable && await hasAxe(frame, token);
 }
 
 // Runs in the page. Keeps axe's own result shape minus the parts nothing reads:
