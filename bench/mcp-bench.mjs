@@ -273,10 +273,16 @@ function compare(beforePath, afterPath) {
   const after = JSON.parse(fs.readFileSync(afterPath, 'utf-8'));
   const byName = new Map(before.scenarios.map(entry => [entry.name, entry]));
   const rows = [['Scenario', `${before.label} (ms)`, `${after.label} (ms)`, 'Change', 'Speedup']];
+  let beforeTotal = 0;
+  let afterTotal = 0;
   for (const entry of after.scenarios) {
     const baseline = byName.get(entry.name);
     if (!baseline)
       continue;
+    if (!entry.micro && !baseline.micro) {
+      beforeTotal += baseline.median;
+      afterTotal += entry.median;
+    }
     const change = (entry.median - baseline.median) / baseline.median * 100;
     rows.push([
       entry.name,
@@ -286,13 +292,15 @@ function compare(beforePath, afterPath) {
       `${(baseline.median / entry.median).toFixed(2)}x`,
     ]);
   }
-  const totalChange = (after.totalMedianMs - before.totalMedianMs) / before.totalMedianMs * 100;
+  if (!beforeTotal)
+    throw new Error('The reports have no end-to-end scenarios in common.');
+  const totalChange = (afterTotal - beforeTotal) / beforeTotal * 100;
   rows.push([
     'TOTAL (end-to-end tool calls)',
-    format(before.totalMedianMs),
-    format(after.totalMedianMs),
+    format(beforeTotal),
+    format(afterTotal),
     `${totalChange >= 0 ? '+' : ''}${totalChange.toFixed(1)}%`,
-    `${(before.totalMedianMs / after.totalMedianMs).toFixed(2)}x`,
+    `${(beforeTotal / afterTotal).toFixed(2)}x`,
   ]);
   const widths = rows[0].map((_, column) => Math.max(...rows.map(row => row[column].length)));
   rows.forEach((row, index) => {

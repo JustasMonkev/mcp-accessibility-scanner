@@ -324,11 +324,33 @@ async function isFrameInScope(
             return false;
           }
         });
-        let hidden = false;
+        const roots: (Document | ShadowRoot)[] = [document];
+        const modals: Element[] = [];
+        for (const root of roots) {
+          modals.push(...root.querySelectorAll('dialog:modal'));
+          for (const element of root.querySelectorAll('*')) {
+            if (element.shadowRoot)
+              roots.push(element.shadowRoot);
+          }
+        }
+        const insideModal = modals.some(modal => {
+          for (let current: Element | null = node as Element; current;) {
+            if (current === modal)
+              return true;
+            const root = current.getRootNode();
+            current = current.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+          }
+          return false;
+        });
+        let hidden = !!modals.length && !insideModal;
         for (let current: Element | null = node as Element; current;) {
+          const parent = current.parentElement;
+          const style = getComputedStyle(current);
           const ariaHidden = current.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true';
-          const displayNone = getComputedStyle(current).display === 'none';
-          if (ariaHidden || displayNone || (current as HTMLElement).hidden) {
+          const closedDetails = parent?.localName === 'details' && !parent.hasAttribute('open') &&
+            (current.localName !== 'summary' || [...parent.children].find(child => child.localName === 'summary') !== current);
+          const contentHidden = current !== node && style.getPropertyValue('content-visibility') === 'hidden';
+          if (ariaHidden || style.display === 'none' || current.hasAttribute('inert') || closedDetails || contentHidden || (current as HTMLElement).hidden) {
             hidden = true;
             break;
           }

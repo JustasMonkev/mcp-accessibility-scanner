@@ -726,6 +726,9 @@ npm run bench -- --out after.json --label after
 npm run bench:compare -- before.json after.json
 ```
 
+The comparison total uses only end-to-end scenarios present in both reports,
+so adding or removing a scenario does not distort the reported speedup.
+
 ## License
 
 MIT
