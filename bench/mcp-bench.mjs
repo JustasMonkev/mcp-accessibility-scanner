@@ -323,7 +323,7 @@ function parseArgs(argv) {
   // silently skipped report after a full benchmark run.
   const value = (index, flag) => {
     const next = argv[index];
-    if (next === undefined || next.startsWith('--'))
+    if (next === undefined || next.startsWith('--') || !next.trim())
       throw new Error(`${flag} needs a value, got: ${next ?? '(nothing)'}`);
     return next;
   };

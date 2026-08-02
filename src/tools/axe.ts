@@ -294,6 +294,7 @@ async function hasAxe(frame: playwright.Frame, token: string): Promise<boolean> 
 // no genuine gap is hidden by a check that failed to resolve.
 async function isFrameInScope(
   frame: playwright.Frame,
+  mainFrame: playwright.Frame,
   include: readonly string[],
   exclude: readonly string[]
 ): Promise<boolean> {
@@ -314,7 +315,11 @@ async function isFrameInScope(
       matches = await withFrameTimeout(element.evaluate((node, scope) => {
         const composedParent = (element: Element) => {
           const root = element.getRootNode();
-          return element.assignedSlot ?? element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+          if (element.assignedSlot) {
+            const slotRoot = element.assignedSlot.getRootNode();
+            return element.assignedSlot.parentElement ?? (slotRoot instanceof ShadowRoot ? slotRoot.host : null);
+          }
+          return element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
         };
         const matchesAny = (selectors: string[]) => selectors.some(selector => {
           try {
@@ -331,7 +336,15 @@ async function isFrameInScope(
         const roots: (Document | ShadowRoot)[] = [document];
         const modals: Element[] = [];
         for (const root of roots) {
-          modals.push(...root.querySelectorAll('dialog:modal'));
+          modals.push(...[...root.querySelectorAll('dialog:modal')].filter(modal => {
+            const style = getComputedStyle(modal);
+            const rect = modal.getBoundingClientRect();
+            const visible = modal.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) ??
+              (style.display !== 'none' && !['hidden', 'collapse'].includes(style.visibility) && style.opacity !== '0');
+            return visible &&
+              rect.width > 0 && rect.height > 0 &&
+              (modal.getRootNode() as Document | ShadowRoot).elementsFromPoint(rect.left + 1, rect.top + 1).includes(modal);
+          }));
           for (const element of root.querySelectorAll('*')) {
             if (element.shadowRoot)
               roots.push(element.shadowRoot);
@@ -347,11 +360,17 @@ async function isFrameInScope(
         });
         let hidden = !!modals.length && !insideModal;
         for (let current: Element | null = node as Element; current;) {
-          const parent = current.parentElement;
+          const parent = current.assignedSlot?.parentElement ?? current.parentElement;
           const style = getComputedStyle(current);
           const ariaHidden = current.getAttribute('aria-hidden') === 'true';
+          const flattenedChildren = parent ? [...parent.children].flatMap(child => {
+            if (child.localName !== 'slot')
+              return [child];
+            const assigned = (child as HTMLSlotElement).assignedElements({ flatten: true });
+            return assigned.length ? assigned : [...child.children];
+          }) : [];
           const closedDetails = parent?.localName === 'details' && !parent.hasAttribute('open') &&
-            (current.localName !== 'summary' || [...parent.children].find(child => child.localName === 'summary') !== current);
+            (current.localName !== 'summary' || flattenedChildren.find(child => child.localName === 'summary') !== current);
           const contentHidden = current !== node && style.getPropertyValue('content-visibility') === 'hidden';
           if (ariaHidden || style.display === 'none' || current.hasAttribute('inert') || closedDetails || contentHidden) {
             hidden = true;
@@ -362,7 +381,9 @@ async function isFrameInScope(
         const visibility = getComputedStyle(node as Element).visibility;
         hidden ||= visibility === 'hidden' || visibility === 'collapse';
         return { included: matchesAny(scope.include), excluded: matchesAny(scope.exclude), hidden };
-      }, { include: [...include], exclude: [...exclude] }), null);
+      }, current.parentFrame() === mainFrame
+        ? { include: [...include], exclude: [...exclude] }
+        : { include: [], exclude: [] }), null);
     } finally {
       await element.dispose().catch(() => {});
     }
@@ -432,7 +453,7 @@ async function injectAxeIntoFrames(
       }
       return false;
     });
-    const matches = await withConcurrency(missed, frame => isFrameInScope(frame, include, exclude));
+    const matches = await withConcurrency(missed, frame => isFrameInScope(frame, mainFrame, include, exclude));
     const inScope = new Map(missed.map((frame, index) => [frame, matches[index]]));
     const latest = page.frames().filter(frame => frame !== mainFrame);
     const attached = new Set(latest);

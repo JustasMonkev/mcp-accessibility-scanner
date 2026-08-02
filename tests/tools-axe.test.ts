@@ -34,7 +34,13 @@ function makeFrame(
     // The scope check reads the owning iframe element in the parent document,
     // walking up one document per ancestor frame.
     frameElement: async () => ({
-      evaluate: async (_script: unknown, arg?: unknown) => arg === undefined ? scope.reachable ?? true : scope,
+      evaluate: async (_script: unknown, arg?: { include: string[], exclude: string[] }) => arg === undefined
+        ? scope.reachable ?? true
+        : {
+          included: !!arg.include.length && scope.included,
+          excluded: !!arg.exclude.length && scope.excluded,
+          hidden: scope.hidden ?? false,
+        },
       dispose: async () => undefined,
     }),
     evaluate: async (script: unknown, arg?: unknown) => {
@@ -443,7 +449,7 @@ describe('axe helpers', () => {
     let reads = 0;
     page.frames = () => ++reads < 4 ? [mainFrame, detached] : [mainFrame, replacement];
 
-    expect((await runAxeScan(page)).unscannedFrames).toEqual([]);
+    expect((await runAxeScan(page, { exclude: ['iframe.widget'] })).unscannedFrames).toEqual([]);
   });
 
   it('fails instead of reporting complete coverage when frames keep changing', async () => {
@@ -694,6 +700,19 @@ describe('axe helpers', () => {
     expect(result.unscannedFrames).toEqual([]);
   });
 
+  it('does not reapply a flat exclude selector inside a descendant document', async () => {
+    resetScan();
+    const outer = makeFrame({}, 'https://example.com/outer', true, '', true, { included: false, excluded: false });
+    const nested = makeFrame({}, 'https://example.com/nested', false, '', true, { included: false, excluded: true });
+    nested.parentFrame = () => outer as any;
+
+    const result = await runAxeScan(pageWithSelectorCounts({ '.widget': 1 }, [outer, nested]), {
+      exclude: ['.widget'],
+    });
+
+    expect(result.unscannedFrames).toEqual(['https://example.com/nested']);
+  });
+
   it('rethrows scan failures untouched', async () => {
     resetScan();
     const failure = new Error('axe run failed');
@@ -715,13 +734,17 @@ describe('axe helpers', () => {
 });
 
 describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage in a real browser', () => {
-  it('reports a hidden iframe made visible by author CSS', async () => {
+  it('reports a hidden iframe made visible by author CSS outside a CSS-hidden modal', async () => {
     const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
     try {
       const page = await browser.newPage();
       await page.setContent('<div id="host"></div>');
       const loaded = page.waitForEvent('framenavigated', frame => frame.url() === 'about:srcdoc');
       await page.evaluate(() => {
+        const dialog = document.createElement('dialog');
+        document.body.append(dialog);
+        dialog.showModal();
+        dialog.style.opacity = '0';
         const root = document.querySelector('#host')!.attachShadow({ mode: 'closed' });
         const style = document.createElement('style');
         style.textContent = 'iframe[hidden]{display:block}';
@@ -729,6 +752,31 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
         frame.hidden = true;
         frame.srcdoc = '<button>inside</button>';
         root.append(style, frame);
+      });
+      await loaded;
+
+      expect((await runAxeScan(page)).unscannedFrames).toEqual(['about:srcdoc']);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('reports a frame inside the first slotted summary of closed details', async () => {
+    const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<div id="host"></div>');
+      const loaded = page.waitForEvent('framenavigated', frame => frame.url() === 'about:srcdoc');
+      await page.evaluate(() => {
+        const host = document.querySelector('#host')!;
+        host.attachShadow({ mode: 'closed' }).innerHTML = '<details><slot></slot></details>';
+        const summary = document.createElement('summary');
+        const innerHost = document.createElement('span');
+        const frame = document.createElement('iframe');
+        frame.srcdoc = '<button>inside</button>';
+        innerHost.attachShadow({ mode: 'closed' }).append(frame);
+        summary.append(innerHost);
+        host.append(summary);
       });
       await loaded;
 

@@ -76,3 +76,13 @@ it.each(['--server', '--lib'])('rejects an unpaired %s override', flag => {
   expect(result.status).not.toBe(0);
   expect(result.stderr).toContain('--server and --lib must be provided together.');
 });
+
+it.each(['--out', '--server', '--lib'])('rejects a blank %s value', flag => {
+  const result = spawnSync(process.execPath, ['bench/mcp-bench.mjs', flag, '  '], {
+    cwd: path.resolve(import.meta.dirname, '..'),
+    encoding: 'utf8',
+  });
+
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain('needs a value');
+});
