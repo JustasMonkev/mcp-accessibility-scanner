@@ -386,9 +386,17 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   // Whether every ref still resolves to a live element. A ref whose element was
   // removed or replaced resolves to nothing, which sends the caller down the
   // fresh-capture path instead of handing back a locator that cannot match.
+  //
+  // Bounded like every other page-state read here: `count()` uses Playwright's
+  // no-timeout query path, so an unresponsive renderer would hang the tool call
+  // on what is meant to be a cheap check. A check that cannot answer in time
+  // counts as unresolved and falls through to a fresh capture.
   private async _refsResolve(params: { ref: string }[]): Promise<boolean> {
     const counts = await Promise.all(params.map(param =>
-      callOnPageNoTrace(this.page, page => page.locator(`aria-ref=${param.ref}`).count()).catch(() => 0)));
+      this._withPageStateTimeout(
+          callOnPageNoTrace(this.page, page => page.locator(`aria-ref=${param.ref}`).count()),
+          'resolving element references',
+      ).catch(() => 0)));
     return counts.every(count => count > 0);
   }
 

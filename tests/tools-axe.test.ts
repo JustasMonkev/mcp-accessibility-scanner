@@ -29,9 +29,9 @@ function makeFrame(countBySelector: Record<string, number>, url = 'https://examp
           throw new Error('Execution context was destroyed');
         return undefined;
       }
-      // The post-injection coverage probe: a frame that took the injection
-      // reports the version, one that did not reports nothing.
-      if (arg === undefined)
+      // The post-injection coverage probe reads the marker this server sets
+      // when it configures its own injection.
+      if (typeof arg === 'string')
         return injectable && keepsAxe ? axeVersion : undefined;
       if (Array.isArray(arg))
         return arg.map(selector => countBySelector[selector as string] ?? 0);
@@ -347,6 +347,35 @@ describe('axe helpers', () => {
     const result = await runAxeScan(pageWithSelectorCounts({}, [navigated]));
 
     expect(result.unscannedFrames).toEqual(['https://example.com/widget']);
+  });
+
+  it('reports a frame carrying only the page own Axe, not this injection', async () => {
+    resetScan();
+    // Same version, but no marker: the page's own instance is not configured
+    // with allowedOrigins, so the top-level run's ping goes unanswered and the
+    // frame contributes nothing. It must not read as covered.
+    const pageOwned = makeFrame({}, 'https://example.com/widget');
+    pageOwned.evaluate = async (script: unknown, arg?: unknown) => {
+      if (typeof script === 'string')
+        return undefined;
+      // Answers a bare `window.axe.version` probe, but not the marker.
+      if (typeof arg === 'string')
+        return undefined;
+      return undefined;
+    };
+    const result = await runAxeScan(pageWithSelectorCounts({}, [pageOwned]));
+
+    expect(result.unscannedFrames).toEqual(['https://example.com/widget']);
+  });
+
+  it('caps and truncates an author-controlled frame name', async () => {
+    resetScan();
+    // The name attribute is author-controlled and unbounded, and can carry a
+    // data URL of its own.
+    const noisy = makeFrame({}, 'https://example.com/widget', false, `promo data:text/html;base64,${'A'.repeat(4000)}`);
+    const result = await runAxeScan(pageWithSelectorCounts({}, [noisy]));
+
+    expect(result.unscannedFrames).toEqual(['https://example.com/widget (name="promo data:text/html;base64,...")']);
   });
 
   it('counts every failed frame, even when they describe identically', async () => {

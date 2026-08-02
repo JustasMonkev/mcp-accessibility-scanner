@@ -1,7 +1,7 @@
 import axe from 'axe-core';
 import { z } from 'zod';
 
-import { truncateDataUrl } from '../utils/dataUrl.js';
+import { truncateDataUrl, truncateDataUrls } from '../utils/dataUrl.js';
 
 import type * as playwright from 'playwright';
 
@@ -173,10 +173,21 @@ async function assertScopeSelectorsResolve(
     throw new Error(`No elements matched includeSelectors: ${unmatched.join(', ')}. The scan would have silently covered less of the page than requested.`);
 }
 
+// Set by the configure step below, and the only thing the coverage check
+// trusts. A frame that navigated to a document carrying its own axe of the same
+// version would answer a bare version probe while lacking the allowedOrigins
+// configuration the top-level run needs - and so would go unscanned while
+// looking covered.
+//
+// Ceiling: any in-page marker can be forged by the page itself. The name is
+// distinctive enough that an accidental collision does not happen; a page
+// deliberately evading its own audit is out of scope.
+const axeReadyMarker = '__mcpAccessibilityScannerAxeReady';
+
 // Axe's frame support needs its own copy in every frame, and the copy talks to
 // the top-level run over postMessage. `<unsafe_all_origins>` is what lets a
 // cross-origin frame answer; without it those frames go unscanned.
-const axeConfigureSource = `;axe.configure({ allowedOrigins: ['<unsafe_all_origins>'], branding: { application: 'playwright' } });`;
+const axeConfigureSource = `;axe.configure({ allowedOrigins: ['<unsafe_all_origins>'], branding: { application: 'playwright' } }); window['${axeReadyMarker}'] = axe.version;`;
 
 // Injected fresh for every scan rather than reused when `window.axe` already
 // looks right: that global belongs to the page, which may have installed its own
@@ -192,21 +203,51 @@ async function injectAxe(frame: playwright.Frame): Promise<void> {
 // violations, and an unreported one turns into a clean-looking report.
 const childFrameInjectionTimeoutMs = 1000;
 
+// Every read from a child frame is bounded by it, not just the injection: an
+// unresponsive renderer answers neither, and `frame.evaluate` has no timeout of
+// its own, so an unbounded probe would hang the whole scan rather than produce
+// the partial-coverage warning it exists to produce.
+async function withFrameTimeout<T>(work: Promise<T>, fallback: T): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Both branches resolve: a rejected loser of the race would surface as an
+    // unhandled rejection once the winner has already been awaited.
+    return await Promise.race([
+      work.catch(() => fallback),
+      new Promise<T>(resolve => {
+        timeoutId = setTimeout(() => resolve(fallback), childFrameInjectionTimeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// A frame name is author-controlled and unbounded, so it is normalized and
+// capped before going anywhere near a report.
+const maxFrameNameLength = 80;
+
 // Identifies a frame for the coverage warning. The URL alone is not enough for
 // a srcdoc or scripted about:blank frame - both report "about:blank" while
 // holding a whole document - so the frame's name comes along when it has one.
-// The URL is truncated: a data: frame's URL is the document, and this string
-// ends up in tool text, structured content and JSON reports alike.
+// Both are truncated: a data: frame's URL is its document, a name can carry one
+// too, and this string ends up in tool text, structured content and JSON
+// reports alike.
 function describeFrame(frame: playwright.Frame): string {
   const url = truncateDataUrl(frame.url()) || 'about:blank';
-  const name = frame.name();
+  const name = truncateDataUrls(frame.name().replace(/\s+/g, ' ').trim()).slice(0, maxFrameNameLength);
   return name ? `${url} (name="${name}")` : url;
 }
 
-// Whether this frame currently holds the Axe build about to be run. A frame that
-// navigated after its injection - or that appeared since - answers no.
+// Whether this frame currently holds the Axe this server injected and
+// configured. A frame that navigated after its injection - or that appeared
+// since, or that carries only the page's own axe - answers no.
 async function hasAxe(frame: playwright.Frame): Promise<boolean> {
-  return await frame.evaluate(() => (window as any).axe?.version).catch(() => undefined) === axe.version;
+  const ready = await withFrameTimeout(
+      frame.evaluate(marker => (window as any)[marker], axeReadyMarker),
+      undefined,
+  );
+  return ready === axe.version;
 }
 
 // Returns an identifier for every child frame Axe could not be installed in, so
@@ -223,15 +264,7 @@ async function injectAxeIntoFrames(page: playwright.Page): Promise<string[]> {
       await injectAxe(frame);
       return;
     }
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    // Both branches resolve: a rejected loser of the race would surface as an
-    // unhandled rejection once the winner has already been awaited.
-    await Promise.race([
-      injectAxe(frame).catch(() => {}),
-      new Promise<void>(resolve => {
-        timeoutId = setTimeout(resolve, childFrameInjectionTimeoutMs);
-      }),
-    ]).finally(() => clearTimeout(timeoutId));
+    await withFrameTimeout(injectAxe(frame), undefined);
   }));
 
   // Coverage is decided here rather than from the injection results: a frame
