@@ -343,7 +343,41 @@ describe('scan_page_matrix tool', () => {
     expect(structured.variants[1].resolvedViolationIds).toBeNull();
     expect(structured.variants[1].newViolationIds).toBeNull();
     expect(structured.variants[1].changedRuleIds).toBeNull();
-    expect(response.result()).toContain('n/a (partial scan)');
+    expect(response.result()).toContain('n/a (coverage differs)');
+  });
+
+  it('reports no delta on a complete variant when the baseline is the incomplete one', async () => {
+    // The mirror of the case above. A fully scanned variant still cannot be
+    // compared against a baseline that missed a frame, and the reason must not
+    // read as though this variant were the partial one - the gap is upstream.
+    const { context, response } = createMatrixHarness('/tmp/scan-partial-baseline.json');
+    vi.spyOn(axe, 'runAxeScan')
+        .mockResolvedValueOnce({
+          ...createAxeResult('https://example.com/page', ['color-contrast']),
+          unscannedFrames: ['https://widget.example/'],
+        } as any)
+        .mockResolvedValueOnce(createAxeResult('https://example.com/page', ['color-contrast']));
+
+    await tool.handle(context as any, {
+      variants: [{ name: 'baseline' }, { name: 'mobile', viewport: { width: 375, height: 812 } }],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterApplyMs: 0,
+      reloadBetweenVariants: false,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    // Neither row is comparable: the baseline is the one with the gap.
+    expect(report.variants[0].diffFromBaseline).toBeNull();
+    expect(report.variants[1].diffFromBaseline).toBeNull();
+    expect(report.variants[1].unscannedFrames).toEqual([]);
+
+    const structured = response.structuredContent() as any;
+    expect(structured.variants[1].newViolationIds).toBeNull();
+    // The wording must not blame the variant for the baseline's missing frame.
+    expect(response.result()).not.toContain('partial scan');
+    expect(response.result()).toContain('n/a (coverage differs)');
   });
 
   it('leaves an unnameable color scheme un-emulated rather than pinning it light', async () => {

@@ -203,7 +203,10 @@ const scanPageMatrix = defineTabTool({
         // would overwrite a zoom applied alongside it, and the variant would be
         // scanned - and reported - at a zoom it never actually had.
         await tab.page.setViewportSize(variant.viewport ?? originalViewport);
-        await tab.page.emulateMedia(normalizeMedia(variant.media, originalMedia));
+        // One value, applied and then reported, so `applied.media` cannot drift
+        // from what the variant was actually scanned under.
+        const media = normalizeMedia(variant.media, originalMedia);
+        await tab.page.emulateMedia(media);
 
         // Before the zoom, not after it. Viewport and media emulation survive a
         // reload, but the zoom is an inline style on documentElement and the new
@@ -232,7 +235,7 @@ const scanPageMatrix = defineTabTool({
           name: variant.name,
           applied: {
             viewport: variant.viewport ?? null,
-            media: normalizeMedia(variant.media, originalMedia),
+            media,
             zoomPercent: variant.zoomPercent ?? null,
           },
           summary: summarizeAxeViolations(violations.trimmed),
@@ -351,10 +354,12 @@ const scanPageMatrix = defineTabTool({
       '--- | --- | --- | --- | ---',
       ...variantResults.map(result => {
         // "n/a" rather than "-": "-" means "compared, nothing new", which is a
-        // claim a pair of scans with differing coverage cannot make.
+        // claim a pair of scans with differing coverage cannot make. The reason
+        // names neither side, because the gap may be in the baseline - in which
+        // case every other row is uncomparable through no fault of its own.
         const topNew = result.diffFromBaseline
           ? result.diffFromBaseline.newViolationIds.slice(0, 5).join(', ') || '-'
-          : 'n/a (partial scan)';
+          : 'n/a (coverage differs)';
         // "-" rather than 0: with collection off, 0 is indistinguishable from
         // "no needs-review findings". audit_site omits its section for the same
         // reason.
