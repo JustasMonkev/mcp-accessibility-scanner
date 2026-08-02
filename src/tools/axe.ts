@@ -1,4 +1,5 @@
 import axe from 'axe-core';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 import { truncateDataUrls } from '../utils/dataUrl.js';
@@ -184,6 +185,7 @@ async function assertScopeSelectorsResolve(
 // deliberately evading its own audit is out of scope.
 const axeReadyMarker = '__mcpAccessibilityScannerAxeReady';
 let axeReadySequence = 0;
+const axeReadyNonce = randomUUID();
 
 // Axe's frame support needs its own copy in every frame, and the copy talks to
 // the top-level run over postMessage. `<unsafe_all_origins>` is what lets a
@@ -387,7 +389,7 @@ async function injectAxeIntoFrames(
   include: readonly string[],
   exclude: readonly string[]
 ): Promise<string[]> {
-  const token = `${axe.version}:${++axeReadySequence}`;
+  const token = `${axe.version}:${axeReadyNonce}:${++axeReadySequence}`;
   const source = `${axe.source}${axeConfigureSource}window[${JSON.stringify(axeReadyMarker)}]=${JSON.stringify(token)};`;
   const mainFrame = page.mainFrame();
   await injectAxe(mainFrame, source);
