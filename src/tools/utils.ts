@@ -21,27 +21,93 @@ const { asLocator } = coreBundle.iso;
 import type * as playwright from 'playwright';
 import type { Tab } from '../tab.js';
 
-// How long an action that finished quietly is watched for work it scheduled
-// rather than started - a click handler whose fetch fires from a timer has
-// issued nothing by the time its own promise resolves. Capped by the settle
-// delay it defers to, so lowering that lowers this with it.
-const quietWindowMs = 100;
+// How long the DOM must stay mutation-free before the settle ends early. The
+// configured settle delay remains the ceiling: a page that keeps mutating (a
+// spinner toggling classes, a carousel) still gets the full budget, while the
+// common case - an action that changed nothing more after it ran - stops
+// paying a fixed half-second on every tool call. This is also the minimum
+// wall-clock length of the settle, which is what lets it double as the watch
+// for work an action scheduled rather than started (see waitForCompletion).
+//
+// Ceiling: the observer watches the top document only. Mutations confined to a
+// shadow root or a child frame's document do not reach it, so timer work that
+// lands there between the quiet threshold and the old fixed delay is no longer
+// waited for. Child-frame *navigations* still get a full settle window - the
+// framenavigated listener marks them as page work - and shadow-root updates
+// driven by requests or light-DOM changes are seen through those signals;
+// only DOM-only timer work entirely inside a shadow root is quicker now.
+const domQuietMs = 100;
+
+// Runs in the page: resolves once the DOM has been mutation-free for quietMs,
+// or after maxMs, whichever comes first. The deadline lives in-page too, so a
+// caller abandoning the evaluate never leaves an observer running forever.
+function inPageDomQuietWait({ quietMs, maxMs }: { quietMs: number, maxMs: number }) {
+  return new Promise<void>(resolve => {
+    let quietTimer: ReturnType<typeof setTimeout>;
+    const done = () => {
+      observer.disconnect();
+      clearTimeout(quietTimer);
+      clearTimeout(deadline);
+      resolve();
+    };
+    const observer = new MutationObserver(() => {
+      clearTimeout(quietTimer);
+      quietTimer = setTimeout(done, quietMs);
+    });
+    observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    quietTimer = setTimeout(done, quietMs);
+    const deadline = setTimeout(done, maxMs);
+  });
+}
+
+// The settle delay after an action, ended early once the DOM goes quiet. Timers
+// can schedule DOM-only work without producing any observable page signal, so
+// some delay must remain - but a fixed sleep charges every action for the page
+// that might mutate, and almost none do. Watching mutations keeps the returned
+// snapshot just as fresh at a fraction of the wall-clock cost.
+async function settleAfterAction(tab: Tab, settleMs: number): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    // Raced against the full settle budget rather than awaited bare: a dialog
+    // blocking JavaScript would hold the evaluate open indefinitely, and the
+    // old fixed sleep never waited longer than settleMs either.
+    await raceTimeout(
+        callOnPageNoTrace(tab.page, page => page.evaluate(inPageDomQuietWait, {
+          quietMs: Math.min(domQuietMs, settleMs),
+          maxMs: settleMs,
+        })),
+        settleMs,
+    );
+    return;
+  } catch {
+    // The page could not host the observer - a navigation racing the settle,
+    // or the page closing. Fall back to the fixed delay for whatever remains
+    // of the budget, through the path that understands blocked JavaScript.
+  }
+  const remainingMs = settleMs - (Date.now() - startedAt);
+  if (remainingMs > 0 && !tab.page.isClosed()) {
+    try {
+      await tab.waitForTimeout(remainingMs);
+    } catch (error) {
+      const targetClosed = error instanceof Error && /Target (?:page, context or browser has been closed|page closed|closed)/i.test(error.message);
+      if (!tab.page.isClosed() || !targetClosed)
+        throw error;
+    }
+  }
+}
 
 export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>): Promise<R> {
   const settleMs = tab.context.config.timeouts.settle ?? 500;
   const requests = new Set<playwright.Request>();
   let requestSeen = false;
   let frameNavigated = false;
+  let childFrameNavigated = false;
   let waitCallback: () => void = () => {};
   const waitBarrier = new Promise<void>(f => { waitCallback = f; });
-  // Resolves on the first sign of page work, whenever it arrives.
-  let signalCallback: () => void = () => {};
-  const firstSignal = new Promise<void>(f => { signalCallback = f; });
 
   const requestListener = (request: playwright.Request) => {
     requestSeen = true;
     requests.add(request);
-    signalCallback();
   };
   // A request that fails - offline, blocked by CORS, aborted - emits
   // `requestfailed` and never `requestfinished`. Without the same removal path
@@ -54,11 +120,13 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
   };
 
   const frameNavigateListener = (frame: playwright.Frame) => {
-    signalCallback();
     if (frame.parentFrame()) {
       // A child frame swapping documents is page work too, and it can issue no
       // request at all. It must not gate the barrier on a top-level load state
-      // that this navigation will never produce.
+      // that this navigation will never produce - but it must still earn the
+      // post-work settle below: the DOM-quiet observer watches the top
+      // document only and cannot see the new frame's contents initializing.
+      childFrameNavigated = true;
       return;
     }
     frameNavigated = true;
@@ -88,25 +156,22 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
 
   try {
     const result = await callback();
-    // Nothing has happened yet, which is not the same as nothing being about to:
-    // watch briefly for work the action scheduled instead of started.
-    if (!requestSeen && !frameNavigated)
-      await raceTimeout(firstSignal, Math.min(quietWindowMs, settleMs));
+    // An action that finished quietly may still be about to do work - a click
+    // handler whose fetch fires from a timer has issued nothing by the time its
+    // own promise resolves. The DOM-quiet settle doubles as that watch: it
+    // lasts at least the quiet threshold with the request listeners still
+    // armed, so work the action scheduled is seen either as a request (awaited
+    // through the barrier below) or as the DOM mutations it makes.
+    if (!requestSeen && !frameNavigated && !childFrameNavigated && !tab.page.isClosed())
+      await settleAfterAction(tab, settleMs);
     if (!requests.size && !frameNavigated)
       waitCallback();
     await waitBarrier;
-    // Timers can schedule DOM-only work without producing any observable page
-    // signal. Preserve the configured settle delay so the returned snapshot
-    // includes those updates too.
-    if (!tab.page.isClosed()) {
-      try {
-        await tab.waitForTimeout(settleMs);
-      } catch (error) {
-        const targetClosed = error instanceof Error && /Target (?:page, context or browser has been closed|page closed|closed)/i.test(error.message);
-        if (!tab.page.isClosed() || !targetClosed)
-          throw error;
-      }
-    }
+    // Requests and navigations usually finish in DOM updates. Settle again so
+    // the returned snapshot includes them - but end as soon as the DOM goes
+    // quiet rather than sleeping the full budget.
+    if ((requestSeen || frameNavigated || childFrameNavigated) && !tab.page.isClosed())
+      await settleAfterAction(tab, settleMs);
     return result;
   } finally {
     dispose();

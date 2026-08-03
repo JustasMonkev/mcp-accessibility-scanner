@@ -131,4 +131,92 @@ describe('audit_site integration', () => {
     expect(report.summary.violations[0].pagesAffected.length).toBe(2);
     expect(response.result()).toContain(reportPath);
   });
+
+  it('crawls pages in parallel worker tabs when concurrency > 1', async () => {
+    tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-site-it-'));
+    const reportPath = path.join(tempDir, 'audit-site-report.json');
+
+    const urls = Array.from({ length: 6 }, (_, index) => `https://example.com/page-${index}`);
+    let activeNavigations = 0;
+    let maxActiveNavigations = 0;
+
+    const makeCrawlTab = () => {
+      let currentUrl = 'about:blank';
+      const page = {
+        context: () => ({ cookies: async () => [] }),
+        url: () => currentUrl,
+        evaluate: async () => ({ title: `Title for ${currentUrl}`, links: [] }),
+      };
+      const crawlTab: any = {
+        page,
+        navigate: async (url: string) => {
+          activeNavigations++;
+          maxActiveNavigations = Math.max(maxActiveNavigations, activeNavigations);
+          await new Promise(resolve => setTimeout(resolve, 10));
+          currentUrl = url;
+          activeNavigations--;
+        },
+        waitForTimeout: async () => undefined,
+      };
+      return crawlTab;
+    };
+
+    const originalTab: any = {
+      page: { url: () => 'https://example.com/' },
+      modalStates: () => [],
+    };
+
+    const tabs: any[] = [originalTab];
+    const context = {
+      currentTabOrDie: () => originalTab,
+      tabs: () => tabs,
+      newTab: vi.fn(async () => {
+        const crawlTab = makeCrawlTab();
+        crawlTab.context = context;
+        tabs.push(crawlTab);
+        return crawlTab;
+      }),
+      closeTab: vi.fn(async (index: number) => {
+        tabs.splice(index, 1);
+        return '';
+      }),
+      selectTab: vi.fn(async () => undefined),
+      outputFile: vi.fn(async () => reportPath),
+      config: {},
+    };
+    originalTab.context = context;
+
+    const response = new Response(context as any, 'audit_site', {});
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) =>
+      createAxeResult(page.url(), [createViolation('color-contrast', `<button>${page.url()}</button>`)]));
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls,
+      maxPages: 10,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      concurrency: 3,
+      reportFile: 'audit-site-report.json',
+    } as any, response);
+
+    const report = JSON.parse(await fs.promises.readFile(reportPath, 'utf-8'));
+    // Three worker tabs were opened, used concurrently, and all closed again.
+    expect(context.newTab).toHaveBeenCalledTimes(3);
+    expect(maxActiveNavigations).toBeGreaterThan(1);
+    expect(tabs).toEqual([originalTab]);
+    // Every page was scanned exactly once and attributed to its own URL.
+    expect(report.pages).toHaveLength(6);
+    expect(report.summary.totals.scannedPages).toBe(6);
+    expect(new Set(report.pages.map((page: any) => page.url)).size).toBe(6);
+    expect(report.metadata.options.concurrency).toBe(3);
+    for (const page of report.pages)
+      expect(page.violations[0].nodes[0].html).toBe(`<button>${page.url}</button>`);
+  });
 });

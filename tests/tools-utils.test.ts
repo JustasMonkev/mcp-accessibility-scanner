@@ -127,7 +127,7 @@ describe('Tool Utils', () => {
       vi.useRealTimers();
     });
 
-    it('should use the configured settle delay after a request', async () => {
+    it('should settle via the in-page DOM-quiet wait, capped at the configured delay', async () => {
       mockTab.context.config.timeouts.settle = 25;
       const callback = vi.fn().mockImplementation(() => {
         const request = { url: 'https://api.example.com' };
@@ -138,29 +138,44 @@ describe('Tool Utils', () => {
 
       await waitForCompletion(mockTab, callback);
 
-      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
+      // The quiet threshold never exceeds the settle budget itself.
+      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function), { quietMs: 25, maxMs: 25 });
+      expect(mockTab.waitForTimeout).not.toHaveBeenCalled();
     });
 
-    it('should preserve the settle delay for delayed DOM-only work', async () => {
-      // A timer can update the DOM without a request or navigation signal.
+    it('should keep a settle window for delayed DOM-only work', async () => {
+      // A timer can update the DOM without a request or navigation signal; the
+      // in-page observer wait is what gives that work time to land.
       mockTab.context.config.timeouts.settle = 5;
       const callback = vi.fn().mockResolvedValue('result');
 
       await waitForCompletion(mockTab, callback);
 
-      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(5);
+      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function), { quietMs: 5, maxMs: 5 });
+    });
+
+    it('should fall back to the fixed delay when the page cannot host the observer', async () => {
+      mockTab.context.config.timeouts.settle = 25;
+      mockPage.evaluate = vi.fn().mockRejectedValue(new Error('Execution context was destroyed'));
+      const callback = vi.fn().mockResolvedValue('result');
+
+      await waitForCompletion(mockTab, callback);
+
+      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(expect.any(Number));
     });
 
     it('should not fail when the action closes its page before settling', async () => {
-      mockTab.waitForTimeout = vi.fn().mockImplementation(async () => {
+      mockPage.evaluate = vi.fn().mockImplementation(async () => {
         mockPage.isClosed.mockReturnValue(true);
         throw new Error('page._wrapApiCall: Target page, context or browser has been closed');
       });
 
       await expect(waitForCompletion(mockTab, vi.fn().mockResolvedValue('result'))).resolves.toBe('result');
+      expect(mockTab.waitForTimeout).not.toHaveBeenCalled();
     });
 
     it('should not hide an unrelated settle error when the page also closes', async () => {
+      mockPage.evaluate = vi.fn().mockRejectedValue(new Error('Execution context was destroyed'));
       mockTab.waitForTimeout = vi.fn().mockImplementation(async () => {
         mockPage.isClosed.mockReturnValue(true);
         throw new Error('Protocol failure');
@@ -171,8 +186,13 @@ describe('Tool Utils', () => {
 
     it('should settle for work the action scheduled rather than started', async () => {
       // A click handler whose fetch fires from a timer has issued no request by
-      // the time its own promise resolves; the quiet window still catches it.
+      // the time its own promise resolves; the DOM-quiet watch still catches it
+      // because it lasts at least the quiet threshold with listeners armed. The
+      // mock must take that long too, or the scheduled request would be missed
+      // only in the test.
       mockTab.context.config.timeouts.settle = 25;
+      mockPage.evaluate = vi.fn().mockImplementation((_fn: unknown, { quietMs }: { quietMs: number }) =>
+        new Promise(resolve => setTimeout(resolve, quietMs)));
       const request = { url: 'https://api.example.com' };
       const callback = vi.fn().mockImplementation(() => {
         setTimeout(() => {
@@ -184,7 +204,9 @@ describe('Tool Utils', () => {
 
       await waitForCompletion(mockTab, callback);
 
-      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
+      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function), { quietMs: 25, maxMs: 25 });
+      // Once as the scheduled-work watch, once to settle after the request.
+      expect(mockPage.evaluate).toHaveBeenCalledTimes(2);
     });
 
     it('should settle after a main-frame navigation', async () => {
@@ -196,7 +218,7 @@ describe('Tool Utils', () => {
 
       await waitForCompletion(mockTab, callback);
 
-      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
+      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function), { quietMs: 25, maxMs: 25 });
     });
 
     it('should settle after a sub-frame navigation that issued no request', async () => {
@@ -212,7 +234,7 @@ describe('Tool Utils', () => {
 
       await waitForCompletion(mockTab, callback);
 
-      expect(mockTab.waitForTimeout).toHaveBeenCalledWith(25);
+      expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function), { quietMs: 25, maxMs: 25 });
       // Still no top-level load state: a sub-frame navigation never produces one.
       expect(mockTab.waitForLoadState).not.toHaveBeenCalled();
     });

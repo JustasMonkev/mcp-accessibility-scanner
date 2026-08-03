@@ -444,6 +444,11 @@ const tests = [
       violationsTag: ['wcag2a', 'wcag2aa'],
       maxNodesPerViolation: 5,
       waitAfterNavigationMs: 50,
+      // The session-loss scenarios below assert *which* URL dropped the cookie.
+      // Exact attribution is only guaranteed on a sequential crawl - with the
+      // default worker pool the loss lands on whichever in-flight page's check
+      // first observes it (see the audit_site concurrency docs).
+      concurrency: 1,
     };
     const result = await callTool('audit_site', {
       ...auditSiteDefaults,

@@ -125,6 +125,7 @@ const auditSiteSchema = z.object({
   includeIncomplete: z.boolean().default(true).describe('Also collect Axe "incomplete" results — checks Axe could not decide automatically. They are reported separately from violations.'),
   maxNodesPerViolation: z.number().int().min(1).max(50).default(10).describe('Maximum nodes kept per violation in the report.'),
   waitAfterNavigationMs: z.number().int().min(0).max(5000).default(250).describe('Extra wait after navigation before scanning.'),
+  concurrency: z.number().int().min(1).max(8).default(4).describe('Pages crawled in parallel, each in its own tab. The default of 4 makes large crawls several times faster. Set 1 for strictly sequential crawling: when exact session-cookie loss attribution matters (parallel workers attribute a loss to the page whose check first observed it), or when the target server should not receive concurrent page loads.'),
   reportFile: z.string().optional().describe('Output JSON report file name.'),
   ...axeScopeSchemaShape,
   ...axeRuleSchemaShape,
@@ -446,6 +447,14 @@ const auditSite = defineTabTool({
     const summaryByViolation = new Map<string, ViolationSummaryAggregate>();
     const summaryByIncomplete = new Map<string, ViolationSummaryAggregate>();
 
+    // Workers idle when the queue is empty but pages still in flight may
+    // discover more links; every enqueue and every finished page wakes them.
+    const idleWaiters: (() => void)[] = [];
+    const wakeIdleWorkers = () => {
+      while (idleWaiters.length)
+        idleWaiters.pop()!();
+    };
+
     const enqueueUrl = (rawUrl: string, depth: number, discoveredFrom: string | null) => {
       const normalizedUrl = normalizeUrl(rawUrl, startUrl, ignoredParams);
       if (!normalizedUrl) {
@@ -483,6 +492,7 @@ const auditSite = defineTabTool({
         discoveredFrom,
       });
       queued.add(normalizedUrlString);
+      wakeIdleWorkers();
     };
 
     if (params.strategy === 'provided') {
@@ -510,32 +520,37 @@ const auditSite = defineTabTool({
       message: `Initialized site audit with ${queue.length} queued URL(s).`,
     });
 
-    const crawlTab = await context.newTab();
+    // One worker tab per unit of concurrency. Pages load, wait and scan
+    // independently of one another, so a pool of tabs overlaps the navigation,
+    // settle and scan time that a sequential crawl serializes.
+    const concurrency = Math.max(1, Math.min(params.concurrency ?? 1, 8));
+    const crawlTabs: (typeof tab)[] = [];
     // Cookies the crawl URLs carry before the crawl are the session the caller
     // signed in with. If one disappears mid-crawl every later page is audited as a
     // signed-out user, which still looks like a clean run, so record where it happened.
     const cookieScopeUrls = queue.map(item => item.cookieUrl);
     const cookieScope = new Set(cookieScopeUrls);
-    // The whole jar is snapshotted once, so a URL discovered mid-crawl can only
-    // add identities that existed when the crawl started. Without this, a cookie
-    // minted by an earlier crawled page would enter the baseline at discovery
-    // and its later removal would be misreported as losing a crawl-start cookie.
-    const initialCookieIdentities = new Set(
-        (await crawlTab.page.context().cookies().catch(() => []))
-            .map(cookie => `${cookie.name}\n${cookie.domain}\n${cookie.path}`));
-    const baselineCookies = await readCrawlCookies(crawlTab.page, cookieScopeUrls);
+    // Assigned once the first worker tab exists, before any worker runs; the
+    // workers below read and mutate these through the shared bindings.
+    let initialCookieIdentities = new Set<string>();
+    let baselineCookies = new Map<string, { name: string, expires: number }>();
     const sessionLosses: { url: string, cookies: string[] }[] = [];
     let processedPages = 0;
-    try {
-      while (queue.length && pages.length < params.maxPages) {
-        const item = queue.shift()!;
-        queued.delete(item.url);
-        if (visited.has(item.url)) {
-          skippedUrls++;
-          continue;
-        }
-        visited.add(item.url);
 
+    // The cookie jar is context-global, so the read-compare-delete sequences
+    // below must not interleave across workers: each runs to completion before
+    // the next starts. Under concurrency > 1 the exact navigation that dropped
+    // a cookie is not observable from outside - overlapping loads share the
+    // jar - so a loss is attributed to the page whose serialized check first
+    // observed it. concurrency: 1 restores exact attribution.
+    let cookieChain: Promise<unknown> = Promise.resolve();
+    const withCookieLock = <T,>(work: () => Promise<T>): Promise<T> => {
+      const result = cookieChain.then(work);
+      cookieChain = result.catch(() => undefined);
+      return result;
+    };
+
+    const processQueueItem = async (workerTab: typeof tab, item: CrawlItem) => {
         const pageReport: PageReport = {
           url: item.url,
           title: '',
@@ -564,17 +579,19 @@ const auditSite = defineTabTool({
         if (!cookieScope.has(item.cookieUrl)) {
           cookieScope.add(item.cookieUrl);
           cookieScopeUrls.push(item.cookieUrl);
-          const discovered = await readCrawlCookies(crawlTab.page, [item.cookieUrl]).catch(() => null);
-          for (const [identity, cookie] of discovered ?? []) {
-            if (initialCookieIdentities.has(identity) && !baselineCookies.has(identity))
-              baselineCookies.set(identity, cookie);
-          }
+          await withCookieLock(async () => {
+            const discovered = await readCrawlCookies(workerTab.page, [item.cookieUrl]).catch(() => null);
+            for (const [identity, cookie] of discovered ?? []) {
+              if (initialCookieIdentities.has(identity) && !baselineCookies.has(identity))
+                baselineCookies.set(identity, cookie);
+            }
+          });
         }
 
-        const urlBeforeNavigation = crawlTab.page.url();
+        const urlBeforeNavigation = workerTab.page.url();
         try {
-          await crawlTab.navigate(item.url);
-          await crawlTab.waitForTimeout(params.waitAfterNavigationMs);
+          await workerTab.navigate(item.url);
+          await workerTab.waitForTimeout(params.waitAfterNavigationMs);
 
           // Discover before scanning. A scoped scan throws when an
           // includeSelectors entry is absent from this page, and that must not
@@ -585,12 +602,12 @@ const auditSite = defineTabTool({
           else if (params.strategy === 'nav' && item.depth === 0)
             linkSelector = navLinksSelector;
 
-          const { title, links } = await readPage(crawlTab.page, linkSelector);
+          const { title, links } = await readPage(workerTab.page, linkSelector);
           pageReport.title = title;
           for (const link of links)
             enqueueUrl(link, item.depth + 1, item.url);
 
-          const axeResult = await runAxeScan(crawlTab.page, {
+          const axeResult = await runAxeScan(workerTab.page, {
             tags: params.violationsTag as AxeTag[],
             rules: params.withRules,
             disableRules: params.disableRules,
@@ -622,17 +639,21 @@ const auditSite = defineTabTool({
           // baseline, so each later disappearance is still caught and attributed
           // to its own URL instead of being masked by an earlier, unrelated one.
           if (baselineCookies.size) {
-            const loss = await findCookieLoss(crawlTab.page, cookieScopeUrls, baselineCookies, item.url, urlBeforeNavigation);
-            if (loss) {
-              sessionLosses.push({ url: loss.url, cookies: loss.cookies });
-              // Removed from the jar snapshot too, or a later-discovered URL
-              // could re-admit an already-reported cookie to the baseline and
-              // report the same loss twice.
-              for (const identity of loss.identities) {
-                baselineCookies.delete(identity);
-                initialCookieIdentities.delete(identity);
+            await withCookieLock(async () => {
+              if (!baselineCookies.size)
+                return;
+              const loss = await findCookieLoss(workerTab.page, cookieScopeUrls, baselineCookies, item.url, urlBeforeNavigation);
+              if (loss) {
+                sessionLosses.push({ url: loss.url, cookies: loss.cookies });
+                // Removed from the jar snapshot too, or a later-discovered URL
+                // could re-admit an already-reported cookie to the baseline and
+                // report the same loss twice.
+                for (const identity of loss.identities) {
+                  baselineCookies.delete(identity);
+                  initialCookieIdentities.delete(identity);
+                }
               }
-            }
+            });
           }
           processedPages++;
           const message = pageReport.status === 'scanned'
@@ -644,11 +665,62 @@ const auditSite = defineTabTool({
             message,
           });
         }
+    };
+
+    // Dequeue-and-mark-visited is synchronous, so two workers can never claim
+    // the same URL; the maxPages ceiling holds because enqueueUrl already
+    // bounds queued + visited, whatever the worker count.
+    let inFlight = 0;
+    const crawlWorker = async (workerTab: typeof tab) => {
+      while (pages.length < params.maxPages) {
+        const item = queue.shift();
+        if (!item) {
+          // Pages still in flight may discover more links; when nothing is in
+          // flight, nothing can be discovered and the crawl is done.
+          if (!inFlight)
+            return;
+          await new Promise<void>(resolve => idleWaiters.push(resolve));
+          continue;
+        }
+        queued.delete(item.url);
+        if (visited.has(item.url)) {
+          skippedUrls++;
+          continue;
+        }
+        visited.add(item.url);
+        inFlight++;
+        try {
+          await processQueueItem(workerTab, item);
+        } finally {
+          inFlight--;
+          wakeIdleWorkers();
+        }
       }
+    };
+
+    try {
+      // Tab creation and the baseline reads live inside the try so a failure
+      // mid-pool still closes the tabs already opened.
+      for (let index = 0; index < Math.min(concurrency, params.maxPages); index++)
+        crawlTabs.push(await context.newTab());
+      // The whole jar is snapshotted once, so a URL discovered mid-crawl can only
+      // add identities that existed when the crawl started. Without this, a cookie
+      // minted by an earlier crawled page would enter the baseline at discovery
+      // and its later removal would be misreported as losing a crawl-start cookie.
+      initialCookieIdentities = new Set(
+          (await crawlTabs[0].page.context().cookies().catch(() => []))
+              .map(cookie => `${cookie.name}\n${cookie.domain}\n${cookie.path}`));
+      baselineCookies = await readCrawlCookies(crawlTabs[0].page, cookieScopeUrls);
+      await Promise.all(crawlTabs.map(workerTab => crawlWorker(workerTab)));
     } finally {
-      const crawlTabIndex = context.tabs().indexOf(crawlTab);
-      if (crawlTabIndex !== -1)
-        await context.closeTab(crawlTabIndex);
+      // A worker failing must still release every idle sibling, or the crawl
+      // would hang on waiters nobody wakes again.
+      wakeIdleWorkers();
+      for (const workerTab of crawlTabs) {
+        const workerTabIndex = context.tabs().indexOf(workerTab);
+        if (workerTabIndex !== -1)
+          await context.closeTab(workerTabIndex);
+      }
       const originalTabIndex = context.tabs().indexOf(originalTab);
       if (originalTabIndex !== -1)
         await context.selectTab(originalTabIndex);
@@ -694,6 +766,7 @@ const auditSite = defineTabTool({
           disableRules: params.disableRules ?? null,
           maxNodesPerViolation: params.maxNodesPerViolation,
           waitAfterNavigationMs: params.waitAfterNavigationMs,
+          concurrency,
         },
         startedAt: startedAtIso,
         finishedAt: new Date().toISOString(),
