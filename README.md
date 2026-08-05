@@ -1,6 +1,8 @@
 
 # MCP Accessibility Scanner 🔍
 
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.JustasMonkev%2Fmcp-accessibility-scanner.svg)](https://mcptoplist.com/server/io.github.JustasMonkev%2Fmcp-accessibility-scanner)
+
 ## Star History
 [![Star History Chart](https://api.star-history.com/svg?repos=justasmonkev%2Fmcp-accessibility-scanner&type=Date)](https://api.star-history.com/svg?repos=justasmonkev%2Fmcp-accessibility-scanner&type=Date)
 
