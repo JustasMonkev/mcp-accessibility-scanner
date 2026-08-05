@@ -28,7 +28,7 @@ import http from 'node:http';
 import path from 'node:path';
 import debug from 'debug';
 import { WebSocket, WebSocketServer } from 'ws';
-import { httpAddressToString } from '../mcp/http.js';
+import { httpAddressToString, validateWebSocketUpgradeHeaders } from '../mcp/http.js';
 import { logUnhandledError } from '../utils/log.js';
 import { ManualPromise } from '../mcp/manualPromise.js';
 import { ExtensionProtocolV2 } from './cdpRelayV2.js';
@@ -82,7 +82,18 @@ export class CDPRelayServer {
     this._connectPagePrefix = connectPageUrl.toString();
 
     this._resetExtensionConnection();
-    this._wss = new WebSocketServer({ server });
+    this._wss = new WebSocketServer({
+      server,
+      verifyClient: ({ req }, callback) => {
+        const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
+        if (pathname !== this._cdpPath && pathname !== this._extensionPath) {
+          callback(false, 400, 'Bad Request');
+          return;
+        }
+        const error = validateWebSocketUpgradeHeaders(server, req);
+        callback(!error, error?.statusCode, error?.message);
+      },
+    });
     this._wss.on('connection', this._onConnection.bind(this));
   }
 
@@ -140,7 +151,7 @@ export class CDPRelayServer {
         throw new Error(`Unsupported channel: "${this._browserChannel}"`);
       executablePath = executableInfo.executablePath();
       if (!executablePath)
-        throw new Error(`"${this._browserChannel}" executable not found. Make sure it is installed at a standard location.`);
+        throw new Error(`"${this._browserChannel}" executable not found. Make sure it is installed at a standard location, or set PLAYWRIGHT_MCP_EXECUTABLE_PATH to use a browser at a custom location.`);
     }
 
     const args: string[] = [];

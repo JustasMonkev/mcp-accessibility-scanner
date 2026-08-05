@@ -149,7 +149,11 @@ function decorateServer(server: net.Server) {
   };
 }
 
-function validateRequestHeaders(httpServer: http.Server, req: http.IncomingMessage): { statusCode: number, message: string } | undefined {
+export function validateWebSocketUpgradeHeaders(httpServer: http.Server, req: http.IncomingMessage): { statusCode: number, message: string } | undefined {
+  return validateRequestHeaders(httpServer, req, true);
+}
+
+function validateRequestHeaders(httpServer: http.Server, req: http.IncomingMessage, allowNonWebOrigin = false): { statusCode: number, message: string } | undefined {
   const allowedHosts = allowedHostnamesForServer(httpServer);
   const hostHeader = req.headers.host;
   const host = typeof hostHeader === 'string' ? parseAuthority(hostHeader) : undefined;
@@ -167,6 +171,15 @@ function validateRequestHeaders(httpServer: http.Server, req: http.IncomingMessa
     return;
 
   const origin = parseOriginAuthority(originHeader);
+  if (!origin && allowNonWebOrigin) {
+    try {
+      const protocol = new URL(originHeader).protocol;
+      if (protocol !== 'http:' && protocol !== 'https:')
+        return;
+    } catch {
+      // Report malformed origins below.
+    }
+  }
   if (!origin) {
     testDebug('reject request with invalid origin header: %o', originHeader);
     return { statusCode: 400, message: 'Invalid Origin header' };

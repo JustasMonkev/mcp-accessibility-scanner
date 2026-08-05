@@ -229,6 +229,26 @@ describe('extension protocol v2', () => {
     }
   });
 
+  it('rejects relay WebSocket upgrades with forged host or origin', async () => {
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
+    try {
+      const invalidPath = new URL(relay.extensionEndpoint());
+      invalidPath.pathname = '/unexpected';
+      await expect(wsUpgradeResult(invalidPath.toString(), {})).resolves.toBe(400);
+      await expect(wsUpgradeResult(relay.extensionEndpoint(), { host: 'evil.example' })).resolves.toBe(403);
+      await expect(wsUpgradeResult(relay.extensionEndpoint(), { origin: 'https://evil.example' })).resolves.toBe(403);
+      await expect(wsUpgradeResult(relay.extensionEndpoint(), { origin: `chrome-extension://${EXTENSION_ID}` })).resolves.toBe('connected');
+    } finally {
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
   it('waits for extension approval and forwards the configured token', async () => {
     vi.mocked(spawn).mockClear();
     vi.stubEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', 'test-token');
@@ -342,3 +362,18 @@ describe('extension protocol v2', () => {
     }
   });
 });
+
+function wsUpgradeResult(url: string, headers: Record<string, string>): Promise<number | 'connected'> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url, { headers });
+    ws.on('open', () => {
+      ws.close();
+      resolve('connected');
+    });
+    ws.on('unexpected-response', (request, response) => {
+      request.destroy();
+      resolve(response.statusCode ?? 0);
+    });
+    ws.on('error', reject);
+  });
+}
