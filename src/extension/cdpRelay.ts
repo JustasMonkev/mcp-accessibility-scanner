@@ -55,6 +55,7 @@ type CDPCommand = {
 type CDPResponse = CDPMessage;
 
 export class CDPRelayServer {
+  private _server: http.Server;
   private _wsHost: string;
   private _browserChannel: string;
   private _userDataDir?: string;
@@ -69,6 +70,7 @@ export class CDPRelayServer {
   private _extensionConnectionPromise!: ManualPromise<void>;
 
   constructor(server: http.Server, browserChannel: string, userDataDir?: string, executablePath?: string) {
+    this._server = server;
     this._wsHost = httpAddressToString(server.address()).replace(/^http/, 'ws');
     this._browserChannel = browserChannel;
     this._userDataDir = userDataDir;
@@ -164,6 +166,9 @@ export class CDPRelayServer {
   stop(): void {
     this.closeConnections('Server stopped');
     this._wss.close();
+    // ws only closes the HTTP server it created itself; ours is passed in,
+    // so close it explicitly or the relay port stays bound after stop().
+    this._server.close();
   }
 
   closeConnections(reason: string) {
