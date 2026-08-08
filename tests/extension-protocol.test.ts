@@ -229,6 +229,20 @@ describe('extension protocol v2', () => {
     }
   });
 
+  it('releases the relay HTTP server port on stop, and stop is idempotent', async () => {
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
+    expect(server.listening).toBe(true);
+
+    relay.stop();
+    expect(server.listening).toBe(false);
+    expect(() => relay.stop()).not.toThrow();
+  });
+
   it('waits for extension approval and forwards the configured token', async () => {
     vi.mocked(spawn).mockClear();
     vi.stubEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', 'test-token');

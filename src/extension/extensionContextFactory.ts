@@ -51,7 +51,13 @@ export class ExtensionContextFactory implements BrowserContextFactory {
   private async _obtainBrowser(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<playwright.Browser> {
     const relay = await this._startRelay(abortSignal);
     await relay.ensureExtensionConnectionForMCPContext(clientInfo, abortSignal, toolName);
-    return await playwright.chromium.connectOverCDP(relay.cdpEndpoint());
+    const browser = await playwright.chromium.connectOverCDP(relay.cdpEndpoint());
+    // Release the relay's HTTP/WebSocket server as soon as the browser goes
+    // away (e.g. the user closes the attached browser), rather than holding
+    // its port until the MCP context is disposed. stop() is idempotent, so
+    // the extra call on normal close/abort is harmless.
+    browser.on('disconnected', () => relay.stop());
+    return browser;
   }
 
   private async _startRelay(abortSignal: AbortSignal) {
