@@ -731,6 +731,25 @@ npm run bench:compare -- before.json after.json
 The comparison total uses only end-to-end scenarios present in both reports,
 so adding or removing a scenario does not distort the reported speedup.
 
+### Benchmarking hand-rolled helpers against libraries
+
+`bench/library-vs-custom.mjs` answers a different question: for each helper this
+repo maintains itself, would an off-the-shelf package be better? It runs both
+implementations over the same fixtures, checks they agree where they are meant
+to, and prints ns/op side by side, plus module load cost, a ReDoS demonstration
+for the `re2` dependency, and an audit of declared dependencies that no file in
+`src/` imports.
+
+```bash
+npm run build
+npm i --no-save acorn sanitize-filename content-type   # optional comparands
+npm run bench:libs -- --json library-vs-custom.json
+```
+
+Cases whose comparand is not installed are reported as skipped, so the script
+runs without the extra installs. Current conclusions are recorded in
+`bench/library-vs-custom.md`.
+
 ## License
 
 MIT
