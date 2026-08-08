@@ -21,8 +21,10 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { WebSocket } from 'ws';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
+import * as playwright from 'playwright';
 import { CDPRelayServer } from '../src/extension/cdpRelay.js';
+import { ExtensionContextFactory } from '../src/extension/extensionContextFactory.js';
 import { ExtensionProtocolV2 } from '../src/extension/cdpRelayV2.js';
 import { EXTENSION_ID, VERSION } from '../src/extension/protocol.js';
 
@@ -235,12 +237,26 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
+    onTestFinished(() => new Promise<void>(resolve => server.close(() => resolve())));
     const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
     expect(server.listening).toBe(true);
 
     relay.stop();
     expect(server.listening).toBe(false);
     expect(() => relay.stop()).not.toThrow();
+  });
+
+  it('stops the relay when CDP attachment fails', async () => {
+    onTestFinished(() => vi.restoreAllMocks());
+    const ensure = vi.spyOn(CDPRelayServer.prototype, 'ensureExtensionConnectionForMCPContext').mockResolvedValue(undefined);
+    const stop = vi.spyOn(CDPRelayServer.prototype, 'stop');
+    vi.spyOn(playwright.chromium, 'connectOverCDP').mockRejectedValue(new Error('attach failed'));
+    onTestFinished(() => (ensure.mock.instances[0] as CDPRelayServer | undefined)?.stop());
+
+    const factory = new ExtensionContextFactory('chrome', undefined, '/tmp/chrome');
+    await expect(factory.createContext(
+        { name: 'test-client', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow('attach failed');
+    expect(stop).toHaveBeenCalledTimes(1);
   });
 
   it('waits for extension approval and forwards the configured token', async () => {
