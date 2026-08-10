@@ -573,6 +573,19 @@ Resize the browser window.
 Manage browser tabs in one tool.
 - Parameters: `action` (`list`, `new`, `close`, `select`) and optional `index` (for `close` and `select`).
 
+### Browser Session Tools
+
+Following the MCP 2026-07-28 stateless prescription, browser state can be named by an explicit server-minted handle instead of living implicitly in the connection. Every browser tool accepts an optional `browserSessionId` argument; when it is omitted, the tool runs in the default session and behaves exactly as before.
+
+#### `browser_session_open`
+Opens a new isolated browser session (its own browser context with its own tabs) and returns its opaque handle (`bs_...`) both in the result text and as `structuredContent.browserSessionId`. Pass that handle as the `browserSessionId` argument of other browser tools to run them in this session.
+
+#### `browser_session_close`
+Closes a session opened with `browser_session_open` and releases its browser resources.
+- Parameters: `browserSessionId` (the handle to close)
+
+Sessions that stay idle expire automatically after 30 minutes; the timer is refreshed on every use and while a tool is running in the session, so a long `audit_site` crawl is never expired mid-run. Set `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` to override the idle TTL in milliseconds (`0` or a negative value disables expiry). Passing an unknown or expired handle produces a tool error listing the currently open sessions.
+
 ### Information & Monitoring Tools
 
 #### `browser_console_messages`

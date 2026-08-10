@@ -17,6 +17,7 @@
 import { z } from 'zod';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { FullConfig } from './config.js';
+import { BrowserSessionRegistry } from './browserSessions.js';
 import { Context } from './context.js';
 import { logUnhandledError } from './utils/log.js';
 import { Response } from './response.js';
@@ -36,6 +37,7 @@ export class BrowserServerBackend implements ServerBackend {
   // whole set and never changes, so it is done once per server.
   private _mcpTools: mcpServer.Tool[] | undefined;
   private _context: Context | undefined;
+  private _sessionRegistry: BrowserSessionRegistry | undefined;
   private _sessionLog: SessionLog | undefined;
   private _config: FullConfig;
   private _browserContextFactory: BrowserContextFactory;
@@ -49,17 +51,38 @@ export class BrowserServerBackend implements ServerBackend {
 
   async initialize(_context: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion): Promise<void> {
     this._sessionLog = this._config.saveSession ? await SessionLog.create(this._config) : undefined;
-    this._context = new Context({
+    const createContext = () => new Context({
       tools: this._tools,
       config: this._config,
       browserContextFactory: this._browserContextFactory,
       sessionLog: this._sessionLog,
       clientInfo: { ...clientVersion },
+      browserSessions: this._sessionRegistry,
     });
+    this._sessionRegistry = new BrowserSessionRegistry(createContext);
+    this._context = createContext();
   }
 
   async listTools(): Promise<mcpServer.Tool[]> {
-    this._mcpTools ??= this._tools.map(tool => toMcpTool(tool.schema));
+    this._mcpTools ??= this._tools.map(tool => {
+      const mcpTool = toMcpTool(tool.schema);
+      // Advertise the session-routing parameter resolved in callTool(). It is
+      // added to the wire schema only: the tools' own zod schemas (all
+      // non-strict objects) simply strip it during parsing, so tool
+      // implementations never see it. The session tools themselves are
+      // excluded — they operate *on* sessions, not *in* them.
+      if (tool.schema.name !== 'browser_session_open' && tool.schema.name !== 'browser_session_close') {
+        const inputSchema = mcpTool.inputSchema as { properties?: Record<string, unknown> };
+        inputSchema.properties = {
+          ...inputSchema.properties,
+          browserSessionId: {
+            type: 'string',
+            description: 'Browser session to run this tool in, as returned by browser_session_open. Omit to use the default session.',
+          },
+        };
+      }
+      return mcpTool;
+    });
     return this._mcpTools;
   }
 
@@ -67,6 +90,10 @@ export class BrowserServerBackend implements ServerBackend {
     const tool = this._toolsByName.get(name);
     if (!tool)
       throw new McpError(ErrorCode.InvalidParams, `Tool "${name}" not found`);
+    // Resolved before the schema parse so an unknown handle surfaces as a
+    // clear execution error, like other input validation failures below.
+    const routedSessionId = this._routedSessionId(name, rawArguments);
+    const context = routedSessionId !== undefined ? this._sessionRegistry!.resolve(routedSessionId) : this._context!;
     let parsedArguments: Record<string, any>;
     try {
       parsedArguments = tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, any>;
@@ -77,7 +104,6 @@ export class BrowserServerBackend implements ServerBackend {
         throw new Error(`Invalid input for tool "${name}":\n${z.prettifyError(error)}`);
       throw error;
     }
-    const context = this._context!;
     const response = new Response(context, name, parsedArguments, requestContext);
     context.setRunningTool(name);
     try {
@@ -88,11 +114,36 @@ export class BrowserServerBackend implements ServerBackend {
       response.addError(String(error));
     } finally {
       context.setRunningTool(undefined);
+      // Refresh after completion too: a long run must not leave the session
+      // one reaper tick from expiry.
+      if (routedSessionId !== undefined)
+        this._sessionRegistry?.touch(routedSessionId);
     }
     return response.serialize();
   }
 
+  /**
+   * The optional `browserSessionId` argument selects which registry Context a
+   * tool runs in; without it (or before any session exists) the default
+   * Context preserves the pre-#167 behavior exactly. The session tools are
+   * exempt: `browser_session_close` takes `browserSessionId` as its own
+   * argument naming the session to close — running it *inside* that session
+   * would dispose the context out from under the running tool — and both
+   * always execute on the default Context.
+   */
+  private _routedSessionId(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments']): string | undefined {
+    if (name === 'browser_session_open' || name === 'browser_session_close')
+      return undefined;
+    const id = rawArguments?.browserSessionId;
+    if (id === undefined)
+      return undefined;
+    if (typeof id !== 'string')
+      throw new Error('Invalid browserSessionId: expected a string handle returned by browser_session_open.');
+    return id;
+  }
+
   serverClosed() {
+    void this._sessionRegistry?.disposeAll().catch(logUnhandledError);
     void this._context?.dispose().catch(logUnhandledError);
   }
 }

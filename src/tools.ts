@@ -26,6 +26,7 @@ import mouse from './tools/mouse.js';
 import navigate from './tools/navigate.js';
 import network from './tools/network.js';
 import pdf from './tools/pdf.js';
+import session from './tools/session.js';
 import snapshot from './tools/snapshot.js';
 import tabs from './tools/tabs.js';
 import screenshot from './tools/screenshot.js';
@@ -53,6 +54,7 @@ export const allTools: Tool<any>[] = [
   ...mouse,
   ...pdf,
   ...screenshot,
+  ...session,
   ...snapshot,
   ...tabs,
   ...wait,
@@ -75,4 +77,7 @@ export const serverInstructions = [
   'and reading order. Results are returned as markdown with axe-core rule ids,',
   'impact levels, failure summaries and remediation links. Regular browser interaction tools (click, type, snapshot,',
   'screenshot, tabs) are also available for navigating to the state you want to audit.',
+  'To work with several isolated browsers at once, `browser_session_open` returns a browserSessionId that every',
+  'browser tool accepts as an optional argument; omit it to use the default session, and close extra sessions with',
+  '`browser_session_close` when done.',
 ].join(' ');

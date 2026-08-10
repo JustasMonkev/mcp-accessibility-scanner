@@ -25,6 +25,7 @@ import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
 import type { FullConfig } from './config.js';
 import type { Tool } from './tools/tool.js';
 import type { BrowserContextFactory, ClientInfo } from './browserContextFactory.js';
+import type { BrowserSessionBroker } from './browserSessions.js';
 import type * as actions from './actions.js';
 import type { SessionLog } from './sessionLog.js';
 
@@ -93,6 +94,7 @@ type ContextOptions = {
   browserContextFactory: BrowserContextFactory;
   sessionLog: SessionLog | undefined;
   clientInfo: ClientInfo;
+  browserSessions?: BrowserSessionBroker;
 };
 
 export class Context {
@@ -184,6 +186,17 @@ export class Context {
 
   async outputFile(name: string): Promise<string> {
     return outputFile(this.config, name);
+  }
+
+  /**
+   * The registry behind `browser_session_open` / `browser_session_close`.
+   * Provided by BrowserServerBackend; absent when the Context is constructed
+   * outside of it (e.g. directly in tests).
+   */
+  browserSessions(): BrowserSessionBroker {
+    if (!this.options.browserSessions)
+      throw new Error('Browser session management is not available in this environment.');
+    return this.options.browserSessions;
   }
 
   private _onPageCreated(page: playwright.Page) {

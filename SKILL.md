@@ -221,6 +221,8 @@ These tools are always available and work in the interactive REPL.
 | `browser_tabs` | Manage tabs: `{"action": "list"}`, `{"action": "new"}`, `{"action": "close"}`, `{"action": "select", "index": 1}` |
 | `browser_navigation_timeout` | Set navigation timeout (30s-20min) |
 | `browser_default_timeout` | Set default operation timeout (30s-20min) |
+| `browser_session_open` | Open an isolated browser session; returns a `browserSessionId` that every browser tool accepts as an optional argument (omit it for the default session) |
+| `browser_session_close` | Close a session opened with `browser_session_open`: `{"browserSessionId": "bs_..."}` |
 
 ### Diagnostics
 
