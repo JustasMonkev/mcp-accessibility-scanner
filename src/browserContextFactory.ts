@@ -491,6 +491,16 @@ abstract class BaseContextFactory implements BrowserContextFactory {
   private _logName: string;
   protected _browserPromise: Promise<playwright.Browser> | undefined;
 
+  // Counts live handouts per browser object, claimed BEFORE awaiting context
+  // creation — the same pattern as CdpContextFactory. A `browser.contexts()`
+  // census cannot see a sibling still inside _doCreateContext(): if session
+  // A's close ran while session B's first newContext() was in flight, A saw
+  // itself as the last context and closed the shared browser out from under
+  // B. Keyed per browser object (not per factory) because an external
+  // disconnect makes _obtainBrowser hand out a fresh browser while stale
+  // handouts still reference the old one.
+  private _handoutCounts = new WeakMap<playwright.Browser, number>();
+
   constructor(name: string, config: FullConfig) {
     this._logName = name;
     this.config = config;
@@ -513,25 +523,59 @@ abstract class BaseContextFactory implements BrowserContextFactory {
 
   protected abstract _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser>;
 
+  private _releaseHandout(browser: playwright.Browser): boolean {
+    const remaining = Math.max(0, (this._handoutCounts.get(browser) ?? 1) - 1);
+    this._handoutCounts.set(browser, remaining);
+    return remaining === 0;
+  }
+
   async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     testDebug(`create browser context (${this._logName})`);
     const browser = await this._obtainBrowser(clientInfo);
-    const browserContext = await this._doCreateContext(browser);
-    return { browserContext, close: () => this._closeBrowserContext(browserContext, browser) };
+    // Captured to guard the eager `_browserPromise` reset below: after an
+    // external disconnect a NEW promise may be in place, and clearing it
+    // would orphan the fresh connection other sessions are about to use.
+    const obtainedPromise = this._browserPromise;
+    this._handoutCounts.set(browser, (this._handoutCounts.get(browser) ?? 0) + 1);
+    let browserContext: playwright.BrowserContext;
+    try {
+      browserContext = await this._doCreateContext(browser);
+    } catch (error) {
+      // The handout never materialized. When it was the last one, the browser
+      // must not stay behind ownerless — a sibling's close may have deferred
+      // the browser shutdown to this in-flight creation.
+      if (this._releaseHandout(browser)) {
+        if (this._browserPromise === obtainedPromise)
+          this._browserPromise = undefined;
+        testDebug(`close browser (${this._logName})`);
+        await browser.close().catch(logUnhandledError);
+      }
+      throw error;
+    }
+    let released = false;
+    return {
+      browserContext,
+      close: async () => {
+        if (released)
+          return;
+        released = true;
+        testDebug(`close browser context (${this._logName})`);
+        const last = this._releaseHandout(browser);
+        // Cleared before the awaits so a createContext() arriving while this
+        // close is still in flight obtains a fresh browser instead of the
+        // closing one.
+        if (last && this._browserPromise === obtainedPromise)
+          this._browserPromise = undefined;
+        await browserContext.close().catch(logUnhandledError);
+        if (last) {
+          testDebug(`close browser (${this._logName})`);
+          await browser.close().catch(logUnhandledError);
+        }
+      },
+    };
   }
 
   protected abstract _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext>;
-
-  private async _closeBrowserContext(browserContext: playwright.BrowserContext, browser: playwright.Browser) {
-    testDebug(`close browser context (${this._logName})`);
-    if (browser.contexts().length === 1)
-      this._browserPromise = undefined;
-    await browserContext.close().catch(logUnhandledError);
-    if (browser.contexts().length === 0) {
-      testDebug(`close browser (${this._logName})`);
-      await browser.close().catch(logUnhandledError);
-    }
-  }
 }
 
 class IsolatedContextFactory extends BaseContextFactory {
@@ -726,13 +770,19 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
   }
 
   // Without --isolated a session would reuse a launched application's single
-  // existing context (and, with a pinned port, could even attach to another
-  // session's instance). With --isolated each context is created fresh, at the
-  // documented cost of launching another application instance per context.
+  // existing context. With --isolated each context is created fresh, at the
+  // documented cost of launching another application instance per context —
+  // unless the port is pinned: then every session's child is launched against
+  // the SAME endpoint, the second session's connect loop reaches the first
+  // session's instance (its own child never bound the busy port), its
+  // "separate" context lands in a sibling's application, and its cleanup
+  // kills a child that owns nothing while leaking that context.
   get sessionsUnsupportedReason(): string | undefined {
-    if (this.config.browser.isolated)
-      return undefined;
-    return 'without --isolated each session would attach to a launched application\'s single shared context (same tabs, cookies and storage). Add --isolated to give each session its own browser context.';
+    if (!this.config.browser.isolated)
+      return 'without --isolated each session would attach to a launched application\'s single shared context (same tabs, cookies and storage). Add --isolated to give each session its own browser context.';
+    if (this.config.browser.cdpLaunch?.port !== undefined)
+      return 'the pinned --cdp-launch-port can serve only one launched application at a time, so a second session would attach to the first session\'s instance. Drop --cdp-launch-port (each session then launches on its own free port) or run one session at a time.';
+    return undefined;
   }
 
   async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {

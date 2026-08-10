@@ -18,6 +18,7 @@ import debug from 'debug';
 import type * as playwright from 'playwright';
 
 import { logUnhandledError } from './utils/log.js';
+import { createShortGuid } from './utils/guid.js';
 import { Tab } from './tab.js';
 import { outputFile } from './config.js';
 import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
@@ -57,8 +58,15 @@ async function acquireTrace(browserContext: playwright.BrowserContext): Promise<
   if (!hub) {
     const created: TraceHub = {
       users: 0,
+      // The name is unique per context: with --isolated (or a remote/CDP
+      // browser) several sessions' contexts share the browser's one cached
+      // tracesDir, and a fixed name would make every context write the same
+      // trace.trace/trace.network files — concurrent corruption, and later
+      // sessions overwriting earlier traces. The 'trace' prefix is kept
+      // because the printed viewer URL (…/trace.json) is served as a
+      // prefix-matched descriptor over the traces directory.
       ready: browserContext.tracing.start({
-        name: 'trace',
+        name: `trace-${createShortGuid()}`,
         screenshots: false,
         snapshots: true,
         sources: false,

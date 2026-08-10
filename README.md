@@ -587,7 +587,7 @@ Opens a separate browser session — its own browser context with its own tabs, 
 How the separate context is provided depends on the mode:
 
 - **Default persistent-profile mode**: each session runs in its own fresh, disposable profile (removed when the session closes or expires); only the default session uses the stable persistent profile, whose sign-in state keeps surviving restarts. This is required — one profile directory can back only one running browser at a time.
-- **`--isolated`, remote endpoints, and CDP/`--cdp-launch` with `--isolated`**: each session gets its own fresh browser context. In `--cdp-launch` mode each context launches its own instance of the configured application.
+- **`--isolated`, remote endpoints, and CDP/`--cdp-launch` with `--isolated`**: each session gets its own fresh browser context. In `--cdp-launch` mode each context launches its own instance of the configured application on its own free port — which is why combining `--cdp-launch-port` with `--isolated` also rejects `browser_session_open`: a pinned port can serve only one launched instance, so a second session would silently attach to the first session's application.
 - **Modes that reuse one live browser context** — CDP attach or `--cdp-launch` without `--isolated`, `--extension`, the VS Code bridge, and servers created with a custom context getter — cannot create a separate context, so `browser_session_open` is rejected with an explanation instead of handing out a handle that would share the same tabs, cookies and storage as everything else. The same applies in the default mode when `--user-data-dir` pins all browsing to one user-supplied profile.
 
 #### `browser_session_close`

@@ -418,6 +418,15 @@ describe('browserContextFactory', () => {
     const nonIsolatedLaunch = contextFactory(await resolveConfig({ browser: { cdpLaunch: { command: 'open' } } }));
     expect(nonIsolatedLaunch.sessionsUnsupportedReason).toContain('--isolated');
 
+    // Even with --isolated, a pinned port launches every session's app on the
+    // same endpoint — the second session would attach to the first session's
+    // instance instead of its own.
+    const pinnedPortLaunch = contextFactory(await resolveConfig({ browser: { cdpLaunch: { command: 'open', port: 9223 }, isolated: true } }));
+    expect(pinnedPortLaunch.sessionsUnsupportedReason).toContain('--cdp-launch-port');
+
+    const freePortLaunch = contextFactory(await resolveConfig({ browser: { cdpLaunch: { command: 'open' }, isolated: true } }));
+    expect(freePortLaunch.sessionsUnsupportedReason).toBeUndefined();
+
     const isolated = contextFactory(await resolveConfig({ browser: { isolated: true } }));
     expect(isolated.sessionsUnsupportedReason).toBeUndefined();
 
@@ -1302,6 +1311,78 @@ describe('browserContextFactory', () => {
     releaseApply!();
     const resultA = await pendingA;
     await resultA.close();
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not close the shared isolated browser while a sibling context is still being created', async () => {
+    // BaseContextFactory used to census browser.contexts(): session A closing
+    // its only registered context while session B was still awaiting
+    // newContext() saw an empty census and closed the shared browser out from
+    // under B. The handout count is claimed before the await, so B holds the
+    // browser open.
+    const contextA = createMockBrowserContext();
+    const contextB = createMockBrowserContext();
+    const browser = {
+      close: vi.fn().mockResolvedValue(undefined),
+      contexts: vi.fn().mockReturnValue([]),
+      newContext: vi.fn(),
+      on: vi.fn(),
+    } as any;
+    let releaseB: (context: any) => void;
+    browser.newContext
+        .mockResolvedValueOnce(contextA)
+        .mockImplementationOnce(() => new Promise(resolve => { releaseB = resolve; }));
+    (playwright.chromium.launch as any).mockResolvedValue(browser);
+
+    const config = await resolveConfig({ browser: { isolated: true } });
+    const factory = contextFactory(config);
+    const sessionA = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const pendingB = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    await vi.waitFor(() => expect(browser.newContext).toHaveBeenCalledTimes(2));
+
+    // A closes while B's newContext() is still in flight: the shared browser
+    // must survive for B.
+    await sessionA.close();
+    expect(contextA.close).toHaveBeenCalledTimes(1);
+    expect(browser.close).not.toHaveBeenCalled();
+
+    releaseB!(contextB);
+    const sessionB = await pendingB;
+    expect(sessionB.browserContext).toBe(contextB);
+
+    // B is the last holder — its close shuts the browser down.
+    await sessionB.close();
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the deferred shared browser when the last in-flight creation fails', async () => {
+    // Session A's close deferred the browser shutdown to B's in-flight
+    // handout; if B's creation then fails, B must close the browser instead
+    // of leaving it running with no owner.
+    const contextA = createMockBrowserContext();
+    const browser = {
+      close: vi.fn().mockResolvedValue(undefined),
+      contexts: vi.fn().mockReturnValue([]),
+      newContext: vi.fn(),
+      on: vi.fn(),
+    } as any;
+    let rejectB: (error: Error) => void;
+    browser.newContext
+        .mockResolvedValueOnce(contextA)
+        .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectB = reject; }));
+    (playwright.chromium.launch as any).mockResolvedValue(browser);
+
+    const config = await resolveConfig({ browser: { isolated: true } });
+    const factory = contextFactory(config);
+    const sessionA = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const pendingB = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    await vi.waitFor(() => expect(browser.newContext).toHaveBeenCalledTimes(2));
+
+    await sessionA.close();
+    expect(browser.close).not.toHaveBeenCalled();
+
+    rejectB!(new Error('Target crashed'));
+    await expect(pendingB).rejects.toThrow('Target crashed');
     expect(browser.close).toHaveBeenCalledTimes(1);
   });
 

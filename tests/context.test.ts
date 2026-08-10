@@ -174,6 +174,46 @@ describe('Context', () => {
       expect(mockBrowserContext.tracing.stop).toHaveBeenCalledTimes(1);
     });
 
+    it('gives each context its own trace name so traces in a shared tracesDir never collide', async () => {
+      // With --isolated several sessions' contexts share the browser's one
+      // cached tracesDir; a fixed name made every context write the same
+      // trace.trace/trace.network files concurrently.
+      const makeMockContext = () => {
+        const browserContext: any = new EventEmitter();
+        browserContext.newPage = vi.fn().mockResolvedValue({});
+        browserContext.pages = vi.fn().mockReturnValue([]);
+        browserContext.route = vi.fn().mockResolvedValue(undefined);
+        browserContext.tracing = {
+          start: vi.fn().mockResolvedValue(undefined),
+          stop: vi.fn().mockResolvedValue(undefined),
+        };
+        return browserContext;
+      };
+      const first = makeMockContext();
+      const second = makeMockContext();
+      (mockBrowserContextFactory.createContext as any)
+          .mockResolvedValueOnce({ browserContext: first, close: vi.fn().mockResolvedValue(undefined) })
+          .mockResolvedValueOnce({ browserContext: second, close: vi.fn().mockResolvedValue(undefined) });
+      const makeContext = () => new Context({
+        tools: [],
+        config: { saveTrace: true } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      await makeContext().newTab();
+      await makeContext().newTab();
+
+      const firstName = first.tracing.start.mock.calls[0][0].name;
+      const secondName = second.tracing.start.mock.calls[0][0].name;
+      // The 'trace' prefix keeps the printed viewer URL (…/trace.json, served
+      // as a prefix descriptor) matching the files.
+      expect(firstName).toMatch(/^trace-/);
+      expect(secondName).toMatch(/^trace-/);
+      expect(firstName).not.toBe(secondName);
+    });
+
     it('closes the factory-owned context even when stopping tracing fails on shutdown', async () => {
       // This close attempt is the only one — _browserContextPromise is cleared
       // before the trace stop — so a failing tracing.stop() must not skip the
