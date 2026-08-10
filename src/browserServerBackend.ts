@@ -15,7 +15,7 @@
  */
 
 import { z } from 'zod';
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import type { FullConfig } from './config.js';
 import { BrowserSessionRegistry } from './browserSessions.js';
 import { Context } from './context.js';
@@ -104,7 +104,7 @@ export class BrowserServerBackend implements ServerBackend {
   async callTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext) {
     const tool = this._toolsByName.get(name);
     if (!tool)
-      throw new McpError(ErrorCode.InvalidParams, `Tool "${name}" not found`);
+      throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Tool "${name}" not found`);
     // Resolved before the schema parse so an unknown handle surfaces as a
     // clear execution error, like other input validation failures below.
     const routedSessionId = this._routedSessionId(name, rawArguments);

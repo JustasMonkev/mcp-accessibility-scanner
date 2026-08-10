@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import * as mcpServer from '../mcp/server.js';
 import { BrowserServerBackend } from '../browserServerBackend.js';
 import { VSCodeBrowserContextFactory } from './browserContextFactory.js';

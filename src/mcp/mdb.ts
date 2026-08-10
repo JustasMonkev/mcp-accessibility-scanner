@@ -17,10 +17,8 @@
 import debug from 'debug';
 import { z } from 'zod';
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 
 import { defineToolSchema } from './tool.js';
 import * as mcpServer from './server.js';
@@ -28,7 +26,7 @@ import * as mcpHttp from './http.js';
 import { wrapInProcess } from './server.js';
 import { ManualPromise } from './manualPromise.js';
 
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import type { Transport } from '@modelcontextprotocol/client';
 
 const mdbDebug = debug('pw:mcp:mdb');
 const errorsDebug = debug('pw:mcp:errors');
@@ -116,7 +114,7 @@ export class MDBBackend implements mcpServer.ServerBackend {
   private async _pushClient(transport: Transport, introMessage?: string): Promise<mcpServer.CallToolResult> {
     mdbDebug('pushing client to the stack');
     const client = new Client({ name: 'Internal client', version: '0.0.0' });
-    client.setRequestHandler(PingRequestSchema, () => ({}));
+    client.setRequestHandler('ping', () => ({}));
     await client.connect(transport);
     mdbDebug('connected to the new client');
     const { tools } = await client.listTools();
@@ -181,7 +179,7 @@ export async function runOnPauseBackendLoop(mdbUrl: string, backend: ServerBacke
   const url = mcpHttp.httpAddressToString(httpServer.address());
 
   const client = new Client({ name: 'Internal client', version: '0.0.0' });
-  client.setRequestHandler(PingRequestSchema, () => ({}));
+  client.setRequestHandler('ping', () => ({}));
   const transport = new StreamableHTTPClientTransport(new URL(mdbUrl));
   await client.connect(transport);
 

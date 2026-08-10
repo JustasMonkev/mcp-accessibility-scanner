@@ -23,7 +23,7 @@ import { compressAriaSnapshot } from './utils/ariaCompression.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
 
 import type { Tab, TabSnapshot } from './tab.js';
-import type { CallToolResult, ResourceLink } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, ResourceLink } from '@modelcontextprotocol/server';
 import type { Context } from './context.js';
 import type { CallToolRequestContext } from './mcp/server.js';
 

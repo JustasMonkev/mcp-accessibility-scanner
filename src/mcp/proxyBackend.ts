@@ -17,13 +17,11 @@
 import debug from 'debug';
 import { z } from 'zod';
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { Client } from '@modelcontextprotocol/client';
 import { notifyToolListChanged } from './toolListChanged.js';
 
-import type { CallToolRequestContext, ServerBackend, ClientVersion, ServerBackendContext } from './server.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolRequestContext, ServerBackend, ClientVersion, ServerBackendContext, Tool, CallToolResult, CallToolRequest } from './server.js';
+import type { Transport } from '@modelcontextprotocol/client';
 
 export type MCPProvider = {
   name: string;
@@ -74,11 +72,11 @@ export class ProxyBackend implements ServerBackend {
       name,
       arguments: args,
       _meta: requestContext?._meta,
-    }, undefined, progressToken === undefined ? undefined : {
+    }, progressToken === undefined ? undefined : {
       onprogress: params => {
         void this._forwardProgressNotification(requestContext, progressToken, params);
       },
-    }) as CallToolResult;
+    });
   }
 
   serverClosed?(): void {
@@ -146,7 +144,7 @@ export class ProxyBackend implements ServerBackend {
     this._currentClient = undefined;
 
     const client = new Client({ name: 'Playwright MCP Proxy', version: '0.0.0' });
-    client.setRequestHandler(PingRequestSchema, () => ({}));
+    client.setRequestHandler('ping', () => ({}));
 
     const transport = await factory.connect();
     await client.connect(transport);

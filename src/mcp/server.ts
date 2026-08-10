@@ -16,23 +16,29 @@
 
 import debug from 'debug';
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema, EmptyResultSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
+import { ProtocolError, ProtocolErrorCode, Server } from '@modelcontextprotocol/server';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
 import { InProcessTransport } from './inProcessTransport.js';
 
-import type { Tool, CallToolResult, CallToolRequest, ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-export type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-export type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
+export type { Server } from '@modelcontextprotocol/server';
+export type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/server';
 
 const serverDebug = debug('pw:mcp:server');
 const errorsDebug = debug('pw:mcp:errors');
 
 export type ClientVersion = { name: string, version: string };
-export type CallToolRequestContext = Pick<RequestHandlerExtra<ServerRequest, ServerNotification>, 'signal' | 'requestId' | 'sendNotification' | '_meta'>;
+// The stable request context handed to backends. The v2 SDK reshaped the
+// handler context (`RequestHandlerExtra` became `ServerContext`/`ctx.mcpReq`);
+// this type keeps the backend contract unchanged and is populated from the
+// SDK context at the tools/call handler boundary.
+export type CallToolRequestContext = {
+  signal: AbortSignal;
+  requestId: RequestId;
+  sendNotification: (notification: ServerNotification) => Promise<void>;
+  _meta?: RequestMeta;
+};
 export type ServerBackendContext = {
   notifyToolListChanged(): Promise<void>;
 };
@@ -77,7 +83,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
   });
 
   // Idempotent backend initialization shared by the handshake path and the
-  // lazy per-request path. The v1 `initialized` notification remains the
+  // lazy per-request path. The `initialized` notification remains the
   // preferred entry point (it carries the client's identity), but the MCP
   // 2026-07-28 revision removes the initialize/initialized handshake entirely,
   // so a request arriving without one must trigger initialization on demand
@@ -100,7 +106,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
     return backendInitialized;
   };
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
+  server.setRequestHandler('tools/list', async () => {
     serverDebug('listTools');
     await ensureInitialized();
     const tools = await backend.listTools();
@@ -108,7 +114,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
   });
 
   let heartbeatRunning = false;
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  server.setRequestHandler('tools/call', async (request, ctx) => {
     serverDebug('callTool', request);
     await ensureInitialized();
 
@@ -117,12 +123,21 @@ export function createServer(name: string, version: string, backend: ServerBacke
       startHeartbeat(server);
     }
 
+    const requestContext: CallToolRequestContext = {
+      signal: ctx.mcpReq.signal,
+      requestId: ctx.mcpReq.id,
+      sendNotification: notification => ctx.mcpReq.notify(notification),
+      _meta: ctx.mcpReq._meta,
+    };
     try {
-      return await backend.callTool(request.params.name, request.params.arguments || {}, extra);
+      return await backend.callTool(request.params.name, request.params.arguments || {}, requestContext);
     } catch (error) {
       // Protocol-level failures (e.g. unknown tool) surface as JSON-RPC
       // errors; only tool execution failures become isError results.
-      if (error instanceof McpError)
+      // `isInstance` brand-matches, so a `ProtocolError` constructed by
+      // another bundled SDK copy (e.g. the client package in-process) is
+      // recognized too.
+      if (ProtocolError.isInstance(error))
         throw error;
       return {
         content: [{ type: 'text', text: '### Result\n' + String(error) }],
@@ -144,7 +159,7 @@ const startHeartbeat = (server: Server) => {
 
   const beat = () => {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const ping = server.request({ method: 'ping' }, EmptyResultSchema, { timeout }).finally(() => {
+    const ping = server.request({ method: 'ping' }, { timeout }).finally(() => {
       if (timeoutId)
         clearTimeout(timeoutId);
     });
@@ -160,7 +175,9 @@ const startHeartbeat = (server: Server) => {
       // MCP 2026-07-28 clients reject `ping` as an unknown method, so stop
       // heartbeating this connection for good instead of killing it. Only a
       // timeout or transport-level failure still closes the server. Refs #168.
-      if (error instanceof McpError && error.code === ErrorCode.MethodNotFound)
+      // Brand-matched check: the error may be constructed by the client
+      // package's bundled SDK copy when both run in-process.
+      if (ProtocolError.isInstance(error) && error.code === ProtocolErrorCode.MethodNotFound)
         return;
       void server.close();
     });

@@ -21,8 +21,8 @@ import crypto from 'node:crypto';
 
 import debug from 'debug';
 
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { isInitializeRequest } from '@modelcontextprotocol/server';
+import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import * as mcpServer from './server.js';
 
 import type { ServerBackendFactory } from './server.js';
@@ -71,26 +71,27 @@ export async function installHttpTransport(httpServer: http.Server, serverBacken
   });
 }
 
-// ─── Session compatibility layer ─────────────────────────────────────────────
-// The v1 SDK's Streamable HTTP transport keys connections on the
-// `Mcp-Session-Id` header and requires one MCP server per session. The MCP
-// 2026-07-28 revision removes that header and per-connection sessions, but the
-// stateless transport only ships with the v2 SDK. Until we migrate, this class
-// is the only place that reads the header or tracks sessions — delete it (and
-// dispatch every request to a single stateless transport instead) as part of
-// the v2 migration. Refs #166.
+// ─── Sessionful 2025-era serving ─────────────────────────────────────────────
+// The Streamable HTTP transport (2025-era protocol revisions) keys
+// connections on the `Mcp-Session-Id` header and requires one MCP server per
+// session; the MCP 2026-07-28 revision removes that header and per-connection
+// sessions. The v2 SDK serves 2025-era HTTP traffic natively only in the
+// stateless per-request idiom (`createMcpHandler`'s `legacy: 'stateless'` —
+// no sessions, GET/DELETE answer 405), so this class remains as the minimal
+// user-land session map the SDK's sessionful transport requires: it keeps
+// stateful clients — heartbeat, standalone GET stream, server-initiated
+// notifications — working exactly as before. Refs #166.
 //
 // Clients on the 2026-07-28 revision never send `initialize`, so their first
-// POST is already `tools/list` or `tools/call`; the v1 stateful transport
-// rejects such a sessionless request with "Server not initialized" before the
-// server's lazy backend init (Refs #165) can run. Sessionless POSTs are
-// therefore routed on their body: an `initialize` request keeps today's v1
-// stateful session wire behavior, anything else is dispatched through the v1
-// SDK's stateless mode instead.
+// POST is already `tools/list` or `tools/call`; the stateful transport
+// rejects such a sessionless request before the server's lazy backend init
+// (Refs #165) can run. Sessionless POSTs are therefore routed on their body:
+// an `initialize` request keeps the stateful session wire behavior, anything
+// else is dispatched through the SDK's stateless mode instead.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class SessionStore {
-  private readonly _sessions = new Map<string, StreamableHTTPServerTransport>();
+  private readonly _sessions = new Map<string, NodeStreamableHTTPServerTransport>();
 
   constructor(private readonly _serverBackendFactory: ServerBackendFactory) {}
 
@@ -119,7 +120,7 @@ class SessionStore {
   }
 
   // Peeks at the JSON-RPC body once to route it: `initialize` (also inside a
-  // batch) → v1 stateful session; anything else → stateless dispatch. The
+  // batch) → stateful session; anything else → stateless dispatch. The
   // already-parsed body is handed to the chosen transport so the consumed
   // request stream is never read twice.
   private async _handleSessionlessPost(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -134,7 +135,7 @@ class SessionStore {
       body = await readJsonBody(req);
     } catch {
       // The stream is consumed, so the transport could no longer produce its
-      // own parse error; mirror the v1 SDK's response exactly.
+      // own parse error; mirror the SDK's response exactly.
       res.statusCode = 400;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error: Invalid JSON' }, id: null }));
@@ -148,7 +149,7 @@ class SessionStore {
   }
 
   // Serves one request from a client that skips the initialize handshake. The
-  // v1 SDK's stateless mode (`sessionIdGenerator: undefined`) performs no
+  // SDK's stateless mode (`sessionIdGenerator: undefined`) performs no
   // session validation but insists on a fresh transport per request, so each
   // request gets its own transport, server and backend; the request then
   // flows into the server's lazy ensureInitialized() path. A stateless tool
@@ -158,7 +159,7 @@ class SessionStore {
   // heartbeat: the response stream ends with the request, so there is no
   // long-lived connection to probe.
   private async _handleStatelessRequest(req: http.IncomingMessage, res: http.ServerResponse, parsedBody: unknown): Promise<void> {
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     // Dispose the per-request server — and with it the backend's default
     // context, if the request ever created one — once the response finishes
     // or aborts. Shared state (the factory's browser-session registry and
@@ -169,7 +170,7 @@ class SessionStore {
   }
 
   private async _createSession(req: http.IncomingMessage, res: http.ServerResponse, parsedBody: unknown): Promise<void> {
-    const transport = new StreamableHTTPServerTransport({
+    const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: async sessionId => {
         testDebug(`create http session: ${transport.sessionId}`);

@@ -19,9 +19,8 @@ import path from 'node:path';
 import { z } from 'zod';
 
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import * as mcpServer from '../mcp/server.js';
 import { notifyToolListChanged } from '../mcp/toolListChanged.js';
 import { logUnhandledError } from '../utils/log.js';
@@ -31,9 +30,8 @@ import type { FullConfig } from '../config.js';
 import { BrowserServerBackend } from '../browserServerBackend.js';
 import { assertStorageStateDoesNotResetUserProfile, contextFactory } from '../browserContextFactory.js';
 import { vscodeProfileConflictRemedy } from './browserContextFactory.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { ClientVersion, ServerBackend, ServerBackendContext } from '../mcp/server.js';
-import type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
+import type { Transport } from '@modelcontextprotocol/client';
+import type { ClientVersion, ServerBackend, ServerBackendContext, Tool, CallToolResult, CallToolRequest } from '../mcp/server.js';
 
 const contextSwitchOptions = z.object({
   connectionString: z.string().optional().describe('The connection string to use to connect to the browser'),
@@ -75,7 +73,7 @@ export class VSCodeProxyBackend implements ServerBackend {
       name,
       arguments: args,
       _meta: requestContext?._meta,
-    }) as CallToolResult;
+    });
   }
 
   serverClosed?(): void {
@@ -142,7 +140,7 @@ export class VSCodeProxyBackend implements ServerBackend {
     this._currentClient = undefined;
 
     const client = new Client(this._clientVersion!);
-    client.setRequestHandler(PingRequestSchema, () => ({}));
+    client.setRequestHandler('ping', () => ({}));
 
     await client.connect(transport);
     this._currentClient = client;
