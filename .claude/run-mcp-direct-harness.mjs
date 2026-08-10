@@ -411,6 +411,28 @@ const tests = [
     await callTool('browser_tabs', { action: 'close', index: 1 });
   }),
 
+  test('browser_session_open', async () => {
+    const result = await callTool('browser_session_open', {});
+    const browserSessionId = result.structuredContent?.browserSessionId;
+    if (typeof browserSessionId !== 'string' || !browserSessionId.startsWith('bs_'))
+      throw new Error(`Expected browser session handle, got ${JSON.stringify(browserSessionId)}`);
+    assertText(result, new RegExp(browserSessionId));
+    await callTool('browser_tabs', { action: 'list', browserSessionId });
+    await callTool('browser_session_close', { browserSessionId });
+  }),
+
+  test('browser_session_close', async () => {
+    const opened = await callTool('browser_session_open', {});
+    const browserSessionId = opened.structuredContent?.browserSessionId;
+    const result = await callTool('browser_session_close', { browserSessionId });
+    assertText(result, new RegExp(browserSessionId));
+    await assertToolError(
+      'browser_tabs',
+      { action: 'list', browserSessionId },
+      /Unknown browserSessionId/,
+    );
+  }),
+
   test('browser_navigation_timeout', async () => {
     await navigate('<title>NavTimeout</title><h1>NavTimeout</h1>');
     const result = await callTool('browser_navigation_timeout', { timeout: 30000 });
