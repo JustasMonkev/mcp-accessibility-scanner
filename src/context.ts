@@ -100,7 +100,17 @@ type ContextOptions = {
   tools: Tool[];
   config: FullConfig;
   browserContextFactory: BrowserContextFactory;
-  sessionLog: SessionLog | undefined;
+  /**
+   * Resolves the `--save-session` log this context writes to, called when
+   * the context first launches its browser context. The log is created
+   * lazily at that point rather than eagerly by the owning backend: over
+   * stateless HTTP every request builds a fresh backend, and a request that
+   * only lists tools or routes to an existing browser session must not mint
+   * an empty session directory. A backend hands the same async-once
+   * supplier to its default context and to every session it opens, so all
+   * of them share one log.
+   */
+  sessionLog: (() => Promise<SessionLog | undefined>) | undefined;
   clientInfo: ClientInfo;
   browserSessions?: BrowserSessionBroker;
   /**
@@ -116,7 +126,6 @@ type ContextOptions = {
 export class Context {
   readonly tools: Tool[];
   readonly config: FullConfig;
-  readonly sessionLog: SessionLog | undefined;
   readonly options: ContextOptions;
   private _browserContextPromise: Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> | undefined;
   private _browserContextFactory: BrowserContextFactory;
@@ -133,11 +142,12 @@ export class Context {
   private _abortController = new AbortController();
   private _removePageObserver: (() => void) | undefined;
   private _inputRecorder: InputRecorder | undefined;
+  // Resolved from options.sessionLog at the first browser context launch.
+  private _sessionLog: SessionLog | undefined;
 
   constructor(options: ContextOptions) {
     this.tools = options.tools;
     this.config = options.config;
-    this.sessionLog = options.sessionLog;
     this.options = options;
     this._browserContextFactory = options.browserContextFactory;
     this._clientInfo = options.clientInfo;
@@ -147,6 +157,10 @@ export class Context {
 
   static async disposeAll() {
     await contextRegistry.disposeAll();
+  }
+
+  get sessionLog(): SessionLog | undefined {
+    return this._sessionLog;
   }
 
   tabs(): Tab[] {
@@ -348,6 +362,9 @@ export class Context {
     try {
       const { browserContext } = result;
       await this._setupRequestInterception(browserContext);
+      // First real use of this context: resolve — and, once per backend,
+      // create — the session log before deciding whether to record input.
+      this._sessionLog ??= await this.options.sessionLog?.();
       if (this.sessionLog)
         this._inputRecorder = await InputRecorder.create(this, browserContext);
       for (const page of browserContext.pages())

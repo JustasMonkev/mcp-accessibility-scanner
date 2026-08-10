@@ -292,7 +292,7 @@ describe('Context', () => {
         tools: [],
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
-        sessionLog,
+        sessionLog: () => Promise.resolve(sessionLog),
         clientInfo: {},
       });
       const context1 = makeContext(log1);
@@ -330,7 +330,7 @@ describe('Context', () => {
         tools: [],
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
-        sessionLog,
+        sessionLog: () => Promise.resolve(sessionLog),
         clientInfo: {},
       });
       const context1 = makeContext(log1);
@@ -363,7 +363,7 @@ describe('Context', () => {
         tools: [],
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
-        sessionLog,
+        sessionLog: () => Promise.resolve(sessionLog),
         clientInfo: {},
       });
       const context1 = makeContext(log1);
@@ -400,7 +400,7 @@ describe('Context', () => {
         tools: [],
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
-        sessionLog: { logUserAction: vi.fn() } as any,
+        sessionLog: async () => ({ logUserAction: vi.fn() }) as any,
         clientInfo: {},
       });
       const pending1 = makeContext().newTab();
@@ -423,7 +423,7 @@ describe('Context', () => {
         tools: [],
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
-        sessionLog: { logUserAction: vi.fn() } as any,
+        sessionLog: async () => ({ logUserAction: vi.fn() }) as any,
         clientInfo: {},
       });
       await expect(makeContext().newTab()).rejects.toThrow('recorder unavailable');

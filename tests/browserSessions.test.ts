@@ -246,6 +246,49 @@ describe('browser sessions', () => {
     }
   });
 
+  it('creates the --save-session directory lazily, only for backends whose own contexts are used', async () => {
+    // Over stateless HTTP every request builds a fresh backend; creating the
+    // log eagerly at initialize() minted (and announced) an empty session-*
+    // folder for every tools/list and every call routed to an existing
+    // browser session handle.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-lazy-log-'));
+    try {
+      const config = await resolveConfig({ saveSession: true, outputDir });
+      const { factory } = makeFactory();
+      const registry = new BrowserSessionRegistry();
+      const makeSharedBackend = async () => {
+        const backend = new BrowserServerBackend(config, factory, registry);
+        await backend.initialize(
+            { notifyToolListChanged: async () => {} } as any,
+            { name: 'vitest', version: 'browser-sessions' },
+        );
+        return backend;
+      };
+      const sessionDirs = () => fs.readdirSync(outputDir).filter(name => name.startsWith('session-'));
+
+      // A backend that only lists tools never touches its default context.
+      const listBackend = await makeSharedBackend();
+      await listBackend.listTools();
+      expect(sessionDirs()).toHaveLength(0);
+
+      // Opening and using a session is a real use of the opener backend.
+      const opener = await makeSharedBackend();
+      const id = await openSession(opener);
+      expect(sessionDirs()).toHaveLength(1);
+
+      // A fresh backend that only routes to the existing handle creates no
+      // directory of its own — the routed call logs into the opener's.
+      const router = await makeSharedBackend();
+      const routed = await router.callTool('browser_tabs', { action: 'list', browserSessionId: id });
+      expect(routed.isError).not.toBe(true);
+      expect(sessionDirs()).toHaveLength(1);
+    } finally {
+      vi.restoreAllMocks();
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it('advertises browserSessionId on browser tools but not on the session tools', async () => {
     const { factory } = makeFactory();
     const backend = await makeBackend(factory);
