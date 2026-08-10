@@ -53,7 +53,7 @@
 		"mime": "^4.1.0",
 		"playwright": "1.62.1",
 		"playwright-core": "1.62.1",
-		"re2": "^1.24.1",
+		"re2": "^1.26.1",
 		"ws": "^8.21.3",
 		"zod": "^4.4.3"
 	},
@@ -104,6 +104,6 @@
 	"allowScripts": {
 		"fsevents@2.3.2": true,
 		"fsevents@2.3.3": true,
-		"re2@1.24.1": true
+		"re2@1.26.1": true
 	}
 }
