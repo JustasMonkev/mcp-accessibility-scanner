@@ -67,8 +67,6 @@ export async function wrapInProcess(backend: ServerBackend): Promise<Transport> 
 }
 
 export function createServer(name: string, version: string, backend: ServerBackend, transportInitialized: Promise<void>, runHeartbeat: boolean, metadata?: ServerMetadata): Server {
-  let initializedPromiseResolve = () => {};
-  const initializedPromise = new Promise<void>(resolve => initializedPromiseResolve = resolve);
   const server = new Server({ name, version, title: metadata?.title }, {
     capabilities: {
       tools: {
@@ -78,9 +76,43 @@ export function createServer(name: string, version: string, backend: ServerBacke
     instructions: metadata?.instructions,
   });
 
+  // Idempotent backend initialization shared by the handshake path and the
+  // lazy per-request path. The v1 `initialized` notification remains the
+  // preferred entry point (it can fetch the client's roots), but the MCP
+  // 2026-07-28 revision removes the initialize/initialized handshake entirely,
+  // so a request arriving without one must trigger initialization on demand
+  // instead of hanging forever. Whichever path runs first wins; concurrent
+  // callers await the same in-flight promise. Refs #165.
+  let backendInitialized: Promise<void> | undefined;
+  const ensureInitialized = (fetchRoots: () => Promise<Root[]>): Promise<void> => {
+    backendInitialized ??= (async () => {
+      const roots = await fetchRoots();
+      // Pre-handshake there is no client info yet.
+      const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
+      const context: ServerBackendContext = {
+        notifyToolListChanged: () => server.sendToolListChanged(),
+      };
+      await backend.initialize?.(context, clientVersion, roots);
+    })();
+    return backendInitialized;
+  };
+
+  const handshakeRoots = async (): Promise<Root[]> => {
+    if (!server.getClientCapabilities()?.roots)
+      return [];
+    const { roots } = await transportInitialized
+        .then(() => server.listRoots(undefined, { timeout: 2_000 }))
+        .catch(e => {
+          serverDebug(e);
+          return { roots: [] as Root[] };
+        });
+    return roots;
+  };
+  const noRoots = async (): Promise<Root[]> => [];
+
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     serverDebug('listTools');
-    await initializedPromise;
+    await ensureInitialized(noRoots);
     const tools = await backend.listTools();
     return { tools };
   });
@@ -88,7 +120,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
   let heartbeatRunning = false;
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     serverDebug('callTool', request);
-    await initializedPromise;
+    await ensureInitialized(noRoots);
 
     if (runHeartbeat && !heartbeatRunning) {
       heartbeatRunning = true;
@@ -108,28 +140,8 @@ export function createServer(name: string, version: string, backend: ServerBacke
       };
     }
   });
-  addServerListener(server, 'initialized', async () => {
-    try {
-      const capabilities = server.getClientCapabilities();
-      let clientRoots: Root[] = [];
-      if (capabilities?.roots) {
-        const { roots } = await transportInitialized
-            .then(() => server.listRoots(undefined, { timeout: 2_000 }))
-            .catch(e => {
-              serverDebug(e);
-              return { roots: [] };
-            });
-        clientRoots = roots;
-      }
-      const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
-      const context: ServerBackendContext = {
-        notifyToolListChanged: () => server.sendToolListChanged(),
-      };
-      await backend.initialize?.(context, clientVersion, clientRoots);
-      initializedPromiseResolve();
-    } catch (e) {
-      errorsDebug(e);
-    }
+  addServerListener(server, 'initialized', () => {
+    ensureInitialized(handshakeRoots).catch(e => errorsDebug(e));
   });
   addServerListener(server, 'close', () => backend.serverClosed?.());
   return server;
