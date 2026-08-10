@@ -1314,6 +1314,42 @@ describe('browserContextFactory', () => {
     expect(browser.close).toHaveBeenCalledTimes(1);
   });
 
+  it('hands a fresh CDP connection to a session arriving while the last close is in flight', async () => {
+    // The closing browser stayed cached in _browserPromise until its
+    // asynchronous 'disconnected' event fired, so a session starting during
+    // the disconnect obtained the dying connection and failed newContext().
+    // The cache is evicted before the close is awaited.
+    const context1 = createMockBrowserContext();
+    const context2 = createMockBrowserContext();
+    const browser1 = createMockBrowser(context1);
+    const browser2 = createMockBrowser(context2);
+    let releaseClose: () => void;
+    browser1.close.mockImplementation(() => new Promise<void>(resolve => { releaseClose = resolve; }));
+    connectOverCDP.mockResolvedValueOnce(browser1).mockResolvedValueOnce(browser2);
+
+    const config = await resolveConfig({ browser: { cdpEndpoint: 'http://127.0.0.1:9222', isolated: true } });
+    const factory = contextFactory(config);
+    const sessionA = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    // A is the last holder: its close starts disconnecting browser1 and
+    // blocks inside browser.close().
+    const closingA = sessionA.close();
+    await vi.waitFor(() => expect(browser1.close).toHaveBeenCalledTimes(1));
+
+    // A session arriving mid-disconnect must get a fresh connection, not the
+    // closing one.
+    const sessionB = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    expect(connectOverCDP).toHaveBeenCalledTimes(2);
+    expect(sessionB.browserContext).toBe(context2);
+
+    releaseClose!();
+    await closingA;
+
+    // B is its own browser's only user; its close disconnects browser2.
+    await sessionB.close();
+    expect(browser2.close).toHaveBeenCalledTimes(1);
+  });
+
   it('does not close the shared isolated browser while a sibling context is still being created', async () => {
     // BaseContextFactory used to census browser.contexts(): session A closing
     // its only registered context while session B was still awaiting

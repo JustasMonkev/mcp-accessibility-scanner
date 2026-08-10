@@ -660,6 +660,11 @@ class CdpContextFactory extends BaseContextFactory {
   override async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     testDebug('create browser context (cdp)');
     const browser = await this._obtainBrowser(clientInfo);
+    // Captured to guard the eager `_browserPromise` evictions below — same
+    // pattern as the base class: after an external disconnect a NEW promise
+    // may be in place, and clearing it would orphan the fresh connection
+    // other sessions are about to use.
+    const obtainedPromise = this._browserPromise;
     this._sessionCounts.set(browser, (this._sessionCounts.get(browser) ?? 0) + 1);
     let browserContext: playwright.BrowserContext;
     try {
@@ -668,8 +673,11 @@ class CdpContextFactory extends BaseContextFactory {
       // Without this the CDP connection stays open after e.g. an unreadable
       // storage-state file, even though no context was ever handed out — but
       // only when no sibling session is still using the shared connection.
-      if (this._releaseBrowser(browser))
+      if (this._releaseBrowser(browser)) {
+        if (this._browserPromise === obtainedPromise)
+          this._browserPromise = undefined;
         await browser.close().catch(logUnhandledError);
+      }
       throw error;
     }
     let released = false;
@@ -687,6 +695,12 @@ class CdpContextFactory extends BaseContextFactory {
         if (this.config.browser.isolated)
           await browserContext.close().catch(logUnhandledError);
         if (this._releaseBrowser(browser)) {
+          // Evicted before the await so a createContext() arriving while
+          // this disconnect is still in flight obtains a fresh connection
+          // instead of the closing one — the 'disconnected' event that also
+          // clears the cache fires too late to catch that window.
+          if (this._browserPromise === obtainedPromise)
+            this._browserPromise = undefined;
           testDebug('disconnect browser (cdp)');
           await browser.close().catch(logUnhandledError);
         }
