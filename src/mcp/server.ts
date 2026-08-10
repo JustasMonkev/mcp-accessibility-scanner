@@ -17,7 +17,7 @@
 import debug from 'debug';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema, EmptyResultSchema, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, EmptyResultSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
@@ -165,7 +165,13 @@ const startHeartbeat = (server: Server) => {
       }),
     ]).then(() => {
       setTimeout(beat, 3000);
-    }).catch(() => {
+    }).catch(error => {
+      // A "method not found" reply proves the peer is alive — it answered.
+      // MCP 2026-07-28 clients reject `ping` as an unknown method, so stop
+      // heartbeating this connection for good instead of killing it. Only a
+      // timeout or transport-level failure still closes the server. Refs #168.
+      if (error instanceof McpError && error.code === ErrorCode.MethodNotFound)
+        return;
       void server.close();
     });
   };

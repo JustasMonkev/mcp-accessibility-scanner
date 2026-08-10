@@ -145,6 +145,41 @@ describe('mcp server error mapping', () => {
     });
   });
 
+  it('stops heartbeating instead of closing when the client rejects ping as method-not-found', async () => {
+    await withPingTimeout('1000', async () => {
+      const backend = {
+        initialize: vi.fn(async () => undefined),
+        listTools: vi.fn(async () => []),
+        callTool: vi.fn(async () => ({ content: [] })),
+        serverClosed: vi.fn(),
+      };
+
+      // An MCP 2026-07-28 client no longer implements `ping`.
+      const pingHandler = vi.fn(() => {
+        throw new McpError(ErrorCode.MethodNotFound, 'Method not found');
+      });
+      const { client } = await connectHeartbeatClient(backend, pingHandler);
+      try {
+        await client.callTool({ name: 'some_tool', arguments: {} });
+        await waitForAssertion(() => expect(pingHandler).toHaveBeenCalledTimes(1));
+
+        // Wait past the 3s re-beat interval: the heartbeat must not retry.
+        await new Promise(resolve => setTimeout(resolve, 3200));
+        expect(pingHandler).toHaveBeenCalledTimes(1);
+        expect(backend.serverClosed).not.toHaveBeenCalled();
+
+        // The connection stays healthy, and further calls don't resurrect the heartbeat.
+        await client.callTool({ name: 'some_tool', arguments: {} });
+        await new Promise(resolve => setTimeout(resolve, 100));
+        expect(backend.callTool).toHaveBeenCalledTimes(2);
+        expect(pingHandler).toHaveBeenCalledTimes(1);
+        expect(backend.serverClosed).not.toHaveBeenCalled();
+      } finally {
+        await client.close();
+      }
+    });
+  }, 10_000);
+
   it('does not run heartbeat when ping timeout is non-positive', async () => {
     await withPingTimeout('0', async () => {
       const backend = {
