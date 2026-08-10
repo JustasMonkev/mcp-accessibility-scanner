@@ -20,7 +20,7 @@ import { z } from 'zod';
 
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { ListRootsRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import * as mcpServer from '../mcp/server.js';
 import { notifyToolListChanged } from '../mcp/toolListChanged.js';
@@ -33,7 +33,7 @@ import { assertStorageStateDoesNotResetUserProfile, contextFactory } from '../br
 import { vscodeProfileConflictRemedy } from './browserContextFactory.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { ClientVersion, ServerBackend, ServerBackendContext } from '../mcp/server.js';
-import type { Root, Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
 const contextSwitchOptions = z.object({
   connectionString: z.string().optional().describe('The connection string to use to connect to the browser'),
@@ -46,7 +46,6 @@ export class VSCodeProxyBackend implements ServerBackend {
 
   private _currentClient: Client | undefined;
   private _contextSwitchTool: Tool;
-  private _roots: Root[] = [];
   private _clientVersion?: ClientVersion;
   private _backendContext: ServerBackendContext | undefined;
 
@@ -54,10 +53,9 @@ export class VSCodeProxyBackend implements ServerBackend {
     this._contextSwitchTool = this._defineContextSwitchTool();
   }
 
-  async initialize(context: ServerBackendContext, clientVersion: ClientVersion, roots: Root[]): Promise<void> {
+  async initialize(context: ServerBackendContext, clientVersion: ClientVersion): Promise<void> {
     this._backendContext = context;
     this._clientVersion = clientVersion;
-    this._roots = roots;
     const transport = await this._defaultTransportFactory();
     await this._setCurrentClient(transport, false);
   }
@@ -144,12 +142,6 @@ export class VSCodeProxyBackend implements ServerBackend {
     this._currentClient = undefined;
 
     const client = new Client(this._clientVersion!);
-    client.registerCapabilities({
-      roots: {
-        listChanged: true,
-      },
-    });
-    client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: this._roots }));
     client.setRequestHandler(PingRequestSchema, () => ({}));
 
     await client.connect(transport);

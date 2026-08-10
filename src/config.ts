@@ -319,9 +319,8 @@ async function loadConfig(configFile: string | undefined): Promise<Config> {
   }
 }
 
-export async function outputFile(config: FullConfig, rootPath: string | undefined, name: string): Promise<string> {
+export async function outputFile(config: FullConfig, name: string): Promise<string> {
   const outputDir = config.outputDir
-        ?? (rootPath ? path.join(rootPath, '.playwright-mcp') : undefined)
         ?? path.join(os.tmpdir(), 'playwright-mcp-output', sanitizeForFilePath(new Date().toISOString()));
 
   await fs.promises.mkdir(outputDir, { recursive: true });

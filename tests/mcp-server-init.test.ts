@@ -32,7 +32,7 @@ function createBackend() {
 // Drives the server over raw JSON-RPC, deliberately skipping the
 // initialize/initialized handshake — the way an MCP 2026-07-28 client behaves.
 async function startRawClient(backend: unknown) {
-  const server = createServer('Test', '1.0.0', backend as any, Promise.resolve(), false);
+  const server = createServer('Test', '1.0.0', backend as any, false);
   const transport = new InProcessTransport(server);
   const pending = new Map<number, (response: JSONRPCResponse) => void>();
   transport.onmessage = message => {
@@ -57,9 +57,8 @@ describe('mcp server lazy initialization', () => {
       const response = await sendRequest(1, 'tools/call', { name: 'some_tool', arguments: {} });
       expect(response.result).toMatchObject({ content: [{ type: 'text', text: 'ok' }] });
       expect(backend.initialize).toHaveBeenCalledTimes(1);
-      // No handshake means no client info and no roots.
+      // No handshake means no client info.
       expect(backend.initialize.mock.calls[0][1]).toEqual({ name: 'unknown', version: 'unknown' });
-      expect(backend.initialize.mock.calls[0][2]).toEqual([]);
       expect(backend.callTool).toHaveBeenCalledWith('some_tool', {}, expect.anything());
     } finally {
       await transport.close();
@@ -108,7 +107,7 @@ describe('mcp server lazy initialization', () => {
 
   it('still initializes from the handshake with the client identity', async () => {
     const backend = createBackend();
-    const server = createServer('Test', '1.0.0', backend as any, Promise.resolve(), false);
+    const server = createServer('Test', '1.0.0', backend as any, false);
     const client = new Client({ name: 'test-client', version: '1.0.0' });
     await client.connect(new InProcessTransport(server));
     try {

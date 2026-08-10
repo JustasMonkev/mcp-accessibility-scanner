@@ -18,10 +18,10 @@ import debug from 'debug';
 import { z } from 'zod';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { ListRootsRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { notifyToolListChanged } from './toolListChanged.js';
 
-import type { CallToolRequestContext, ServerBackend, ClientVersion, Root, ServerBackendContext } from './server.js';
+import type { CallToolRequestContext, ServerBackend, ClientVersion, ServerBackendContext } from './server.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
@@ -44,7 +44,6 @@ export class ProxyBackend implements ServerBackend {
   private _mcpProviders: MCPProvider[];
   private _currentClient: Client | undefined;
   private _contextSwitchTool: Tool;
-  private _roots: Root[] = [];
   private _backendContext: ServerBackendContext | undefined;
 
   constructor(mcpProviders: MCPProvider[]) {
@@ -52,9 +51,8 @@ export class ProxyBackend implements ServerBackend {
     this._contextSwitchTool = this._defineContextSwitchTool();
   }
 
-  async initialize(context: ServerBackendContext, clientVersion: ClientVersion, roots: Root[]): Promise<void> {
+  async initialize(context: ServerBackendContext, _clientVersion: ClientVersion): Promise<void> {
     this._backendContext = context;
-    this._roots = roots;
     await this._setCurrentClient(this._mcpProviders[0], false);
   }
 
@@ -148,12 +146,6 @@ export class ProxyBackend implements ServerBackend {
     this._currentClient = undefined;
 
     const client = new Client({ name: 'Playwright MCP Proxy', version: '0.0.0' });
-    client.registerCapabilities({
-      roots: {
-        listChanged: true,
-      },
-    });
-    client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: this._roots }));
     client.setRequestHandler(PingRequestSchema, () => ({}));
 
     const transport = await factory.connect();

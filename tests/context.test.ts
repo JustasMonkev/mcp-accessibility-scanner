@@ -52,7 +52,7 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       expect(context.tools).toEqual([]);
@@ -67,7 +67,7 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       expect(context.tabs()).toEqual([]);
@@ -81,7 +81,7 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       expect(context.currentTab()).toBeUndefined();
@@ -95,7 +95,7 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       expect(() => context.currentTabOrDie()).toThrow('No open pages available');
@@ -119,7 +119,7 @@ describe('Context', () => {
         config: { saveTrace: true } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       await expect(context.newTab()).rejects.toThrow('traces dir is not writable');
@@ -138,7 +138,7 @@ describe('Context', () => {
         config: { saveTrace: true } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       await expect(context.newTab()).rejects.toThrow('already started');
@@ -153,14 +153,14 @@ describe('Context', () => {
         config: { saveTrace: true } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
       const second = new Context({
         tools: [],
         config: { saveTrace: true } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       await first.newTab();
@@ -190,7 +190,7 @@ describe('Context', () => {
         config: { saveTrace: true } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       await context.newTab();
@@ -219,7 +219,7 @@ describe('Context', () => {
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
       await context.newTab();
 
@@ -253,7 +253,7 @@ describe('Context', () => {
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
       const context1 = makeContext(log1);
       await context1.newTab();
@@ -291,7 +291,7 @@ describe('Context', () => {
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
       const context1 = makeContext(log1);
       await context1.newTab();
@@ -324,7 +324,7 @@ describe('Context', () => {
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
       const context1 = makeContext(log1);
       await context1.newTab();
@@ -361,7 +361,7 @@ describe('Context', () => {
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: { logUserAction: vi.fn() } as any,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
       const pending1 = makeContext().newTab();
       const pending2 = makeContext().newTab();
@@ -384,7 +384,7 @@ describe('Context', () => {
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: { logUserAction: vi.fn() } as any,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
       await expect(makeContext().newTab()).rejects.toThrow('recorder unavailable');
 
@@ -401,7 +401,7 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       expect(context.isRunningTool()).toBe(false);
@@ -413,7 +413,7 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       context.setRunningTool('test_tool');
@@ -426,7 +426,7 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       context.setRunningTool('test_tool');

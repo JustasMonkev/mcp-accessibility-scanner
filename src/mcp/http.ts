@@ -23,7 +23,6 @@ import debug from 'debug';
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import * as mcpServer from './server.js';
-import { ManualPromise } from './manualPromise.js';
 
 import type { ServerBackendFactory } from './server.js';
 
@@ -81,10 +80,8 @@ export async function installHttpTransport(httpServer: http.Server, serverBacken
 // the v2 migration. Refs #166.
 // ─────────────────────────────────────────────────────────────────────────────
 
-type StreamableSessionInfo = { transport: StreamableHTTPServerTransport, transportInitialized: ManualPromise<void>, fallbackStarted: boolean };
-
 class SessionStore {
-  private readonly _sessions = new Map<string, StreamableSessionInfo>();
+  private readonly _sessions = new Map<string, StreamableHTTPServerTransport>();
 
   constructor(private readonly _serverBackendFactory: ServerBackendFactory) {}
 
@@ -103,19 +100,13 @@ class SessionStore {
   }
 
   private async _handleSessionRequest(sessionId: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const sessionInfo = this._sessions.get(sessionId);
-    if (!sessionInfo) {
+    const transport = this._sessions.get(sessionId);
+    if (!transport) {
       res.statusCode = 404;
       res.end('Session not found');
       return;
     }
-    if (req.method === 'GET' && acceptsEventStream(req)) {
-      sessionInfo.transportInitialized.resolve();
-    } else if (req.method === 'POST' && !sessionInfo.fallbackStarted) {
-      sessionInfo.fallbackStarted = true;
-      setTimeout(() => sessionInfo.transportInitialized.resolve(), 5000);
-    }
-    await sessionInfo.transport.handleRequest(req, res);
+    await transport.handleRequest(req, res);
   }
 
   private async _createSession(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -123,9 +114,8 @@ class SessionStore {
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: async sessionId => {
         testDebug(`create http session: ${transport.sessionId}`);
-        const sessionInfo = { transport, transportInitialized: new ManualPromise<void>(), fallbackStarted: false };
-        this._sessions.set(sessionId, sessionInfo);
-        await mcpServer.connect(this._serverBackendFactory, transport, sessionInfo.transportInitialized, true);
+        this._sessions.set(sessionId, transport);
+        await mcpServer.connect(this._serverBackendFactory, transport, true);
       }
     });
 
@@ -141,11 +131,6 @@ class SessionStore {
 }
 
 // ─── End of session compatibility layer ──────────────────────────────────────
-
-function acceptsEventStream(req: http.IncomingMessage): boolean {
-  const accept = req.headers.accept;
-  return Array.isArray(accept) ? accept.some(value => value.includes('text/event-stream')) : !!accept?.includes('text/event-stream');
-}
 
 function decorateServer(server: net.Server) {
   const sockets = new Set<net.Socket>();

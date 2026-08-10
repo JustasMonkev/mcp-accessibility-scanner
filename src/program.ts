@@ -204,7 +204,6 @@ program
       await backend.initialize(
           { notifyToolListChanged: async () => {} },
           { name: 'interactive-cli', version: packageJSON.version },
-          [],
       );
 
       const rl = readline.createInterface({

@@ -25,7 +25,7 @@ import coreBundle from 'playwright-core/lib/coreBundle';
 const { registryDirectory } = coreBundle.registry;
 const { startTraceViewerServer } = coreBundle.server;
 import { logUnhandledError, testDebug } from './utils/log.js';
-import { createGuid, createHash } from './utils/guid.js';
+import { createGuid } from './utils/guid.js';
 import { outputFile  } from './config.js';
 import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
 
@@ -451,7 +451,7 @@ function createContextFactory(config: FullConfig): BrowserContextFactory {
   return new PersistentContextFactory(config);
 }
 
-export type ClientInfo = { name?: string, version?: string, rootPath?: string };
+export type ClientInfo = { name?: string, version?: string };
 
 export interface BrowserContextFactory {
   /**
@@ -525,7 +525,7 @@ class IsolatedContextFactory extends BaseContextFactory {
     await injectCdpPort(this.config.browser);
     const browserType = playwright[this.config.browser.browserName];
     return browserType.launch({
-      tracesDir: await startTraceServer(this.config, clientInfo.rootPath),
+      tracesDir: await startTraceServer(this.config),
       ...this.config.browser.launchOptions,
       handleSIGINT: false,
       handleSIGTERM: false,
@@ -814,8 +814,8 @@ export class PersistentContextFactory implements BrowserContextFactory {
     // unwritable output directory), and nothing after the directory is created
     // may throw outside the cleanup scope below, or failed starts would leave
     // stray profiles behind.
-    const tracesDir = await startTraceServer(this.config, clientInfo.rootPath);
-    const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(clientInfo.rootPath, storageState ? `-storage-state-${createGuid()}` : '');
+    const tracesDir = await startTraceServer(this.config);
+    const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(storageState ? `-storage-state-${createGuid()}` : '');
 
     this._userDataDirs.add(userDataDir);
     testDebug('lock user data dir', userDataDir);
@@ -898,12 +898,10 @@ export class PersistentContextFactory implements BrowserContextFactory {
   // The suffix keeps disposable storage-state profiles apart from the regular
   // persistent profile (and, carrying a per-context guid, from each other), so
   // removing one can never destroy an interactive session or a sibling's.
-  private async _createUserDataDir(rootPath: string | undefined, suffix: string) {
+  private async _createUserDataDir(suffix: string) {
     const dir = process.env.PWMCP_PROFILES_DIR_FOR_TEST ?? registryDirectory;
     const browserToken = this.config.browser.launchOptions?.channel ?? this.config.browser?.browserName;
-    // Hesitant putting hundreds of files into the user's workspace, so using it for hashing instead.
-    const rootPathToken = rootPath ? `-${createHash(rootPath)}` : '';
-    const result = path.join(dir, `mcp-${browserToken}${rootPathToken}${suffix}`);
+    const result = path.join(dir, `mcp-${browserToken}${suffix}`);
     await fs.promises.mkdir(result, { recursive: true });
     return result;
   }
@@ -953,11 +951,11 @@ function browserNotInstalledError(error: Error): Error {
   return new Error(`Browser specified in your config is not installed${location}. Either install it (likely) or change the config.`);
 }
 
-async function startTraceServer(config: FullConfig, rootPath: string | undefined): Promise<string | undefined> {
+async function startTraceServer(config: FullConfig): Promise<string | undefined> {
   if (!config.saveTrace)
     return undefined;
 
-  const tracesDir = await outputFile(config, rootPath, `traces-${Date.now()}`);
+  const tracesDir = await outputFile(config, `traces-${Date.now()}`);
   const server = await startTraceViewerServer();
   const urlPrefix = server.urlPrefix('human-readable');
   const url = urlPrefix + '/trace/index.html?trace=' + tracesDir + '/trace.json';

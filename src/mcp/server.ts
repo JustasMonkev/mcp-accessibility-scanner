@@ -23,10 +23,10 @@ import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/proto
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
 import { InProcessTransport } from './inProcessTransport.js';
 
-import type { Tool, CallToolResult, CallToolRequest, Root, ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool, CallToolResult, CallToolRequest, ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 export type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-export type { Tool, CallToolResult, CallToolRequest, Root } from '@modelcontextprotocol/sdk/types.js';
+export type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
 const serverDebug = debug('pw:mcp:server');
 const errorsDebug = debug('pw:mcp:errors');
@@ -38,7 +38,7 @@ export type ServerBackendContext = {
 };
 
 export interface ServerBackend {
-  initialize?(context: ServerBackendContext, clientVersion: ClientVersion, roots: Root[]): Promise<void>;
+  initialize?(context: ServerBackendContext, clientVersion: ClientVersion): Promise<void>;
   listTools(): Promise<Tool[]>;
   callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: CallToolRequestContext): Promise<CallToolResult>;
   serverClosed?(): void;
@@ -56,17 +56,17 @@ export type ServerBackendFactory = ServerMetadata & {
   create: () => ServerBackend;
 };
 
-export async function connect(factory: ServerBackendFactory, transport: Transport, transportInitialized: Promise<void>, runHeartbeat: boolean) {
-  const server = createServer(factory.name, factory.version, factory.create(), transportInitialized, runHeartbeat, factory);
+export async function connect(factory: ServerBackendFactory, transport: Transport, runHeartbeat: boolean) {
+  const server = createServer(factory.name, factory.version, factory.create(), runHeartbeat, factory);
   await server.connect(transport);
 }
 
 export async function wrapInProcess(backend: ServerBackend): Promise<Transport> {
-  const server = createServer('Internal', '0.0.0', backend, Promise.resolve(), false);
+  const server = createServer('Internal', '0.0.0', backend, false);
   return new InProcessTransport(server);
 }
 
-export function createServer(name: string, version: string, backend: ServerBackend, transportInitialized: Promise<void>, runHeartbeat: boolean, metadata?: ServerMetadata): Server {
+export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean, metadata?: ServerMetadata): Server {
   const server = new Server({ name, version, title: metadata?.title }, {
     capabilities: {
       tools: {
@@ -78,41 +78,31 @@ export function createServer(name: string, version: string, backend: ServerBacke
 
   // Idempotent backend initialization shared by the handshake path and the
   // lazy per-request path. The v1 `initialized` notification remains the
-  // preferred entry point (it can fetch the client's roots), but the MCP
+  // preferred entry point (it carries the client's identity), but the MCP
   // 2026-07-28 revision removes the initialize/initialized handshake entirely,
   // so a request arriving without one must trigger initialization on demand
   // instead of hanging forever. Whichever path runs first wins; concurrent
   // callers await the same in-flight promise. Refs #165.
+  // Roots are deprecated in MCP 2026-07-28 (SEP-2577) and are no longer
+  // fetched here — output directories come from server configuration
+  // (`--output-dir` / `outputDir`) instead of a client-supplied root, which
+  // also drops a blocking listRoots round-trip from startup. Refs #169.
   let backendInitialized: Promise<void> | undefined;
-  const ensureInitialized = (fetchRoots: () => Promise<Root[]>): Promise<void> => {
+  const ensureInitialized = (): Promise<void> => {
     backendInitialized ??= (async () => {
-      const roots = await fetchRoots();
       // Pre-handshake there is no client info yet.
       const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
       const context: ServerBackendContext = {
         notifyToolListChanged: () => server.sendToolListChanged(),
       };
-      await backend.initialize?.(context, clientVersion, roots);
+      await backend.initialize?.(context, clientVersion);
     })();
     return backendInitialized;
   };
 
-  const handshakeRoots = async (): Promise<Root[]> => {
-    if (!server.getClientCapabilities()?.roots)
-      return [];
-    const { roots } = await transportInitialized
-        .then(() => server.listRoots(undefined, { timeout: 2_000 }))
-        .catch(e => {
-          serverDebug(e);
-          return { roots: [] as Root[] };
-        });
-    return roots;
-  };
-  const noRoots = async (): Promise<Root[]> => [];
-
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     serverDebug('listTools');
-    await ensureInitialized(noRoots);
+    await ensureInitialized();
     const tools = await backend.listTools();
     return { tools };
   });
@@ -120,7 +110,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
   let heartbeatRunning = false;
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     serverDebug('callTool', request);
-    await ensureInitialized(noRoots);
+    await ensureInitialized();
 
     if (runHeartbeat && !heartbeatRunning) {
       heartbeatRunning = true;
@@ -141,7 +131,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
     }
   });
   addServerListener(server, 'initialized', () => {
-    ensureInitialized(handshakeRoots).catch(e => errorsDebug(e));
+    ensureInitialized().catch(e => errorsDebug(e));
   });
   addServerListener(server, 'close', () => backend.serverClosed?.());
   return server;
@@ -204,7 +194,7 @@ function addServerListener(server: Server, event: 'close' | 'initialized', liste
 
 export async function start(serverBackendFactory: ServerBackendFactory, options: { host?: string; port?: number }) {
   if (options.port === undefined) {
-    await connect(serverBackendFactory, new StdioServerTransport(), Promise.resolve(), false);
+    await connect(serverBackendFactory, new StdioServerTransport(), false);
     return;
   }
 

@@ -335,7 +335,7 @@ describe('Config', () => {
   describe('outputFile', () => {
     it('should generate output file path with filename', async () => {
       const config = await resolveConfig({});
-      const result = await outputFile(config, '/tmp', 'test.txt');
+      const result = await outputFile(config, 'test.txt');
 
       expect(result).toContain('test.txt');
     });
@@ -345,7 +345,7 @@ describe('Config', () => {
         outputDir: '/tmp/custom/output',
       });
 
-      const result = await outputFile(config, '/tmp', 'test.txt');
+      const result = await outputFile(config, 'test.txt');
 
       expect(result).toContain('/tmp/custom/output');
       expect(result).toContain('test.txt');
@@ -354,7 +354,7 @@ describe('Config', () => {
     it('should sanitize file paths', async () => {
       const config = await resolveConfig({});
 
-      const result = await outputFile(config, '/tmp', 'test/../../../etc/passwd');
+      const result = await outputFile(config, 'test/../../../etc/passwd');
 
       // Should sanitize to prevent directory traversal
       expect(result).not.toContain('../');

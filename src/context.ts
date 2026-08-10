@@ -183,7 +183,7 @@ export class Context {
   }
 
   async outputFile(name: string): Promise<string> {
-    return outputFile(this.config, this._clientInfo.rootPath, name);
+    return outputFile(this.config, name);
   }
 
   private _onPageCreated(page: playwright.Page) {

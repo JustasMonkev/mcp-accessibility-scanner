@@ -68,8 +68,8 @@ export class SessionLog {
     this._storage = storage;
   }
 
-  static async create(config: FullConfig, rootPath: string | undefined): Promise<SessionLog> {
-    const sessionFolder = await outputFile(config, rootPath, `session-${Date.now()}`);
+  static async create(config: FullConfig): Promise<SessionLog> {
+    const sessionFolder = await outputFile(config, `session-${Date.now()}`);
     await fs.promises.mkdir(sessionFolder, { recursive: true });
     // eslint-disable-next-line no-console
     console.error(`Session: ${sessionFolder}`);

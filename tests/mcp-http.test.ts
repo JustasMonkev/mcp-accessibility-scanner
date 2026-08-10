@@ -20,7 +20,6 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { ListRootsRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { httpAddressToString, installHttpTransport, startHttpServer } from '../src/mcp/http.js';
-import { ManualPromise } from '../src/mcp/manualPromise.js';
 
 import type { ServerBackendFactory } from '../src/mcp/server.js';
 
@@ -340,16 +339,17 @@ describe('mcp http transport hardening', () => {
     });
   });
 
-  it('waits for the streamable HTTP event stream before listing roots', async () => {
-    const roots = [{ uri: 'file:///workspace', name: 'workspace' }];
-    let initializedRoots: unknown[] | undefined;
+  // Roots are deprecated in MCP 2026-07-28 (SEP-2577); the server must not
+  // fetch them even from a client that still advertises the capability, and
+  // the first tool call must be served without waiting for the standalone
+  // event stream (the old listRoots round-trip needed it). Refs #169.
+  it('never requests roots and serves tools without the event stream', async () => {
     const callTool = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }));
+    const initialize = vi.fn(async () => undefined);
     const { port } = await startServer({
       ...testBackendFactory,
       create: () => ({
-        async initialize(_context, _clientVersion, clientRoots) {
-          initializedRoots = clientRoots;
-        },
+        initialize,
         async listTools() {
           return [];
         },
@@ -357,61 +357,10 @@ describe('mcp http transport hardening', () => {
       }),
     });
 
-    const sawGet = new ManualPromise<void>();
-    const releaseGet = new ManualPromise<void>();
-    const delayedFetch: typeof fetch = async (input, init) => {
-      if (init?.method === 'GET') {
-        sawGet.resolve();
-        await releaseGet;
-      }
-      return fetch(input, init);
-    };
-    const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: { roots: {} } });
-    client.setRequestHandler(ListRootsRequestSchema, () => ({ roots }));
-    client.setRequestHandler(PingRequestSchema, () => ({}));
-    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { fetch: delayedFetch });
-    await client.connect(transport);
-
-    try {
-      if (!transport.sessionId)
-        throw new Error('Expected initialized session');
-      const invalidGet = await sendRequest(port, { sessionId: transport.sessionId, accept: 'application/json' });
-      expect(invalidGet.statusCode).toBe(406);
-
-      const callPromise = client.callTool({ name: 'probe', arguments: {} });
-      await sawGet;
-      await new Promise(resolve => setTimeout(resolve, 50));
-      expect(callTool).not.toHaveBeenCalled();
-
-      releaseGet.resolve();
-      await callPromise;
-
-      expect(initializedRoots).toEqual(roots);
-      expect(callTool).toHaveBeenCalledTimes(1);
-    } finally {
-      await transport.terminateSession();
-      await client.close();
-    }
-  });
-
-  it('falls back when the streamable HTTP event stream never opens', async () => {
-    let initializedRoots: unknown[] | undefined;
-    const callTool = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }));
-    const listRoots = vi.fn(() => ({ roots: [{ uri: 'file:///workspace' }] }));
-    const { port } = await startServer({
-      ...testBackendFactory,
-      create: () => ({
-        async initialize(_context, _clientVersion, clientRoots) {
-          initializedRoots = clientRoots;
-        },
-        async listTools() {
-          return [];
-        },
-        callTool,
-      }),
-    });
-
-    const originalSetTimeout = globalThis.setTimeout;
+    const listRoots = vi.fn(() => ({ roots: [{ uri: 'file:///workspace', name: 'workspace' }] }));
+    // Never open the standalone GET stream: server-to-client requests such as
+    // listRoots could not be delivered, so a tool call only succeeds if the
+    // server no longer performs any.
     const noStreamFetch: typeof fetch = async (input, init) => {
       if (init?.method === 'GET') {
         return await new Promise<Response>((_resolve, reject) => {
@@ -424,28 +373,20 @@ describe('mcp http transport hardening', () => {
     client.setRequestHandler(ListRootsRequestSchema, listRoots);
     client.setRequestHandler(PingRequestSchema, () => ({}));
     const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { fetch: noStreamFetch });
-    let fallbackTimerCount = 0;
-    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
-      if (timeout === 5000) {
-        if (new Error().stack?.includes('/src/mcp/http.ts'))
-          ++fallbackTimerCount;
-        return originalSetTimeout(handler, 0, ...args);
-      }
-      if (timeout === 2000)
-        return originalSetTimeout(handler, 0, ...args);
-      return originalSetTimeout(handler, timeout, ...args);
-    }) as typeof setTimeout);
 
     try {
       await client.connect(transport);
+      if (!transport.sessionId)
+        throw new Error('Expected initialized session');
+      const invalidGet = await sendRequest(port, { sessionId: transport.sessionId, accept: 'application/json' });
+      expect(invalidGet.statusCode).toBe(406);
+
       await client.callTool({ name: 'probe', arguments: {} });
 
-      expect(fallbackTimerCount).toBe(1);
-      expect(initializedRoots).toEqual([]);
       expect(listRoots).not.toHaveBeenCalled();
+      expect(initialize).toHaveBeenCalledTimes(1);
       expect(callTool).toHaveBeenCalledTimes(1);
     } finally {
-      setTimeoutSpy.mockRestore();
       await client.close();
     }
   });

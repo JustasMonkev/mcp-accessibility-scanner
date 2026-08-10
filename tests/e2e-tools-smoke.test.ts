@@ -194,7 +194,6 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
     await backend.initialize(
       {} as any,
       { name: 'vitest', version: 'e2e-smoke' },
-      [{ uri: pathToFileURL(outputDir).toString(), name: 'workspace' } as any]
     );
 
     const tools = await backend.listTools();

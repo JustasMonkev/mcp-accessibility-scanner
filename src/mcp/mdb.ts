@@ -163,7 +163,7 @@ export async function runMainBackend(backendFactory: mcpServer.ServerBackendFact
     return url;
 
   // Start stdio conditionally.
-  await mcpServer.connect(factory, new StdioServerTransport(), Promise.resolve(), false);
+  await mcpServer.connect(factory, new StdioServerTransport(), false);
 }
 
 export async function runOnPauseBackendLoop(mdbUrl: string, backend: ServerBackendOnPause, introMessage: string) {
@@ -217,8 +217,8 @@ class OnceTimeServerBackendWrapper implements mcpServer.ServerBackend {
     this._backend.requestSelfDestruct = () => this._selfDestructPromise.resolve();
   }
 
-  async initialize(context: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion, roots: mcpServer.Root[]): Promise<void> {
-    await this._backend.initialize?.(context, clientVersion, roots);
+  async initialize(context: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion): Promise<void> {
+    await this._backend.initialize?.(context, clientVersion);
   }
 
   async listTools(): Promise<mcpServer.Tool[]> {

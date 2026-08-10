@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { FullConfig } from './config.js';
@@ -48,20 +47,14 @@ export class BrowserServerBackend implements ServerBackend {
     this._toolsByName = new Map(this._tools.map(tool => [tool.schema.name, tool]));
   }
 
-  async initialize(_context: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion, roots: mcpServer.Root[]): Promise<void> {
-    let rootPath: string | undefined;
-    if (roots.length > 0) {
-      const firstRootUri = roots[0]?.uri;
-      const url = firstRootUri ? new URL(firstRootUri) : undefined;
-      rootPath = url ? fileURLToPath(url) : undefined;
-    }
-    this._sessionLog = this._config.saveSession ? await SessionLog.create(this._config, rootPath) : undefined;
+  async initialize(_context: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion): Promise<void> {
+    this._sessionLog = this._config.saveSession ? await SessionLog.create(this._config) : undefined;
     this._context = new Context({
       tools: this._tools,
       config: this._config,
       browserContextFactory: this._browserContextFactory,
       sessionLog: this._sessionLog,
-      clientInfo: { ...clientVersion, rootPath },
+      clientInfo: { ...clientVersion },
     });
   }
 
