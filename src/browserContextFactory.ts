@@ -456,10 +456,12 @@ export type ClientInfo = { name?: string, version?: string };
 export type CreateContextOptions = {
   /**
    * True when the context backs an explicitly opened browser session
-   * (`browser_session_open`) rather than the default session. The persistent
-   * factory gives such contexts their own disposable profile — the stable
-   * `mcp-<browser>` profile can back only one running browser at a time, so a
-   * second session sharing it would fail with "Browser is already in use".
+   * (`browser_session_open`) — or the ephemeral default context of a
+   * stateless per-request HTTP backend — rather than the long-lived default
+   * session. The persistent factory gives such contexts their own disposable
+   * profile: the stable `mcp-<browser>` profile can back only one running
+   * browser at a time, so concurrent contexts sharing it would fail with
+   * "Browser is already in use".
    */
   browserSession?: boolean;
 };

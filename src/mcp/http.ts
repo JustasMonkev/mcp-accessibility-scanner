@@ -112,10 +112,20 @@ class SessionStore {
 
   constructor(private readonly _serverBackendFactory: ServerBackendFactory) {
     const handler = createMcpHandler(
-        () => mcpServer.createServer(this._serverBackendFactory.name, this._serverBackendFactory.version, this._serverBackendFactory.create(), false, this._serverBackendFactory),
+        () => this._createStatelessServer(),
         { legacy: 'reject', onerror: error => testDebug(error) },
     );
     this._modernHandler = toNodeHandler(handler, { onerror: error => testDebug(error) });
+  }
+
+  // Builds the per-request server for both stateless paths (modern envelope
+  // and handshake-free 2025 requests). The backend comes from the factory's
+  // stateless variant when it provides one: a per-request backend is torn
+  // down with the response, so e.g. its default browser context can run in a
+  // disposable profile instead of contending for the stable persistent one.
+  private _createStatelessServer() {
+    const backend = (this._serverBackendFactory.createStateless ?? this._serverBackendFactory.create)();
+    return mcpServer.createServer(this._serverBackendFactory.name, this._serverBackendFactory.version, backend, false, this._serverBackendFactory);
   }
 
   async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -195,7 +205,7 @@ class SessionStore {
     // or aborts. Shared state (the factory's browser-session registry and
     // the contexts it holds) deliberately survives this close.
     res.once('close', () => void transport.close().catch(e => testDebug(e)));
-    await mcpServer.connect(this._serverBackendFactory, transport, false);
+    await this._createStatelessServer().connect(transport);
     await transport.handleRequest(req, res, parsedBody);
   }
 

@@ -169,11 +169,17 @@ export async function runVSCodeTools(config: FullConfig) {
   // inner backends share one launched browser instead of one per request.
   const browserContextFactory = contextFactory(config);
   const sessionRegistry = new BrowserSessionRegistry();
+  // A stateless per-request proxy flags its inner default context ephemeral
+  // (disposable profile, see startMCPServer in program.ts); stateful proxies
+  // keep the stable profile.
+  const createBackend = (ephemeralDefaultContext: boolean) =>
+    new VSCodeProxyBackend(config, () => mcpServer.wrapInProcess(new BrowserServerBackend(config, browserContextFactory, sessionRegistry, { ephemeralDefaultContext })));
   const serverBackendFactory: mcpServer.ServerBackendFactory = {
     name: 'Playwright w/ vscode',
     nameInConfig: 'playwright-vscode',
     version: packageJSON.version,
-    create: () => new VSCodeProxyBackend(config, () => mcpServer.wrapInProcess(new BrowserServerBackend(config, browserContextFactory, sessionRegistry)))
+    create: () => createBackend(false),
+    createStateless: () => createBackend(true),
   };
   await mcpServer.start(serverBackendFactory, config.server);
   return;

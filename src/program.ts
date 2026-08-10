@@ -81,7 +81,12 @@ async function startMCPServer(config: FullConfig, browserContextFactory: Browser
     // (--caps and connection mode), so it must not be served from a shared
     // cache keyed only on the URL.
     toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
-    create: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry)
+    create: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry),
+    // Handshake-free HTTP serves each request with a throwaway backend whose
+    // default context is disposed when the response ends; flagging it
+    // ephemeral gives it a disposable profile in default persistent mode, so
+    // parallel stateless requests stop contending for the one stable profile.
+    createStateless: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry, { ephemeralDefaultContext: true })
   };
   await mcpServer.start(factory, config.server);
 }
@@ -179,11 +184,14 @@ configureBaseProgram()
         // still be closed after a switch (each session's Context keeps the
         // factory it was created with).
         const sessionRegistry = new BrowserSessionRegistry();
-        const providers: MCPProvider[] = [
+        // A stateless per-request proxy flags its inner default context
+        // ephemeral (disposable profile, see startMCPServer); stateful
+        // proxies keep the stable profile.
+        const makeProviders = (ephemeralDefaultContext: boolean): MCPProvider[] => [
           {
             name: 'default',
             description: 'Starts standalone browser',
-            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, browserContextFactory, sessionRegistry)),
+            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, browserContextFactory, sessionRegistry, { ephemeralDefaultContext })),
           },
           {
             name: 'extension',
@@ -191,14 +199,15 @@ configureBaseProgram()
             // Runs before the default provider is torn down, so a rejected
             // switch keeps the session on the provider that works.
             validate: () => assertStorageStateSupported(config, extensionContextFactory, 'The "extension" method works through the browser you are already running and uses the context it already has. Stay on the "default" method, or restart without the storage state and sign in in that browser.'),
-            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, extensionContextFactory, sessionRegistry)),
+            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, extensionContextFactory, sessionRegistry, { ephemeralDefaultContext })),
           },
         ];
         const factory: mcpServer.ServerBackendFactory = {
           name: 'Playwright w/ switch',
           nameInConfig: 'playwright-switch',
           version: packageJSON.version,
-          create: () => new ProxyBackend(providers),
+          create: () => new ProxyBackend(makeProviders(false)),
+          createStateless: () => new ProxyBackend(makeProviders(true)),
         };
         await mcpServer.start(factory, config.server);
         return;

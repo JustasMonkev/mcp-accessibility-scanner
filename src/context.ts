@@ -105,9 +105,10 @@ type ContextOptions = {
   browserSessions?: BrowserSessionBroker;
   /**
    * True when this Context backs an explicitly opened browser session
-   * (`browser_session_open`) rather than the default one; forwarded to the
-   * context factory so e.g. the persistent factory mints a disposable profile
-   * instead of contending for the stable one.
+   * (`browser_session_open`) or the ephemeral default context of a stateless
+   * per-request HTTP backend, rather than the long-lived default one;
+   * forwarded to the context factory so e.g. the persistent factory mints a
+   * disposable profile instead of contending for the stable one.
    */
   browserSession?: boolean;
 };

@@ -418,6 +418,68 @@ describe('mcp http transport hardening', () => {
       expect(response.headers['mcp-session-id']).toBeUndefined();
     });
 
+    it('serves handshake-free requests with the factory\'s stateless backend variant', async () => {
+      // Per-request backends are torn down with the response; the factory can
+      // shape them for that lifecycle (disposable browser profile). Stateful
+      // initialize-handshake sessions must keep using create().
+      const create = vi.fn(() => probeFactory.create());
+      const createStateless = vi.fn(() => probeFactory.create());
+      const { port } = await startServer({ ...probeFactory, create, createStateless });
+
+      const response = await postJson(port, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+      resultOf(response, 1);
+      expect(createStateless).toHaveBeenCalledTimes(1);
+      expect(create).not.toHaveBeenCalled();
+
+      const initResponse = await postJson(port, {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'initialize',
+        params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'raw-client', version: '1.0.0' } },
+      });
+      expect(initResponse.statusCode).toBe(200);
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(createStateless).toHaveBeenCalledTimes(1);
+    });
+
+    it('runs stateless default contexts in disposable browser-session profiles', async () => {
+      // Handshake-free tools/call POSTs without a browserSessionId each mint a
+      // per-request default context. Unflagged, parallel requests raced on
+      // the stable persistent profile ("Browser is already in use"); flagged
+      // like explicit sessions they get disposable profiles — a context torn
+      // down at response end gains nothing from the stable profile anyway.
+      const config = await resolveConfig({});
+      const createBrowserContext = vi.fn(async (..._args: any[]) => {
+        const browserContext: any = new EventEmitter();
+        browserContext.newPage = vi.fn().mockResolvedValue({});
+        browserContext.pages = vi.fn().mockReturnValue([]);
+        browserContext.route = vi.fn().mockResolvedValue(undefined);
+        return { browserContext, close: vi.fn().mockResolvedValue(undefined) };
+      });
+      const sessionRegistry = new BrowserSessionRegistry();
+      const factory: ServerBackendFactory = {
+        ...testBackendFactory,
+        create: () => new BrowserServerBackend(config, { createContext: createBrowserContext } as any, sessionRegistry),
+        createStateless: () => new BrowserServerBackend(config, { createContext: createBrowserContext } as any, sessionRegistry, { ephemeralDefaultContext: true }),
+      };
+      const { port } = await startServer(factory);
+
+      try {
+        const response = await postJson(port, {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'browser_tabs', arguments: { action: 'list' } },
+        });
+        const result = resultOf(response, 1);
+        expect(result.isError).not.toBe(true);
+        expect(createBrowserContext).toHaveBeenCalledTimes(1);
+        expect(createBrowserContext.mock.calls[0][3]).toMatchObject({ browserSession: true });
+      } finally {
+        await Context.disposeAll();
+      }
+    });
+
     it('resolves browser session handles across handshake-free requests', async () => {
       // Each handshake-free request gets a fresh backend, so cross-request
       // browser state must travel via the browser_session_open handles: the

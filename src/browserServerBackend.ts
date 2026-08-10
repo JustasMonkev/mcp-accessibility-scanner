@@ -42,11 +42,26 @@ export class BrowserServerBackend implements ServerBackend {
   private _config: FullConfig;
   private _browserContextFactory: BrowserContextFactory;
   private _sharedSessionRegistry: BrowserSessionRegistry | undefined;
+  private _ephemeralDefaultContext: boolean;
 
-  constructor(config: FullConfig, factory: BrowserContextFactory, sharedSessionRegistry?: BrowserSessionRegistry) {
+  constructor(config: FullConfig, factory: BrowserContextFactory, sharedSessionRegistry?: BrowserSessionRegistry, options?: {
+    /**
+     * True for backends that serve exactly one stateless HTTP exchange and
+     * are closed with the response. Their default context is flagged like an
+     * explicit browser session, so the persistent factory runs it in a
+     * disposable profile: parallel handshake-free requests would otherwise
+     * contend for the stable `mcp-<browser>` profile ("Browser is already in
+     * use"), and a context torn down at response end gains nothing from
+     * profile persistence — cross-request browser state belongs to
+     * browser_session_open handles. Stateful backends (stdio, HTTP sessions)
+     * keep the stable profile.
+     */
+    ephemeralDefaultContext?: boolean;
+  }) {
     this._config = config;
     this._browserContextFactory = factory;
     this._sharedSessionRegistry = sharedSessionRegistry;
+    this._ephemeralDefaultContext = options?.ephemeralDefaultContext ?? false;
     this._tools = filteredTools(config);
     this._toolsByName = new Map(this._tools.map(tool => [tool.schema.name, tool]));
   }
@@ -81,7 +96,7 @@ export class BrowserServerBackend implements ServerBackend {
       },
       browserSession,
     });
-    this._context = createContext();
+    this._context = createContext(this._ephemeralDefaultContext || undefined);
   }
 
   async listTools(): Promise<mcpServer.Tool[]> {

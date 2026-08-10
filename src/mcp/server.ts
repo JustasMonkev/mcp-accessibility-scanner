@@ -69,6 +69,17 @@ export type ServerBackendFactory = ServerMetadata & {
   nameInConfig: string;
   version: string;
   create: () => ServerBackend;
+  /**
+   * Optional variant used for stateless per-request HTTP serving
+   * (handshake-free 2025 requests and the modern 2026-07-28 endpoint): the
+   * created backend serves exactly one exchange and is closed with the
+   * response, so implementations can shape it for that lifecycle — e.g. run
+   * its default browser context in a disposable profile instead of contending
+   * for the stable persistent one. Falls back to create() when absent.
+   * Stateful serving (stdio, Mcp-Session-Id HTTP sessions) always uses
+   * create().
+   */
+  createStateless?: () => ServerBackend;
 };
 
 export async function connect(factory: ServerBackendFactory, transport: Transport, runHeartbeat: boolean) {
