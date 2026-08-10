@@ -130,12 +130,11 @@ export class BrowserSessionRegistry implements BrowserSessionBroker {
     await Promise.all(contexts.map(context => context.dispose().catch(logUnhandledError)));
   }
 
+  // Deliberately does NOT enumerate the open sessions: handles are bearer
+  // tokens, and listing them would hand any caller with a mistyped handle the
+  // keys to every other session's browser.
   private _unknownSessionMessage(id: string): string {
-    const open = [...this._sessions.keys()];
-    const known = open.length
-      ? `Open sessions: ${open.join(', ')}.`
-      : 'No browser sessions are open.';
-    return `Unknown browserSessionId "${id}". ${known} Use browser_session_open to open one, or omit browserSessionId to use the default session.`;
+    return `Unknown browserSessionId "${id}": the session may have expired or been closed. Use browser_session_open to open a session, or omit browserSessionId to use the default session.`;
   }
 
   private _ensureReaper(): void {

@@ -109,7 +109,14 @@ export class BrowserServerBackend implements ServerBackend {
         throw new Error(`Invalid input for tool "${name}":\n${z.prettifyError(error)}`);
       throw error;
     }
-    const response = new Response(context, name, parsedArguments, requestContext);
+    // The wire-only browserSessionId never survives the parse above (the
+    // tools' non-strict zod schemas strip it), which is right for the tool
+    // handler — but Response.toolArgs feeds the --save-session log, and
+    // without the handle, calls into different sessions would log identical
+    // sessionless args with interleaved snapshots. Re-attach it to the logged
+    // view; handlers keep receiving parsedArguments untouched.
+    const responseArguments = routedSessionId !== undefined ? { browserSessionId: routedSessionId, ...parsedArguments } : parsedArguments;
+    const response = new Response(context, name, responseArguments, requestContext);
     // Per-call token, not a single slot: two overlapping calls on one session
     // must keep isRunningTool() true until BOTH finish, or the TTL reaper (and
     // browser_session_close) could dispose the browser under the slower call.

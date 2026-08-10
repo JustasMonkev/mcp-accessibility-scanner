@@ -15,11 +15,15 @@
  */
 
 import { EventEmitter } from 'events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { browserSessionTtlMs } from '../src/browserSessions.js';
 import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
+import { SessionLog } from '../src/sessionLog.js';
 
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
@@ -39,6 +43,8 @@ function makeFactory() {
     browserContext.newPage = newPage;
     browserContext.pages = vi.fn().mockReturnValue([]);
     browserContext.route = vi.fn().mockResolvedValue(undefined);
+    // Only exercised when a test enables --save-session (the input recorder).
+    browserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
     const close = vi.fn().mockResolvedValue(undefined);
     created.push({ browserContext, close, newPage });
     return { browserContext, close };
@@ -148,28 +154,65 @@ describe('browser sessions', () => {
     expect(textOf(result)).toContain('Add --isolated');
   });
 
-  it('rejects unknown handles with the list of open sessions', async () => {
+  it('rejects unknown handles without disclosing the open sessions', async () => {
     const { factory } = makeFactory();
     const backend = await makeBackend(factory);
 
     await expect(backend.callTool('browser_tabs', { action: 'list', browserSessionId: 'bs_missing' }))
-        .rejects.toThrow(/Unknown browserSessionId "bs_missing"\. No browser sessions are open\./);
+        .rejects.toThrow(/Unknown browserSessionId "bs_missing".*browser_session_open/);
 
+    // Handles are bearer tokens: a caller probing with a bad handle must not
+    // be handed the ids that would route it into other sessions' browsers.
     const id = await openSession(backend);
-    await expect(backend.callTool('browser_tabs', { action: 'list', browserSessionId: 'bs_missing' }))
-        .rejects.toThrow(new RegExp(`Open sessions: ${id}`));
+    let caught: Error | undefined;
+    await backend.callTool('browser_tabs', { action: 'list', browserSessionId: 'bs_missing' }).catch(error => caught = error);
+    expect(caught).toBeDefined();
+    expect(String(caught)).toContain('Unknown browserSessionId "bs_missing"');
+    expect(String(caught)).not.toContain(id);
 
     await expect(backend.callTool('browser_tabs', { action: 'list', browserSessionId: 42 as any }))
         .rejects.toThrow(/Invalid browserSessionId/);
   });
 
-  it('closing an unknown handle is a tool error listing the open sessions', async () => {
+  it('closing an unknown handle is a tool error without disclosing the open sessions', async () => {
     const { factory } = makeFactory();
     const backend = await makeBackend(factory);
+    const id = await openSession(backend);
 
     const result = await backend.callTool('browser_session_close', { browserSessionId: 'bs_missing' });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain('Unknown browserSessionId "bs_missing"');
+    expect(textOf(result)).not.toContain(id);
+  });
+
+  it('keeps the browserSessionId in what the --save-session log records', async () => {
+    // The wire-only handle is stripped before the zod parse, so without the
+    // re-attach, calls into different sessions logged identical sessionless
+    // args with interleaved snapshots.
+    const logResponse = vi.spyOn(SessionLog.prototype, 'logResponse').mockImplementation(() => {});
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-session-log-'));
+    try {
+      const config = await resolveConfig({ saveSession: true, outputDir });
+      const { factory } = makeFactory();
+      const backend = new BrowserServerBackend(config, factory);
+      await backend.initialize(
+          { notifyToolListChanged: async () => {} } as any,
+          { name: 'vitest', version: 'browser-sessions' },
+      );
+
+      const id = await openSession(backend);
+      await backend.callTool('browser_tabs', { action: 'list', browserSessionId: id });
+      const routed = logResponse.mock.calls.find(([response]) => response.toolName === 'browser_tabs')![0];
+      expect(routed.toolArgs).toMatchObject({ action: 'list', browserSessionId: id });
+
+      // The default session's calls stay unmarked, exactly as before.
+      await backend.callTool('browser_tabs', { action: 'list' });
+      const unrouted = logResponse.mock.calls.filter(([response]) => response.toolName === 'browser_tabs')[1][0];
+      expect(unrouted.toolArgs).not.toHaveProperty('browserSessionId');
+    } finally {
+      logResponse.mockRestore();
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
   });
 
   it('advertises browserSessionId on browser tools but not on the session tools', async () => {
