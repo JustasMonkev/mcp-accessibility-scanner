@@ -51,15 +51,20 @@ export class BrowserServerBackend implements ServerBackend {
 
   async initialize(_context: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion): Promise<void> {
     this._sessionLog = this._config.saveSession ? await SessionLog.create(this._config) : undefined;
-    const createContext = () => new Context({
+    const createContext = (browserSession?: boolean) => new Context({
       tools: this._tools,
       config: this._config,
       browserContextFactory: this._browserContextFactory,
       sessionLog: this._sessionLog,
       clientInfo: { ...clientVersion },
       browserSessions: this._sessionRegistry,
+      browserSession,
     });
-    this._sessionRegistry = new BrowserSessionRegistry(createContext);
+    // Registry contexts are flagged as explicit sessions so the factory can
+    // give each its own browser context (e.g. a disposable persistent
+    // profile); the default context keeps today's behavior. Factories that
+    // cannot separate contexts veto browser_session_open via their reason.
+    this._sessionRegistry = new BrowserSessionRegistry(() => createContext(true), undefined, this._browserContextFactory.sessionsUnsupportedReason);
     this._context = createContext();
   }
 

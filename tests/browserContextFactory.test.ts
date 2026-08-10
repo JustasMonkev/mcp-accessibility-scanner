@@ -363,6 +363,74 @@ describe('browserContextFactory', () => {
     expect(rmSpy).toHaveBeenCalledWith(secondDir, { recursive: true, force: true });
   });
 
+  // Two explicit browser sessions under the default persistent config used to
+  // resolve to the same `mcp-<browser>` profile: one locked it, the second
+  // spun on ProcessSingleton and failed with "Browser is already in use".
+  it('gives each explicit browser session its own disposable profile while the default context keeps the stable one', async () => {
+    const profilesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-profiles-'));
+    process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
+    try {
+      const browserContext = createMockBrowserContext();
+      (playwright.chromium.launchPersistentContext as any).mockResolvedValue(browserContext);
+      const rmSpy = vi.spyOn(fs.promises, 'rm');
+
+      const config = await resolveConfig({});
+      const factory = contextFactory(config);
+      expect(factory.sessionsUnsupportedReason).toBeUndefined();
+
+      const clientInfo = { name: 'vitest', version: '1.0.0' };
+      const signal = new AbortController().signal;
+      const defaultResult = await factory.createContext(clientInfo, signal, undefined);
+      const first = await factory.createContext(clientInfo, signal, undefined, { browserSession: true });
+      const second = await factory.createContext(clientInfo, signal, undefined, { browserSession: true });
+
+      const dirs = (playwright.chromium.launchPersistentContext as any).mock.calls.map((call: any[]) => call[0] as string);
+      // The default context keeps the stable profile so sign-in state still
+      // survives restarts; each session gets a fresh guid-suffixed one.
+      expect(dirs[0]).toBe(path.join(profilesDir, 'mcp-chrome'));
+      expect(dirs[1]).toMatch(/-session-[0-9a-f]+$/);
+      expect(dirs[2]).toMatch(/-session-[0-9a-f]+$/);
+      expect(dirs[1]).not.toBe(dirs[2]);
+
+      // Session profiles are removed with their contexts; the stable profile
+      // is durable user data and must never be deleted.
+      await first.close();
+      expect(rmSpy).toHaveBeenCalledWith(dirs[1], { recursive: true, force: true });
+      await second.close();
+      expect(rmSpy).toHaveBeenCalledWith(dirs[2], { recursive: true, force: true });
+      await defaultResult.close();
+      expect(rmSpy).not.toHaveBeenCalledWith(dirs[0], expect.anything());
+    } finally {
+      delete process.env.PWMCP_PROFILES_DIR_FOR_TEST;
+      fs.rmSync(profilesDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports which modes cannot mint separate per-session contexts', async () => {
+    // Shared-context modes must veto browser_session_open instead of handing
+    // out a handle that silently routes into everyone else's context.
+    const nonIsolatedCdp = contextFactory(await resolveConfig({ browser: { cdpEndpoint: 'http://127.0.0.1:9222' } }));
+    expect(nonIsolatedCdp.sessionsUnsupportedReason).toContain('--isolated');
+
+    const isolatedCdp = contextFactory(await resolveConfig({ browser: { cdpEndpoint: 'http://127.0.0.1:9222', isolated: true } }));
+    expect(isolatedCdp.sessionsUnsupportedReason).toBeUndefined();
+
+    const nonIsolatedLaunch = contextFactory(await resolveConfig({ browser: { cdpLaunch: { command: 'open' } } }));
+    expect(nonIsolatedLaunch.sessionsUnsupportedReason).toContain('--isolated');
+
+    const isolated = contextFactory(await resolveConfig({ browser: { isolated: true } }));
+    expect(isolated.sessionsUnsupportedReason).toBeUndefined();
+
+    const userProfile = contextFactory(await resolveConfig({ browser: { userDataDir: '/tmp/my-profile' } }));
+    expect(userProfile.sessionsUnsupportedReason).toContain('--user-data-dir');
+
+    const extension = new ExtensionContextFactory('chrome', undefined, undefined);
+    expect(extension.sessionsUnsupportedReason).toContain('--extension');
+
+    const vscode = new VSCodeBrowserContextFactory(await resolveConfig({}), playwright as any, 'ws://127.0.0.1:1234');
+    expect(vscode.sessionsUnsupportedReason).toContain('VS Code');
+  });
+
   it('parks persistent startup pages before the storage state lands', async () => {
     // browser.launchOptions.args can carry a URL, so a page may load before
     // setStorageState() runs and render the anonymous identity — Context

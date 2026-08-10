@@ -95,6 +95,13 @@ type ContextOptions = {
   sessionLog: SessionLog | undefined;
   clientInfo: ClientInfo;
   browserSessions?: BrowserSessionBroker;
+  /**
+   * True when this Context backs an explicitly opened browser session
+   * (`browser_session_open`) rather than the default one; forwarded to the
+   * context factory so e.g. the persistent factory mints a disposable profile
+   * instead of contending for the stable one.
+   */
+  browserSession?: boolean;
 };
 
 export class Context {
@@ -303,7 +310,7 @@ export class Context {
     if (this._closeBrowserContextPromise)
       throw new Error('Another browser context is being closed.');
     // TODO: move to the browser context factory to make it based on isolation mode.
-    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningToolName);
+    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningToolName, { browserSession: this.options.browserSession });
     // The factory handed ownership over with close(); a setup failure past
     // this point would otherwise discard that callback with the browser still
     // running — and, for storage-state sessions, the disposable profile

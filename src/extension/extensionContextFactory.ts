@@ -27,6 +27,9 @@ export class ExtensionContextFactory implements BrowserContextFactory {
   // The relay attaches to the browser the user is already running and hands back
   // its existing context, so contextOptions — storage state included — never apply.
   readonly appliesStorageState = false;
+  // That existing context is the only one there is: every browser session
+  // opened here would share the user's own tabs, cookies and storage.
+  readonly sessionsUnsupportedReason = '--extension works through the browser you are already running and uses its existing context, which every session would share (same tabs, cookies and storage).';
   private _browserChannel: string;
   private _userDataDir?: string;
   private _executablePath?: string;

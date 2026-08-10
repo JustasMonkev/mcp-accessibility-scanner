@@ -453,6 +453,17 @@ function createContextFactory(config: FullConfig): BrowserContextFactory {
 
 export type ClientInfo = { name?: string, version?: string };
 
+export type CreateContextOptions = {
+  /**
+   * True when the context backs an explicitly opened browser session
+   * (`browser_session_open`) rather than the default session. The persistent
+   * factory gives such contexts their own disposable profile — the stable
+   * `mcp-<browser>` profile can back only one running browser at a time, so a
+   * second session sharing it would fail with "Browser is already in use".
+   */
+  browserSession?: boolean;
+};
+
 export interface BrowserContextFactory {
   /**
    * True when createContext() lands config.browser.contextOptions.storageState in
@@ -462,7 +473,16 @@ export interface BrowserContextFactory {
    * than dropping it silently.
    */
   readonly appliesStorageState?: boolean;
-  createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }>;
+  /**
+   * Set when this factory cannot give each Context a browser context of its
+   * own — every wrapper it returns shares one live context, tabs, cookies and
+   * storage included. `browser_session_open` refuses to open explicit browser
+   * sessions in these modes with this reason: a handle that silently routed
+   * into the shared context would advertise a separation that does not exist.
+   * Undefined (or omitted) means separate per-session contexts are supported.
+   */
+  readonly sessionsUnsupportedReason?: string;
+  createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined, options?: CreateContextOptions): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }>;
 }
 
 abstract class BaseContextFactory implements BrowserContextFactory {
@@ -560,6 +580,15 @@ class CdpContextFactory extends BaseContextFactory {
 
   constructor(config: FullConfig) {
     super('cdp', config);
+  }
+
+  // Without --isolated every session gets the attached browser's one existing
+  // context, so a "separate" browser session would share its tabs, cookies
+  // and storage with everything else.
+  get sessionsUnsupportedReason(): string | undefined {
+    if (this.config.browser.isolated)
+      return undefined;
+    return 'this connection attaches to the browser\'s existing context, which every session would share (same tabs, cookies and storage). Add --isolated to give each session its own browser context.';
   }
 
   // The CDP connection (and with it every route and page proxy) is shared by
@@ -696,6 +725,16 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     this.config = config;
   }
 
+  // Without --isolated a session would reuse a launched application's single
+  // existing context (and, with a pinned port, could even attach to another
+  // session's instance). With --isolated each context is created fresh, at the
+  // documented cost of launching another application instance per context.
+  get sessionsUnsupportedReason(): string | undefined {
+    if (this.config.browser.isolated)
+      return undefined;
+    return 'without --isolated each session would attach to a launched application\'s single shared context (same tabs, cookies and storage). Add --isolated to give each session its own browser context.';
+  }
+
   async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     const cdpLaunch = this.config.browser.cdpLaunch!;
     const port = cdpLaunch.port ?? await findFreePort();
@@ -791,7 +830,18 @@ export class PersistentContextFactory implements BrowserContextFactory {
     this.config = config;
   }
 
-  async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  // A user-supplied profile directory can back only one running browser at a
+  // time (Chromium's ProcessSingleton lock), and minting disposable profiles
+  // behind the user's back would silently drop the sign-in state they asked
+  // for — so explicit sessions are refused in that configuration. Without
+  // --user-data-dir, sessions run in their own disposable profiles below.
+  get sessionsUnsupportedReason(): string | undefined {
+    if (this.config.browser.userDataDir)
+      return 'the configured --user-data-dir profile can back only one running browser at a time. Drop --user-data-dir (extra sessions run in their own disposable profiles) or use --isolated.';
+    return undefined;
+  }
+
+  async createContext(clientInfo: ClientInfo, _abortSignal?: AbortSignal, _toolName?: string, options?: CreateContextOptions): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     await injectCdpPort(this.config.browser);
     testDebug('create browser context (persistent)');
     // launchPersistentContext() accepts a storageState option without applying
@@ -815,7 +865,23 @@ export class PersistentContextFactory implements BrowserContextFactory {
     // may throw outside the cleanup scope below, or failed starts would leave
     // stray profiles behind.
     const tracesDir = await startTraceServer(this.config);
-    const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(storageState ? `-storage-state-${createGuid()}` : '');
+    // An explicitly opened browser session gets its own disposable profile for
+    // the same reason a storage-state context does: the stable profile can back
+    // only one running browser, so a second session sharing it would spin on
+    // the ProcessSingleton lock and fail with "Browser is already in use". The
+    // DEFAULT (no-handle) context keeps the stable `mcp-<browser>` profile, so
+    // its sign-in state still survives restarts.
+    const profileSuffix = storageState
+      ? `-storage-state-${createGuid()}`
+      : options?.browserSession
+        ? `-session-${createGuid()}`
+        : '';
+    const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(profileSuffix);
+    // Guarded on the config profile too: sessionsUnsupportedReason keeps
+    // registry sessions out of a user-supplied --user-data-dir, so a suffix
+    // here always means the guid-fresh managed directory above — but a direct
+    // caller combining both must still never see the user's profile deleted.
+    const disposableProfile = !!profileSuffix && !this.config.browser.userDataDir;
 
     this._userDataDirs.add(userDataDir);
     testDebug('lock user data dir', userDataDir);
@@ -831,7 +897,7 @@ export class PersistentContextFactory implements BrowserContextFactory {
             handleSIGINT: false,
             handleSIGTERM: false,
           });
-          return await this._applyStorageState(browserContext, storageState, userDataDir);
+          return await this._applyStorageState(browserContext, storageState, userDataDir, disposableProfile);
         } catch (error: any) {
           if (error instanceof StorageStateError)
             throw error;
@@ -851,7 +917,7 @@ export class PersistentContextFactory implements BrowserContextFactory {
       // never produced a context must not leave it behind — repeated failed
       // starts would otherwise pile one stray directory into the registry each.
       // (Already removed on the StorageStateError path; rm is idempotent.)
-      if (storageState) {
+      if (disposableProfile) {
         await fs.promises.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
         this._userDataDirs.delete(userDataDir);
       }
@@ -861,7 +927,7 @@ export class PersistentContextFactory implements BrowserContextFactory {
 
   // Separate from the launch retry loop: its `catch` retries on messages a
   // malformed storage-state file could coincidentally match (`Invalid URL`).
-  private async _applyStorageState(browserContext: playwright.BrowserContext, storageState: NonNullable<FullConfig['browser']['contextOptions']>['storageState'], userDataDir: string): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  private async _applyStorageState(browserContext: playwright.BrowserContext, storageState: NonNullable<FullConfig['browser']['contextOptions']>['storageState'], userDataDir: string, disposableProfile: boolean): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     if (storageState) {
       try {
         // Startup pages can keep persisting their anonymous identity while the
@@ -874,11 +940,11 @@ export class PersistentContextFactory implements BrowserContextFactory {
       } catch (error) {
         // Nobody holds a close() for this context yet, so a bad storage-state
         // file must not leave the launched browser running.
-        await this._closeBrowserContext(browserContext, userDataDir, true);
+        await this._closeBrowserContext(browserContext, userDataDir, disposableProfile);
         throw new StorageStateError(error instanceof Error ? error.message : String(error));
       }
     }
-    const close = () => this._closeBrowserContext(browserContext, userDataDir, !!storageState);
+    const close = () => this._closeBrowserContext(browserContext, userDataDir, disposableProfile);
     return { browserContext, close };
   }
 
@@ -886,18 +952,20 @@ export class PersistentContextFactory implements BrowserContextFactory {
     testDebug('close browser context (persistent)');
     testDebug('release user data dir', userDataDir);
     await browserContext.close().catch(() => {});
-    // A storage-state profile is unique to this context and holds nothing worth
-    // keeping — the state file is the durable copy — so it is removed rather
-    // than left to pile up next to the regular persistent profile.
+    // A storage-state or browser-session profile is unique to this context and
+    // holds nothing worth keeping — the state file (or the default profile) is
+    // the durable copy — so it is removed rather than left to pile up next to
+    // the regular persistent profile.
     if (disposeUserDataDir)
       await fs.promises.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
     this._userDataDirs.delete(userDataDir);
     testDebug('close browser context complete (persistent)');
   }
 
-  // The suffix keeps disposable storage-state profiles apart from the regular
-  // persistent profile (and, carrying a per-context guid, from each other), so
-  // removing one can never destroy an interactive session or a sibling's.
+  // The suffix keeps disposable storage-state and browser-session profiles
+  // apart from the regular persistent profile (and, carrying a per-context
+  // guid, from each other), so removing one can never destroy an interactive
+  // session or a sibling's.
   private async _createUserDataDir(suffix: string) {
     const dir = process.env.PWMCP_PROFILES_DIR_FOR_TEST ?? registryDirectory;
     const browserToken = this.config.browser.launchOptions?.channel ?? this.config.browser?.browserName;

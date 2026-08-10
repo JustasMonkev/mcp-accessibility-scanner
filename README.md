@@ -575,10 +575,16 @@ Manage browser tabs in one tool.
 
 ### Browser Session Tools
 
-Following the MCP 2026-07-28 stateless prescription, browser state can be named by an explicit server-minted handle instead of living implicitly in the connection. Every browser tool accepts an optional `browserSessionId` argument; when it is omitted, the tool runs in the default session and behaves exactly as before.
+Following the MCP 2026-07-28 stateless prescription, browser state can be named by an explicit server-minted handle instead of living implicitly in the connection. Every browser tool except the two session tools accepts an optional `browserSessionId` argument; when it is omitted, the tool runs in the default session and behaves exactly as before.
 
 #### `browser_session_open`
-Opens a new isolated browser session (its own browser context with its own tabs) and returns its opaque handle (`bs_...`) both in the result text and as `structuredContent.browserSessionId`. Pass that handle as the `browserSessionId` argument of other browser tools to run them in this session.
+Opens a separate browser session — its own browser context with its own tabs, cookies and storage — and returns its opaque handle (`bs_...`) both in the result text and as `structuredContent.browserSessionId`. Pass that handle as the `browserSessionId` argument of other browser tools to run them in this session.
+
+How the separate context is provided depends on the mode:
+
+- **Default persistent-profile mode**: each session runs in its own fresh, disposable profile (removed when the session closes or expires); only the default session uses the stable persistent profile, whose sign-in state keeps surviving restarts. This is required — one profile directory can back only one running browser at a time.
+- **`--isolated`, remote endpoints, and CDP/`--cdp-launch` with `--isolated`**: each session gets its own fresh browser context. In `--cdp-launch` mode each context launches its own instance of the configured application.
+- **Modes that reuse one live browser context** — CDP attach or `--cdp-launch` without `--isolated`, `--extension`, the VS Code bridge, and servers created with a custom context getter — cannot create a separate context, so `browser_session_open` is rejected with an explanation instead of handing out a handle that would share the same tabs, cookies and storage as everything else. The same applies in the default mode when `--user-data-dir` pins all browsing to one user-supplied profile.
 
 #### `browser_session_close`
 Closes a session opened with `browser_session_open` and releases its browser resources.

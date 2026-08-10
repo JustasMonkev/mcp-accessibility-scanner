@@ -30,6 +30,10 @@ export class VSCodeBrowserContextFactory implements BrowserContextFactory {
   // A fresh context is created with the state; a reused extension context gets
   // it applied via setStorageState(), like the other reused-context factories.
   readonly appliesStorageState = true;
+  // Each createContext() reuses the extension browser's existing context when
+  // one is present, so two sessions would end up in the same context (same
+  // tabs, cookies and storage) — never a separate one per handle.
+  readonly sessionsUnsupportedReason = 'the VS Code extension supplies the browser\'s existing context, which every session would share (same tabs, cookies and storage).';
 
   constructor(private _config: FullConfig, private _playwright: typeof import('playwright'), private _connectionString: string) {}
 

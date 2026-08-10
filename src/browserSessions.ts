@@ -72,13 +72,21 @@ export class BrowserSessionRegistry implements BrowserSessionBroker {
   private _createContext: () => Context;
   private _ttlMs: number;
   private _reaper: NodeJS.Timeout | undefined;
+  private _sessionsUnsupportedReason: string | undefined;
 
-  constructor(createContext: () => Context, ttlMs: number = browserSessionTtlMs()) {
+  constructor(createContext: () => Context, ttlMs: number = browserSessionTtlMs(), sessionsUnsupportedReason?: string) {
     this._createContext = createContext;
     this._ttlMs = ttlMs;
+    this._sessionsUnsupportedReason = sessionsUnsupportedReason;
   }
 
   open(): string {
+    // Modes whose factory hands every Context the same live browser context
+    // (non-isolated CDP attach, extension, VS Code, custom getters) are
+    // refused up front: a handle here would claim a separation that does not
+    // exist — two "sessions" sharing tabs, cookies and storage.
+    if (this._sessionsUnsupportedReason)
+      throw new Error(`Cannot open a separate browser session: ${this._sessionsUnsupportedReason}`);
     const id = `bs_${crypto.randomUUID()}`;
     this._sessions.set(id, { context: this._createContext(), lastUsedAt: Date.now() });
     this._ensureReaper();

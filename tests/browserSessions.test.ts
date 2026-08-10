@@ -33,7 +33,7 @@ type FakeBrowserContext = {
 
 function makeFactory() {
   const created: FakeBrowserContext[] = [];
-  const createContext = vi.fn(async () => {
+  const createContext = vi.fn(async (..._args: any[]) => {
     const browserContext: any = new EventEmitter();
     const newPage = vi.fn().mockResolvedValue({});
     browserContext.newPage = newPage;
@@ -120,6 +120,32 @@ describe('browser sessions', () => {
     expect(createContext).toHaveBeenCalledTimes(3);
     await backend.callTool('browser_tabs', { action: 'list' });
     expect(createContext).toHaveBeenCalledTimes(3);
+  });
+
+  it('marks registry contexts as browser sessions for the factory, default context unmarked', async () => {
+    // The persistent factory keys disposable-profile allocation off this flag:
+    // without it, two session handles under the default config collide on the
+    // one stable profile and the second open fails "Browser is already in use".
+    const { factory, createContext } = makeFactory();
+    const backend = await makeBackend(factory);
+
+    const id = await openSession(backend);
+    await backend.callTool('browser_tabs', { action: 'list', browserSessionId: id });
+    expect(createContext.mock.calls[0][3]).toMatchObject({ browserSession: true });
+
+    await backend.callTool('browser_tabs', { action: 'list' });
+    expect(createContext.mock.calls[1][3]?.browserSession).toBeFalsy();
+  });
+
+  it('refuses to open a session when the factory cannot mint separate contexts', async () => {
+    const { factory } = makeFactory();
+    factory.sessionsUnsupportedReason = 'this connection attaches to the browser\'s existing context. Add --isolated.';
+    const backend = await makeBackend(factory);
+
+    const result = await backend.callTool('browser_session_open', {});
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Cannot open a separate browser session');
+    expect(textOf(result)).toContain('Add --isolated');
   });
 
   it('rejects unknown handles with the list of open sessions', async () => {
