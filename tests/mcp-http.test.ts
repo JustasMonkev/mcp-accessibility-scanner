@@ -197,6 +197,10 @@ describe('mcp http transport hardening', () => {
     expect(response.body).toBe('Forbidden Origin header');
   });
 
+  // A sessionless GET reaches method routing (past header validation), where
+  // it is answered 405 like the SDK's own stateless mode answers non-POST.
+  const methodNotAllowedBody = { jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null };
+
   it('allows browser requests when origin authority exactly matches the host header', async () => {
     const { port } = await startServer();
 
@@ -205,8 +209,8 @@ describe('mcp http transport hardening', () => {
       origin: `http://127.0.0.1:${port}`,
     });
 
-    expect(response.statusCode).toBe(400);
-    expect(response.body).toBe('Invalid request');
+    expect(response.statusCode).toBe(405);
+    expect(JSON.parse(response.body)).toEqual(methodNotAllowedBody);
   });
 
   it('allows non-browser requests without an origin header', async () => {
@@ -216,8 +220,20 @@ describe('mcp http transport hardening', () => {
       hostHeader: `127.0.0.1:${port}`,
     });
 
-    expect(response.statusCode).toBe(400);
-    expect(response.body).toBe('Invalid request');
+    expect(response.statusCode).toBe(405);
+    expect(JSON.parse(response.body)).toEqual(methodNotAllowedBody);
+  });
+
+  it('answers sessionless non-POST methods with 405 like the SDK stateless mode', async () => {
+    const { port } = await startServer();
+
+    const response = await sendRequest(port, {
+      method: 'DELETE',
+      hostHeader: `127.0.0.1:${port}`,
+    });
+
+    expect(response.statusCode).toBe(405);
+    expect(JSON.parse(response.body)).toEqual(methodNotAllowedBody);
   });
 
   it('does not expose the deprecated /sse endpoint', async () => {
@@ -253,8 +269,8 @@ describe('mcp http transport hardening', () => {
       hostHeader: `127.0.0.1:${port}`,
     });
 
-    expect(response.statusCode).toBe(400);
-    expect(response.body).toBe('Invalid request');
+    expect(response.statusCode).toBe(405);
+    expect(JSON.parse(response.body)).toEqual(methodNotAllowedBody);
   });
 
   // v1 session compatibility layer (Refs #166): until the v2 stateless

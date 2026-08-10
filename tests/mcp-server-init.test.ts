@@ -105,6 +105,60 @@ describe('mcp server lazy initialization', () => {
     }
   });
 
+  it('retries backend initialization after a failed attempt instead of memoizing the failure', async () => {
+    const backend = createBackend();
+    backend.initialize.mockRejectedValueOnce(new Error('backend offline'));
+
+    const { transport, sendRequest } = await startRawClient(backend);
+    try {
+      // The first request observes the initialization failure.
+      const failed = await sendRequest(1, 'tools/call', { name: 'some_tool', arguments: {} });
+      expect(failed.result).toBeUndefined();
+      expect((failed as unknown as { error: { message: string } }).error.message).toContain('backend offline');
+      expect(backend.initialize).toHaveBeenCalledTimes(1);
+      expect(backend.callTool).not.toHaveBeenCalled();
+
+      // The backend has recovered: the next request initializes again.
+      const recovered = await sendRequest(2, 'tools/call', { name: 'some_tool', arguments: {} });
+      expect(recovered.result).toMatchObject({ content: [{ type: 'text', text: 'ok' }] });
+      expect(backend.initialize).toHaveBeenCalledTimes(2);
+
+      // Success stays memoized: no third initialization.
+      const list = await sendRequest(3, 'tools/list');
+      expect(list.result).toMatchObject({ tools: [] });
+      expect(backend.initialize).toHaveBeenCalledTimes(2);
+    } finally {
+      await transport.close();
+    }
+  });
+
+  it('rejects all concurrent requests awaiting the same failed initialization', async () => {
+    let failInitialize = (_: Error) => {};
+    const initializeGate = new Promise<void>((_, reject) => failInitialize = reject);
+    const backend = createBackend();
+    backend.initialize.mockImplementationOnce(() => initializeGate);
+
+    const { transport, sendRequest } = await startRawClient(backend);
+    try {
+      const firstCall = sendRequest(1, 'tools/call', { name: 'some_tool', arguments: {} });
+      const secondCall = sendRequest(2, 'tools/list');
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(backend.initialize).toHaveBeenCalledTimes(1);
+
+      failInitialize(new Error('backend offline'));
+      const [first, second] = await Promise.all([firstCall, secondCall]);
+      expect((first as unknown as { error: { message: string } }).error.message).toContain('backend offline');
+      expect((second as unknown as { error: { message: string } }).error.message).toContain('backend offline');
+
+      // A later request still retries.
+      const recovered = await sendRequest(3, 'tools/list');
+      expect(recovered.result).toMatchObject({ tools: [] });
+      expect(backend.initialize).toHaveBeenCalledTimes(2);
+    } finally {
+      await transport.close();
+    }
+  });
+
   it('still initializes from the handshake with the client identity', async () => {
     const backend = createBackend();
     const server = createServer('Test', '1.0.0', backend as any, false);

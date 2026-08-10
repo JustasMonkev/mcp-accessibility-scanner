@@ -116,14 +116,26 @@ export function createServer(name: string, version: string, backend: ServerBacke
   // also drops a blocking listRoots round-trip from startup. Refs #169.
   let backendInitialized: Promise<void> | undefined;
   const ensureInitialized = (): Promise<void> => {
-    backendInitialized ??= (async () => {
-      // Pre-handshake there is no client info yet.
-      const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
-      const context: ServerBackendContext = {
-        notifyToolListChanged: () => server.sendToolListChanged(),
-      };
-      await backend.initialize?.(context, clientVersion);
-    })();
+    if (!backendInitialized) {
+      const initialization = (async () => {
+        // Pre-handshake there is no client info yet.
+        const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
+        const context: ServerBackendContext = {
+          notifyToolListChanged: () => server.sendToolListChanged(),
+        };
+        await backend.initialize?.(context, clientVersion);
+      })();
+      // Memoize success only: a rejected attempt clears the memo so the next
+      // request retries instead of replaying the same failure forever (e.g. a
+      // long-lived stdio process whose backend hit a transient error). Callers
+      // already awaiting this attempt still observe its rejection — they hold
+      // the promise before this handler clears the memo.
+      initialization.catch(() => {
+        if (backendInitialized === initialization)
+          backendInitialized = undefined;
+      });
+      backendInitialized = initialization;
+    }
     return backendInitialized;
   };
 

@@ -32,6 +32,9 @@ describe('session log folders', () => {
     // overwritten snapshot ordinals.
     const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-session-folders-'));
     vi.spyOn(Date, 'now').mockReturnValue(1735689600000);
+    // SessionLog.create() announces every session folder with
+    // `console.error('Session: <folder>')`; silence the five copies so the
+    // test output stays clean.
     vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const config = await resolveConfig({ saveSession: true, outputDir });

@@ -138,8 +138,13 @@ class SessionStore {
       await this._handleSessionlessPost(req, res);
       return;
     }
-    res.statusCode = 400;
-    res.end('Invalid request');
+    // Sessionless GET/DELETE are 2025-era session operations that a
+    // stateless endpoint does not serve. Mirror the SDK's own stateless mode
+    // (`createLegacyStatelessFallback`), which answers every non-POST with
+    // this 405 JSON-RPC error body and no Allow header.
+    res.statusCode = 405;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null }));
   }
 
   private async _handleSessionRequest(sessionId: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -215,8 +220,18 @@ class SessionStore {
     // or aborts. Shared state (the factory's browser-session registry and
     // the contexts it holds) deliberately survives this close.
     res.once('close', () => void transport.close().catch(e => testDebug(e)));
-    await this._createStatelessServer().connect(transport);
-    await transport.handleRequest(req, res, parsedBody);
+    try {
+      await this._createStatelessServer().connect(transport);
+      await transport.handleRequest(req, res, parsedBody);
+    } catch (error) {
+      // A failure before the response is written leaves the connection open,
+      // and res 'close' — the disposal path above — only fires once the
+      // client abandons it, which can be arbitrarily late. Close eagerly so
+      // the transport (and any backend state behind it) does not linger;
+      // close() is idempotent, so the 'close' listener firing later is fine.
+      await transport.close().catch(e => testDebug(e));
+      throw error;
+    }
   }
 
   private async _createSession(req: http.IncomingMessage, res: http.ServerResponse, parsedBody: unknown): Promise<void> {
