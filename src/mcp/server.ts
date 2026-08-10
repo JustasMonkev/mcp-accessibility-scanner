@@ -21,7 +21,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
 import { InProcessTransport } from './inProcessTransport.js';
 
-import type { Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
+import type { CacheHint, Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
 export type { Server } from '@modelcontextprotocol/server';
 export type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/server';
 
@@ -53,6 +53,15 @@ export interface ServerBackend {
 export type ServerMetadata = {
   title?: string;
   instructions?: string;
+  /**
+   * Cache hint stamped on `tools/list` results served to MCP 2026-07-28
+   * clients (SEP-2549 `ttlMs`/`cacheScope`). Set it only for backends whose
+   * tool list is fixed for the process lifetime; leave it unset for backends
+   * that can change their list at runtime (e.g. the proxy's context switch or
+   * the VS Code host), which keeps the SDK's conservative `ttlMs: 0` default.
+   * 2025-era responses never carry cache fields either way.
+   */
+  toolListCacheHint?: CacheHint;
 };
 
 export type ServerBackendFactory = ServerMetadata & {
@@ -80,6 +89,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
       },
     },
     instructions: metadata?.instructions,
+    ...(metadata?.toolListCacheHint ? { cacheHints: { 'tools/list': metadata.toolListCacheHint } } : {}),
   });
 
   // Idempotent backend initialization shared by the handshake path and the

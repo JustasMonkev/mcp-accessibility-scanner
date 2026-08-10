@@ -21,10 +21,11 @@ import crypto from 'node:crypto';
 
 import debug from 'debug';
 
-import { isInitializeRequest } from '@modelcontextprotocol/server';
-import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
+import { createMcpHandler, isInitializeRequest, isLegacyRequest } from '@modelcontextprotocol/server';
+import { NodeStreamableHTTPServerTransport, toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
 import * as mcpServer from './server.js';
 
+import type { NodeMcpRequestHandler } from '@modelcontextprotocol/node';
 import type { ServerBackendFactory } from './server.js';
 
 const testDebug = debug('pw:mcp:test');
@@ -82,18 +83,40 @@ export async function installHttpTransport(httpServer: http.Server, serverBacken
 // stateful clients — heartbeat, standalone GET stream, server-initiated
 // notifications — working exactly as before. Refs #166.
 //
-// Clients on the 2026-07-28 revision never send `initialize`, so their first
-// POST is already `tools/list` or `tools/call`; the stateful transport
-// rejects such a sessionless request before the server's lazy backend init
-// (Refs #165) can run. Sessionless POSTs are therefore routed on their body:
-// an `initialize` request keeps the stateful session wire behavior, anything
-// else is dispatched through the SDK's stateless mode instead.
+// Sessionless POSTs are routed with the SDK's own era classifier
+// (`isLegacyRequest` — the exact predicate `createMcpHandler` routes on):
+//
+// - Requests carrying the 2026-07-28 per-request `_meta` envelope go to a
+//   modern `createMcpHandler` endpoint (`legacy: 'reject'` — this store owns
+//   all 2025 serving). That is the SDK's native 2026-07-28 serving: it
+//   answers `server/discover`, stamps `resultType` and the SEP-2549
+//   `ttlMs`/`cacheScope` cache fields, and validates the SEP-2243 standard
+//   headers (`MCP-Protocol-Version`/`Mcp-Method`/`Mcp-Name`) — none of which
+//   the 2025-era `Server` + transport pair provides. Refs #165, #166.
+// - Envelope-less 2025-era requests keep the pre-existing body routing: an
+//   `initialize` request gets the stateful session wire behavior; anything
+//   else (a handshake-free 2025 client) is dispatched through the SDK's
+//   stateless mode.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class SessionStore {
   private readonly _sessions = new Map<string, NodeStreamableHTTPServerTransport>();
+  // The modern (2026-07-28) endpoint: one handler for the server lifetime,
+  // serving each enveloped request with a fresh server + backend from the
+  // factory — the same per-request idiom as the legacy stateless path, so the
+  // factory's shared browser-session registry carries state across requests.
+  // The SDK closes the per-request server once its exchange finishes, which
+  // runs backend.serverClosed() and disposes any default context it created.
+  // No heartbeat: the modern era has no server-initiated request channel.
+  private readonly _modernHandler: NodeMcpRequestHandler;
 
-  constructor(private readonly _serverBackendFactory: ServerBackendFactory) {}
+  constructor(private readonly _serverBackendFactory: ServerBackendFactory) {
+    const handler = createMcpHandler(
+        () => mcpServer.createServer(this._serverBackendFactory.name, this._serverBackendFactory.version, this._serverBackendFactory.create(), false, this._serverBackendFactory),
+        { legacy: 'reject', onerror: error => testDebug(error) },
+    );
+    this._modernHandler = toNodeHandler(handler, { onerror: error => testDebug(error) });
+  }
 
   async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
@@ -119,10 +142,11 @@ class SessionStore {
     await transport.handleRequest(req, res);
   }
 
-  // Peeks at the JSON-RPC body once to route it: `initialize` (also inside a
-  // batch) → stateful session; anything else → stateless dispatch. The
-  // already-parsed body is handed to the chosen transport so the consumed
-  // request stream is never read twice.
+  // Peeks at the JSON-RPC body once to route it: modern envelope → the
+  // 2026-07-28 handler; `initialize` (also inside a batch) → stateful
+  // session; anything else → stateless dispatch. The already-parsed body is
+  // handed to the chosen handler so the consumed request stream is never
+  // read twice.
   private async _handleSessionlessPost(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     if (!hasJsonContentType(req)) {
       // Don't consume the stream — the transport rejects the media type
@@ -139,6 +163,12 @@ class SessionStore {
       res.statusCode = 400;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error: Invalid JSON' }, id: null }));
+      return;
+    }
+    // The parsed body is passed alongside the headers-only web request, so
+    // nothing further is read from the drained node stream.
+    if (!(await isLegacyRequest(await toWebRequest(req, body), body))) {
+      await this._modernHandler(req, res, body);
       return;
     }
     const messages = Array.isArray(body) ? body : [body];

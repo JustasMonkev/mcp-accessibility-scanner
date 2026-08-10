@@ -63,6 +63,18 @@ describe('mcp http transport hardening', () => {
     expect(httpAddressToString({ address: '::', family: 'IPv6', port: 1234 })).toBe('http://[::]:1234');
   });
 
+  const probeFactory: ServerBackendFactory = {
+    ...testBackendFactory,
+    create: () => ({
+      async listTools() {
+        return [{ name: 'probe', description: 'Probe tool', inputSchema: { type: 'object' as const } }];
+      },
+      async callTool(name: string) {
+        return { content: [{ type: 'text' as const, text: `called ${name}` }] };
+      },
+    }),
+  };
+
   async function startServer(serverBackendFactory = testBackendFactory) {
     const server = await startHttpServer({ host: '127.0.0.1', port: 0 });
     servers.add(server);
@@ -380,18 +392,6 @@ describe('mcp http transport hardening', () => {
       return message.result;
     }
 
-    const probeFactory: ServerBackendFactory = {
-      ...testBackendFactory,
-      create: () => ({
-        async listTools() {
-          return [{ name: 'probe', description: 'Probe tool', inputSchema: { type: 'object' as const } }];
-        },
-        async callTool(name: string) {
-          return { content: [{ type: 'text' as const, text: `called ${name}` }] };
-        },
-      }),
-    };
-
     it('serves tools/list on a first POST without initialize', async () => {
       const { port } = await startServer(probeFactory);
 
@@ -464,6 +464,110 @@ describe('mcp http transport hardening', () => {
       } finally {
         await Context.disposeAll();
       }
+    });
+  });
+
+  // Requests carrying the 2026-07-28 per-request `_meta` envelope are served
+  // by the SDK's native modern endpoint (`createMcpHandler`), not the 2025
+  // transports: `server/discover` is answered, results are stamped with
+  // `resultType` and the SEP-2549 cache fields, and the SEP-2243 standard
+  // headers are validated. Refs #165, #166.
+  describe('MCP 2026-07-28 modern serving', () => {
+    const envelope = {
+      'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+      'io.modelcontextprotocol/clientInfo': { name: 'raw-modern', version: '1.0.0' },
+      'io.modelcontextprotocol/clientCapabilities': {},
+    };
+
+    async function modernPost(port: number, body: unknown, headers: Record<string, string> = {}) {
+      const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'accept': 'application/json, text/event-stream',
+          ...headers,
+        },
+        body: JSON.stringify(body),
+      });
+      return { statusCode: response.status, json: await response.json() as any };
+    }
+
+    it('serves a modern-mode v2 client end to end without initialize or a session', async () => {
+      const serverClosed = vi.fn();
+      const { port } = await startServer({
+        ...probeFactory,
+        create: () => ({ ...probeFactory.create(), serverClosed }),
+      });
+
+      const client = new Client({ name: 'modern-client', version: '1.0.0' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
+      const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
+      try {
+        await client.connect(transport);
+        expect(client.getProtocolEra()).toBe('modern');
+        // server/discover was answered (SDK-built from the server identity
+        // and capabilities) — a 2025-only endpoint would fail the pin.
+        expect(client.getDiscoverResult()?.supportedVersions).toContain('2026-07-28');
+
+        const tools = await client.listTools();
+        expect(tools.tools).toEqual([expect.objectContaining({ name: 'probe' })]);
+
+        const result = await client.callTool({ name: 'probe', arguments: {} });
+        expect(result.content).toEqual([{ type: 'text', text: 'called probe' }]);
+
+        // Stateless: no session id was ever minted.
+        expect(transport.sessionId).toBeUndefined();
+      } finally {
+        await client.close();
+      }
+      // Each modern request was served by a disposable per-request server
+      // whose backend was torn down once the exchange finished.
+      await vi.waitFor(() => expect(serverClosed.mock.calls.length).toBeGreaterThanOrEqual(2));
+    });
+
+    it('stamps resultType and the advertised cache hint on tools/list', async () => {
+      const { port } = await startServer({
+        ...probeFactory,
+        toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
+      });
+
+      const { statusCode, json } = await modernPost(port,
+          { jsonrpc: '2.0', id: 1, method: 'tools/list', params: { _meta: envelope } },
+          { 'Mcp-Method': 'tools/list', 'Mcp-Name': 'raw-modern' });
+
+      expect(statusCode).toBe(200);
+      expect(json.result.resultType).toBe('complete');
+      expect(json.result.ttlMs).toBe(3600000);
+      expect(json.result.cacheScope).toBe('private');
+      expect(json.result.tools).toEqual([expect.objectContaining({ name: 'probe' })]);
+    });
+
+    it('defaults to an uncacheable tools/list when no hint is configured', async () => {
+      // Backends with a runtime-mutable tool list (proxy context switch,
+      // VS Code host) advertise no hint, which must surface as ttlMs: 0.
+      const { port } = await startServer(probeFactory);
+
+      const { statusCode, json } = await modernPost(port,
+          { jsonrpc: '2.0', id: 1, method: 'tools/list', params: { _meta: envelope } },
+          { 'Mcp-Method': 'tools/list', 'Mcp-Name': 'raw-modern' });
+
+      expect(statusCode).toBe(200);
+      expect(json.result.ttlMs).toBe(0);
+      expect(json.result.cacheScope).toBe('private');
+    });
+
+    it('rejects a modern POST whose Mcp-Method header disagrees with the body', async () => {
+      const { port } = await startServer(probeFactory);
+
+      const mismatch = await modernPost(port,
+          { jsonrpc: '2.0', id: 2, method: 'tools/list', params: { _meta: envelope } },
+          { 'Mcp-Method': 'tools/call', 'Mcp-Name': 'raw-modern' });
+      expect(mismatch.statusCode).toBe(400);
+      expect(mismatch.json.error.code).toBe(-32020);
+
+      const missing = await modernPost(port,
+          { jsonrpc: '2.0', id: 3, method: 'tools/list', params: { _meta: envelope } });
+      expect(missing.statusCode).toBe(400);
+      expect(missing.json.error.code).toBe(-32020);
     });
   });
 
