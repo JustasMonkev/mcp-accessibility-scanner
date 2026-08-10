@@ -15,7 +15,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { Client } from '@modelcontextprotocol/client';
 import { ProxyBackend } from '../src/mcp/proxyBackend.js';
 
 describe('ProxyBackend', () => {
@@ -31,7 +31,7 @@ describe('ProxyBackend', () => {
     } as any]);
 
     const sendNotification = vi.fn(async () => undefined);
-    const callTool = vi.fn(async (_params: any, _schema: any, options?: { onprogress?: (params: { progress: number; total?: number; message?: string }) => void }) => {
+    const callTool = vi.fn(async (_params: any, options?: { onprogress?: (params: { progress: number; total?: number; message?: string }) => void }) => {
       options?.onprogress?.({
         progress: 1,
         total: 2,
@@ -54,7 +54,6 @@ describe('ProxyBackend', () => {
           arguments: { startUrl: 'https://example.com' },
           _meta: { progressToken: 'progress-123' },
         },
-        undefined,
         expect.objectContaining({
           onprogress: expect.any(Function),
         }),

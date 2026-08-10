@@ -15,15 +15,14 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { ErrorCode, McpError, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { Client, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/client';
 import { createServer, wrapInProcess } from '../src/mcp/server.js';
 import { InProcessTransport } from '../src/mcp/inProcessTransport.js';
 
 async function connectClient(backend: unknown) {
   const transport = await wrapInProcess(backend as any);
   const client = new Client({ name: 'test-client', version: '1.0.0' });
-  client.setRequestHandler(PingRequestSchema, () => ({}));
+  client.setRequestHandler('ping', () => ({}));
   await client.connect(transport);
   return client;
 }
@@ -31,7 +30,7 @@ async function connectClient(backend: unknown) {
 async function connectHeartbeatClient(backend: unknown, pingHandler: () => object | Promise<object>) {
   const server = createServer('Test', '1.0.0', backend as any, true);
   const client = new Client({ name: 'test-client', version: '1.0.0' });
-  client.setRequestHandler(PingRequestSchema, pingHandler);
+  client.setRequestHandler('ping', pingHandler);
   await client.connect(new InProcessTransport(server));
   return { client, server };
 }
@@ -70,14 +69,14 @@ describe('mcp server error mapping', () => {
       initialize: vi.fn(async () => undefined),
       listTools: vi.fn(async () => []),
       callTool: vi.fn(async () => {
-        throw new McpError(ErrorCode.InvalidParams, 'Tool "missing_tool" not found');
+        throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Tool "missing_tool" not found');
       }),
     };
 
     const client = await connectClient(backend);
     try {
       await expect(client.callTool({ name: 'missing_tool', arguments: {} }))
-          .rejects.toMatchObject({ code: ErrorCode.InvalidParams });
+          .rejects.toMatchObject({ code: ProtocolErrorCode.InvalidParams });
     } finally {
       await client.close();
     }
@@ -116,7 +115,7 @@ describe('mcp server error mapping', () => {
       instructions: 'Use the tools wisely.',
     });
     const client = new Client({ name: 'test-client', version: '1.0.0' });
-    client.setRequestHandler(PingRequestSchema, () => ({}));
+    client.setRequestHandler('ping', () => ({}));
     await client.connect(new InProcessTransport(server));
     try {
       expect(client.getInstructions()).toBe('Use the tools wisely.');
@@ -156,7 +155,7 @@ describe('mcp server error mapping', () => {
 
       // An MCP 2026-07-28 client no longer implements `ping`.
       const pingHandler = vi.fn(() => {
-        throw new McpError(ErrorCode.MethodNotFound, 'Method not found');
+        throw new ProtocolError(ProtocolErrorCode.MethodNotFound, 'Method not found');
       });
       const { client } = await connectHeartbeatClient(backend, pingHandler);
       try {
@@ -218,7 +217,6 @@ describe('mcp server error mapping', () => {
 
         expect(requestSpy).toHaveBeenCalledWith(
             { method: 'ping' },
-            expect.any(Object),
             expect.objectContaining({ timeout: 120000 }),
         );
       } finally {
@@ -242,7 +240,6 @@ describe('mcp server error mapping', () => {
 
         expect(requestSpy).toHaveBeenCalledWith(
             { method: 'ping' },
-            expect.any(Object),
             expect.objectContaining({ timeout: 5000 }),
         );
       } finally {

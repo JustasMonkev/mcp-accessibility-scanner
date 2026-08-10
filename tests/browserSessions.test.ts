@@ -25,7 +25,7 @@ import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
 import { SessionLog } from '../src/sessionLog.js';
 
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 
 const TTL_MS = 30 * 60 * 1000;
 

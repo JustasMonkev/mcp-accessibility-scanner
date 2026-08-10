@@ -15,11 +15,11 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { Client } from '@modelcontextprotocol/client';
 import { createServer } from '../src/mcp/server.js';
 import { InProcessTransport } from '../src/mcp/inProcessTransport.js';
 
-import type { JSONRPCMessage, JSONRPCResponse } from '@modelcontextprotocol/sdk/types.js';
+import type { JSONRPCMessage, JSONRPCResultResponse } from '@modelcontextprotocol/server';
 
 function createBackend() {
   return {
@@ -34,15 +34,15 @@ function createBackend() {
 async function startRawClient(backend: unknown) {
   const server = createServer('Test', '1.0.0', backend as any, false);
   const transport = new InProcessTransport(server);
-  const pending = new Map<number, (response: JSONRPCResponse) => void>();
+  const pending = new Map<number, (response: JSONRPCResultResponse) => void>();
   transport.onmessage = message => {
-    const response = message as JSONRPCResponse;
+    const response = message as JSONRPCResultResponse;
     if (response.id !== undefined)
       pending.get(response.id as number)?.(response);
   };
   await transport.start();
   const sendRequest = (id: number, method: string, params?: Record<string, unknown>) => {
-    const response = new Promise<JSONRPCResponse>(resolve => pending.set(id, resolve));
+    const response = new Promise<JSONRPCResultResponse>(resolve => pending.set(id, resolve));
     void transport.send({ jsonrpc: '2.0', id, method, params } as JSONRPCMessage);
     return response;
   };

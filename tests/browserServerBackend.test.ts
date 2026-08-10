@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { resolveConfig } from '../src/config.js';
 
@@ -30,7 +30,7 @@ describe('BrowserServerBackend.callTool', () => {
     const config = await resolveConfig({});
     const backend = new BrowserServerBackend(config, unusedFactory);
     await expect(backend.callTool('does_not_exist', {}))
-        .rejects.toMatchObject({ code: ErrorCode.InvalidParams });
+        .rejects.toMatchObject({ code: ProtocolErrorCode.InvalidParams });
   });
 
   it('reports invalid tool input as a readable execution error', async () => {

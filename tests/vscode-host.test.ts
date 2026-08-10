@@ -15,7 +15,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { Client } from '@modelcontextprotocol/client';
 import { VSCodeProxyBackend } from '../src/vscode/host.js';
 
 describe('VSCodeProxyBackend', () => {

@@ -15,8 +15,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { Client } from '@modelcontextprotocol/client';
 import { wrapInProcess } from '../src/mcp/server.js';
 
 describe('mcp server progress plumbing', () => {
@@ -42,7 +41,7 @@ describe('mcp server progress plumbing', () => {
 
     const transport = await wrapInProcess(backend as any);
     const client = new Client({ name: 'test-client', version: '1.0.0' });
-    client.setRequestHandler(PingRequestSchema, () => ({}));
+    client.setRequestHandler('ping', () => ({}));
     await client.connect(transport);
 
     try {
@@ -50,7 +49,7 @@ describe('mcp server progress plumbing', () => {
       const result = await client.callTool({
         name: 'audit_site',
         arguments: {},
-      }, undefined, { onprogress });
+      }, { onprogress });
 
       expect(result.isError).not.toBe(true);
       expect(backend.callTool).toHaveBeenCalledTimes(1);
