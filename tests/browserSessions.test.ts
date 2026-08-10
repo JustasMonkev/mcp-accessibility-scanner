@@ -20,7 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
-import { browserSessionTtlMs } from '../src/browserSessions.js';
+import { BrowserSessionRegistry, browserSessionTtlMs } from '../src/browserSessions.js';
 import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
 import { SessionLog } from '../src/sessionLog.js';
@@ -141,6 +141,37 @@ describe('browser sessions', () => {
 
     await backend.callTool('browser_tabs', { action: 'list' });
     expect(createContext.mock.calls[1][3]?.browserSession).toBeFalsy();
+  });
+
+  it('mints sessions with the opening backend\'s identity, not the last initializer\'s', async () => {
+    // A shared registry serves several live backends at once (stateful HTTP
+    // sessions, stateless per-request backends). A registry-wide rebindable
+    // context constructor made browser_session_open from client A create its
+    // Context with whichever backend initialized last — the wrong clientInfo
+    // (CDP User-Agent) and SessionLog folder.
+    const { factory, createContext } = makeFactory();
+    const config = await resolveConfig({});
+    const registry = new BrowserSessionRegistry();
+    const makeSharedBackend = async (clientName: string) => {
+      const backend = new BrowserServerBackend(config, factory, registry);
+      await backend.initialize(
+          { notifyToolListChanged: async () => {} } as any,
+          { name: clientName, version: '1.0.0' },
+      );
+      return backend;
+    };
+    const backendA = await makeSharedBackend('client-a');
+    // Client B initializes AFTER A; its identity must not leak into A's sessions.
+    const backendB = await makeSharedBackend('client-b');
+
+    const id = await openSession(backendA);
+    await backendA.callTool('browser_tabs', { action: 'list', browserSessionId: id });
+    expect(createContext.mock.calls[0][0]).toMatchObject({ name: 'client-a' });
+
+    // And B's own sessions keep B's identity.
+    const idB = await openSession(backendB);
+    await backendB.callTool('browser_tabs', { action: 'list', browserSessionId: idB });
+    expect(createContext.mock.calls[1][0]).toMatchObject({ name: 'client-b' });
   });
 
   it('refuses to open a session when the factory cannot mint separate contexts', async () => {

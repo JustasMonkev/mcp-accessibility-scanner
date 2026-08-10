@@ -53,28 +53,34 @@ export class BrowserServerBackend implements ServerBackend {
 
   async initialize(_context: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion): Promise<void> {
     this._sessionLog = this._config.saveSession ? await SessionLog.create(this._config) : undefined;
-    const createContext = (browserSession?: boolean) => new Context({
+    // A registry shared across the backends of one server factory (stateless
+    // HTTP creates a fresh backend per request, and a handle minted in one
+    // request must resolve in the next) outlives this backend; an owned one
+    // is disposed with it in serverClosed().
+    const registry = this._sharedSessionRegistry ?? new BrowserSessionRegistry();
+    this._sessionRegistry = registry;
+    // Registry contexts are flagged as explicit sessions so the factory can
+    // give each its own browser context (e.g. a disposable persistent
+    // profile); the default context keeps today's behavior. Factories that
+    // cannot separate contexts veto browser_session_open via their reason.
+    // The context constructor is handed to the registry per open() call —
+    // through this backend's own broker slice — never bound registry-wide: a
+    // shared registry serves several live backends at once, and a global
+    // rebind would mint sessions with whichever backend initialized last,
+    // leaking that client's identity (clientInfo, SessionLog) into sessions
+    // other clients open.
+    const createContext = (browserSession?: boolean): Context => new Context({
       tools: this._tools,
       config: this._config,
       browserContextFactory: this._browserContextFactory,
       sessionLog: this._sessionLog,
       clientInfo: { ...clientVersion },
-      browserSessions: this._sessionRegistry,
+      browserSessions: {
+        open: () => registry.open(() => createContext(true), this._browserContextFactory.sessionsUnsupportedReason),
+        close: id => registry.close(id),
+      },
       browserSession,
     });
-    // Registry contexts are flagged as explicit sessions so the factory can
-    // give each its own browser context (e.g. a disposable persistent
-    // profile); the default context keeps today's behavior. Factories that
-    // cannot separate contexts veto browser_session_open via their reason.
-    // A registry shared across the backends of one server factory (stateless
-    // HTTP creates a fresh backend per request, and a handle minted in one
-    // request must resolve in the next) is rebound instead of replaced.
-    if (this._sharedSessionRegistry) {
-      this._sharedSessionRegistry.bind(() => createContext(true), this._browserContextFactory.sessionsUnsupportedReason);
-      this._sessionRegistry = this._sharedSessionRegistry;
-    } else {
-      this._sessionRegistry = new BrowserSessionRegistry(() => createContext(true), undefined, this._browserContextFactory.sessionsUnsupportedReason);
-    }
     this._context = createContext();
   }
 

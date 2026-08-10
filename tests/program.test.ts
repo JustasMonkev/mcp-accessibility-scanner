@@ -124,6 +124,72 @@ describe('CLI command dispatch contract', () => {
     });
   });
 
+  describe('browser session handles across handshake-free requests in proxy modes', () => {
+    // Each handshake-free POST builds a fresh proxy backend with a fresh
+    // inner BrowserServerBackend. With a request-local registry, the handle
+    // minted by the first POST was unknown to the second one (and disposed
+    // when its response closed); the registry must be process-scoped, exactly
+    // like the direct startMCPServer path.
+    async function startServer(args: string[]) {
+      const child = spawn(process.execPath, [...cliArgs, ...args, '--port', '0'], { stdio: 'pipe' });
+      let stderr = '';
+      const url = await new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`server did not start:\n${stderr}`)), 25_000);
+        child.stderr.on('data', (data: Buffer) => {
+          stderr += data.toString();
+          const match = stderr.match(/Listening on (http:\S+)/);
+          if (match) {
+            clearTimeout(timer);
+            resolve(match[1]);
+          }
+        });
+        child.on('close', () => {
+          clearTimeout(timer);
+          reject(new Error(`server exited early:\n${stderr}`));
+        });
+      });
+      return { child, url };
+    }
+
+    async function callTool(url: string, id: number, name: string, args: Record<string, unknown>) {
+      const response = await fetch(`${url}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'accept': 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }),
+      });
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      const messages = response.headers.get('content-type')?.includes('application/json')
+        ? [JSON.parse(text)]
+        : text.split('\n\n')
+            .map(chunk => chunk.split('\n').filter(line => line.startsWith('data: ')).map(line => line.slice('data: '.length)).join(''))
+            .filter(Boolean)
+            .map(data => JSON.parse(data));
+      const message = messages.find(m => m.id === id);
+      expect(message?.error).toBeUndefined();
+      expect(message?.result).toBeDefined();
+      return message.result;
+    }
+
+    for (const mode of ['--connect-tool', '--vscode']) {
+      it(`${mode} resolves a handle minted in an earlier handshake-free POST`, async () => {
+        const { child, url } = await startServer([mode]);
+        try {
+          const openResult = await callTool(url, 1, 'browser_session_open', {});
+          expect(openResult.isError).not.toBe(true);
+          const browserSessionId = JSON.stringify(openResult).match(/bs_[0-9a-f-]+/)?.[0];
+          expect(browserSessionId).toBeTruthy();
+
+          const closeResult = await callTool(url, 2, 'browser_session_close', { browserSessionId });
+          expect(closeResult.isError).not.toBe(true);
+          expect(JSON.stringify(closeResult.content)).toContain(browserSessionId);
+        } finally {
+          child.kill('SIGTERM');
+        }
+      });
+    }
+  });
+
   describe('subcommand --help flags', () => {
     it('list-tools accepts --help', () => {
       const output = runCLI('list-tools --help');

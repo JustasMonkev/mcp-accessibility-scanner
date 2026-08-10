@@ -67,46 +67,33 @@ type SessionEntry = {
  * tool is running (a long `audit_site` crawl must not be reaped mid-run); the
  * reaper timer is unref'ed so it never keeps the process alive. Refs #167.
  */
-export class BrowserSessionRegistry implements BrowserSessionBroker {
+export class BrowserSessionRegistry {
   private _sessions = new Map<string, SessionEntry>();
-  private _createContext: (() => Context) | undefined;
   private _ttlMs: number;
   private _reaper: NodeJS.Timeout | undefined;
-  private _sessionsUnsupportedReason: string | undefined;
 
-  constructor(createContext?: () => Context, ttlMs: number = browserSessionTtlMs(), sessionsUnsupportedReason?: string) {
-    this._createContext = createContext;
+  constructor(ttlMs: number = browserSessionTtlMs()) {
     this._ttlMs = ttlMs;
-    this._sessionsUnsupportedReason = sessionsUnsupportedReason;
   }
 
   /**
-   * (Re)binds how new session contexts are created. A registry shared across
-   * backend instances (one per ServerBackendFactory — the stateless HTTP path
-   * creates a fresh backend per request) is constructed unbound and bound by
-   * each backend's initialize(); the backends of one factory are built from
-   * the same config and browser-context factory, so the latest binding is
-   * equivalent to any earlier one. Existing sessions keep the context they
-   * were created with — only future open() calls use the new binding.
+   * Mints a handle for a Context built by `createContext` — supplied per call,
+   * never stored: a registry shared across backend instances (stateful HTTP
+   * sessions, and the stateless HTTP path's fresh backend per request) serves
+   * several live backends at once, and a registry-wide rebindable constructor
+   * would mint every new session with the LAST initializer's identity — its
+   * clientInfo (CDP User-Agent) and SessionLog (recorder entries in the wrong
+   * session folder) — regardless of which client asked.
    */
-  bind(createContext: () => Context, sessionsUnsupportedReason: string | undefined): void {
-    this._createContext = createContext;
-    this._sessionsUnsupportedReason = sessionsUnsupportedReason;
-  }
-
-  open(): string {
+  open(createContext: () => Context, sessionsUnsupportedReason?: string): string {
     // Modes whose factory hands every Context the same live browser context
     // (non-isolated CDP attach, extension, VS Code, custom getters) are
     // refused up front: a handle here would claim a separation that does not
     // exist — two "sessions" sharing tabs, cookies and storage.
-    if (this._sessionsUnsupportedReason)
-      throw new Error(`Cannot open a separate browser session: ${this._sessionsUnsupportedReason}`);
-    // Unreachable in practice: open() runs through a backend's callTool, and
-    // every backend binds the registry during its initialize().
-    if (!this._createContext)
-      throw new Error('Cannot open a browser session: the registry is not bound to a server backend yet.');
+    if (sessionsUnsupportedReason)
+      throw new Error(`Cannot open a separate browser session: ${sessionsUnsupportedReason}`);
     const id = `bs_${crypto.randomUUID()}`;
-    this._sessions.set(id, { context: this._createContext(), lastUsedAt: Date.now() });
+    this._sessions.set(id, { context: createContext(), lastUsedAt: Date.now() });
     this._ensureReaper();
     return id;
   }

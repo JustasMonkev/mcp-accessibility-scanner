@@ -28,6 +28,7 @@ import { packageJSON } from '../utils/package.js';
 
 import type { FullConfig } from '../config.js';
 import { BrowserServerBackend } from '../browserServerBackend.js';
+import { BrowserSessionRegistry } from '../browserSessions.js';
 import { assertStorageStateDoesNotResetUserProfile, contextFactory } from '../browserContextFactory.js';
 import { vscodeProfileConflictRemedy } from './browserContextFactory.js';
 import type { Transport } from '@modelcontextprotocol/client';
@@ -160,11 +161,19 @@ export class VSCodeProxyBackend implements ServerBackend {
 }
 
 export async function runVSCodeTools(config: FullConfig) {
+  // Both process-scoped, mirroring the direct factories in program.ts: over
+  // stateless HTTP each handshake-free POST builds a fresh proxy whose
+  // default transport creates a fresh inner backend, and a browserSessionId
+  // minted in one request must resolve in the next instead of being disposed
+  // when the response closes. Hoisting the context factory also lets those
+  // inner backends share one launched browser instead of one per request.
+  const browserContextFactory = contextFactory(config);
+  const sessionRegistry = new BrowserSessionRegistry();
   const serverBackendFactory: mcpServer.ServerBackendFactory = {
     name: 'Playwright w/ vscode',
     nameInConfig: 'playwright-vscode',
     version: packageJSON.version,
-    create: () => new VSCodeProxyBackend(config, () => mcpServer.wrapInProcess(new BrowserServerBackend(config, contextFactory(config))))
+    create: () => new VSCodeProxyBackend(config, () => mcpServer.wrapInProcess(new BrowserServerBackend(config, browserContextFactory, sessionRegistry)))
   };
   await mcpServer.start(serverBackendFactory, config.server);
   return;
