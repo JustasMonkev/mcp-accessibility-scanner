@@ -45,7 +45,7 @@
 	},
 	"dependencies": {
 		"@cfworker/json-schema": "^4.1.1",
-		"@modelcontextprotocol/sdk": "^1.29.0",
+		"@modelcontextprotocol/sdk": "^1.30.0",
 		"axe-core": "4.12.1",
 		"commander": "^15.0.0",
 		"debug": "^4.4.3",
@@ -54,7 +54,7 @@
 		"playwright": "1.62.1",
 		"playwright-core": "1.62.1",
 		"re2": "^1.24.1",
-		"ws": "^8.21.1",
+		"ws": "^8.21.3",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
