@@ -85,7 +85,7 @@ describe('mcp http transport hardening', () => {
     return { server, port: address.port };
   }
 
-  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string, sessionId?: string, accept?: string, body?: string }) {
+  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string, sessionId?: string, accept?: string, body?: string, contentLength?: number }) {
     const response = await new Promise<{ statusCode: number, headers: http.IncomingHttpHeaders, body: string }>((resolve, reject) => {
       const req = http.request({
         host: '127.0.0.1',
@@ -98,6 +98,7 @@ describe('mcp http transport hardening', () => {
           ...(options?.sessionId ? { 'mcp-session-id': options.sessionId } : {}),
           ...(options?.accept ? { accept: options.accept } : {}),
           ...(options?.body ? { 'content-type': 'application/json' } : {}),
+          ...(options?.contentLength !== undefined ? { 'content-length': String(options.contentLength) } : {}),
         },
       }, res => {
         const chunks: Buffer[] = [];
@@ -416,6 +417,81 @@ describe('mcp http transport hardening', () => {
       const result = resultOf(response, 7);
       expect(result.content).toEqual([{ type: 'text', text: 'called probe' }]);
       expect(response.headers['mcp-session-id']).toBeUndefined();
+    });
+
+    it('answers malformed JSON with the SDK parse-error response', async () => {
+      const { port } = await startServer(probeFactory);
+
+      const response = await sendRequest(port, {
+        method: 'POST',
+        hostHeader: `127.0.0.1:${port}`,
+        accept: 'application/json, text/event-stream',
+        body: '{ not json',
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body)).toMatchObject({ error: { code: -32700 } });
+    });
+
+    it('rejects oversized bodies with 413 before buffering them', async () => {
+      // readJsonBody buffers sessionless JSON POSTs in user land, so it must
+      // enforce the message-size cap itself: without one, a single large (or
+      // slow) request holds arbitrary memory, multiplied by concurrency.
+      const { port } = await startServer(probeFactory);
+
+      const response = await new Promise<{ statusCode: number, body: string }>((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1',
+          port,
+          path: '/mcp',
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'accept': 'application/json, text/event-stream' },
+        }, res => {
+          const chunks: Buffer[] = [];
+          res.on('data', chunk => chunks.push(chunk));
+          const settle = () => resolve({ statusCode: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') });
+          res.on('end', settle);
+          res.on('close', settle);
+        });
+        // The server destroys the request at the cap, so the client may see
+        // EPIPE/ECONNRESET while still uploading — after the 413 arrived.
+        // Promise settle-once semantics ignore the late rejection.
+        req.on('error', reject);
+        // Stream 11 MB chunked (no Content-Length) to exercise the byte
+        // counter, not the header short-circuit.
+        const filler = Buffer.alloc(64 * 1024, 'a');
+        let sent = 0;
+        req.write('{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"pad":"');
+        const pump = () => {
+          while (sent < 11 * 1024 * 1024) {
+            sent += filler.length;
+            if (!req.write(filler)) {
+              req.once('drain', pump);
+              return;
+            }
+          }
+          req.end('"}');
+        };
+        pump();
+      });
+
+      expect(response.statusCode).toBe(413);
+      expect(JSON.parse(response.body)).toMatchObject({ error: { code: -32600 } });
+    });
+
+    it('rejects a declared oversize from its Content-Length without reading the body', async () => {
+      const { port } = await startServer(probeFactory);
+
+      const response = await sendRequest(port, {
+        method: 'POST',
+        hostHeader: `127.0.0.1:${port}`,
+        accept: 'application/json, text/event-stream',
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+        contentLength: 11 * 1024 * 1024,
+      });
+
+      expect(response.statusCode).toBe(413);
+      expect(JSON.parse(response.body)).toMatchObject({ error: { code: -32600 } });
     });
 
     it('serves handshake-free requests with the factory\'s stateless backend variant', async () => {

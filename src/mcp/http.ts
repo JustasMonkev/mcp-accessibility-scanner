@@ -21,7 +21,7 @@ import crypto from 'node:crypto';
 
 import debug from 'debug';
 
-import { createMcpHandler, isInitializeRequest, isLegacyRequest } from '@modelcontextprotocol/server';
+import { createMcpHandler, isInitializeRequest, isLegacyRequest, STDIO_DEFAULT_MAX_BUFFER_SIZE } from '@modelcontextprotocol/server';
 import { NodeStreamableHTTPServerTransport, toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
 import * as mcpServer from './server.js';
 
@@ -167,7 +167,17 @@ class SessionStore {
     let body: unknown;
     try {
       body = await readJsonBody(req);
-    } catch {
+    } catch (error) {
+      if (error instanceof BodyTooLargeError) {
+        // The cap tripped before the body was buffered; the request stream is
+        // already destroyed, so close the connection instead of draining the
+        // rest of the upload.
+        res.statusCode = 413;
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Connection', 'close');
+        res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32600, message: `Request body exceeded maximum size of ${maxJsonBodyBytes} bytes` }, id: null }));
+        return;
+      }
       // The stream is consumed, so the transport could no longer produce its
       // own parse error; mirror the SDK's response exactly.
       res.statusCode = 400;
@@ -238,10 +248,34 @@ function hasJsonContentType(req: http.IncomingMessage): boolean {
   return contentType.split(';')[0].trim().toLowerCase() === 'application/json';
 }
 
+// Sessionless JSON POSTs are buffered here in user land (the parsed body is
+// handed to the SDK), so this reader owns the message-size cap the SDK
+// transports apply to the streams they read themselves. The value matches the
+// SDK's own per-message transport limit (10 MB).
+const maxJsonBodyBytes = STDIO_DEFAULT_MAX_BUFFER_SIZE;
+
+class BodyTooLargeError extends Error {
+  constructor() {
+    super(`Request body exceeded maximum size of ${maxJsonBodyBytes} bytes`);
+  }
+}
+
 async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
+  // A declared oversize is rejected before reading a single chunk.
+  if (Number(req.headers['content-length']) > maxJsonBodyBytes)
+    throw new BodyTooLargeError();
   const chunks: Buffer[] = [];
-  for await (const chunk of req)
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.length;
+    // Thrown mid-iteration this destroys the request stream, so reading
+    // stops at the cap instead of draining an arbitrarily large upload;
+    // the 413 response still goes out on the not-yet-destroyed response.
+    if (totalBytes > maxJsonBodyBytes)
+      throw new BodyTooLargeError();
+    chunks.push(buffer);
+  }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 

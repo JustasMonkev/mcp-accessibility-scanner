@@ -38,7 +38,7 @@ export class BrowserServerBackend implements ServerBackend {
   private _mcpTools: mcpServer.Tool[] | undefined;
   private _context: Context | undefined;
   private _sessionRegistry: BrowserSessionRegistry | undefined;
-  private _sessionLog: SessionLog | undefined;
+  private _sessionLog: Promise<SessionLog | undefined> | undefined;
   private _config: FullConfig;
   private _browserContextFactory: BrowserContextFactory;
   private _sharedSessionRegistry: BrowserSessionRegistry | undefined;
@@ -67,7 +67,6 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   async initialize(_context: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion): Promise<void> {
-    this._sessionLog = this._config.saveSession ? await SessionLog.create(this._config) : undefined;
     // A registry shared across the backends of one server factory (stateless
     // HTTP creates a fresh backend per request, and a handle minted in one
     // request must resolve in the next) outlives this backend; an owned one
@@ -88,7 +87,7 @@ export class BrowserServerBackend implements ServerBackend {
       tools: this._tools,
       config: this._config,
       browserContextFactory: this._browserContextFactory,
-      sessionLog: this._sessionLog,
+      sessionLog: () => this._ensureSessionLog(),
       clientInfo: { ...clientVersion },
       browserSessions: {
         open: () => registry.open(() => createContext(true), this._browserContextFactory.sessionsUnsupportedReason),
@@ -97,6 +96,21 @@ export class BrowserServerBackend implements ServerBackend {
       browserSession,
     });
     this._context = createContext(this._ephemeralDefaultContext || undefined);
+  }
+
+  /**
+   * Creates the `--save-session` log on first demand, once per backend.
+   * Eager creation at initialize() littered the output directory over
+   * stateless HTTP, where every request builds a fresh backend: a tools/list
+   * or a call routed to an existing browser session minted (and announced)
+   * an empty session-* folder per request. The default context and every
+   * session this backend opens share this one lazy log — via the supplier
+   * handed to createContext above — so recorder entries and tool responses
+   * land in the same folder regardless of which context launches first.
+   */
+  private _ensureSessionLog(): Promise<SessionLog | undefined> {
+    this._sessionLog ??= this._config.saveSession ? SessionLog.create(this._config) : Promise.resolve(undefined);
+    return this._sessionLog;
   }
 
   async listTools(): Promise<mcpServer.Tool[]> {
@@ -155,7 +169,12 @@ export class BrowserServerBackend implements ServerBackend {
     try {
       await tool.handle(context, parsedArguments, response);
       await response.finish();
-      this._sessionLog?.logResponse(response);
+      // A routed call belongs to the session's own log — captured from the
+      // backend that opened it, which over stateless HTTP is not this one. A
+      // default-context call is a real use of THIS backend, so it may create
+      // the backend's log on first demand.
+      const sessionLog = routedSessionId !== undefined ? context.sessionLog : await this._ensureSessionLog();
+      sessionLog?.logResponse(response);
     } catch (error: any) {
       response.addError(String(error));
     } finally {
