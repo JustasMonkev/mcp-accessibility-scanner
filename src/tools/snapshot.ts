@@ -22,7 +22,7 @@ import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
 import { axeRuleSchemaShape, axeScopeSchemaShape, axeTagValues, dedupeAxeNodes, defaultAxeTags, prepareAxeResults, runAxeScan, unscannedFrameLines } from './axe.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
-import { sanitizeForFilePath } from '../utils/fileUtils.js';
+import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 
 import type { AxeViolation } from './axe.js';
 import type { Response } from '../response.js';
@@ -144,9 +144,6 @@ function nodeCountSuffix(shown: number, total: number): string {
   return shown < total ? ` (showing ${shown} of ${total} nodes, raise maxNodesPerViolation for the rest)` : '';
 }
 
-function safeIsoTimestampForFileName() {
-  return sanitizeForFilePath(new Date().toISOString());
-}
 
 /**
  * Draws a labelled outline over every violating element, screenshots the page,

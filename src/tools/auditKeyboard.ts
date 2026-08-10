@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
-import { sanitizeForFilePath } from '../utils/fileUtils.js';
+import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
 
 type PressableKey = 'Tab' | 'Shift+Tab' | 'Enter';
 
@@ -191,9 +191,6 @@ function didUrlHashChange(urlBefore: string | null, urlAfter: string | null): bo
   }
 }
 
-function safeIsoTimestampForFileName() {
-  return sanitizeForFilePath(new Date().toISOString());
-}
 
 async function maybeCaptureIssueScreenshot(
   options: KeyboardAuditOptions,

@@ -17,6 +17,8 @@
 import os from 'node:os';
 import path from 'node:path';
 
+import { createShortGuid } from './guid.js';
+
 export function cacheDir() {
   let cacheDirectory: string;
   if (process.platform === 'linux')
@@ -36,4 +38,16 @@ export function sanitizeForFilePath(s: string) {
   if (separator === -1)
     return sanitize(s);
   return sanitize(s.substring(0, separator)) + '.' + sanitize(s.substring(separator + 1));
+}
+
+/**
+ * Timestamp fragment for DEFAULT artifact file names (screenshots, PDFs,
+ * reports). Carries a short random token besides the sanitized ISO timestamp:
+ * concurrent sessions (or overlapping calls) share one output directory, and
+ * a timestamp alone let two artifacts produced in the same millisecond
+ * overwrite each other. User-specified file names are never routed through
+ * this helper.
+ */
+export function safeIsoTimestampForFileName(): string {
+  return `${sanitizeForFilePath(new Date().toISOString())}-${createShortGuid()}`;
 }

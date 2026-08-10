@@ -329,7 +329,7 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 - `annotateScreenshot` (default `false`): capture an annotated screenshot of the violations
 
 **Annotated screenshots:**
-When `annotateScreenshot` is `true`, each violating element is outlined and labelled with the rule ids it failed, a full-page PNG is written to the MCP output directory (`scan-page-annotated-{timestamp}.png`) and returned as a resource link, and the markers are then removed so the page is left exactly as it was. The markers are drawn in an out-of-flow overlay clipped to each element's own box, so they never reflow the page. The overlay uses a fresh id per scan, is placed in the browser's top layer so it stays visible over an open dialog, popover or fullscreen element, and compensates for a CSS `zoom` or a scaled ancestor so markers line up with what is rendered.
+When `annotateScreenshot` is `true`, each violating element is outlined and labelled with the rule ids it failed, a full-page PNG is written to the MCP output directory (`scan-page-annotated-{timestamp}-{token}.png`) and returned as a resource link, and the markers are then removed so the page is left exactly as it was. The markers are drawn in an out-of-flow overlay clipped to each element's own box, so they never reflow the page. The overlay uses a fresh id per scan, is placed in the browser's top layer so it stays visible over an open dialog, popover or fullscreen element, and compensates for a CSS `zoom` or a scaled ancestor so markers line up with what is rendered.
 An element that fails several rules gets one box listing every rule id, and elements inside open shadow roots are marked by walking the shadow path Axe reports.
 Running animations are paused before the elements are measured and resumed after the capture, so a moving target keeps its marker. The markers themselves live in a shadow root under an overlay whose own styles are `!important`, so page CSS cannot restyle or hide what the report counts, and each rule label sits outside the clipped box so it stays readable on an element smaller than its own label.
 At most 50 elements are annotated per scan. The result text always reports how many nodes were marked out of the total, plus how many were left out because they exceeded the limit, were hidden, zero-size or off-canvas (a full-page screenshot is clipped to the document box), or were inside an iframe (cross-frame selectors cannot be resolved from the top document).
@@ -380,7 +380,7 @@ A frame you scoped out yourself is not reported: with `excludeSelectors: ["ifram
 Crawls and scans multiple internal pages, then aggregates violations across the site.
 - Default strategy: link-based BFS from the current URL
 - Supports `links`, `nav`, `sitemap`, and `provided` URL strategies
-- Always writes a JSON report (default filename: `audit-site-{timestamp}.json`)
+- Always writes a JSON report (default filename: `audit-site-{timestamp}-{token}.json`)
 - Warns and records `sessionLosses` if the crawl loses cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 
 **Example flow:**
@@ -394,7 +394,7 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 Runs Axe scans on the same page across viewport/media/zoom variants and compares deltas against baseline.
 - Default variants: baseline, mobile, desktop, forced-colors, reduced-motion, zoom-200
 - Supports custom variants and optional reload between variants
-- Always writes a JSON report (default filename: `scan-matrix-{timestamp}.json`)
+- Always writes a JSON report (default filename: `scan-matrix-{timestamp}-{token}.json`)
 - JSON report and structured result schema `v2` set baseline deltas to `null` when either scan left frames unscanned, because their coverage is not comparable
 
 **Example flow:**
@@ -410,7 +410,7 @@ Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) wit
 - Checks target size against WCAG 2.2 SC 2.5.8 (`checkTargetSize`, default on)
 - Checks that focus is not entirely obscured, WCAG 2.2 SC 2.4.11 (`checkFocusObscured`, default on)
 - Optional issue screenshots (`screenshotOnIssue`)
-- Always writes a JSON report (default filename: `audit-keyboard-{timestamp}.json`)
+- Always writes a JSON report (default filename: `audit-keyboard-{timestamp}-{token}.json`)
 
 **Limits of the WCAG 2.2 checks** — these are heuristics, not a conformance verdict:
 - Target size only inspects elements the tab order actually reaches, so pointer-only targets are never measured.
@@ -462,7 +462,7 @@ Audits what a screen reader actually announces, using the browser's own accessib
 - Findings for names overlap with axe rules such as `link-name`, `button-name` and `image-alt`; this tool adds the quality checks (generic names, file names, label-in-name, duplicates) that axe cannot make.
 - It reports the page as currently rendered. Content behind a collapsed panel or another viewport is judged in that state.
 
-**Bounds:** `maxElements` (default 400) caps how many *screen-reader-reachable* accessibility tree elements are analyzed. The snapshot also refs `aria-hidden` subtrees, which no check reports, so measuring continues past them until the budget is filled with reachable elements (up to a hard ceiling of twice `maxElements` measured, so a page built mostly of hidden refs stays bounded). `maxFindingsPerCheck` (default 20) caps the findings listed per check. Both truncations are stated in the summary and the JSON report, and the full counts are always reported. Always writes a JSON report (default filename: `audit-screen-reader-{timestamp}.json`).
+**Bounds:** `maxElements` (default 400) caps how many *screen-reader-reachable* accessibility tree elements are analyzed. The snapshot also refs `aria-hidden` subtrees, which no check reports, so measuring continues past them until the budget is filled with reachable elements (up to a hard ceiling of twice `maxElements` measured, so a page built mostly of hidden refs stays bounded). `maxFindingsPerCheck` (default 20) caps the findings listed per check. Both truncations are stated in the summary and the JSON report, and the full counts are always reported. Always writes a JSON report (default filename: `audit-screen-reader-{timestamp}-{token}.json`).
 
 **Example flow:**
 ```text
@@ -554,7 +554,7 @@ Take a screenshot of the current page.
 
 #### `browser_pdf_save`
 Save page as PDF.
-- Parameters: `filename` (optional, defaults to `page-{timestamp}.pdf`)
+- Parameters: `filename` (optional, defaults to `page-{timestamp}-{token}.pdf`)
 
 This tool requires `--caps pdf` in the CLI.
 
