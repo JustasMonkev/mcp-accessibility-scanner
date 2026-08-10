@@ -22,6 +22,7 @@ import crypto from 'node:crypto';
 import debug from 'debug';
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import * as mcpServer from './server.js';
 
 import type { ServerBackendFactory } from './server.js';
@@ -78,6 +79,14 @@ export async function installHttpTransport(httpServer: http.Server, serverBacken
 // is the only place that reads the header or tracks sessions — delete it (and
 // dispatch every request to a single stateless transport instead) as part of
 // the v2 migration. Refs #166.
+//
+// Clients on the 2026-07-28 revision never send `initialize`, so their first
+// POST is already `tools/list` or `tools/call`; the v1 stateful transport
+// rejects such a sessionless request with "Server not initialized" before the
+// server's lazy backend init (Refs #165) can run. Sessionless POSTs are
+// therefore routed on their body: an `initialize` request keeps today's v1
+// stateful session wire behavior, anything else is dispatched through the v1
+// SDK's stateless mode instead.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class SessionStore {
@@ -92,7 +101,7 @@ class SessionStore {
       return;
     }
     if (req.method === 'POST') {
-      await this._createSession(req, res);
+      await this._handleSessionlessPost(req, res);
       return;
     }
     res.statusCode = 400;
@@ -109,7 +118,57 @@ class SessionStore {
     await transport.handleRequest(req, res);
   }
 
-  private async _createSession(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  // Peeks at the JSON-RPC body once to route it: `initialize` (also inside a
+  // batch) → v1 stateful session; anything else → stateless dispatch. The
+  // already-parsed body is handed to the chosen transport so the consumed
+  // request stream is never read twice.
+  private async _handleSessionlessPost(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    if (!hasJsonContentType(req)) {
+      // Don't consume the stream — the transport rejects the media type
+      // itself (415, after its Accept check), same as before this routing.
+      await this._handleStatelessRequest(req, res, undefined);
+      return;
+    }
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      // The stream is consumed, so the transport could no longer produce its
+      // own parse error; mirror the v1 SDK's response exactly.
+      res.statusCode = 400;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error: Invalid JSON' }, id: null }));
+      return;
+    }
+    const messages = Array.isArray(body) ? body : [body];
+    if (messages.some(message => isInitializeRequest(message)))
+      await this._createSession(req, res, body);
+    else
+      await this._handleStatelessRequest(req, res, body);
+  }
+
+  // Serves one request from a client that skips the initialize handshake. The
+  // v1 SDK's stateless mode (`sessionIdGenerator: undefined`) performs no
+  // session validation but insists on a fresh transport per request, so each
+  // request gets its own transport, server and backend; the request then
+  // flows into the server's lazy ensureInitialized() path. A stateless tool
+  // call thus runs against a fresh default browser context — cross-request
+  // browser state travels via browser_session_open handles instead, whose
+  // registry the backend factory shares across the backends it creates. No
+  // heartbeat: the response stream ends with the request, so there is no
+  // long-lived connection to probe.
+  private async _handleStatelessRequest(req: http.IncomingMessage, res: http.ServerResponse, parsedBody: unknown): Promise<void> {
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    // Dispose the per-request server — and with it the backend's default
+    // context, if the request ever created one — once the response finishes
+    // or aborts. Shared state (the factory's browser-session registry and
+    // the contexts it holds) deliberately survives this close.
+    res.once('close', () => void transport.close().catch(e => testDebug(e)));
+    await mcpServer.connect(this._serverBackendFactory, transport, false);
+    await transport.handleRequest(req, res, parsedBody);
+  }
+
+  private async _createSession(req: http.IncomingMessage, res: http.ServerResponse, parsedBody: unknown): Promise<void> {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: async sessionId => {
@@ -126,8 +185,23 @@ class SessionStore {
       testDebug(`delete http session: ${transport.sessionId}`);
     };
 
-    await transport.handleRequest(req, res);
+    await transport.handleRequest(req, res, parsedBody);
   }
+}
+
+function hasJsonContentType(req: http.IncomingMessage): boolean {
+  const contentType = req.headers['content-type'];
+  if (!contentType)
+    return false;
+  // Media type only — parameters such as charset are irrelevant here.
+  return contentType.split(';')[0].trim().toLowerCase() === 'application/json';
+}
+
+async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req)
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
 // ─── End of session compatibility layer ──────────────────────────────────────

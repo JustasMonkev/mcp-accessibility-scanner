@@ -41,10 +41,12 @@ export class BrowserServerBackend implements ServerBackend {
   private _sessionLog: SessionLog | undefined;
   private _config: FullConfig;
   private _browserContextFactory: BrowserContextFactory;
+  private _sharedSessionRegistry: BrowserSessionRegistry | undefined;
 
-  constructor(config: FullConfig, factory: BrowserContextFactory) {
+  constructor(config: FullConfig, factory: BrowserContextFactory, sharedSessionRegistry?: BrowserSessionRegistry) {
     this._config = config;
     this._browserContextFactory = factory;
+    this._sharedSessionRegistry = sharedSessionRegistry;
     this._tools = filteredTools(config);
     this._toolsByName = new Map(this._tools.map(tool => [tool.schema.name, tool]));
   }
@@ -64,7 +66,15 @@ export class BrowserServerBackend implements ServerBackend {
     // give each its own browser context (e.g. a disposable persistent
     // profile); the default context keeps today's behavior. Factories that
     // cannot separate contexts veto browser_session_open via their reason.
-    this._sessionRegistry = new BrowserSessionRegistry(() => createContext(true), undefined, this._browserContextFactory.sessionsUnsupportedReason);
+    // A registry shared across the backends of one server factory (stateless
+    // HTTP creates a fresh backend per request, and a handle minted in one
+    // request must resolve in the next) is rebound instead of replaced.
+    if (this._sharedSessionRegistry) {
+      this._sharedSessionRegistry.bind(() => createContext(true), this._browserContextFactory.sessionsUnsupportedReason);
+      this._sessionRegistry = this._sharedSessionRegistry;
+    } else {
+      this._sessionRegistry = new BrowserSessionRegistry(() => createContext(true), undefined, this._browserContextFactory.sessionsUnsupportedReason);
+    }
     this._context = createContext();
   }
 
@@ -158,7 +168,13 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   serverClosed() {
-    void this._sessionRegistry?.disposeAll().catch(logUnhandledError);
+    // A shared registry outlives any one backend — over stateless HTTP the
+    // per-request server closes after every response, and disposing the
+    // registry with it would kill the very sessions the handles exist for.
+    // Its sessions are reaped by their idle TTL, closed explicitly, or
+    // disposed at process exit; only an owned registry is disposed here.
+    if (this._sessionRegistry && this._sessionRegistry !== this._sharedSessionRegistry)
+      void this._sessionRegistry.disposeAll().catch(logUnhandledError);
     void this._context?.dispose().catch(logUnhandledError);
   }
 }

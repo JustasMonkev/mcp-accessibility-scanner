@@ -236,6 +236,10 @@ Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-a
 
 When the server runs with `--port`, it sends MCP heartbeat pings for Streamable HTTP sessions. Set `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` to override the default `5000` ms timeout. Set it to `0` or any negative value to disable heartbeat pings for clients or proxies that do not answer server-initiated pings. A client that answers `ping` with a JSON-RPC "method not found" error (as clients on the MCP 2026-07-28 revision do) is treated as alive: the server stops heartbeating that session instead of closing it. Only an unanswered ping (timeout) or a transport failure closes the session.
 
+#### Clients without the initialize handshake
+
+Clients on the MCP 2026-07-28 revision no longer send the `initialize` handshake; their first HTTP POST is already `tools/list` or `tools/call`. With `--port`, such handshake-free requests are served statelessly: each request runs against a fresh default browser session and receives no heartbeat pings. Browser state that must persist across handshake-free requests belongs in an explicit browser session — a `browserSessionId` handle minted by `browser_session_open` in one request resolves in later ones (see [Browser Session Tools](#browser-session-tools)). Clients that do send `initialize` keep the classic `Mcp-Session-Id` session behavior unchanged.
+
 ## Auditing pages behind a login
 
 Most real audits target pages that only exist for a signed-in user. There are two ways to get there.

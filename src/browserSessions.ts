@@ -69,14 +69,28 @@ type SessionEntry = {
  */
 export class BrowserSessionRegistry implements BrowserSessionBroker {
   private _sessions = new Map<string, SessionEntry>();
-  private _createContext: () => Context;
+  private _createContext: (() => Context) | undefined;
   private _ttlMs: number;
   private _reaper: NodeJS.Timeout | undefined;
   private _sessionsUnsupportedReason: string | undefined;
 
-  constructor(createContext: () => Context, ttlMs: number = browserSessionTtlMs(), sessionsUnsupportedReason?: string) {
+  constructor(createContext?: () => Context, ttlMs: number = browserSessionTtlMs(), sessionsUnsupportedReason?: string) {
     this._createContext = createContext;
     this._ttlMs = ttlMs;
+    this._sessionsUnsupportedReason = sessionsUnsupportedReason;
+  }
+
+  /**
+   * (Re)binds how new session contexts are created. A registry shared across
+   * backend instances (one per ServerBackendFactory — the stateless HTTP path
+   * creates a fresh backend per request) is constructed unbound and bound by
+   * each backend's initialize(); the backends of one factory are built from
+   * the same config and browser-context factory, so the latest binding is
+   * equivalent to any earlier one. Existing sessions keep the context they
+   * were created with — only future open() calls use the new binding.
+   */
+  bind(createContext: () => Context, sessionsUnsupportedReason: string | undefined): void {
+    this._createContext = createContext;
     this._sessionsUnsupportedReason = sessionsUnsupportedReason;
   }
 
@@ -87,6 +101,10 @@ export class BrowserSessionRegistry implements BrowserSessionBroker {
     // exist — two "sessions" sharing tabs, cookies and storage.
     if (this._sessionsUnsupportedReason)
       throw new Error(`Cannot open a separate browser session: ${this._sessionsUnsupportedReason}`);
+    // Unreachable in practice: open() runs through a backend's callTool, and
+    // every backend binds the registry during its initialize().
+    if (!this._createContext)
+      throw new Error('Cannot open a browser session: the registry is not bound to a server backend yet.');
     const id = `bs_${crypto.randomUUID()}`;
     this._sessions.set(id, { context: this._createContext(), lastUsedAt: Date.now() });
     this._ensureReaper();

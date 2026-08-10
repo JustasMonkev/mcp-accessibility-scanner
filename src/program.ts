@@ -24,6 +24,7 @@ import { Context } from './context.js';
 import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported, contextFactory, PersistentContextFactory, persistentProfileConflictRemedy } from './browserContextFactory.js';
 import { ProxyBackend } from './mcp/proxyBackend.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
+import { BrowserSessionRegistry } from './browserSessions.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
 import { filteredTools, serverInstructions } from './tools.js';
 import { logUnhandledError } from './utils/log.js';
@@ -62,13 +63,19 @@ async function resolveProgramContext(options: Record<string, unknown>): Promise<
 }
 
 async function startMCPServer(config: FullConfig, browserContextFactory: BrowserContextFactory) {
+  // One browser-session handle registry for every backend this factory mints:
+  // handshake-free (MCP 2026-07-28) HTTP requests are each served by a fresh
+  // backend, and a browserSessionId minted in one request must resolve in the
+  // next. Stateful (stdio and v1 HTTP session) backends share it too — handles
+  // are already opaque bearer tokens scoped to this server process.
+  const sessionRegistry = new BrowserSessionRegistry();
   const factory: mcpServer.ServerBackendFactory = {
     name: 'Playwright',
     title: 'Accessibility Scanner',
     nameInConfig: 'playwright',
     version: packageJSON.version,
     instructions: serverInstructions,
-    create: () => new BrowserServerBackend(config, browserContextFactory)
+    create: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry)
   };
   await mcpServer.start(factory, config.server);
 }
@@ -134,13 +141,17 @@ configureBaseProgram()
       const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(options);
 
       if (options.extension) {
+        // Shared for the same reason as in startMCPServer (the extension
+        // factory vetoes browser_session_open, but the veto itself must
+        // still reach handshake-free HTTP requests consistently).
+        const sessionRegistry = new BrowserSessionRegistry();
         const serverBackendFactory: mcpServer.ServerBackendFactory = {
           name: 'Playwright w/ extension',
           title: 'Accessibility Scanner (browser extension)',
           nameInConfig: 'playwright-extension',
           version: packageJSON.version,
           instructions: serverInstructions,
-          create: () => new BrowserServerBackend(config, extensionContextFactory)
+          create: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry)
         };
         await mcpServer.start(serverBackendFactory, config.server);
         return;

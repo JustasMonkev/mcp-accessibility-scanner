@@ -14,11 +14,16 @@
  * limitations under the License.
  */
 
+import { EventEmitter } from 'events';
 import http from 'http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { ListRootsRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { BrowserServerBackend } from '../src/browserServerBackend.js';
+import { BrowserSessionRegistry } from '../src/browserSessions.js';
+import { resolveConfig } from '../src/config.js';
+import { Context } from '../src/context.js';
 import { httpAddressToString, installHttpTransport, startHttpServer } from '../src/mcp/http.js';
 
 import type { ServerBackendFactory } from '../src/mcp/server.js';
@@ -336,6 +341,131 @@ describe('mcp http transport hardening', () => {
       });
       expect(afterDelete.statusCode).toBe(404);
       expect(afterDelete.body).toBe('Session not found');
+    });
+  });
+
+  // Clients on the MCP 2026-07-28 revision never send `initialize` — their
+  // first POST is already tools/list or tools/call. The v1 stateful transport
+  // would reject that with "Server not initialized", so sessionless
+  // non-initialize POSTs must be dispatched statelessly instead. Refs #166.
+  describe('handshake-free requests', () => {
+    async function postJson(port: number, message: unknown) {
+      return await sendRequest(port, {
+        method: 'POST',
+        hostHeader: `127.0.0.1:${port}`,
+        accept: 'application/json, text/event-stream',
+        body: JSON.stringify(message),
+      });
+    }
+
+    // The stateless transport answers in SSE framing by default; a direct
+    // JSON body is also accepted for robustness.
+    function jsonRpcMessages(response: { headers: http.IncomingHttpHeaders, body: string }): any[] {
+      if (response.headers['content-type']?.includes('application/json'))
+        return [JSON.parse(response.body)];
+      return response.body
+          .split('\n\n')
+          .map(chunk => chunk
+              .split('\n')
+              .filter(line => line.startsWith('data: '))
+              .map(line => line.slice('data: '.length))
+              .join(''))
+          .filter(Boolean)
+          .map(data => JSON.parse(data));
+    }
+
+    function resultOf(response: { statusCode: number, headers: http.IncomingHttpHeaders, body: string }, id: number): any {
+      expect(response.statusCode).toBe(200);
+      const message = jsonRpcMessages(response).find(m => m.id === id);
+      expect(message?.error).toBeUndefined();
+      expect(message?.result).toBeDefined();
+      return message.result;
+    }
+
+    const probeFactory: ServerBackendFactory = {
+      ...testBackendFactory,
+      create: () => ({
+        async listTools() {
+          return [{ name: 'probe', description: 'Probe tool', inputSchema: { type: 'object' as const } }];
+        },
+        async callTool(name: string) {
+          return { content: [{ type: 'text' as const, text: `called ${name}` }] };
+        },
+      }),
+    };
+
+    it('serves tools/list on a first POST without initialize', async () => {
+      const { port } = await startServer(probeFactory);
+
+      const response = await postJson(port, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+
+      const result = resultOf(response, 1);
+      expect(result.tools).toEqual([expect.objectContaining({ name: 'probe' })]);
+      // Stateless: no session is minted for handshake-free clients.
+      expect(response.headers['mcp-session-id']).toBeUndefined();
+    });
+
+    it('executes tools/call on a first POST without initialize', async () => {
+      const { port } = await startServer(probeFactory);
+
+      const response = await postJson(port, {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'tools/call',
+        params: { name: 'probe', arguments: {} },
+      });
+
+      const result = resultOf(response, 7);
+      expect(result.content).toEqual([{ type: 'text', text: 'called probe' }]);
+      expect(response.headers['mcp-session-id']).toBeUndefined();
+    });
+
+    it('resolves browser session handles across handshake-free requests', async () => {
+      // Each handshake-free request gets a fresh backend, so cross-request
+      // browser state must travel via the browser_session_open handles: the
+      // registry shared by the factory has to route the second request's
+      // browserSessionId to the context the first request created.
+      const config = await resolveConfig({});
+      const createBrowserContext = vi.fn(async () => {
+        const browserContext: any = new EventEmitter();
+        browserContext.newPage = vi.fn().mockResolvedValue({});
+        browserContext.pages = vi.fn().mockReturnValue([]);
+        browserContext.route = vi.fn().mockResolvedValue(undefined);
+        return { browserContext, close: vi.fn().mockResolvedValue(undefined) };
+      });
+      const sessionRegistry = new BrowserSessionRegistry();
+      const factory: ServerBackendFactory = {
+        ...testBackendFactory,
+        create: () => new BrowserServerBackend(config, { createContext: createBrowserContext } as any, sessionRegistry),
+      };
+      const { port } = await startServer(factory);
+
+      try {
+        const openResponse = await postJson(port, {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'browser_session_open', arguments: {} },
+        });
+        const openResult = resultOf(openResponse, 1);
+        expect(openResult.isError).not.toBe(true);
+        const browserSessionId = openResult.structuredContent?.browserSessionId;
+        expect(browserSessionId).toMatch(/^bs_/);
+
+        const listResponse = await postJson(port, {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: { name: 'browser_tabs', arguments: { action: 'list', browserSessionId } },
+        });
+        const listResult = resultOf(listResponse, 2);
+        expect(listResult.isError).not.toBe(true);
+        // The handle routed to the session's one context — resolved, not
+        // recreated, by the second request's fresh backend.
+        expect(createBrowserContext).toHaveBeenCalledTimes(1);
+      } finally {
+        await Context.disposeAll();
+      }
     });
   });
 
