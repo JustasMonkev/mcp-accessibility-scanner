@@ -29,7 +29,6 @@ import type { ServerBackendFactory } from './server.js';
 
 const testDebug = debug('pw:mcp:test');
 const allowedLoopbackHostnamePattern = /^127(?:\.\d{1,3}){3}$/;
-type StreamableSessionInfo = { transport: StreamableHTTPServerTransport, transportInitialized: ManualPromise<void>, fallbackStarted: boolean };
 
 export async function startHttpServer(config: { host?: string, port?: number }, abortSignal?: AbortSignal): Promise<http.Server> {
   const host = config.host ?? 'localhost';
@@ -60,34 +59,51 @@ export function httpAddressToString(address: string | net.AddressInfo | null): s
 }
 
 export async function installHttpTransport(httpServer: http.Server, serverBackendFactory: ServerBackendFactory) {
-  const streamableSessions = new Map<string, StreamableSessionInfo>();
+  const sessions = new SessionStore(serverBackendFactory);
   httpServer.on('request', async (req, res) => {
-    const validationError = validateRequestHeaders(httpServer, req);
+    const validationError = validateRequestHeaders(httpServer, req) ?? validateRequestRouting(req);
     if (validationError) {
       res.statusCode = validationError.statusCode;
       res.end(validationError.message);
       return;
     }
-    const routingError = validateRequestRouting(req, !!req.headers['mcp-session-id']);
-    if (routingError) {
-      res.statusCode = routingError.statusCode;
-      res.end(routingError.message);
-      return;
-    }
-    await handleStreamable(serverBackendFactory, req, res, streamableSessions);
+    await sessions.handleRequest(req, res);
   });
 }
 
-async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, StreamableSessionInfo>) {
-  const routingError = validateRequestRouting(req, !!req.headers['mcp-session-id']);
-  if (routingError) {
-    res.statusCode = routingError.statusCode;
-    res.end(routingError.message);
-    return;
+// ─── Session compatibility layer ─────────────────────────────────────────────
+// The v1 SDK's Streamable HTTP transport keys connections on the
+// `Mcp-Session-Id` header and requires one MCP server per session. The MCP
+// 2026-07-28 revision removes that header and per-connection sessions, but the
+// stateless transport only ships with the v2 SDK. Until we migrate, this class
+// is the only place that reads the header or tracks sessions — delete it (and
+// dispatch every request to a single stateless transport instead) as part of
+// the v2 migration. Refs #166.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type StreamableSessionInfo = { transport: StreamableHTTPServerTransport, transportInitialized: ManualPromise<void>, fallbackStarted: boolean };
+
+class SessionStore {
+  private readonly _sessions = new Map<string, StreamableSessionInfo>();
+
+  constructor(private readonly _serverBackendFactory: ServerBackendFactory) {}
+
+  async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    if (sessionId) {
+      await this._handleSessionRequest(sessionId, req, res);
+      return;
+    }
+    if (req.method === 'POST') {
+      await this._createSession(req, res);
+      return;
+    }
+    res.statusCode = 400;
+    res.end('Invalid request');
   }
-  const sessionId = req.headers['mcp-session-id'] as string | undefined;
-  if (sessionId) {
-    const sessionInfo = sessions.get(sessionId);
+
+  private async _handleSessionRequest(sessionId: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const sessionInfo = this._sessions.get(sessionId);
     if (!sessionInfo) {
       res.statusCode = 404;
       res.end('Session not found');
@@ -99,34 +115,32 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
       sessionInfo.fallbackStarted = true;
       setTimeout(() => sessionInfo.transportInitialized.resolve(), 5000);
     }
-    return await sessionInfo.transport.handleRequest(req, res);
+    await sessionInfo.transport.handleRequest(req, res);
   }
 
-  if (req.method === 'POST') {
+  private async _createSession(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: async sessionId => {
         testDebug(`create http session: ${transport.sessionId}`);
         const sessionInfo = { transport, transportInitialized: new ManualPromise<void>(), fallbackStarted: false };
-        sessions.set(sessionId, sessionInfo);
-        await mcpServer.connect(serverBackendFactory, transport, sessionInfo.transportInitialized, true);
+        this._sessions.set(sessionId, sessionInfo);
+        await mcpServer.connect(this._serverBackendFactory, transport, sessionInfo.transportInitialized, true);
       }
     });
 
     transport.onclose = () => {
       if (!transport.sessionId)
         return;
-      sessions.delete(transport.sessionId);
+      this._sessions.delete(transport.sessionId);
       testDebug(`delete http session: ${transport.sessionId}`);
     };
 
     await transport.handleRequest(req, res);
-    return;
   }
-
-  res.statusCode = 400;
-  res.end('Invalid request');
 }
+
+// ─── End of session compatibility layer ──────────────────────────────────────
 
 function acceptsEventStream(req: http.IncomingMessage): boolean {
   const accept = req.headers.accept;
@@ -201,15 +215,12 @@ function isWildcardAddress(hostname: string): boolean {
   return hostname === '0.0.0.0' || hostname === '::';
 }
 
-function validateRequestRouting(req: http.IncomingMessage, hasSessionId: boolean): { statusCode: number, message: string } | undefined {
+function validateRequestRouting(req: http.IncomingMessage): { statusCode: number, message: string } | undefined {
   const requestPath = parseRequestPath(req.url);
   if (!requestPath)
     return { statusCode: 400, message: 'Invalid request' };
   if (requestPath !== '/mcp')
     return { statusCode: 404, message: 'Not found' };
-  if (req.method === 'POST' || hasSessionId)
-    return;
-  return { statusCode: 400, message: 'Invalid request' };
 }
 
 function parseAuthority(authority: string): { hostname: string, authority: string, scheme: 'http' } | undefined {

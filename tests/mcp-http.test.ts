@@ -71,8 +71,8 @@ describe('mcp http transport hardening', () => {
     return { server, port: address.port };
   }
 
-  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string, sessionId?: string, accept?: string }) {
-    const response = await new Promise<{ statusCode: number, body: string }>((resolve, reject) => {
+  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string, sessionId?: string, accept?: string, body?: string }) {
+    const response = await new Promise<{ statusCode: number, headers: http.IncomingHttpHeaders, body: string }>((resolve, reject) => {
       const req = http.request({
         host: '127.0.0.1',
         port,
@@ -83,6 +83,7 @@ describe('mcp http transport hardening', () => {
           ...(options?.origin ? { origin: options.origin } : {}),
           ...(options?.sessionId ? { 'mcp-session-id': options.sessionId } : {}),
           ...(options?.accept ? { accept: options.accept } : {}),
+          ...(options?.body ? { 'content-type': 'application/json' } : {}),
         },
       }, res => {
         const chunks: Buffer[] = [];
@@ -90,14 +91,38 @@ describe('mcp http transport hardening', () => {
         res.on('end', () => {
           resolve({
             statusCode: res.statusCode ?? 0,
+            headers: res.headers,
             body: Buffer.concat(chunks).toString('utf8'),
           });
         });
       });
       req.on('error', reject);
-      req.end();
+      req.end(options?.body);
     });
     return response;
+  }
+
+  // Opens a request and resolves as soon as response headers arrive, then
+  // aborts — needed for SSE streams that never end.
+  async function openStream(port: number, options: { sessionId: string }) {
+    return await new Promise<{ statusCode: number, headers: http.IncomingHttpHeaders }>((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        path: '/mcp',
+        method: 'GET',
+        headers: {
+          'host': `127.0.0.1:${port}`,
+          'mcp-session-id': options.sessionId,
+          'accept': 'text/event-stream',
+        },
+      }, res => {
+        resolve({ statusCode: res.statusCode ?? 0, headers: res.headers });
+        res.destroy();
+      });
+      req.on('error', reject);
+      req.end();
+    });
   }
 
   it('rejects disallowed host headers before routing', async () => {
@@ -215,6 +240,104 @@ describe('mcp http transport hardening', () => {
 
     expect(response.statusCode).toBe(400);
     expect(response.body).toBe('Invalid request');
+  });
+
+  // v1 session compatibility layer (Refs #166): until the v2 stateless
+  // transport lands, POST without Mcp-Session-Id must initialize a session,
+  // requests carrying the header must route to it, and unknown ids must 404.
+  describe('v1 Mcp-Session-Id compatibility', () => {
+    async function initializeSession(port: number) {
+      const response = await sendRequest(port, {
+        method: 'POST',
+        hostHeader: `127.0.0.1:${port}`,
+        accept: 'application/json, text/event-stream',
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'raw-client', version: '1.0.0' } },
+        }),
+      });
+      return response;
+    }
+
+    it('returns 404 for an unknown session id', async () => {
+      const { port } = await startServer();
+
+      const response = await sendRequest(port, {
+        method: 'POST',
+        hostHeader: `127.0.0.1:${port}`,
+        sessionId: 'no-such-session',
+        accept: 'application/json, text/event-stream',
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' }),
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(response.body).toBe('Session not found');
+    });
+
+    it('initializes a new session on POST without a session id and routes follow-ups by header', async () => {
+      const { port } = await startServer();
+
+      const initResponse = await initializeSession(port);
+      expect(initResponse.statusCode).toBe(200);
+      const sessionId = initResponse.headers['mcp-session-id'];
+      expect(typeof sessionId).toBe('string');
+
+      const notifyResponse = await sendRequest(port, {
+        method: 'POST',
+        hostHeader: `127.0.0.1:${port}`,
+        sessionId: sessionId as string,
+        accept: 'application/json, text/event-stream',
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+      });
+      expect(notifyResponse.statusCode).toBe(202);
+
+      const pingResponse = await sendRequest(port, {
+        method: 'POST',
+        hostHeader: `127.0.0.1:${port}`,
+        sessionId: sessionId as string,
+        accept: 'application/json, text/event-stream',
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' }),
+      });
+      expect(pingResponse.statusCode).toBe(200);
+    });
+
+    it('opens the standalone event stream on GET with Accept: text/event-stream', async () => {
+      const { port } = await startServer();
+
+      const initResponse = await initializeSession(port);
+      const sessionId = initResponse.headers['mcp-session-id'] as string;
+
+      const stream = await openStream(port, { sessionId });
+      expect(stream.statusCode).toBe(200);
+      expect(stream.headers['content-type']).toContain('text/event-stream');
+    });
+
+    it('forgets the session when the client terminates it', async () => {
+      const { port } = await startServer();
+
+      const initResponse = await initializeSession(port);
+      const sessionId = initResponse.headers['mcp-session-id'] as string;
+
+      const deleteResponse = await sendRequest(port, {
+        method: 'DELETE',
+        hostHeader: `127.0.0.1:${port}`,
+        sessionId,
+        accept: 'application/json, text/event-stream',
+      });
+      expect(deleteResponse.statusCode).toBe(200);
+
+      const afterDelete = await sendRequest(port, {
+        method: 'POST',
+        hostHeader: `127.0.0.1:${port}`,
+        sessionId,
+        accept: 'application/json, text/event-stream',
+        body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' }),
+      });
+      expect(afterDelete.statusCode).toBe(404);
+      expect(afterDelete.body).toBe('Session not found');
+    });
   });
 
   it('waits for the streamable HTTP event stream before listing roots', async () => {
