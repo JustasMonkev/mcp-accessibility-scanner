@@ -64,7 +64,7 @@ async function withPingTimeout<T>(value: string, callback: () => Promise<T>) {
 }
 
 describe('mcp server error mapping', () => {
-  it('surfaces McpError from the backend as a protocol error', async () => {
+  it('surfaces ProtocolError from the backend as a protocol error', async () => {
     const backend = {
       initialize: vi.fn(async () => undefined),
       listTools: vi.fn(async () => []),
