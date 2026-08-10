@@ -17,7 +17,7 @@
 import fs from 'fs';
 import { chromium, type Browser } from 'playwright';
 import { describe, it, expect } from 'vitest';
-import { createGuid, createHash } from '../src/utils/guid.js';
+import { createGuid, createHash, createShortGuid } from '../src/utils/guid.js';
 import { compressAriaSnapshot } from '../src/utils/ariaCompression.js';
 import { truncateDataUrl, truncateDataUrls } from '../src/utils/dataUrl.js';
 
@@ -71,6 +71,18 @@ describe('Utils', () => {
         expect(id).toMatch(/^[a-f0-9]+$/);
         expect(id.length).toBe(32); // 16 bytes = 32 hex chars
       });
+    });
+  });
+
+  describe('createShortGuid', () => {
+    it('should generate 8 hex character tokens', () => {
+      const ids = Array.from({ length: 10 }, () => createShortGuid());
+      ids.forEach(id => expect(id).toMatch(/^[a-f0-9]{8}$/));
+    });
+
+    it('should generate unique tokens', () => {
+      const ids = Array.from({ length: 100 }, () => createShortGuid());
+      expect(new Set(ids).size).toBe(ids.length);
     });
   });
 

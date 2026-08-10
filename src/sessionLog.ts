@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { Response } from './response.js';
+import { createShortGuid } from './utils/guid.js';
 import { logUnhandledError } from './utils/log.js';
 import { outputFile } from './config.js';
 
@@ -69,7 +70,11 @@ export class SessionLog {
   }
 
   static async create(config: FullConfig): Promise<SessionLog> {
-    const sessionFolder = await outputFile(config, `session-${Date.now()}`);
+    // The random suffix keeps two sessions created in the same millisecond
+    // (e.g. concurrent HTTP connections) from sharing a folder — a collision
+    // would interleave their session.md entries and overwrite each other's
+    // snapshot ordinals. Nothing parses the folder name back.
+    const sessionFolder = await outputFile(config, `session-${Date.now()}-${createShortGuid()}`);
     await fs.promises.mkdir(sessionFolder, { recursive: true });
     // eslint-disable-next-line no-console
     console.error(`Session: ${sessionFolder}`);

@@ -25,7 +25,7 @@ import coreBundle from 'playwright-core/lib/coreBundle';
 const { registryDirectory } = coreBundle.registry;
 const { startTraceViewerServer } = coreBundle.server;
 import { logUnhandledError, testDebug } from './utils/log.js';
-import { createGuid } from './utils/guid.js';
+import { createGuid, createShortGuid } from './utils/guid.js';
 import { outputFile  } from './config.js';
 import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
 
@@ -1023,7 +1023,10 @@ async function startTraceServer(config: FullConfig): Promise<string | undefined>
   if (!config.saveTrace)
     return undefined;
 
-  const tracesDir = await outputFile(config, `traces-${Date.now()}`);
+  // The random suffix keeps two contexts created in the same millisecond
+  // (e.g. concurrent sessions) from sharing a trace folder and overwriting
+  // each other's trace files. Nothing parses the folder name back.
+  const tracesDir = await outputFile(config, `traces-${Date.now()}-${createShortGuid()}`);
   const server = await startTraceViewerServer();
   const urlPrefix = server.urlPrefix('human-readable');
   const url = urlPrefix + '/trace/index.html?trace=' + tracesDir + '/trace.json';
