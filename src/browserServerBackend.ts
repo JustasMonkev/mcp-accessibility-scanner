@@ -110,7 +110,10 @@ export class BrowserServerBackend implements ServerBackend {
       throw error;
     }
     const response = new Response(context, name, parsedArguments, requestContext);
-    context.setRunningTool(name);
+    // Per-call token, not a single slot: two overlapping calls on one session
+    // must keep isRunningTool() true until BOTH finish, or the TTL reaper (and
+    // browser_session_close) could dispose the browser under the slower call.
+    const endToolCall = context.beginToolCall(name);
     try {
       await tool.handle(context, parsedArguments, response);
       await response.finish();
@@ -118,7 +121,7 @@ export class BrowserServerBackend implements ServerBackend {
     } catch (error: any) {
       response.addError(String(error));
     } finally {
-      context.setRunningTool(undefined);
+      endToolCall();
       // Refresh after completion too: a long run must not leave the session
       // one reaper tick from expiry.
       if (routedSessionId !== undefined)

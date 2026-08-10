@@ -590,6 +590,8 @@ How the separate context is provided depends on the mode:
 Closes a session opened with `browser_session_open` and releases its browser resources.
 - Parameters: `browserSessionId` (the handle to close)
 
+Closing is refused with a tool error while a tool call is still running in that session — a close that disposed the browser mid-call would fail the running tool; wait for it to finish and retry.
+
 Sessions that stay idle expire automatically after 30 minutes; the timer is refreshed on every use and while a tool is running in the session, so a long `audit_site` crawl is never expired mid-run. Set `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` to override the idle TTL in milliseconds (`0` or a negative value disables expiry). Passing an unknown or expired handle produces a tool error listing the currently open sessions.
 
 ### Information & Monitoring Tools

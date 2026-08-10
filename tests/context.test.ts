@@ -338,12 +338,12 @@ describe('Context', () => {
       mockBrowserContext.emit('page', page);
 
       const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
-      context1.setRunningTool('browser_click');
+      const endToolCall = context1.beginToolCall('browser_click');
       sink.actionAdded(page, { action: { name: 'click' } }, 'await page.click();');
       expect(log1.logUserAction).not.toHaveBeenCalled();
       expect(log2.logUserAction).not.toHaveBeenCalled();
 
-      context1.setRunningTool(undefined);
+      endToolCall();
       sink.actionAdded(page, { action: { name: 'click' } }, 'await page.click();');
       expect(log1.logUserAction).toHaveBeenCalledTimes(1);
       expect(log2.logUserAction).toHaveBeenCalledTimes(1);
@@ -416,7 +416,7 @@ describe('Context', () => {
         clientInfo: {},
       });
 
-      context.setRunningTool('test_tool');
+      context.beginToolCall('test_tool');
       expect(context.isRunningTool()).toBe(true);
     });
 
@@ -429,8 +429,31 @@ describe('Context', () => {
         clientInfo: {},
       });
 
-      context.setRunningTool('test_tool');
-      context.setRunningTool(undefined);
+      const endToolCall = context.beginToolCall('test_tool');
+      endToolCall();
+      expect(context.isRunningTool()).toBe(false);
+    });
+
+    it('stays running until every overlapping call has released', () => {
+      // A single running-tool slot let the first finisher clear the marker
+      // while a second call still ran — the TTL reaper could then dispose the
+      // session's browser mid-operation.
+      const context = new Context({
+        tools: [],
+        config: {} as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      const endFirst = context.beginToolCall('browser_click');
+      const endSecond = context.beginToolCall('browser_click');
+      endFirst();
+      expect(context.isRunningTool()).toBe(true);
+      // Releasing one call twice must not release its sibling.
+      endFirst();
+      expect(context.isRunningTool()).toBe(true);
+      endSecond();
       expect(context.isRunningTool()).toBe(false);
     });
   });

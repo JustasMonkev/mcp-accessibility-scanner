@@ -113,6 +113,11 @@ export class BrowserSessionRegistry implements BrowserSessionBroker {
     const entry = this._sessions.get(id);
     if (!entry)
       throw new Error(this._unknownSessionMessage(id));
+    // Disposing under a running call would yank the browser out from under it
+    // (browser_session_close itself executes on the default Context, so it
+    // never counts as the session's own running tool).
+    if (entry.context.isRunningTool())
+      throw new Error(`Browser session "${id}" still has a tool call running. Wait for it to finish, then retry browser_session_close.`);
     this._sessions.delete(id);
     this._stopReaperIfIdle();
     await entry.context.dispose();

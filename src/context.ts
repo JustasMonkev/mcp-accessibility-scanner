@@ -116,7 +116,11 @@ export class Context {
   private _clientInfo: ClientInfo;
 
   private _closeBrowserContextPromise: Promise<void> | undefined;
-  private _runningToolName: string | undefined;
+  // A multiset, not a single slot: tool calls on one Context can overlap, and
+  // with a single marker the first call to finish would clear it while the
+  // second still ran — letting the session TTL reaper (or a session close)
+  // dispose the browser mid-operation.
+  private _runningTools: string[] = [];
   private _abortController = new AbortController();
   private _removePageObserver: (() => void) | undefined;
   private _inputRecorder: InputRecorder | undefined;
@@ -232,12 +236,27 @@ export class Context {
     this._closeBrowserContextPromise = undefined;
   }
 
+  /** True while ANY tool call is running in this Context, overlap included. */
   isRunningTool() {
-    return this._runningToolName !== undefined;
+    return this._runningTools.length > 0;
   }
 
-  setRunningTool(name: string | undefined) {
-    this._runningToolName = name;
+  /**
+   * Marks a tool call as running and returns the release callback for that
+   * specific call (idempotent, and releasing out of completion order is
+   * fine). isRunningTool() stays true until every overlapping call released.
+   */
+  beginToolCall(name: string): () => void {
+    this._runningTools.push(name);
+    let released = false;
+    return () => {
+      if (released)
+        return;
+      released = true;
+      const index = this._runningTools.lastIndexOf(name);
+      if (index !== -1)
+        this._runningTools.splice(index, 1);
+    };
   }
 
   private async _closeBrowserContextImpl() {
@@ -310,7 +329,9 @@ export class Context {
     if (this._closeBrowserContextPromise)
       throw new Error('Another browser context is being closed.');
     // TODO: move to the browser context factory to make it based on isolation mode.
-    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningToolName, { browserSession: this.options.browserSession });
+    // The factory gets the most recently started call's name — with overlap
+    // that is the call whose execution is creating the context right now.
+    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningTools[this._runningTools.length - 1], { browserSession: this.options.browserSession });
     // The factory handed ownership over with close(); a setup failure past
     // this point would otherwise discard that callback with the browser still
     // running — and, for storage-state sessions, the disposable profile

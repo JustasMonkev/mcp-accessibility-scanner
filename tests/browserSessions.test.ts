@@ -256,6 +256,77 @@ describe('browser sessions', () => {
     expect(created[0].close).toHaveBeenCalled();
   });
 
+  it('keeps the session alive past the TTL until every overlapping call finished', async () => {
+    // A single running-tool slot let the first finisher clear the marker while
+    // the second call still ran, so the reaper disposed the browser mid-call.
+    vi.useFakeTimers();
+    const { factory, created } = makeFactory();
+    const backend = await makeBackend(factory);
+
+    const id = await openSession(backend);
+    await backend.callTool('browser_tabs', { action: 'list', browserSessionId: id });
+
+    let releaseFirst = () => {};
+    const firstGate = new Promise<any>(resolve => releaseFirst = () => resolve({}));
+    let releaseSecond = () => {};
+    const secondGate = new Promise<any>(resolve => releaseSecond = () => resolve({}));
+    created[0].newPage
+        .mockImplementationOnce(() => firstGate)
+        .mockImplementationOnce(() => secondGate);
+
+    const first = backend.callTool('browser_tabs', { action: 'new', browserSessionId: id });
+    for (let i = 0; i < 100 && created[0].newPage.mock.calls.length < 1; i++)
+      await Promise.resolve();
+    const second = backend.callTool('browser_tabs', { action: 'new', browserSessionId: id });
+    for (let i = 0; i < 100 && created[0].newPage.mock.calls.length < 2; i++)
+      await Promise.resolve();
+
+    // The first call completes; the second still runs. Well past the TTL the
+    // session must survive on the second call's account.
+    releaseFirst();
+    await first;
+    await vi.advanceTimersByTimeAsync(TTL_MS * 3);
+    expect(created[0].close).not.toHaveBeenCalled();
+
+    releaseSecond();
+    const result = await second;
+    expect(result.isError).not.toBe(true);
+
+    // Only once genuinely idle does the session expire.
+    await vi.advanceTimersByTimeAsync(TTL_MS + 60_000);
+    expect(created[0].close).toHaveBeenCalled();
+  });
+
+  it('refuses to close a session while a tool call is still running in it', async () => {
+    const { factory, created } = makeFactory();
+    const backend = await makeBackend(factory);
+
+    const id = await openSession(backend);
+    await backend.callTool('browser_tabs', { action: 'list', browserSessionId: id });
+
+    let releaseNewPage = () => {};
+    const gate = new Promise<any>(resolve => releaseNewPage = () => resolve({}));
+    created[0].newPage.mockImplementationOnce(() => gate);
+    const running = backend.callTool('browser_tabs', { action: 'new', browserSessionId: id });
+    for (let i = 0; i < 100 && !created[0].newPage.mock.calls.length; i++)
+      await Promise.resolve();
+
+    // Closing now would dispose the browser out from under the running call.
+    const refused = await backend.callTool('browser_session_close', { browserSessionId: id });
+    expect(refused.isError).toBe(true);
+    expect(textOf(refused)).toContain('still has a tool call running');
+    expect(created[0].close).not.toHaveBeenCalled();
+
+    releaseNewPage();
+    const result = await running;
+    expect(result.isError).not.toBe(true);
+
+    // Once the call finished, close succeeds and disposes the context.
+    const closed = await backend.callTool('browser_session_close', { browserSessionId: id });
+    expect(closed.isError).not.toBe(true);
+    expect(created[0].close).toHaveBeenCalled();
+  });
+
   it('serverClosed disposes every session context and the default one', async () => {
     const { factory, created } = makeFactory();
     const backend = await makeBackend(factory);
