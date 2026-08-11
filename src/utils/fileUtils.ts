@@ -42,7 +42,8 @@ export function sanitizeForFilePath(s: string) {
 
 /**
  * Timestamp fragment for DEFAULT artifact file names (screenshots, PDFs,
- * reports). Carries a short random token besides the sanitized ISO timestamp:
+ * reports, downloaded files). Carries a short random token besides the
+ * sanitized ISO timestamp:
  * concurrent sessions (or overlapping calls) share one output directory, and
  * a timestamp alone let two artifacts produced in the same millisecond
  * overwrite each other. User-specified file names are never routed through

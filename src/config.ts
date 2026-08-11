@@ -19,7 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { BrowserContextOptions, LaunchOptions } from 'playwright';
 import { devices } from 'playwright';
-import { sanitizeForFilePath } from './utils/fileUtils.js';
+import { safeIsoTimestampForFileName, sanitizeForFilePath } from './utils/fileUtils.js';
 
 import type { Config, ToolCapability } from '../config.js';
 
@@ -319,9 +319,26 @@ async function loadConfig(configFile: string | undefined): Promise<Config> {
   }
 }
 
+// One fallback output directory per resolved config — i.e. per server, which
+// resolves its FullConfig once and hands the same object to every consumer.
+// Recomputing the timestamped path per call scattered one audit's artifacts
+// (screenshots, JSON reports, traces, session logs) across a different temp
+// directory per millisecond tick. Keyed weakly on the config object so two
+// server instances in one process still get distinct fallback directories.
+const defaultOutputDirs = new WeakMap<FullConfig, string>();
+
 export async function outputFile(config: FullConfig, name: string): Promise<string> {
-  const outputDir = config.outputDir
-        ?? path.join(os.tmpdir(), 'playwright-mcp-output', sanitizeForFilePath(new Date().toISOString()));
+  let outputDir = config.outputDir;
+  if (!outputDir) {
+    outputDir = defaultOutputDirs.get(config);
+    if (!outputDir) {
+      // The random token keeps two servers starting in the same millisecond
+      // from sharing a fallback directory — the per-call timestamp used to
+      // make that unlikely; a per-server one no longer would.
+      outputDir = path.join(os.tmpdir(), 'playwright-mcp-output', safeIsoTimestampForFileName());
+      defaultOutputDirs.set(config, outputDir);
+    }
+  }
 
   await fs.promises.mkdir(outputDir, { recursive: true });
   const fileName = sanitizeForFilePath(name);

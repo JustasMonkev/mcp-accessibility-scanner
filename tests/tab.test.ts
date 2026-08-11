@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import path from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Tab, renderModalStates } from '../src/tab.js';
 import type { Context } from '../src/context.js';
@@ -324,6 +325,58 @@ describe('Tab', () => {
       await vi.advanceTimersByTimeAsync(6000);
       await result;
       expect(mockPage.listenerCount('download')).toBe(1);
+    });
+  });
+
+  describe('downloads', () => {
+    function makeDownload(suggested: string) {
+      return {
+        suggestedFilename: vi.fn().mockReturnValue(suggested),
+        saveAs: vi.fn().mockResolvedValue(undefined),
+      };
+    }
+
+    beforeEach(() => {
+      // Echo the requested file name back as the full path, like the real
+      // outputFile() does, so the assertions can see what would be written.
+      (mockContext.outputFile as any).mockImplementation(async (name: string) => `/tmp/out/${name}`);
+    });
+
+    it('saves two downloads suggesting the same name to distinct files, keeping the name recognizable', async () => {
+      // Sessions share one output directory; saving under the suggested name
+      // alone let two concurrent "report.pdf" downloads overwrite each other.
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const first = makeDownload('report.pdf');
+      const second = makeDownload('report.pdf');
+      mockPage.emit('download', first);
+      mockPage.emit('download', second);
+      await vi.waitFor(() => {
+        expect(first.saveAs).toHaveBeenCalledTimes(1);
+        expect(second.saveAs).toHaveBeenCalledTimes(1);
+      });
+
+      const firstPath = first.saveAs.mock.calls[0][0] as string;
+      const secondPath = second.saveAs.mock.calls[0][0] as string;
+      expect(firstPath).not.toBe(secondPath);
+      // The suggested name stays the recognizable part, extension preserved.
+      expect(path.basename(firstPath)).toMatch(/^report-.+\.pdf$/);
+      expect(path.basename(secondPath)).toMatch(/^report-.+\.pdf$/);
+    });
+
+    it('suffixes an extensionless download name at the end', async () => {
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const download = makeDownload('LICENSE');
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+      expect(path.basename(download.saveAs.mock.calls[0][0] as string)).toMatch(/^LICENSE-.+$/);
+    });
+
+    it('falls back to a generic name when the page suggests none', async () => {
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const download = makeDownload('');
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+      expect(path.basename(download.saveAs.mock.calls[0][0] as string)).toMatch(/^download-.+$/);
     });
   });
 

@@ -359,5 +359,29 @@ describe('Config', () => {
       // Should sanitize to prevent directory traversal
       expect(result).not.toContain('../');
     });
+
+    it('keeps every artifact of one server in one fallback directory', async () => {
+      // The timestamped fallback used to be recomputed per call, scattering
+      // one audit's screenshots, reports, traces and session logs across a
+      // different temp directory per millisecond tick.
+      const config = await resolveConfig({});
+
+      const first = await outputFile(config, 'screenshot.png');
+      // Cross a millisecond tick so a recomputed timestamp would differ.
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const second = await outputFile(config, 'report.json');
+
+      expect(path.dirname(second)).toBe(path.dirname(first));
+    });
+
+    it('gives two server configurations distinct fallback directories', async () => {
+      // Two servers in one process must not interleave artifacts: the
+      // fallback is memoized per resolved config, not process-wide.
+      const first = await outputFile(await resolveConfig({}), 'file.txt');
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const second = await outputFile(await resolveConfig({}), 'file.txt');
+
+      expect(path.dirname(first)).not.toBe(path.dirname(second));
+    });
   });
 });

@@ -20,6 +20,7 @@ import { callOnPageNoTrace, waitForCompletion } from './tools/utils.js';
 import { logUnhandledError } from './utils/log.js';
 import { ManualPromise } from './mcp/manualPromise.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
+import { safeIsoTimestampForFileName } from './utils/fileUtils.js';
 import type { ModalState } from './tools/tool.js';
 
 import type { Context } from './context.js';
@@ -155,10 +156,21 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   private async _downloadStarted(download: playwright.Download) {
+    // The suggested name alone is not collision-safe: sessions share one
+    // output directory, and two downloads suggesting "report.pdf" would
+    // overwrite each other. The same {timestamp}-{token} fragment the other
+    // default artifact names carry goes in before the extension, keeping the
+    // suggested name as the recognizable part; responses print the suggested
+    // name next to the saved path, so the file stays attributable.
+    const suggested = download.suggestedFilename() || 'download';
+    const separator = suggested.lastIndexOf('.');
+    const uniqueName = separator > 0
+      ? `${suggested.slice(0, separator)}-${safeIsoTimestampForFileName()}${suggested.slice(separator)}`
+      : `${suggested}-${safeIsoTimestampForFileName()}`;
     const entry = {
       download,
       finished: false,
-      outputFile: await this.context.outputFile(download.suggestedFilename())
+      outputFile: await this.context.outputFile(uniqueName)
     };
     this._downloads.push(entry);
     await download.saveAs(entry.outputFile);

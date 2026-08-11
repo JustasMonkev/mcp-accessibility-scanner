@@ -226,7 +226,7 @@ Create a `config.json` file with the following options:
 - `timeouts.settle`: How long to wait after every action before responding (default: `500`). An action that finishes quietly is first watched for up to 100ms (or the settle delay, whichever is shorter) so scheduled network work can still be awaited before the settle delay.
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
-- `outputDir`: Directory for output files — reports, screenshots, traces, and session logs (CLI: `--output-dir`, env: `PLAYWRIGHT_MCP_OUTPUT_DIR`). Defaults to a fresh directory under the system temp folder. The output location is always server configuration; the deprecated MCP roots capability (client workspace folders) is no longer consulted.
+- `outputDir`: Directory for output files — reports, screenshots, traces, and session logs (CLI: `--output-dir`, env: `PLAYWRIGHT_MCP_OUTPUT_DIR`). Defaults to a fresh directory under the system temp folder, resolved once per server run so all of a run's artifacts land together. The output location is always server configuration; the deprecated MCP roots capability (client workspace folders) is no longer consulted.
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
