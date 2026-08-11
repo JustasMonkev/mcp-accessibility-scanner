@@ -120,7 +120,22 @@ export class BrowserServerBackend implements ServerBackend {
    * land in the same folder regardless of which context launches first.
    */
   private _ensureSessionLog(): Promise<SessionLog | undefined> {
-    this._sessionLog ??= this._config.saveSession ? SessionLog.create(this._config) : Promise.resolve(undefined);
+    if (!this._sessionLog) {
+      const creation = this._config.saveSession ? SessionLog.create(this._config) : Promise.resolve(undefined);
+      // Memoize success only: a rejected create (e.g. the output volume
+      // briefly unavailable) must not be replayed to every later default-
+      // context call and browser_session_open for the backend's lifetime —
+      // clear the memo so the next call retries. Guarded by identity, like
+      // ensureInitialized in mcp/server.ts: a retry may already have stored a
+      // fresh in-flight promise by the time this failure handler runs, and
+      // that one must not be clobbered. Everyone who awaited the failed
+      // attempt still sees its rejection.
+      creation.catch(() => {
+        if (this._sessionLog === creation)
+          this._sessionLog = undefined;
+      });
+      this._sessionLog = creation;
+    }
     return this._sessionLog;
   }
 

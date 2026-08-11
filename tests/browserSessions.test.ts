@@ -289,6 +289,41 @@ describe('browser sessions', () => {
     }
   });
 
+  it('retries --save-session log creation after a transient failure instead of memoizing the rejection', async () => {
+    // The lazy supplier used `??=`, which retained a rejected SessionLog.create
+    // promise: after one transient failure every later browser_session_open
+    // (and default-context call) replayed the original rejection until the
+    // backend was recreated.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-log-retry-'));
+    const outputDir = path.join(parent, 'out');
+    // A regular file occupies the output path, so the first create fails.
+    fs.writeFileSync(outputDir, '');
+    try {
+      const config = await resolveConfig({ saveSession: true, outputDir });
+      const { factory } = makeFactory();
+      const backend = new BrowserServerBackend(config, factory);
+      await backend.initialize(
+          { notifyToolListChanged: async () => {} } as any,
+          { name: 'vitest', version: 'browser-sessions' },
+      );
+
+      const failed = await backend.callTool('browser_session_open', {});
+      expect(failed.isError).toBe(true);
+
+      // The transient obstruction is fixed; the next open must retry the
+      // create instead of replaying the memoized rejection.
+      fs.rmSync(outputDir);
+      const opened = await backend.callTool('browser_session_open', {});
+      expect(opened.isError).not.toBe(true);
+      const sessionDirs = fs.readdirSync(outputDir).filter(name => name.startsWith('session-'));
+      expect(sessionDirs).toHaveLength(1);
+    } finally {
+      vi.restoreAllMocks();
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it('advertises browserSessionId on browser tools but not on the session tools', async () => {
     const { factory } = makeFactory();
     const backend = await makeBackend(factory);
