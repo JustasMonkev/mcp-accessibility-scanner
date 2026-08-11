@@ -1054,34 +1054,42 @@ export class PersistentContextFactory implements BrowserContextFactory {
       : options?.browserSession
         ? `-session-${createGuid()}`
         : '';
-    // A default (no-suffix) context claims the stable profile — unless a
-    // sibling already holds it (see _stableProfileClaimed): then it runs in
-    // a disposable profile instead of failing the launch. A user-supplied
-    // --user-data-dir is exempt: silently substituting a disposable profile
-    // would drop the sign-in state the user explicitly asked for, so that
-    // configuration keeps the launch-time contention error.
     let claimedStableProfile = false;
-    if (!profileSuffix && !this.config.browser.userDataDir) {
-      if (this._stableProfileClaimed) {
-        profileSuffix = `-concurrent-${createGuid()}`;
-        testDebug('stable persistent profile is in use by a concurrent context; falling back to a disposable profile');
-      } else {
-        this._stableProfileClaimed = true;
-        claimedStableProfile = true;
-      }
-    }
-    const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(profileSuffix);
-    // Guarded on the config profile too: sessionsUnsupportedReason keeps
-    // registry sessions out of a user-supplied --user-data-dir, so a suffix
-    // here always means the guid-fresh managed directory above — but a direct
-    // caller combining both must still never see the user's profile deleted.
-    const disposableProfile = !!profileSuffix && !this.config.browser.userDataDir;
-
-    this._userDataDirs.add(userDataDir);
-    testDebug('lock user data dir', userDataDir);
-
+    let userDataDir: string | undefined;
+    let disposableProfile = false;
     const browserType = playwright[this.config.browser.browserName];
+    // The cleanup scope opens right after the port reservation: the
+    // profile-directory mkdir below can reject too (e.g. a transient volume
+    // failure), and a failure between the claim and the launch loop used to
+    // escape the cleanup — the claim was never reset (every later default
+    // context misclassified as concurrent and demoted to a disposable
+    // profile) and the reserved CDP port was never released.
     try {
+      // A default (no-suffix) context claims the stable profile — unless a
+      // sibling already holds it (see _stableProfileClaimed): then it runs in
+      // a disposable profile instead of failing the launch. A user-supplied
+      // --user-data-dir is exempt: silently substituting a disposable profile
+      // would drop the sign-in state the user explicitly asked for, so that
+      // configuration keeps the launch-time contention error.
+      if (!profileSuffix && !this.config.browser.userDataDir) {
+        if (this._stableProfileClaimed) {
+          profileSuffix = `-concurrent-${createGuid()}`;
+          testDebug('stable persistent profile is in use by a concurrent context; falling back to a disposable profile');
+        } else {
+          this._stableProfileClaimed = true;
+          claimedStableProfile = true;
+        }
+      }
+      userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(profileSuffix);
+      // Guarded on the config profile too: sessionsUnsupportedReason keeps
+      // registry sessions out of a user-supplied --user-data-dir, so a suffix
+      // here always means the guid-fresh managed directory above — but a direct
+      // caller combining both must still never see the user's profile deleted.
+      disposableProfile = !!profileSuffix && !this.config.browser.userDataDir;
+
+      this._userDataDirs.add(userDataDir);
+      testDebug('lock user data dir', userDataDir);
+
       for (let i = 0; i < 5; i++) {
         try {
           const browserContext = await browserType.launchPersistentContext(userDataDir, {
@@ -1138,7 +1146,7 @@ export class PersistentContextFactory implements BrowserContextFactory {
       // never produced a context must not leave it behind — repeated failed
       // starts would otherwise pile one stray directory into the registry each.
       // (Already removed on the StorageStateError path; rm is idempotent.)
-      if (disposableProfile) {
+      if (disposableProfile && userDataDir !== undefined) {
         await fs.promises.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
         this._userDataDirs.delete(userDataDir);
       }

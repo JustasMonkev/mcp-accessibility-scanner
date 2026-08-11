@@ -583,6 +583,49 @@ describe('browserContextFactory', () => {
     }
   });
 
+  // _createUserDataDir's mkdir can reject (a transient volume failure) after
+  // the stable-profile claim was set and the CDP port reserved but before the
+  // launch loop's cleanup scope: both used to leak — every later default
+  // context was misclassified as concurrent (disposable profiles, losing the
+  // stable profile's sign-in state, forever) and the reserved port was never
+  // returned to the pool.
+  it('releases the stable-profile claim and the reserved CDP port when profile-dir creation fails', async () => {
+    const profilesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-profiles-'));
+    process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
+    // A deterministic port pool: every allocation is offered the same OS
+    // port, so a leaked reservation makes the next allocation spin on the
+    // reserved-ports check instead of completing.
+    const createServerSpy = vi.spyOn(net, 'createServer').mockImplementation((() => {
+      const server: any = new EventEmitter();
+      server.listen = (_port: number, cb: () => void) => { setImmediate(cb); return server; };
+      server.address = () => ({ port: 45678 });
+      server.close = (cb?: () => void) => { if (cb) setImmediate(cb); return server; };
+      return server;
+    }) as any);
+    try {
+      (playwright.chromium.launchPersistentContext as any).mockImplementation(async () => createMockBrowserContext());
+      const config = await resolveConfig({});
+      const factory = contextFactory(config);
+      const clientInfo = { name: 'vitest', version: '1.0.0' };
+      const signal = new AbortController().signal;
+
+      vi.spyOn(fs.promises, 'mkdir').mockRejectedValueOnce(new Error('EIO: volume unavailable'));
+      await expect(factory.createContext(clientInfo, signal, undefined)).rejects.toThrow('EIO: volume unavailable');
+
+      // The failed attempt released both: the next default context allocates
+      // the same port again (instead of spinning on a leaked reservation) and
+      // gets the stable profile (instead of a -concurrent- fallback).
+      const result = await factory.createContext(clientInfo, signal, undefined);
+      expect((playwright.chromium.launchPersistentContext as any).mock.calls[0][0])
+          .toBe(path.join(profilesDir, stableProfileName()));
+      await result.close();
+    } finally {
+      createServerSpy.mockRestore();
+      delete process.env.PWMCP_PROFILES_DIR_FOR_TEST;
+      fs.rmSync(profilesDir, { recursive: true, force: true });
+    }
+  });
+
   // Dropping the MCP Roots hash (the old per-client-root profile token) must
   // not collapse every workspace's server onto one bare `mcp-<browser>`
   // profile: separate server processes would contend on Chromium's
