@@ -985,6 +985,20 @@ export class PersistentContextFactory implements BrowserContextFactory {
 
   private _userDataDirs = new Set<string>();
 
+  // True while a live context (or one still launching) holds the stable
+  // `mcp-<browser>` profile. The profile can back only one running browser at
+  // a time (Chromium's ProcessSingleton lock), and every stateful backend's
+  // default context resolves to it — one such context under stdio, but each
+  // concurrent Mcp-Session-Id HTTP client brings its own backend, and the
+  // second used to spin on the lock and fail with "Browser is already in
+  // use". The stable profile now goes to the FIRST claimant; contended
+  // claimants fall back to a disposable profile (their audit runs, without
+  // the stable profile's sign-in state), and the claim is released when the
+  // holder's context closes so the next default context — and the profile's
+  // persisted state — line up again. Checked-and-set synchronously, so
+  // concurrent createContext() calls cannot both claim.
+  private _stableProfileClaimed = false;
+
   constructor(config: FullConfig) {
     this.config = config;
   }
@@ -1035,11 +1049,27 @@ export class PersistentContextFactory implements BrowserContextFactory {
     // the ProcessSingleton lock and fail with "Browser is already in use". The
     // DEFAULT (no-handle) context keeps the stable `mcp-<browser>` profile, so
     // its sign-in state still survives restarts.
-    const profileSuffix = storageState
+    let profileSuffix = storageState
       ? `-storage-state-${createGuid()}`
       : options?.browserSession
         ? `-session-${createGuid()}`
         : '';
+    // A default (no-suffix) context claims the stable profile — unless a
+    // sibling already holds it (see _stableProfileClaimed): then it runs in
+    // a disposable profile instead of failing the launch. A user-supplied
+    // --user-data-dir is exempt: silently substituting a disposable profile
+    // would drop the sign-in state the user explicitly asked for, so that
+    // configuration keeps the launch-time contention error.
+    let claimedStableProfile = false;
+    if (!profileSuffix && !this.config.browser.userDataDir) {
+      if (this._stableProfileClaimed) {
+        profileSuffix = `-concurrent-${createGuid()}`;
+        testDebug('stable persistent profile is in use by a concurrent context; falling back to a disposable profile');
+      } else {
+        this._stableProfileClaimed = true;
+        claimedStableProfile = true;
+      }
+    }
     const userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(profileSuffix);
     // Guarded on the config profile too: sessionsUnsupportedReason keeps
     // registry sessions out of a user-supplied --user-data-dir, so a suffix
@@ -1062,7 +1092,28 @@ export class PersistentContextFactory implements BrowserContextFactory {
             handleSIGINT: false,
             handleSIGTERM: false,
           });
-          return await this._applyStorageState(browserContext, storageState, userDataDir, disposableProfile);
+          const result = await this._applyStorageState(browserContext, storageState, userDataDir, disposableProfile);
+          if (!claimedStableProfile)
+            return result;
+          // Guarded so a repeated close() releases the claim only once — a
+          // second call must not free a claim a successor context now holds.
+          let claimReleased = false;
+          return {
+            browserContext: result.browserContext,
+            close: async () => {
+              try {
+                await result.close();
+              } finally {
+                // Released only after the browser has shut down, so the next
+                // claimant's launch meets a freed ProcessSingleton lock (the
+                // launch retry loop covers the OS-level shutdown tail).
+                if (!claimReleased) {
+                  claimReleased = true;
+                  this._stableProfileClaimed = false;
+                }
+              }
+            },
+          };
         } catch (error: any) {
           if (error instanceof StorageStateError)
             throw error;
@@ -1078,6 +1129,11 @@ export class PersistentContextFactory implements BrowserContextFactory {
       }
       throw new Error(`Browser is already in use for ${userDataDir}, use --isolated to run multiple instances of the same browser`);
     } catch (error) {
+      // A claim that never produced a context must not pin the stable profile
+      // forever — the next default context would needlessly fall back to a
+      // disposable profile with the stable one sitting free.
+      if (claimedStableProfile)
+        this._stableProfileClaimed = false;
       // The disposable profile belongs to this context alone, so a launch that
       // never produced a context must not leave it behind — repeated failed
       // starts would otherwise pile one stray directory into the registry each.

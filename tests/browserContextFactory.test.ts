@@ -507,6 +507,60 @@ describe('browserContextFactory', () => {
     }
   });
 
+  // Each stateful HTTP client's backend builds its own default context, and
+  // they all used to resolve to the stable mcp-<browser> profile: the second
+  // concurrent client spun on Chromium's ProcessSingleton lock and failed
+  // with "Browser is already in use".
+  it('hands the stable profile to the first default context and a disposable fallback to a concurrent second', async () => {
+    const profilesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-profiles-'));
+    process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
+    try {
+      const launchedDirs = new Map<any, string>();
+      (playwright.chromium.launchPersistentContext as any).mockImplementation(async (dir: string) => {
+        const browserContext = createMockBrowserContext();
+        launchedDirs.set(browserContext, dir);
+        return browserContext;
+      });
+      const rmSpy = vi.spyOn(fs.promises, 'rm');
+
+      const config = await resolveConfig({});
+      const factory = contextFactory(config);
+      const clientInfo = { name: 'vitest', version: '1.0.0' };
+      const signal = new AbortController().signal;
+
+      // Two concurrent default contexts: both must succeed instead of one
+      // erroring on the profile lock.
+      const [first, second] = await Promise.all([
+        factory.createContext(clientInfo, signal, undefined),
+        factory.createContext(clientInfo, signal, undefined),
+      ]);
+
+      const stableDir = path.join(profilesDir, 'mcp-chrome');
+      const dirs = [launchedDirs.get(first.browserContext)!, launchedDirs.get(second.browserContext)!];
+      expect(dirs.filter(dir => dir === stableDir)).toHaveLength(1);
+      const disposableDir = dirs.find(dir => dir !== stableDir)!;
+      expect(disposableDir).toMatch(/-concurrent-[0-9a-f]+$/);
+
+      // Closing the stable holder frees the claim: the next default context
+      // gets the stable profile — and its sign-in state — back.
+      const stableHolder = dirs[0] === stableDir ? first : second;
+      const disposableHolder = stableHolder === first ? second : first;
+      await stableHolder.close();
+      const third = await factory.createContext(clientInfo, signal, undefined);
+      expect(launchedDirs.get(third.browserContext)).toBe(stableDir);
+
+      // The fallback profile is disposable and removed with its context; the
+      // stable profile is durable and never deleted.
+      await disposableHolder.close();
+      expect(rmSpy).toHaveBeenCalledWith(disposableDir, { recursive: true, force: true });
+      await third.close();
+      expect(rmSpy).not.toHaveBeenCalledWith(stableDir, expect.anything());
+    } finally {
+      delete process.env.PWMCP_PROFILES_DIR_FOR_TEST;
+      fs.rmSync(profilesDir, { recursive: true, force: true });
+    }
+  });
+
   it('gives concurrent persistent launches distinct per-launch CDP ports', async () => {
     // injectCdpPort() used to write the allocated port into the SHARED
     // config.browser.launchOptions; the awaits between allocation and
