@@ -23,9 +23,12 @@ import type { Context } from './context.js';
 /**
  * The slice of the registry the session tools reach through their Context:
  * `browser_session_open` mints a handle, `browser_session_close` releases one.
+ * open() is async so the backend can finish fallible setup (the --save-session
+ * log) BEFORE the handle is registered — a failure must not leave a
+ * half-registered session behind.
  */
 export type BrowserSessionBroker = {
-  open(): string;
+  open(): Promise<string>;
   close(id: string): Promise<void>;
 };
 

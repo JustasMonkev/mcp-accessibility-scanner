@@ -90,7 +90,18 @@ export class BrowserServerBackend implements ServerBackend {
       sessionLog: () => this._ensureSessionLog(),
       clientInfo: { ...clientVersion },
       browserSessions: {
-        open: () => registry.open(() => createContext(true), this._browserContextFactory.sessionsUnsupportedReason),
+        open: async () => {
+          // Resolved BEFORE the handle is minted: the session log is this
+          // backend's one fallible piece of open() setup (an uncreatable
+          // --output-dir rejects SessionLog.create()), and it used to be
+          // awaited only after the tool had already registered the Context —
+          // the error result carried no handle to close, so every retry
+          // accumulated another live session until TTL reaping. Failing
+          // first leaves nothing half-registered, and callTool() would have
+          // created this same backend-wide log right after the call anyway.
+          await this._ensureSessionLog();
+          return registry.open(() => createContext(true), this._browserContextFactory.sessionsUnsupportedReason);
+        },
         close: id => registry.close(id),
       },
       browserSession,

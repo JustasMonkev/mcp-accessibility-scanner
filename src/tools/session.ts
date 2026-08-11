@@ -27,7 +27,7 @@ const open = defineTool({
     type: 'readOnly',
   },
   handle: async (context, _params, response) => {
-    const browserSessionId = context.browserSessions().open();
+    const browserSessionId = await context.browserSessions().open();
     response.addResult(`Opened browser session "${browserSessionId}". Pass browserSessionId: "${browserSessionId}" to other browser tools to use it.`);
     response.setStructuredContent({ browserSessionId });
   },
