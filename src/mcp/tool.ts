@@ -22,7 +22,11 @@ export type ToolSchema<Input extends z.Schema> = {
   title: string;
   description: string;
   inputSchema: Input;
-  type: 'readOnly' | 'destructive';
+  // 'stateChanging' is an additive update: it creates state a retry would
+  // duplicate (readOnlyHint false) without destroying anything
+  // (destructiveHint false) — e.g. browser_session_open, which mints a new
+  // live session and bearer handle on every call.
+  type: 'readOnly' | 'stateChanging' | 'destructive';
 };
 
 export function toMcpTool(tool: ToolSchema<any>): mcpServer.Tool {
@@ -37,6 +41,9 @@ export function toMcpTool(tool: ToolSchema<any>): mcpServer.Tool {
       title: tool.title,
       readOnlyHint: tool.type === 'readOnly',
       destructiveHint: tool.type === 'destructive',
+      // stateChanging tools are non-idempotent by nature (each call creates
+      // fresh state), so clients must not silently retry them.
+      ...(tool.type === 'stateChanging' ? { idempotentHint: false } : {}),
       openWorldHint: true,
     },
   };

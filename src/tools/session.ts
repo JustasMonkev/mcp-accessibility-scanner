@@ -24,7 +24,7 @@ const open = defineTool({
     title: 'Open browser session',
     description: 'Open a separate browser session — its own browser context with its own tabs, cookies and storage — and return its browserSessionId. Pass that id as the optional browserSessionId argument of the non-session browser tools to run them in this session instead of the default one. Unavailable in modes that share one live browser context (non-isolated CDP attach, extension); such modes reject the call instead of handing out a session that is not separate. Idle sessions expire automatically, so close the session with browser_session_close when done.',
     inputSchema: z.object({}),
-    type: 'readOnly',
+    type: 'stateChanging',
   },
   handle: async (context, _params, response) => {
     const browserSessionId = await context.browserSessions().open();
