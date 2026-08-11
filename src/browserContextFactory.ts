@@ -484,7 +484,15 @@ export interface BrowserContextFactory {
    * Undefined (or omitted) means separate per-session contexts are supported.
    */
   readonly sessionsUnsupportedReason?: string;
-  createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined, options?: CreateContextOptions): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }>;
+  /**
+   * `closeStarting`, when present, is the owning Context's advance notice
+   * that `close()` will follow — invoked synchronously when the Context
+   * begins its shutdown, ahead of async cleanup (the bounded pending-download
+   * drain) that can hold the actual `close()` call open for tens of seconds.
+   * The persistent factory uses it to tell a stable-profile holder that is
+   * closing apart from one that is concurrently alive.
+   */
+  createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined, options?: CreateContextOptions): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void>, closeStarting?: () => void }>;
 }
 
 abstract class BaseContextFactory implements BrowserContextFactory {
@@ -985,19 +993,53 @@ export class PersistentContextFactory implements BrowserContextFactory {
 
   private _userDataDirs = new Set<string>();
 
-  // True while a live context (or one still launching) holds the stable
+  // Set while a live context (or one still launching) holds the stable
   // `mcp-<browser>-<workspace>` profile. The profile can back only one running browser at
   // a time (Chromium's ProcessSingleton lock), and every stateful backend's
   // default context resolves to it — one such context under stdio, but each
   // concurrent Mcp-Session-Id HTTP client brings its own backend, and the
   // second used to spin on the lock and fail with "Browser is already in
-  // use". The stable profile now goes to the FIRST claimant; contended
-  // claimants fall back to a disposable profile (their audit runs, without
-  // the stable profile's sign-in state), and the claim is released when the
-  // holder's context closes so the next default context — and the profile's
-  // persisted state — line up again. Checked-and-set synchronously, so
-  // concurrent createContext() calls cannot both claim.
-  private _stableProfileClaimed = false;
+  // use". The stable profile goes to the FIRST claimant; genuinely
+  // concurrent claimants fall back to a disposable profile (their audit
+  // runs, without the stable profile's sign-in state), and the claim is
+  // released when the holder's context closes so the next default context —
+  // and the profile's persisted state — line up again. Checked-and-set
+  // synchronously, so concurrent createContext() calls cannot both claim.
+  //
+  // A holder that has BEGUN closing (`closing`, set via the handle's
+  // closeStarting notice) is a release in progress, not genuine concurrency:
+  // its async shutdown — dominated by the Context's bounded pending-download
+  // drain — can outlast a --connect-tool/--vscode provider switch-away, and a
+  // claimant arriving in that window (the user switching back) used to be
+  // silently demoted to a disposable profile, losing the stable profile's
+  // sign-in state. Such a claimant now waits on `released` (bounded: the
+  // drain is capped at 30s and the browser shutdown bounds the rest) and
+  // then claims the stable profile itself.
+  private _stableProfileClaim: {
+    closing: boolean;
+    released: Promise<void>;
+    // Frees the claim (identity-guarded, so a stale release can never free a
+    // successor's claim) and resolves `released`; idempotent.
+    release: () => void;
+  } | undefined;
+
+  // Claims the stable profile for one context. Synchronous, so a concurrent
+  // createContext() cannot interleave between check and set.
+  private _claimStableProfile(): NonNullable<PersistentContextFactory['_stableProfileClaim']> {
+    let resolveReleased!: () => void;
+    const released = new Promise<void>(resolve => { resolveReleased = resolve; });
+    const claim = {
+      closing: false,
+      released,
+      release: () => {
+        if (this._stableProfileClaim === claim)
+          this._stableProfileClaim = undefined;
+        resolveReleased();
+      },
+    };
+    this._stableProfileClaim = claim;
+    return claim;
+  }
 
   constructor(config: FullConfig) {
     this.config = config;
@@ -1014,7 +1056,7 @@ export class PersistentContextFactory implements BrowserContextFactory {
     return undefined;
   }
 
-  async createContext(clientInfo: ClientInfo, _abortSignal?: AbortSignal, _toolName?: string, options?: CreateContextOptions): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  async createContext(clientInfo: ClientInfo, _abortSignal?: AbortSignal, _toolName?: string, options?: CreateContextOptions): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void>, closeStarting?: () => void }> {
     testDebug('create browser context (persistent)');
     // launchPersistentContext() accepts a storageState option without applying
     // it (verified against 1.61.1) — the profile is normally the state — so it
@@ -1054,7 +1096,7 @@ export class PersistentContextFactory implements BrowserContextFactory {
       : options?.browserSession
         ? `-session-${createGuid()}`
         : '';
-    let claimedStableProfile = false;
+    let claim: PersistentContextFactory['_stableProfileClaim'];
     let userDataDir: string | undefined;
     let disposableProfile = false;
     const browserType = playwright[this.config.browser.browserName];
@@ -1066,18 +1108,27 @@ export class PersistentContextFactory implements BrowserContextFactory {
     // profile) and the reserved CDP port was never released.
     try {
       // A default (no-suffix) context claims the stable profile — unless a
-      // sibling already holds it (see _stableProfileClaimed): then it runs in
+      // sibling already holds it (see _stableProfileClaim): then it runs in
       // a disposable profile instead of failing the launch. A user-supplied
       // --user-data-dir is exempt: silently substituting a disposable profile
       // would drop the sign-in state the user explicitly asked for, so that
       // configuration keeps the launch-time contention error.
       if (!profileSuffix && !this.config.browser.userDataDir) {
-        if (this._stableProfileClaimed) {
+        // A holder that has begun closing is a release in progress, not
+        // genuine concurrency: wait for the release (bounded by the holder's
+        // capped download drain and browser shutdown) instead of silently
+        // demoting this context to a disposable profile. Re-checked after
+        // the wait — another claimant may have won the freed claim.
+        const holder = this._stableProfileClaim;
+        if (holder?.closing) {
+          testDebug('stable persistent profile holder is closing; waiting for its release');
+          await holder.released;
+        }
+        if (this._stableProfileClaim) {
           profileSuffix = `-concurrent-${createGuid()}`;
           testDebug('stable persistent profile is in use by a concurrent context; falling back to a disposable profile');
         } else {
-          this._stableProfileClaimed = true;
-          claimedStableProfile = true;
+          claim = this._claimStableProfile();
         }
       }
       userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(profileSuffix);
@@ -1101,13 +1152,16 @@ export class PersistentContextFactory implements BrowserContextFactory {
             handleSIGTERM: false,
           });
           const result = await this._applyStorageState(browserContext, storageState, userDataDir, disposableProfile);
-          if (!claimedStableProfile)
+          if (!claim)
             return result;
-          // Guarded so a repeated close() releases the claim only once — a
-          // second call must not free a claim a successor context now holds.
-          let claimReleased = false;
+          const heldClaim = claim;
           return {
             browserContext: result.browserContext,
+            // The owning Context's advance notice that close() will follow
+            // once its async cleanup (the bounded download drain) finishes:
+            // from here on a new default claimant waits for the release
+            // instead of treating this holder as genuine concurrency.
+            closeStarting: () => { heldClaim.closing = true; },
             close: async () => {
               try {
                 await result.close();
@@ -1115,10 +1169,9 @@ export class PersistentContextFactory implements BrowserContextFactory {
                 // Released only after the browser has shut down, so the next
                 // claimant's launch meets a freed ProcessSingleton lock (the
                 // launch retry loop covers the OS-level shutdown tail).
-                if (!claimReleased) {
-                  claimReleased = true;
-                  this._stableProfileClaimed = false;
-                }
+                // release() is idempotent and identity-guarded, so a repeated
+                // close() can never free a claim a successor context holds.
+                heldClaim.release();
               }
             },
           };
@@ -1140,8 +1193,7 @@ export class PersistentContextFactory implements BrowserContextFactory {
       // A claim that never produced a context must not pin the stable profile
       // forever — the next default context would needlessly fall back to a
       // disposable profile with the stable one sitting free.
-      if (claimedStableProfile)
-        this._stableProfileClaimed = false;
+      claim?.release();
       // The disposable profile belongs to this context alone, so a launch that
       // never produced a context must not leave it behind — repeated failed
       // starts would otherwise pile one stray directory into the registry each.

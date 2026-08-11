@@ -583,6 +583,59 @@ describe('browserContextFactory', () => {
     }
   });
 
+  // A --connect-tool/--vscode provider switch-away starts an async close
+  // whose cleanup (the Context's bounded pending-download drain) can still be
+  // running when the user switches back: the new default context used to be
+  // misclassified as concurrent and silently demoted to a -concurrent-
+  // disposable profile, losing the stable profile's sign-in state.
+  it('hands the stable profile to a default context arriving while the previous holder is closing', async () => {
+    const profilesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-profiles-'));
+    process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
+    try {
+      const launchedDirs = new Map<any, string>();
+      (playwright.chromium.launchPersistentContext as any).mockImplementation(async (dir: string) => {
+        const browserContext = createMockBrowserContext();
+        launchedDirs.set(browserContext, dir);
+        return browserContext;
+      });
+
+      const config = await resolveConfig({});
+      const factory = contextFactory(config);
+      const clientInfo = { name: 'vitest', version: '1.0.0' };
+      const signal = new AbortController().signal;
+      const stableDir = path.join(profilesDir, stableProfileName());
+
+      const holder = await factory.createContext(clientInfo, signal, undefined);
+      expect(launchedDirs.get(holder.browserContext)).toBe(stableDir);
+      expect(holder.closeStarting).toBeDefined();
+
+      // The holder announces its close (the Context does this ahead of the
+      // download drain) and begins a shutdown that stays in flight.
+      let finishShutdown = () => {};
+      (holder.browserContext.close as any).mockImplementation(() => new Promise<void>(resolve => { finishShutdown = resolve; }));
+      holder.closeStarting!();
+      const closing = holder.close();
+
+      // A default claimant arriving mid-close is a successor, not genuine
+      // concurrency: it must wait for the release instead of launching into
+      // a disposable profile...
+      const pendingSuccessor = factory.createContext(clientInfo, signal, undefined);
+      for (let i = 0; i < 10; i++)
+        await Promise.resolve();
+      expect((playwright.chromium.launchPersistentContext as any).mock.calls).toHaveLength(1);
+
+      // ...and it gets the STABLE profile once the close completes.
+      finishShutdown();
+      await closing;
+      const successor = await pendingSuccessor;
+      expect(launchedDirs.get(successor.browserContext)).toBe(stableDir);
+      await successor.close();
+    } finally {
+      delete process.env.PWMCP_PROFILES_DIR_FOR_TEST;
+      fs.rmSync(profilesDir, { recursive: true, force: true });
+    }
+  });
+
   // _createUserDataDir's mkdir can reject (a transient volume failure) after
   // the stable-profile claim was set and the CDP port reserved but before the
   // launch loop's cleanup scope: both used to leak — every later default
@@ -599,7 +652,7 @@ describe('browserContextFactory', () => {
       const server: any = new EventEmitter();
       server.listen = (_port: number, cb: () => void) => { setImmediate(cb); return server; };
       server.address = () => ({ port: 45678 });
-      server.close = (cb?: () => void) => { if (cb) setImmediate(cb); return server; };
+      server.close = (cb?: () => void) => { cb && setImmediate(cb); return server; };
       return server;
     }) as any);
     try {

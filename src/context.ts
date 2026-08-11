@@ -138,7 +138,7 @@ export class Context {
   readonly tools: Tool[];
   readonly config: FullConfig;
   readonly options: ContextOptions;
-  private _browserContextPromise: Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> | undefined;
+  private _browserContextPromise: Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void>, closeStarting?: () => void }> | undefined;
   private _browserContextFactory: BrowserContextFactory;
   private _tabs: Tab[] = [];
   private _currentTab: Tab | undefined;
@@ -381,7 +381,13 @@ export class Context {
     const promise = this._browserContextPromise;
     this._browserContextPromise = undefined;
 
-    await promise.then(async ({ browserContext, close }) => {
+    await promise.then(async ({ browserContext, close, closeStarting }) => {
+      // Advance notice for the factory, ahead of the download drain: the
+      // persistent factory uses it to tell a stable-profile holder that is
+      // closing apart from one that is concurrently alive, so a default
+      // context arriving mid-drain waits for the release instead of being
+      // silently demoted to a disposable profile.
+      closeStarting?.();
       // Before the browser goes away — whoever is closing it: a stateless
       // HTTP response's disposal, browser_session_close, the TTL reaper, the
       // last tab closing — give in-flight download saves their bounded
@@ -444,7 +450,7 @@ export class Context {
     return this._browserContextPromise;
   }
 
-  private async _setupBrowserContext(): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  private async _setupBrowserContext(): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void>, closeStarting?: () => void }> {
     if (this._closeBrowserContextPromise)
       throw new Error('Another browser context is being closed.');
     // TODO: move to the browser context factory to make it based on isolation mode.

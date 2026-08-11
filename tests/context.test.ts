@@ -306,6 +306,40 @@ describe('Context', () => {
       }
     });
 
+    it('signals closeStarting to the factory before waiting out the download drain', async () => {
+      // The persistent factory needs the notice AHEAD of the bounded drain:
+      // it is what lets a stable-profile successor arriving mid-drain be
+      // told apart from a genuinely concurrent context.
+      const close = vi.fn().mockResolvedValue(undefined);
+      const closeStarting = vi.fn();
+      (mockBrowserContextFactory.createContext as any).mockResolvedValue({
+        browserContext: mockBrowserContext,
+        close,
+        closeStarting,
+      });
+      const context = new Context({
+        tools: [],
+        config: {} as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await context.newTab();
+
+      let finishDownload = () => {};
+      context.trackPendingDownload(new Promise<void>(resolve => finishDownload = resolve));
+      const closing = context.closeBrowserContext();
+      for (let i = 0; i < 10; i++)
+        await Promise.resolve();
+      // The notice landed while close() is still parked on the drain.
+      expect(closeStarting).toHaveBeenCalledTimes(1);
+      expect(close).not.toHaveBeenCalled();
+
+      finishDownload();
+      await closing;
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+
     it('rejects a tool call arriving during the download drain instead of handing out the closing context', async () => {
       // The last tab closing with a download pending starts the bounded drain,
       // but _browserContextPromise used to stay published for its duration: a
