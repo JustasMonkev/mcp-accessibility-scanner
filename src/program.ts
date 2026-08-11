@@ -221,7 +221,11 @@ configureBaseProgram()
         // context.
         const sharedSelection: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders(false) };
         exitCleanups.push(async () => {
-          await sharedSelection.slot.replace(undefined);
+          // dispose(), not replace(undefined): shutdown must close the
+          // switched client even while in-flight requests still hold leases
+          // on it — nothing outlives the process, and waiting for a drain
+          // could stall exit forever.
+          await sharedSelection.slot.dispose();
         });
         const factory: mcpServer.ServerBackendFactory = {
           name: 'Playwright w/ switch',

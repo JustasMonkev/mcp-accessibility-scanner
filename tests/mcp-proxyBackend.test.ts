@@ -284,6 +284,155 @@ describe('ProxyBackend', () => {
       expect(defaults.length).toBeGreaterThanOrEqual(2);
     });
 
+    it('lets an in-flight call finish on the outgoing shared client, closing it exactly once after the drain', async () => {
+      // slot.replace() used to close the previous client as soon as the swap
+      // was published, failing a request that had adopted it and was still
+      // inside a long callTool. The close is now deferred until every
+      // adopter has released its lease.
+      const backendContext = { notifyToolListChanged: vi.fn(async () => undefined) };
+      const clientVersion = { name: 'vitest', version: '1.0.0' };
+      let releaseCall: (() => void) | undefined;
+      const alternateInner = {
+        closed: 0,
+        listTools: async () => [{ name: 'tool_alternate', description: 'a', inputSchema: { type: 'object' as const, properties: {} } }],
+        callTool: async () => {
+          await new Promise<void>(resolve => { releaseCall = resolve; });
+          return { content: [{ type: 'text' as const, text: 'late result' }] };
+        },
+        serverClosed: () => {
+          alternateInner.closed++;
+        },
+      };
+      const makeProviders = () => [
+        { name: 'default', description: 'd', connect: async () => wrapInProcess(makeInnerBackend('tool_default') as any) },
+        { name: 'alternate', description: 'a', connect: async () => wrapInProcess(alternateInner as any) },
+      ];
+      const shared: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders() as any };
+      const makeRequestBackend = () => new ProxyBackend(makeProviders() as any, shared);
+
+      const request1 = makeRequestBackend();
+      await request1.initialize(backendContext as any, clientVersion);
+      await request1.callTool('browser_connect', { name: 'alternate' });
+      request1.serverClosed?.();
+
+      // request2 adopts the shared client and starts a long tool call.
+      const request2 = makeRequestBackend();
+      await request2.initialize(backendContext as any, clientVersion);
+      const inFlight = request2.callTool('tool_alternate', {});
+      await vi.waitFor(() => expect(releaseCall).toBeDefined());
+
+      // request3 switches back to default while request2's call is still in
+      // flight: the outgoing client must stay open for it.
+      const request3 = makeRequestBackend();
+      await request3.initialize(backendContext as any, clientVersion);
+      const back = await request3.callTool('browser_connect', { name: 'default' });
+      expect(back.isError).not.toBe(true);
+      expect(alternateInner.closed).toBe(0);
+      request3.serverClosed?.();
+
+      releaseCall!();
+      const result = await inFlight;
+      expect((result.content?.[0] as any).text).toBe('late result');
+
+      // request2's response cleanup releases the last lease, which runs the
+      // deferred close — exactly once; a straggling repeat is a no-op.
+      request2.serverClosed?.();
+      await vi.waitFor(() => expect(alternateInner.closed).toBe(1));
+      request2.serverClosed?.();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(alternateInner.closed).toBe(1);
+    });
+
+    it('keeps an adopter arriving mid-switch on the live outgoing client, and later adopters on the new one', async () => {
+      // The swap is atomic for adopters: a request initializing while the
+      // replacement is still connecting adopts the outgoing client — which
+      // must stay usable until that request releases it — and a request
+      // arriving after the swap adopts the replacement.
+      const backendContext = { notifyToolListChanged: vi.fn(async () => undefined) };
+      const clientVersion = { name: 'vitest', version: '1.0.0' };
+      const alternates: ReturnType<typeof makeInnerBackend>[] = [];
+      const gateRef: { gate?: Promise<void> } = {};
+      const makeProviders = () => [
+        { name: 'default', description: 'd', connect: async () => wrapInProcess(makeInnerBackend('tool_default') as any) },
+        {
+          name: 'alternate',
+          description: 'a',
+          connect: async () => {
+            if (gateRef.gate)
+              await gateRef.gate;
+            const inner = makeInnerBackend('tool_alternate');
+            alternates.push(inner);
+            return wrapInProcess(inner as any);
+          },
+        },
+      ];
+      const shared: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders() as any };
+      const makeRequestBackend = () => new ProxyBackend(makeProviders() as any, shared);
+
+      const request1 = makeRequestBackend();
+      await request1.initialize(backendContext as any, clientVersion);
+      await request1.callTool('browser_connect', { name: 'alternate' });
+      request1.serverClosed?.();
+
+      // request2 re-switches to a fresh alternate connection; its connect
+      // blocks on the gate.
+      let releaseGate: () => void;
+      gateRef.gate = new Promise<void>(resolve => { releaseGate = resolve; });
+      const request2 = makeRequestBackend();
+      await request2.initialize(backendContext as any, clientVersion);
+      const switching = request2.callTool('browser_connect', { name: 'alternate' });
+
+      // request3 arrives mid-switch and adopts the still-published old client.
+      const request3 = makeRequestBackend();
+      await request3.initialize(backendContext as any, clientVersion);
+
+      releaseGate!();
+      const switched = await switching;
+      expect(switched.isError).not.toBe(true);
+      expect(alternates).toHaveLength(2);
+
+      // The old client request3 adopted survived the swap and still serves it.
+      const result = await request3.callTool('tool_alternate', {});
+      expect((result.content?.[0] as any).text).toBe('tool_alternate');
+      expect(alternates[0].calls).toContain('tool_alternate');
+      expect(alternates[0].closed).toBe(0);
+
+      // Its release drains the retired client; the replacement stays live for
+      // the requests that come after the swap.
+      request3.serverClosed?.();
+      await vi.waitFor(() => expect(alternates[0].closed).toBe(1));
+      request2.serverClosed?.();
+
+      const request4 = makeRequestBackend();
+      await request4.initialize(backendContext as any, clientVersion);
+      const late = await request4.callTool('tool_alternate', {});
+      expect((late.content?.[0] as any).text).toBe('tool_alternate');
+      expect(alternates[1].calls).toContain('tool_alternate');
+      expect(alternates[1].closed).toBe(0);
+    });
+
+    it('dispose closes the shared client even while adopters still hold leases', async () => {
+      // Exit cleanup must not wait for a drain: a hung request would stall
+      // process shutdown forever, and nothing outlives the process anyway.
+      const { alternates, backendContext, clientVersion, shared, makeRequestBackend } = makeSharedSetup();
+
+      const request1 = makeRequestBackend();
+      await request1.initialize(backendContext as any, clientVersion);
+      await request1.callTool('browser_connect', { name: 'alternate' });
+      request1.serverClosed?.();
+
+      const request2 = makeRequestBackend();
+      await request2.initialize(backendContext as any, clientVersion);
+
+      await shared.slot.dispose();
+      expect(alternates[0].closed).toBe(1);
+
+      // request2's straggling release must not double-close.
+      request2.serverClosed?.();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(alternates[0].closed).toBe(1);
+    });
+
     it('keeps the previous shared selection when connecting the new provider fails', async () => {
       const { alternates, backendContext, clientVersion, shared, makeRequestBackend } = makeSharedSetup();
 

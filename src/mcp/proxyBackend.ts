@@ -73,8 +73,11 @@ export class ProxyBackend implements ServerBackend {
     this._backendContext = context;
     // A process-scoped browser_connect switch is in effect: adopt it instead
     // of connecting the default provider, so the selection made in an earlier
-    // handshake-free request keeps governing this one.
-    const shared = this._sharedSelection?.slot.current();
+    // handshake-free request keeps governing this one. The adoption holds a
+    // lease on the shared client (released in serverClosed, or earlier when
+    // this request switches away), so a concurrent switch cannot close it
+    // under this request's in-flight calls.
+    const shared = this._sharedSelection?.slot.acquire();
     if (shared) {
       this._currentClient = shared;
       this._ownsCurrentClient = false;
@@ -111,6 +114,10 @@ export class ProxyBackend implements ServerBackend {
   serverClosed?(): void {
     if (this._ownsCurrentClient)
       void this._currentClient?.close().catch(errorsDebug);
+    else if (this._currentClient)
+      // Adopted from the shared slot: release the lease instead of closing —
+      // the slot closes the client once it is retired and fully drained.
+      void this._sharedSelection?.slot.release(this._currentClient);
   }
 
   private async _callContextSwitchTool(params: any): Promise<CallToolResult> {
@@ -137,8 +144,9 @@ export class ProxyBackend implements ServerBackend {
 
   // Stateless serving: publish the switch through the process-scoped slot so
   // later per-request backends adopt it. The slot closes the previously
-  // shared client itself (exactly once, after the swap); only a client this
-  // request owned — its per-request default — is closed here.
+  // shared client itself (exactly once, after the swap, once every adopting
+  // request has released it); only a client this request owned — its
+  // per-request default — is closed here.
   private async _switchSharedClient(name: string): Promise<void> {
     const { slot, providers } = this._sharedSelection!;
     // The stateful-flavored list mirrors this._mcpProviders name-for-name;
@@ -148,6 +156,7 @@ export class ProxyBackend implements ServerBackend {
       throw new Error('Unknown connection method: ' + name);
     const previousTools = await this._getExposedTools(this._currentClient).catch(() => undefined);
     const previousOwned = this._ownsCurrentClient ? this._currentClient : undefined;
+    const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
     const shared = await slot.replace(provider === providers[0] ? undefined : () => this._connectClient(provider));
     if (shared) {
       this._currentClient = shared;
@@ -158,6 +167,12 @@ export class ProxyBackend implements ServerBackend {
       this._currentClient = await this._connectClient(this._mcpProviders[0]);
       this._ownsCurrentClient = true;
     }
+    // This request no longer routes through the shared client it adopted;
+    // when it was the retiring client's last adopter, this runs the close
+    // the replace deferred. Only on success — a failed replace threw above,
+    // and the request keeps using its adopted client.
+    if (previousShared)
+      await slot.release(previousShared);
     await previousOwned?.close().catch(errorsDebug);
     await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(this._currentClient));
   }

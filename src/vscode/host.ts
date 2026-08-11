@@ -63,8 +63,11 @@ export class VSCodeProxyBackend implements ServerBackend {
     this._clientVersion = clientVersion;
     // A process-scoped browser_connect switch is in effect: adopt it instead
     // of connecting the default provider, so the selection made in an earlier
-    // handshake-free request keeps governing this one.
-    const shared = this._sharedSlot?.current();
+    // handshake-free request keeps governing this one. The adoption holds a
+    // lease on the shared client (released in serverClosed, or earlier when
+    // this request switches away), so a concurrent switch cannot close it —
+    // and kill the child behind it — under this request's in-flight calls.
+    const shared = this._sharedSlot?.acquire();
     if (shared) {
       this._currentClient = shared;
       this._ownsCurrentClient = false;
@@ -95,6 +98,10 @@ export class VSCodeProxyBackend implements ServerBackend {
   serverClosed?(): void {
     if (this._ownsCurrentClient)
       void this._currentClient?.close().catch(logUnhandledError);
+    else if (this._currentClient)
+      // Adopted from the shared slot: release the lease instead of closing —
+      // the slot closes the client once it is retired and fully drained.
+      void this._sharedSlot?.release(this._currentClient);
   }
 
   private async _callContextSwitchTool(params: z.infer<typeof contextSwitchOptions>, _requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
@@ -151,12 +158,14 @@ export class VSCodeProxyBackend implements ServerBackend {
 
   // Stateless serving: publish the switch through the process-scoped slot so
   // later per-request backends adopt it. The slot closes the previously
-  // shared client itself (exactly once, after the swap, terminating that
-  // client's spawned child); only a client this request owned — its
-  // per-request default — is closed here.
+  // shared client itself (exactly once, after the swap, once every adopting
+  // request has released it — the close terminates that client's spawned
+  // child); only a client this request owned — its per-request default — is
+  // closed here.
   private async _switchSharedClient(createTransport: (() => Promise<Transport>) | undefined): Promise<void> {
     const previousTools = await this._getExposedTools(this._currentClient).catch(() => undefined);
     const previousOwned = this._ownsCurrentClient ? this._currentClient : undefined;
+    const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
     // The transport is created inside the serialized replace(), so a queued
     // concurrent switch never reuses an already-consumed transport.
     const shared = await this._sharedSlot!.replace(createTransport ? async () => this._connectClient(await createTransport()) : undefined);
@@ -169,6 +178,12 @@ export class VSCodeProxyBackend implements ServerBackend {
       this._currentClient = await this._connectClient(await this._defaultTransportFactory());
       this._ownsCurrentClient = true;
     }
+    // This request no longer routes through the shared client it adopted;
+    // when it was the retiring client's last adopter, this runs the close
+    // the replace deferred. Only on success — a failed replace threw above,
+    // and the request keeps using its adopted client.
+    if (previousShared)
+      await this._sharedSlot!.release(previousShared);
     await previousOwned?.close().catch(logUnhandledError);
     await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(this._currentClient));
   }
@@ -235,8 +250,11 @@ export async function runVSCodeTools(config: FullConfig, registerExitCleanup?: (
   const sharedSlot = new SharedClientSlot();
   // The switched child outlives every response, so process shutdown must
   // close it explicitly instead of relying on stdio teardown alone.
+  // dispose(), not replace(undefined): shutdown must close the child even
+  // while in-flight requests still hold leases on its client — nothing
+  // outlives the process, and waiting for a drain could stall exit forever.
   registerExitCleanup?.(async () => {
-    await sharedSlot.replace(undefined);
+    await sharedSlot.dispose();
   });
   // A stateless per-request proxy flags its inner default context ephemeral
   // (disposable profile, see startMCPServer in program.ts); stateful proxies
