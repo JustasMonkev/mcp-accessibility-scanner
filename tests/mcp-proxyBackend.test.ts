@@ -17,6 +17,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/client';
 import { ProxyBackend } from '../src/mcp/proxyBackend.js';
+import { SharedClientSlot } from '../src/mcp/sharedClientSlot.js';
+import { wrapInProcess } from '../src/mcp/server.js';
+
+import type { SharedProxySelection } from '../src/mcp/proxyBackend.js';
 
 describe('ProxyBackend', () => {
   afterEach(() => {
@@ -172,5 +176,140 @@ describe('ProxyBackend', () => {
     // The session still serves tools through the previous provider.
     await backend.callTool('scan_page', {});
     expect(currentClient.callTool).toHaveBeenCalled();
+  });
+
+  // Stateless HTTP serves every handshake-free POST with a throwaway
+  // ProxyBackend; a browser_connect switch must therefore be published
+  // process-wide, or it reports success and silently reverts to the default
+  // provider on the very next request.
+  describe('process-scoped provider selection for stateless serving', () => {
+    function makeInnerBackend(toolName: string) {
+      const backend = {
+        toolName,
+        closed: 0,
+        calls: [] as string[],
+        listTools: async () => [{ name: toolName, description: toolName, inputSchema: { type: 'object' as const, properties: {} } }],
+        callTool: async (name: string) => {
+          backend.calls.push(name);
+          return { content: [{ type: 'text' as const, text: toolName }] };
+        },
+        serverClosed: () => {
+          backend.closed++;
+        },
+      };
+      return backend;
+    }
+
+    function makeSharedSetup() {
+      const defaults: ReturnType<typeof makeInnerBackend>[] = [];
+      const alternates: ReturnType<typeof makeInnerBackend>[] = [];
+      const makeProviders = () => [
+        {
+          name: 'default',
+          description: 'Default provider',
+          connect: async () => {
+            const inner = makeInnerBackend('tool_default');
+            defaults.push(inner);
+            return wrapInProcess(inner as any);
+          },
+        },
+        {
+          name: 'alternate',
+          description: 'Alternate provider',
+          connect: async () => {
+            const inner = makeInnerBackend('tool_alternate');
+            alternates.push(inner);
+            return wrapInProcess(inner as any);
+          },
+        },
+      ];
+      const shared: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders() as any };
+      const backendContext = { notifyToolListChanged: vi.fn(async () => undefined) };
+      const clientVersion = { name: 'vitest', version: '1.0.0' };
+      const makeRequestBackend = () => new ProxyBackend(makeProviders() as any, shared);
+      return { shared, defaults, alternates, backendContext, clientVersion, makeRequestBackend };
+    }
+
+    it('keeps a browser_connect switch in force for later per-request backends', async () => {
+      const { alternates, backendContext, clientVersion, makeRequestBackend } = makeSharedSetup();
+
+      const request1 = makeRequestBackend();
+      await request1.initialize(backendContext as any, clientVersion);
+      const switched = await request1.callTool('browser_connect', { name: 'alternate' });
+      expect(switched.isError).not.toBe(true);
+      // Response cleanup of the switching request must not tear down the
+      // process-scoped client.
+      request1.serverClosed?.();
+      expect(alternates).toHaveLength(1);
+      expect(alternates[0].closed).toBe(0);
+
+      const request2 = makeRequestBackend();
+      await request2.initialize(backendContext as any, clientVersion);
+      const tools = await request2.listTools();
+      expect(tools.map(tool => tool.name)).toContain('tool_alternate');
+      const result = await request2.callTool('tool_alternate', {});
+      expect((result.content?.[0] as any).text).toBe('tool_alternate');
+      expect(alternates[0].calls).toContain('tool_alternate');
+      // No second alternate connection was made, and this response's cleanup
+      // leaves the shared client alive too.
+      expect(alternates).toHaveLength(1);
+      request2.serverClosed?.();
+      expect(alternates[0].closed).toBe(0);
+    });
+
+    it('closes the shared client exactly once when switching back to the default provider', async () => {
+      const { defaults, alternates, backendContext, clientVersion, makeRequestBackend } = makeSharedSetup();
+
+      const request1 = makeRequestBackend();
+      await request1.initialize(backendContext as any, clientVersion);
+      await request1.callTool('browser_connect', { name: 'alternate' });
+      request1.serverClosed?.();
+
+      const request2 = makeRequestBackend();
+      await request2.initialize(backendContext as any, clientVersion);
+      const back = await request2.callTool('browser_connect', { name: 'default' });
+      expect(back.isError).not.toBe(true);
+      expect(alternates[0].closed).toBe(1);
+      // The rest of this exchange runs on an owned per-request default
+      // client, closed with the response.
+      const tools = await request2.listTools();
+      expect(tools.map(tool => tool.name)).toContain('tool_default');
+      request2.serverClosed?.();
+      expect(alternates[0].closed).toBe(1);
+
+      const request3 = makeRequestBackend();
+      await request3.initialize(backendContext as any, clientVersion);
+      expect((await request3.listTools()).map(tool => tool.name)).toContain('tool_default');
+      // Per-request default clients again: request2's and request3's.
+      expect(defaults.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('keeps the previous shared selection when connecting the new provider fails', async () => {
+      const { alternates, backendContext, clientVersion, shared, makeRequestBackend } = makeSharedSetup();
+
+      const request1 = makeRequestBackend();
+      await request1.initialize(backendContext as any, clientVersion);
+      await request1.callTool('browser_connect', { name: 'alternate' });
+      request1.serverClosed?.();
+
+      const failing = new ProxyBackend([
+        { name: 'default', description: 'd', connect: vi.fn(async () => ({ id: 'default-transport' })) },
+        { name: 'alternate', description: 'a', connect: vi.fn(async () => ({ id: 'alternate-transport' })) },
+      ] as any, {
+        slot: shared.slot,
+        providers: [
+          { name: 'default', description: 'd', connect: vi.fn() },
+          { name: 'alternate', description: 'a', connect: vi.fn(async () => { throw new Error('connect exploded'); }) },
+        ] as any,
+      });
+      await failing.initialize(backendContext as any, clientVersion);
+      const result = await failing.callTool('browser_connect', { name: 'alternate' });
+      expect(result.isError).toBe(true);
+      // The previously shared client was neither closed nor replaced.
+      expect(alternates[0].closed).toBe(0);
+      const request2 = makeRequestBackend();
+      await request2.initialize(backendContext as any, clientVersion);
+      expect((await request2.listTools()).map(tool => tool.name)).toContain('tool_alternate');
+    });
   });
 });

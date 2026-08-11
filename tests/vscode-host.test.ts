@@ -18,6 +18,8 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/client';
 import { outputFile, resolveConfig } from '../src/config.js';
+import { SharedClientSlot } from '../src/mcp/sharedClientSlot.js';
+import { wrapInProcess } from '../src/mcp/server.js';
 import { VSCodeProxyBackend } from '../src/vscode/host.js';
 
 describe('VSCodeProxyBackend', () => {
@@ -101,5 +103,81 @@ describe('VSCodeProxyBackend', () => {
     expect(close).not.toHaveBeenCalled();
     await backend.callTool('scan_page', {});
     expect(callTool).toHaveBeenCalledTimes(1);
+  });
+
+  // Stateless HTTP serves every handshake-free POST with a throwaway
+  // VSCodeProxyBackend; a browser_connect switch must therefore be published
+  // process-wide, or it reports success while the child it launched is killed
+  // with the response and the next request reverts to the default provider.
+  describe('process-scoped provider selection for stateless serving', () => {
+    function makeInnerBackend(toolName: string) {
+      const backend = {
+        toolName,
+        closed: 0,
+        calls: [] as string[],
+        listTools: async () => [{ name: toolName, description: toolName, inputSchema: { type: 'object' as const, properties: {} } }],
+        callTool: async (name: string) => {
+          backend.calls.push(name);
+          return { content: [{ type: 'text' as const, text: toolName }] };
+        },
+        serverClosed: () => {
+          backend.closed++;
+        },
+      };
+      return backend;
+    }
+
+    async function makeSharedSetup() {
+      const config = await resolveConfig({});
+      const slot = new SharedClientSlot();
+      const defaults: ReturnType<typeof makeInnerBackend>[] = [];
+      const defaultTransportFactory = async () => {
+        const inner = makeInnerBackend('tool_default');
+        defaults.push(inner);
+        return await wrapInProcess(inner as any);
+      };
+      const backendContext = { notifyToolListChanged: vi.fn(async () => undefined) };
+      const clientVersion = { name: 'vitest', version: '1.0.0' };
+      const makeRequestBackend = () => new VSCodeProxyBackend(config, defaultTransportFactory, slot);
+      return { config, slot, defaults, backendContext, clientVersion, makeRequestBackend };
+    }
+
+    it('keeps a browser_connect switch in force for later per-request backends', async () => {
+      const { defaults, backendContext, clientVersion, makeRequestBackend } = await makeSharedSetup();
+      const child = makeInnerBackend('tool_child');
+
+      const request1 = makeRequestBackend();
+      await request1.initialize(backendContext as any, clientVersion);
+      vi.spyOn(request1 as any, '_createSwitchTransport').mockImplementation(() => wrapInProcess(child as any));
+      const switched = await request1.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' });
+      expect(switched.isError).not.toBe(true);
+      // Response cleanup of the switching request must not tear down the
+      // process-scoped child client.
+      request1.serverClosed?.();
+      expect(child.closed).toBe(0);
+
+      const request2 = makeRequestBackend();
+      await request2.initialize(backendContext as any, clientVersion);
+      const result = await request2.callTool('tool_child', {});
+      expect((result.content?.[0] as any).text).toBe('tool_child');
+      expect(child.calls).toContain('tool_child');
+      request2.serverClosed?.();
+      expect(child.closed).toBe(0);
+
+      // Disconnecting closes the shared child exactly once and returns later
+      // requests to the per-request default provider.
+      const request3 = makeRequestBackend();
+      await request3.initialize(backendContext as any, clientVersion);
+      const disconnected = await request3.callTool('browser_connect', {});
+      expect(disconnected.isError).not.toBe(true);
+      expect(child.closed).toBe(1);
+      request3.serverClosed?.();
+      expect(child.closed).toBe(1);
+
+      const request4 = makeRequestBackend();
+      await request4.initialize(backendContext as any, clientVersion);
+      await request4.callTool('tool_default', {});
+      expect(defaults.at(-1)!.calls).toContain('tool_default');
+    });
   });
 });

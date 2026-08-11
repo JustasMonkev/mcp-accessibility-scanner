@@ -22,6 +22,7 @@ import { z } from 'zod';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import * as mcpServer from '../mcp/server.js';
+import { SharedClientSlot } from '../mcp/sharedClientSlot.js';
 import { notifyToolListChanged } from '../mcp/toolListChanged.js';
 import { logUnhandledError } from '../utils/log.js';
 import { packageJSON } from '../utils/package.js';
@@ -45,17 +46,30 @@ export class VSCodeProxyBackend implements ServerBackend {
   version = packageJSON.version;
 
   private _currentClient: Client | undefined;
+  // False when _currentClient is adopted from the shared slot: response
+  // cleanup (serverClosed) must not tear down the process-scoped client (and
+  // the spawned VS Code child behind it) that later requests route through.
+  private _ownsCurrentClient = true;
   private _contextSwitchTool: Tool;
   private _clientVersion?: ClientVersion;
   private _backendContext: ServerBackendContext | undefined;
 
-  constructor(private readonly _config: FullConfig, private readonly _defaultTransportFactory: () => Promise<Transport>) {
+  constructor(private readonly _config: FullConfig, private readonly _defaultTransportFactory: () => Promise<Transport>, private readonly _sharedSlot?: SharedClientSlot) {
     this._contextSwitchTool = this._defineContextSwitchTool();
   }
 
   async initialize(context: ServerBackendContext, clientVersion: ClientVersion): Promise<void> {
     this._backendContext = context;
     this._clientVersion = clientVersion;
+    // A process-scoped browser_connect switch is in effect: adopt it instead
+    // of connecting the default provider, so the selection made in an earlier
+    // handshake-free request keeps governing this one.
+    const shared = this._sharedSlot?.current();
+    if (shared) {
+      this._currentClient = shared;
+      this._ownsCurrentClient = false;
+      return;
+    }
     const transport = await this._defaultTransportFactory();
     await this._setCurrentClient(transport, false);
   }
@@ -79,13 +93,16 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   serverClosed?(): void {
-    void this._currentClient?.close().catch(logUnhandledError);
+    if (this._ownsCurrentClient)
+      void this._currentClient?.close().catch(logUnhandledError);
   }
 
   private async _callContextSwitchTool(params: z.infer<typeof contextSwitchOptions>, _requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
     if (!params.connectionString || !params.lib) {
-      const transport = await this._defaultTransportFactory();
-      await this._setCurrentClient(transport, true);
+      if (this._sharedSlot)
+        await this._switchSharedClient(undefined);
+      else
+        await this._setCurrentClient(await this._defaultTransportFactory(), true);
       return {
         content: [{ type: 'text', text: '### Result\nSuccessfully disconnected.\n' }],
       };
@@ -105,27 +122,55 @@ export class VSCodeProxyBackend implements ServerBackend {
       };
     }
 
-    await this._setCurrentClient(
-        new StdioClientTransport({
-          command: process.execPath,
-          cwd: process.cwd(),
-          args: [
-            path.join(fileURLToPath(import.meta.url), '..', 'main.js'),
-            // The fallback output dir is memoized on the config OBJECT, and
-            // JSON round-tripping into the child mints a new object — without
-            // materializing the resolved dir here, the spawned provider would
-            // open a second temp root and scatter one run's artifacts across
-            // the provider switch.
-            JSON.stringify({ ...this._config, outputDir: resolveOutputDir(this._config) }),
-            params.connectionString,
-            params.lib,
-          ],
-        }),
-        true,
-    );
+    if (this._sharedSlot)
+      await this._switchSharedClient(() => this._createSwitchTransport(params.connectionString!, params.lib!));
+    else
+      await this._setCurrentClient(await this._createSwitchTransport(params.connectionString, params.lib), true);
     return {
       content: [{ type: 'text', text: '### Result\nSuccessfully connected.\n' }],
     };
+  }
+
+  private async _createSwitchTransport(connectionString: string, lib: string): Promise<Transport> {
+    return new StdioClientTransport({
+      command: process.execPath,
+      cwd: process.cwd(),
+      args: [
+        path.join(fileURLToPath(import.meta.url), '..', 'main.js'),
+        // The fallback output dir is memoized on the config OBJECT, and
+        // JSON round-tripping into the child mints a new object — without
+        // materializing the resolved dir here, the spawned provider would
+        // open a second temp root and scatter one run's artifacts across
+        // the provider switch.
+        JSON.stringify({ ...this._config, outputDir: resolveOutputDir(this._config) }),
+        connectionString,
+        lib,
+      ],
+    });
+  }
+
+  // Stateless serving: publish the switch through the process-scoped slot so
+  // later per-request backends adopt it. The slot closes the previously
+  // shared client itself (exactly once, after the swap, terminating that
+  // client's spawned child); only a client this request owned — its
+  // per-request default — is closed here.
+  private async _switchSharedClient(createTransport: (() => Promise<Transport>) | undefined): Promise<void> {
+    const previousTools = await this._getExposedTools(this._currentClient).catch(() => undefined);
+    const previousOwned = this._ownsCurrentClient ? this._currentClient : undefined;
+    // The transport is created inside the serialized replace(), so a queued
+    // concurrent switch never reuses an already-consumed transport.
+    const shared = await this._sharedSlot!.replace(createTransport ? async () => this._connectClient(await createTransport()) : undefined);
+    if (shared) {
+      this._currentClient = shared;
+      this._ownsCurrentClient = false;
+    } else {
+      // Back to the default provider, which stateless serving runs
+      // per-request: finish this exchange on an owned per-request client.
+      this._currentClient = await this._connectClient(await this._defaultTransportFactory());
+      this._ownsCurrentClient = true;
+    }
+    await previousOwned?.close().catch(logUnhandledError);
+    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(this._currentClient));
   }
 
   private _defineContextSwitchTool(): Tool {
@@ -146,12 +191,18 @@ export class VSCodeProxyBackend implements ServerBackend {
     await this._currentClient?.close();
     this._currentClient = undefined;
 
+    const client = await this._connectClient(transport);
+    this._currentClient = client;
+    this._ownsCurrentClient = true;
+    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(client));
+  }
+
+  private async _connectClient(transport: Transport): Promise<Client> {
     const client = new Client(this._clientVersion!);
     client.setRequestHandler('ping', () => ({}));
 
     await client.connect(transport);
-    this._currentClient = client;
-    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(client));
+    return client;
   }
 
   private async _getExposedTools(client: Client | undefined): Promise<Tool[]> {
@@ -166,7 +217,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 }
 
-export async function runVSCodeTools(config: FullConfig) {
+export async function runVSCodeTools(config: FullConfig, registerExitCleanup?: (cleanup: () => Promise<void>) => void) {
   // Both process-scoped, mirroring the direct factories in program.ts: over
   // stateless HTTP each handshake-free POST builds a fresh proxy whose
   // default transport creates a fresh inner backend, and a browserSessionId
@@ -175,17 +226,29 @@ export async function runVSCodeTools(config: FullConfig) {
   // inner backends share one launched browser instead of one per request.
   const browserContextFactory = contextFactory(config);
   const sessionRegistry = new BrowserSessionRegistry();
+  // Process-scoped as well: a browser_connect switch made in one
+  // handshake-free POST must keep governing the next one — stored only on
+  // the per-request proxy it would be closed with the response and silently
+  // revert to the default provider. The slot owns the switched client (and
+  // the VS Code child process behind it); per-request backends adopt it
+  // without owning it.
+  const sharedSlot = new SharedClientSlot();
+  // The switched child outlives every response, so process shutdown must
+  // close it explicitly instead of relying on stdio teardown alone.
+  registerExitCleanup?.(async () => {
+    await sharedSlot.replace(undefined);
+  });
   // A stateless per-request proxy flags its inner default context ephemeral
   // (disposable profile, see startMCPServer in program.ts); stateful proxies
   // keep the stable profile.
-  const createBackend = (ephemeralDefaultContext: boolean) =>
-    new VSCodeProxyBackend(config, () => mcpServer.wrapInProcess(new BrowserServerBackend(config, browserContextFactory, sessionRegistry, { ephemeralDefaultContext })));
+  const createBackend = (ephemeralDefaultContext: boolean, slot?: SharedClientSlot) =>
+    new VSCodeProxyBackend(config, () => mcpServer.wrapInProcess(new BrowserServerBackend(config, browserContextFactory, sessionRegistry, { ephemeralDefaultContext })), slot);
   const serverBackendFactory: mcpServer.ServerBackendFactory = {
     name: 'Playwright w/ vscode',
     nameInConfig: 'playwright-vscode',
     version: packageJSON.version,
     create: () => createBackend(false),
-    createStateless: () => createBackend(true),
+    createStateless: () => createBackend(true, sharedSlot),
   };
   await mcpServer.start(serverBackendFactory, config.server);
   return;

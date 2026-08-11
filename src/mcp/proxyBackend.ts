@@ -21,6 +21,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { notifyToolListChanged } from './toolListChanged.js';
 
 import type { CallToolRequestContext, ServerBackend, ClientVersion, ServerBackendContext, Tool, CallToolResult, CallToolRequest } from './server.js';
+import type { SharedClientSlot } from './sharedClientSlot.js';
 import type { Transport } from '@modelcontextprotocol/client';
 
 export type MCPProvider = {
@@ -36,21 +37,49 @@ export type MCPProvider = {
   connect(): Promise<Transport>;
 };
 
+/**
+ * Wiring for stateless (per-request) proxy backends: the slot carries a
+ * `browser_connect` switch across handshake-free requests, and `providers`
+ * is the stateful-flavored provider list used to connect the shared client —
+ * a process-scoped client outlives any single response, so it must not run
+ * its default context in the throwaway per-request (ephemeral) shape. The
+ * list must mirror the per-request providers name-for-name.
+ */
+export type SharedProxySelection = {
+  slot: SharedClientSlot;
+  providers: MCPProvider[];
+};
+
 const errorsDebug = debug('pw:mcp:errors');
 
 export class ProxyBackend implements ServerBackend {
   private _mcpProviders: MCPProvider[];
   private _currentClient: Client | undefined;
+  // False when _currentClient is adopted from the shared slot: response
+  // cleanup (serverClosed) must not tear down a process-scoped client that
+  // later requests still route through.
+  private _ownsCurrentClient = true;
   private _contextSwitchTool: Tool;
   private _backendContext: ServerBackendContext | undefined;
+  private _sharedSelection: SharedProxySelection | undefined;
 
-  constructor(mcpProviders: MCPProvider[]) {
+  constructor(mcpProviders: MCPProvider[], sharedSelection?: SharedProxySelection) {
     this._mcpProviders = mcpProviders;
+    this._sharedSelection = sharedSelection;
     this._contextSwitchTool = this._defineContextSwitchTool();
   }
 
   async initialize(context: ServerBackendContext, _clientVersion: ClientVersion): Promise<void> {
     this._backendContext = context;
+    // A process-scoped browser_connect switch is in effect: adopt it instead
+    // of connecting the default provider, so the selection made in an earlier
+    // handshake-free request keeps governing this one.
+    const shared = this._sharedSelection?.slot.current();
+    if (shared) {
+      this._currentClient = shared;
+      this._ownsCurrentClient = false;
+      return;
+    }
     await this._setCurrentClient(this._mcpProviders[0], false);
   }
 
@@ -80,7 +109,8 @@ export class ProxyBackend implements ServerBackend {
   }
 
   serverClosed?(): void {
-    void this._currentClient?.close().catch(errorsDebug);
+    if (this._ownsCurrentClient)
+      void this._currentClient?.close().catch(errorsDebug);
   }
 
   private async _callContextSwitchTool(params: any): Promise<CallToolResult> {
@@ -90,7 +120,10 @@ export class ProxyBackend implements ServerBackend {
         throw new Error('Unknown connection method: ' + params.name);
 
       factory.validate?.();
-      await this._setCurrentClient(factory, true);
+      if (this._sharedSelection)
+        await this._switchSharedClient(factory.name);
+      else
+        await this._setCurrentClient(factory, true);
       return {
         content: [{ type: 'text', text: '### Result\nSuccessfully changed connection method.\n' }],
       };
@@ -100,6 +133,33 @@ export class ProxyBackend implements ServerBackend {
         isError: true,
       };
     }
+  }
+
+  // Stateless serving: publish the switch through the process-scoped slot so
+  // later per-request backends adopt it. The slot closes the previously
+  // shared client itself (exactly once, after the swap); only a client this
+  // request owned — its per-request default — is closed here.
+  private async _switchSharedClient(name: string): Promise<void> {
+    const { slot, providers } = this._sharedSelection!;
+    // The stateful-flavored list mirrors this._mcpProviders name-for-name;
+    // the name was already resolved and validated against the latter.
+    const provider = providers.find(factory => factory.name === name);
+    if (!provider)
+      throw new Error('Unknown connection method: ' + name);
+    const previousTools = await this._getExposedTools(this._currentClient).catch(() => undefined);
+    const previousOwned = this._ownsCurrentClient ? this._currentClient : undefined;
+    const shared = await slot.replace(provider === providers[0] ? undefined : () => this._connectClient(provider));
+    if (shared) {
+      this._currentClient = shared;
+      this._ownsCurrentClient = false;
+    } else {
+      // Back to the default provider, which stateless serving runs
+      // per-request: finish this exchange on an owned per-request client.
+      this._currentClient = await this._connectClient(this._mcpProviders[0]);
+      this._ownsCurrentClient = true;
+    }
+    await previousOwned?.close().catch(errorsDebug);
+    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(this._currentClient));
   }
 
   private async _forwardProgressNotification(
@@ -143,13 +203,19 @@ export class ProxyBackend implements ServerBackend {
     await this._currentClient?.close();
     this._currentClient = undefined;
 
+    const client = await this._connectClient(factory);
+    this._currentClient = client;
+    this._ownsCurrentClient = true;
+    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(client));
+  }
+
+  private async _connectClient(factory: MCPProvider): Promise<Client> {
     const client = new Client({ name: 'Playwright MCP Proxy', version: '0.0.0' });
     client.setRequestHandler('ping', () => ({}));
 
     const transport = await factory.connect();
     await client.connect(transport);
-    this._currentClient = client;
-    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(client));
+    return client;
   }
 
   private async _getExposedTools(client: Client | undefined): Promise<Tool[]> {

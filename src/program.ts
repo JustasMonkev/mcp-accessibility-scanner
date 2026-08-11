@@ -23,6 +23,7 @@ import { packageJSON } from './utils/package.js';
 import { Context } from './context.js';
 import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported, contextFactory, PersistentContextFactory, persistentProfileConflictRemedy } from './browserContextFactory.js';
 import { ProxyBackend } from './mcp/proxyBackend.js';
+import { SharedClientSlot } from './mcp/sharedClientSlot.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
 import { BrowserSessionRegistry } from './browserSessions.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
@@ -30,7 +31,7 @@ import { filteredTools, serverInstructions } from './tools.js';
 import { logUnhandledError } from './utils/log.js';
 
 import { runVSCodeTools } from './vscode/host.js';
-import type { MCPProvider } from './mcp/proxyBackend.js';
+import type { MCPProvider, SharedProxySelection } from './mcp/proxyBackend.js';
 import type { FullConfig } from './config.js';
 import type { BrowserContextFactory } from './browserContextFactory.js';
 
@@ -147,7 +148,16 @@ function configureBaseProgram() {
 
 configureBaseProgram()
     .action(async options => {
-      setupExitWatchdog();
+      // Cleanups the proxy modes register for their process-scoped switched
+      // clients; they run before the contexts are disposed so a switched
+      // provider (e.g. a spawned VS Code child) shuts down deliberately
+      // instead of relying on process teardown.
+      const exitCleanups: Array<() => Promise<void>> = [];
+      setupExitWatchdog(async () => {
+        for (const cleanup of exitCleanups)
+          await cleanup().catch(logUnhandledError);
+        await Context.disposeAll();
+      });
 
       const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(options);
 
@@ -171,7 +181,7 @@ configureBaseProgram()
       }
 
       if (options.vscode) {
-        await runVSCodeTools(config);
+        await runVSCodeTools(config, cleanup => exitCleanups.push(cleanup));
         return;
       }
 
@@ -202,12 +212,23 @@ configureBaseProgram()
             connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, extensionContextFactory, sessionRegistry, { ephemeralDefaultContext })),
           },
         ];
+        // Process-scoped browser_connect selection for handshake-free HTTP:
+        // each such POST serves with a throwaway ProxyBackend, so a switch
+        // stored only there would report success and silently revert to the
+        // default provider on the next request. The shared client connects
+        // through the stateful-flavored providers — it outlives any single
+        // response, so it must not take the ephemeral per-request default
+        // context.
+        const sharedSelection: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders(false) };
+        exitCleanups.push(async () => {
+          await sharedSelection.slot.replace(undefined);
+        });
         const factory: mcpServer.ServerBackendFactory = {
           name: 'Playwright w/ switch',
           nameInConfig: 'playwright-switch',
           version: packageJSON.version,
           create: () => new ProxyBackend(makeProviders(false)),
-          createStateless: () => new ProxyBackend(makeProviders(true)),
+          createStateless: () => new ProxyBackend(makeProviders(true), sharedSelection),
         };
         await mcpServer.start(factory, config.server);
         return;

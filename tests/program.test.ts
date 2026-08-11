@@ -180,6 +180,62 @@ describe('CLI command dispatch contract', () => {
       return message.result;
     }
 
+    // A browser_connect switch must survive the response that carried it:
+    // handshake-free POSTs are each served by a throwaway proxy backend, so
+    // without a process-scoped selection the switch reported success while
+    // the very next request silently ran on the default provider again.
+    it('--connect-tool keeps a browser_connect switch in force for later handshake-free POSTs', async () => {
+      const { child, url } = await startServer(['--connect-tool']);
+      try {
+        const switched = await callTool(url, 1, 'browser_connect', { name: 'extension' });
+        expect(switched.isError).not.toBe(true);
+
+        // The extension provider vetoes separate browser sessions; before
+        // the fix this call ran on the default provider and minted a handle.
+        const vetoed = await callTool(url, 2, 'browser_session_open', {});
+        expect(vetoed.isError).toBe(true);
+        expect(JSON.stringify(vetoed.content)).toContain('browser you are already running');
+
+        // Switching back re-enables the default provider for later requests.
+        const back = await callTool(url, 3, 'browser_connect', { name: 'default' });
+        expect(back.isError).not.toBe(true);
+        const opened = await callTool(url, 4, 'browser_session_open', {});
+        expect(opened.isError).not.toBe(true);
+        const browserSessionId = JSON.stringify(opened).match(/bs_[0-9a-f-]+/)?.[0];
+        expect(browserSessionId).toBeTruthy();
+        await callTool(url, 5, 'browser_session_close', { browserSessionId });
+      } finally {
+        child.kill('SIGTERM');
+      }
+    });
+
+    it('--vscode keeps a browser_connect switch in force for later handshake-free POSTs', async () => {
+      const { child, url } = await startServer(['--vscode']);
+      try {
+        // The switch spawns the child provider and handshakes with it; no
+        // browser operation runs, so the dead connection string is fine.
+        const switched = await callTool(url, 1, 'browser_connect', { connectionString: 'ws://127.0.0.1:9/never-connected', lib: 'playwright' });
+        expect(switched.isError).not.toBe(true);
+
+        // The VS Code provider vetoes separate browser sessions; before the
+        // fix this call ran on the default provider and minted a handle.
+        const vetoed = await callTool(url, 2, 'browser_session_open', {});
+        expect(vetoed.isError).toBe(true);
+        expect(JSON.stringify(vetoed.content)).toContain('VS Code extension supplies');
+
+        // Disconnecting re-enables the default provider for later requests.
+        const back = await callTool(url, 3, 'browser_connect', {});
+        expect(back.isError).not.toBe(true);
+        const opened = await callTool(url, 4, 'browser_session_open', {});
+        expect(opened.isError).not.toBe(true);
+        const browserSessionId = JSON.stringify(opened).match(/bs_[0-9a-f-]+/)?.[0];
+        expect(browserSessionId).toBeTruthy();
+        await callTool(url, 5, 'browser_session_close', { browserSessionId });
+      } finally {
+        child.kill('SIGTERM');
+      }
+    });
+
     for (const mode of ['--connect-tool', '--vscode']) {
       it(`${mode} resolves a handle minted in an earlier handshake-free POST`, async () => {
         const { child, url } = await startServer([mode]);
