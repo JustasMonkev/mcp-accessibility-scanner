@@ -83,7 +83,7 @@ export class BrowserServerBackend implements ServerBackend {
     // rebind would mint sessions with whichever backend initialized last,
     // leaking that client's identity (clientInfo, SessionLog) into sessions
     // other clients open.
-    const createContext = (browserSession?: boolean): Context => new Context({
+    const createContext = (browserSession?: boolean, browserSessionId?: string): Context => new Context({
       tools: this._tools,
       config: this._config,
       browserContextFactory: this._browserContextFactory,
@@ -108,11 +108,12 @@ export class BrowserServerBackend implements ServerBackend {
           // first leaves nothing half-registered, and callTool() would have
           // created this same backend-wide log right after the call anyway.
           await this._ensureSessionLog();
-          return registry.open(() => createContext(true), this._browserContextFactory.sessionsUnsupportedReason);
+          return registry.open(id => createContext(true, id), this._browserContextFactory.sessionsUnsupportedReason);
         },
         close: id => registry.close(id),
       },
       browserSession,
+      browserSessionId,
     });
     this._context = createContext(this._ephemeralDefaultContext || undefined);
   }

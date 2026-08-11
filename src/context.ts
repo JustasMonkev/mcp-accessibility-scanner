@@ -121,6 +121,17 @@ type ContextOptions = {
    * disposable profile instead of contending for the stable one.
    */
   browserSession?: boolean;
+  /**
+   * The registry handle (`bs_...`) this Context serves when it backs an
+   * explicitly opened browser session. The `--save-session` log is shared by
+   * a backend's default context and every session it opens, so recorded user
+   * actions are tagged with this handle — the same identity routed tool
+   * calls already carry in their logged args — and the log scopes its
+   * pending-action merging by originating context. Absent for the default
+   * context (including the ephemeral stateless-HTTP one, which has no
+   * handle).
+   */
+  browserSessionId?: string;
 };
 
 export class Context {

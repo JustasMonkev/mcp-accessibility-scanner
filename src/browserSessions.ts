@@ -87,11 +87,16 @@ export class BrowserSessionRegistry {
    * would mint every new session with the LAST initializer's identity — its
    * clientInfo (CDP User-Agent) and SessionLog (recorder entries in the wrong
    * session folder) — regardless of which client asked.
+   *
+   * The minted handle is handed to `createContext` so the Context knows the
+   * identity it serves: the `--save-session` log is shared backend-wide, and
+   * recorded user actions are tagged with the handle the way routed tool
+   * calls already tag their logged args.
    */
-  open(createContext: () => Context, sessionsUnsupportedReason?: string): string {
+  open(createContext: (id: string) => Context, sessionsUnsupportedReason?: string): string {
     BrowserSessionRegistry.checkSessionsSupported(sessionsUnsupportedReason);
     const id = `bs_${crypto.randomUUID()}`;
-    this._sessions.set(id, { context: createContext(), lastUsedAt: Date.now() });
+    this._sessions.set(id, { context: createContext(id), lastUsedAt: Date.now() });
     this._ensureReaper();
     return id;
   }

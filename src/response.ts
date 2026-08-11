@@ -59,6 +59,15 @@ export class Response {
     this._requestContext = requestContext;
   }
 
+  /**
+   * The Context the tool call ran in. The `--save-session` log uses it as
+   * the entry's originating identity: the log is shared backend-wide, and
+   * its pending-action bookkeeping is scoped per context.
+   */
+  get context(): Context {
+    return this._context;
+  }
+
   addResult(result: string) {
     this._result.push(result);
   }

@@ -273,6 +273,45 @@ describe('browser sessions', () => {
     }
   });
 
+  it('hands the minted handle to the session context so recorded user actions are attributable', async () => {
+    // The backend's one --save-session log is shared by the default context
+    // and every session it opens; a session context that does not know its
+    // own handle logs recorder actions no different from anyone else's.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logUserAction = vi.spyOn(SessionLog.prototype, 'logUserAction').mockImplementation(() => {});
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-recorder-tag-'));
+    try {
+      const config = await resolveConfig({ saveSession: true, outputDir });
+      const { factory, created } = makeFactory();
+      const backend = new BrowserServerBackend(config, factory);
+      await backend.initialize(
+          { notifyToolListChanged: async () => {} } as any,
+          { name: 'vitest', version: 'browser-sessions' },
+      );
+
+      const id = await openSession(backend);
+      // First routed call launches the session's browser context (and, with
+      // --save-session, its input recorder).
+      await backend.callTool('browser_tabs', { action: 'list', browserSessionId: id });
+
+      // A page joins the session's context and the user acts on it.
+      const page = new EventEmitter() as any;
+      page.setDefaultNavigationTimeout = vi.fn();
+      page.setDefaultTimeout = vi.fn();
+      page.url = () => 'about:blank';
+      created[0].browserContext.emit('page', page);
+      const sink = created[0].browserContext._enableRecorder.mock.calls[0][1];
+      sink.actionAdded(page, { action: { name: 'click' } }, 'await page.click();');
+
+      expect(logUserAction).toHaveBeenCalledTimes(1);
+      const tab = logUserAction.mock.calls[0][1] as any;
+      expect(tab.context.options.browserSessionId).toBe(id);
+    } finally {
+      vi.restoreAllMocks();
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it('creates the --save-session directory lazily, only for backends whose own contexts are used', async () => {
     // Over stateless HTTP every request builds a fresh backend; creating the
     // log eagerly at initialize() minted (and announced) an empty session-*

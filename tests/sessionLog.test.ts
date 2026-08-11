@@ -48,4 +48,45 @@ describe('session log folders', () => {
       fs.rmSync(outputDir, { recursive: true, force: true });
     }
   });
+
+  it('scopes user-action merging per context and tags session actions with their handle', async () => {
+    // One log is shared by a backend's default context and every explicit
+    // session: an update matched against the globally-last pending entry
+    // merged one context's action into ANOTHER context's same-named one, and
+    // untagged entries made concurrent sessions' actions unattributable.
+    vi.useFakeTimers();
+    try {
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const log = new SessionLog('/unused', storage);
+      const sessionContext = { options: { browserSessionId: 'bs_0a1b2c3d' } } as any;
+      const defaultContext = { options: {} } as any;
+      const sessionTab = { context: sessionContext, page: { url: () => 'https://session.example/' } } as any;
+      const defaultTab = { context: defaultContext, page: { url: () => 'https://default.example/' } } as any;
+
+      log.logUserAction({ name: 'fill', text: 'session-1' } as any, sessionTab, `await page.fill('#a', 'session-1');`, false);
+      log.logUserAction({ name: 'fill', text: 'default-1' } as any, defaultTab, `await page.fill('#b', 'default-1');`, false);
+      // The session's update must merge into ITS pending action, not into the
+      // default context's more recent same-named one.
+      log.logUserAction({ name: 'fill', text: 'session-2' } as any, sessionTab, `await page.fill('#a', 'session-2');`, true);
+
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
+      const blocks = appended.split('### User action: fill');
+      // Two entries, not three: the update merged into the session's own entry.
+      expect(blocks).toHaveLength(3);
+      const [, sessionBlock, defaultBlock] = blocks;
+      expect(sessionBlock).toContain('"text": "session-2"');
+      expect(sessionBlock).toContain('"browserSessionId": "bs_0a1b2c3d"');
+      expect(appended).not.toContain('session-1');
+      // The default context's entry is intact and stays untagged, as before.
+      expect(defaultBlock).toContain('"text": "default-1"');
+      expect(defaultBlock).not.toContain('browserSessionId');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
