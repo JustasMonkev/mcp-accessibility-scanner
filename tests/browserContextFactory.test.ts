@@ -1576,6 +1576,74 @@ describe('browserContextFactory', () => {
     expect(browser.close).toHaveBeenCalledTimes(1);
   });
 
+  it('defers the shutdown to a sibling createContext that has not resumed from the cached browser promise', async () => {
+    // `await _obtainBrowser()` yields to the microtask queue even when the
+    // cached promise is already resolved, and the handout count used to be
+    // claimed only after resumption. Session B entering createContext()
+    // synchronously (no awaits completed) was therefore invisible to session
+    // A's close, which saw zero remaining handouts and shut the shared
+    // browser down under B. The acquisition is now registered synchronously,
+    // so A defers the shutdown to B.
+    const contextA = createMockBrowserContext();
+    const contextB = createMockBrowserContext();
+    const browser = {
+      close: vi.fn().mockResolvedValue(undefined),
+      contexts: vi.fn().mockReturnValue([]),
+      newContext: vi.fn().mockResolvedValueOnce(contextA).mockResolvedValueOnce(contextB),
+      on: vi.fn(),
+    } as any;
+    (playwright.chromium.launch as any).mockResolvedValue(browser);
+
+    const config = await resolveConfig({ browser: { isolated: true } });
+    const factory = contextFactory(config);
+    const clientInfo = { name: 'vitest', version: '1.0.0' };
+    const signal = new AbortController().signal;
+
+    const sessionA = await factory.createContext(clientInfo, signal, undefined);
+    // B starts createContext and A closes within the same synchronous
+    // continuation — B has completed no awaits yet.
+    const pendingB = factory.createContext(clientInfo, signal, undefined);
+    await sessionA.close();
+    expect(contextA.close).toHaveBeenCalledTimes(1);
+    expect(browser.close).not.toHaveBeenCalled();
+
+    // B resumes onto the same live browser instead of failing.
+    const sessionB = await pendingB;
+    expect(sessionB.browserContext).toBe(contextB);
+    expect(playwright.chromium.launch).toHaveBeenCalledTimes(1);
+
+    // B inherited the last handout — its close shuts the browser down.
+    await sessionB.close();
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('defers the CDP disconnect to a sibling createContext that has not resumed from the cached browser promise', async () => {
+    // Same window as the isolated variant, on CdpContextFactory's override:
+    // session B's session count is claimed atomically with the cached
+    // browser's delivery, so session A closing inside B's await window must
+    // not disconnect the shared connection.
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({ browser: { cdpEndpoint: 'http://127.0.0.1:9222' } });
+    const factory = contextFactory(config);
+    const clientInfo = { name: 'vitest', version: '1.0.0' };
+    const signal = new AbortController().signal;
+
+    const sessionA = await factory.createContext(clientInfo, signal, undefined);
+    const pendingB = factory.createContext(clientInfo, signal, undefined);
+    await sessionA.close();
+    expect(browser.close).not.toHaveBeenCalled();
+
+    const sessionB = await pendingB;
+    expect(sessionB.browserContext).toBe(browserContext);
+    expect(connectOverCDP).toHaveBeenCalledTimes(1);
+
+    await sessionB.close();
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
   it('closes the deferred shared browser when the last in-flight creation fails', async () => {
     // Session A's close deferred the browser shutdown to B's in-flight
     // handout; if B's creation then fails, B must close the browser instead
