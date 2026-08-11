@@ -507,6 +507,46 @@ describe('browserContextFactory', () => {
     }
   });
 
+  it('gives concurrent persistent launches distinct per-launch CDP ports', async () => {
+    // injectCdpPort() used to write the allocated port into the SHARED
+    // config.browser.launchOptions; the awaits between allocation and
+    // launchPersistentContext() let a concurrent session overwrite it, so
+    // both browsers raced for one port and one failed to bind. The port now
+    // travels in per-launch options and the shared config stays untouched.
+    const profilesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-profiles-'));
+    process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
+    try {
+      const launchGates: Array<(context: any) => void> = [];
+      (playwright.chromium.launchPersistentContext as any).mockImplementation(
+          () => new Promise(resolve => launchGates.push(resolve)));
+
+      const config = await resolveConfig({});
+      const factory = contextFactory(config);
+      const clientInfo = { name: 'vitest', version: '1.0.0' };
+      const signal = new AbortController().signal;
+
+      // Both sessions allocate their port and reach the (gated) launch before
+      // either resolves — the overwrite window of the old shared-config path.
+      const pendingA = factory.createContext(clientInfo, signal, undefined, { browserSession: true });
+      const pendingB = factory.createContext(clientInfo, signal, undefined, { browserSession: true });
+      await vi.waitFor(() => expect(launchGates.length).toBe(2));
+
+      const ports = (playwright.chromium.launchPersistentContext as any).mock.calls
+          .map((call: any[]) => call[1]?.cdpPort as number | undefined);
+      expect(ports[0]).toEqual(expect.any(Number));
+      expect(ports[1]).toEqual(expect.any(Number));
+      expect(ports[0]).not.toBe(ports[1]);
+      // The allocation never leaks into the shared config.
+      expect((config.browser.launchOptions as any)?.cdpPort).toBeUndefined();
+
+      launchGates.forEach(release => release(createMockBrowserContext()));
+      await Promise.all([pendingA, pendingB]);
+    } finally {
+      delete process.env.PWMCP_PROFILES_DIR_FOR_TEST;
+      fs.rmSync(profilesDir, { recursive: true, force: true });
+    }
+  });
+
   it('reports which modes cannot mint separate per-session contexts', async () => {
     // Shared-context modes must veto browser_session_open instead of handing
     // out a handle that silently routes into everyone else's context.

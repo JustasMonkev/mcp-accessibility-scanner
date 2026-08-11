@@ -597,18 +597,25 @@ class IsolatedContextFactory extends BaseContextFactory {
   }
 
   protected override async _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser> {
-    await injectCdpPort(this.config.browser);
+    const { cdpPortOptions, releaseCdpPort } = await allocateCdpPort(this.config.browser);
     const browserType = playwright[this.config.browser.browserName];
-    return browserType.launch({
-      tracesDir: await startTraceServer(this.config),
-      ...this.config.browser.launchOptions,
-      handleSIGINT: false,
-      handleSIGTERM: false,
-    }).catch(error => {
-      if (error.message.includes('Executable doesn\'t exist'))
-        throw browserNotInstalledError(error);
-      throw error;
-    });
+    try {
+      return await browserType.launch({
+        tracesDir: await startTraceServer(this.config),
+        ...this.config.browser.launchOptions,
+        ...cdpPortOptions,
+        handleSIGINT: false,
+        handleSIGTERM: false,
+      }).catch(error => {
+        if (error.message.includes('Executable doesn\'t exist'))
+          throw browserNotInstalledError(error);
+        throw error;
+      });
+    } finally {
+      // Bound by the launched browser on success, free for reuse on failure —
+      // either way the reservation has served its purpose.
+      releaseCdpPort();
+    }
   }
 
   protected override async _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext> {
@@ -937,7 +944,6 @@ export class PersistentContextFactory implements BrowserContextFactory {
   }
 
   async createContext(clientInfo: ClientInfo, _abortSignal?: AbortSignal, _toolName?: string, options?: CreateContextOptions): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
-    await injectCdpPort(this.config.browser);
     testDebug('create browser context (persistent)');
     // launchPersistentContext() accepts a storageState option without applying
     // it (verified against 1.61.1) — the profile is normally the state — so it
@@ -960,6 +966,12 @@ export class PersistentContextFactory implements BrowserContextFactory {
     // may throw outside the cleanup scope below, or failed starts would leave
     // stray profiles behind.
     const tracesDir = await startTraceServer(this.config);
+    // Per-launch and reserved until this launch binds it: two explicit
+    // sessions launching concurrently interleave their awaits here, and a
+    // port written into the shared config would be overwritten by the
+    // sibling before launchPersistentContext() reads it — both browsers
+    // then race for one port and one fails to bind.
+    const { cdpPortOptions, releaseCdpPort } = await allocateCdpPort(this.config.browser);
     // An explicitly opened browser session gets its own disposable profile for
     // the same reason a storage-state context does: the stable profile can back
     // only one running browser, so a second session sharing it would spin on
@@ -988,6 +1000,7 @@ export class PersistentContextFactory implements BrowserContextFactory {
           const browserContext = await browserType.launchPersistentContext(userDataDir, {
             tracesDir,
             ...this.config.browser.launchOptions,
+            ...cdpPortOptions,
             ...contextOptions,
             handleSIGINT: false,
             handleSIGTERM: false,
@@ -1017,6 +1030,10 @@ export class PersistentContextFactory implements BrowserContextFactory {
         this._userDataDirs.delete(userDataDir);
       }
       throw error;
+    } finally {
+      // Bound by the launched browser on success, free for reuse on failure —
+      // either way the reservation has served its purpose.
+      releaseCdpPort();
     }
   }
 
@@ -1070,9 +1087,18 @@ export class PersistentContextFactory implements BrowserContextFactory {
   }
 }
 
-async function injectCdpPort(browserConfig: FullConfig['browser']) {
-  if (browserConfig.browserName === 'chromium')
-    (browserConfig.launchOptions as any).cdpPort = await findFreePort();
+/**
+ * Allocates the CDP port for a Chromium launch, reserved until that launch has
+ * bound it (or failed). The port travels in per-launch options instead of
+ * being written into the shared config: concurrent launches from one factory
+ * (e.g. two explicit persistent sessions) would otherwise overwrite each
+ * other's `cdpPort` between allocation and launch and race for a single port.
+ */
+async function allocateCdpPort(browserConfig: FullConfig['browser']): Promise<{ cdpPortOptions: { cdpPort?: number }, releaseCdpPort: () => void }> {
+  if (browserConfig.browserName !== 'chromium')
+    return { cdpPortOptions: {}, releaseCdpPort: () => {} };
+  const cdpPort = await findFreePort({ reserve: true });
+  return { cdpPortOptions: { cdpPort }, releaseCdpPort: () => reservedPorts.delete(cdpPort) };
 }
 
 /**
