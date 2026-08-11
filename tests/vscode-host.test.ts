@@ -14,17 +14,35 @@
  * limitations under the License.
  */
 
+import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/client';
+import { BrowserServerBackend } from '../src/browserServerBackend.js';
+import { BrowserSessionRegistry } from '../src/browserSessions.js';
 import { outputFile, resolveConfig } from '../src/config.js';
+import { Context } from '../src/context.js';
 import { SharedClientSlot } from '../src/mcp/sharedClientSlot.js';
 import { wrapInProcess } from '../src/mcp/server.js';
 import { VSCodeProxyBackend } from '../src/vscode/host.js';
 
+// A minimal browser-context factory, matching the one in
+// browserSessions.test.ts: enough for browser_tabs to run without a browser.
+function makeFakeContextFactory(sessionsUnsupportedReason?: string) {
+  const createContext = vi.fn(async (..._args: any[]) => {
+    const browserContext: any = new EventEmitter();
+    browserContext.newPage = vi.fn().mockResolvedValue({});
+    browserContext.pages = vi.fn().mockReturnValue([]);
+    browserContext.route = vi.fn().mockResolvedValue(undefined);
+    return { browserContext, close: vi.fn().mockResolvedValue(undefined) };
+  });
+  return { createContext, sessionsUnsupportedReason } as any;
+}
+
 describe('VSCodeProxyBackend', () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
+    await Context.disposeAll();
   });
 
   it('notifies clients when the exposed tool list changes after switching clients', async () => {
@@ -103,6 +121,67 @@ describe('VSCodeProxyBackend', () => {
     expect(close).not.toHaveBeenCalled();
     await backend.callTool('scan_page', {});
     expect(callTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps session handles at the host across a browser_connect provider switch', async () => {
+    // The switched VS Code provider is a separate server process whose
+    // BrowserServerBackend builds its own registry — forwarding handle-routed
+    // calls there answered "Unknown browserSessionId" while the session's
+    // context stayed alive in the host until its TTL. Session traffic must
+    // resolve against the host's registry regardless of the selected
+    // provider; only session-less traffic follows the switch.
+    const config = await resolveConfig({});
+    const registry = new BrowserSessionRegistry();
+    const factory = makeFakeContextFactory();
+    const backend = new VSCodeProxyBackend(
+        config,
+        async () => wrapInProcess(new BrowserServerBackend(config, factory, registry)),
+    );
+    await backend.initialize(
+        { notifyToolListChanged: async () => {} } as any,
+        { name: 'vitest', version: '1.0.0' },
+    );
+
+    const opened = await backend.callTool('browser_session_open', {});
+    expect(opened.isError).not.toBe(true);
+    const id = (opened.structuredContent as any)?.browserSessionId;
+    expect(id).toMatch(/^bs_/);
+
+    // The switched child mirrors main.ts: its own backend, its own registry,
+    // and a factory that vetoes sessions like VSCodeBrowserContextFactory.
+    const childBackend = new BrowserServerBackend(
+        config,
+        makeFakeContextFactory('the VS Code extension supplies the browser\'s existing context.'),
+    );
+    const childCallTool = vi.spyOn(childBackend, 'callTool');
+    vi.spyOn(backend as any, '_createSwitchTransport').mockImplementation(async () => wrapInProcess(childBackend));
+    const switched = await backend.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' });
+    expect(switched.isError).not.toBe(true);
+
+    // Session-less traffic follows the switch...
+    await backend.callTool('browser_tabs', { action: 'list' });
+    expect(childCallTool).toHaveBeenCalledWith('browser_tabs', { action: 'list' }, expect.anything());
+
+    // ...while handle-routed calls keep resolving at the host...
+    const routed = await backend.callTool('browser_tabs', { action: 'list', browserSessionId: id });
+    expect(routed.isError).not.toBe(true);
+
+    // ...opening a new session works despite the child's veto (host-minted)...
+    const openedWhileSwitched = await backend.callTool('browser_session_open', {});
+    expect(openedWhileSwitched.isError).not.toBe(true);
+    const idWhileSwitched = (openedWhileSwitched.structuredContent as any)?.browserSessionId;
+    expect(idWhileSwitched).toMatch(/^bs_/);
+
+    // ...and both handles close cleanly instead of "Unknown browserSessionId".
+    for (const handle of [id, idWhileSwitched]) {
+      const closed = await backend.callTool('browser_session_close', { browserSessionId: handle });
+      expect(closed.isError).not.toBe(true);
+    }
+    // None of the session traffic leaked into the switched provider.
+    expect(childCallTool.mock.calls.every(([name, args]) =>
+      name !== 'browser_session_open' && name !== 'browser_session_close' && (args as any)?.browserSessionId === undefined)).toBe(true);
+
+    backend.serverClosed?.();
   });
 
   // Stateless HTTP serves every handshake-free POST with a throwaway
