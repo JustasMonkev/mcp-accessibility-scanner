@@ -370,17 +370,24 @@ export class Context {
 
     testDebug('close context');
 
-    // Before the browser goes away — whoever is closing it: a stateless HTTP
-    // response's disposal, browser_session_close, the TTL reaper, the last
-    // tab closing — give in-flight download saves their bounded window to
-    // finish, so the files tool responses reported as "still downloading"
-    // actually materialize.
-    await this._waitForPendingDownloads();
-
+    // Unpublished BEFORE the download drain below: the drain can hold this
+    // close open for up to 30s, and with the promise still published a tool
+    // call arriving in that window (browser_navigate after the last tab
+    // closed with a download pending) was handed the closing context — its
+    // fresh tab was silently torn down when the drain settled. Unpublishing
+    // first routes such calls into _setupBrowserContext(), whose
+    // _closeBrowserContextPromise check rejects them with the existing
+    // "Another browser context is being closed" error.
     const promise = this._browserContextPromise;
     this._browserContextPromise = undefined;
 
     await promise.then(async ({ browserContext, close }) => {
+      // Before the browser goes away — whoever is closing it: a stateless
+      // HTTP response's disposal, browser_session_close, the TTL reaper, the
+      // last tab closing — give in-flight download saves their bounded
+      // window to finish, so the files tool responses reported as "still
+      // downloading" actually materialize.
+      await this._waitForPendingDownloads();
       this._detachFromBrowserContext();
       // close() is the factory's only cleanup hook — for storage-state
       // sessions it also removes the disposable profile — and this close

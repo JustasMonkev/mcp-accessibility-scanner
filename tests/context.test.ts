@@ -306,6 +306,48 @@ describe('Context', () => {
       }
     });
 
+    it('rejects a tool call arriving during the download drain instead of handing out the closing context', async () => {
+      // The last tab closing with a download pending starts the bounded drain,
+      // but _browserContextPromise used to stay published for its duration: a
+      // browser_navigate/browser_tabs call in that window reused the closing
+      // context, and its fresh tab was silently torn down when the drain
+      // settled. The closing context must be unpublished before the drain so
+      // such calls get the existing "being closed" rejection instead.
+      const close = vi.fn().mockResolvedValue(undefined);
+      (mockBrowserContextFactory.createContext as any).mockResolvedValue({
+        browserContext: mockBrowserContext,
+        close,
+      });
+      const context = new Context({
+        tools: [],
+        config: {} as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await context.newTab();
+
+      let finishDownload = () => {};
+      context.trackPendingDownload(new Promise<void>(resolve => finishDownload = resolve));
+      // The path _onPageClosed takes when the last tab closes.
+      const closing = context.closeBrowserContext();
+      // Park the close on the download drain.
+      for (let i = 0; i < 10; i++)
+        await Promise.resolve();
+      expect(close).not.toHaveBeenCalled();
+
+      // A tool call mid-drain must never get a tab in the draining context.
+      await expect(context.newTab()).rejects.toThrow('Another browser context is being closed');
+
+      finishDownload();
+      await closing;
+      expect(close).toHaveBeenCalledTimes(1);
+
+      // Once the close has settled, the next tool call starts a fresh context.
+      await context.newTab();
+      expect(mockBrowserContextFactory.createContext).toHaveBeenCalledTimes(2);
+    });
+
     it('logs a failed download save instead of leaving an unhandled rejection', async () => {
       const context = new Context({
         tools: [],
