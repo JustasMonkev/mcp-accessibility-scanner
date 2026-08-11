@@ -578,12 +578,37 @@ describe('browser sessions', () => {
     const registry = new BrowserSessionRegistry(TTL_MS);
 
     registry.open(() => context);
-    await vi.advanceTimersByTimeAsync(TTL_MS * 3);
+    // Past the TTL but within the bounded download grace: still held.
+    await vi.advanceTimersByTimeAsync(TTL_MS + 60_000);
     expect(context.dispose).not.toHaveBeenCalled();
 
-    // Once the save finishes, normal TTL expiry resumes.
+    // Once the save finishes, normal TTL expiry resumes at the next sweep.
     pendingDownload = false;
-    await vi.advanceTimersByTimeAsync(TTL_MS + 60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(context.dispose).toHaveBeenCalled();
+  });
+
+  it('reaps a session whose download never settles once the grace period lapses', async () => {
+    // The download hold must be bounded: a stalled saveAs() on an abandoned
+    // handle used to refresh the TTL forever, keeping the browser alive
+    // indefinitely — the 30s disposal bound never applied because disposal
+    // never began.
+    vi.useFakeTimers();
+    const context = {
+      isRunningTool: () => false,
+      hasPendingDownloads: () => true,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Context;
+    const registry = new BrowserSessionRegistry(TTL_MS);
+
+    registry.open(() => context);
+    // Anywhere under one extra TTL past expiry the download still holds.
+    await vi.advanceTimersByTimeAsync(TTL_MS + TTL_MS / 2);
+    expect(context.dispose).not.toHaveBeenCalled();
+
+    // The save never settles: past 2x TTL the session is reaped anyway, and
+    // disposal gives the download its own bounded window from there.
+    await vi.advanceTimersByTimeAsync(TTL_MS / 2 + 60_000);
     expect(context.dispose).toHaveBeenCalled();
   });
 

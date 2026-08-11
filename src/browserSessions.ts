@@ -180,17 +180,26 @@ export class BrowserSessionRegistry {
     const now = Date.now();
     for (const [id, entry] of this._sessions) {
       // A running tool holds the session's TTL: refresh instead of expiring,
-      // so a long crawl that never re-touches the registry survives. An
-      // in-flight download save holds it too — downloads outlive the tool
-      // call that started them, and reaping would abort the save.
-      if (entry.context.isRunningTool() || entry.context.hasPendingDownloads()) {
+      // so a long crawl that never re-touches the registry survives.
+      if (entry.context.isRunningTool()) {
         entry.lastUsedAt = now;
         continue;
       }
-      if (now - entry.lastUsedAt >= this._ttlMs) {
-        this._sessions.delete(id);
-        void entry.context.dispose().catch(logUnhandledError);
-      }
+      const idleFor = now - entry.lastUsedAt;
+      if (idleFor < this._ttlMs)
+        continue;
+      // An in-flight download save holds expiry too — downloads outlive the
+      // tool call that started them, and reaping would abort the save. But
+      // the hold is bounded at one extra TTL period (proportionate to the
+      // operator's configured idle tolerance): a stalled saveAs() on an
+      // abandoned handle must not pin the browser forever. Because the tool
+      // call that starts a download refreshes lastUsedAt as it finishes,
+      // every download gets at least a full TTL of downloads-only grace,
+      // and disposal itself still waits (bounded) for the save.
+      if (entry.context.hasPendingDownloads() && idleFor < this._ttlMs * 2)
+        continue;
+      this._sessions.delete(id);
+      void entry.context.dispose().catch(logUnhandledError);
     }
     this._stopReaperIfIdle();
   }
