@@ -574,13 +574,11 @@ Large `data:` URL payloads in request URLs are truncated to their media type pre
 When there is at least one request, a closing line points at `browser_network_request`.
 
 #### `browser_network_request`
-Returns the request headers, request body, response headers and response body of one request from the `browser_network_requests` listing.
+Returns credential-redacted request/response headers and body metadata for one request from the `browser_network_requests` listing.
 - Parameters: `index` (the number shown in the listing, starting at 1)
 - The listing is cleared by `browser_navigate` and when the tab closes; other navigations (link clicks, form submits, `history` calls) leave it in place and keep appending. Re-run `browser_network_requests` to get current indexes.
 - Credential-bearing headers (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`) are reported as `<redacted, N characters>`, so their presence and size stay visible but the secret never reaches the transcript. All other headers are reported in full, one line each.
-- Binary request and response bodies are reported as `<binary data, N bytes, mime/type>` rather than dumped. The type decides: `text/*`, `+json`/`+xml` suffixes and known textual types are text; `image/`, `audio/`, `video/`, `font/`, `model/` and known binary types are binary; anything else (`multipart/form-data`, custom types, a missing type) is decided by inspecting the bytes.
-- Textual bodies are decoded using the charset in `content-type`, and are truncated at 20000 characters with a trailing note. The cap applies to the request body and the response body separately, so one call can return up to two truncated bodies.
-- Bodies are wrapped in a code fence, so page-controlled content cannot forge the report's own section headings.
+- Request and response body contents are never returned because they can contain submitted credentials or private API data. Non-empty bodies are reported as `<redacted, N bytes, mime/type>`; empty bodies remain `<empty>`.
 - A request that failed after its response arrived reports both the status and the failure.
 - Sections that could not be read are reported in place (`<headers unavailable: ...>`, `<body unavailable: ...>`) rather than failing the whole call; reads are bounded by the default timeout, so a still-streaming response cannot hang the tool.
 
