@@ -92,7 +92,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
 
     if (runHeartbeat && !heartbeatRunning) {
       heartbeatRunning = true;
-      startHeartbeat(server);
+      void transportInitialized.then(() => startHeartbeat(server)).catch(errorsDebug);
     }
 
     try {
@@ -113,12 +113,11 @@ export function createServer(name: string, version: string, backend: ServerBacke
       const capabilities = server.getClientCapabilities();
       let clientRoots: Root[] = [];
       if (capabilities?.roots) {
-        const { roots } = await transportInitialized
-            .then(() => server.listRoots(undefined, { timeout: 2_000 }))
-            .catch(e => {
-              serverDebug(e);
-              return { roots: [] };
-            });
+        await raceTimeout(transportInitialized, 5000);
+        const { roots } = await server.listRoots(undefined, { timeout: 2_000 }).catch(e => {
+          serverDebug(e);
+          return { roots: [] };
+        });
         clientRoots = roots;
       }
       const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
@@ -175,6 +174,18 @@ const pingTimeout = (): number => {
     return defaultPingTimeout;
   return parsed;
 };
+
+async function raceTimeout(promise: Promise<void>, timeoutMs: number): Promise<void> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<void>(resolve => timeoutId = setTimeout(resolve, timeoutMs)),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 function addServerListener(server: Server, event: 'close' | 'initialized', listener: () => void) {
   const oldListener = server[`on${event}`];

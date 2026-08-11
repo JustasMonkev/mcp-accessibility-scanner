@@ -271,7 +271,7 @@ describe('mcp http transport hardening', () => {
     }
   });
 
-  it('falls back when the streamable HTTP event stream never opens', async () => {
+  it('keeps POST-only sessions alive while root discovery falls back', async () => {
     let initializedRoots: unknown[] | undefined;
     const callTool = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }));
     const listRoots = vi.fn(() => ({ roots: [{ uri: 'file:///workspace' }] }));
@@ -301,11 +301,13 @@ describe('mcp http transport hardening', () => {
     client.setRequestHandler(ListRootsRequestSchema, listRoots);
     client.setRequestHandler(PingRequestSchema, () => ({}));
     const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { fetch: noStreamFetch });
-    let fallbackTimerCount = 0;
+    const previousPingTimeout = process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS;
+    process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS = '20';
+    let rootFallbackTimerCount = 0;
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
       if (timeout === 5000) {
-        if (new Error().stack?.includes('/src/mcp/http.ts'))
-          ++fallbackTimerCount;
+        if (new Error().stack?.includes('/src/mcp/server.ts'))
+          ++rootFallbackTimerCount;
         return originalSetTimeout(handler, 0, ...args);
       }
       if (timeout === 2000)
@@ -316,13 +318,19 @@ describe('mcp http transport hardening', () => {
     try {
       await client.connect(transport);
       await client.callTool({ name: 'probe', arguments: {} });
+      await new Promise(resolve => originalSetTimeout(resolve, 50));
+      await client.callTool({ name: 'probe', arguments: {} });
 
-      expect(fallbackTimerCount).toBe(1);
+      expect(rootFallbackTimerCount).toBe(1);
       expect(initializedRoots).toEqual([]);
       expect(listRoots).not.toHaveBeenCalled();
-      expect(callTool).toHaveBeenCalledTimes(1);
+      expect(callTool).toHaveBeenCalledTimes(2);
     } finally {
       setTimeoutSpy.mockRestore();
+      if (previousPingTimeout === undefined)
+        delete process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS;
+      else
+        process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS = previousPingTimeout;
       await client.close();
     }
   });
