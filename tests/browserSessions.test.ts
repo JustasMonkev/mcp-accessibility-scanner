@@ -355,6 +355,92 @@ describe('browser sessions', () => {
     }
   });
 
+  it('logs a stateless-style close into the opener\'s session log, not a second directory', async () => {
+    // browser_session_close runs unrouted, so over stateless HTTP it arrives
+    // on a fresh per-request backend while the session was opened by another.
+    // Awaiting the closing backend's own lazy log minted a second empty
+    // session-* directory per close; the entry belongs in the opener's log,
+    // reached through the closed session's Context.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logResponse = vi.spyOn(SessionLog.prototype, 'logResponse').mockImplementation(() => {});
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-close-log-'));
+    try {
+      const config = await resolveConfig({ saveSession: true, outputDir });
+      const { factory } = makeFactory();
+      const registry = new BrowserSessionRegistry();
+      const makeSharedBackend = async () => {
+        const backend = new BrowserServerBackend(config, factory, registry);
+        await backend.initialize(
+            { notifyToolListChanged: async () => {} } as any,
+            { name: 'vitest', version: 'browser-sessions' },
+        );
+        return backend;
+      };
+      const sessionDirs = () => fs.readdirSync(outputDir).filter(name => name.startsWith('session-'));
+
+      const opener = await makeSharedBackend();
+      const id = await openSession(opener);
+      expect(sessionDirs()).toHaveLength(1);
+      const openerLog = await (opener as any)._ensureSessionLog();
+
+      // A fresh backend serves the close, the way each handshake-free HTTP
+      // request builds its own.
+      const closer = await makeSharedBackend();
+      const closed = await closer.callTool('browser_session_close', { browserSessionId: id });
+      expect(closed.isError).not.toBe(true);
+
+      expect(sessionDirs()).toHaveLength(1);
+      const closeIndex = logResponse.mock.calls.findIndex(([response]) => response.toolName === 'browser_session_close');
+      expect(closeIndex).toBeGreaterThanOrEqual(0);
+      expect(logResponse.mock.contexts[closeIndex]).toBe(openerLog);
+    } finally {
+      vi.restoreAllMocks();
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a completed close as success even when the closing backend cannot create its own log', async () => {
+    // The session is already disposed by the time the response is logged; a
+    // log-creation failure on the closing backend must not convert the
+    // completed close into an isError — the caller's retry would only meet
+    // "Unknown browserSessionId".
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(SessionLog.prototype, 'logResponse').mockImplementation(() => {});
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-close-nolog-'));
+    try {
+      const config = await resolveConfig({ saveSession: true, outputDir });
+      const { factory } = makeFactory();
+      const registry = new BrowserSessionRegistry();
+      const makeSharedBackend = async () => {
+        const backend = new BrowserServerBackend(config, factory, registry);
+        await backend.initialize(
+            { notifyToolListChanged: async () => {} } as any,
+            { name: 'vitest', version: 'browser-sessions' },
+        );
+        return backend;
+      };
+
+      const opener = await makeSharedBackend();
+      const id = await openSession(opener);
+
+      // The closing backend's own log cannot be created (say, the output
+      // volume is briefly unavailable when its request arrives).
+      vi.spyOn(SessionLog, 'create').mockRejectedValue(new Error('EACCES: output volume unavailable'));
+      const closer = await makeSharedBackend();
+      const closed = await closer.callTool('browser_session_close', { browserSessionId: id });
+      expect(closed.isError).not.toBe(true);
+      expect(textOf(closed)).toContain(id);
+
+      // The close really happened: the handle is gone.
+      const again = await closer.callTool('browser_session_close', { browserSessionId: id });
+      expect(again.isError).toBe(true);
+      expect(textOf(again)).toContain('Unknown browserSessionId');
+    } finally {
+      vi.restoreAllMocks();
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it('retries --save-session log creation after a transient failure instead of memoizing the rejection', async () => {
     // The lazy supplier used `??=`, which retained a rejected SessionLog.create
     // promise: after one transient failure every later browser_session_open

@@ -196,6 +196,22 @@ export class BrowserServerBackend implements ServerBackend {
     // sessionless args with interleaved snapshots. Re-attach it to the logged
     // view; handlers keep receiving parsedArguments untouched.
     const responseArguments = routedSessionId !== undefined ? { browserSessionId: routedSessionId, ...parsedArguments } : parsedArguments;
+    // browser_session_close is deliberately unrouted (see _routedSessionId),
+    // so over stateless HTTP it runs on a fresh per-request backend while the
+    // session it closes was opened by another. The close entry belongs in the
+    // OPENER's --save-session log — the session's Context carries that
+    // backend's log supplier — and the Context must be captured before the
+    // tool disposes it out of the registry. Awaiting this backend's own lazy
+    // log instead minted a second empty session-* directory per stateless
+    // close. An unknown handle stays the tool's own error to report.
+    let closingSessionContext: Context | undefined;
+    if (name === 'browser_session_close' && typeof parsedArguments.browserSessionId === 'string') {
+      try {
+        closingSessionContext = this._sessionRegistry!.resolve(parsedArguments.browserSessionId);
+      } catch {
+        // Unknown handle: the tool itself reports it.
+      }
+    }
     const response = new Response(context, name, responseArguments, requestContext);
     // Per-call token, not a single slot: two overlapping calls on one session
     // must keep isRunningTool() true until BOTH finish, or the TTL reaper (and
@@ -204,16 +220,29 @@ export class BrowserServerBackend implements ServerBackend {
     try {
       await tool.handle(context, parsedArguments, response);
       await response.finish();
-      // A routed call belongs to the session's own log — resolved through the
-      // supplier captured from the backend that opened it, which over
-      // stateless HTTP is not this one. Resolving (not just reading the
-      // cached field) matters when the routed call is the session's first and
-      // needs no browser: the field is only populated at browser launch, so a
-      // browser_default_timeout opening move would otherwise never be logged.
-      // A default-context call is a real use of THIS backend, so it may
-      // create the backend's log on first demand.
-      const sessionLog = routedSessionId !== undefined ? await context.resolveSessionLog() : await this._ensureSessionLog();
-      sessionLog?.logResponse(response);
+      if (name === 'browser_session_close') {
+        // The close has already completed and the handle is gone, so a log
+        // failure must not turn the result into an isError — the caller's
+        // retry would only meet "Unknown browserSessionId". Logged via debug
+        // instead of surfacing.
+        try {
+          const sessionLog = await closingSessionContext?.resolveSessionLog();
+          sessionLog?.logResponse(response);
+        } catch (error) {
+          logUnhandledError(error);
+        }
+      } else {
+        // A routed call belongs to the session's own log — resolved through
+        // the supplier captured from the backend that opened it, which over
+        // stateless HTTP is not this one. Resolving (not just reading the
+        // cached field) matters when the routed call is the session's first
+        // and needs no browser: the field is only populated at browser
+        // launch, so a browser_default_timeout opening move would otherwise
+        // never be logged. A default-context call is a real use of THIS
+        // backend, so it may create the backend's log on first demand.
+        const sessionLog = routedSessionId !== undefined ? await context.resolveSessionLog() : await this._ensureSessionLog();
+        sessionLog?.logResponse(response);
+      }
     } catch (error: any) {
       response.addError(String(error));
     } finally {
