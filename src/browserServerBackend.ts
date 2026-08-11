@@ -180,11 +180,15 @@ export class BrowserServerBackend implements ServerBackend {
     try {
       await tool.handle(context, parsedArguments, response);
       await response.finish();
-      // A routed call belongs to the session's own log — captured from the
-      // backend that opened it, which over stateless HTTP is not this one. A
-      // default-context call is a real use of THIS backend, so it may create
-      // the backend's log on first demand.
-      const sessionLog = routedSessionId !== undefined ? context.sessionLog : await this._ensureSessionLog();
+      // A routed call belongs to the session's own log — resolved through the
+      // supplier captured from the backend that opened it, which over
+      // stateless HTTP is not this one. Resolving (not just reading the
+      // cached field) matters when the routed call is the session's first and
+      // needs no browser: the field is only populated at browser launch, so a
+      // browser_default_timeout opening move would otherwise never be logged.
+      // A default-context call is a real use of THIS backend, so it may
+      // create the backend's log on first demand.
+      const sessionLog = routedSessionId !== undefined ? await context.resolveSessionLog() : await this._ensureSessionLog();
       sessionLog?.logResponse(response);
     } catch (error: any) {
       response.addError(String(error));

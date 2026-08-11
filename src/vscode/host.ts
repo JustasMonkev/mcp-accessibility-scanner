@@ -26,6 +26,7 @@ import { notifyToolListChanged } from '../mcp/toolListChanged.js';
 import { logUnhandledError } from '../utils/log.js';
 import { packageJSON } from '../utils/package.js';
 
+import { resolveOutputDir } from '../config.js';
 import type { FullConfig } from '../config.js';
 import { BrowserServerBackend } from '../browserServerBackend.js';
 import { BrowserSessionRegistry } from '../browserSessions.js';
@@ -110,7 +111,12 @@ export class VSCodeProxyBackend implements ServerBackend {
           cwd: process.cwd(),
           args: [
             path.join(fileURLToPath(import.meta.url), '..', 'main.js'),
-            JSON.stringify(this._config),
+            // The fallback output dir is memoized on the config OBJECT, and
+            // JSON round-tripping into the child mints a new object — without
+            // materializing the resolved dir here, the spawned provider would
+            // open a second temp root and scatter one run's artifacts across
+            // the provider switch.
+            JSON.stringify({ ...this._config, outputDir: resolveOutputDir(this._config) }),
             params.connectionString,
             params.lib,
           ],

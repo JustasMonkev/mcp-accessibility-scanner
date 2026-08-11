@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/client';
+import { outputFile, resolveConfig } from '../src/config.js';
 import { VSCodeProxyBackend } from '../src/vscode/host.js';
 
 describe('VSCodeProxyBackend', () => {
@@ -45,6 +47,28 @@ describe('VSCodeProxyBackend', () => {
 
     expect(close).toHaveBeenCalledTimes(1);
     expect((backend as any)._backendContext.notifyToolListChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes the resolved fallback output dir into the spawned provider config', async () => {
+    // The fallback output dir is memoized on the config OBJECT; the JSON
+    // round-trip into the spawned VS Code provider mints a new object, so an
+    // unmaterialized config gave the child a second temp root and scattered
+    // one run's artifacts across the provider switch.
+    const config = await resolveConfig({});
+    const parentFile = await outputFile(config, 'parent.txt');
+
+    const backend = new VSCodeProxyBackend(config, vi.fn(async () => ({ id: 'default-transport' } as any)));
+    const setCurrentClient = vi.spyOn(backend as any, '_setCurrentClient').mockResolvedValue(undefined);
+
+    await backend.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' });
+
+    expect(setCurrentClient).toHaveBeenCalledTimes(1);
+    const transport = setCurrentClient.mock.calls[0][0] as any;
+    const childConfig = JSON.parse(transport._serverParams.args[1]);
+    expect(childConfig.outputDir).toBe(path.dirname(parentFile));
+    // The deserialized child config writes into the parent's directory.
+    const childFile = await outputFile(childConfig, 'child.txt');
+    expect(path.dirname(childFile)).toBe(path.dirname(parentFile));
   });
 
   it('rejects a profile-conflicted browser_connect without tearing down the working provider', async () => {

@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it, expect } from 'vitest';
-import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders } from '../src/config.js';
+import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders, resolveOutputDir } from '../src/config.js';
 import type { Config } from '../config.js';
 
 async function writeConfigFile(config: Config): Promise<string> {
@@ -372,6 +372,22 @@ describe('Config', () => {
       const second = await outputFile(config, 'report.json');
 
       expect(path.dirname(second)).toBe(path.dirname(first));
+    });
+
+    it('keeps one fallback directory across a config serialization boundary', async () => {
+      // The VS Code integration JSON-serializes the config into a spawned
+      // provider process (src/vscode/host.ts); the round-trip mints a new
+      // object the WeakMap memo has never seen. Materializing the resolved
+      // fallback into the serialized copy keeps the child's artifacts in the
+      // parent's directory instead of a second temp root.
+      const config = await resolveConfig({});
+      const parentFile = await outputFile(config, 'parent.txt');
+
+      const childConfig = JSON.parse(JSON.stringify({ ...config, outputDir: resolveOutputDir(config) }));
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const childFile = await outputFile(childConfig, 'child.txt');
+
+      expect(path.dirname(childFile)).toBe(path.dirname(parentFile));
     });
 
     it('gives two server configurations distinct fallback directories', async () => {

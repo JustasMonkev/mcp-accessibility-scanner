@@ -327,19 +327,31 @@ async function loadConfig(configFile: string | undefined): Promise<Config> {
 // server instances in one process still get distinct fallback directories.
 const defaultOutputDirs = new WeakMap<FullConfig, string>();
 
-export async function outputFile(config: FullConfig, name: string): Promise<string> {
-  let outputDir = config.outputDir;
+/**
+ * Resolves the output directory this config's artifacts land in, memoizing
+ * the timestamped fallback when no `outputDir` is configured. Exported so a
+ * config that crosses an identity boundary — the VS Code integration
+ * serializes it into a spawned provider process, where JSON.parse mints a new
+ * object the WeakMap has never seen — can materialize the resolved fallback
+ * into the serialized copy instead of letting the other side mint a second
+ * temp root.
+ */
+export function resolveOutputDir(config: FullConfig): string {
+  if (config.outputDir)
+    return config.outputDir;
+  let outputDir = defaultOutputDirs.get(config);
   if (!outputDir) {
-    outputDir = defaultOutputDirs.get(config);
-    if (!outputDir) {
-      // The random token keeps two servers starting in the same millisecond
-      // from sharing a fallback directory — the per-call timestamp used to
-      // make that unlikely; a per-server one no longer would.
-      outputDir = path.join(os.tmpdir(), 'playwright-mcp-output', safeIsoTimestampForFileName());
-      defaultOutputDirs.set(config, outputDir);
-    }
+    // The random token keeps two servers starting in the same millisecond
+    // from sharing a fallback directory — the per-call timestamp used to
+    // make that unlikely; a per-server one no longer would.
+    outputDir = path.join(os.tmpdir(), 'playwright-mcp-output', safeIsoTimestampForFileName());
+    defaultOutputDirs.set(config, outputDir);
   }
+  return outputDir;
+}
 
+export async function outputFile(config: FullConfig, name: string): Promise<string> {
+  const outputDir = resolveOutputDir(config);
   await fs.promises.mkdir(outputDir, { recursive: true });
   const fileName = sanitizeForFilePath(name);
   return path.join(outputDir, fileName);

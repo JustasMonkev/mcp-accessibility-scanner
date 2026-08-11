@@ -163,6 +163,20 @@ export class Context {
     return this._sessionLog;
   }
 
+  /**
+   * Resolves this context's `--save-session` log through the supplier handed
+   * in by the backend that created it, caching the result. Called at the
+   * first browser context launch, and by the owning backend for routed tool
+   * calls: a no-browser tool (e.g. browser_default_timeout) routed to a
+   * freshly opened session must land in the opener backend's log even though
+   * the session has not launched a browser yet — reading the cached field
+   * alone would silently skip it.
+   */
+  async resolveSessionLog(): Promise<SessionLog | undefined> {
+    this._sessionLog ??= await this.options.sessionLog?.();
+    return this._sessionLog;
+  }
+
   tabs(): Tab[] {
     return this._tabs;
   }
@@ -364,7 +378,7 @@ export class Context {
       await this._setupRequestInterception(browserContext);
       // First real use of this context: resolve — and, once per backend,
       // create — the session log before deciding whether to record input.
-      this._sessionLog ??= await this.options.sessionLog?.();
+      await this.resolveSessionLog();
       if (this.sessionLog)
         this._inputRecorder = await InputRecorder.create(this, browserContext);
       for (const page of browserContext.pages())
