@@ -103,7 +103,7 @@ export type FullConfig = Config & {
 };
 
 export async function resolveConfig(config: Config): Promise<FullConfig> {
-  return mergeConfig(defaultConfig, config);
+  return validateResolvedConfig(mergeConfig(defaultConfig, config));
 }
 
 export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConfig> {
@@ -112,7 +112,22 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
   const envOverrides = configFromCLIOptions(envOptions);
   const cliOverrides = configFromCLIOptions(cliOptions);
   const result = mergeCLIConfigSources(configInFile, envOverrides, cliOverrides);
-  return applyMobileConfig(result, configInFile, envOverrides, cliOverrides, envOptions, cliOptions);
+  return validateResolvedConfig(applyMobileConfig(result, configInFile, envOverrides, cliOverrides, envOptions, cliOptions));
+}
+
+// A blank outputDir is an explicit value with no usable meaning, and both
+// ways of tolerating it go wrong silently: honoring it would fail on
+// mkdir('') only at the first artifact write — deep into a run — while
+// treating it as omitted (what a truthiness check on the resolved value does)
+// would quietly redirect artifacts the user configured a destination for
+// into a temp directory. Rejected here instead, at startup like the other
+// config validations, on the merged result so every source (config file,
+// env, CLI, programmatic Config) is covered. Only undefined/null count as
+// omitted — the nullish semantics the fallback historically used.
+function validateResolvedConfig(config: FullConfig): FullConfig {
+  if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
+    throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
+  return config;
 }
 
 type MobileSource = 'env' | 'cli';

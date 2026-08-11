@@ -399,5 +399,23 @@ describe('Config', () => {
 
       expect(path.dirname(first)).not.toBe(path.dirname(second));
     });
+
+    it('rejects a blank outputDir at resolution instead of redirecting artifacts to a temp directory', async () => {
+      // An explicitly-empty outputDir must not be coerced into the omitted
+      // default: the user configured a destination, and "" silently falling
+      // back to the temp root would strand the artifacts they asked to keep.
+      // Rejected at startup — honoring "" would only fail on mkdir('') at
+      // the first artifact write, deep into a run.
+      await expect(resolveConfig({ outputDir: '' })).rejects.toThrow('outputDir must not be blank');
+      await expect(resolveConfig({ outputDir: '   ' })).rejects.toThrow('outputDir must not be blank');
+      await expect(resolveCLIConfig({ outputDir: '' })).rejects.toThrow('outputDir must not be blank');
+    });
+
+    it('keeps the temp-directory fallback when outputDir is omitted', async () => {
+      const config = await resolveConfig({});
+      expect(config.outputDir).toBeUndefined();
+      const result = await outputFile(config, 'artifact.txt');
+      expect(path.dirname(result)).toContain('playwright-mcp-output');
+    });
   });
 });
