@@ -862,6 +862,23 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
   // See CdpContextFactory: fresh context when isolated, setStorageState otherwise.
   readonly appliesStorageState = true;
 
+  // The live child launched on a pinned --cdp-launch-port, tracked from spawn
+  // until the process exits. The sessionsUnsupportedReason veto below keeps
+  // registry sessions off this path, but DEFAULT contexts reach it too —
+  // parallel handshake-free HTTP requests each build a per-request backend
+  // whose default context launches here — and a second launch against the
+  // pinned port cannot work while the first child lives: its own child can
+  // never bind the busy port, so the connect loop attaches to the FIRST
+  // child's endpoint, the "separate" context lands in a sibling's
+  // application, and cleanup kills a child that owns nothing. Serializing
+  // the launches would not fix that — the port stays bound for the first
+  // context's whole lifetime, so a queued second launch could only time out
+  // or cross-attach after all — hence the second concurrent context is
+  // honestly rejected instead. `closing` marks a teardown in progress (kill
+  // sent), which a new arrival may briefly wait out rather than failing a
+  // plain sequential close-then-relaunch on the OS shutdown tail.
+  private _pinnedPortLaunch: { closing: boolean, exited: Promise<void> } | undefined;
+
   constructor(config: FullConfig) {
     this.config = config;
   }
@@ -884,6 +901,14 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
 
   async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     const cdpLaunch = this.config.browser.cdpLaunch!;
+    if (cdpLaunch.port !== undefined) {
+      await this._waitForClosingPinnedPortHolder(cdpLaunch);
+      // Checked synchronously with the spawn-and-track below (nothing awaits
+      // in between on the pinned path): a concurrent createContext() resuming
+      // from the same wait could otherwise interleave here and both would
+      // launch against the one port.
+      this._assertPinnedPortFree(cdpLaunch);
+    }
     // Reserved until the child is known to have bound the port (or the launch
     // failed): findFreePort()'s probe socket is closed before the child
     // spawns, so a concurrent session's probe could otherwise be handed the
@@ -899,6 +924,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     const args = (cdpLaunch.args ?? []).map(arg => arg.replaceAll('{port}', String(port)));
     let browser: playwright.Browser;
     let childProcess: ReturnType<typeof spawn>;
+    let pinnedLaunch: NonNullable<CdpLaunchContextFactory['_pinnedPortLaunch']> | undefined;
     try {
       childProcess = spawn(cdpLaunch.command, args, {
         cwd: cdpLaunch.cwd,
@@ -908,6 +934,8 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
         },
         stdio: ['ignore', 'ignore', 'pipe'],
       });
+      if (cdpLaunch.port !== undefined)
+        pinnedLaunch = this._trackPinnedPortChild(childProcess);
 
       childProcess.stderr?.on('data', data => {
         testDebug(`cdp-launch stderr: ${String(data).trimEnd()}`);
@@ -917,6 +945,13 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
       // longer hand it to a sibling's probe; on failure the child is already
       // killed and the port free again.
       browser = await this._waitForBrowser(endpoint, clientInfo, childProcess, cdpLaunch.startupTimeoutMs ?? 30000);
+    } catch (error) {
+      // _waitForBrowser has already killed the child on failure; marking the
+      // tracked launch closing lets the next pinned-port context wait out the
+      // exit instead of rejecting against a corpse.
+      if (pinnedLaunch)
+        pinnedLaunch.closing = true;
+      throw error;
     } finally {
       if (allocatedPort !== undefined)
         reservedPorts.delete(allocatedPort);
@@ -940,6 +975,8 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
       // The desktop process is already running by now; failing to obtain a
       // context (say, an unreadable storage-state file) must not leave it and
       // the CDP connection behind with nobody holding a close() for them.
+      if (pinnedLaunch)
+        pinnedLaunch.closing = true;
       await browser.close().catch(logUnhandledError);
       childProcess.kill('SIGTERM');
       throw error;
@@ -947,10 +984,63 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     return {
       browserContext,
       close: async () => {
+        if (pinnedLaunch)
+          pinnedLaunch.closing = true;
         await browser.close().catch(logUnhandledError);
         childProcess.kill('SIGTERM');
       }
     };
+  }
+
+  /**
+   * Waits out a pinned-port holder whose teardown has already begun (kill
+   * sent, exit pending), bounded by the configured startup timeout — the
+   * same budget a launch gets — so a plain sequential close-then-relaunch
+   * does not flake on the child's asynchronous exit. A holder that is NOT
+   * closing is genuine concurrency; _assertPinnedPortFree rejects it.
+   */
+  private async _waitForClosingPinnedPortHolder(cdpLaunch: NonNullable<FullConfig['browser']['cdpLaunch']>): Promise<void> {
+    const previous = this._pinnedPortLaunch;
+    if (!previous?.closing)
+      return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        previous.exited,
+        new Promise<void>(resolve => {
+          timer = setTimeout(resolve, cdpLaunch.startupTimeoutMs ?? 30000);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Rejects a pinned-port launch while another live context's child still
+   * holds the port (see _pinnedPortLaunch). Synchronous, so callers can bind
+   * the check to the spawn without an interleaving window. */
+  private _assertPinnedPortFree(cdpLaunch: NonNullable<FullConfig['browser']['cdpLaunch']>): void {
+    if (this._pinnedPortLaunch)
+      throw new Error(`The pinned --cdp-launch-port ${cdpLaunch.port} already serves a launched application from another live browser context, and a second launch on the same port would silently attach to that application instead of its own. Close the other context first, or drop --cdp-launch-port so each context launches on its own free port.`);
+  }
+
+  /** Tracks the pinned-port child until its process is gone; identity-guarded
+   * so a stale exit can never untrack a successor's launch. The 'error'
+   * listener covers a spawn that never produces an 'exit' (e.g. ENOENT). */
+  private _trackPinnedPortChild(childProcess: ReturnType<typeof spawn>): NonNullable<CdpLaunchContextFactory['_pinnedPortLaunch']> {
+    const launch = { closing: false, exited: undefined as unknown as Promise<void> };
+    launch.exited = new Promise<void>(resolve => {
+      const done = () => {
+        if (this._pinnedPortLaunch === launch)
+          this._pinnedPortLaunch = undefined;
+        resolve();
+      };
+      childProcess.once('exit', done);
+      childProcess.once('error', done);
+    });
+    this._pinnedPortLaunch = launch;
+    return launch;
   }
 
   private async _waitForBrowser(endpoint: string, clientInfo: ClientInfo, childProcess: ReturnType<typeof spawn>, startupTimeoutMs: number): Promise<playwright.Browser> {

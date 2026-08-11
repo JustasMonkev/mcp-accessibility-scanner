@@ -410,6 +410,45 @@ describe('browserContextFactory', () => {
     }
   });
 
+  it('rejects a second concurrent context on a pinned --cdp-launch-port instead of cross-attaching', async () => {
+    // The sessionsUnsupportedReason veto covers browser_session_open only;
+    // parallel handshake-free HTTP requests reach the launch path through
+    // their per-request DEFAULT contexts. The second child could never bind
+    // the busy pinned port, so its connect loop would attach to the FIRST
+    // child's endpoint — its "own" context landing in a sibling's
+    // application, its cleanup killing a child that owns nothing.
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    const childA = createMockChildProcess();
+    const childB = createMockChildProcess();
+    spawnMock.mockReturnValueOnce(childA).mockReturnValue(childB);
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      browser: {
+        isolated: true,
+        cdpLaunch: { command: 'open', args: ['--remote-debugging-port={port}'], port: 9222, startupTimeoutMs: 500 },
+      },
+    });
+    const factory = contextFactory(config);
+    const clientInfo = { name: 'vitest', version: '1.0.0' };
+    const signal = new AbortController().signal;
+
+    const first = await factory.createContext(clientInfo, signal, undefined);
+    await expect(factory.createContext(clientInfo, signal, undefined))
+        .rejects.toThrow(/pinned --cdp-launch-port 9222 already serves a launched application/);
+    // The doomed launch was refused before spawning another child.
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+
+    // Once the first context is gone (mock kill emits exit), the pinned port
+    // serves the next context again.
+    await first.close();
+    expect(childA.kill).toHaveBeenCalledWith('SIGTERM');
+    const second = await factory.createContext(clientInfo, signal, undefined);
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    await second.close();
+  });
+
   it('surfaces the missing browser executable path on the isolated launch path', async () => {
     (playwright.chromium.launch as any).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
 
