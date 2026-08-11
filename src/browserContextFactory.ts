@@ -1272,13 +1272,39 @@ function browserNotInstalledError(error: Error): Error {
   return new Error(`Browser specified in your config is not installed${location}. Either install it (likely) or change the config.`);
 }
 
+// One trace-viewer server and traces directory per config — i.e. per server
+// run, the same WeakMap pattern as resolveOutputDir. startTraceViewerServer()
+// binds a listening HTTP socket that nothing ever closes, so starting one per
+// browser launch (the persistent factory launches per context, so every
+// explicit-session open/close cycle) leaked a listener for the life of the
+// process. Sharing one tracesDir across launches is safe for the trace files:
+// each Context records under its own `trace-<guid>` name (see acquireTrace in
+// context.ts), exactly as --isolated mode has always shared its per-browser
+// tracesDir.
+const traceServers = new WeakMap<FullConfig, Promise<string>>();
+
 async function startTraceServer(config: FullConfig): Promise<string | undefined> {
   if (!config.saveTrace)
     return undefined;
+  let started = traceServers.get(config);
+  if (!started) {
+    started = doStartTraceServer(config);
+    traceServers.set(config, started);
+    // A failed start (e.g. an unwritable output directory) is not memoized:
+    // the next launch retries instead of replaying the rejection for the
+    // process lifetime. Guarded by identity — a retry may already have
+    // stored a fresh in-flight promise by the time this handler runs.
+    started.catch(() => {
+      if (traceServers.get(config) === started)
+        traceServers.delete(config);
+    });
+  }
+  return started;
+}
 
-  // The random suffix keeps two contexts created in the same millisecond
-  // (e.g. concurrent sessions) from sharing a trace folder and overwriting
-  // each other's trace files. Nothing parses the folder name back.
+async function doStartTraceServer(config: FullConfig): Promise<string> {
+  // The random suffix keeps two configs resolving in the same millisecond
+  // from sharing a trace folder. Nothing parses the folder name back.
   const tracesDir = await outputFile(config, `traces-${Date.now()}-${createShortGuid()}`);
   const server = await startTraceViewerServer();
   const urlPrefix = server.urlPrefix('human-readable');

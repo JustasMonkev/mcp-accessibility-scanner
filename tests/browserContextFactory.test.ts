@@ -21,9 +21,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { connectOverCDP, spawnMock } = vi.hoisted(() => ({
+const { connectOverCDP, spawnMock, startTraceViewerServerMock } = vi.hoisted(() => ({
   connectOverCDP: vi.fn(),
   spawnMock: vi.fn(),
+  startTraceViewerServerMock: vi.fn(async () => ({ urlPrefix: () => 'http://127.0.0.1:0' })),
 }));
 
 vi.mock('playwright', () => ({
@@ -49,6 +50,22 @@ vi.mock('playwright', () => ({
 vi.mock('node:child_process', () => ({
   spawn: spawnMock,
 }));
+
+// The trace-viewer server binds a real listening socket; tests spy on the
+// start instead. The registry directory (the fallback profile root when
+// PWMCP_PROFILES_DIR_FOR_TEST is unset) is pointed into the temp dir so tests
+// never touch the real Playwright registry.
+vi.mock('playwright-core/lib/coreBundle', async () => {
+  const os = await import('node:os');
+  const path = await import('node:path');
+  return {
+    default: {
+      registry: { registryDirectory: path.join(os.tmpdir(), 'mcp-a11y-test-registry'), registry: {} },
+      server: { startTraceViewerServer: startTraceViewerServerMock },
+      iso: { asLocator: () => '' },
+    },
+  };
+});
 
 import * as playwright from 'playwright';
 import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported, contextFactory } from '../src/browserContextFactory.js';
@@ -555,6 +572,38 @@ describe('browserContextFactory', () => {
       expect(rmSpy).toHaveBeenCalledWith(disposableDir, { recursive: true, force: true });
       await third.close();
       expect(rmSpy).not.toHaveBeenCalledWith(stableDir, expect.anything());
+    } finally {
+      delete process.env.PWMCP_PROFILES_DIR_FOR_TEST;
+      fs.rmSync(profilesDir, { recursive: true, force: true });
+    }
+  });
+
+  it('starts one trace-viewer server per config and shares it across launches', async () => {
+    // With --save-trace in persistent mode every launch used to call
+    // startTraceViewerServer(), leaking one listening HTTP server per
+    // explicit-session open/close cycle for the life of the process.
+    const profilesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-profiles-'));
+    process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
+    try {
+      (playwright.chromium.launchPersistentContext as any).mockImplementation(async () => createMockBrowserContext());
+
+      const config = await resolveConfig({ saveTrace: true });
+      const factory = contextFactory(config);
+      const clientInfo = { name: 'vitest', version: '1.0.0' };
+      const signal = new AbortController().signal;
+
+      const first = await factory.createContext(clientInfo, signal, undefined, { browserSession: true });
+      await first.close();
+      const second = await factory.createContext(clientInfo, signal, undefined, { browserSession: true });
+      await second.close();
+
+      expect(startTraceViewerServerMock).toHaveBeenCalledTimes(1);
+      // Both launches record into the one traces directory; per-context trace
+      // names keep the files apart (see acquireTrace in context.ts).
+      const tracesDirs = (playwright.chromium.launchPersistentContext as any).mock.calls
+          .map((call: any[]) => call[1]?.tracesDir as string | undefined);
+      expect(tracesDirs[0]).toMatch(/traces-/);
+      expect(tracesDirs[1]).toBe(tracesDirs[0]);
     } finally {
       delete process.env.PWMCP_PROFILES_DIR_FOR_TEST;
       fs.rmSync(profilesDir, { recursive: true, force: true });
