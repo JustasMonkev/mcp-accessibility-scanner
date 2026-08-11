@@ -16,6 +16,7 @@
 
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -285,6 +286,106 @@ describe('browserContextFactory', () => {
 
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow('Timed out waiting for CDP endpoint http://127.0.0.1:9222.');
     expect(childProcess.kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('never hands two concurrent --cdp-launch sessions the same endpoint', async () => {
+    // findFreePort()'s probe socket closes before the launched child binds the
+    // port, so the OS can offer the same port to a concurrent session's probe
+    // — both connect loops would then attach to whichever child bound first,
+    // sharing its context and killing the wrong child on cleanup. Simulated by
+    // an OS that offers port 9400 twice: the in-process reservation must make
+    // the second session retry and launch on 9401 instead.
+    const probePorts = [9400, 9400, 9401];
+    let probeIndex = 0;
+    const probeSpy = vi.spyOn(net, 'createServer').mockImplementation((() => {
+      const port = probePorts[Math.min(probeIndex++, probePorts.length - 1)];
+      return {
+        listen: (_port: number, callback: () => void) => callback(),
+        address: () => ({ port }),
+        close: (callback?: () => void) => callback?.(),
+        on: () => {},
+      };
+    }) as any);
+    try {
+      const contextA = createMockBrowserContext();
+      const contextB = createMockBrowserContext();
+      const browserA = createMockBrowser(contextA);
+      const browserB = createMockBrowser(contextB);
+      spawnMock.mockImplementation(() => createMockChildProcess());
+      // Session A's connect stays pending, so its port is still unbound — and
+      // must still be reserved — while session B allocates its own.
+      let releaseA: (browser: any) => void;
+      connectOverCDP
+          .mockImplementationOnce(() => new Promise(resolve => { releaseA = resolve; }))
+          .mockResolvedValueOnce(browserB);
+
+      const config = await resolveConfig({
+        browser: {
+          isolated: true,
+          cdpLaunch: { command: 'open', args: ['--remote-debugging-port={port}'], startupTimeoutMs: 500 },
+        },
+      });
+      const factory = contextFactory(config);
+      const clientInfo = { name: 'vitest', version: '1.0.0' };
+      const signal = new AbortController().signal;
+
+      const pendingA = factory.createContext(clientInfo, signal, undefined);
+      await vi.waitFor(() => expect(connectOverCDP).toHaveBeenCalledWith('http://127.0.0.1:9400', expect.anything()));
+
+      const sessionB = await factory.createContext(clientInfo, signal, undefined);
+      releaseA!(browserA);
+      const sessionA = await pendingA;
+
+      expect(spawnMock).toHaveBeenCalledWith('open', ['--remote-debugging-port=9400'], expect.anything());
+      expect(spawnMock).toHaveBeenCalledWith('open', ['--remote-debugging-port=9401'], expect.anything());
+      expect(connectOverCDP).toHaveBeenCalledWith('http://127.0.0.1:9401', expect.anything());
+
+      await sessionA.close();
+      await sessionB.close();
+    } finally {
+      probeSpy.mockRestore();
+    }
+  });
+
+  it('releases an allocated --cdp-launch port for reuse once its child has bound it', async () => {
+    // The reservation exists only to bridge the probe-to-bind window; once a
+    // session's connect succeeded (or its launch failed), the OS itself keeps
+    // the port from being re-offered while bound, and holding the number
+    // reserved forever would slowly drain the pool on a long-lived server.
+    const probePorts = [9400];
+    const probeSpy = vi.spyOn(net, 'createServer').mockImplementation((() => ({
+      listen: (_port: number, callback: () => void) => callback(),
+      address: () => ({ port: probePorts[0] }),
+      close: (callback?: () => void) => callback?.(),
+      on: () => {},
+    })) as any);
+    try {
+      const browserContext = createMockBrowserContext();
+      const browser = createMockBrowser(browserContext);
+      spawnMock.mockImplementation(() => createMockChildProcess());
+      connectOverCDP.mockResolvedValue(browser);
+
+      const config = await resolveConfig({
+        browser: {
+          isolated: true,
+          cdpLaunch: { command: 'open', args: ['--remote-debugging-port={port}'], startupTimeoutMs: 500 },
+        },
+      });
+      const factory = contextFactory(config);
+      const clientInfo = { name: 'vitest', version: '1.0.0' };
+      const signal = new AbortController().signal;
+
+      const first = await factory.createContext(clientInfo, signal, undefined);
+      await first.close();
+      // The same port coming back from the OS after the first session is done
+      // must be usable again, not skipped as still-reserved.
+      const second = await factory.createContext(clientInfo, signal, undefined);
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+      expect(spawnMock).toHaveBeenLastCalledWith('open', ['--remote-debugging-port=9400'], expect.anything());
+      await second.close();
+    } finally {
+      probeSpy.mockRestore();
+    }
   });
 
   it('surfaces the missing browser executable path on the isolated launch path', async () => {
@@ -1346,6 +1447,50 @@ describe('browserContextFactory', () => {
     await closingA;
 
     // B is its own browser's only user; its close disconnects browser2.
+    await sessionB.close();
+    expect(browser2.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the successor browser cached when a stale disconnected event fires', async () => {
+    // Session A's close evicts the cache eagerly and session B obtains a NEW
+    // browser before A's close settles. When A's old browser finally fires
+    // its asynchronous 'disconnected', that stale event must not wipe B's
+    // cached promise — a third session would otherwise churn yet another
+    // connection while B's browser is alive.
+    const context1 = createMockBrowserContext();
+    const context2 = createMockBrowserContext();
+    const browser1 = createMockBrowser(context1);
+    const browser2 = createMockBrowser(context2);
+    let releaseClose: () => void;
+    browser1.close.mockImplementation(() => new Promise<void>(resolve => { releaseClose = resolve; }));
+    connectOverCDP.mockResolvedValueOnce(browser1).mockResolvedValueOnce(browser2);
+
+    const config = await resolveConfig({ browser: { cdpEndpoint: 'http://127.0.0.1:9222', isolated: true } });
+    const factory = contextFactory(config);
+    const clientInfo = { name: 'vitest', version: '1.0.0' };
+    const signal = new AbortController().signal;
+
+    const sessionA = await factory.createContext(clientInfo, signal, undefined);
+    const closingA = sessionA.close();
+    await vi.waitFor(() => expect(browser1.close).toHaveBeenCalledTimes(1));
+
+    // B arrives mid-close and obtains the fresh connection.
+    const sessionB = await factory.createContext(clientInfo, signal, undefined);
+    expect(sessionB.browserContext).toBe(context2);
+
+    // A's close settles and its browser's 'disconnected' finally fires.
+    releaseClose!();
+    await closingA;
+    const disconnected = browser1.on.mock.calls.find((call: any[]) => call[0] === 'disconnected')?.[1];
+    disconnected?.();
+
+    // The stale event must not have evicted B's browser: a third session
+    // reuses it instead of opening another connection.
+    const sessionC = await factory.createContext(clientInfo, signal, undefined);
+    expect(connectOverCDP).toHaveBeenCalledTimes(2);
+    expect(sessionC.browserContext).toBe(context2);
+
+    await sessionC.close();
     await sessionB.close();
     expect(browser2.close).toHaveBeenCalledTimes(1);
   });

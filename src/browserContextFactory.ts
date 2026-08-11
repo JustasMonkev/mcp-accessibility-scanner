@@ -512,15 +512,24 @@ abstract class BaseContextFactory implements BrowserContextFactory {
     if (this._browserPromise)
       return this._browserPromise;
     testDebug(`obtain browser (${this._logName})`);
-    this._browserPromise = this._doObtainBrowser(clientInfo);
-    void this._browserPromise.then(browser => {
+    const promise = this._doObtainBrowser(clientInfo);
+    this._browserPromise = promise;
+    // The eviction is bound to the promise this browser came from — the same
+    // identity guard the close paths use: a close evicts the cache eagerly,
+    // so by the time the closing browser's asynchronous 'disconnected' fires
+    // (or a failed obtain rejects), a successor connection may already be
+    // cached, and clearing it would churn yet another browser for the next
+    // session while the successor is alive.
+    void promise.then(browser => {
       browser.on('disconnected', () => {
-        this._browserPromise = undefined;
+        if (this._browserPromise === promise)
+          this._browserPromise = undefined;
       });
     }).catch(() => {
-      this._browserPromise = undefined;
+      if (this._browserPromise === promise)
+        this._browserPromise = undefined;
     });
-    return this._browserPromise;
+    return promise;
   }
 
   protected abstract _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser>;
@@ -803,23 +812,43 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
 
   async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     const cdpLaunch = this.config.browser.cdpLaunch!;
-    const port = cdpLaunch.port ?? await findFreePort();
+    // Reserved until the child is known to have bound the port (or the launch
+    // failed): findFreePort()'s probe socket is closed before the child
+    // spawns, so a concurrent session's probe could otherwise be handed the
+    // same port — both connect loops would then attach to whichever child
+    // bound first, sharing its context and killing the wrong child on
+    // cleanup (exactly the confusion the pinned-port session veto exists to
+    // prevent). In-process reservation suffices: the realistic collision
+    // source is concurrent createContext() calls in this process racing one
+    // OS port pool.
+    const allocatedPort = cdpLaunch.port === undefined ? await findFreePort({ reserve: true }) : undefined;
+    const port = cdpLaunch.port ?? allocatedPort!;
     const endpoint = `http://127.0.0.1:${port}`;
     const args = (cdpLaunch.args ?? []).map(arg => arg.replaceAll('{port}', String(port)));
-    const childProcess = spawn(cdpLaunch.command, args, {
-      cwd: cdpLaunch.cwd,
-      env: {
-        ...process.env,
-        ...cdpLaunch.env,
-      },
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
+    let browser: playwright.Browser;
+    let childProcess: ReturnType<typeof spawn>;
+    try {
+      childProcess = spawn(cdpLaunch.command, args, {
+        cwd: cdpLaunch.cwd,
+        env: {
+          ...process.env,
+          ...cdpLaunch.env,
+        },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
 
-    childProcess.stderr.on('data', data => {
-      testDebug(`cdp-launch stderr: ${String(data).trimEnd()}`);
-    });
+      childProcess.stderr?.on('data', data => {
+        testDebug(`cdp-launch stderr: ${String(data).trimEnd()}`);
+      });
 
-    const browser = await this._waitForBrowser(endpoint, clientInfo, childProcess, cdpLaunch.startupTimeoutMs ?? 30000);
+      // A successful connect proves the child owns the port, so the OS can no
+      // longer hand it to a sibling's probe; on failure the child is already
+      // killed and the port free again.
+      browser = await this._waitForBrowser(endpoint, clientInfo, childProcess, cdpLaunch.startupTimeoutMs ?? 30000);
+    } finally {
+      if (allocatedPort !== undefined)
+        reservedPorts.delete(allocatedPort);
+    }
     let browserContext: playwright.BrowserContext;
     try {
       if (this.config.browser.isolated) {
@@ -1060,15 +1089,34 @@ function cdpConnectHeaders(clientInfo: ClientInfo, browserConfig: FullConfig['br
   return Object.keys(headers).length ? headers : undefined;
 }
 
-async function findFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.listen(0, () => {
-      const { port } = server.address() as net.AddressInfo;
-      server.close(() => resolve(port));
+/**
+ * Ports handed out by `findFreePort({ reserve: true })` whose intended owner
+ * has not bound them yet. The probe socket below is closed before the caller
+ * uses the port, so without this set two concurrent allocations in this
+ * process could be handed the same port. Module-level because every factory
+ * in the process draws from the one OS port pool.
+ */
+const reservedPorts = new Set<number>();
+
+async function findFreePort(options?: { reserve?: boolean }): Promise<number> {
+  for (;;) {
+    const port = await new Promise<number>((resolve, reject) => {
+      const server = net.createServer();
+      server.listen(0, () => {
+        const { port } = server.address() as net.AddressInfo;
+        server.close(() => resolve(port));
+      });
+      server.on('error', reject);
     });
-    server.on('error', reject);
-  });
+    // Reserved ports are skipped for every caller — nothing may be pointed at
+    // a port a launched child is still starting up on. The check-and-reserve
+    // is synchronous, so concurrent allocations cannot interleave inside it.
+    if (reservedPorts.has(port))
+      continue;
+    if (options?.reserve)
+      reservedPorts.add(port);
+    return port;
+  }
 }
 
 /**
