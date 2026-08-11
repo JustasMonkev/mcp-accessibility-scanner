@@ -50,7 +50,7 @@ export class BrowserServerBackend implements ServerBackend {
      * are closed with the response. Their default context is flagged like an
      * explicit browser session, so the persistent factory runs it in a
      * disposable profile: parallel handshake-free requests would otherwise
-     * contend for the stable `mcp-<browser>` profile ("Browser is already in
+     * contend for the stable `mcp-<browser>-<workspace>` profile ("Browser is already in
      * use"), and a context torn down at response end gains nothing from
      * profile persistence — cross-request browser state belongs to
      * browser_session_open handles. Stateful backends (stdio, HTTP sessions)

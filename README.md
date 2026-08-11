@@ -255,7 +255,7 @@ Every tool shares one browser context, and `audit_site` crawls in a temporary ta
 4. audit_site — the crawl inherits the session you just created
 ```
 
-This works out of the box in every mode, including the default persistent-profile mode. With the default profile the session also survives across server restarts, so you usually only sign in once.
+This works out of the box in every mode, including the default persistent-profile mode. With the default profile the session also survives across server restarts, so you usually only sign in once. The default profile is keyed to the server's working directory, so each workspace's server keeps its own sign-in state — servers launched for different workspaces neither share cookies nor contend for the same profile.
 
 ### Storage state route (repeatable, CI-friendly)
 

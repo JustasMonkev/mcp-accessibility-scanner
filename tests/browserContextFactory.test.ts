@@ -72,6 +72,11 @@ import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported,
 import { ExtensionContextFactory } from '../src/extension/extensionContextFactory.js';
 import { VSCodeBrowserContextFactory } from '../src/vscode/browserContextFactory.js';
 import { resolveConfig } from '../src/config.js';
+import { createHash } from '../src/utils/guid.js';
+
+// The stable persistent profile is discriminated per workspace by a hash of
+// the server's own working directory (see _createUserDataDir).
+const stableProfileName = () => `mcp-chrome-${createHash(process.cwd())}`;
 
 function createMockBrowserContext() {
   return {
@@ -505,7 +510,7 @@ describe('browserContextFactory', () => {
       const dirs = (playwright.chromium.launchPersistentContext as any).mock.calls.map((call: any[]) => call[0] as string);
       // The default context keeps the stable profile so sign-in state still
       // survives restarts; each session gets a fresh guid-suffixed one.
-      expect(dirs[0]).toBe(path.join(profilesDir, 'mcp-chrome'));
+      expect(dirs[0]).toBe(path.join(profilesDir, stableProfileName()));
       expect(dirs[1]).toMatch(/-session-[0-9a-f]+$/);
       expect(dirs[2]).toMatch(/-session-[0-9a-f]+$/);
       expect(dirs[1]).not.toBe(dirs[2]);
@@ -552,7 +557,7 @@ describe('browserContextFactory', () => {
         factory.createContext(clientInfo, signal, undefined),
       ]);
 
-      const stableDir = path.join(profilesDir, 'mcp-chrome');
+      const stableDir = path.join(profilesDir, stableProfileName());
       const dirs = [launchedDirs.get(first.browserContext)!, launchedDirs.get(second.browserContext)!];
       expect(dirs.filter(dir => dir === stableDir)).toHaveLength(1);
       const disposableDir = dirs.find(dir => dir !== stableDir)!;
@@ -572,6 +577,52 @@ describe('browserContextFactory', () => {
       expect(rmSpy).toHaveBeenCalledWith(disposableDir, { recursive: true, force: true });
       await third.close();
       expect(rmSpy).not.toHaveBeenCalledWith(stableDir, expect.anything());
+    } finally {
+      delete process.env.PWMCP_PROFILES_DIR_FOR_TEST;
+      fs.rmSync(profilesDir, { recursive: true, force: true });
+    }
+  });
+
+  // Dropping the MCP Roots hash (the old per-client-root profile token) must
+  // not collapse every workspace's server onto one bare `mcp-<browser>`
+  // profile: separate server processes would contend on Chromium's
+  // ProcessSingleton lock and sequential workspaces would inherit each
+  // other's cookies and storage. The stable profile is discriminated by a
+  // hash of the server's own cwd instead — deterministic across restarts of
+  // the same workspace (sign-in state survives), different across workspaces.
+  it('keys the stable profile on the workspace cwd: stable across restarts, distinct across workspaces', async () => {
+    const profilesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-profiles-'));
+    process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
+    try {
+      const browserContext = createMockBrowserContext();
+      (playwright.chromium.launchPersistentContext as any).mockResolvedValue(browserContext);
+
+      const clientInfo = { name: 'vitest', version: '1.0.0' };
+      const signal = new AbortController().signal;
+      const launchedDir = (call: number) =>
+        (playwright.chromium.launchPersistentContext as any).mock.calls[call][0] as string;
+
+      // Restart parity: a fresh factory built from the same config in the
+      // same workspace resolves to the same directory, so the profile's
+      // sign-in state survives a server restart.
+      const first = await contextFactory(await resolveConfig({})).createContext(clientInfo, signal, undefined);
+      await first.close();
+      const second = await contextFactory(await resolveConfig({})).createContext(clientInfo, signal, undefined);
+      await second.close();
+      expect(launchedDir(0)).toBe(path.join(profilesDir, `mcp-chrome-${createHash(process.cwd())}`));
+      expect(launchedDir(1)).toBe(launchedDir(0));
+
+      // A server launched for another workspace (different cwd) gets its own
+      // profile: no ProcessSingleton contention, no inherited cookies.
+      const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(path.join(os.tmpdir(), 'some-other-workspace'));
+      try {
+        const other = await contextFactory(await resolveConfig({})).createContext(clientInfo, signal, undefined);
+        await other.close();
+      } finally {
+        cwdSpy.mockRestore();
+      }
+      expect(launchedDir(2)).toBe(path.join(profilesDir, `mcp-chrome-${createHash(path.join(os.tmpdir(), 'some-other-workspace'))}`));
+      expect(launchedDir(2)).not.toBe(launchedDir(0));
     } finally {
       delete process.env.PWMCP_PROFILES_DIR_FOR_TEST;
       fs.rmSync(profilesDir, { recursive: true, force: true });

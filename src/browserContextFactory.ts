@@ -25,7 +25,7 @@ import coreBundle from 'playwright-core/lib/coreBundle';
 const { registryDirectory } = coreBundle.registry;
 const { startTraceViewerServer } = coreBundle.server;
 import { logUnhandledError, testDebug } from './utils/log.js';
-import { createGuid, createShortGuid } from './utils/guid.js';
+import { createGuid, createHash, createShortGuid } from './utils/guid.js';
 import { outputFile  } from './config.js';
 import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
 
@@ -459,7 +459,7 @@ export type CreateContextOptions = {
    * (`browser_session_open`) — or the ephemeral default context of a
    * stateless per-request HTTP backend — rather than the long-lived default
    * session. The persistent factory gives such contexts their own disposable
-   * profile: the stable `mcp-<browser>` profile can back only one running
+   * profile: the stable `mcp-<browser>-<workspace>` profile can back only one running
    * browser at a time, so concurrent contexts sharing it would fail with
    * "Browser is already in use".
    */
@@ -986,7 +986,7 @@ export class PersistentContextFactory implements BrowserContextFactory {
   private _userDataDirs = new Set<string>();
 
   // True while a live context (or one still launching) holds the stable
-  // `mcp-<browser>` profile. The profile can back only one running browser at
+  // `mcp-<browser>-<workspace>` profile. The profile can back only one running browser at
   // a time (Chromium's ProcessSingleton lock), and every stateful backend's
   // default context resolves to it — one such context under stdio, but each
   // concurrent Mcp-Session-Id HTTP client brings its own backend, and the
@@ -1047,7 +1047,7 @@ export class PersistentContextFactory implements BrowserContextFactory {
     // the same reason a storage-state context does: the stable profile can back
     // only one running browser, so a second session sharing it would spin on
     // the ProcessSingleton lock and fail with "Browser is already in use". The
-    // DEFAULT (no-handle) context keeps the stable `mcp-<browser>` profile, so
+    // DEFAULT (no-handle) context keeps the stable `mcp-<browser>-<workspace>` profile, so
     // its sign-in state still survives restarts.
     let profileSuffix = storageState
       ? `-storage-state-${createGuid()}`
@@ -1191,10 +1191,21 @@ export class PersistentContextFactory implements BrowserContextFactory {
   // apart from the regular persistent profile (and, carrying a per-context
   // guid, from each other), so removing one can never destroy an interactive
   // session or a sibling's.
+  //
+  // The workspace token keeps different servers' stable profiles apart. MCP
+  // clients typically launch one stdio server per workspace, cwd'd into it, so
+  // hashing process.cwd() gives each workspace its own deterministic profile:
+  // sign-in state survives restarts of the same server (same cwd, same hash),
+  // while servers for other workspaces neither contend for this profile's
+  // ProcessSingleton lock nor inherit its cookies and storage. (This restores
+  // the separation the deprecated MCP Roots hash used to provide — keyed on
+  // the server's own launch directory instead of a client-reported root, so it
+  // covers every client rather than only those that exposed roots.)
   private async _createUserDataDir(suffix: string) {
     const dir = process.env.PWMCP_PROFILES_DIR_FOR_TEST ?? registryDirectory;
     const browserToken = this.config.browser.launchOptions?.channel ?? this.config.browser?.browserName;
-    const result = path.join(dir, `mcp-${browserToken}${suffix}`);
+    const workspaceToken = `-${createHash(process.cwd())}`;
+    const result = path.join(dir, `mcp-${browserToken}${workspaceToken}${suffix}`);
     await fs.promises.mkdir(result, { recursive: true });
     return result;
   }
