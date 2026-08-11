@@ -134,7 +134,14 @@ describe('CLI command dispatch contract', () => {
       const child = spawn(process.execPath, [...cliArgs, ...args, '--port', '0'], { stdio: 'pipe' });
       let stderr = '';
       const url = await new Promise<string>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`server did not start:\n${stderr}`)), 25_000);
+        // The timeout must kill the child: the test's finally-cleanup only
+        // sees a child once startServer has returned, so a server that never
+        // announced its URL would otherwise keep running — and holding its
+        // port — for the rest of the test run.
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL');
+          reject(new Error(`server did not start:\n${stderr}`));
+        }, 25_000);
         child.stderr.on('data', (data: Buffer) => {
           stderr += data.toString();
           const match = stderr.match(/Listening on (http:\S+)/);
@@ -143,6 +150,8 @@ describe('CLI command dispatch contract', () => {
             resolve(match[1]);
           }
         });
+        // No kill needed here: 'close' only fires once the child has already
+        // exited and its stdio streams are closed.
         child.on('close', () => {
           clearTimeout(timer);
           reject(new Error(`server exited early:\n${stderr}`));

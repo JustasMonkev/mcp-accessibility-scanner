@@ -424,6 +424,11 @@ const tests = [
   test('browser_session_close', async () => {
     const opened = await callTool('browser_session_open', {});
     const browserSessionId = opened.structuredContent?.browserSessionId;
+    // Without this check an absent handle would build new RegExp(undefined),
+    // i.e. the empty pattern /(?:)/ that matches anything, letting the
+    // assertions below pass vacuously.
+    if (typeof browserSessionId !== 'string' || !browserSessionId.startsWith('bs_'))
+      throw new Error(`Expected browser session handle, got ${JSON.stringify(browserSessionId)}`);
     const result = await callTool('browser_session_close', { browserSessionId });
     assertText(result, new RegExp(browserSessionId));
     await assertToolError(
