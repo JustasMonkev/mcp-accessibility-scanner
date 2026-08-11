@@ -185,6 +185,33 @@ describe('browser sessions', () => {
     expect(textOf(result)).toContain('Add --isolated');
   });
 
+  it('refuses a vetoed session open before minting a --save-session directory', async () => {
+    // The broker awaited the session-log supplier before registry.open()'s
+    // sessionsUnsupportedReason check, so in modes that reject sessions
+    // outright every attempt created (and announced) an empty session-*
+    // directory — which the rejection itself never even landed in.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-vetoed-log-'));
+    try {
+      const config = await resolveConfig({ saveSession: true, outputDir });
+      const { factory } = makeFactory();
+      factory.sessionsUnsupportedReason = 'this connection attaches to the browser\'s existing context. Add --isolated.';
+      const backend = new BrowserServerBackend(config, factory);
+      await backend.initialize(
+          { notifyToolListChanged: async () => {} } as any,
+          { name: 'vitest', version: 'browser-sessions' },
+      );
+
+      const result = await backend.callTool('browser_session_open', {});
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain('Cannot open a separate browser session');
+      expect(fs.readdirSync(outputDir)).toHaveLength(0);
+    } finally {
+      vi.restoreAllMocks();
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects unknown handles without disclosing the open sessions', async () => {
     const { factory } = makeFactory();
     const backend = await makeBackend(factory);

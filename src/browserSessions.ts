@@ -89,16 +89,26 @@ export class BrowserSessionRegistry {
    * session folder) — regardless of which client asked.
    */
   open(createContext: () => Context, sessionsUnsupportedReason?: string): string {
-    // Modes whose factory hands every Context the same live browser context
-    // (non-isolated CDP attach, extension, VS Code, custom getters) are
-    // refused up front: a handle here would claim a separation that does not
-    // exist — two "sessions" sharing tabs, cookies and storage.
-    if (sessionsUnsupportedReason)
-      throw new Error(`Cannot open a separate browser session: ${sessionsUnsupportedReason}`);
+    BrowserSessionRegistry.checkSessionsSupported(sessionsUnsupportedReason);
     const id = `bs_${crypto.randomUUID()}`;
     this._sessions.set(id, { context: createContext(), lastUsedAt: Date.now() });
     this._ensureReaper();
     return id;
+  }
+
+  /**
+   * Throws the veto for modes whose factory hands every Context the same live
+   * browser context (non-isolated CDP attach, extension, VS Code, custom
+   * getters): a handle there would claim a separation that does not exist —
+   * two "sessions" sharing tabs, cookies and storage. open() enforces this
+   * itself; it is exposed so a caller with fallible pre-open side effects
+   * (the backend resolves the --save-session log before minting a handle)
+   * can fail first, without minting an empty session-* directory per
+   * doomed attempt.
+   */
+  static checkSessionsSupported(sessionsUnsupportedReason: string | undefined): void {
+    if (sessionsUnsupportedReason)
+      throw new Error(`Cannot open a separate browser session: ${sessionsUnsupportedReason}`);
   }
 
   /** Returns the session's Context and refreshes its TTL. */

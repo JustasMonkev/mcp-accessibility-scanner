@@ -91,6 +91,14 @@ export class BrowserServerBackend implements ServerBackend {
       clientInfo: { ...clientVersion },
       browserSessions: {
         open: async () => {
+          // The unsupported-mode veto comes before everything else: it is
+          // registry.open()'s own first check, but by then the session-log
+          // await below would already have run — in modes that reject
+          // sessions outright (extension, VS Code, non-isolated CDP, pinned
+          // cdp-launch port, --user-data-dir) every doomed attempt minted
+          // and announced an empty session-* directory the rejection never
+          // even landed in.
+          BrowserSessionRegistry.checkSessionsSupported(this._browserContextFactory.sessionsUnsupportedReason);
           // Resolved BEFORE the handle is minted: the session log is this
           // backend's one fallible piece of open() setup (an uncreatable
           // --output-dir rejects SessionLog.create()), and it used to be
