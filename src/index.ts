@@ -24,17 +24,21 @@ import { packageJSON } from './utils/package.js';
 import type { Config } from '../config.js';
 import type { BrowserContext } from 'playwright';
 import type { BrowserContextFactory } from './browserContextFactory.js';
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import type { Server } from '@modelcontextprotocol/server';
 
 export async function createConnection(userConfig: Config = {}, contextGetter?: () => Promise<BrowserContext>): Promise<Server> {
   const config = await resolveConfig(userConfig);
   const factory = contextGetter ? new SimpleBrowserContextFactory(contextGetter) : contextFactory(config);
-  return mcpServer.createServer('Playwright', packageJSON.version, new BrowserServerBackend(config, factory), Promise.resolve(), false, { title: 'Accessibility Scanner', instructions: serverInstructions });
+  return mcpServer.createServer('Playwright', packageJSON.version, new BrowserServerBackend(config, factory), false, { title: 'Accessibility Scanner', instructions: serverInstructions });
 }
 
 class SimpleBrowserContextFactory implements BrowserContextFactory {
   name = 'custom';
   description = 'Connect to a browser using a custom context getter';
+  // The getter is caller-supplied and typically hands back one long-lived
+  // context; nothing guarantees a separate context per call, so explicit
+  // browser sessions cannot promise separation here.
+  readonly sessionsUnsupportedReason = 'this server was created with a custom browser context getter, which supplies a single browser context that every session would share.';
 
   private readonly _contextGetter: () => Promise<BrowserContext>;
 

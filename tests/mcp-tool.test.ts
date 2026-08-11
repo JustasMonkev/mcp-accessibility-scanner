@@ -61,6 +61,24 @@ describe('mcp/tool', () => {
     expect(tool.annotations?.destructiveHint).toBe(true);
   });
 
+  it('maps stateChanging to non-readonly, non-destructive, non-idempotent annotations', () => {
+    // A retried stateChanging call duplicates state (e.g. browser_session_open
+    // mints another live session), so clients must see it as neither safe to
+    // parallelize (readOnly) nor destructive — and never silently retryable.
+    const schema = defineToolSchema({
+      name: 'state_changing',
+      title: 'State changing',
+      description: 'State-changing tool',
+      inputSchema: z.object({}),
+      type: 'stateChanging',
+    });
+
+    const tool = toMcpTool(schema);
+    expect(tool.annotations?.readOnlyHint).toBe(false);
+    expect(tool.annotations?.destructiveHint).toBe(false);
+    expect(tool.annotations?.idempotentHint).toBe(false);
+  });
+
   it('defineToolSchema is identity helper', () => {
     const schema = defineToolSchema({
       name: 'identity',

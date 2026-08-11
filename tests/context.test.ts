@@ -52,7 +52,7 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       expect(context.tools).toEqual([]);
@@ -67,7 +67,7 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       expect(context.tabs()).toEqual([]);
@@ -81,7 +81,7 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       expect(context.currentTab()).toBeUndefined();
@@ -95,7 +95,7 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       expect(() => context.currentTabOrDie()).toThrow('No open pages available');
@@ -119,7 +119,7 @@ describe('Context', () => {
         config: { saveTrace: true } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       await expect(context.newTab()).rejects.toThrow('traces dir is not writable');
@@ -138,7 +138,7 @@ describe('Context', () => {
         config: { saveTrace: true } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       await expect(context.newTab()).rejects.toThrow('already started');
@@ -153,14 +153,14 @@ describe('Context', () => {
         config: { saveTrace: true } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
       const second = new Context({
         tools: [],
         config: { saveTrace: true } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       await first.newTab();
@@ -172,6 +172,46 @@ describe('Context', () => {
 
       await second.closeBrowserContext();
       expect(mockBrowserContext.tracing.stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('gives each context its own trace name so traces in a shared tracesDir never collide', async () => {
+      // With --isolated several sessions' contexts share the browser's one
+      // cached tracesDir; a fixed name made every context write the same
+      // trace.trace/trace.network files concurrently.
+      const makeMockContext = () => {
+        const browserContext: any = new EventEmitter();
+        browserContext.newPage = vi.fn().mockResolvedValue({});
+        browserContext.pages = vi.fn().mockReturnValue([]);
+        browserContext.route = vi.fn().mockResolvedValue(undefined);
+        browserContext.tracing = {
+          start: vi.fn().mockResolvedValue(undefined),
+          stop: vi.fn().mockResolvedValue(undefined),
+        };
+        return browserContext;
+      };
+      const first = makeMockContext();
+      const second = makeMockContext();
+      (mockBrowserContextFactory.createContext as any)
+          .mockResolvedValueOnce({ browserContext: first, close: vi.fn().mockResolvedValue(undefined) })
+          .mockResolvedValueOnce({ browserContext: second, close: vi.fn().mockResolvedValue(undefined) });
+      const makeContext = () => new Context({
+        tools: [],
+        config: { saveTrace: true } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      await makeContext().newTab();
+      await makeContext().newTab();
+
+      const firstName = first.tracing.start.mock.calls[0][0].name;
+      const secondName = second.tracing.start.mock.calls[0][0].name;
+      // The 'trace' prefix keeps the printed viewer URL (…/trace.json, served
+      // as a prefix descriptor) matching the files.
+      expect(firstName).toMatch(/^trace-/);
+      expect(secondName).toMatch(/^trace-/);
+      expect(firstName).not.toBe(secondName);
     });
 
     it('closes the factory-owned context even when stopping tracing fails on shutdown', async () => {
@@ -190,13 +230,171 @@ describe('Context', () => {
         config: { saveTrace: true } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       await context.newTab();
       await context.closeBrowserContext();
 
       expect(close).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('pending downloads', () => {
+    it('waits for an in-flight download save before closing the browser context', async () => {
+      // A download outlives the tool call that started it (the response even
+      // reports it as "still downloading"); the stateless HTTP path disposes
+      // the backend's default context the moment the response closes, which
+      // used to abort saveAs() and leave the reported file missing/partial.
+      const close = vi.fn().mockResolvedValue(undefined);
+      (mockBrowserContextFactory.createContext as any).mockResolvedValue({
+        browserContext: mockBrowserContext,
+        close,
+      });
+      const context = new Context({
+        tools: [],
+        config: {} as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await context.newTab();
+
+      let finishDownload = () => {};
+      context.trackPendingDownload(new Promise<void>(resolve => finishDownload = resolve));
+      expect(context.hasPendingDownloads()).toBe(true);
+
+      const disposing = context.dispose();
+      // Give disposal a few turns: it must be parked on the download, not on
+      // the factory close.
+      for (let i = 0; i < 10; i++)
+        await Promise.resolve();
+      expect(close).not.toHaveBeenCalled();
+
+      finishDownload();
+      await disposing;
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(context.hasPendingDownloads()).toBe(false);
+    });
+
+    it('abandons a stalled download after the 30s cap instead of hanging disposal', async () => {
+      vi.useFakeTimers();
+      try {
+        const close = vi.fn().mockResolvedValue(undefined);
+        (mockBrowserContextFactory.createContext as any).mockResolvedValue({
+          browserContext: mockBrowserContext,
+          close,
+        });
+        const context = new Context({
+          tools: [],
+          config: {} as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        await context.newTab();
+
+        // Never resolves: a download stalled forever must not stall disposal.
+        context.trackPendingDownload(new Promise(() => {}));
+
+        const disposing = context.dispose();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await disposing;
+        expect(close).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('signals closeStarting to the factory before waiting out the download drain', async () => {
+      // The persistent factory needs the notice AHEAD of the bounded drain:
+      // it is what lets a stable-profile successor arriving mid-drain be
+      // told apart from a genuinely concurrent context.
+      const close = vi.fn().mockResolvedValue(undefined);
+      const closeStarting = vi.fn();
+      (mockBrowserContextFactory.createContext as any).mockResolvedValue({
+        browserContext: mockBrowserContext,
+        close,
+        closeStarting,
+      });
+      const context = new Context({
+        tools: [],
+        config: {} as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await context.newTab();
+
+      let finishDownload = () => {};
+      context.trackPendingDownload(new Promise<void>(resolve => finishDownload = resolve));
+      const closing = context.closeBrowserContext();
+      for (let i = 0; i < 10; i++)
+        await Promise.resolve();
+      // The notice landed while close() is still parked on the drain.
+      expect(closeStarting).toHaveBeenCalledTimes(1);
+      expect(close).not.toHaveBeenCalled();
+
+      finishDownload();
+      await closing;
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a tool call arriving during the download drain instead of handing out the closing context', async () => {
+      // The last tab closing with a download pending starts the bounded drain,
+      // but _browserContextPromise used to stay published for its duration: a
+      // browser_navigate/browser_tabs call in that window reused the closing
+      // context, and its fresh tab was silently torn down when the drain
+      // settled. The closing context must be unpublished before the drain so
+      // such calls get the existing "being closed" rejection instead.
+      const close = vi.fn().mockResolvedValue(undefined);
+      (mockBrowserContextFactory.createContext as any).mockResolvedValue({
+        browserContext: mockBrowserContext,
+        close,
+      });
+      const context = new Context({
+        tools: [],
+        config: {} as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await context.newTab();
+
+      let finishDownload = () => {};
+      context.trackPendingDownload(new Promise<void>(resolve => finishDownload = resolve));
+      // The path _onPageClosed takes when the last tab closes.
+      const closing = context.closeBrowserContext();
+      // Park the close on the download drain.
+      for (let i = 0; i < 10; i++)
+        await Promise.resolve();
+      expect(close).not.toHaveBeenCalled();
+
+      // A tool call mid-drain must never get a tab in the draining context.
+      await expect(context.newTab()).rejects.toThrow('Another browser context is being closed');
+
+      finishDownload();
+      await closing;
+      expect(close).toHaveBeenCalledTimes(1);
+
+      // Once the close has settled, the next tool call starts a fresh context.
+      await context.newTab();
+      expect(mockBrowserContextFactory.createContext).toHaveBeenCalledTimes(2);
+    });
+
+    it('logs a failed download save instead of leaving an unhandled rejection', async () => {
+      const context = new Context({
+        tools: [],
+        config: {} as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      context.trackPendingDownload(Promise.reject(new Error('canceled')));
+      // The tracked rejection settles handled; the set drains.
+      await new Promise(resolve => setImmediate(resolve));
+      expect(context.hasPendingDownloads()).toBe(false);
+      await context.dispose();
     });
   });
 
@@ -219,7 +417,7 @@ describe('Context', () => {
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
       await context.newTab();
 
@@ -252,8 +450,8 @@ describe('Context', () => {
         tools: [],
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
-        sessionLog,
-        clientInfo: { rootPath: '/tmp' } as any,
+        sessionLog: () => Promise.resolve(sessionLog),
+        clientInfo: {},
       });
       const context1 = makeContext(log1);
       await context1.newTab();
@@ -290,8 +488,8 @@ describe('Context', () => {
         tools: [],
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
-        sessionLog,
-        clientInfo: { rootPath: '/tmp' } as any,
+        sessionLog: () => Promise.resolve(sessionLog),
+        clientInfo: {},
       });
       const context1 = makeContext(log1);
       await context1.newTab();
@@ -323,8 +521,8 @@ describe('Context', () => {
         tools: [],
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
-        sessionLog,
-        clientInfo: { rootPath: '/tmp' } as any,
+        sessionLog: () => Promise.resolve(sessionLog),
+        clientInfo: {},
       });
       const context1 = makeContext(log1);
       await context1.newTab();
@@ -338,12 +536,12 @@ describe('Context', () => {
       mockBrowserContext.emit('page', page);
 
       const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
-      context1.setRunningTool('browser_click');
+      const endToolCall = context1.beginToolCall('browser_click');
       sink.actionAdded(page, { action: { name: 'click' } }, 'await page.click();');
       expect(log1.logUserAction).not.toHaveBeenCalled();
       expect(log2.logUserAction).not.toHaveBeenCalled();
 
-      context1.setRunningTool(undefined);
+      endToolCall();
       sink.actionAdded(page, { action: { name: 'click' } }, 'await page.click();');
       expect(log1.logUserAction).toHaveBeenCalledTimes(1);
       expect(log2.logUserAction).toHaveBeenCalledTimes(1);
@@ -360,8 +558,8 @@ describe('Context', () => {
         tools: [],
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
-        sessionLog: { logUserAction: vi.fn() } as any,
-        clientInfo: { rootPath: '/tmp' } as any,
+        sessionLog: async () => ({ logUserAction: vi.fn() }) as any,
+        clientInfo: {},
       });
       const pending1 = makeContext().newTab();
       const pending2 = makeContext().newTab();
@@ -383,8 +581,8 @@ describe('Context', () => {
         tools: [],
         config: { timeouts: {} } as any,
         browserContextFactory: mockBrowserContextFactory,
-        sessionLog: { logUserAction: vi.fn() } as any,
-        clientInfo: { rootPath: '/tmp' } as any,
+        sessionLog: async () => ({ logUserAction: vi.fn() }) as any,
+        clientInfo: {},
       });
       await expect(makeContext().newTab()).rejects.toThrow('recorder unavailable');
 
@@ -401,7 +599,7 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
       expect(context.isRunningTool()).toBe(false);
@@ -413,10 +611,10 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
-      context.setRunningTool('test_tool');
+      context.beginToolCall('test_tool');
       expect(context.isRunningTool()).toBe(true);
     });
 
@@ -426,11 +624,34 @@ describe('Context', () => {
         config: {} as any,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
-        clientInfo: { rootPath: '/tmp' } as any,
+        clientInfo: {},
       });
 
-      context.setRunningTool('test_tool');
-      context.setRunningTool(undefined);
+      const endToolCall = context.beginToolCall('test_tool');
+      endToolCall();
+      expect(context.isRunningTool()).toBe(false);
+    });
+
+    it('stays running until every overlapping call has released', () => {
+      // A single running-tool slot let the first finisher clear the marker
+      // while a second call still ran — the TTL reaper could then dispose the
+      // session's browser mid-operation.
+      const context = new Context({
+        tools: [],
+        config: {} as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      const endFirst = context.beginToolCall('browser_click');
+      const endSecond = context.beginToolCall('browser_click');
+      endFirst();
+      expect(context.isRunningTool()).toBe(true);
+      // Releasing one call twice must not release its sibling.
+      endFirst();
+      expect(context.isRunningTool()).toBe(true);
+      endSecond();
       expect(context.isRunningTool()).toBe(false);
     });
   });

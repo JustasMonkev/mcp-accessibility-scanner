@@ -18,11 +18,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { Response } from './response.js';
+import { createShortGuid } from './utils/guid.js';
 import { logUnhandledError } from './utils/log.js';
 import { outputFile } from './config.js';
 
 import type { FullConfig } from './config.js';
 import type * as actions from './actions.js';
+import type { Context } from './context.js';
 import type { Tab, TabSnapshot } from './tab.js';
 
 export interface IFileStorage {
@@ -49,6 +51,17 @@ type LogEntry = {
     isError?: boolean;
   };
   userAction?: actions.Action;
+  /**
+   * The Context this entry originated from. One log is shared by a backend's
+   * default context and every explicit session it opens, so the pending-entry
+   * bookkeeping (action-update merging, navigate dedup) must be scoped by
+   * originating context — "the last entry" globally is whichever context
+   * wrote last, and merging into it would fold one session's action into
+   * another's whenever the action names match.
+   */
+  source?: Context;
+  /** Tags a session context's user actions in session.md; see logUserAction. */
+  browserSessionId?: string;
   code: string;
   tabSnapshot?: TabSnapshot;
 };
@@ -68,8 +81,12 @@ export class SessionLog {
     this._storage = storage;
   }
 
-  static async create(config: FullConfig, rootPath: string | undefined): Promise<SessionLog> {
-    const sessionFolder = await outputFile(config, rootPath, `session-${Date.now()}`);
+  static async create(config: FullConfig): Promise<SessionLog> {
+    // The random suffix keeps two sessions created in the same millisecond
+    // (e.g. concurrent HTTP connections) from sharing a folder — a collision
+    // would interleave their session.md entries and overwrite each other's
+    // snapshot ordinals. Nothing parses the folder name back.
+    const sessionFolder = await outputFile(config, `session-${Date.now()}-${createShortGuid()}`);
     await fs.promises.mkdir(sessionFolder, { recursive: true });
     // eslint-disable-next-line no-console
     console.error(`Session: ${sessionFolder}`);
@@ -85,6 +102,7 @@ export class SessionLog {
         result: response.result(),
         isError: response.isError(),
       },
+      source: response.context,
       code: response.code(),
       tabSnapshot: response.tabSnapshot(),
     };
@@ -93,9 +111,15 @@ export class SessionLog {
 
   logUserAction(action: actions.Action, tab: Tab, code: string, isUpdate: boolean) {
     code = code.trim();
+    // All bookkeeping is scoped to the context the recorder event came from:
+    // with the log shared across a backend's contexts, an update matched
+    // against the globally-last entry could merge into ANOTHER session's
+    // same-named pending action, and a navigate could be deduplicated
+    // against another session's location.
+    const source = tab.context;
+    const lastEntry = this._lastPendingEntryFor(source);
     if (isUpdate) {
-      const lastEntry = this._pendingEntries[this._pendingEntries.length - 1];
-      if (lastEntry.userAction?.name === action.name) {
+      if (lastEntry?.userAction?.name === action.name) {
         lastEntry.userAction = action;
         lastEntry.code = code;
         return;
@@ -103,13 +127,19 @@ export class SessionLog {
     }
     if (action.name === 'navigate') {
       // Already logged at this location.
-      const lastEntry = this._pendingEntries[this._pendingEntries.length - 1];
       if (lastEntry?.tabSnapshot?.url === action.url)
         return;
     }
     const entry: LogEntry = {
       timestamp: performance.now(),
       userAction: action,
+      source,
+      // Session contexts' recorded actions carry the handle in session.md,
+      // mirroring how routed tool calls log a browserSessionId in their
+      // args — otherwise concurrent sessions' user actions would be
+      // indistinguishable in the shared log. Default-context actions stay
+      // untagged, exactly as before.
+      browserSessionId: source.options.browserSessionId,
       code,
       tabSnapshot: {
         url: tab.page.url(),
@@ -121,6 +151,15 @@ export class SessionLog {
       },
     };
     this._appendEntry(entry);
+  }
+
+  /** The last not-yet-flushed entry this context wrote, tool calls included. */
+  private _lastPendingEntryFor(source: Context): LogEntry | undefined {
+    for (let i = this._pendingEntries.length - 1; i >= 0; i--) {
+      if (this._pendingEntries[i].source === source)
+        return this._pendingEntries[i];
+    }
+    return undefined;
   }
 
   private _appendEntry(entry: LogEntry) {
@@ -161,12 +200,16 @@ export class SessionLog {
         delete actionData.ariaSnapshot;
         delete actionData.selector;
         delete actionData.signals;
+        // Leads the args like a routed tool call's browserSessionId does.
+        const loggedAction = entry.browserSessionId !== undefined
+          ? { browserSessionId: entry.browserSessionId, ...actionData }
+          : actionData;
 
         lines.push(
             `### User action: ${entry.userAction.name}`,
             `- Args`,
             '```json',
-            JSON.stringify(actionData, null, 2),
+            JSON.stringify(loggedAction, null, 2),
             '```',
         );
       }

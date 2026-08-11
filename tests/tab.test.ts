@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import path from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Tab, renderModalStates } from '../src/tab.js';
 import type { Context } from '../src/context.js';
@@ -55,6 +56,7 @@ describe('Tab', () => {
       },
       currentTab: vi.fn(),
       outputFile: vi.fn().mockResolvedValue('/tmp/download'),
+      trackPendingDownload: vi.fn(),
       tools: [],
     } as any;
 
@@ -324,6 +326,119 @@ describe('Tab', () => {
       await vi.advanceTimersByTimeAsync(6000);
       await result;
       expect(mockPage.listenerCount('download')).toBe(1);
+    });
+  });
+
+  describe('downloads', () => {
+    function makeDownload(suggested: string) {
+      return {
+        suggestedFilename: vi.fn().mockReturnValue(suggested),
+        saveAs: vi.fn().mockResolvedValue(undefined),
+      };
+    }
+
+    beforeEach(() => {
+      // Echo the requested file name back as the full path, like the real
+      // outputFile() does, so the assertions can see what would be written.
+      (mockContext.outputFile as any).mockImplementation(async (name: string) => `/tmp/out/${name}`);
+    });
+
+    it('saves two downloads suggesting the same name to distinct files, keeping the name recognizable', async () => {
+      // Sessions share one output directory; saving under the suggested name
+      // alone let two concurrent "report.pdf" downloads overwrite each other.
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const first = makeDownload('report.pdf');
+      const second = makeDownload('report.pdf');
+      mockPage.emit('download', first);
+      mockPage.emit('download', second);
+      await vi.waitFor(() => {
+        expect(first.saveAs).toHaveBeenCalledTimes(1);
+        expect(second.saveAs).toHaveBeenCalledTimes(1);
+      });
+
+      const firstPath = first.saveAs.mock.calls[0][0] as string;
+      const secondPath = second.saveAs.mock.calls[0][0] as string;
+      expect(firstPath).not.toBe(secondPath);
+      // The suggested name stays the recognizable part, extension preserved.
+      expect(path.basename(firstPath)).toMatch(/^report-.+\.pdf$/);
+      expect(path.basename(secondPath)).toMatch(/^report-.+\.pdf$/);
+    });
+
+    it('suffixes an extensionless download name at the end', async () => {
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const download = makeDownload('LICENSE');
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+      expect(path.basename(download.saveAs.mock.calls[0][0] as string)).toMatch(/^LICENSE-.+$/);
+    });
+
+    it('falls back to a generic name when the page suggests none', async () => {
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const download = makeDownload('');
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+      expect(path.basename(download.saveAs.mock.calls[0][0] as string)).toMatch(/^download-.+$/);
+    });
+
+    it('keeps a long suggested name within the 255-byte filename limit', async () => {
+      // A long but valid Content-Disposition name plus the uniqueness suffix
+      // used to exceed the filesystem's 255-byte component cap and fail
+      // saveAs() with ENAMETOOLONG.
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const download = makeDownload('a'.repeat(300) + '.pdf');
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+
+      const name = path.basename(download.saveAs.mock.calls[0][0] as string);
+      expect(Buffer.byteLength(name, 'utf8')).toBeLessThanOrEqual(255);
+      // Extension and uniqueness token survive the truncation.
+      expect(name).toMatch(/^a+-[0-9TZ.-]+-[0-9a-f]{8}\.pdf$/);
+    });
+
+    it('truncates multibyte names by whole code points, not mid-sequence', async () => {
+      new Tab(mockContext, mockPage as any, onPageClose);
+      // 120 x 3-byte code points = 360 bytes before the suffix.
+      const download = makeDownload('€'.repeat(120) + '.bin');
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+
+      const name = path.basename(download.saveAs.mock.calls[0][0] as string);
+      expect(Buffer.byteLength(name, 'utf8')).toBeLessThanOrEqual(255);
+      // Only whole euro signs remain in the base — a split UTF-8 sequence
+      // would leave a lone surrogate/replacement character here.
+      expect(name).toMatch(/^€+-[0-9TZ.-]+-[0-9a-f]{8}\.bin$/);
+    });
+
+    it('caps an extensionless long name too', async () => {
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const download = makeDownload('b'.repeat(300));
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+
+      const name = path.basename(download.saveAs.mock.calls[0][0] as string);
+      expect(Buffer.byteLength(name, 'utf8')).toBeLessThanOrEqual(255);
+      expect(name).toMatch(/^b+-[0-9TZ.-]+-[0-9a-f]{8}$/);
+    });
+
+    it('registers the in-flight save with the context so disposal can wait for it', async () => {
+      // The save outlives the tool call; untracked, context disposal closed
+      // the browser mid-stream and the reported file never materialized.
+      new Tab(mockContext, mockPage as any, onPageClose);
+      let finishSave = () => {};
+      const download = {
+        suggestedFilename: vi.fn().mockReturnValue('report.pdf'),
+        saveAs: vi.fn().mockReturnValue(new Promise<void>(resolve => finishSave = resolve)),
+      };
+      mockPage.emit('download', download);
+      expect(mockContext.trackPendingDownload).toHaveBeenCalledTimes(1);
+
+      const tracked = (mockContext.trackPendingDownload as any).mock.calls[0][0] as Promise<unknown>;
+      let settled = false;
+      void tracked.then(() => settled = true);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+      expect(settled).toBe(false);
+      finishSave();
+      await tracked;
     });
   });
 

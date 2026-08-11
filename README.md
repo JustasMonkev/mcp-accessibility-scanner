@@ -226,6 +226,7 @@ Create a `config.json` file with the following options:
 - `timeouts.settle`: How long to wait after every action before responding (default: `500`). An action that finishes quietly is first watched for up to 100ms (or the settle delay, whichever is shorter) so scheduled network work can still be awaited before the settle delay.
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
+- `outputDir`: Directory for output files — reports, screenshots, traces, and session logs (CLI: `--output-dir`, env: `PLAYWRIGHT_MCP_OUTPUT_DIR`). Defaults to a fresh directory under the system temp folder, resolved once per server run so all of a run's artifacts land together. The output location is always server configuration; the deprecated MCP roots capability (client workspace folders) is no longer consulted.
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
@@ -233,7 +234,11 @@ Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-a
 
 #### HTTP Heartbeat
 
-When the server runs with `--port`, it sends MCP heartbeat pings for Streamable HTTP sessions. Set `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` to override the default `5000` ms timeout. Set it to `0` or any negative value to disable heartbeat pings for clients or proxies that do not answer server-initiated pings.
+When the server runs with `--port`, it sends MCP heartbeat pings for Streamable HTTP sessions. Set `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` to override the default `5000` ms timeout. Set it to `0` or any negative value to disable heartbeat pings for clients or proxies that do not answer server-initiated pings. A client that answers `ping` with a JSON-RPC "method not found" error (as clients on the MCP 2026-07-28 revision do) is treated as alive: the server stops heartbeating that session instead of closing it. Only an unanswered ping (timeout) or a transport failure closes the session.
+
+#### Clients without the initialize handshake
+
+Clients on the MCP 2026-07-28 revision no longer send the `initialize` handshake. With `--port`, requests carrying the revision's per-request `_meta` envelope are served natively on the 2026-07-28 protocol: `server/discover` is answered (so clients negotiating with `versionNegotiation: 'auto'` or a `2026-07-28` pin connect directly), results carry `resultType` and the SEP-2549 cache fields — the tool list is advertised as cacheable for one hour with `cacheScope: "private"` — and the SEP-2243 standard headers (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) are validated against the request body. Older handshake-free clients (2025-era requests without the envelope) are served statelessly as before. In both cases requests receive no heartbeat pings, and in the modes where the server creates browser contexts itself each request runs against a fresh default browser session: with the default persistent profile the per-request default context runs in its own disposable profile (like an explicit browser session), so parallel handshake-free requests do not contend for the stable profile — and the stable profile's sign-in state is not visible to them — while `--isolated`, remote endpoints and isolated CDP modes mint a fresh context per request anyway. Modes that reuse one live browser context are the exception: `--extension` (and a `browser_connect` or VS Code session switched to a connected-browser provider) and CDP attach without `--isolated` serve every handshake-free request from the same shared context, so its tabs, cookies and storage persist across requests — the same sharing that makes these modes refuse `browser_session_open` (in `--vscode` serving the session tools are the exception: they are host-scoped and keep running against the default provider even while switched — see [Browser Session Tools](#browser-session-tools)). With a pinned `--cdp-launch-port`, only one launched application can be served at a time, so a second handshake-free request arriving while another request's browser context is still live is rejected with a clear error instead of silently attaching to the first request's application. With `--user-data-dir`, each handshake-free request launches a browser in the one configured profile: the profile's state persists across requests, and parallel requests contend for its browser lock and can fail with "Browser is already in use". Elsewhere, browser state that must persist across handshake-free requests belongs in an explicit browser session — a `browserSessionId` handle minted by `browser_session_open` in one request resolves in later ones (see [Browser Session Tools](#browser-session-tools)). Clients that do send `initialize` keep the classic `Mcp-Session-Id` session behavior unchanged. When several such stateful clients are connected at once in the default persistent-profile mode, the first client's default context holds the stable profile — concurrent clients' default contexts run in their own disposable profiles (without the stable profile's sign-in state) until it is freed, instead of failing with "Browser is already in use".
 
 ## Auditing pages behind a login
 
@@ -250,7 +255,7 @@ Every tool shares one browser context, and `audit_site` crawls in a temporary ta
 4. audit_site — the crawl inherits the session you just created
 ```
 
-This works out of the box in every mode, including the default persistent-profile mode. With the default profile the session also survives across server restarts, so you usually only sign in once.
+This works out of the box in every mode, including the default persistent-profile mode. With the default profile the session also survives across server restarts, so you usually only sign in once. The default profile is keyed to the server's working directory, so each workspace's server keeps its own sign-in state — servers launched for different workspaces neither share cookies nor contend for the same profile.
 
 ### Storage state route (repeatable, CI-friendly)
 
@@ -324,7 +329,7 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 - `annotateScreenshot` (default `false`): capture an annotated screenshot of the violations
 
 **Annotated screenshots:**
-When `annotateScreenshot` is `true`, each violating element is outlined and labelled with the rule ids it failed, a full-page PNG is written to the MCP output directory (`scan-page-annotated-{timestamp}.png`) and returned as a resource link, and the markers are then removed so the page is left exactly as it was. The markers are drawn in an out-of-flow overlay clipped to each element's own box, so they never reflow the page. The overlay uses a fresh id per scan, is placed in the browser's top layer so it stays visible over an open dialog, popover or fullscreen element, and compensates for a CSS `zoom` or a scaled ancestor so markers line up with what is rendered.
+When `annotateScreenshot` is `true`, each violating element is outlined and labelled with the rule ids it failed, a full-page PNG is written to the MCP output directory (`scan-page-annotated-{timestamp}-{token}.png`) and returned as a resource link, and the markers are then removed so the page is left exactly as it was. The markers are drawn in an out-of-flow overlay clipped to each element's own box, so they never reflow the page. The overlay uses a fresh id per scan, is placed in the browser's top layer so it stays visible over an open dialog, popover or fullscreen element, and compensates for a CSS `zoom` or a scaled ancestor so markers line up with what is rendered.
 An element that fails several rules gets one box listing every rule id, and elements inside open shadow roots are marked by walking the shadow path Axe reports.
 Running animations are paused before the elements are measured and resumed after the capture, so a moving target keeps its marker. The markers themselves live in a shadow root under an overlay whose own styles are `!important`, so page CSS cannot restyle or hide what the report counts, and each rule label sits outside the clipped box so it stays readable on an element smaller than its own label.
 At most 50 elements are annotated per scan. The result text always reports how many nodes were marked out of the total, plus how many were left out because they exceeded the limit, were hidden, zero-size or off-canvas (a full-page screenshot is clipped to the document box), or were inside an iframe (cross-frame selectors cannot be resolved from the top document).
@@ -375,7 +380,7 @@ A frame you scoped out yourself is not reported: with `excludeSelectors: ["ifram
 Crawls and scans multiple internal pages, then aggregates violations across the site.
 - Default strategy: link-based BFS from the current URL
 - Supports `links`, `nav`, `sitemap`, and `provided` URL strategies
-- Always writes a JSON report (default filename: `audit-site-{timestamp}.json`)
+- Always writes a JSON report (default filename: `audit-site-{timestamp}-{token}.json`)
 - Warns and records `sessionLosses` if the crawl loses cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 
 **Example flow:**
@@ -389,7 +394,7 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 Runs Axe scans on the same page across viewport/media/zoom variants and compares deltas against baseline.
 - Default variants: baseline, mobile, desktop, forced-colors, reduced-motion, zoom-200
 - Supports custom variants and optional reload between variants
-- Always writes a JSON report (default filename: `scan-matrix-{timestamp}.json`)
+- Always writes a JSON report (default filename: `scan-matrix-{timestamp}-{token}.json`)
 - JSON report and structured result schema `v2` set baseline deltas to `null` when either scan left frames unscanned, because their coverage is not comparable
 
 **Example flow:**
@@ -405,7 +410,7 @@ Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) wit
 - Checks target size against WCAG 2.2 SC 2.5.8 (`checkTargetSize`, default on)
 - Checks that focus is not entirely obscured, WCAG 2.2 SC 2.4.11 (`checkFocusObscured`, default on)
 - Optional issue screenshots (`screenshotOnIssue`)
-- Always writes a JSON report (default filename: `audit-keyboard-{timestamp}.json`)
+- Always writes a JSON report (default filename: `audit-keyboard-{timestamp}-{token}.json`)
 
 **Limits of the WCAG 2.2 checks** — these are heuristics, not a conformance verdict:
 - Target size only inspects elements the tab order actually reaches, so pointer-only targets are never measured.
@@ -457,7 +462,7 @@ Audits what a screen reader actually announces, using the browser's own accessib
 - Findings for names overlap with axe rules such as `link-name`, `button-name` and `image-alt`; this tool adds the quality checks (generic names, file names, label-in-name, duplicates) that axe cannot make.
 - It reports the page as currently rendered. Content behind a collapsed panel or another viewport is judged in that state.
 
-**Bounds:** `maxElements` (default 400) caps how many *screen-reader-reachable* accessibility tree elements are analyzed. The snapshot also refs `aria-hidden` subtrees, which no check reports, so measuring continues past them until the budget is filled with reachable elements (up to a hard ceiling of twice `maxElements` measured, so a page built mostly of hidden refs stays bounded). `maxFindingsPerCheck` (default 20) caps the findings listed per check. Both truncations are stated in the summary and the JSON report, and the full counts are always reported. Always writes a JSON report (default filename: `audit-screen-reader-{timestamp}.json`).
+**Bounds:** `maxElements` (default 400) caps how many *screen-reader-reachable* accessibility tree elements are analyzed. The snapshot also refs `aria-hidden` subtrees, which no check reports, so measuring continues past them until the budget is filled with reachable elements (up to a hard ceiling of twice `maxElements` measured, so a page built mostly of hidden refs stays bounded). `maxFindingsPerCheck` (default 20) caps the findings listed per check. Both truncations are stated in the summary and the JSON report, and the full counts are always reported. Always writes a JSON report (default filename: `audit-screen-reader-{timestamp}-{token}.json`).
 
 **Example flow:**
 ```text
@@ -549,7 +554,7 @@ Take a screenshot of the current page.
 
 #### `browser_pdf_save`
 Save page as PDF.
-- Parameters: `filename` (optional, defaults to `page-{timestamp}.pdf`)
+- Parameters: `filename` (optional, defaults to `page-{timestamp}-{token}.pdf`)
 
 This tool requires `--caps pdf` in the CLI.
 
@@ -571,6 +576,29 @@ Resize the browser window.
 #### `browser_tabs`
 Manage browser tabs in one tool.
 - Parameters: `action` (`list`, `new`, `close`, `select`) and optional `index` (for `close` and `select`).
+
+### Browser Session Tools
+
+Following the MCP 2026-07-28 stateless prescription, browser state can be named by an explicit server-minted handle instead of living implicitly in the connection. Every browser tool except the two session tools accepts an optional `browserSessionId` argument; when it is omitted, the tool runs in the default session and behaves exactly as before.
+
+#### `browser_session_open`
+Opens a separate browser session — its own browser context with its own tabs, cookies and storage — and returns its opaque handle (`bs_...`) both in the result text and as `structuredContent.browserSessionId`. Pass that handle as the `browserSessionId` argument of other browser tools to run them in this session.
+
+How the separate context is provided depends on the mode:
+
+- **Default persistent-profile mode**: each session runs in its own fresh, disposable profile (removed when the session closes or expires); only the default session uses the stable persistent profile, whose sign-in state keeps surviving restarts. This is required — one profile directory can back only one running browser at a time.
+- **`--isolated`, remote endpoints, and CDP/`--cdp-launch` with `--isolated`**: each session gets its own fresh browser context. In `--cdp-launch` mode each context launches its own instance of the configured application on its own free port — which is why combining `--cdp-launch-port` with `--isolated` also rejects `browser_session_open`: a pinned port can serve only one launched instance, so a second session would silently attach to the first session's application. A second concurrent browser context on the pinned port (e.g. from a parallel client) is likewise rejected with an error rather than attaching to the first context's application.
+- **Modes that reuse one live browser context** — CDP attach or `--cdp-launch` without `--isolated`, `--extension`, the VS Code bridge, and servers created with a custom context getter — cannot create a separate context, so `browser_session_open` is rejected with an explanation instead of handing out a handle that would share the same tabs, cookies and storage as everything else. The same applies in the default mode when `--user-data-dir` pins all browsing to one user-supplied profile.
+
+In `--vscode` serving, browser sessions are host-scoped: `browser_session_open`, `browser_session_close`, and every call carrying a `browserSessionId` always run against the default provider's session registry at the host, regardless of any `browser_connect` provider switch. A handle opened before a switch keeps working (and can be closed) while the proxy is switched to a VS Code-connected browser, and a session opened while switched is created by the default provider — the VS Code-connected browser itself reuses one live context and cannot host separate sessions. Only session-less tool calls follow the switch.
+
+#### `browser_session_close`
+Closes a session opened with `browser_session_open` and releases its browser resources.
+- Parameters: `browserSessionId` (the handle to close)
+
+Closing is refused with a tool error while a tool call is still running in that session — a close that disposed the browser mid-call would fail the running tool; wait for it to finish and retry.
+
+Sessions that stay idle expire automatically after 30 minutes; the timer is refreshed on every use and while a tool is running in the session (overlapping calls each count, so the session survives until the last one finishes), so a long `audit_site` crawl is never expired mid-run. Set `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` to override the idle TTL in milliseconds (`0` or a negative value disables expiry). Passing an unknown or expired handle produces a tool error pointing back to `browser_session_open`; the error deliberately does not list other open sessions' handles, since handles are bearer tokens that route tool calls into their sessions. With `--save-session`, logged tool calls record the `browserSessionId` they were routed with, and recorded user actions from an explicit session carry the same `browserSessionId` in their logged args, so entries from different sessions stay distinguishable (default-session entries stay untagged).
 
 ### Information & Monitoring Tools
 

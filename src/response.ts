@@ -23,7 +23,7 @@ import { compressAriaSnapshot } from './utils/ariaCompression.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
 
 import type { Tab, TabSnapshot } from './tab.js';
-import type { CallToolResult, ResourceLink } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, ResourceLink } from '@modelcontextprotocol/server';
 import type { Context } from './context.js';
 import type { CallToolRequestContext } from './mcp/server.js';
 
@@ -57,6 +57,15 @@ export class Response {
     this.toolName = toolName;
     this.toolArgs = toolArgs;
     this._requestContext = requestContext;
+  }
+
+  /**
+   * The Context the tool call ran in. The `--save-session` log uses it as
+   * the entry's originating identity: the log is shared backend-wide, and
+   * its pending-action bookkeeping is scoped per context.
+   */
+  get context(): Context {
+    return this._context;
   }
 
   addResult(result: string) {

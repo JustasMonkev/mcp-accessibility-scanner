@@ -16,29 +16,35 @@
 
 import debug from 'debug';
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequestSchema, EmptyResultSchema, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
+import { ProtocolError, ProtocolErrorCode, Server } from '@modelcontextprotocol/server';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
 import { InProcessTransport } from './inProcessTransport.js';
 
-import type { Tool, CallToolResult, CallToolRequest, Root, ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-export type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-export type { Tool, CallToolResult, CallToolRequest, Root } from '@modelcontextprotocol/sdk/types.js';
+import type { CacheHint, Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
+export type { Server } from '@modelcontextprotocol/server';
+export type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/server';
 
 const serverDebug = debug('pw:mcp:server');
 const errorsDebug = debug('pw:mcp:errors');
 
 export type ClientVersion = { name: string, version: string };
-export type CallToolRequestContext = Pick<RequestHandlerExtra<ServerRequest, ServerNotification>, 'signal' | 'requestId' | 'sendNotification' | '_meta'>;
+// The stable request context handed to backends. The v2 SDK reshaped the
+// handler context (`RequestHandlerExtra` became `ServerContext`/`ctx.mcpReq`);
+// this type keeps the backend contract unchanged and is populated from the
+// SDK context at the tools/call handler boundary.
+export type CallToolRequestContext = {
+  signal: AbortSignal;
+  requestId: RequestId;
+  sendNotification: (notification: ServerNotification) => Promise<void>;
+  _meta?: RequestMeta;
+};
 export type ServerBackendContext = {
   notifyToolListChanged(): Promise<void>;
 };
 
 export interface ServerBackend {
-  initialize?(context: ServerBackendContext, clientVersion: ClientVersion, roots: Root[]): Promise<void>;
+  initialize?(context: ServerBackendContext, clientVersion: ClientVersion): Promise<void>;
   listTools(): Promise<Tool[]>;
   callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: CallToolRequestContext): Promise<CallToolResult>;
   serverClosed?(): void;
@@ -47,6 +53,15 @@ export interface ServerBackend {
 export type ServerMetadata = {
   title?: string;
   instructions?: string;
+  /**
+   * Cache hint stamped on `tools/list` results served to MCP 2026-07-28
+   * clients (SEP-2549 `ttlMs`/`cacheScope`). Set it only for backends whose
+   * tool list is fixed for the process lifetime; leave it unset for backends
+   * that can change their list at runtime (e.g. the proxy's context switch or
+   * the VS Code host), which keeps the SDK's conservative `ttlMs: 0` default.
+   * 2025-era responses never carry cache fields either way.
+   */
+  toolListCacheHint?: CacheHint;
 };
 
 export type ServerBackendFactory = ServerMetadata & {
@@ -54,21 +69,30 @@ export type ServerBackendFactory = ServerMetadata & {
   nameInConfig: string;
   version: string;
   create: () => ServerBackend;
+  /**
+   * Optional variant used for stateless per-request HTTP serving
+   * (handshake-free 2025 requests and the modern 2026-07-28 endpoint): the
+   * created backend serves exactly one exchange and is closed with the
+   * response, so implementations can shape it for that lifecycle — e.g. run
+   * its default browser context in a disposable profile instead of contending
+   * for the stable persistent one. Falls back to create() when absent.
+   * Stateful serving (stdio, Mcp-Session-Id HTTP sessions) always uses
+   * create().
+   */
+  createStateless?: () => ServerBackend;
 };
 
-export async function connect(factory: ServerBackendFactory, transport: Transport, transportInitialized: Promise<void>, runHeartbeat: boolean) {
-  const server = createServer(factory.name, factory.version, factory.create(), transportInitialized, runHeartbeat, factory);
+export async function connect(factory: ServerBackendFactory, transport: Transport, runHeartbeat: boolean) {
+  const server = createServer(factory.name, factory.version, factory.create(), runHeartbeat, factory);
   await server.connect(transport);
 }
 
 export async function wrapInProcess(backend: ServerBackend): Promise<Transport> {
-  const server = createServer('Internal', '0.0.0', backend, Promise.resolve(), false);
+  const server = createServer('Internal', '0.0.0', backend, false);
   return new InProcessTransport(server);
 }
 
-export function createServer(name: string, version: string, backend: ServerBackend, transportInitialized: Promise<void>, runHeartbeat: boolean, metadata?: ServerMetadata): Server {
-  let initializedPromiseResolve = () => {};
-  const initializedPromise = new Promise<void>(resolve => initializedPromiseResolve = resolve);
+export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean, metadata?: ServerMetadata): Server {
   const server = new Server({ name, version, title: metadata?.title }, {
     capabilities: {
       tools: {
@@ -76,31 +100,77 @@ export function createServer(name: string, version: string, backend: ServerBacke
       },
     },
     instructions: metadata?.instructions,
+    ...(metadata?.toolListCacheHint ? { cacheHints: { 'tools/list': metadata.toolListCacheHint } } : {}),
   });
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
+  // Idempotent backend initialization shared by the handshake path and the
+  // lazy per-request path. The `initialized` notification remains the
+  // preferred entry point (it carries the client's identity), but the MCP
+  // 2026-07-28 revision removes the initialize/initialized handshake entirely,
+  // so a request arriving without one must trigger initialization on demand
+  // instead of hanging forever. Whichever path runs first wins; concurrent
+  // callers await the same in-flight promise. Refs #165.
+  // Roots are deprecated in MCP 2026-07-28 (SEP-2577) and are no longer
+  // fetched here — output directories come from server configuration
+  // (`--output-dir` / `outputDir`) instead of a client-supplied root, which
+  // also drops a blocking listRoots round-trip from startup. Refs #169.
+  let backendInitialized: Promise<void> | undefined;
+  const ensureInitialized = (): Promise<void> => {
+    if (!backendInitialized) {
+      const initialization = (async () => {
+        // Pre-handshake there is no client info yet.
+        const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
+        const context: ServerBackendContext = {
+          notifyToolListChanged: () => server.sendToolListChanged(),
+        };
+        await backend.initialize?.(context, clientVersion);
+      })();
+      // Memoize success only: a rejected attempt clears the memo so the next
+      // request retries instead of replaying the same failure forever (e.g. a
+      // long-lived stdio process whose backend hit a transient error). Callers
+      // already awaiting this attempt still observe its rejection — they hold
+      // the promise before this handler clears the memo.
+      initialization.catch(() => {
+        if (backendInitialized === initialization)
+          backendInitialized = undefined;
+      });
+      backendInitialized = initialization;
+    }
+    return backendInitialized;
+  };
+
+  server.setRequestHandler('tools/list', async () => {
     serverDebug('listTools');
-    await initializedPromise;
+    await ensureInitialized();
     const tools = await backend.listTools();
     return { tools };
   });
 
   let heartbeatRunning = false;
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  server.setRequestHandler('tools/call', async (request, ctx) => {
     serverDebug('callTool', request);
-    await initializedPromise;
+    await ensureInitialized();
 
     if (runHeartbeat && !heartbeatRunning) {
       heartbeatRunning = true;
       startHeartbeat(server);
     }
 
+    const requestContext: CallToolRequestContext = {
+      signal: ctx.mcpReq.signal,
+      requestId: ctx.mcpReq.id,
+      sendNotification: notification => ctx.mcpReq.notify(notification),
+      _meta: ctx.mcpReq._meta,
+    };
     try {
-      return await backend.callTool(request.params.name, request.params.arguments || {}, extra);
+      return await backend.callTool(request.params.name, request.params.arguments || {}, requestContext);
     } catch (error) {
       // Protocol-level failures (e.g. unknown tool) surface as JSON-RPC
       // errors; only tool execution failures become isError results.
-      if (error instanceof McpError)
+      // `isInstance` brand-matches, so a `ProtocolError` constructed by
+      // another bundled SDK copy (e.g. the client package in-process) is
+      // recognized too.
+      if (ProtocolError.isInstance(error))
         throw error;
       return {
         content: [{ type: 'text', text: '### Result\n' + String(error) }],
@@ -108,28 +178,8 @@ export function createServer(name: string, version: string, backend: ServerBacke
       };
     }
   });
-  addServerListener(server, 'initialized', async () => {
-    try {
-      const capabilities = server.getClientCapabilities();
-      let clientRoots: Root[] = [];
-      if (capabilities?.roots) {
-        const { roots } = await transportInitialized
-            .then(() => server.listRoots(undefined, { timeout: 2_000 }))
-            .catch(e => {
-              serverDebug(e);
-              return { roots: [] };
-            });
-        clientRoots = roots;
-      }
-      const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
-      const context: ServerBackendContext = {
-        notifyToolListChanged: () => server.sendToolListChanged(),
-      };
-      await backend.initialize?.(context, clientVersion, clientRoots);
-      initializedPromiseResolve();
-    } catch (e) {
-      errorsDebug(e);
-    }
+  addServerListener(server, 'initialized', () => {
+    ensureInitialized().catch(e => errorsDebug(e));
   });
   addServerListener(server, 'close', () => backend.serverClosed?.());
   return server;
@@ -142,7 +192,7 @@ const startHeartbeat = (server: Server) => {
 
   const beat = () => {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const ping = server.request({ method: 'ping' }, EmptyResultSchema, { timeout }).finally(() => {
+    const ping = server.request({ method: 'ping' }, { timeout }).finally(() => {
       if (timeoutId)
         clearTimeout(timeoutId);
     });
@@ -153,7 +203,15 @@ const startHeartbeat = (server: Server) => {
       }),
     ]).then(() => {
       setTimeout(beat, 3000);
-    }).catch(() => {
+    }).catch(error => {
+      // A "method not found" reply proves the peer is alive — it answered.
+      // MCP 2026-07-28 clients reject `ping` as an unknown method, so stop
+      // heartbeating this connection for good instead of killing it. Only a
+      // timeout or transport-level failure still closes the server. Refs #168.
+      // Brand-matched check: the error may be constructed by the client
+      // package's bundled SDK copy when both run in-process.
+      if (ProtocolError.isInstance(error) && error.code === ProtocolErrorCode.MethodNotFound)
+        return;
       void server.close();
     });
   };
@@ -186,7 +244,7 @@ function addServerListener(server: Server, event: 'close' | 'initialized', liste
 
 export async function start(serverBackendFactory: ServerBackendFactory, options: { host?: string; port?: number }) {
   if (options.port === undefined) {
-    await connect(serverBackendFactory, new StdioServerTransport(), Promise.resolve(), false);
+    await connect(serverBackendFactory, new StdioServerTransport(), false);
     return;
   }
 

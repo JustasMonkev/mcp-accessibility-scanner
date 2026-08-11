@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
-import { sanitizeForFilePath } from '../utils/fileUtils.js';
+import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
 
 import type * as playwright from 'playwright';
 
@@ -742,9 +742,6 @@ const auditScreenReaderSchema = z.object({
   reportFile: z.string().optional().describe('Output JSON report file name.'),
 });
 
-function safeIsoTimestampForFileName() {
-  return sanitizeForFilePath(new Date().toISOString());
-}
 
 const auditScreenReader = defineTabTool({
   capability: 'core',

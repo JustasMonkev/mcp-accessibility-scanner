@@ -19,7 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { BrowserContextOptions, LaunchOptions } from 'playwright';
 import { devices } from 'playwright';
-import { sanitizeForFilePath } from './utils/fileUtils.js';
+import { safeIsoTimestampForFileName, sanitizeForFilePath } from './utils/fileUtils.js';
 
 import type { Config, ToolCapability } from '../config.js';
 
@@ -103,7 +103,7 @@ export type FullConfig = Config & {
 };
 
 export async function resolveConfig(config: Config): Promise<FullConfig> {
-  return mergeConfig(defaultConfig, config);
+  return validateResolvedConfig(mergeConfig(defaultConfig, config));
 }
 
 export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConfig> {
@@ -112,7 +112,22 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
   const envOverrides = configFromCLIOptions(envOptions);
   const cliOverrides = configFromCLIOptions(cliOptions);
   const result = mergeCLIConfigSources(configInFile, envOverrides, cliOverrides);
-  return applyMobileConfig(result, configInFile, envOverrides, cliOverrides, envOptions, cliOptions);
+  return validateResolvedConfig(applyMobileConfig(result, configInFile, envOverrides, cliOverrides, envOptions, cliOptions));
+}
+
+// A blank outputDir is an explicit value with no usable meaning, and both
+// ways of tolerating it go wrong silently: honoring it would fail on
+// mkdir('') only at the first artifact write — deep into a run — while
+// treating it as omitted (what a truthiness check on the resolved value does)
+// would quietly redirect artifacts the user configured a destination for
+// into a temp directory. Rejected here instead, at startup like the other
+// config validations, on the merged result so every source (config file,
+// env, CLI, programmatic Config) is covered. Only undefined/null count as
+// omitted — the nullish semantics the fallback historically used.
+function validateResolvedConfig(config: FullConfig): FullConfig {
+  if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
+    throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
+  return config;
 }
 
 type MobileSource = 'env' | 'cli';
@@ -319,11 +334,39 @@ async function loadConfig(configFile: string | undefined): Promise<Config> {
   }
 }
 
-export async function outputFile(config: FullConfig, rootPath: string | undefined, name: string): Promise<string> {
-  const outputDir = config.outputDir
-        ?? (rootPath ? path.join(rootPath, '.playwright-mcp') : undefined)
-        ?? path.join(os.tmpdir(), 'playwright-mcp-output', sanitizeForFilePath(new Date().toISOString()));
+// One fallback output directory per resolved config — i.e. per server, which
+// resolves its FullConfig once and hands the same object to every consumer.
+// Recomputing the timestamped path per call scattered one audit's artifacts
+// (screenshots, JSON reports, traces, session logs) across a different temp
+// directory per millisecond tick. Keyed weakly on the config object so two
+// server instances in one process still get distinct fallback directories.
+const defaultOutputDirs = new WeakMap<FullConfig, string>();
 
+/**
+ * Resolves the output directory this config's artifacts land in, memoizing
+ * the timestamped fallback when no `outputDir` is configured. Exported so a
+ * config that crosses an identity boundary — the VS Code integration
+ * serializes it into a spawned provider process, where JSON.parse mints a new
+ * object the WeakMap has never seen — can materialize the resolved fallback
+ * into the serialized copy instead of letting the other side mint a second
+ * temp root.
+ */
+export function resolveOutputDir(config: FullConfig): string {
+  if (config.outputDir)
+    return config.outputDir;
+  let outputDir = defaultOutputDirs.get(config);
+  if (!outputDir) {
+    // The random token keeps two servers starting in the same millisecond
+    // from sharing a fallback directory — the per-call timestamp used to
+    // make that unlikely; a per-server one no longer would.
+    outputDir = path.join(os.tmpdir(), 'playwright-mcp-output', safeIsoTimestampForFileName());
+    defaultOutputDirs.set(config, outputDir);
+  }
+  return outputDir;
+}
+
+export async function outputFile(config: FullConfig, name: string): Promise<string> {
+  const outputDir = resolveOutputDir(config);
   await fs.promises.mkdir(outputDir, { recursive: true });
   const fileName = sanitizeForFilePath(name);
   return path.join(outputDir, fileName);

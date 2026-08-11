@@ -17,7 +17,8 @@
 import fs from 'fs';
 import { chromium, type Browser } from 'playwright';
 import { describe, it, expect } from 'vitest';
-import { createGuid, createHash } from '../src/utils/guid.js';
+import { createGuid, createHash, createShortGuid } from '../src/utils/guid.js';
+import { safeIsoTimestampForFileName } from '../src/utils/fileUtils.js';
 import { compressAriaSnapshot } from '../src/utils/ariaCompression.js';
 import { truncateDataUrl, truncateDataUrls } from '../src/utils/dataUrl.js';
 
@@ -71,6 +72,33 @@ describe('Utils', () => {
         expect(id).toMatch(/^[a-f0-9]+$/);
         expect(id.length).toBe(32); // 16 bytes = 32 hex chars
       });
+    });
+  });
+
+  describe('createShortGuid', () => {
+    it('should generate 8 hex character tokens', () => {
+      const ids = Array.from({ length: 10 }, () => createShortGuid());
+      ids.forEach(id => expect(id).toMatch(/^[a-f0-9]{8}$/));
+    });
+
+    it('should generate unique tokens', () => {
+      const ids = Array.from({ length: 100 }, () => createShortGuid());
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+  });
+
+  describe('safeIsoTimestampForFileName', () => {
+    it('is filename-safe and collision-resistant within one millisecond', () => {
+      // Default artifact names (screenshots, PDFs, reports) land in an output
+      // directory shared by concurrent sessions; a timestamp alone let two
+      // same-millisecond artifacts overwrite each other.
+      const values = Array.from({ length: 25 }, () => safeIsoTimestampForFileName());
+      for (const value of values) {
+        // No characters the path sanitizer would need to rewrite (it keeps
+        // the final extension-style dot of the ISO milliseconds).
+        expect(value).toMatch(/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9-]+\.[0-9]{3}Z-[a-f0-9]{8}$/);
+      }
+      expect(new Set(values).size).toBe(values.length);
     });
   });
 

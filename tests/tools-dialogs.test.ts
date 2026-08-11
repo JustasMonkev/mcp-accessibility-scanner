@@ -146,7 +146,7 @@ describe.skipIf(!hasBundledChromium)('phantom dialog recovery in a real browser'
         };
       },
     });
-    await backend.initialize({} as any, { name: 'vitest', version: 'dialogs' }, []);
+    await backend.initialize({} as any, { name: 'vitest', version: 'dialogs' });
 
     const navigateResult = await backend.callTool('browser_navigate', { url: 'http://fixture.local/' });
     expect(navigateResult.isError).not.toBe(true);

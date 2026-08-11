@@ -124,6 +124,147 @@ describe('CLI command dispatch contract', () => {
     });
   });
 
+  describe('browser session handles across handshake-free requests in proxy modes', () => {
+    // Each handshake-free POST builds a fresh proxy backend with a fresh
+    // inner BrowserServerBackend. With a request-local registry, the handle
+    // minted by the first POST was unknown to the second one (and disposed
+    // when its response closed); the registry must be process-scoped, exactly
+    // like the direct startMCPServer path.
+    async function startServer(args: string[]) {
+      const child = spawn(process.execPath, [...cliArgs, ...args, '--port', '0'], { stdio: 'pipe' });
+      let stderr = '';
+      const url = await new Promise<string>((resolve, reject) => {
+        // The timeout must kill the child: the test's finally-cleanup only
+        // sees a child once startServer has returned, so a server that never
+        // announced its URL would otherwise keep running — and holding its
+        // port — for the rest of the test run.
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL');
+          reject(new Error(`server did not start:\n${stderr}`));
+        }, 25_000);
+        child.stderr.on('data', (data: Buffer) => {
+          stderr += data.toString();
+          const match = stderr.match(/Listening on (http:\S+)/);
+          if (match) {
+            clearTimeout(timer);
+            resolve(match[1]);
+          }
+        });
+        // No kill needed here: 'close' only fires once the child has already
+        // exited and its stdio streams are closed.
+        child.on('close', () => {
+          clearTimeout(timer);
+          reject(new Error(`server exited early:\n${stderr}`));
+        });
+      });
+      return { child, url };
+    }
+
+    async function callTool(url: string, id: number, name: string, args: Record<string, unknown>) {
+      const response = await fetch(`${url}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'accept': 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }),
+      });
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      const messages = response.headers.get('content-type')?.includes('application/json')
+        ? [JSON.parse(text)]
+        : text.split('\n\n')
+            .map(chunk => chunk.split('\n').filter(line => line.startsWith('data: ')).map(line => line.slice('data: '.length)).join(''))
+            .filter(Boolean)
+            .map(data => JSON.parse(data));
+      const message = messages.find(m => m.id === id);
+      expect(message?.error).toBeUndefined();
+      expect(message?.result).toBeDefined();
+      return message.result;
+    }
+
+    // A browser_connect switch must survive the response that carried it:
+    // handshake-free POSTs are each served by a throwaway proxy backend, so
+    // without a process-scoped selection the switch reported success while
+    // the very next request silently ran on the default provider again.
+    it('--connect-tool keeps a browser_connect switch in force for later handshake-free POSTs', async () => {
+      const { child, url } = await startServer(['--connect-tool']);
+      try {
+        const switched = await callTool(url, 1, 'browser_connect', { name: 'extension' });
+        expect(switched.isError).not.toBe(true);
+
+        // The extension provider vetoes separate browser sessions; before
+        // the fix this call ran on the default provider and minted a handle.
+        const vetoed = await callTool(url, 2, 'browser_session_open', {});
+        expect(vetoed.isError).toBe(true);
+        expect(JSON.stringify(vetoed.content)).toContain('browser you are already running');
+
+        // Switching back re-enables the default provider for later requests.
+        const back = await callTool(url, 3, 'browser_connect', { name: 'default' });
+        expect(back.isError).not.toBe(true);
+        const opened = await callTool(url, 4, 'browser_session_open', {});
+        expect(opened.isError).not.toBe(true);
+        const browserSessionId = JSON.stringify(opened).match(/bs_[0-9a-f-]+/)?.[0];
+        expect(browserSessionId).toBeTruthy();
+        await callTool(url, 5, 'browser_session_close', { browserSessionId });
+      } finally {
+        child.kill('SIGTERM');
+      }
+    });
+
+    it('--vscode keeps a browser_connect switch in force for later handshake-free POSTs', async () => {
+      const { child, url } = await startServer(['--vscode']);
+      try {
+        // The switch spawns the child provider and handshakes with it; no
+        // browser operation runs, so the dead connection string is fine.
+        const switched = await callTool(url, 1, 'browser_connect', { connectionString: 'ws://127.0.0.1:9/never-connected', lib: 'playwright' });
+        expect(switched.isError).not.toBe(true);
+
+        // Session-less traffic runs on the switched provider, whose dead
+        // connection string surfaces on the first browser operation; before
+        // the process-scoped selection fix this request silently reverted to
+        // the default provider (and launched a real browser).
+        const navigated = await callTool(url, 2, 'browser_navigate', { url: 'data:text/html,<p>hi</p>' });
+        expect(navigated.isError).toBe(true);
+        expect(JSON.stringify(navigated.content)).toContain('127.0.0.1:9');
+
+        // The session tools are host-scoped: even while switched, the handle
+        // is minted by the default provider's registry at the host — the
+        // switched child could neither mint one (its factory vetoes
+        // sessions) nor resolve one minted before the switch.
+        const opened = await callTool(url, 3, 'browser_session_open', {});
+        expect(opened.isError).not.toBe(true);
+        const browserSessionId = JSON.stringify(opened).match(/bs_[0-9a-f-]+/)?.[0];
+        expect(browserSessionId).toBeTruthy();
+
+        // Disconnecting re-enables the default provider for later requests...
+        const back = await callTool(url, 4, 'browser_connect', {});
+        expect(back.isError).not.toBe(true);
+        // ...and the handle minted while switched still resolves at the host.
+        const closed = await callTool(url, 5, 'browser_session_close', { browserSessionId });
+        expect(closed.isError).not.toBe(true);
+        expect(JSON.stringify(closed.content)).toContain(browserSessionId);
+      } finally {
+        child.kill('SIGTERM');
+      }
+    });
+
+    for (const mode of ['--connect-tool', '--vscode']) {
+      it(`${mode} resolves a handle minted in an earlier handshake-free POST`, async () => {
+        const { child, url } = await startServer([mode]);
+        try {
+          const openResult = await callTool(url, 1, 'browser_session_open', {});
+          expect(openResult.isError).not.toBe(true);
+          const browserSessionId = JSON.stringify(openResult).match(/bs_[0-9a-f-]+/)?.[0];
+          expect(browserSessionId).toBeTruthy();
+
+          const closeResult = await callTool(url, 2, 'browser_session_close', { browserSessionId });
+          expect(closeResult.isError).not.toBe(true);
+          expect(JSON.stringify(closeResult.content)).toContain(browserSessionId);
+        } finally {
+          child.kill('SIGTERM');
+        }
+      });
+    }
+  });
+
   describe('subcommand --help flags', () => {
     it('list-tools accepts --help', () => {
       const output = runCLI('list-tools --help');

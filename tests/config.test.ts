@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it, expect } from 'vitest';
-import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders } from '../src/config.js';
+import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders, resolveOutputDir } from '../src/config.js';
 import type { Config } from '../config.js';
 
 async function writeConfigFile(config: Config): Promise<string> {
@@ -335,7 +335,7 @@ describe('Config', () => {
   describe('outputFile', () => {
     it('should generate output file path with filename', async () => {
       const config = await resolveConfig({});
-      const result = await outputFile(config, '/tmp', 'test.txt');
+      const result = await outputFile(config, 'test.txt');
 
       expect(result).toContain('test.txt');
     });
@@ -345,7 +345,7 @@ describe('Config', () => {
         outputDir: '/tmp/custom/output',
       });
 
-      const result = await outputFile(config, '/tmp', 'test.txt');
+      const result = await outputFile(config, 'test.txt');
 
       expect(result).toContain('/tmp/custom/output');
       expect(result).toContain('test.txt');
@@ -354,10 +354,68 @@ describe('Config', () => {
     it('should sanitize file paths', async () => {
       const config = await resolveConfig({});
 
-      const result = await outputFile(config, '/tmp', 'test/../../../etc/passwd');
+      const result = await outputFile(config, 'test/../../../etc/passwd');
 
       // Should sanitize to prevent directory traversal
       expect(result).not.toContain('../');
+    });
+
+    it('keeps every artifact of one server in one fallback directory', async () => {
+      // The timestamped fallback used to be recomputed per call, scattering
+      // one audit's screenshots, reports, traces and session logs across a
+      // different temp directory per millisecond tick.
+      const config = await resolveConfig({});
+
+      const first = await outputFile(config, 'screenshot.png');
+      // Cross a millisecond tick so a recomputed timestamp would differ.
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const second = await outputFile(config, 'report.json');
+
+      expect(path.dirname(second)).toBe(path.dirname(first));
+    });
+
+    it('keeps one fallback directory across a config serialization boundary', async () => {
+      // The VS Code integration JSON-serializes the config into a spawned
+      // provider process (src/vscode/host.ts); the round-trip mints a new
+      // object the WeakMap memo has never seen. Materializing the resolved
+      // fallback into the serialized copy keeps the child's artifacts in the
+      // parent's directory instead of a second temp root.
+      const config = await resolveConfig({});
+      const parentFile = await outputFile(config, 'parent.txt');
+
+      const childConfig = JSON.parse(JSON.stringify({ ...config, outputDir: resolveOutputDir(config) }));
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const childFile = await outputFile(childConfig, 'child.txt');
+
+      expect(path.dirname(childFile)).toBe(path.dirname(parentFile));
+    });
+
+    it('gives two server configurations distinct fallback directories', async () => {
+      // Two servers in one process must not interleave artifacts: the
+      // fallback is memoized per resolved config, not process-wide.
+      const first = await outputFile(await resolveConfig({}), 'file.txt');
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const second = await outputFile(await resolveConfig({}), 'file.txt');
+
+      expect(path.dirname(first)).not.toBe(path.dirname(second));
+    });
+
+    it('rejects a blank outputDir at resolution instead of redirecting artifacts to a temp directory', async () => {
+      // An explicitly-empty outputDir must not be coerced into the omitted
+      // default: the user configured a destination, and "" silently falling
+      // back to the temp root would strand the artifacts they asked to keep.
+      // Rejected at startup — honoring "" would only fail on mkdir('') at
+      // the first artifact write, deep into a run.
+      await expect(resolveConfig({ outputDir: '' })).rejects.toThrow('outputDir must not be blank');
+      await expect(resolveConfig({ outputDir: '   ' })).rejects.toThrow('outputDir must not be blank');
+      await expect(resolveCLIConfig({ outputDir: '' })).rejects.toThrow('outputDir must not be blank');
+    });
+
+    it('keeps the temp-directory fallback when outputDir is omitted', async () => {
+      const config = await resolveConfig({});
+      expect(config.outputDir).toBeUndefined();
+      const result = await outputFile(config, 'artifact.txt');
+      expect(path.dirname(result)).toContain('playwright-mcp-output');
     });
   });
 });

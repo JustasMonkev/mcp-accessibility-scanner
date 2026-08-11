@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import RE2 from 're2';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
-import { sanitizeForFilePath } from '../utils/fileUtils.js';
+import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
 import {
   assertRuleOptionsValid,
   axeRuleSchemaShape,
@@ -201,9 +201,6 @@ function inferStartUrlFromProvidedUrls(urls: string[] | undefined): string | und
   return undefined;
 }
 
-function safeIsoTimestampForFileName() {
-  return sanitizeForFilePath(new Date().toISOString());
-}
 
 function isExcludedByPath(candidate: URL, excludePatterns: RE2[]): boolean {
   const value = `${candidate.pathname}${candidate.search}`;

@@ -18,7 +18,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
 import type { Tab } from '../src/tab.js';
-import type { ImageContent, ResourceLink, TextContent } from '@modelcontextprotocol/sdk/types.js';
+import type { ImageContent, ResourceLink, TextContent } from '@modelcontextprotocol/server';
 
 function expectTextContent(content: TextContent | ImageContent): TextContent {
   expect(content.type).toBe('text');

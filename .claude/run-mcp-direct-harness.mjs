@@ -5,8 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDir, '..');
@@ -409,6 +409,33 @@ const tests = [
     await callTool('browser_tabs', { action: 'list' });
     await callTool('browser_tabs', { action: 'select', index: 0 });
     await callTool('browser_tabs', { action: 'close', index: 1 });
+  }),
+
+  test('browser_session_open', async () => {
+    const result = await callTool('browser_session_open', {});
+    const browserSessionId = result.structuredContent?.browserSessionId;
+    if (typeof browserSessionId !== 'string' || !browserSessionId.startsWith('bs_'))
+      throw new Error(`Expected browser session handle, got ${JSON.stringify(browserSessionId)}`);
+    assertText(result, new RegExp(browserSessionId));
+    await callTool('browser_tabs', { action: 'list', browserSessionId });
+    await callTool('browser_session_close', { browserSessionId });
+  }),
+
+  test('browser_session_close', async () => {
+    const opened = await callTool('browser_session_open', {});
+    const browserSessionId = opened.structuredContent?.browserSessionId;
+    // Without this check an absent handle would build new RegExp(undefined),
+    // i.e. the empty pattern /(?:)/ that matches anything, letting the
+    // assertions below pass vacuously.
+    if (typeof browserSessionId !== 'string' || !browserSessionId.startsWith('bs_'))
+      throw new Error(`Expected browser session handle, got ${JSON.stringify(browserSessionId)}`);
+    const result = await callTool('browser_session_close', { browserSessionId });
+    assertText(result, new RegExp(browserSessionId));
+    await assertToolError(
+      'browser_tabs',
+      { action: 'list', browserSessionId },
+      /Unknown browserSessionId/,
+    );
   }),
 
   test('browser_navigation_timeout', async () => {

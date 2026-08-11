@@ -23,13 +23,15 @@ import { packageJSON } from './utils/package.js';
 import { Context } from './context.js';
 import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported, contextFactory, PersistentContextFactory, persistentProfileConflictRemedy } from './browserContextFactory.js';
 import { ProxyBackend } from './mcp/proxyBackend.js';
+import { SharedClientSlot } from './mcp/sharedClientSlot.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
+import { BrowserSessionRegistry } from './browserSessions.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
 import { filteredTools, serverInstructions } from './tools.js';
 import { logUnhandledError } from './utils/log.js';
 
 import { runVSCodeTools } from './vscode/host.js';
-import type { MCPProvider } from './mcp/proxyBackend.js';
+import type { MCPProvider, SharedProxySelection } from './mcp/proxyBackend.js';
 import type { FullConfig } from './config.js';
 import type { BrowserContextFactory } from './browserContextFactory.js';
 
@@ -62,13 +64,30 @@ async function resolveProgramContext(options: Record<string, unknown>): Promise<
 }
 
 async function startMCPServer(config: FullConfig, browserContextFactory: BrowserContextFactory) {
+  // One browser-session handle registry for every backend this factory mints:
+  // handshake-free (MCP 2026-07-28) HTTP requests are each served by a fresh
+  // backend, and a browserSessionId minted in one request must resolve in the
+  // next. Stateful (stdio and v1 HTTP session) backends share it too — handles
+  // are already opaque bearer tokens scoped to this server process.
+  const sessionRegistry = new BrowserSessionRegistry();
   const factory: mcpServer.ServerBackendFactory = {
     name: 'Playwright',
     title: 'Accessibility Scanner',
     nameInConfig: 'playwright',
     version: packageJSON.version,
     instructions: serverInstructions,
-    create: () => new BrowserServerBackend(config, browserContextFactory)
+    // The tool list is fixed per process (filteredTools(config) never changes
+    // at runtime), so 2026-07-28 clients may cache it for an hour. Scope is
+    // `private`: the list depends on this server's local configuration
+    // (--caps and connection mode), so it must not be served from a shared
+    // cache keyed only on the URL.
+    toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
+    create: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry),
+    // Handshake-free HTTP serves each request with a throwaway backend whose
+    // default context is disposed when the response ends; flagging it
+    // ephemeral gives it a disposable profile in default persistent mode, so
+    // parallel stateless requests stop contending for the one stable profile.
+    createStateless: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry, { ephemeralDefaultContext: true })
   };
   await mcpServer.start(factory, config.server);
 }
@@ -129,34 +148,60 @@ function configureBaseProgram() {
 
 configureBaseProgram()
     .action(async options => {
-      setupExitWatchdog();
+      // Cleanups the proxy modes register for their process-scoped switched
+      // clients; they run before the contexts are disposed so a switched
+      // provider (e.g. a spawned VS Code child) shuts down deliberately
+      // instead of relying on process teardown.
+      const exitCleanups: Array<() => Promise<void>> = [];
+      setupExitWatchdog(async () => {
+        for (const cleanup of exitCleanups)
+          await cleanup().catch(logUnhandledError);
+        await Context.disposeAll();
+      });
 
       const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(options);
 
       if (options.extension) {
+        // Shared for the same reason as in startMCPServer (the extension
+        // factory vetoes browser_session_open, but the veto itself must
+        // still reach handshake-free HTTP requests consistently).
+        const sessionRegistry = new BrowserSessionRegistry();
         const serverBackendFactory: mcpServer.ServerBackendFactory = {
           name: 'Playwright w/ extension',
           title: 'Accessibility Scanner (browser extension)',
           nameInConfig: 'playwright-extension',
           version: packageJSON.version,
           instructions: serverInstructions,
-          create: () => new BrowserServerBackend(config, extensionContextFactory)
+          // Static per process, same rationale as in startMCPServer above.
+          toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
+          create: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry)
         };
         await mcpServer.start(serverBackendFactory, config.server);
         return;
       }
 
       if (options.vscode) {
-        await runVSCodeTools(config);
+        await runVSCodeTools(config, cleanup => exitCleanups.push(cleanup));
         return;
       }
 
       if (options.connectTool) {
-        const providers: MCPProvider[] = [
+        // Process-scoped, like startMCPServer's: over stateless HTTP every
+        // handshake-free POST builds a fresh proxy with a fresh inner
+        // backend, and a browserSessionId minted in one request must resolve
+        // in the next instead of dying with the response. Shared between the
+        // two providers as well, so a handle opened under one provider can
+        // still be closed after a switch (each session's Context keeps the
+        // factory it was created with).
+        const sessionRegistry = new BrowserSessionRegistry();
+        // A stateless per-request proxy flags its inner default context
+        // ephemeral (disposable profile, see startMCPServer); stateful
+        // proxies keep the stable profile.
+        const makeProviders = (ephemeralDefaultContext: boolean): MCPProvider[] => [
           {
             name: 'default',
             description: 'Starts standalone browser',
-            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, browserContextFactory)),
+            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, browserContextFactory, sessionRegistry, { ephemeralDefaultContext })),
           },
           {
             name: 'extension',
@@ -164,14 +209,30 @@ configureBaseProgram()
             // Runs before the default provider is torn down, so a rejected
             // switch keeps the session on the provider that works.
             validate: () => assertStorageStateSupported(config, extensionContextFactory, 'The "extension" method works through the browser you are already running and uses the context it already has. Stay on the "default" method, or restart without the storage state and sign in in that browser.'),
-            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, extensionContextFactory)),
+            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, extensionContextFactory, sessionRegistry, { ephemeralDefaultContext })),
           },
         ];
+        // Process-scoped browser_connect selection for handshake-free HTTP:
+        // each such POST serves with a throwaway ProxyBackend, so a switch
+        // stored only there would report success and silently revert to the
+        // default provider on the next request. The shared client connects
+        // through the stateful-flavored providers — it outlives any single
+        // response, so it must not take the ephemeral per-request default
+        // context.
+        const sharedSelection: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders(false) };
+        exitCleanups.push(async () => {
+          // dispose(), not replace(undefined): shutdown must close the
+          // switched client even while in-flight requests still hold leases
+          // on it — nothing outlives the process, and waiting for a drain
+          // could stall exit forever.
+          await sharedSelection.slot.dispose();
+        });
         const factory: mcpServer.ServerBackendFactory = {
           name: 'Playwright w/ switch',
           nameInConfig: 'playwright-switch',
           version: packageJSON.version,
-          create: () => new ProxyBackend(providers),
+          create: () => new ProxyBackend(makeProviders(false)),
+          createStateless: () => new ProxyBackend(makeProviders(true), sharedSelection),
         };
         await mcpServer.start(factory, config.server);
         return;
@@ -204,7 +265,6 @@ program
       await backend.initialize(
           { notifyToolListChanged: async () => {} },
           { name: 'interactive-cli', version: packageJSON.version },
-          [],
       );
 
       const rl = readline.createInterface({

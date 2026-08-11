@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { z } from 'zod';
 import type * as playwright from 'playwright';
 import { defineTabTool } from './tool.js';
-import { sanitizeForFilePath } from '../utils/fileUtils.js';
+import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
 import {
   assertRuleOptionsValid,
   axeRuleSchemaShape,
@@ -139,9 +139,6 @@ function normalizeMedia(variantMedia: z.output<typeof variantSchema>['media'] | 
   };
 }
 
-function safeIsoTimestampForFileName() {
-  return sanitizeForFilePath(new Date().toISOString());
-}
 
 function countNodesByRule(violations: { id: string; nodes: unknown[] }[]): Record<string, number> {
   const counts: Record<string, number> = {};
