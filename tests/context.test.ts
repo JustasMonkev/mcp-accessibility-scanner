@@ -240,6 +240,88 @@ describe('Context', () => {
     });
   });
 
+  describe('pending downloads', () => {
+    it('waits for an in-flight download save before closing the browser context', async () => {
+      // A download outlives the tool call that started it (the response even
+      // reports it as "still downloading"); the stateless HTTP path disposes
+      // the backend's default context the moment the response closes, which
+      // used to abort saveAs() and leave the reported file missing/partial.
+      const close = vi.fn().mockResolvedValue(undefined);
+      (mockBrowserContextFactory.createContext as any).mockResolvedValue({
+        browserContext: mockBrowserContext,
+        close,
+      });
+      const context = new Context({
+        tools: [],
+        config: {} as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await context.newTab();
+
+      let finishDownload = () => {};
+      context.trackPendingDownload(new Promise<void>(resolve => finishDownload = resolve));
+      expect(context.hasPendingDownloads()).toBe(true);
+
+      const disposing = context.dispose();
+      // Give disposal a few turns: it must be parked on the download, not on
+      // the factory close.
+      for (let i = 0; i < 10; i++)
+        await Promise.resolve();
+      expect(close).not.toHaveBeenCalled();
+
+      finishDownload();
+      await disposing;
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(context.hasPendingDownloads()).toBe(false);
+    });
+
+    it('abandons a stalled download after the 30s cap instead of hanging disposal', async () => {
+      vi.useFakeTimers();
+      try {
+        const close = vi.fn().mockResolvedValue(undefined);
+        (mockBrowserContextFactory.createContext as any).mockResolvedValue({
+          browserContext: mockBrowserContext,
+          close,
+        });
+        const context = new Context({
+          tools: [],
+          config: {} as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        await context.newTab();
+
+        // Never resolves: a download stalled forever must not stall disposal.
+        context.trackPendingDownload(new Promise(() => {}));
+
+        const disposing = context.dispose();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await disposing;
+        expect(close).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('logs a failed download save instead of leaving an unhandled rejection', async () => {
+      const context = new Context({
+        tools: [],
+        config: {} as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      context.trackPendingDownload(Promise.reject(new Error('canceled')));
+      // The tracked rejection settles handled; the set drains.
+      await new Promise(resolve => setImmediate(resolve));
+      expect(context.hasPendingDownloads()).toBe(false);
+      await context.dispose();
+    });
+  });
+
   describe('shared context observers', () => {
     function createMockPage() {
       const page = new EventEmitter() as any;

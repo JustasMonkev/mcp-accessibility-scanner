@@ -56,6 +56,7 @@ describe('Tab', () => {
       },
       currentTab: vi.fn(),
       outputFile: vi.fn().mockResolvedValue('/tmp/download'),
+      trackPendingDownload: vi.fn(),
       tools: [],
     } as any;
 
@@ -377,6 +378,67 @@ describe('Tab', () => {
       mockPage.emit('download', download);
       await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
       expect(path.basename(download.saveAs.mock.calls[0][0] as string)).toMatch(/^download-.+$/);
+    });
+
+    it('keeps a long suggested name within the 255-byte filename limit', async () => {
+      // A long but valid Content-Disposition name plus the uniqueness suffix
+      // used to exceed the filesystem's 255-byte component cap and fail
+      // saveAs() with ENAMETOOLONG.
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const download = makeDownload('a'.repeat(300) + '.pdf');
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+
+      const name = path.basename(download.saveAs.mock.calls[0][0] as string);
+      expect(Buffer.byteLength(name, 'utf8')).toBeLessThanOrEqual(255);
+      // Extension and uniqueness token survive the truncation.
+      expect(name).toMatch(/^a+-[0-9TZ.-]+-[0-9a-f]{8}\.pdf$/);
+    });
+
+    it('truncates multibyte names by whole code points, not mid-sequence', async () => {
+      new Tab(mockContext, mockPage as any, onPageClose);
+      // 120 x 3-byte code points = 360 bytes before the suffix.
+      const download = makeDownload('€'.repeat(120) + '.bin');
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+
+      const name = path.basename(download.saveAs.mock.calls[0][0] as string);
+      expect(Buffer.byteLength(name, 'utf8')).toBeLessThanOrEqual(255);
+      // Only whole euro signs remain in the base — a split UTF-8 sequence
+      // would leave a lone surrogate/replacement character here.
+      expect(name).toMatch(/^€+-[0-9TZ.-]+-[0-9a-f]{8}\.bin$/);
+    });
+
+    it('caps an extensionless long name too', async () => {
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const download = makeDownload('b'.repeat(300));
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+
+      const name = path.basename(download.saveAs.mock.calls[0][0] as string);
+      expect(Buffer.byteLength(name, 'utf8')).toBeLessThanOrEqual(255);
+      expect(name).toMatch(/^b+-[0-9TZ.-]+-[0-9a-f]{8}$/);
+    });
+
+    it('registers the in-flight save with the context so disposal can wait for it', async () => {
+      // The save outlives the tool call; untracked, context disposal closed
+      // the browser mid-stream and the reported file never materialized.
+      new Tab(mockContext, mockPage as any, onPageClose);
+      let finishSave = () => {};
+      const download = {
+        suggestedFilename: vi.fn().mockReturnValue('report.pdf'),
+        saveAs: vi.fn().mockReturnValue(new Promise<void>(resolve => finishSave = resolve)),
+      };
+      mockPage.emit('download', download);
+      expect(mockContext.trackPendingDownload).toHaveBeenCalledTimes(1);
+
+      const tracked = (mockContext.trackPendingDownload as any).mock.calls[0][0] as Promise<unknown>;
+      let settled = false;
+      void tracked.then(() => settled = true);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+      expect(settled).toBe(false);
+      finishSave();
+      await tracked;
     });
   });
 

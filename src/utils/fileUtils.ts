@@ -52,3 +52,26 @@ export function sanitizeForFilePath(s: string) {
 export function safeIsoTimestampForFileName(): string {
   return `${sanitizeForFilePath(new Date().toISOString())}-${createShortGuid()}`;
 }
+
+/**
+ * Truncates `value` to at most `maxBytes` of UTF-8. Measured in bytes, not
+ * characters — filesystem name limits are byte limits — and cut between code
+ * points (surrogate pairs stay whole), so the result never ends in a split
+ * UTF-8 sequence.
+ */
+export function truncateToUtf8Bytes(value: string, maxBytes: number): string {
+  if (maxBytes <= 0)
+    return '';
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes)
+    return value;
+  let bytes = 0;
+  let result = '';
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, 'utf8');
+    if (bytes + characterBytes > maxBytes)
+      break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
+}

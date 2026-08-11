@@ -180,8 +180,10 @@ export class BrowserSessionRegistry {
     const now = Date.now();
     for (const [id, entry] of this._sessions) {
       // A running tool holds the session's TTL: refresh instead of expiring,
-      // so a long crawl that never re-touches the registry survives.
-      if (entry.context.isRunningTool()) {
+      // so a long crawl that never re-touches the registry survives. An
+      // in-flight download save holds it too — downloads outlive the tool
+      // call that started them, and reaping would abort the save.
+      if (entry.context.isRunningTool() || entry.context.hasPendingDownloads()) {
         entry.lastUsedAt = now;
         continue;
       }

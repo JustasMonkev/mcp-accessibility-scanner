@@ -564,6 +564,29 @@ describe('browser sessions', () => {
     });
   });
 
+  it('does not reap a session while a download save is still in flight', async () => {
+    // Downloads outlive the tool call that starts them, so the running-tool
+    // hold alone left a window: a long download in an otherwise idle session
+    // was reaped mid-save, aborting the file the response had promised.
+    vi.useFakeTimers();
+    let pendingDownload = true;
+    const context = {
+      isRunningTool: () => false,
+      hasPendingDownloads: () => pendingDownload,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Context;
+    const registry = new BrowserSessionRegistry(TTL_MS);
+
+    registry.open(() => context);
+    await vi.advanceTimersByTimeAsync(TTL_MS * 3);
+    expect(context.dispose).not.toHaveBeenCalled();
+
+    // Once the save finishes, normal TTL expiry resumes.
+    pendingDownload = false;
+    await vi.advanceTimersByTimeAsync(TTL_MS + 60_000);
+    expect(context.dispose).toHaveBeenCalled();
+  });
+
   it('parses the TTL override defensively', () => {
     const original = process.env.PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS;
     try {

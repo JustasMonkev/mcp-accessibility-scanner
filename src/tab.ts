@@ -20,7 +20,7 @@ import { callOnPageNoTrace, waitForCompletion } from './tools/utils.js';
 import { logUnhandledError } from './utils/log.js';
 import { ManualPromise } from './mcp/manualPromise.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
-import { safeIsoTimestampForFileName } from './utils/fileUtils.js';
+import { safeIsoTimestampForFileName, truncateToUtf8Bytes } from './utils/fileUtils.js';
 import type { ModalState } from './tools/tool.js';
 
 import type { Context } from './context.js';
@@ -110,7 +110,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     // recovers the session on the pinned version.
     listen('dialogclosed', dialog => this._dialogClosed(dialog));
     listen('download', download => {
-      void this._downloadStarted(download);
+      // Tracked on the Context: the save outlives this tool call (and can
+      // outlive the tab), and context disposal must wait for it instead of
+      // closing the browser mid-stream. The context also owns the promise's
+      // rejection handling.
+      this.context.trackPendingDownload(this._downloadStarted(download));
     });
     page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? 30000);
     page.setDefaultTimeout(this._defaultTimeout);
@@ -164,9 +168,23 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     // name next to the saved path, so the file stays attributable.
     const suggested = download.suggestedFilename() || 'download';
     const separator = suggested.lastIndexOf('.');
-    const uniqueName = separator > 0
-      ? `${suggested.slice(0, separator)}-${safeIsoTimestampForFileName()}${suggested.slice(separator)}`
-      : `${suggested}-${safeIsoTimestampForFileName()}`;
+    let base = separator > 0 ? suggested.slice(0, separator) : suggested;
+    let extension = separator > 0 ? suggested.slice(separator) : '';
+    const uniqueSuffix = `-${safeIsoTimestampForFileName()}`;
+    // Filesystems cap a single name component at 255 bytes, and a long but
+    // valid Content-Disposition name plus the ~35-byte suffix used to fail
+    // saveAs() with ENAMETOOLONG. The recognizable part is truncated by BYTE
+    // length (UTF-8, whole code points) so extension and uniqueness suffix
+    // survive intact; a pathological "extension" too long to leave any base
+    // is just part of one long name and is truncated with it.
+    const maxNameBytes = 255;
+    let baseBudget = maxNameBytes - Buffer.byteLength(uniqueSuffix, 'utf8') - Buffer.byteLength(extension, 'utf8');
+    if (baseBudget < 1) {
+      base = suggested;
+      extension = '';
+      baseBudget = maxNameBytes - Buffer.byteLength(uniqueSuffix, 'utf8');
+    }
+    const uniqueName = `${truncateToUtf8Bytes(base, baseBudget)}${uniqueSuffix}${extension}`;
     const entry = {
       download,
       finished: false,

@@ -150,6 +150,13 @@ export class Context {
   // second still ran — letting the session TTL reaper (or a session close)
   // dispose the browser mid-operation.
   private _runningTools: string[] = [];
+  // In-flight download saves (Tab hands them over as they start). A download
+  // outlives the tool call that triggered it — the response reports it as
+  // "still downloading" — so disposal must wait for these before closing the
+  // browser, or saveAs() is aborted mid-stream and the reported file ends up
+  // missing or partial (the stateless HTTP path disposes the backend's
+  // default context the moment the response closes).
+  private _pendingDownloads = new Set<Promise<unknown>>();
   private _abortController = new AbortController();
   private _removePageObserver: (() => void) | undefined;
   private _inputRecorder: InputRecorder | undefined;
@@ -290,6 +297,56 @@ export class Context {
   }
 
   /**
+   * Registers an in-flight download save. Disposal waits (bounded) for the
+   * registered saves before closing the browser context, and the session TTL
+   * reaper holds off like it does for running tools — a download routinely
+   * outlives the tool call that started it. The save's rejection is handled
+   * here (logged): an aborted download must not surface as an unhandled
+   * rejection.
+   */
+  trackPendingDownload(promise: Promise<unknown>): void {
+    const settled = promise.catch(logUnhandledError);
+    this._pendingDownloads.add(settled);
+    void settled.then(() => this._pendingDownloads.delete(settled));
+  }
+
+  /** True while a download save is still writing its file. */
+  hasPendingDownloads(): boolean {
+    return this._pendingDownloads.size > 0;
+  }
+
+  /**
+   * Waits for in-flight download saves, bounded at 30s: the same order as the
+   * default navigation timeout, so a download that network conditions allow
+   * to finish gets to — while disposal (a stateless HTTP response closing,
+   * process shutdown, the TTL reaper) can never hang indefinitely on a
+   * stalled download. Past the cap the download is abandoned, exactly as
+   * every download was before this wait existed. Loops because a page can
+   * start another download while an earlier one is awaited; the cap spans
+   * the whole wait, not each download.
+   */
+  private async _waitForPendingDownloads(timeoutMs = 30_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this._pendingDownloads.size) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0)
+        return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all([...this._pendingDownloads]),
+          new Promise<void>(resolve => {
+            timer = setTimeout(resolve, remaining);
+            timer.unref?.();
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  }
+
+  /**
    * Marks a tool call as running and returns the release callback for that
    * specific call (idempotent, and releasing out of completion order is
    * fine). isRunningTool() stays true until every overlapping call released.
@@ -312,6 +369,13 @@ export class Context {
       return;
 
     testDebug('close context');
+
+    // Before the browser goes away — whoever is closing it: a stateless HTTP
+    // response's disposal, browser_session_close, the TTL reaper, the last
+    // tab closing — give in-flight download saves their bounded window to
+    // finish, so the files tool responses reported as "still downloading"
+    // actually materialize.
+    await this._waitForPendingDownloads();
 
     const promise = this._browserContextPromise;
     this._browserContextPromise = undefined;
