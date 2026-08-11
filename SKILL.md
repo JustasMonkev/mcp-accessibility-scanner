@@ -228,7 +228,7 @@ These tools are always available and work in the interactive REPL.
 |------|-------------|
 | `browser_console_messages` | Get all console messages |
 | `browser_network_requests` | Get all network requests, numbered |
-| `browser_network_request` | Get headers and bodies of one request: `{"index": 3}` (credential headers redacted, binary bodies summarised) |
+| `browser_network_request` | Get credential-redacted headers and body metadata for one request: `{"index": 3}` |
 
 ### Optional Tools (require `--caps`)
 

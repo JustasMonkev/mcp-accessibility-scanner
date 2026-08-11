@@ -21,10 +21,6 @@ import { truncateDataUrls } from '../utils/dataUrl.js';
 import type * as playwright from 'playwright';
 import type { Tab } from '../tab.js';
 
-// Bodies land in the model's context verbatim, so cap what a single detail call
-// can contribute. Anything longer is reported as truncated rather than dropped.
-export const maxBodyLength = 20000;
-
 const requests = defineTabTool({
   capability: 'core',
 
@@ -40,7 +36,7 @@ const requests = defineTabTool({
     const entries = [...tab.requests().entries()];
     entries.forEach(([req, res], index) => response.addResult(renderRequest(index + 1, req, res)));
     if (entries.length)
-      response.addResult('\nCall browser_network_request with one of the indexes above to see the headers and response body of that request.');
+      response.addResult('\nCall browser_network_request with one of the indexes above to see its headers and body metadata.');
   },
 });
 
@@ -50,7 +46,7 @@ const requestDetails = defineTabTool({
   schema: {
     name: 'browser_network_request',
     title: 'Get network request details',
-    description: 'Returns the request headers, response headers and response body of a single network request listed by browser_network_requests',
+    description: 'Returns credential-redacted headers and body metadata for a single network request listed by browser_network_requests',
     inputSchema: z.object({
       index: z.number().int().min(1).describe('Index of the request in the browser_network_requests listing, starting at 1'),
     }),
@@ -115,11 +111,11 @@ function renderRequestDetails(details: RequestDetails): string[] {
     ...section('Request headers', renderHeaderSection(details.requestHeaders)),
   ];
 
-  // `postData()` decodes as UTF-8, which mangles file uploads and protobuf
-  // payloads, so go through the buffer and let the same binary check decide.
+  // Use the buffer so the reported size is accurate for file uploads and other
+  // non-UTF-8 payloads.
   const postData = request.postDataBuffer();
   if (postData?.length)
-    result.push(...section('Request body', renderBody(postData, contentTypeOf(requestHeaders))));
+    result.push(...section('Request body', summarizeBody(postData, contentTypeOf(requestHeaders))));
 
   // Playwright records a failure on the request even when a response already
   // arrived — a connection reset mid-body is a 200 that never completed.
@@ -186,126 +182,28 @@ function renderHeaders(headers: Record<string, string>): string[] {
   });
 }
 
-type ContentType = { mimeType: string, charset: string };
-
-function contentTypeOf(headers: Record<string, string>): ContentType {
+function contentTypeOf(headers: Record<string, string>): string {
   // `allHeaders()` joins a repeated header with a comma, so only the first
   // media type and its parameters describe the payload.
   const first = (headers['content-type'] ?? '').split(',')[0];
-  return {
-    mimeType: first.split(';')[0].trim().toLowerCase(),
-    charset: /;\s*charset\s*=\s*"?([^";]*)/i.exec(first)?.[1].trim() ?? '',
-  };
+  return first.split(';')[0].trim().toLowerCase();
 }
 
-function renderResponseBody(read: Read<Buffer> | undefined, contentType: ContentType): string[] {
+function renderResponseBody(read: Read<Buffer> | undefined, mimeType: string): string[] {
   if (!read)
     return ['<empty>'];
   // Redirects, responses whose body the browser never retained, and bodies
   // still streaming all fail the read; the rest of the report is worth showing.
-  return 'error' in read ? [`<body unavailable: ${read.error}>`] : renderBody(read.value, contentType);
+  return 'error' in read ? [`<body unavailable: ${read.error}>`] : summarizeBody(read.value, mimeType);
 }
 
-// A body large enough to matter is decoded only up to the cap: a 100MB response
-// must not become a 200MB string, and `toString` throws outright past ~512MB.
-const maxBodyBytes = maxBodyLength * 4;
-
-function renderBody(body: Buffer, contentType: ContentType): string[] {
+// Bodies can contain submitted credentials and private API data even when their
+// content type looks harmless. Report useful diagnostics without placing any
+// page-controlled body content in the MCP transcript.
+function summarizeBody(body: Buffer, mimeType: string): string[] {
   if (!body.length)
     return ['<empty>'];
-  if (!isTextualMimeType(contentType.mimeType, body))
-    return [`<binary data, ${body.length} bytes${contentType.mimeType ? `, ${contentType.mimeType}` : ''}>`];
-
-  // Collapse data: URLs before measuring — doing it after would let the
-  // replacement text push the rendered body back over the cap.
-  const text = truncateDataUrls(decodeText(body.subarray(0, maxBodyBytes), contentType.charset));
-  if (body.length <= maxBodyBytes && text.length <= maxBodyLength)
-    return fence(text);
-
-  const shown = sliceWholeCharacters(text, maxBodyLength);
-  return [...fence(shown), `<truncated, showing the first ${shown.length} characters of a ${body.length}-byte body>`];
-}
-
-function decodeText(body: Buffer, charset: string): string {
-  if (!charset || /^utf-?8$/i.test(charset))
-    return body.toString('utf8');
-  try {
-    // Legacy pages really do serve windows-1252 and shift_jis; decoding those
-    // as UTF-8 turns the body into replacement characters.
-    return new TextDecoder(charset).decode(body);
-  } catch {
-    return body.toString('utf8');
-  }
-}
-
-// The body is page-controlled. Fencing it stops a response from forging the
-// `####` sections around it, and the fence is grown past any run of backticks
-// inside so the block still terminates where it should.
-function fence(text: string): string[] {
-  const delimiter = '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map(match => match[0].length + 1)));
-  return [delimiter, text, delimiter];
-}
-
-// Never cut between the halves of a surrogate pair -- a lone half renders as a
-// replacement character and can corrupt the JSON the response is packed into.
-function sliceWholeCharacters(text: string, length: number): string {
-  const last = text.charCodeAt(length - 1);
-  const isHighSurrogate = last >= 0xd800 && last <= 0xdbff;
-  return text.slice(0, isHighSurrogate ? length - 1 : length);
-}
-
-const textualMimeTypes = new Set([
-  'application/csv',
-  'application/ecmascript',
-  'application/graphql',
-  'application/javascript',
-  'application/json',
-  'application/ndjson',
-  'application/sql',
-  'application/x-ecmascript',
-  'application/x-javascript',
-  'application/x-ndjson',
-  'application/x-sh',
-  'application/x-www-form-urlencoded',
-  'application/x-yaml',
-  'application/xml',
-  'application/yaml',
-]);
-
-const binaryMimePrefixes = ['audio/', 'font/', 'image/', 'model/', 'video/'];
-
-const binaryMimeTypes = new Set([
-  'application/grpc',
-  'application/gzip',
-  'application/octet-stream',
-  'application/pdf',
-  'application/protobuf',
-  'application/wasm',
-  'application/x-gzip',
-  'application/x-protobuf',
-  'application/x-tar',
-  'application/zip',
-]);
-
-function isTextualMimeType(mimeType: string, body: Buffer): boolean {
-  if (mimeType.startsWith('text/'))
-    return true;
-  // Structured syntax suffixes: `image/svg+xml`, `application/ld+json`, ...
-  if (mimeType.endsWith('+json') || mimeType.endsWith('+xml') || mimeType.endsWith('+text'))
-    return true;
-  if (textualMimeTypes.has(mimeType))
-    return true;
-  if (binaryMimeTypes.has(mimeType) || binaryMimePrefixes.some(prefix => mimeType.startsWith(prefix)))
-    return false;
-  // Absent or unrecognised type -- `multipart/form-data` posts are the common
-  // case, and those are text until a file part makes them otherwise.
-  return !looksBinary(body);
-}
-
-function looksBinary(body: Buffer): boolean {
-  // A NUL byte is the cheapest reliable signal that a payload is not text --
-  // UTF-8 encoded text never contains one outside of a deliberate \0.
-  return body.subarray(0, 1024).includes(0);
+  return [`<redacted, ${body.length} bytes${mimeType ? `, ${mimeType}` : ''}>`];
 }
 
 export default [
