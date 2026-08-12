@@ -23,6 +23,7 @@ import debug from 'debug';
 
 import { createMcpHandler, isInitializeRequest, isLegacyRequest, STDIO_DEFAULT_MAX_BUFFER_SIZE } from '@modelcontextprotocol/server';
 import { NodeStreamableHTTPServerTransport, toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
+import { ManualPromise } from './manualPromise.js';
 import * as mcpServer from './server.js';
 
 import type { NodeMcpRequestHandler } from '@modelcontextprotocol/node';
@@ -99,8 +100,10 @@ export async function installHttpTransport(httpServer: http.Server, serverBacken
 //   stateless mode.
 // ─────────────────────────────────────────────────────────────────────────────
 
+type StatefulSession = { transport: NodeStreamableHTTPServerTransport, eventStreamReady: ManualPromise<void> };
+
 class SessionStore {
-  private readonly _sessions = new Map<string, NodeStreamableHTTPServerTransport>();
+  private readonly _sessions = new Map<string, StatefulSession>();
   // The modern (2026-07-28) endpoint: one handler for the server lifetime,
   // serving each enveloped request with a fresh server + backend from the
   // factory — the same per-request idiom as the legacy stateless path, so the
@@ -148,13 +151,15 @@ class SessionStore {
   }
 
   private async _handleSessionRequest(sessionId: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const transport = this._sessions.get(sessionId);
-    if (!transport) {
+    const session = this._sessions.get(sessionId);
+    if (!session) {
       res.statusCode = 404;
       res.end('Session not found');
       return;
     }
-    await transport.handleRequest(req, res);
+    if (req.method === 'GET' && req.headers.accept?.split(',').some(type => type.split(';')[0].trim().toLowerCase() === 'text/event-stream'))
+      session.eventStreamReady.resolve();
+    await session.transport.handleRequest(req, res);
   }
 
   // Peeks at the JSON-RPC body once to route it: modern envelope → the
@@ -235,12 +240,13 @@ class SessionStore {
   }
 
   private async _createSession(req: http.IncomingMessage, res: http.ServerResponse, parsedBody: unknown): Promise<void> {
+    const eventStreamReady = new ManualPromise<void>();
     const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: async sessionId => {
         testDebug(`create http session: ${transport.sessionId}`);
-        this._sessions.set(sessionId, transport);
-        await mcpServer.connect(this._serverBackendFactory, transport, true);
+        this._sessions.set(sessionId, { transport, eventStreamReady });
+        await mcpServer.connect(this._serverBackendFactory, transport, true, eventStreamReady);
       }
     });
 

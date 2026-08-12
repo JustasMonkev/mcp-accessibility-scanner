@@ -729,7 +729,7 @@ describe('mcp http transport hardening', () => {
   // fetch them even from a client that still advertises the capability, and
   // the first tool call must be served without waiting for the standalone
   // event stream (the old listRoots round-trip needed it). Refs #169.
-  it('never requests roots and serves tools without the event stream', async () => {
+  it('keeps POST-only sessions alive without the event stream or roots', async () => {
     const callTool = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }));
     const initialize = vi.fn(async () => undefined);
     const { port } = await startServer({
@@ -748,9 +748,11 @@ describe('mcp http transport hardening', () => {
     // listRoots could not be delivered, so a tool call only succeeds if the
     // server no longer performs any.
     const noStreamFetch: typeof fetch = async (input, init) => {
-      if (init?.method === 'GET') {
+      const request = input instanceof Request ? input : undefined;
+      const method = init?.method ?? request?.method;
+      if (method === 'GET') {
         return await new Promise<Response>((_resolve, reject) => {
-          init.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          (init?.signal ?? request?.signal)?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
         });
       }
       return fetch(input, init);
@@ -759,6 +761,8 @@ describe('mcp http transport hardening', () => {
     client.setRequestHandler('roots/list', listRoots);
     client.setRequestHandler('ping', () => ({}));
     const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { fetch: noStreamFetch });
+    const previousPingTimeout = process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS;
+    process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS = '20';
 
     try {
       await client.connect(transport);
@@ -768,11 +772,17 @@ describe('mcp http transport hardening', () => {
       expect(invalidGet.statusCode).toBe(406);
 
       await client.callTool({ name: 'probe', arguments: {} });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await client.callTool({ name: 'probe', arguments: {} });
 
       expect(listRoots).not.toHaveBeenCalled();
       expect(initialize).toHaveBeenCalledTimes(1);
-      expect(callTool).toHaveBeenCalledTimes(1);
+      expect(callTool).toHaveBeenCalledTimes(2);
     } finally {
+      if (previousPingTimeout === undefined)
+        delete process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS;
+      else
+        process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS = previousPingTimeout;
       await client.close();
     }
   });
