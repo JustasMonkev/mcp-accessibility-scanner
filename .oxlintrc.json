@@ -3,9 +3,6 @@
   "categories": {
     "correctness": "off"
   },
-  "options": {
-    "typeAware": true
-  },
   "env": {
     "builtin": true
   },

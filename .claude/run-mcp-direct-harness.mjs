@@ -169,7 +169,8 @@ const tests = [
     assertText(result, /#### Request headers/);
     assertText(result, /x-mcp-fixture: network-json/);
     assertText(result, /#### Response\n\[200\] OK/);
-    assertText(result, /\{"ok":true\}/);
+    assertText(result, /<redacted, 11 bytes, application\/json>/);
+    assertNoText(result, /\{"ok":true\}/);
 
     // An out-of-range index reports the usable range instead of a stack trace.
     await assertToolError('browser_network_request', { index: 999 }, /No network request with index 999/);
@@ -187,7 +188,7 @@ const tests = [
     await callTool('browser_navigate', { url: `${state.fixtureOrigin}/network-png` });
     const pngList = await callTool('browser_network_requests', {});
     const png = await callTool('browser_network_request', { index: indexFor(resultText(pngList), /\/network-png\.png/) });
-    assertText(png, /<binary data, \d+ bytes, image\/png>/);
+    assertText(png, /<redacted, \d+ bytes, image\/png>/);
   }),
 
   test('browser_take_screenshot', async () => {
