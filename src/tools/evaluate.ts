@@ -79,6 +79,8 @@ const evaluate = defineTabTool({
  * The decision is made from the source form and never from the runtime type of
  * the result: `window.open` is an expression that happens to evaluate to a
  * function, and it must be returned rather than called.
+ *
+ * @public
  */
 export function toFunctionSource(source: string, onElement: boolean): string {
   if (isFunctionSource(source))

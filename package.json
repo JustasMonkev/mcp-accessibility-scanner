@@ -41,18 +41,16 @@
 		"bench:compare": "node bench/mcp-bench.mjs --compare",
 		"test:watch": "vitest",
 		"test:ui": "vitest --ui",
-		"test:coverage": "vitest run --coverage"
+		"test:coverage": "vitest run --coverage",
+		"knip": "knip --strict"
 	},
 	"dependencies": {
-		"@cfworker/json-schema": "^4.1.1",
 		"@modelcontextprotocol/client": "^2.0.0",
 		"@modelcontextprotocol/node": "^2.0.0",
 		"@modelcontextprotocol/server": "^2.0.0",
 		"axe-core": "4.13.0",
 		"commander": "^15.0.0",
 		"debug": "^4.4.3",
-		"dotenv": "^17.4.2",
-		"mime": "^4.1.0",
 		"playwright": "1.62.1",
 		"playwright-core": "1.62.1",
 		"re2": "^1.26.1",
@@ -70,6 +68,8 @@
 		"eslint": "^10.8.1",
 		"eslint-plugin-notice": "^1.0.0",
 		"happy-dom": "^20.11.2",
+		"json-schema": "^0.4.0",
+		"knip": "^6.32.2",
 		"oxlint": "^1.78.0",
 		"typescript": "^7.0.2",
 		"vitest": "^4.1.10"

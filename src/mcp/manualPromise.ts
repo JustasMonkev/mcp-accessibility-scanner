@@ -54,6 +54,7 @@ export class ManualPromise<T = void> extends Promise<T> {
   }
 }
 
+/** @public */
 export class LongStandingScope {
   private _terminateError: Error | undefined;
   private _closeError: Error | undefined;
