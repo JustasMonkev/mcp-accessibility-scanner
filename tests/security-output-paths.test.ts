@@ -6,10 +6,9 @@ import { outputFile } from '../src/config.js';
 import { sanitizeForFilePath } from '../src/utils/fileUtils.js';
 import type { FullConfig } from '../src/config.js';
 
-// Report and screenshot names come straight from a tool argument, i.e. from
-// whatever the model was told to ask for. Containment inside the configured
-// output directory is the property that keeps a prompt-injected filename from
-// writing anywhere on the host, and nothing pinned it before.
+// Report and screenshot names come straight from a tool argument. Containment
+// inside the output directory is what stops a prompt-injected filename from
+// writing anywhere on the host.
 
 let outputDir: string;
 let config: FullConfig;

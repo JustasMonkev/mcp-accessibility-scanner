@@ -226,23 +226,20 @@ type AnnotationMark = { path: string[], labels: string[] };
 
 async function drawAnnotations(page: playwright.Page, layerId: string, marks: AnnotationMark[]): Promise<number> {
   return await page.evaluate(({ marks, layerId }) => {
-    // Playwright leaves animations running, so a target that is moving would
-    // drift between the measurement below and the screenshot and leave its
-    // marker behind. The cleanup evaluate resumes exactly these.
-    const paused = document.getAnimations().filter(animation => animation.playState === 'running');
-    for (const animation of paused) {
-      // pause() alone only makes the animation "pause-pending": until the next
-      // frame its currentTime keeps advancing with the timeline, so a rect
-      // measured right after it can sit a frame ahead of where the element
-      // finally settles — the very drift this pause exists to prevent, and a
-      // marker offset by one frame of travel in the screenshot. Assigning
-      // currentTime commits the hold time synchronously, without awaiting a
-      // frame that a throttled or offscreen page might never produce.
-      const currentTime = animation.currentTime;
+    // pause() alone leaves the animation "pause-pending" — currentTime keeps
+    // advancing until the next frame — so re-assigning it commits the hold
+    // time now and the rects measured below cannot be a frame stale.
+    const freeze = (animation: Animation) => {
+      const heldAt = animation.currentTime;
       animation.pause();
-      if (currentTime !== null)
-        animation.currentTime = currentTime;
-    }
+      if (heldAt !== null)
+        animation.currentTime = heldAt;
+    };
+
+    // A moving target would drift between measurement and screenshot and leave
+    // its marker behind. The cleanup evaluate resumes exactly these.
+    const paused = document.getAnimations().filter(animation => animation.playState === 'running');
+    paused.forEach(freeze);
 
     const layer = document.createElement('div') as HTMLDivElement & { mcpPausedAnimations?: Animation[] };
     layer.id = layerId;

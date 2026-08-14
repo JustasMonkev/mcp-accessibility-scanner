@@ -66,15 +66,12 @@ type LogEntry = {
   tabSnapshot?: TabSnapshot;
 };
 
-// Argument names whose value is typed into the page: browser_type's `text`,
-// browser_fill_form's per-field `value`. A sign-in step puts the password, the
-// MFA code or an API key there, and session.md is a plain file on disk that
-// outlives the run. The recorded-action branch below already strips fields it
-// does not want persisted; tool args got no such treatment.
+// Values typed into the page — browser_type's `text`, browser_fill_form's
+// per-field `value` — which on a sign-in step are the password or MFA code.
 const secretArgNames = new Set(['text', 'value', 'promptText']);
 
-// Fields that name a secret regardless of the tool, so a future tool with a
-// `password`/`token` argument is covered without another edit here.
+// Matched anywhere in the name, so a future tool's `password`/`token`
+// argument is covered without another edit here.
 const secretArgWords = ['password', 'passwd', 'secret', 'token', 'credential', 'apikey', 'api_key'];
 
 function isSecretArgName(name: string): boolean {
@@ -83,10 +80,9 @@ function isSecretArgName(name: string): boolean {
 }
 
 /**
- * Replaces typed-in values with a length-preserving placeholder so session.md
- * still shows what happened without recording what was typed. Structure,
- * ordering and every non-secret argument are preserved, so the log stays
- * useful for replaying a run by hand.
+ * Replaces secret values with a length-preserving placeholder. session.md is a
+ * plain file that outlives the run; everything else is left intact so the log
+ * still describes what happened.
  */
 export function redactSecretArgs(value: unknown, keyName?: string): unknown {
   if (typeof value === 'string' && keyName !== undefined && isSecretArgName(keyName))

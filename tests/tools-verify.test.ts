@@ -3,10 +3,9 @@ import verifyTools from '../src/tools/verify.js';
 import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
 
-// The four browser_verify_* tools had no tests at all. They are assertion
-// tools: an LLM calls them to confirm page state, so a verify that reports
-// "Done" when the element is absent (or when the value differs) is worse than
-// no check at all — it converts a failed expectation into a passing one.
+// The four browser_verify_* tools had no tests at all. They are assertions: a
+// verify that reports "Done" when the element is absent turns a failed
+// expectation into a passing one.
 
 // The exported array is a union of differently-shaped tools, so a `find()`
 // result types its handler's params as the INTERSECTION of every tool's input.

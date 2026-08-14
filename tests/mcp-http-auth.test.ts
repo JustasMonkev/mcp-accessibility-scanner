@@ -4,12 +4,9 @@ import { httpAddressToString, installHttpTransport, startHttpServer } from '../s
 
 import type { ServerBackendFactory } from '../src/mcp/server.js';
 
-// The Host-header allowlist defends browsers against DNS rebinding, but any
-// non-browser client can send `Host: localhost`, so it is not authentication.
-// PLAYWRIGHT_MCP_HTTP_TOKEN is what actually gates the tool surface when the
-// port is published beyond loopback. These drive a real socket rather than
-// calling the validator, so a change to the request pipeline that skips the
-// check is caught.
+// The Host allowlist stops DNS rebinding but is not authentication — any
+// non-browser client can send `Host: localhost`. These drive a real socket, so
+// a change to the request pipeline that skips the token check is caught.
 
 const testBackendFactory: ServerBackendFactory = {
   name: 'auth-test-backend',

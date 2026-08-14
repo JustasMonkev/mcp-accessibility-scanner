@@ -315,17 +315,9 @@ const allLinksSelector = 'a[href]';
 const navLinksSelector = 'nav a[href], header a[href], [role="navigation"] a[href]';
 
 /**
- * Validates `sitemapUrl` the way every other URL entering the crawl is
- * validated.
- *
- * The sitemap is fetched with `page.request.get`, which shares the browser
- * context's cookie jar and follows redirects, so an unchecked value reached
- * arbitrary hosts carrying the session's cookies — a cookie-bearing SSRF with
- * the response status as an oracle — while `normalizeUrl` and
- * `isAllowedByOrigin` gated every link discovered on a page. The origin check
- * is applied under the caller's own `sameOriginOnly`/`includeSubdomains`
- * settings, so it constrains the fetch exactly as far as it constrains the
- * crawl it feeds.
+ * Holds `sitemapUrl` to the same scope as the crawl it feeds. The sitemap is
+ * fetched with the browser context's cookies and follows redirects, so an
+ * unchecked value reaches arbitrary hosts as the signed-in user.
  */
 export function resolveSitemapUrl(
   sitemapUrlInput: string | undefined,
@@ -357,41 +349,34 @@ async function extractSitemapUrls(page: import('playwright').Page, sitemapUrl: s
   return parseSitemapLocations(xmlText);
 }
 
-// A sitemap URL is capped well below this by the spec; anything longer is not
-// a location we could crawl anyway, and refusing it keeps one malformed entry
-// from carrying the rest of the document along with it.
+// Longer than any crawlable location, so an unterminated entry cannot carry
+// the rest of the document with it.
 const maxSitemapUrlLength = 4096;
 
+const locTagPattern = /<(\/?)loc\s*>/gi;
+
 /**
- * Extracts `<loc>` values without a lazily-quantified regex.
+ * Extracts `<loc>` values in one forward pass.
  *
- * `/<loc>([\s\S]*?)<\/loc>/gi` backtracks across the whole remaining document
- * at every `<loc>` that has no closing tag, which is quadratic: a hostile (or
- * merely truncated) sitemap of 500KB of bare `<loc>` took 11s of blocked event
- * loop, ~45s/MB, freezing every other MCP session in the process. The fetch
- * timeout does not bound the parse.
- *
- * Scanning forward for the next closing tag and resuming past it visits each
- * character a bounded number of times, and a document with no closing tag left
- * ends the scan instead of rescanning its tail.
+ * The lazy `/<loc>([\s\S]*?)<\/loc>/gi` this replaced backtracked over the
+ * remaining document at every unclosed `<loc>`, so a hostile or truncated
+ * sitemap cost ~45s of blocked event loop per MB — unbounded by the fetch
+ * timeout. Each closing tag pairs with the nearest preceding open, which is
+ * the pairing the lazy quantifier produced.
  */
 export function parseSitemapLocations(xmlText: string): string[] {
   const urls: string[] = [];
-  // One forward pass over both tags. A later opening tag overwrites the
-  // pending one, so each closing tag pairs with the nearest preceding open —
-  // the same pairing the lazy quantifier produced, without its backtracking.
-  const tag = /<(\/?)loc\s*>/gi;
+  const tag = new RegExp(locTagPattern);
   let openAt = -1;
   for (let match = tag.exec(xmlText); match; match = tag.exec(xmlText)) {
-    if (!match[1]) {
+    const isClosing = !!match[1];
+    if (!isClosing) {
       openAt = tag.lastIndex;
       continue;
     }
-    if (openAt < 0)
-      continue;
-    const raw = xmlText.slice(openAt, match.index);
+    const raw = openAt < 0 ? '' : xmlText.slice(openAt, match.index);
     openAt = -1;
-    if (raw.length > maxSitemapUrlLength)
+    if (!raw || raw.length > maxSitemapUrlLength)
       continue;
     const url = raw.replace('<![CDATA[', '').replace(']]>', '').trim();
     if (url)

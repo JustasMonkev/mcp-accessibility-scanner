@@ -6,11 +6,9 @@ import fileTools from '../src/tools/files.js';
 import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
 
-// browser_press_key, browser_type, browser_fill_form, browser_wait_for and
-// browser_file_upload had no behavioural tests: only tools-codegen.test.ts
-// touched keyboard.ts, and it asserted nothing beyond the generated snippet
-// parsing. Nothing checked that the right Playwright call was made with the
-// right arguments, so a swapped fill/press or a dropped submit was invisible.
+// None of these tools had a behavioural test: nothing checked that the right
+// Playwright call was made with the right arguments, so a swapped fill/press
+// or a dropped submit was invisible.
 
 type ToolUnderTest = { handle: (context: Context, params: any, response: Response) => Promise<void> };
 const find = (tools: any[], name: string): ToolUnderTest =>

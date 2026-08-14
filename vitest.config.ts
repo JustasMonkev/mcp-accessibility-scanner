@@ -46,15 +46,10 @@ export default defineConfig({
       ],
       include: ['src/**/*.ts'],
       all: true,
-      // These MUST stay nested under `thresholds`. Vitest only reads them
-      // here; sitting directly on `coverage` they are silently ignored, which
-      // is how a declared 90% gate ran for a long time against real coverage
-      // in the 69-80% band without ever failing a build.
-      //
-      // The numbers are a ratchet set just under the measured values, not an
-      // aspiration: raise them as coverage improves. They are deliberately
-      // lower than the old inert 90 because they are now enforced — an
-      // enforced 80 stops regressions that an ignored 90 never could.
+      // Must stay nested under `thresholds` — Vitest ignores these silently
+      // when they sit directly on `coverage`, which is how a declared 90% gate
+      // never once failed a build. A ratchet just under the measured values,
+      // not an aspiration: raise it as coverage improves.
       thresholds: {
         statements: 80,
         branches: 70,

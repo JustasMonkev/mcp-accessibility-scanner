@@ -147,10 +147,8 @@ function overlapRatio(a: Rect, b: Rect, axis: 'x' | 'y'): number {
 
 function countBands(rects: Rect[], axis: 'x' | 'y'): number {
   const band = rects.map((_, index) => index);
-  // Iterative with path compression. A container can hold hundreds of text
-  // siblings, so each lookup runs many times over the pairwise loop below;
-  // flattening the chain on the way out keeps every later lookup O(1), and the
-  // loop form removes the recursion depth an uncompressed chain would need.
+  // Path-compressing find: the pairwise loop below calls this O(n^2) times
+  // for a container that can hold hundreds of siblings.
   const rootOf = (index: number): number => {
     let root = index;
     while (band[root] !== root)

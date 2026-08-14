@@ -90,10 +90,9 @@ const requestDetails = defineTabTool({
   },
 });
 
-// Query parameters that carry a credential rather than a locator. An OAuth
-// redirect (`?code=`), an implicit-flow fragment (`#access_token=`) and a
-// presigned S3 link (`X-Amz-Signature`) all put live secrets in the URL, and
-// browser_network_requests prints every URL it recorded.
+// OAuth redirects (`?code=`), implicit-flow fragments (`#access_token=`) and
+// presigned links (`X-Amz-Signature`) all put live secrets in the URL, and
+// every recorded URL is printed.
 const sensitiveParamWords = ['token', 'key', 'secret', 'password', 'passwd', 'signature', 'credential', 'auth', 'code', 'session', 'sig'];
 
 function isSensitiveParamName(name: string): boolean {
@@ -101,31 +100,36 @@ function isSensitiveParamName(name: string): boolean {
   return sensitiveParamWords.some(word => lowered.includes(word));
 }
 
+const secretFragmentPattern = /token|secret|password|signature|credential/i;
+
 function redactUrlSecrets(rawUrl: string): string {
   let url: URL;
   try {
     url = new URL(rawUrl);
   } catch {
-    // Not parseable as a URL, so there are no components to redact and the
-    // string is reported as recorded.
+    // Nothing to pick apart; report it as recorded.
     return rawUrl;
   }
-  // `https://user:pass@host/` — the password never has a reason to be shown,
-  // and the username identifies the request well enough on its own.
-  if (url.password)
-    url.password = 'redacted';
+
   let redacted = false;
-  for (const name of [...url.searchParams.keys()]) {
-    if (!isSensitiveParamName(name))
-      continue;
-    url.searchParams.set(name, 'redacted');
+  const redact = (apply: () => void) => {
+    apply();
     redacted = true;
+  };
+
+  if (url.password)
+    redact(() => url.password = 'redacted');
+  for (const name of [...url.searchParams.keys()]) {
+    if (isSensitiveParamName(name))
+      redact(() => url.searchParams.set(name, 'redacted'));
   }
-  // A fragment never reaches the server but is where implicit-flow tokens
-  // land, and Playwright records it.
-  if (url.hash && /(?:token|secret|password|signature|credential)/i.test(url.hash))
-    url.hash = '#redacted';
-  return redacted || url.password || url.hash === '#redacted' ? url.toString() : rawUrl;
+  // A fragment never reaches the server, but implicit-flow tokens land there
+  // and Playwright records it.
+  if (secretFragmentPattern.test(url.hash))
+    redact(() => url.hash = '#redacted');
+
+  // Rebuilding a URL normalizes it, so an untouched one is returned verbatim.
+  return redacted ? url.toString() : rawUrl;
 }
 
 function requestLine(index: number, request: playwright.Request): string {

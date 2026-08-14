@@ -60,16 +60,11 @@ export function httpAddressToString(address: string | net.AddressInfo | null): s
 }
 
 /**
- * Shared secret every HTTP request must present, from
- * `PLAYWRIGHT_MCP_HTTP_TOKEN`. Blank or unset means no token is required,
- * which is the historical behaviour and is safe on a loopback bind.
+ * Shared secret every request must present. Blank or unset requires none,
+ * which is safe on a loopback bind.
  *
- * The Host-header allowlist above defends browsers against DNS rebinding; it
- * is not authentication, because any non-browser client can simply send
- * `Host: localhost`. On a loopback bind that does not matter — reaching the
- * socket already implies local access — but `--host 0.0.0.0` publishes the
- * full tool surface (arbitrary JS in the page, the browser's authenticated
- * cookie jar, file writes) to the network with nothing in front of it.
+ * The Host allowlist above stops DNS rebinding from browsers but is not
+ * authentication: any other client can just send `Host: localhost`.
  */
 function configuredHttpToken(): string | undefined {
   const token = process.env.PLAYWRIGHT_MCP_HTTP_TOKEN?.trim();
@@ -100,20 +95,17 @@ function validateRequestAuth(req: http.IncomingMessage): { statusCode: number, m
   return undefined;
 }
 
-/**
- * Warns when the server publishes an unauthenticated tool surface beyond
- * loopback. Deliberately a warning rather than a refusal: the published Docker
- * image runs `--host 0.0.0.0` inside a container whose port is bound to
- * 127.0.0.1 by the compose file, which is a legitimate deployment.
- */
+function isLoopbackHost(host: string | undefined): boolean {
+  const bound = (host ?? 'localhost').toLowerCase().replace(/^\[|\]$/g, '');
+  return bound === 'localhost' || bound === '::1' || bound === '::ffff:127.0.0.1'
+    || bound.endsWith('.localhost') || allowedLoopbackHostnamePattern.test(bound);
+}
+
+// A warning rather than a refusal: the Docker image runs `--host 0.0.0.0`
+// inside a container whose port the compose file binds to 127.0.0.1.
 // eslint-disable-next-line no-console
 export function warnIfUnauthenticatedOnPublicHost(host: string | undefined, log: (message: string) => void = message => console.error(message)): void {
-  if (configuredHttpToken())
-    return;
-  const bound = (host ?? 'localhost').toLowerCase().replace(/^\[|\]$/g, '');
-  const isLoopback = bound === 'localhost' || bound === '::1' || bound === '::ffff:127.0.0.1'
-    || allowedLoopbackHostnamePattern.test(bound) || bound.endsWith('.localhost');
-  if (isLoopback)
+  if (configuredHttpToken() || isLoopbackHost(host))
     return;
   log(`WARNING: listening on ${host} without authentication. Anyone who can reach this port can drive the browser, read pages it is signed in to, and write files. Set PLAYWRIGHT_MCP_HTTP_TOKEN to require a bearer token, or bind to localhost and use a tunnel.`);
 }

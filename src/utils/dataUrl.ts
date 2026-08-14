@@ -207,9 +207,8 @@ function isBase64PayloadTerminator(char: string): boolean {
 }
 
 function isWhitespace(char: string): boolean {
-  // Runs once per character of a base64 payload alongside the switch above, so
-  // the ASCII range — which is every character such a payload can hold — is
-  // answered by char code. Only the rarer Unicode spaces reach the regex.
+  // Once per character of a base64 payload, so ASCII — all such a payload can
+  // hold — is answered by char code and only Unicode spaces reach the regex.
   const code = char.charCodeAt(0);
   if (code < 0x80)
     return code === 32 || (code >= 9 && code <= 13);

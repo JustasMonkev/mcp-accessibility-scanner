@@ -3,18 +3,15 @@ import { z } from 'zod';
 import { allTools, filteredTools } from '../src/tools.js';
 
 // Contract tests over the REAL registry. tool-definitions.test.ts only
-// exercises the defineTool helper with synthetic tools, so nothing previously
-// checked what the server actually advertises: dropping a tool from
-// src/tools.ts, or shipping a schema whose description contradicts its own
-// constraints, broke no test.
+// exercises the defineTool helper with synthetic tools, so nothing checked
+// what the server actually advertises.
 
 function inputJsonSchema(tool: (typeof allTools)[number]): any {
   return z.toJSONSchema(tool.schema.inputSchema as any, { io: 'input' });
 }
 
-// Every tool the package documents as part of its surface. A name only leaves
-// this list through a deliberate edit, which is the point: silently dropping a
-// tool is a breaking change for every client that calls it.
+// Silently dropping a tool breaks every client that calls it, so a name only
+// leaves this list through a deliberate edit.
 const expectedToolNames = [
   'audit_keyboard',
   'audit_screen_reader',
@@ -102,9 +99,8 @@ describe('tool registry contract', () => {
     expect(withVerify).not.toContain('browser_pdf_save');
   });
 
-  // browser_file_upload hands the audited page any absolute path on the
-  // server's filesystem, so it must not be reachable unless an operator asked
-  // for it. It was `core` — i.e. always on and impossible to remove.
+  // Hands the page any absolute path on the server, so it must not be
+  // reachable unless an operator asked for it. It used to be `core`.
   it('keeps browser_file_upload behind the opt-in files capability', () => {
     const uploadTool = allTools.find(t => t.schema.name === 'browser_file_upload')!;
     expect(uploadTool.capability).toBe('files');
@@ -124,11 +120,8 @@ describe('tool registry contract', () => {
     }
   });
 
-  // Regression: browser_navigation_timeout and browser_default_timeout both
-  // enforced min 30000 / max 1200000 while their description advertised
-  // "(0-300000ms)". The description is the only range an LLM client sees, so a
-  // client following it sent 5000 and got a validation error, and never used
-  // the 300000-1200000 range that was actually allowed.
+  // Regression: both timeout tools enforced 30000-1200000 while advertising
+  // "(0-300000ms)". The description is the only range a client sees.
   it('never advertises a numeric range that contradicts the enforced bounds', () => {
     const mismatches: string[] = [];
     for (const tool of allTools) {
@@ -153,10 +146,8 @@ describe('tool registry contract', () => {
     expect(mismatches).toEqual([]);
   });
 
-  // A tool whose JSON Schema marks every field optional but which still
-  // rejects `{}` (browser_find needs text-or-regex, expressed as a
-  // superRefine that JSON Schema cannot carry) must say which fields are
-  // needed in its own descriptions — that text is all the client has to go on.
+  // browser_find needs text-or-regex via a superRefine that JSON Schema
+  // cannot carry, so its descriptions are all the client has to go on.
   it('explains cross-field requirements in the field descriptions', () => {
     for (const tool of allTools) {
       const json = inputJsonSchema(tool);
@@ -171,9 +162,8 @@ describe('tool registry contract', () => {
     }
   });
 
-  // reportFile names a file the tool writes. An empty string is not a name:
-  // it resolves to the output directory itself and the write fails with a
-  // bare EISDIR after the whole audit has already run.
+  // An empty reportFile resolves to the output directory itself, failing with
+  // a bare EISDIR after the whole audit has run.
   it('rejects an empty reportFile rather than failing at write time', () => {
     const writers = allTools.filter(tool => 'reportFile' in (inputJsonSchema(tool).properties ?? {}));
     expect(writers.length).toBeGreaterThanOrEqual(4);

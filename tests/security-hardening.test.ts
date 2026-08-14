@@ -5,9 +5,8 @@ import { isSensitiveHeaderName } from '../src/tools/network.js';
 import { redactSecretArgs } from '../src/sessionLog.js';
 import { warnIfUnauthenticatedOnPublicHost } from '../src/mcp/http.js';
 
-// Each block here pins one boundary that a tool argument, a scanned page or an
-// HTTP client can push against. They are grouped so a regression names the
-// boundary it broke rather than a line number.
+// Each block pins one boundary a tool argument, a scanned page or an HTTP
+// client can push against, so a regression names the boundary it broke.
 
 describe('navigation scheme allowlist', () => {
   it.each([
