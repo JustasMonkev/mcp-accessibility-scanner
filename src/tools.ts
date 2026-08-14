@@ -40,6 +40,7 @@ import auditScreenReader from './tools/auditScreenReader.js';
 import type { Tool } from './tools/tool.js';
 import type { FullConfig } from './config.js';
 
+/** Also imported dynamically by bench/mcp-bench.mjs from the compiled lib. @public */
 export const allTools: Tool<any>[] = [
   ...common,
   ...console,

@@ -5,8 +5,9 @@ import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileU
 
 type PressableKey = 'Tab' | 'Shift+Tab' | 'Enter';
 
-export type TargetRect = { x: number; y: number; width: number; height: number };
+type TargetRect = { x: number; y: number; width: number; height: number };
 
+/** @public */
 export type FocusPoint = {
   role: string | null;
   name: string | null;
@@ -25,7 +26,7 @@ export type FocusPoint = {
   scrollY: number;
 };
 
-export type FocusStop = FocusPoint & {
+type FocusStop = FocusPoint & {
   step: number;
   key: 'Tab' | 'Shift+Tab';
   fingerprint: string;
@@ -34,6 +35,7 @@ export type FocusStop = FocusPoint & {
   issues: string[];
 };
 
+/** @public */
 export type KeyboardAuditOptions = {
   maxTabs: number;
   includeShiftTab: boolean;
@@ -71,7 +73,7 @@ type SkipLinkActivation = {
   urlAfter: string | null;
 };
 
-export type KeyboardAuditResult = {
+type KeyboardAuditResult = {
   stops: FocusStop[];
   uniqueFingerprints: number;
   skipLink: {
@@ -154,7 +156,7 @@ function meetsSpacingException(rect: TargetRect, neighbors: TargetRect[]): boole
   });
 }
 
-export function meetsTargetSizeMinimum(point: FocusPoint): boolean {
+function meetsTargetSizeMinimum(point: FocusPoint): boolean {
   const rect = point.boundingBox;
   // Document root / non-interactive focus stops are not pointer targets at all.
   if (!point.isPointerTarget || !rect)
@@ -176,7 +178,7 @@ export function meetsTargetSizeMinimum(point: FocusPoint): boolean {
  * SC 2.4.11 Focus Not Obscured (Minimum) is only violated when the focused
  * component is *entirely* hidden, so a partially covered target passes here.
  */
-export function isFocusEntirelyObscured(point: FocusPoint): boolean {
+function isFocusEntirelyObscured(point: FocusPoint): boolean {
   const obstruction = point.obstruction;
   return obstruction !== null && obstruction.sampled > 0 && obstruction.blocked === obstruction.sampled;
 }
@@ -206,6 +208,7 @@ async function maybeCaptureIssueScreenshot(
   screenshots.push(path);
 }
 
+/** @public */
 export async function runKeyboardFocusAudit(
   options: KeyboardAuditOptions,
   callbacks: KeyboardAuditCallbacks

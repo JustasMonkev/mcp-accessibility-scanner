@@ -5,9 +5,10 @@ import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileU
 
 import type * as playwright from 'playwright';
 
+/** @public */
 export type Rect = { x: number; y: number; width: number; height: number };
 
-export type AriaTreeNode = {
+type AriaTreeNode = {
   role: string;
   name: string | null;
   level: number | null;
@@ -16,6 +17,7 @@ export type AriaTreeNode = {
   parent: number | null;
 };
 
+/** @public */
 export type ElementFacts = {
   tagName: string | null;
   selector: string | null;
@@ -28,8 +30,10 @@ export type ElementFacts = {
   ariaHidden: boolean;
 };
 
+/** @public */
 export type ScreenReaderNode = AriaTreeNode & ElementFacts & { childCount: number };
 
+/** @public */
 export type ScreenReaderCheck =
   | 'missing-accessible-name'
   | 'uninformative-accessible-name'
@@ -38,7 +42,7 @@ export type ScreenReaderCheck =
   | 'duplicate-accessible-name'
   | 'reading-order-mismatch';
 
-export type ScreenReaderFinding = {
+type ScreenReaderFinding = {
   check: ScreenReaderCheck;
   wcag: string;
   ref: string | null;
@@ -49,13 +53,13 @@ export type ScreenReaderFinding = {
   fix: string;
 };
 
-export type ScreenReaderAuditResult = {
+type ScreenReaderAuditResult = {
   findings: ScreenReaderFinding[];
   countByCheck: Record<ScreenReaderCheck, number>;
   truncatedChecks: ScreenReaderCheck[];
 };
 
-export type ScreenReaderAuditOptions = {
+type ScreenReaderAuditOptions = {
   checkNames: boolean;
   checkReadingOrder: boolean;
   maxFindingsPerCheck: number;
@@ -100,6 +104,7 @@ function normalizeText(value: string | null): string {
   return value.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/gu, ' ').trim();
 }
 
+/** @public */
 export function parseAriaSnapshot(snapshot: string): AriaTreeNode[] {
   const nodes: AriaTreeNode[] = [];
   const stack: { depth: number; index: number }[] = [];
@@ -382,6 +387,7 @@ function checkReadingOrder(nodes: ScreenReaderNode[], push: (finding: ScreenRead
   }
 }
 
+/** @public */
 export function analyzeScreenReader(
   rawNodes: ScreenReaderNode[],
   options: ScreenReaderAuditOptions
@@ -426,6 +432,7 @@ export function analyzeScreenReader(
 }
 
 // Runs inside the page: no imports, no closures over module scope.
+/** @public */
 export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): ElementFacts[] {
   // innerText counts visually hidden (clipped) labels as visible, which makes
   // icon-only controls look like text. Walk the subtree instead and skip the

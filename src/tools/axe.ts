@@ -588,6 +588,7 @@ export function dedupeAxeNodes(nodes: AxeNode[]): AxeNode[] {
   });
 }
 
+/** @public */
 export function trimAxeResults(
   violations: AxeViolation[],
   options: { maxNodesPerViolation: number; dedupe?: boolean }

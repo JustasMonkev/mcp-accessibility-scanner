@@ -25,6 +25,7 @@ import type { ModalState } from './tools/tool.js';
 
 import type { Context } from './context.js';
 
+/** @public */
 export const TabEvents = {
   modalState: 'modalState'
 };

@@ -39,6 +39,8 @@ const defaultSessionTtlMs = 30 * 60 * 1000;
  * `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS`; a present-but-blank or unparsable
  * value keeps the default rather than becoming 0, and a zero or negative
  * value disables reaping entirely.
+ *
+ * @public
  */
 export function browserSessionTtlMs(): number {
   const value = process.env.PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS;

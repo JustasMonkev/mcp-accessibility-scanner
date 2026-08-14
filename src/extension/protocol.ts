@@ -24,6 +24,7 @@ export const EXTENSION_ID = 'mmlmfjhmonkocbjadbfplnigmagldckm';
 // imports the real chrome.* types and they are structurally compatible.
 export type Debuggee = { tabId?: number; extensionId?: string; targetId?: string };
 export type DebuggerSession = Debuggee & { sessionId?: string };
+/** @public */
 export type TabCreateProperties = {
   active?: boolean;
   index?: number;
@@ -42,6 +43,7 @@ export type Tab = {
   active: boolean;
   pinned: boolean;
 };
+/** @public */
 export type TabRemoveInfo = { windowId: number; isWindowClosing: boolean };
 
 // Protocol v2 command params/results mirror chrome.* positional arguments.

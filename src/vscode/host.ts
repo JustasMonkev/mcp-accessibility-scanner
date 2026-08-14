@@ -41,6 +41,7 @@ const contextSwitchOptions = z.object({
   lib: z.string().optional().describe('The library to use for the connection'),
 });
 
+/** @public */
 export class VSCodeProxyBackend implements ServerBackend {
   name = 'Playwright MCP Client Switcher';
   version = packageJSON.version;

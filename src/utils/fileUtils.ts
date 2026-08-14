@@ -14,23 +14,7 @@
  * limitations under the License.
  */
 
-import os from 'node:os';
-import path from 'node:path';
-
 import { createShortGuid } from './guid.js';
-
-export function cacheDir() {
-  let cacheDirectory: string;
-  if (process.platform === 'linux')
-    cacheDirectory = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
-  else if (process.platform === 'darwin')
-    cacheDirectory = path.join(os.homedir(), 'Library', 'Caches');
-  else if (process.platform === 'win32')
-    cacheDirectory = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-  else
-    throw new Error('Unsupported platform: ' + process.platform);
-  return path.join(cacheDirectory, 'ms-playwright');
-}
 
 export function sanitizeForFilePath(s: string) {
   const sanitize = (s: string) => s.replace(/[\x00-\x2C\x2E-\x2F\x3A-\x40\x5B-\x60\x7B-\x7F]+/g, '-');

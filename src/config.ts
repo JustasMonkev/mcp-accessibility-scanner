@@ -167,7 +167,7 @@ function applyMobileConfig(resolved: FullConfig, configInFile: Config, envOverri
   return mergeCLIConfigSources(configInFile, envOverrides, cliOverrides, mobileOverride, source);
 }
 
-export function configFromCLIOptions(cliOptions: CLIOptions): Config {
+function configFromCLIOptions(cliOptions: CLIOptions): Config {
   let browserName: 'chromium' | 'firefox' | 'webkit' | undefined;
   let channel: string | undefined;
   switch (cliOptions.browser) {
@@ -435,7 +435,7 @@ export function commaSeparatedList(value: string | undefined): string[] | undefi
  * empties. Used for `PLAYWRIGHT_MCP_CDP_HEADERS` so that commas inside header
  * values (e.g. `Forwarded: for=a, for=b`) are preserved.
  */
-export function newlineSeparatedList(value: string | undefined): string[] | undefined {
+function newlineSeparatedList(value: string | undefined): string[] | undefined {
   if (!value)
     return undefined;
   const entries = value.split('\n').map(v => v.trim()).filter(Boolean);
@@ -447,6 +447,8 @@ export function newlineSeparatedList(value: string | undefined): string[] | unde
  * newline-separated `PLAYWRIGHT_MCP_CDP_HEADERS` env var) into a header map.
  * Only the first colon is treated as the name/value separator, so colons inside
  * the value are preserved.
+ *
+ * @public
  */
 export function parseCdpHeaders(entries: string[] | undefined): Record<string, string> | undefined {
   if (!entries || !entries.length)

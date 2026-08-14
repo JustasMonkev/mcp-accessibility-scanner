@@ -15,6 +15,7 @@
 - Build: `npm run build`
 - Lint: `npm run lint`
 - Test: `npm test`
+- Knip: `npm run knip`
 - Coverage: `npm run test:coverage`
 - Docker smoke test: `npm run test:docker`
 - Tool latency benchmark: `npm run bench` (see the Benchmarking section of `README.md`; build first, and compare revisions with `npm run bench:compare`)
@@ -26,13 +27,3 @@
 - When touching build, lint, or test behavior, run the relevant npm script before finalizing.
 - Before committing or pushing, self-review your diff against `.claude/skills/pre-push-review/SKILL.md` — a checklist of the recurring defect patterns automated PR review keeps finding in this repo.
 - Avoid introducing ignored or generated artifacts into version control; `.gitignore` already excludes `lib/`, `coverage/`, Playwright reports, and similar outputs.
-
-<!-- OPENWIKI:START -->
-
-## OpenWiki
-
-This repository uses OpenWiki for recurring code documentation. Start with `openwiki/quickstart.md`, then follow its links to architecture, workflows, domain concepts, operations, integrations, testing guidance, and source maps.
-
-OpenWiki pages are generated documentation. Do not hand-edit them unless explicitly asked; prefer updating source code/docs, then regenerate OpenWiki.
-
-<!-- OPENWIKI:END -->
