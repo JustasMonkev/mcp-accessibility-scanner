@@ -66,6 +66,41 @@ type LogEntry = {
   tabSnapshot?: TabSnapshot;
 };
 
+// Argument names whose value is typed into the page: browser_type's `text`,
+// browser_fill_form's per-field `value`. A sign-in step puts the password, the
+// MFA code or an API key there, and session.md is a plain file on disk that
+// outlives the run. The recorded-action branch below already strips fields it
+// does not want persisted; tool args got no such treatment.
+const secretArgNames = new Set(['text', 'value', 'promptText']);
+
+// Fields that name a secret regardless of the tool, so a future tool with a
+// `password`/`token` argument is covered without another edit here.
+const secretArgWords = ['password', 'passwd', 'secret', 'token', 'credential', 'apikey', 'api_key'];
+
+function isSecretArgName(name: string): boolean {
+  const lowered = name.toLowerCase();
+  return secretArgNames.has(name) || secretArgWords.some(word => lowered.includes(word));
+}
+
+/**
+ * Replaces typed-in values with a length-preserving placeholder so session.md
+ * still shows what happened without recording what was typed. Structure,
+ * ordering and every non-secret argument are preserved, so the log stays
+ * useful for replaying a run by hand.
+ */
+export function redactSecretArgs(value: unknown, keyName?: string): unknown {
+  if (typeof value === 'string' && keyName !== undefined && isSecretArgName(keyName))
+    return `<redacted, ${value.length} characters>`;
+  if (Array.isArray(value))
+    return value.map(entry => redactSecretArgs(entry, keyName));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+            .map(([key, entry]) => [key, redactSecretArgs(entry, key)]));
+  }
+  return value;
+}
+
 export class SessionLog {
   private _folder: string;
   private _file: string;
@@ -182,7 +217,7 @@ export class SessionLog {
             `### Tool call: ${entry.toolCall.toolName}`,
             `- Args`,
             '```json',
-            JSON.stringify(entry.toolCall.toolArgs, null, 2),
+            JSON.stringify(redactSecretArgs(entry.toolCall.toolArgs), null, 2),
             '```',
         );
         if (entry.toolCall.result) {

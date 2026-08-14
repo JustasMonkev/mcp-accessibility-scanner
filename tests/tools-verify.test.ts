@@ -8,10 +8,19 @@ import type { Context } from '../src/context.js';
 // "Done" when the element is absent (or when the value differs) is worse than
 // no check at all — it converts a failed expectation into a passing one.
 
-const verifyElement = verifyTools.find(t => t.schema.name === 'browser_verify_element_visible')!;
-const verifyText = verifyTools.find(t => t.schema.name === 'browser_verify_text_visible')!;
-const verifyList = verifyTools.find(t => t.schema.name === 'browser_verify_list_visible')!;
-const verifyValue = verifyTools.find(t => t.schema.name === 'browser_verify_value')!;
+// The exported array is a union of differently-shaped tools, so a `find()`
+// result types its handler's params as the INTERSECTION of every tool's input.
+// Narrowing to the handler signature keeps each call site checkable against
+// the arguments it actually passes.
+type ToolUnderTest = { handle: (context: Context, params: any, response: Response) => Promise<void> };
+
+const findTool = (name: string): ToolUnderTest =>
+  verifyTools.find(tool => tool.schema.name === name)! as unknown as ToolUnderTest;
+
+const verifyElement = findTool('browser_verify_element_visible');
+const verifyText = findTool('browser_verify_text_visible');
+const verifyList = findTool('browser_verify_list_visible');
+const verifyValue = findTool('browser_verify_value');
 
 type LocatorStub = {
   count: ReturnType<typeof vi.fn>;

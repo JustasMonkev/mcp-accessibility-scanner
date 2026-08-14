@@ -24,6 +24,9 @@ import type { JSONSchema7 } from 'json-schema';
 import snapshotTools from '../src/tools/snapshot.js';
 import { toMcpTool } from '../src/mcp/tool.js';
 import * as axe from '../src/tools/axe.js';
+import { canLaunchChromium } from './browserFixture.js';
+
+const canRunBrowserTests = await canLaunchChromium();
 
 describe('Snapshot Tools', () => {
   const snapshotTool = snapshotTools.find(tool => tool.schema.name === 'browser_snapshot')!;
@@ -481,7 +484,7 @@ describe('scan_page annotated screenshots', () => {
   });
 });
 
-describe.skipIf(!fs.existsSync(chromium.executablePath()))('scan_page annotated screenshots in a real browser', () => {
+describe.skipIf(!canRunBrowserTests)('scan_page annotated screenshots in a real browser', () => {
   const scanPageTool = snapshotTools.find(tool => tool.schema.name === 'scan_page')!;
   let browser: Browser;
   let outputDir: string;
@@ -828,7 +831,7 @@ describe('browser_drop', () => {
   });
 });
 
-describe.skipIf(!fs.existsSync(chromium.executablePath()))('browser_drop in a real browser', () => {
+describe.skipIf(!canRunBrowserTests)('browser_drop in a real browser', () => {
   const dropTool = snapshotTools.find(tool => tool.schema.name === 'browser_drop')!;
   let browser: Browser;
   let scratchDir: string;

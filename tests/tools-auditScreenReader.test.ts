@@ -11,6 +11,9 @@ import auditScreenReaderTools, {
   type ScreenReaderNode,
 } from '../src/tools/auditScreenReader.js';
 import { Response } from '../src/response.js';
+import { canLaunchChromium } from './browserFixture.js';
+
+const canRunBrowserTests = await canLaunchChromium();
 
 function node(overrides: Partial<ScreenReaderNode>): ScreenReaderNode {
   return {
@@ -500,11 +503,15 @@ describe('audit_screen_reader tool measurement', () => {
   });
 });
 
-describe('collectElementFacts in a real page', () => {
+// Gated like every other browser-backed suite. These 28 tests cover the
+// hardest logic in the audit (clip-path, transforms, shadow DOM, visibility
+// inheritance) and used to launch Chromium unconditionally, so on a machine
+// without one they hard-failed while the rest of the suite skipped quietly.
+describe.skipIf(!canRunBrowserTests)('collectElementFacts in a real page', () => {
   let browser: Browser | undefined;
 
   beforeEach(async () => {
-    browser ??= await chromium.launch();
+    browser ??= await chromium.launch({ headless: true, chromiumSandbox: false });
   });
 
   // Shared scaffold for the pure visible-text measurements; tests asserting

@@ -23,8 +23,20 @@ import path from 'node:path';
 const rootDir = path.resolve(__dirname, '..');
 const cliArgs = [path.join(rootDir, 'cli.js')];
 
+// These tests spawn the real cli.js, which loads lib/. Building it here used
+// to rewrite lib/ while other suites were already running against it under
+// fileParallelism, and a compile error surfaced as an opaque hook timeout
+// rather than a build failure. Build only when lib/ is missing, and say so
+// clearly when the build fails.
 beforeAll(() => {
-  execFileSync(process.execPath, [path.join(rootDir, 'node_modules/typescript/bin/tsc'), '--project', path.join(rootDir, 'tsconfig.json')]);
+  if (fs.existsSync(path.join(rootDir, 'lib', 'program.js')))
+    return;
+  try {
+    execFileSync(process.execPath, [path.join(rootDir, 'node_modules/typescript/bin/tsc'), '--project', path.join(rootDir, 'tsconfig.json')]);
+  } catch (error) {
+    const output = error instanceof Error && 'stdout' in error ? String((error as any).stdout) : String(error);
+    throw new Error(`lib/ is missing and could not be built for the CLI tests. Run "npm run build" first.\n${output}`);
+  }
 });
 
 function runCLI(args: string): string {

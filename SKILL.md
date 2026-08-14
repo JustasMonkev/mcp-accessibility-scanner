@@ -210,7 +210,7 @@ These tools are always available and work in the interactive REPL.
 | `browser_drop` | Drop external files or data onto an element: `{"element": "Dropzone", "ref": "e7", "paths": ["/path/to/file"]}` (paths are read on the server host) |
 | `browser_select_option` | Select dropdown option |
 | `browser_fill_form` | Fill multiple form fields at once |
-| `browser_file_upload` | Upload files: `{"paths": ["/path/to/file"]}` |
+| `browser_file_upload` | Upload files: `{"paths": ["/path/to/file"]}` (requires `--caps files`) |
 | `browser_handle_dialog` | Handle browser dialog: `{"accept": true}` |
 | `browser_evaluate` | Run JavaScript on page: a function or a bare expression such as `{"function": "document.title"}` |
 

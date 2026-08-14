@@ -17,8 +17,16 @@
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 
+// Opt-in (`--caps files`) rather than always on. The tool hands the audited
+// page any absolute path on the server's filesystem, and the page can read
+// what it is given and send it anywhere — so a page that opens a file chooser
+// plus one injected tool call is a read-and-exfiltrate primitive for
+// ~/.ssh/id_rsa or a cloud credentials file. Confining the paths would defeat
+// the tool's purpose (uploading files the operator chose), so the control is
+// the capability switch the other privileged tool groups already use, and it
+// defaults to off.
 const uploadFile = defineTabTool({
-  capability: 'core',
+  capability: 'files',
 
   schema: {
     name: 'browser_file_upload',

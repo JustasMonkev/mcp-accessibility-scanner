@@ -18,7 +18,7 @@ import debug from 'debug';
 
 import { ProtocolError, ProtocolErrorCode, Server } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
-import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
+import { httpAddressToString, installHttpTransport, startHttpServer, warnIfUnauthenticatedOnPublicHost } from './http.js';
 import { InProcessTransport } from './inProcessTransport.js';
 
 import type { CacheHint, Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
@@ -250,6 +250,9 @@ export async function start(serverBackendFactory: ServerBackendFactory, options:
 
   const httpServer = await startHttpServer(options);
   await installHttpTransport(httpServer, serverBackendFactory);
+  // Said once at startup, where an operator publishing the port beyond
+  // loopback will actually see it.
+  warnIfUnauthenticatedOnPublicHost(options.host);
   const url = httpAddressToString(httpServer.address());
 
   const mcpConfig: any = { mcpServers: { } };

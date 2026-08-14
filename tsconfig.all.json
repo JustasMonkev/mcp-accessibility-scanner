@@ -1,4 +1,13 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["**/*.ts", "**/*.js"],
+  "compilerOptions": {
+    // The base config emits src/ into lib/ and pins rootDir there. This config
+    // only typechecks, and it covers tests/ and bench/ too, so rootDir must be
+    // widened to the repository root or every file outside src/ fails with
+    // TS6059 before a single real error is reported.
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": ["src", "tests", "utils", "bench", "*.ts"],
+  "exclude": ["lib", "node_modules", ".claude/worktrees"]
 }

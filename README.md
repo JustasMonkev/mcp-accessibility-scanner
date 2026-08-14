@@ -70,7 +70,9 @@ Without the `-v` mount, output files only exist inside the container and are los
 docker compose up -d
 ```
 
-The Compose configuration publishes the unauthenticated MCP HTTP transport on `127.0.0.1:8931` only. Do not expose this port to untrusted networks.
+The Compose configuration publishes the MCP HTTP transport on `127.0.0.1:8931` only. Do not expose this port to untrusted networks.
+
+Set `PLAYWRIGHT_MCP_HTTP_TOKEN` to require a bearer token on every HTTP request; clients then send `Authorization: Bearer <token>` and anything else gets `401`. Leave it unset for a loopback bind, where reaching the socket already implies local access. The server prints a warning at startup if it binds to a non-loopback address without a token: the `Host` header allowlist blocks DNS rebinding from browsers, but any other client can send `Host: localhost`, so it is not authentication.
 
 #### Build from source
 
@@ -632,8 +634,11 @@ Handle browser dialogs (alerts, confirms, prompts).
 - If the dialog was already closed outside the session (e.g. dismissed manually in a headed browser), the call succeeds, reports the dialog as already closed, and clears its leftover state instead of failing.
 
 #### `browser_file_upload`
-Upload files to the page.
+Upload files to the page. **Requires `--caps files`.**
 - Parameters: `paths` (array of absolute file paths)
+- Opt-in because it hands the page any file the server process can read, and a
+  page that receives one can send it anywhere. Enable it only when you actually
+  need to upload files during an audit.
 
 #### `browser_verify_element_visible`
 Verify an element by ARIA role/name.

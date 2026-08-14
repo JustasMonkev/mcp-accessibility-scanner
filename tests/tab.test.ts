@@ -298,7 +298,7 @@ describe('Tab', () => {
       mockPage.waitForEvent = vi.fn().mockReturnValue(new Promise(() => {}));
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
-      await expect(tab.navigate('chrome://crash')).rejects.toThrow('net::ERR_ABORTED');
+      await expect(tab.navigate('https://example.com/crash')).rejects.toThrow('net::ERR_ABORTED');
     });
 
     it('waits for an explicitly reported download', async () => {

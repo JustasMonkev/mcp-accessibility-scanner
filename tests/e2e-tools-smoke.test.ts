@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { resolveConfig } from '../src/config.js';
+import { canLaunchChromium } from './browserFixture.js';
 
 const fixtureOrigin = 'http://fixture.local';
 
@@ -107,26 +108,7 @@ function extractResourceLinks(result: { content: Array<{ type: string, uri?: str
   return result.content.filter(item => item.type === 'resource_link');
 }
 
-const hasBundledChromium = fs.existsSync(chromium.executablePath());
-async function canLaunchBundledChromium(): Promise<boolean> {
-  if (!hasBundledChromium)
-    return false;
-
-  let browser: Browser | undefined;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      chromiumSandbox: false,
-    });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    await browser?.close().catch(() => undefined);
-  }
-}
-
-const canRunE2E = await canLaunchBundledChromium();
+const canRunE2E = await canLaunchChromium();
 
 describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
   const launchResources: Array<() => Promise<void>> = [];

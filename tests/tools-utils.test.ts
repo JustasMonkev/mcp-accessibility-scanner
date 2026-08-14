@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-import fs from 'fs';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { chromium, type Browser } from 'playwright';
 import { waitForCompletion, generateLocator, callOnPageNoTrace } from '../src/tools/utils.js';
 import type { Tab } from '../src/tab.js';
 import { EventEmitter } from 'events';
+import { canLaunchChromium } from './browserFixture.js';
 
 vi.mock('playwright-core/lib/coreBundle', () => ({
   default: {
@@ -29,26 +29,7 @@ vi.mock('playwright-core/lib/coreBundle', () => ({
   },
 }));
 
-const hasBundledChromium = fs.existsSync(chromium.executablePath());
-async function canLaunchBundledChromium(): Promise<boolean> {
-  if (!hasBundledChromium)
-    return false;
-
-  let browser: Browser | undefined;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      chromiumSandbox: false,
-    });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    await browser?.close().catch(() => undefined);
-  }
-}
-
-const canRunLocatorIntegration = await canLaunchBundledChromium();
+const canRunLocatorIntegration = await canLaunchChromium();
 
 describe('Tool Utils', () => {
   let mockTab: Tab;

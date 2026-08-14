@@ -314,6 +314,41 @@ async function readPage(page: import('playwright').Page, linkSelector: string): 
 const allLinksSelector = 'a[href]';
 const navLinksSelector = 'nav a[href], header a[href], [role="navigation"] a[href]';
 
+/**
+ * Validates `sitemapUrl` the way every other URL entering the crawl is
+ * validated.
+ *
+ * The sitemap is fetched with `page.request.get`, which shares the browser
+ * context's cookie jar and follows redirects, so an unchecked value reached
+ * arbitrary hosts carrying the session's cookies — a cookie-bearing SSRF with
+ * the response status as an oracle — while `normalizeUrl` and
+ * `isAllowedByOrigin` gated every link discovered on a page. The origin check
+ * is applied under the caller's own `sameOriginOnly`/`includeSubdomains`
+ * settings, so it constrains the fetch exactly as far as it constrains the
+ * crawl it feeds.
+ */
+export function resolveSitemapUrl(
+  sitemapUrlInput: string | undefined,
+  startUrl: URL,
+  sameOriginOnly: boolean,
+  includeSubdomains: boolean
+): string {
+  if (sitemapUrlInput === undefined)
+    return new URL('sitemap.xml', startUrl).toString();
+
+  let sitemapUrl: URL;
+  try {
+    sitemapUrl = new URL(sitemapUrlInput, startUrl);
+  } catch {
+    throw new Error(`Invalid sitemapUrl "${sitemapUrlInput}". Provide an absolute http(s) URL.`);
+  }
+  if (sitemapUrl.protocol !== 'http:' && sitemapUrl.protocol !== 'https:')
+    throw new Error(`sitemapUrl must use http:// or https://. Received "${sitemapUrlInput}".`);
+  if (!isAllowedByOrigin(sitemapUrl, startUrl, sameOriginOnly, includeSubdomains))
+    throw new Error(`sitemapUrl "${sitemapUrl.toString()}" is outside the crawl scope (start URL "${startUrl.toString()}"). The sitemap is fetched with the browser's cookies, so it is restricted to the same scope as the crawl; set sameOriginOnly=false or includeSubdomains=true to widen it deliberately.`);
+  return sitemapUrl.toString();
+}
+
 async function extractSitemapUrls(page: import('playwright').Page, sitemapUrl: string): Promise<string[]> {
   const response = await page.request.get(sitemapUrl, { timeout: 15000 });
   if (!response.ok())
@@ -531,7 +566,7 @@ const auditSite = defineTabTool({
       for (const url of params.urls ?? [])
         enqueueUrl(url, 0, null);
     } else if (params.strategy === 'sitemap') {
-      const sitemapUrl = params.sitemapUrl ?? new URL('sitemap.xml', startUrl).toString();
+      const sitemapUrl = resolveSitemapUrl(params.sitemapUrl, startUrl, params.sameOriginOnly, params.includeSubdomains);
       const temporaryTab = await context.newTab();
       try {
         const sitemapUrls = await extractSitemapUrls(temporaryTab.page, sitemapUrl);

@@ -22,6 +22,7 @@ import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { resolveConfig } from '../src/config.js';
 import type { Context } from '../src/context.js';
 import type { Tab } from '../src/tab.js';
+import { canLaunchChromium } from './browserFixture.js';
 
 const handleDialogTool = dialogTools.find(t => t.schema.name === 'browser_handle_dialog')!;
 
@@ -99,12 +100,7 @@ describe('browser_handle_dialog', () => {
   });
 });
 
-const hasBundledChromium = await chromium.launch({ headless: true, chromiumSandbox: false })
-    .then(async browser => {
-      await browser.close();
-      return true;
-    })
-    .catch(() => false);
+const hasBundledChromium = await canLaunchChromium();
 
 describe.skipIf(!hasBundledChromium)('phantom dialog recovery in a real browser', () => {
   let browser: Browser | undefined;

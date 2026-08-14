@@ -240,6 +240,10 @@
         "tests/contract-tool-registry.test.ts",
         "tests/contract-package-metadata.test.ts",
         "tests/security-output-paths.test.ts",
+        "tests/security-hardening.test.ts",
+        "tests/mcp-http-auth.test.ts",
+        "tests/tools-input.test.ts",
+        "tests/browserFixture.ts",
         "bench/**"
       ],
       "rules": {

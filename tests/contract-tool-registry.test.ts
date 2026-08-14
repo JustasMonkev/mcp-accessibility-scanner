@@ -78,7 +78,7 @@ describe('tool registry contract', () => {
   });
 
   it('declares only known capabilities and annotation types', () => {
-    const knownCapabilities = new Set(['core', 'core-install', 'core-tabs', 'vision', 'pdf', 'verify']);
+    const knownCapabilities = new Set(['core', 'core-install', 'core-tabs', 'vision', 'pdf', 'verify', 'files']);
     // The three hints in ToolSchema (src/mcp/tool.ts) drive the MCP
     // readOnlyHint/destructiveHint/idempotentHint a client uses to decide
     // whether a retry is safe, so an unknown value here is not cosmetic.
@@ -100,6 +100,20 @@ describe('tool registry contract', () => {
     const withVerify = filteredTools({ capabilities: ['verify'] } as any).map(t => t.schema.name);
     expect(withVerify).toContain('browser_verify_value');
     expect(withVerify).not.toContain('browser_pdf_save');
+  });
+
+  // browser_file_upload hands the audited page any absolute path on the
+  // server's filesystem, so it must not be reachable unless an operator asked
+  // for it. It was `core` — i.e. always on and impossible to remove.
+  it('keeps browser_file_upload behind the opt-in files capability', () => {
+    const uploadTool = allTools.find(t => t.schema.name === 'browser_file_upload')!;
+    expect(uploadTool.capability).toBe('files');
+
+    const defaultNames = filteredTools({ capabilities: undefined } as any).map(t => t.schema.name);
+    expect(defaultNames).not.toContain('browser_file_upload');
+
+    const withFiles = filteredTools({ capabilities: ['files'] } as any).map(t => t.schema.name);
+    expect(withFiles).toContain('browser_file_upload');
   });
 
   it('produces a serializable JSON Schema for every tool', () => {

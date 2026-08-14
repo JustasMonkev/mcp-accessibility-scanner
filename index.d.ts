@@ -18,10 +18,21 @@ import type { Server } from '@modelcontextprotocol/server';
 import type { Config } from './config.js';
 import type { BrowserContext } from 'playwright';
 
-export type Connection = {
-  server: Server;
-  close(): Promise<void>;
-};
+/**
+ * @deprecated `createConnection` has never returned this shape. It resolves to
+ * the MCP `Server` itself; the wrapper is kept only so an existing import of
+ * the name still compiles. Use `Server` directly.
+ */
+export type Connection = Server;
 
-export declare function createConnection(config?: Config, contextGetter?: () => Promise<BrowserContext>): Promise<Connection>;
+/**
+ * Creates an MCP server for this package.
+ *
+ * Returns the `Server` — connect it to a transport with `server.connect(...)`
+ * and close it with `server.close()`. This declaration previously promised a
+ * `{ server, close() }` wrapper that `src/index.ts` never produced, so a
+ * TypeScript consumer reading `connection.server` compiled cleanly and got
+ * `undefined` at runtime.
+ */
+export declare function createConnection(config?: Config, contextGetter?: () => Promise<BrowserContext>): Promise<Server>;
 export {};

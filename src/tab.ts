@@ -45,6 +45,32 @@ export type TabSnapshot = {
 
 class StaleAriaSnapshotError extends Error {}
 
+// Schemes a navigation may use. `browser_navigate` takes a bare string from
+// the model, so without this an injected instruction reaches the host
+// filesystem through `file:///etc/passwd` — the snapshot the tool returns then
+// carries the file's contents straight back into the transcript, and
+// `file:///home/user/` lists directories. `view-source:` and `filesystem:`
+// wrap the same access, `chrome://`/`devtools://` reach browser internals, and
+// `javascript:` runs script in whatever document is loaded (browser_evaluate
+// is the supported way to do that, against a page the caller chose).
+//
+// http/https are the audit targets, `data:` is caller-supplied content that
+// touches nothing local, and `about:` covers the blank pages the tools
+// themselves navigate to.
+const navigableSchemes = new Set(['http:', 'https:', 'data:', 'about:']);
+
+export function assertNavigableUrl(url: string): void {
+  // A scheme-relative ("//example.com") or relative URL has no scheme of its
+  // own; the browser resolves it against the current document, which is
+  // already a navigable one, so there is nothing to reject.
+  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(url.trim())?.[1];
+  if (scheme === undefined)
+    return;
+  if (navigableSchemes.has(`${scheme.toLowerCase()}:`))
+    return;
+  throw new Error(`Refusing to navigate to a "${scheme}:" URL. Only http:, https:, data: and about: URLs can be opened — "${scheme}:" would reach the host filesystem or browser internals rather than a web page.`);
+}
+
 export class Tab extends EventEmitter<TabEventsInterface> {
   readonly context: Context;
   readonly page: playwright.Page;
@@ -258,6 +284,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   async navigate(url: string) {
+    assertNavigableUrl(url);
     this._clearCollectedArtifacts();
 
     const downloadEvent = new ManualPromise<playwright.Download>();

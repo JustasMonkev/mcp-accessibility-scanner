@@ -1,10 +1,13 @@
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { assertRuleOptionsValid, axeRuleSchemaShape, axeTagValues, defaultAxeTags, dedupeAxeNodes, prepareAxeResults, runAxeScan, summarizeAxeViolations, trimAxeResults } from '../src/tools/axe.js';
+import { canLaunchChromium } from './browserFixture.js';
+
+const canRunBrowserTests = await canLaunchChromium();
 
 // The scan drives the page itself: axe-core is injected into every frame, then
 // run in the main one. The fake page records what the run was asked to do, and
@@ -88,6 +91,13 @@ function resetScan() {
   lastScan = undefined;
   scanResult = { url: 'https://example.com', violations: [], incomplete: [], passes: [], inapplicable: [] };
 }
+
+// The module-level fakes above were reset by 45 hand-written calls, and 13
+// tests did not make one — the isolation was enforced by copy-paste discipline
+// rather than by the framework, so a new test inherited the previous test's
+// scanResult. The explicit calls remain valid (several tests reset mid-test
+// between two scans); this only guarantees the starting state.
+beforeEach(resetScan);
 
 function node(target: string, html: string) {
   return { target: [target], html, failureSummary: `${target} failed` } as any;
@@ -510,7 +520,15 @@ describe('axe helpers', () => {
     });
 
     expect((await runAxeScan(pageWithSelectorCounts({}, frames))).unscannedFrames).toHaveLength(frames.length);
-    expect({ maxCoverage, maxScope }).toEqual({ maxCoverage: 4, maxScope: 4 });
+    // The cap is the invariant worth pinning: never more than 4 in flight.
+    // Asserting the observed peak is EXACTLY 4 additionally requires the
+    // scheduler to fill every slot, which a loaded CI box need not do — that
+    // made this the one assertion here that could fail for being busy. The
+    // lower bound still proves the work runs concurrently rather than serially.
+    expect(maxCoverage).toBeLessThanOrEqual(4);
+    expect(maxScope).toBeLessThanOrEqual(4);
+    expect(maxCoverage).toBeGreaterThan(1);
+    expect(maxScope).toBeGreaterThan(1);
   });
 
   it('does not accept a readiness marker left by an earlier scan', async () => {
@@ -742,7 +760,7 @@ describe('axe helpers', () => {
   });
 });
 
-describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage in a real browser', () => {
+describe.skipIf(!canRunBrowserTests)('axe frame coverage in a real browser', () => {
   it('reports a hidden iframe made visible by author CSS outside a CSS-hidden modal', async () => {
     const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
     try {

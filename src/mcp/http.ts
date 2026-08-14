@@ -59,12 +59,75 @@ export function httpAddressToString(address: string | net.AddressInfo | null): s
   return `http://${resolvedHost}:${resolvedPort}`;
 }
 
+/**
+ * Shared secret every HTTP request must present, from
+ * `PLAYWRIGHT_MCP_HTTP_TOKEN`. Blank or unset means no token is required,
+ * which is the historical behaviour and is safe on a loopback bind.
+ *
+ * The Host-header allowlist above defends browsers against DNS rebinding; it
+ * is not authentication, because any non-browser client can simply send
+ * `Host: localhost`. On a loopback bind that does not matter — reaching the
+ * socket already implies local access — but `--host 0.0.0.0` publishes the
+ * full tool surface (arbitrary JS in the page, the browser's authenticated
+ * cookie jar, file writes) to the network with nothing in front of it.
+ */
+function configuredHttpToken(): string | undefined {
+  const token = process.env.PLAYWRIGHT_MCP_HTTP_TOKEN?.trim();
+  return token ? token : undefined;
+}
+
+// Constant-time compare so a wrong token cannot be recovered byte by byte.
+function tokenMatches(provided: string, expected: string): boolean {
+  const providedBytes = Buffer.from(provided);
+  const expectedBytes = Buffer.from(expected);
+  if (providedBytes.length !== expectedBytes.length)
+    return false;
+  return crypto.timingSafeEqual(providedBytes, expectedBytes);
+}
+
+function validateRequestAuth(req: http.IncomingMessage): { statusCode: number, message: string } | undefined {
+  const expected = configuredHttpToken();
+  if (!expected)
+    return;
+  const header = req.headers.authorization;
+  const provided = typeof header === 'string' && /^Bearer /i.test(header)
+    ? header.slice('Bearer '.length).trim()
+    : undefined;
+  if (!provided || !tokenMatches(provided, expected)) {
+    testDebug('reject request with missing or invalid bearer token');
+    return { statusCode: 401, message: 'Unauthorized' };
+  }
+  return undefined;
+}
+
+/**
+ * Warns when the server publishes an unauthenticated tool surface beyond
+ * loopback. Deliberately a warning rather than a refusal: the published Docker
+ * image runs `--host 0.0.0.0` inside a container whose port is bound to
+ * 127.0.0.1 by the compose file, which is a legitimate deployment.
+ */
+// eslint-disable-next-line no-console
+export function warnIfUnauthenticatedOnPublicHost(host: string | undefined, log: (message: string) => void = message => console.error(message)): void {
+  if (configuredHttpToken())
+    return;
+  const bound = (host ?? 'localhost').toLowerCase().replace(/^\[|\]$/g, '');
+  const isLoopback = bound === 'localhost' || bound === '::1' || bound === '::ffff:127.0.0.1'
+    || allowedLoopbackHostnamePattern.test(bound) || bound.endsWith('.localhost');
+  if (isLoopback)
+    return;
+  log(`WARNING: listening on ${host} without authentication. Anyone who can reach this port can drive the browser, read pages it is signed in to, and write files. Set PLAYWRIGHT_MCP_HTTP_TOKEN to require a bearer token, or bind to localhost and use a tunnel.`);
+}
+
 export async function installHttpTransport(httpServer: http.Server, serverBackendFactory: ServerBackendFactory) {
   const sessions = new SessionStore(serverBackendFactory);
   httpServer.on('request', async (req, res) => {
-    const validationError = validateRequestHeaders(httpServer, req) ?? validateRequestRouting(req);
+    const validationError = validateRequestHeaders(httpServer, req)
+      ?? validateRequestAuth(req)
+      ?? validateRequestRouting(req);
     if (validationError) {
       res.statusCode = validationError.statusCode;
+      if (validationError.statusCode === 401)
+        res.setHeader('WWW-Authenticate', 'Bearer');
       res.end(validationError.message);
       return;
     }

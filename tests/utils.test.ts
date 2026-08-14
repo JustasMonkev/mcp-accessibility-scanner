@@ -14,34 +14,15 @@
  * limitations under the License.
  */
 
-import fs from 'fs';
 import { chromium, type Browser } from 'playwright';
 import { describe, it, expect } from 'vitest';
 import { createGuid, createHash, createShortGuid } from '../src/utils/guid.js';
 import { safeIsoTimestampForFileName } from '../src/utils/fileUtils.js';
 import { compressAriaSnapshot } from '../src/utils/ariaCompression.js';
 import { truncateDataUrl, truncateDataUrls } from '../src/utils/dataUrl.js';
+import { canLaunchChromium } from './browserFixture.js';
 
-const hasBundledChromium = fs.existsSync(chromium.executablePath());
-async function canLaunchBundledChromium(): Promise<boolean> {
-  if (!hasBundledChromium)
-    return false;
-
-  let browser: Browser | undefined;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      chromiumSandbox: false,
-    });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    await browser?.close().catch(() => undefined);
-  }
-}
-
-const canRunAriaSnapshotIntegration = await canLaunchBundledChromium();
+const canRunAriaSnapshotIntegration = await canLaunchChromium();
 
 describe('Utils', () => {
   describe('createGuid', () => {

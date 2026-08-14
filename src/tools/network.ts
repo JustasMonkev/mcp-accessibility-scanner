@@ -90,8 +90,46 @@ const requestDetails = defineTabTool({
   },
 });
 
+// Query parameters that carry a credential rather than a locator. An OAuth
+// redirect (`?code=`), an implicit-flow fragment (`#access_token=`) and a
+// presigned S3 link (`X-Amz-Signature`) all put live secrets in the URL, and
+// browser_network_requests prints every URL it recorded.
+const sensitiveParamWords = ['token', 'key', 'secret', 'password', 'passwd', 'signature', 'credential', 'auth', 'code', 'session', 'sig'];
+
+function isSensitiveParamName(name: string): boolean {
+  const lowered = name.toLowerCase();
+  return sensitiveParamWords.some(word => lowered.includes(word));
+}
+
+function redactUrlSecrets(rawUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    // Not parseable as a URL, so there are no components to redact and the
+    // string is reported as recorded.
+    return rawUrl;
+  }
+  // `https://user:pass@host/` — the password never has a reason to be shown,
+  // and the username identifies the request well enough on its own.
+  if (url.password)
+    url.password = 'redacted';
+  let redacted = false;
+  for (const name of [...url.searchParams.keys()]) {
+    if (!isSensitiveParamName(name))
+      continue;
+    url.searchParams.set(name, 'redacted');
+    redacted = true;
+  }
+  // A fragment never reaches the server but is where implicit-flow tokens
+  // land, and Playwright records it.
+  if (url.hash && /(?:token|secret|password|signature|credential)/i.test(url.hash))
+    url.hash = '#redacted';
+  return redacted || url.password || url.hash === '#redacted' ? url.toString() : rawUrl;
+}
+
 function requestLine(index: number, request: playwright.Request): string {
-  return `[${index}] [${request.method().toUpperCase()}] ${truncateDataUrls(request.url())}`;
+  return `[${index}] [${request.method().toUpperCase()}] ${truncateDataUrls(redactUrlSecrets(request.url()))}`;
 }
 
 function renderRequest(index: number, request: playwright.Request, response: playwright.Response | null) {
@@ -179,13 +217,29 @@ const sensitiveHeaderNames = new Set([
   'x-auth-token',
 ]);
 
+// An enumeration alone cannot keep up with the header names real services
+// invent, and every miss puts a live credential in the transcript verbatim. A
+// name carrying any of these words is redacted whatever else it is called,
+// which covers x-csrf-token, x-amz-security-token, x-goog-api-key,
+// x-functions-key, api-key, x-refresh-token, www-authenticate and their
+// vendor-specific relatives. False positives cost only a hidden value whose
+// length is still reported.
+const sensitiveHeaderWords = ['auth', 'token', 'key', 'secret', 'credential', 'session', 'cookie', 'password'];
+
+export function isSensitiveHeaderName(name: string): boolean {
+  const lowered = name.toLowerCase();
+  if (sensitiveHeaderNames.has(lowered))
+    return true;
+  return sensitiveHeaderWords.some(word => lowered.includes(word));
+}
+
 function renderHeaders(headers: Record<string, string>): string[] {
   const names = Object.keys(headers).sort();
   if (!names.length)
     return ['<none>'];
   return names.map(name => {
     const value = headers[name];
-    if (sensitiveHeaderNames.has(name.toLowerCase()))
+    if (isSensitiveHeaderName(name))
       return `${name}: <redacted, ${value.length} characters>`;
     // `allHeaders()` joins repeated headers (`set-cookie` especially) with a
     // newline; keep one line per header so `name: value` stays parseable.

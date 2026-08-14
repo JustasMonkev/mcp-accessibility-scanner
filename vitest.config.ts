@@ -39,12 +39,8 @@ export default defineConfig({
         'src/index.ts', // Entry point
         'src/tools.ts', // Server initialization
         // Tools requiring complex Playwright mocking or integration tests
-        'src/tools/files.ts',
-        'src/tools/form.ts',
         'src/tools/install.ts',
-        'src/tools/keyboard.ts',
         'src/tools/pdf.ts',
-        'src/tools/wait.ts',
         'src/utils/codegen.ts', // Code generation utilities
         'src/utils/package.ts', // Simple package.json wrapper
       ],
