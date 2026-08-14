@@ -1,0 +1,12 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/index.ts!",
+    "src/program.ts!",
+    "src/vscode/main.ts!",
+    "bench/*.mjs",
+    "utils/copyright.js",
+    ".claude/run-mcp-direct-harness.mjs"
+  ],
+  "ignore": [".claude/worktrees/**"]
+}

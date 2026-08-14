@@ -22,13 +22,13 @@ import type { Tab } from '../tab.js';
 import type { Response } from '../response.js';
 import type { ToolSchema } from '../mcp/tool.js';
 
-export type FileUploadModalState = {
+type FileUploadModalState = {
   type: 'fileChooser';
   description: string;
   fileChooser: playwright.FileChooser;
 };
 
-export type DialogModalState = {
+type DialogModalState = {
   type: 'dialog';
   description: string;
   dialog: playwright.Dialog;

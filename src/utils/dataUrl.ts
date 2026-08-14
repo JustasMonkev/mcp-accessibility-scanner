@@ -18,6 +18,7 @@ const dataUrlPrefix = 'data:';
 const encodedDataUrlPrefix = 'data%3a';
 const maxDataUrlMetadataLength = 120;
 
+/** @public */
 export function truncateDataUrl(url: string): string {
   if (!startsWithIgnoreCase(url, 0, dataUrlPrefix) && !startsWithIgnoreCase(url, 0, encodedDataUrlPrefix))
     return url;

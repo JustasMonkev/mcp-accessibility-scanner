@@ -22,6 +22,7 @@ const errorsDebug = debug('pw:mcp:errors');
 
 export type ToolDescriptor = Tool;
 
+/** @public */
 export function haveToolNamesChanged(previousTools: ToolDescriptor[] | undefined, nextTools: ToolDescriptor[]): boolean {
   if (!previousTools)
     return true;

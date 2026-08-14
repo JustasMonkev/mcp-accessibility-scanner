@@ -168,7 +168,7 @@ function endOfRegex(source: string, start: number): number {
 }
 
 /** Offset of the first character at or after `offset` that is not whitespace or a comment. */
-export function skipTrivia(source: string, offset: number): number {
+function skipTrivia(source: string, offset: number): number {
   for (;;) {
     while (offset < source.length && whitespace.test(source[offset]))
       offset++;
