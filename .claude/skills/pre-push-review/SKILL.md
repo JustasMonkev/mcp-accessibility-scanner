@@ -110,7 +110,7 @@ False positives matter as much as false negatives — several findings were "thi
 
 AGENTS.md requires README updates for user-facing changes, and Codex enforces it:
 
-- Grep `README.md`, `SKILL.md`, and `openwiki/` for every flag, field, tool output line, or behavior you changed. A report field you renamed (`sessionLoss` → `sessionLosses`) leaves recipes reading an absent field.
+- Grep `README.md` and `SKILL.md` for every flag, field, tool output line, or behavior you changed. A report field you renamed (`sessionLoss` → `sessionLosses`) leaves recipes reading an absent field.
 - Docs must describe what the code *does*: don't claim the harness builds first when it doesn't, or document an install command that also runs the full harness.
 - New user-visible output lines (e.g. `HTTP status:`) are part of the documented tool response format — document them.
 
