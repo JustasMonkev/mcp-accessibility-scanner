@@ -51,6 +51,7 @@ class StaleAriaSnapshotError extends Error {}
 // filesystem or browser internals straight into the returned snapshot.
 const navigableSchemes = new Set(['http:', 'https:', 'data:', 'about:']);
 
+/** @public */
 export function assertNavigableUrl(url: string): void {
   const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(url.trim())?.[1];
   // Relative and scheme-relative URLs resolve against the current document,

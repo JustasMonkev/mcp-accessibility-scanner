@@ -230,6 +230,7 @@ const sensitiveHeaderNames = new Set([
 // length is still reported.
 const sensitiveHeaderWords = ['auth', 'token', 'key', 'secret', 'credential', 'session', 'cookie', 'password'];
 
+/** @public */
 export function isSensitiveHeaderName(name: string): boolean {
   const lowered = name.toLowerCase();
   if (sensitiveHeaderNames.has(lowered))

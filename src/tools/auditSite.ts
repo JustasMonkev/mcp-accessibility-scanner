@@ -318,6 +318,8 @@ const navLinksSelector = 'nav a[href], header a[href], [role="navigation"] a[hre
  * Holds `sitemapUrl` to the same scope as the crawl it feeds. The sitemap is
  * fetched with the browser context's cookies and follows redirects, so an
  * unchecked value reaches arbitrary hosts as the signed-in user.
+ *
+ * @public
  */
 export function resolveSitemapUrl(
   sitemapUrlInput: string | undefined,
@@ -363,6 +365,8 @@ const locTagPattern = /<(\/?)loc\s*>/gi;
  * sitemap cost ~45s of blocked event loop per MB — unbounded by the fetch
  * timeout. Each closing tag pairs with the nearest preceding open, which is
  * the pairing the lazy quantifier produced.
+ *
+ * @public
  */
 export function parseSitemapLocations(xmlText: string): string[] {
   const urls: string[] = [];

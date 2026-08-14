@@ -42,7 +42,7 @@ export const defaultAxeTags: readonly AxeTag[] = axeTagValues.filter(
 // every passing rule, which together are ~85% of a content-heavy page's result
 // and are dropped inside the page rather than serialized across the CDP
 // connection and thrown away here.
-export type AxeNode = {
+type AxeNode = {
   target: axe.NodeResult['target'];
   html: string;
   failureSummary: string | null;
@@ -575,6 +575,7 @@ export function unscannedFrameLines(unscannedFrames: string[]): string[] {
   ];
 }
 
+/** @public */
 export function dedupeAxeNodes(nodes: AxeNode[]): AxeNode[] {
   const seen = new Set<string>();
   return nodes.filter(node => {

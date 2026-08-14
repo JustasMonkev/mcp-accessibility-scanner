@@ -46,18 +46,26 @@ function runCLI(args: string): string {
   });
 }
 
-function collectOutput(args: string[], timeoutMs = 3000): Promise<{ stdout: string; stderr: string }> {
+// The budget only bounds a CLI that never exits (the server modes, which are
+// killed on purpose). A CLI that exits — every startup-rejection test here —
+// resolves on 'close' long before it, so a generous cap costs those nothing
+// and stops a loaded machine from asserting against output the child had not
+// managed to print yet. Matches runCLI's own 15s.
+function collectOutput(args: string[], timeoutMs = 15_000): Promise<{ stdout: string; stderr: string }> {
   return new Promise(resolve => {
     const child = spawn(process.execPath, [...cliArgs, ...args], { stdio: 'pipe' });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
     child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       child.kill('SIGTERM');
       resolve({ stdout, stderr });
     }, timeoutMs);
-    child.on('close', () => resolve({ stdout, stderr }));
+    child.on('close', () => {
+      clearTimeout(timer);
+      resolve({ stdout, stderr });
+    });
   });
 }
 

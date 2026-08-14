@@ -8,5 +8,5 @@
     "utils/copyright.js",
     ".claude/run-mcp-direct-harness.mjs"
   ],
-  "ignore": [".claude/worktrees/**"]
+  "ignore": [".claude/worktrees/**", "tests/**"]
 }

@@ -83,6 +83,8 @@ function isSecretArgName(name: string): boolean {
  * Replaces secret values with a length-preserving placeholder. session.md is a
  * plain file that outlives the run; everything else is left intact so the log
  * still describes what happened.
+ *
+ * @public
  */
 export function redactSecretArgs(value: unknown, keyName?: string): unknown {
   if (typeof value === 'string' && keyName !== undefined && isSecretArgName(keyName))
