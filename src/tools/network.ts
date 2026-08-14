@@ -33,9 +33,11 @@ const requests = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    const entries = [...tab.requests().entries()];
-    entries.forEach(([req, res], index) => response.addResult(renderRequest(index + 1, req, res)));
-    if (entries.length)
+    const requestMap = tab.requests();
+    let index = 0;
+    for (const [req, res] of requestMap)
+      response.addResult(renderRequest(++index, req, res));
+    if (index)
       response.addResult('\nCall browser_network_request with one of the indexes above to see its headers and body metadata.');
   },
 });
@@ -54,11 +56,20 @@ const requestDetails = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    const entries = [...tab.requests().entries()];
-    const entry = entries[params.index - 1];
+    // Walked to the requested position rather than copied out: a long-lived
+    // page accumulates thousands of requests, and only one entry is wanted.
+    const requestMap = tab.requests();
+    let entry: [playwright.Request, playwright.Response | null] | undefined;
+    let position = 0;
+    for (const candidate of requestMap) {
+      if (++position === params.index) {
+        entry = candidate;
+        break;
+      }
+    }
     if (!entry) {
-      response.addError(entries.length
-        ? `Error: No network request with index ${params.index}. The current list is numbered 1 to ${entries.length}; run browser_network_requests for the up-to-date list.`
+      response.addError(requestMap.size
+        ? `Error: No network request with index ${params.index}. The current list is numbered 1 to ${requestMap.size}; run browser_network_requests for the up-to-date list.`
         : 'Error: No network requests have been recorded since the page was loaded.');
       return;
     }

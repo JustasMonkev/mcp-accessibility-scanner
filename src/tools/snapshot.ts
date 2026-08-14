@@ -20,7 +20,7 @@ import { z } from 'zod';
 import { defineTabTool, defineTool } from './tool.js';
 import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
-import { axeRuleSchemaShape, axeScopeSchemaShape, axeTagValues, dedupeAxeNodes, defaultAxeTags, prepareAxeResults, runAxeScan, unscannedFrameLines } from './axe.js';
+import { axeRuleSchemaShape, axeScopeSchemaShape, axeTagValues, defaultAxeTags, prepareAxeResults, runAxeScan, unscannedFrameLines } from './axe.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 
@@ -90,8 +90,14 @@ const scanPage = defineTool({
       exclude: params.excludeSelectors,
     });
 
+    // Trimmed nodes drop axe's any/all/none check arrays, which are the bulk of
+    // a raw result — a content-heavy page otherwise serializes to ~1MB here.
+    // Deduped once, up front: the annotation pass needs the same unique nodes
+    // the report below does, and re-deduping there hashed every node twice.
+    const { deduped, trimmed: violations } = prepareAxeResults(results.violations, params.maxNodesPerViolation);
+
     const annotationLines = params.annotateScreenshot
-      ? await annotateAndScreenshot(tab, results.violations, response)
+      ? await annotateAndScreenshot(tab, deduped, response)
       : [];
 
     // Omit the incomplete count entirely when it was not requested, matching
@@ -107,9 +113,6 @@ const scanPage = defineTool({
     ].join('\n'));
 
 
-    // Trimmed nodes drop axe's any/all/none check arrays, which are the bulk of
-    // a raw result — a content-heavy page otherwise serializes to ~1MB here.
-    const { deduped, trimmed: violations } = prepareAxeResults(results.violations, params.maxNodesPerViolation);
     violations.forEach((violation, index) => {
       response.addResult([
         '',
@@ -148,6 +151,7 @@ function nodeCountSuffix(shown: number, total: number): string {
 /**
  * Draws a labelled outline over every violating element, screenshots the page,
  * then removes the markers. Returns the lines to append to the tool result.
+ * `violations` carries node lists the caller has already deduped.
  */
 async function annotateAndScreenshot(tab: Tab, violations: AxeViolation[], response: Response): Promise<string[]> {
   const marks = new Map<string, AnnotationMark>();
@@ -155,7 +159,7 @@ async function annotateAndScreenshot(tab: Tab, violations: AxeViolation[], respo
   let unreachableNodes = 0;
   let queuedNodes = 0;
   for (const violation of violations) {
-    for (const node of dedupeAxeNodes(violation.nodes)) {
+    for (const node of violation.nodes) {
       totalNodes++;
       const target = node.target ?? [];
       // A target with more than one step is nested inside an iframe, which

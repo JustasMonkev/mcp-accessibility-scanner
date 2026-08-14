@@ -147,14 +147,31 @@ function overlapRatio(a: Rect, b: Rect, axis: 'x' | 'y'): number {
 
 function countBands(rects: Rect[], axis: 'x' | 'y'): number {
   const band = rects.map((_, index) => index);
-  const rootOf = (index: number): number => band[index] === index ? index : rootOf(band[index]);
+  // Iterative with path compression. A container can hold hundreds of text
+  // siblings, so each lookup runs many times over the pairwise loop below;
+  // flattening the chain on the way out keeps every later lookup O(1), and the
+  // loop form removes the recursion depth an uncompressed chain would need.
+  const rootOf = (index: number): number => {
+    let root = index;
+    while (band[root] !== root)
+      root = band[root];
+    for (let node = index; band[node] !== root;) {
+      const next = band[node];
+      band[node] = root;
+      node = next;
+    }
+    return root;
+  };
   for (let i = 0; i < rects.length; i++) {
     for (let j = i + 1; j < rects.length; j++) {
       if (overlapRatio(rects[i], rects[j], axis) >= bandOverlapRatio)
         band[rootOf(j)] = rootOf(i);
     }
   }
-  return new Set(rects.map((_, index) => rootOf(index))).size;
+  const roots = new Set<number>();
+  for (let index = 0; index < rects.length; index++)
+    roots.add(rootOf(index));
+  return roots.size;
 }
 
 function isLayoutRelevant(node: ScreenReaderNode): boolean {
@@ -216,15 +233,22 @@ function checkAccessibleNames(nodes: ScreenReaderNode[], push: (finding: ScreenR
     // Both name-quality checks below judge how a control or image is announced,
     // so they only apply to roles that carry their own name.
     const isNamedRole = namedRoles.has(node.role);
+    // Shared by both checks but normalized at most once, and only once a check
+    // actually reaches it — a heading or paragraph carries a name that neither
+    // check reads, and normalizing every one of those is pure overhead.
+    let normalizedName: string | undefined;
 
-    if (isNamedRole && uninformativeNames.has(normalizeText(name))) {
-      push({
-        ...base,
-        check: 'uninformative-accessible-name',
-        wcag: '2.4.4 Link Purpose (In Context) / 2.4.9',
-        problem: `${describe(node)} is announced as "${name}", which says nothing when read out of context in a links or controls list.`,
-        fix: 'Rename it after its destination or action (e.g. "Pricing details"), or extend it with visually hidden text.',
-      });
+    if (isNamedRole) {
+      normalizedName = normalizeText(name);
+      if (uninformativeNames.has(normalizedName)) {
+        push({
+          ...base,
+          check: 'uninformative-accessible-name',
+          wcag: '2.4.4 Link Purpose (In Context) / 2.4.9',
+          problem: `${describe(node)} is announced as "${name}", which says nothing when read out of context in a links or controls list.`,
+          fix: 'Rename it after its destination or action (e.g. "Pricing details"), or extend it with visually hidden text.',
+        });
+      }
     }
 
     // Only an image is *described* by its name, so only there is a file name a
@@ -244,7 +268,8 @@ function checkAccessibleNames(nodes: ScreenReaderNode[], push: (finding: ScreenR
     const normalizedVisible = normalizeText(visibleText);
     const isLeaf = node.childCount === 0;
     if (labelInNameRoles.has(node.role) && isLeaf && normalizedVisible && visibleText.length <= 60
-        && /[\p{L}\p{N}]/u.test(visibleText) && !normalizeText(name).includes(normalizedVisible)) {
+        && /[\p{L}\p{N}]/u.test(visibleText)
+        && !(normalizedName ??= normalizeText(name)).includes(normalizedVisible)) {
       push({
         ...base,
         check: 'label-in-name-mismatch',
@@ -327,14 +352,19 @@ function checkReadingOrder(nodes: ScreenReaderNode[], push: (finding: ScreenRead
       ? (rtl ? a.x + a.width <= b.x + layoutTolerancePx : a.x >= b.x + b.width - layoutTolerancePx)
       : a.y >= b.y + b.height - layoutTolerancePx;
 
-    let inversions = 0;
-    for (let i = 0; i < siblings.length; i++) {
+    // Only whether an inversion exists decides the finding, so the scan stops
+    // at the first pair out of order rather than counting every one of the
+    // O(n^2) pairs a large container has.
+    let inverted = false;
+    for (let i = 0; i < siblings.length && !inverted; i++) {
       for (let j = i + 1; j < siblings.length; j++) {
-        if (isInverted(rects[i], rects[j]))
-          inversions++;
+        if (isInverted(rects[i], rects[j])) {
+          inverted = true;
+          break;
+        }
       }
     }
-    if (!inversions)
+    if (!inverted)
       continue;
 
     const sortKey = (rect: Rect) => horizontal ? (rtl ? -(rect.x + rect.width) : rect.x) : rect.y;
@@ -864,7 +894,7 @@ const auditScreenReader = defineTabTool({
       elements: {
         total: refIndexes.length,
         analyzed: analyzedIndexes.length,
-        unresolved: analyzedIndexes.length - resolvedCount,
+        unresolved: unresolvedCount,
         truncated: truncatedElements > 0,
       },
       countByCheck: result.countByCheck,

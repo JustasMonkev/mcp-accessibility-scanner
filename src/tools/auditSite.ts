@@ -319,8 +319,15 @@ async function extractSitemapUrls(page: import('playwright').Page, sitemapUrl: s
   if (!response.ok())
     throw new Error(`Failed to fetch sitemap ${sitemapUrl}: ${response.status()} ${response.statusText()}`);
   const xmlText = await response.text();
-  const matches = [...xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)];
-  return matches.map(match => match[1].replace('<![CDATA[', '').replace(']]>', '').trim()).filter(Boolean);
+  // A sitemap can list 50k URLs; collected in one pass rather than through an
+  // intermediate match array plus a map and a filter over it.
+  const urls: string[] = [];
+  for (const match of xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)) {
+    const url = match[1].replace('<![CDATA[', '').replace(']]>', '').trim();
+    if (url)
+      urls.push(url);
+  }
+  return urls;
 }
 
 function aggregateIntoSummary(
@@ -329,19 +336,24 @@ function aggregateIntoSummary(
   pageUrl: string
 ) {
   for (const violation of violations) {
-    const existingSummary = summaryByRuleId.get(violation.id);
-    const summary: ViolationSummaryAggregate = existingSummary ?? {
-      id: violation.id,
-      impact: violation.impact,
-      tags: [...violation.tags],
-      help: violation.help,
-      helpUrl: violation.helpUrl,
-      description: violation.description,
-      pagesAffected: new Set<string>(),
-      totalOccurrences: 0,
-      fingerprints: new Set<string>(),
-      sampleNodes: [],
-    };
+    let summary = summaryByRuleId.get(violation.id);
+    if (!summary) {
+      summary = {
+        id: violation.id,
+        impact: violation.impact,
+        tags: [...violation.tags],
+        help: violation.help,
+        helpUrl: violation.helpUrl,
+        description: violation.description,
+        pagesAffected: new Set<string>(),
+        totalOccurrences: 0,
+        fingerprints: new Set<string>(),
+        sampleNodes: [],
+      };
+      // Aggregates are mutated in place from here on, so the map only needs
+      // the one write that first publishes a rule's entry.
+      summaryByRuleId.set(violation.id, summary);
+    }
     summary.pagesAffected.add(pageUrl);
     summary.totalOccurrences += violation.nodes.length;
 
@@ -361,8 +373,6 @@ function aggregateIntoSummary(
         });
       }
     }
-
-    summaryByRuleId.set(violation.id, summary);
   }
 }
 

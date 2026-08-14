@@ -207,6 +207,12 @@ function isBase64PayloadTerminator(char: string): boolean {
 }
 
 function isWhitespace(char: string): boolean {
+  // Runs once per character of a base64 payload alongside the switch above, so
+  // the ASCII range — which is every character such a payload can hold — is
+  // answered by char code. Only the rarer Unicode spaces reach the regex.
+  const code = char.charCodeAt(0);
+  if (code < 0x80)
+    return code === 32 || (code >= 9 && code <= 13);
   return /\s/.test(char);
 }
 
@@ -255,6 +261,12 @@ function looksLikeSourceLocationSuffix(text: string, colon: number): boolean {
   return position === text.length || isLineBreak(text[position]) || isWhitespace(text[position]);
 }
 
+// Module-level so the per-character scans below do not allocate a fresh array
+// on every character they test.
+const queryParamTerminators = new Set(['&', '#', '"', '\'', '<', '>', ')', '}', '`']);
+const payloadBoundarySuffixes = new Set(['"', '\'', ')', ']', '}', '`']);
+const payloadWrapperBoundaries = new Set([')', ']', '}']);
+
 function looksLikeQueryParam(text: string, offset: number): boolean {
   if (offset >= text.length)
     return false;
@@ -262,7 +274,7 @@ function looksLikeQueryParam(text: string, offset: number): boolean {
     const char = text[position];
     if (char === '=')
       return position > offset;
-    if (isLineBreak(char) || isWhitespace(char) || ['&', '#', '"', '\'', '<', '>', ')', '}', '`'].includes(char))
+    if (isLineBreak(char) || isWhitespace(char) || queryParamTerminators.has(char))
       return false;
   }
   return false;
@@ -287,19 +299,19 @@ function isDataUrlStartBoundary(text: string, start: number): boolean {
 }
 
 function isRawPayloadWrapperBoundary(text: string, match: DataUrlMatch, position: number): boolean {
-  return [')', ']', '}'].includes(text[position]) && (isRawPayloadCompleteBefore(text, match.payloadStart, position) || isRawPayloadBoundarySuffix(text, position + 1));
+  return payloadWrapperBoundaries.has(text[position]) && (isRawPayloadCompleteBefore(text, match.payloadStart, position) || isRawPayloadBoundarySuffix(text, position + 1));
 }
 
 function isRawPayloadBoundarySuffix(text: string, offset: number): boolean {
   if (offset >= text.length)
     return true;
   const char = text[offset];
-  return isLineBreak(char) || isWhitespace(char) || ['"', '\'', ')', ']', '}', '`'].includes(char) || (char === '&' && looksLikeQueryParam(text, offset + 1));
+  return isLineBreak(char) || isWhitespace(char) || payloadBoundarySuffixes.has(char) || (char === '&' && looksLikeQueryParam(text, offset + 1));
 }
 
 function isEncodedPayloadTerminator(text: string, position: number): boolean {
   const encodedChar = percentEncodedCharAt(text, position);
-  return !!encodedChar && ['"', '\'', ')', ']', '}', '`'].includes(encodedChar);
+  return !!encodedChar && payloadBoundarySuffixes.has(encodedChar);
 }
 
 function percentEncodedCharBefore(text: string, position: number): string | undefined {

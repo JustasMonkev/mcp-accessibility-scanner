@@ -315,13 +315,20 @@ async function isFrameInScope(
     let matches: { included: boolean, excluded: boolean, hidden: boolean } | null;
     try {
       matches = await withFrameTimeout(element.evaluate((node, scope) => {
+        // getRootNode() is only consulted on the branch that needs it: the
+        // walk runs per ancestor per candidate selector, and the light-DOM
+        // case (by far the common one) never reads the root at all.
         const composedParent = (element: Element) => {
-          const root = element.getRootNode();
           if (element.assignedSlot) {
+            if (element.assignedSlot.parentElement)
+              return element.assignedSlot.parentElement;
             const slotRoot = element.assignedSlot.getRootNode();
-            return element.assignedSlot.parentElement ?? (slotRoot instanceof ShadowRoot ? slotRoot.host : null);
+            return slotRoot instanceof ShadowRoot ? slotRoot.host : null;
           }
-          return element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+          if (element.parentElement)
+            return element.parentElement;
+          const root = element.getRootNode();
+          return root instanceof ShadowRoot ? root.host : null;
         };
         const matchesAny = (selectors: string[]) => selectors.some(selector => {
           try {

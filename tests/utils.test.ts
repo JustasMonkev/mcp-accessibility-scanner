@@ -141,6 +141,30 @@ describe('Utils', () => {
       expect(truncateDataUrl('12345image/png,payload')).toBe('12345image/png,payload');
     });
 
+    // The payload scan answers the ASCII range by char code and defers only the
+    // rarer Unicode spaces to a regex; both classes must still end a payload.
+    it('should end a base64 payload at any whitespace character', () => {
+      const terminators = {
+        space: ' ',
+        tab: '\t',
+        verticalTab: '\v',
+        formFeed: '\f',
+        nonBreakingSpace: '\u00a0',
+        enQuad: '\u2000',
+        lineSeparator: '\u2028',
+        ideographicSpace: '\u3000',
+      };
+      for (const [name, terminator] of Object.entries(terminators)) {
+        const text = `- /url: data:image/png;base64,PHAgLz4=${terminator}trailing-${name}`;
+        expect(truncateDataUrls(text)).toBe(`- /url: data:image/png;base64,...${terminator}trailing-${name}`);
+      }
+    });
+
+    it('should not treat a non-whitespace character above the ASCII range as a payload end', () => {
+      const text = '- /url: data:image/png;base64,PHAgLz4\u00e9Lz4=\n- button "Next"';
+      expect(truncateDataUrls(text)).toBe('- /url: data:image/png;base64,...\n- button "Next"');
+    });
+
     it('should truncate raw SVG data URL payloads without leaking markup', () => {
       const payload = '<svg viewBox="0 0 10 10"><text>&Hello</text></svg>';
       const text = `- /url: data:image/svg+xml,${payload}\n- button "Next"`;
