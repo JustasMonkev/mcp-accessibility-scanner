@@ -483,11 +483,11 @@ Go back to the previous page.
 
 #### `browser_navigation_timeout`
 Set default navigation timeout for existing tabs.
-- Parameters: `timeout` (in ms; 30000-300000)
+- Parameters: `timeout` (in ms; 30000-1200000)
 
 #### `browser_default_timeout`
 Set default operation timeout for existing tabs.
-- Parameters: `timeout` (in ms; 30000-300000)
+- Parameters: `timeout` (in ms; 30000-1200000)
 
 ### Page Interaction Tools
 

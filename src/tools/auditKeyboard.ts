@@ -357,7 +357,7 @@ const auditKeyboardSchema = z.object({
   jumpScrollThresholdPx: z.number().int().min(1).default(800).describe('Scroll delta threshold for jump detection.'),
   screenshotOnIssue: z.boolean().default(false).describe('Capture screenshots for detected issues.'),
   maxIssueScreenshots: z.number().int().min(1).max(20).default(3).describe('Maximum screenshots saved when screenshotOnIssue=true.'),
-  reportFile: z.string().optional().describe('Output JSON report file name.'),
+  reportFile: z.string().min(1).optional().describe('Output JSON report file name.'),
 });
 
 const auditKeyboard = defineTabTool({

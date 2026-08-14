@@ -125,7 +125,7 @@ const auditSiteSchema = z.object({
   includeIncomplete: z.boolean().default(true).describe('Also collect Axe "incomplete" results — checks Axe could not decide automatically. They are reported separately from violations.'),
   maxNodesPerViolation: z.number().int().min(1).max(50).default(10).describe('Maximum nodes kept per violation in the report.'),
   waitAfterNavigationMs: z.number().int().min(0).max(5000).default(250).describe('Extra wait after navigation before scanning.'),
-  reportFile: z.string().optional().describe('Output JSON report file name.'),
+  reportFile: z.string().min(1).optional().describe('Output JSON report file name.'),
   ...axeScopeSchemaShape,
   ...axeRuleSchemaShape,
 }).superRefine((value, context) => {
@@ -319,11 +319,46 @@ async function extractSitemapUrls(page: import('playwright').Page, sitemapUrl: s
   if (!response.ok())
     throw new Error(`Failed to fetch sitemap ${sitemapUrl}: ${response.status()} ${response.statusText()}`);
   const xmlText = await response.text();
-  // A sitemap can list 50k URLs; collected in one pass rather than through an
-  // intermediate match array plus a map and a filter over it.
+  return parseSitemapLocations(xmlText);
+}
+
+// A sitemap URL is capped well below this by the spec; anything longer is not
+// a location we could crawl anyway, and refusing it keeps one malformed entry
+// from carrying the rest of the document along with it.
+const maxSitemapUrlLength = 4096;
+
+/**
+ * Extracts `<loc>` values without a lazily-quantified regex.
+ *
+ * `/<loc>([\s\S]*?)<\/loc>/gi` backtracks across the whole remaining document
+ * at every `<loc>` that has no closing tag, which is quadratic: a hostile (or
+ * merely truncated) sitemap of 500KB of bare `<loc>` took 11s of blocked event
+ * loop, ~45s/MB, freezing every other MCP session in the process. The fetch
+ * timeout does not bound the parse.
+ *
+ * Scanning forward for the next closing tag and resuming past it visits each
+ * character a bounded number of times, and a document with no closing tag left
+ * ends the scan instead of rescanning its tail.
+ */
+export function parseSitemapLocations(xmlText: string): string[] {
   const urls: string[] = [];
-  for (const match of xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)) {
-    const url = match[1].replace('<![CDATA[', '').replace(']]>', '').trim();
+  // One forward pass over both tags. A later opening tag overwrites the
+  // pending one, so each closing tag pairs with the nearest preceding open —
+  // the same pairing the lazy quantifier produced, without its backtracking.
+  const tag = /<(\/?)loc\s*>/gi;
+  let openAt = -1;
+  for (let match = tag.exec(xmlText); match; match = tag.exec(xmlText)) {
+    if (!match[1]) {
+      openAt = tag.lastIndex;
+      continue;
+    }
+    if (openAt < 0)
+      continue;
+    const raw = xmlText.slice(openAt, match.index);
+    openAt = -1;
+    if (raw.length > maxSitemapUrlLength)
+      continue;
+    const url = raw.replace('<![CDATA[', '').replace(']]>', '').trim();
     if (url)
       urls.push(url);
   }

@@ -769,7 +769,7 @@ const auditScreenReaderSchema = z.object({
   checkReadingOrder: z.boolean().default(true).describe('Compare accessibility tree order against visual position to find reading-order mismatches.'),
   maxElements: z.number().int().min(1).max(2000).default(400).describe('Maximum accessibility tree elements to analyze; extra elements are reported as truncated.'),
   maxFindingsPerCheck: z.number().int().min(1).max(200).default(20).describe('Maximum findings kept per check; the full count is still reported.'),
-  reportFile: z.string().optional().describe('Output JSON report file name.'),
+  reportFile: z.string().min(1).optional().describe('Output JSON report file name.'),
 });
 
 

@@ -235,6 +235,11 @@
         "tests/tools-scanPageMatrix.test.ts",
         "tests/tools-auditKeyboard.test.ts",
         "tests/tools-auditSite.integration.test.ts",
+        "tests/tools-auditSite.sitemap.test.ts",
+        "tests/tools-verify.test.ts",
+        "tests/contract-tool-registry.test.ts",
+        "tests/contract-package-metadata.test.ts",
+        "tests/security-output-paths.test.ts",
         "bench/**"
       ],
       "rules": {

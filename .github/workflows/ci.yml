@@ -1,8 +1,14 @@
 name: CI
 
+# `branches` filters the pull request's BASE branch, and it takes globs, not
+# prefixes: the previous value ['feat/'] matched only a base branch named
+# literally "feat/", so no pull request into main ever triggered this workflow
+# and the suite was effectively never run.
 on:
   pull_request:
-    branches: ['feat/']
+    branches: [main]
+  push:
+    branches: [main]
 
 jobs:
   test:
@@ -34,8 +40,10 @@ jobs:
       - name: Run lint
         run: npm run lint
 
-      - name: Run tests
-        run: npm test
+      # Coverage runs the same suite and additionally enforces the thresholds
+      # in vitest.config.ts, which nothing ran before.
+      - name: Run tests with coverage thresholds
+        run: npm run test:coverage
 
       - name: Build
         run: npm run build

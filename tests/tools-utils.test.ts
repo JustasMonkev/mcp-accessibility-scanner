@@ -244,7 +244,10 @@ describe('Tool Utils', () => {
 
       expect(mockLocator.normalize).toHaveBeenCalled();
       expect(mockLocator._resolveSelector).toHaveBeenCalled();
-      expect(result).toBeDefined();
+      // The fallback's whole purpose is the value it produces; asserting only
+      // that it is defined would pass for any string, including the
+      // '[object Object]' the last-resort branch is meant to replace.
+      expect(result).toBe(`locator('button[name="submit"]')`);
     });
 
     it('should generate locator string', async () => {
@@ -257,7 +260,7 @@ describe('Tool Utils', () => {
       const result = await generateLocator(mockLocator);
 
       expect(mockLocator._resolveSelector).toHaveBeenCalled();
-      expect(result).toBeDefined();
+      expect(result).toBe(`locator('button[name="submit"]')`);
     });
 
     it('should fall back to locator string when private selector resolution is unavailable', async () => {

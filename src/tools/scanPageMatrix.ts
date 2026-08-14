@@ -93,7 +93,7 @@ const scanPageMatrixSchema = z.object({
   maxNodesPerViolation: z.number().int().min(1).max(50).default(10).describe('Maximum nodes kept per violation in the report.'),
   waitAfterApplyMs: z.number().int().min(0).max(5000).default(250).describe('Wait after applying each variant before scanning.'),
   reloadBetweenVariants: z.boolean().default(false).describe('Reload page between variants.'),
-  reportFile: z.string().optional().describe('Output JSON report file name.'),
+  reportFile: z.string().min(1).optional().describe('Output JSON report file name.'),
   ...axeScopeSchemaShape,
   ...axeRuleSchemaShape,
 });

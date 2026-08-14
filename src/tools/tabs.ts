@@ -67,7 +67,7 @@ const navigationTimeout = defineTool({
     title: 'Navigation timeout',
     description: 'Sets the timeout for navigation and page load actions. Only affects the current tab and does not persist across browser context recreation.',
     inputSchema: z.object({
-      timeout: z.number().min(SECOND * 30).max(MINUTE * 20).describe('Timeout in milliseconds for navigation (0-300000ms)'),
+      timeout: z.number().min(SECOND * 30).max(MINUTE * 20).describe('Timeout in milliseconds for navigation (30000-1200000ms)'),
     }),
     type: 'destructive',
   },
@@ -88,7 +88,7 @@ const defaultTimeout = defineTool({
     title: 'Default timeout',
     description: 'Sets the default timeout for all Playwright operations (clicks, fills, etc). Only affects existing tabs and does not persist across browser context recreation.',
     inputSchema: z.object({
-      timeout: z.number().min(SECOND * 30).max(MINUTE * 20).describe('Timeout in milliseconds for default operations (0-300000ms)'),
+      timeout: z.number().min(SECOND * 30).max(MINUTE * 20).describe('Timeout in milliseconds for default operations (30000-1200000ms)'),
     }),
     type: 'destructive',
   },
