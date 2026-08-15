@@ -348,7 +348,7 @@ function validateRequestHeaders(httpServer: http.Server, req: http.IncomingMessa
   }
 }
 
-function allowedHostnamesForServer(httpServer: http.Server): Set<string> {
+export function allowedHostnamesForServer(httpServer: http.Server): Set<string> {
   const allowed = new Set<string>(['localhost', '::1', '127.0.0.1']);
   const address = httpServer.address();
   if (!address || typeof address === 'string')
@@ -372,7 +372,7 @@ function validateRequestRouting(req: http.IncomingMessage): { statusCode: number
     return { statusCode: 404, message: 'Not found' };
 }
 
-function parseAuthority(authority: string): { hostname: string, authority: string, scheme: 'http' } | undefined {
+export function parseAuthority(authority: string): { hostname: string, authority: string, scheme: 'http' } | undefined {
   try {
     const url = new URL(`http://${authority}`);
     const hostname = normalizeHostname(url.hostname);

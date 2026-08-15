@@ -28,12 +28,13 @@ import http from 'node:http';
 import path from 'node:path';
 import debug from 'debug';
 import { WebSocket, WebSocketServer } from 'ws';
-import { httpAddressToString } from '../mcp/http.js';
+import { allowedHostnamesForServer, httpAddressToString, parseAuthority } from '../mcp/http.js';
 import { logUnhandledError } from '../utils/log.js';
 import { ManualPromise } from '../mcp/manualPromise.js';
 import { ExtensionProtocolV2 } from './cdpRelayV2.js';
 import * as protocol from './protocol.js';
 
+import type { Duplex } from 'node:stream';
 import type websocket from 'ws';
 import type { ClientInfo } from '../browserContextFactory.js';
 import type { CDPMessage } from './browserModel.js';
@@ -53,6 +54,31 @@ type CDPCommand = {
 };
 
 type CDPResponse = CDPMessage;
+
+// Guards the relay WebSocket upgrade. A cross-origin web page can open a
+// WebSocket to a loopback port, so path secrecy alone is not enough: reject a
+// Host header that is not one of the server's loopback names (DNS rebinding)
+// and any http/https Origin (a web page). The local Playwright client sends no
+// Origin and the extension sends a chrome-extension:// Origin, both of which
+// pass.
+function validateUpgradeRequest(request: http.IncomingMessage, allowedHosts: Set<string>): { statusCode: number, message: string } | undefined {
+  const hostHeader = request.headers.host;
+  const host = typeof hostHeader === 'string' ? parseAuthority(hostHeader) : undefined;
+  if (!host || !allowedHosts.has(host.hostname))
+    return { statusCode: 403, message: 'Forbidden Host header' };
+
+  const originHeader = request.headers.origin;
+  if (originHeader === undefined)
+    return;
+  let origin: URL;
+  try {
+    origin = new URL(originHeader);
+  } catch {
+    return { statusCode: 400, message: 'Invalid Origin header' };
+  }
+  if (origin.protocol === 'http:' || origin.protocol === 'https:')
+    return { statusCode: 403, message: 'Forbidden Origin header' };
+}
 
 export class CDPRelayServer {
   private _server: http.Server;
@@ -84,9 +110,26 @@ export class CDPRelayServer {
     this._connectPagePrefix = connectPageUrl.toString();
 
     this._resetExtensionConnection();
-    this._wss = new WebSocketServer({ server });
+    // Own the upgrade handshake (noServer) so Host/Origin are validated before
+    // the socket is upgraded. The legitimate clients are the local Playwright
+    // CDP client (no Origin) and the Chrome extension (a chrome-extension://
+    // Origin); reject a non-loopback Host (DNS rebinding) or a web-page
+    // (http/https) Origin as defense-in-depth over the unguessable UUID paths.
+    this._wss = new WebSocketServer({ noServer: true });
     this._wss.on('connection', this._onConnection.bind(this));
+    this._server.on('upgrade', this._onUpgrade);
   }
+
+  private _onUpgrade = (request: http.IncomingMessage, socket: Duplex, head: Buffer): void => {
+    const rejection = validateUpgradeRequest(request, allowedHostnamesForServer(this._server));
+    if (rejection) {
+      debugLogger(`Rejecting upgrade: ${rejection.message}`);
+      socket.write(`HTTP/1.1 ${rejection.statusCode} ${rejection.message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+      socket.destroy();
+      return;
+    }
+    this._wss.handleUpgrade(request, socket, head, ws => this._wss.emit('connection', ws, request));
+  };
 
   cdpEndpoint() {
     return `${this._wsHost}${this._cdpPath}`;
@@ -165,6 +208,7 @@ export class CDPRelayServer {
 
   stop(): void {
     this.closeConnections('Server stopped');
+    this._server.removeListener('upgrade', this._onUpgrade);
     this._wss.close();
     // ws only closes the HTTP server it created itself; ours is passed in,
     // so close it explicitly or the relay port stays bound after stop().
