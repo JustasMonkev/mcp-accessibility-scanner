@@ -372,7 +372,7 @@ function validateRequestRouting(req: http.IncomingMessage): { statusCode: number
     return { statusCode: 404, message: 'Not found' };
 }
 
-function parseAuthority(authority: string): { hostname: string, authority: string, scheme: 'http' } | undefined {
+export function parseAuthority(authority: string): { hostname: string, authority: string, scheme: 'http' } | undefined {
   try {
     const url = new URL(`http://${authority}`);
     const hostname = normalizeHostname(url.hostname);

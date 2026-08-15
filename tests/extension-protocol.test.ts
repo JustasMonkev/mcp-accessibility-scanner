@@ -372,3 +372,76 @@ describe('extension protocol v2', () => {
     }
   });
 });
+
+describe('cdp relay upgrade hardening', () => {
+  async function startRelay() {
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
+    onTestFinished(async () => {
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string')
+      throw new Error('Expected TCP server address');
+    return { relay, port: address.port };
+  }
+
+  // Attempts the WebSocket upgrade and resolves with whether it opened or the
+  // HTTP status the relay answered the upgrade with when it rejected it.
+  function attemptUpgrade(endpoint: string, headers: Record<string, string>) {
+    return new Promise<{ opened: boolean, statusCode?: number }>((resolve, reject) => {
+      const ws = new WebSocket(endpoint, { headers });
+      ws.on('open', () => {
+        ws.close();
+        resolve({ opened: true });
+      });
+      ws.on('unexpected-response', (_req, res) => {
+        ws.terminate();
+        resolve({ opened: false, statusCode: res.statusCode });
+      });
+      ws.on('error', reject);
+    });
+  }
+
+  it('rejects an upgrade with a non-loopback Host header', async () => {
+    const { relay, port } = await startRelay();
+    const result = await attemptUpgrade(relay.extensionEndpoint(), { host: `evil.example:${port}` });
+    expect(result).toEqual({ opened: false, statusCode: 403 });
+  });
+
+  it('rejects an upgrade with a non-loopback Host even if the relay is reachable there', async () => {
+    // The allowlist is loopback-only and never widens to the bind address, so a
+    // relay reachable on a LAN/public interface still rejects that Host.
+    const { relay, port } = await startRelay();
+    const result = await attemptUpgrade(relay.extensionEndpoint(), { host: `192.168.1.10:${port}` });
+    expect(result).toEqual({ opened: false, statusCode: 403 });
+  });
+
+  it('rejects an upgrade carrying a web-page Origin', async () => {
+    const { relay, port } = await startRelay();
+    const result = await attemptUpgrade(relay.extensionEndpoint(), {
+      host: `127.0.0.1:${port}`,
+      origin: 'https://evil.example',
+    });
+    expect(result).toEqual({ opened: false, statusCode: 403 });
+  });
+
+  it('accepts an upgrade from the extension chrome-extension:// Origin', async () => {
+    const { relay } = await startRelay();
+    const result = await attemptUpgrade(relay.extensionEndpoint(), {
+      origin: `chrome-extension://${EXTENSION_ID}`,
+    });
+    expect(result).toEqual({ opened: true });
+  });
+
+  it('accepts an upgrade from the local Playwright client without an Origin', async () => {
+    const { relay } = await startRelay();
+    const result = await attemptUpgrade(relay.extensionEndpoint(), {});
+    expect(result).toEqual({ opened: true });
+  });
+});
