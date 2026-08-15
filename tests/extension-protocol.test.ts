@@ -414,6 +414,14 @@ describe('cdp relay upgrade hardening', () => {
     expect(result).toEqual({ opened: false, statusCode: 403 });
   });
 
+  it('rejects an upgrade with a non-loopback Host even if the relay is reachable there', async () => {
+    // The allowlist is loopback-only and never widens to the bind address, so a
+    // relay reachable on a LAN/public interface still rejects that Host.
+    const { relay, port } = await startRelay();
+    const result = await attemptUpgrade(relay.extensionEndpoint(), { host: `192.168.1.10:${port}` });
+    expect(result).toEqual({ opened: false, statusCode: 403 });
+  });
+
   it('rejects an upgrade carrying a web-page Origin', async () => {
     const { relay, port } = await startRelay();
     const result = await attemptUpgrade(relay.extensionEndpoint(), {

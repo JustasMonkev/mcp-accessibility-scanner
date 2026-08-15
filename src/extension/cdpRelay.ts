@@ -28,7 +28,7 @@ import http from 'node:http';
 import path from 'node:path';
 import debug from 'debug';
 import { WebSocket, WebSocketServer } from 'ws';
-import { allowedHostnamesForServer, httpAddressToString, parseAuthority } from '../mcp/http.js';
+import { httpAddressToString, parseAuthority } from '../mcp/http.js';
 import { logUnhandledError } from '../utils/log.js';
 import { ManualPromise } from '../mcp/manualPromise.js';
 import { ExtensionProtocolV2 } from './cdpRelayV2.js';
@@ -55,16 +55,22 @@ type CDPCommand = {
 
 type CDPResponse = CDPMessage;
 
+// The relay only ever bridges the local Playwright client and a Chrome
+// extension over loopback, so its upgrade allowlist is loopback-only —
+// deliberately narrower than the HTTP transport's server-derived allowlist,
+// which widens to a non-loopback bind address. parseAuthority collapses every
+// 127.0.0.0/8 address and *.localhost name onto these three.
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '::1', '127.0.0.1']);
+
 // Guards the relay WebSocket upgrade. A cross-origin web page can open a
 // WebSocket to a loopback port, so path secrecy alone is not enough: reject a
-// Host header that is not one of the server's loopback names (DNS rebinding)
-// and any http/https Origin (a web page). The local Playwright client sends no
-// Origin and the extension sends a chrome-extension:// Origin, both of which
-// pass.
-function validateUpgradeRequest(request: http.IncomingMessage, allowedHosts: Set<string>): { statusCode: number, message: string } | undefined {
+// Host header that is not loopback (DNS rebinding) and any http/https Origin (a
+// web page). The local Playwright client sends no Origin and the extension
+// sends a chrome-extension:// Origin, both of which pass.
+function validateUpgradeRequest(request: http.IncomingMessage): { statusCode: number, message: string } | undefined {
   const hostHeader = request.headers.host;
   const host = typeof hostHeader === 'string' ? parseAuthority(hostHeader) : undefined;
-  if (!host || !allowedHosts.has(host.hostname))
+  if (!host || !LOOPBACK_HOSTNAMES.has(host.hostname))
     return { statusCode: 403, message: 'Forbidden Host header' };
 
   const originHeader = request.headers.origin;
@@ -121,7 +127,7 @@ export class CDPRelayServer {
   }
 
   private _onUpgrade = (request: http.IncomingMessage, socket: Duplex, head: Buffer): void => {
-    const rejection = validateUpgradeRequest(request, allowedHostnamesForServer(this._server));
+    const rejection = validateUpgradeRequest(request);
     if (rejection) {
       debugLogger(`Rejecting upgrade: ${rejection.message}`);
       socket.write(`HTTP/1.1 ${rejection.statusCode} ${rejection.message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);

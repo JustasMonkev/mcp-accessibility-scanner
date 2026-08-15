@@ -348,7 +348,7 @@ function validateRequestHeaders(httpServer: http.Server, req: http.IncomingMessa
   }
 }
 
-export function allowedHostnamesForServer(httpServer: http.Server): Set<string> {
+function allowedHostnamesForServer(httpServer: http.Server): Set<string> {
   const allowed = new Set<string>(['localhost', '::1', '127.0.0.1']);
   const address = httpServer.address();
   if (!address || typeof address === 'string')
