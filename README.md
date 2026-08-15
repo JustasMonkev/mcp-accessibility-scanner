@@ -234,7 +234,7 @@ Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-a
 
 #### HTTP Heartbeat
 
-When the server runs with `--port`, it sends MCP heartbeat pings for Streamable HTTP sessions. Set `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` to override the default `5000` ms timeout. Set it to `0` or any negative value to disable heartbeat pings for clients or proxies that do not answer server-initiated pings. A client that answers `ping` with a JSON-RPC "method not found" error (as clients on the MCP 2026-07-28 revision do) is treated as alive: the server stops heartbeating that session instead of closing it. Only an unanswered ping (timeout) or a transport failure closes the session.
+When the server runs with `--port`, it sends MCP heartbeat pings after a Streamable HTTP client opens the optional event stream. POST-only clients stay connected without heartbeat because server-initiated requests cannot reach them. Set `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` to override the default `5000` ms timeout, or to `0` or any negative value to disable heartbeat pings. A client that answers `ping` with a JSON-RPC "method not found" error is treated as alive: the server stops heartbeating that session instead of closing it. Only an unanswered ping (timeout) or a transport failure closes the session.
 
 #### Clients without the initialize handshake
 
