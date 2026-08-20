@@ -34,8 +34,8 @@ export type SendToCDPClient = (message: CDPMessage) => void;
 // "target_closed") when a frame navigates to a scheme it cannot attach to,
 // even though the tab stays open and re-attachable. Mirroring the recovery
 // upstream added to the extension in microsoft/playwright#42221, wait for the
-// navigation to settle before re-attaching, and refuse to recover again within
-// the cooldown so a page that keeps triggering the condition cannot cause a
+// navigation to settle before re-attaching, and space attempts at least the
+// cooldown apart so a page that keeps triggering the condition cannot cause a
 // tight re-attach loop.
 /** @public */
 export const REATTACH_DELAY_MS = 500;
@@ -59,6 +59,7 @@ export class BrowserModel {
   private _lastReattachAttempt = new Map<number, number>();
   private _autoAttachOperation = Promise.resolve();
   private _autoAttach = false;
+  private _disposed = false;
   private _nextSessionId = 1;
 
   constructor(sendToExtension: SendCommand, private _connectPagePrefix?: string) {
@@ -116,8 +117,11 @@ export class BrowserModel {
   }
 
   // The extension connection is gone; this model is about to be replaced and
-  // must not fire a re-attach over whatever connection the relay holds next.
+  // must not act over whatever connection the relay holds next — the send
+  // closure resolves the relay's current connection at each call, so pending
+  // timers and in-flight attach operations both have to stand down.
   dispose(): void {
+    this._disposed = true;
     for (const tabId of [...this._reattachTimers.keys()])
       this._cancelReattach(tabId);
   }
@@ -128,20 +132,43 @@ export class BrowserModel {
   // enabled domains and child sessions do not survive a re-attach — so tear
   // it down for the client, then re-attach the tab under a fresh session.
   private _recoverAfterInvoluntaryDetach(tabId: number): void {
+    if (this._disposed)
+      return;
+    const inFlightAttach = this._tabAttachmentPromises.get(tabId);
+    if (inFlightAttach) {
+      // The debugger detached while an attach was still completing. If that
+      // attach fails against the now-detached debugger there is no session to
+      // observe the detach, so recover once the attempt settles instead of
+      // losing the tab.
+      void inFlightAttach.then(
+          () => this._recoverAfterInvoluntaryDetach(tabId),
+          () => this._scheduleReattach(tabId),
+      );
+      return;
+    }
     if (!this._tabSessions.has(tabId))
       return;
     this._detachTab(tabId);
-    const now = Date.now();
-    const lastAttempt = this._lastReattachAttempt.get(tabId);
-    if (lastAttempt !== undefined && now - lastAttempt < REATTACH_COOLDOWN_MS)
+    this._scheduleReattach(tabId);
+  }
+
+  private _scheduleReattach(tabId: number): void {
+    if (this._disposed || !this._knownTabs.has(tabId) || this._reattachTimers.has(tabId))
       return;
-    this._lastReattachAttempt.set(tabId, now);
+    // Wait out whatever remains of the cooldown since the last attempt, so a
+    // page that keeps forcing detaches is retried at most once per cooldown
+    // instead of in a tight loop.
+    const lastAttempt = this._lastReattachAttempt.get(tabId);
+    const cooldownRemaining = lastAttempt === undefined
+      ? 0
+      : Math.max(0, lastAttempt + REATTACH_COOLDOWN_MS - Date.now());
     const timer = setTimeout(() => {
       this._reattachTimers.delete(tabId);
-      if (!this._knownTabs.has(tabId) || this._tabSessions.has(tabId))
+      if (this._disposed || !this._knownTabs.has(tabId) || this._tabSessions.has(tabId))
         return;
+      this._lastReattachAttempt.set(tabId, Date.now());
       void this._attachTab(tabId, { tolerateAlreadyAttached: true }).catch(logUnhandledError);
-    }, REATTACH_DELAY_MS);
+    }, Math.max(REATTACH_DELAY_MS, cooldownRemaining));
     timer.unref?.();
     this._reattachTimers.set(tabId, timer);
   }
@@ -171,6 +198,10 @@ export class BrowserModel {
         await this._sendToExtension('chrome.debugger.detach', [{ tabId }]);
         this._detachTab(tabId);
       }));
+      // A target_closed event arriving during the awaits above can schedule a
+      // new recovery, so cancel once more now that the operation has settled.
+      for (const tabId of [...this._reattachTimers.keys()])
+        this._cancelReattach(tabId);
     });
   }
 
@@ -267,10 +298,17 @@ export class BrowserModel {
       if (!options?.tolerateAlreadyAttached || !alreadyAttached)
         throw error;
     }
+    // Re-check after every await: the model may have been disposed while the
+    // extension round trip was in flight, and the send closure would other-
+    // wise act over whatever connection replaced the one that disconnected.
+    if (this._disposed)
+      throw new Error('Browser model was disposed while attaching');
     const result = await this._sendToExtension('chrome.debugger.sendCommand', [
       { tabId },
       'Target.getTargetInfo',
     ]);
+    if (this._disposed)
+      throw new Error('Browser model was disposed while attaching');
     const targetInfo = result?.targetInfo;
     const sessionId = `pw-tab-${this._nextSessionId++}`;
     const tabSession: TabSession = { tabId, sessionId, targetInfo, childSessions: new Set() };
