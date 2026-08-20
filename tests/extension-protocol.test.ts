@@ -26,7 +26,7 @@ import * as playwright from 'playwright';
 import { CDPRelayServer } from '../src/extension/cdpRelay.js';
 import { ExtensionContextFactory } from '../src/extension/extensionContextFactory.js';
 import { ExtensionProtocolV2 } from '../src/extension/cdpRelayV2.js';
-import { REATTACH_COOLDOWN_MS, REATTACH_DELAY_MS } from '../src/extension/browserModel.js';
+import { REATTACH_COOLDOWN_MS, REATTACH_DELAY_MS, REATTACH_MAX_ATTEMPTS } from '../src/extension/browserModel.js';
 import { EXTENSION_ID, VERSION } from '../src/extension/protocol.js';
 
 import type { CDPMessage } from '../src/extension/browserModel.js';
@@ -391,10 +391,12 @@ describe('involuntary debugger detach recovery', () => {
   async function createAttachedHandler(overrides: {
     attach?: (call: number) => void | Promise<void>,
     detach?: () => Promise<void>,
+    targetInfo?: (call: number) => void,
   } = {}) {
     vi.useFakeTimers();
     onTestFinished(() => vi.useRealTimers());
     let attachCalls = 0;
+    let targetInfoCalls = 0;
     const sendCommand = vi.fn(async (method: string, params: any[]) => {
       if (method === 'chrome.debugger.attach') {
         attachCalls++;
@@ -403,8 +405,11 @@ describe('involuntary debugger detach recovery', () => {
       }
       if (method === 'chrome.debugger.detach')
         await overrides.detach?.();
-      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
+        targetInfoCalls++;
+        overrides.targetInfo?.(targetInfoCalls);
         return { targetInfo: { targetId: `target-${params[0].tabId}`, type: 'page' } };
+      }
       return {};
     });
     const messages: CDPMessage[] = [];
@@ -585,6 +590,79 @@ describe('involuntary debugger detach recovery', () => {
     expect(attachCount(sendCommand)).toBe(1);
   });
 
+  it('does not recover a tab when the voluntary detach round trip fails', async () => {
+    let failDetach!: () => void;
+    const detachGate = new Promise<void>((_, reject) =>
+      failDetach = () => reject(new Error('Debugger is not attached to the tab with id: 7.')));
+    const { handler, sendCommand } = await createAttachedHandler({ detach: () => detachGate });
+
+    const disabling = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: false }, undefined);
+    await flushMicrotasks();
+
+    // Chrome force-detached on its own while disableAutoAttach was mid-round
+    // trip, so the voluntary detach RPC rejects — the cleanup pass must still
+    // run and drop the recovery the event scheduled.
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    failDetach();
+    await expect(disabling).rejects.toThrow('Debugger is not attached');
+
+    await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(1);
+  });
+
+  it('rolls back and retries when recovery attaches but session setup fails', async () => {
+    const { handler, sendCommand, messages } = await createAttachedHandler({
+      targetInfo: call => {
+        if (call === 2)
+          throw new Error('Detached while handling command');
+      },
+    });
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    await vi.advanceTimersByTimeAsync(REATTACH_DELAY_MS);
+    await flushMicrotasks();
+
+    // chrome.debugger.attach succeeded but Target.getTargetInfo failed, so the
+    // partial attachment is rolled back instead of leaving Chrome attached to
+    // a tab no session tracks.
+    expect(attachCount(sendCommand)).toBe(2);
+    expect(sendCommand).toHaveBeenLastCalledWith('chrome.debugger.detach', [{ tabId: 7 }]);
+    expect(messages.filter(message => message.method === 'Target.attachedToTarget')).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(3);
+    expect(messages.at(-1)).toMatchObject({
+      method: 'Target.attachedToTarget',
+      params: { sessionId: 'pw-tab-2', targetInfo: { targetId: 'target-7', attached: true } },
+    });
+  });
+
+  it('stops retrying recovery once the attempt budget is spent', async () => {
+    const { handler, sendCommand } = await createAttachedHandler({
+      attach: call => {
+        if (call >= 2)
+          throw new Error('No tab with given id 7.');
+      },
+    });
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    await vi.advanceTimersByTimeAsync(REATTACH_DELAY_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(2);
+
+    for (let attempt = 2; attempt <= REATTACH_MAX_ATTEMPTS; attempt++) {
+      await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS);
+      await flushMicrotasks();
+      expect(attachCount(sendCommand)).toBe(1 + attempt);
+    }
+
+    await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS * 2);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(1 + REATTACH_MAX_ATTEMPTS);
+  });
+
   it('does not re-attach when the tab closes before the recovery delay elapses', async () => {
     const { handler, sendCommand, messages } = await createAttachedHandler();
 
@@ -640,9 +718,12 @@ describe('involuntary debugger detach recovery', () => {
     expect(messages.filter(message => message.method === 'Target.attachedToTarget')).toHaveLength(1);
     expect(sendCommand.mock.calls.filter(([method, params]) =>
       method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')).toHaveLength(1);
+    // A disposed model must not send a rollback detach either — no RPC may go
+    // over whatever connection replaced the disconnected one.
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.detach')).toHaveLength(0);
   });
 
-  it('drops the session when the recovery attach fails for another reason', async () => {
+  it('drops the session when the recovery attach fails, then retries after the cooldown', async () => {
     const { handler, sendCommand, messages } = await createAttachedHandler({
       attach: call => {
         if (call === 2)
@@ -658,6 +739,14 @@ describe('involuntary debugger detach recovery', () => {
     expect(messages.filter(message => message.method === 'Target.attachedToTarget')).toHaveLength(1);
     await expect(handler.forwardToExtension('Runtime.evaluate', {}, 'pw-tab-1'))
         .rejects.toThrow('No tab found for sessionId: pw-tab-1');
+
+    await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(3);
+    expect(messages.at(-1)).toMatchObject({
+      method: 'Target.attachedToTarget',
+      params: { sessionId: 'pw-tab-2', targetInfo: { targetId: 'target-7', attached: true } },
+    });
   });
 });
 

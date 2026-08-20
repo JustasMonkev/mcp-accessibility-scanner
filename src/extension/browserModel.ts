@@ -41,6 +41,11 @@ export type SendToCDPClient = (message: CDPMessage) => void;
 export const REATTACH_DELAY_MS = 500;
 /** @public */
 export const REATTACH_COOLDOWN_MS = 10_000;
+// Consecutive failed recovery attempts before a tab is given up on, so a tab
+// that can no longer be attached at all does not keep the model retrying
+// forever in the background.
+/** @public */
+export const REATTACH_MAX_ATTEMPTS = 3;
 
 type TabSession = {
   tabId: number;
@@ -57,6 +62,7 @@ export class BrowserModel {
   private _tabAttachmentPromises = new Map<number, Promise<TabSession>>();
   private _reattachTimers = new Map<number, NodeJS.Timeout>();
   private _lastReattachAttempt = new Map<number, number>();
+  private _reattachFailures = new Map<number, number>();
   private _autoAttachOperation = Promise.resolve();
   private _autoAttach = false;
   private _disposed = false;
@@ -86,6 +92,7 @@ export class BrowserModel {
     this._knownTabs.delete(tabId);
     this._cancelReattach(tabId);
     this._lastReattachAttempt.delete(tabId);
+    this._reattachFailures.delete(tabId);
     this._detachTab(tabId);
   }
 
@@ -148,6 +155,9 @@ export class BrowserModel {
     }
     if (!this._tabSessions.has(tabId))
       return;
+    // A live session proves the last attach succeeded, so this is a fresh
+    // recovery episode with a fresh attempt budget.
+    this._reattachFailures.delete(tabId);
     this._detachTab(tabId);
     this._scheduleReattach(tabId);
   }
@@ -167,7 +177,19 @@ export class BrowserModel {
       if (this._disposed || !this._knownTabs.has(tabId) || this._tabSessions.has(tabId))
         return;
       this._lastReattachAttempt.set(tabId, Date.now());
-      void this._attachTab(tabId, { tolerateAlreadyAttached: true }).catch(logUnhandledError);
+      void this._attachTab(tabId, { tolerateAlreadyAttached: true }).then(
+          () => this._reattachFailures.delete(tabId),
+          error => {
+            logUnhandledError(error);
+            const failures = (this._reattachFailures.get(tabId) ?? 0) + 1;
+            this._reattachFailures.set(tabId, failures);
+            // A failed attempt may be transient (e.g. another navigation raced
+            // the re-attach), so retry after the cooldown until the budget for
+            // this recovery episode is spent.
+            if (failures < REATTACH_MAX_ATTEMPTS)
+              this._scheduleReattach(tabId);
+          },
+      );
     }, Math.max(REATTACH_DELAY_MS, cooldownRemaining));
     timer.unref?.();
     this._reattachTimers.set(tabId, timer);
@@ -194,14 +216,18 @@ export class BrowserModel {
       for (const tabId of [...this._reattachTimers.keys()])
         this._cancelReattach(tabId);
       await Promise.allSettled(this._tabAttachmentPromises.values());
-      await Promise.all([...this._tabSessions.keys()].map(async tabId => {
-        await this._sendToExtension('chrome.debugger.detach', [{ tabId }]);
-        this._detachTab(tabId);
-      }));
-      // A target_closed event arriving during the awaits above can schedule a
-      // new recovery, so cancel once more now that the operation has settled.
-      for (const tabId of [...this._reattachTimers.keys()])
-        this._cancelReattach(tabId);
+      try {
+        await Promise.all([...this._tabSessions.keys()].map(async tabId => {
+          await this._sendToExtension('chrome.debugger.detach', [{ tabId }]);
+          this._detachTab(tabId);
+        }));
+      } finally {
+        // A target_closed event arriving during the awaits above can schedule
+        // a new recovery, and a detach RPC can reject when Chrome already
+        // force-detached — so cancel once more however the operation settles.
+        for (const tabId of [...this._reattachTimers.keys()])
+          this._cancelReattach(tabId);
+      }
     });
   }
 
@@ -298,11 +324,25 @@ export class BrowserModel {
       if (!options?.tolerateAlreadyAttached || !alreadyAttached)
         throw error;
     }
-    // Re-check after every await: the model may have been disposed while the
-    // extension round trip was in flight, and the send closure would other-
-    // wise act over whatever connection replaced the one that disconnected.
-    if (this._disposed)
-      throw new Error('Browser model was disposed while attaching');
+    try {
+      // Re-check after every await: the model may have been disposed while
+      // the extension round trip was in flight, and the send closure would
+      // otherwise act over whatever connection replaced the disconnected one.
+      if (this._disposed)
+        throw new Error('Browser model was disposed while attaching');
+      return await this._createTabSession(tabId);
+    } catch (error) {
+      // The debugger is attached but no session tracks it, so nothing would
+      // ever detach it or observe its detach events. Roll the attach back
+      // (unless disposed — then no RPC may leave this model) so the tab stays
+      // re-attachable.
+      if (!this._disposed)
+        void this._sendToExtension('chrome.debugger.detach', [{ tabId }]).catch(logUnhandledError);
+      throw error;
+    }
+  }
+
+  private async _createTabSession(tabId: number): Promise<TabSession> {
     const result = await this._sendToExtension('chrome.debugger.sendCommand', [
       { tabId },
       'Target.getTargetInfo',
