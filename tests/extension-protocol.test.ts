@@ -26,6 +26,7 @@ import * as playwright from 'playwright';
 import { CDPRelayServer } from '../src/extension/cdpRelay.js';
 import { ExtensionContextFactory } from '../src/extension/extensionContextFactory.js';
 import { ExtensionProtocolV2 } from '../src/extension/cdpRelayV2.js';
+import { REATTACH_COOLDOWN_MS, REATTACH_DELAY_MS } from '../src/extension/browserModel.js';
 import { EXTENSION_ID, VERSION } from '../src/extension/protocol.js';
 
 import type { CDPMessage } from '../src/extension/browserModel.js';
@@ -370,6 +371,201 @@ describe('extension protocol v2', () => {
       relay.stop();
       await new Promise<void>(resolve => server.close(() => resolve()));
     }
+  });
+});
+
+describe('involuntary debugger detach recovery', () => {
+  // Drains the microtask chain of an in-flight async attach without relying
+  // on real timers (the tests below run under fake timers).
+  async function flushMicrotasks() {
+    for (let i = 0; i < 20; i++)
+      await Promise.resolve();
+  }
+
+  function attachCount(sendCommand: ReturnType<typeof vi.fn>) {
+    return sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach').length;
+  }
+
+  // Creates a handler with tab 7 attached under sessionId pw-tab-1, so each
+  // test starts from a live debugger session it can then knock out.
+  async function createAttachedHandler(overrides: { attach?: (call: number) => void } = {}) {
+    vi.useFakeTimers();
+    onTestFinished(() => vi.useRealTimers());
+    let attachCalls = 0;
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.attach') {
+        attachCalls++;
+        overrides.attach?.(attachCalls);
+        return undefined;
+      }
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')
+        return { targetInfo: { targetId: `target-${params[0].tabId}`, type: 'page' } };
+      return {};
+    });
+    const messages: CDPMessage[] = [];
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.connectOverCDP(message => messages.push(message));
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [
+      { id: 7, index: 0, windowId: 1, active: true, pinned: false },
+    ]);
+    await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+    expect(messages.at(-1)).toMatchObject({ method: 'Target.attachedToTarget', params: { sessionId: 'pw-tab-1' } });
+    return { handler, sendCommand, messages };
+  }
+
+  it('still tears down the session on a voluntary detach', async () => {
+    const { handler, sendCommand, messages } = await createAttachedHandler();
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'canceled_by_user']);
+    expect(messages.at(-1)).toMatchObject({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId: 'pw-tab-1', targetId: 'target-7' },
+    });
+
+    await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(1);
+    await expect(handler.forwardToExtension('Runtime.evaluate', {}, 'pw-tab-1'))
+        .rejects.toThrow('No tab found for sessionId: pw-tab-1');
+  });
+
+  it('re-attaches the tab under a fresh session after a target_closed detach', async () => {
+    const { handler, sendCommand, messages } = await createAttachedHandler();
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    expect(messages.at(-1)).toMatchObject({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId: 'pw-tab-1', targetId: 'target-7' },
+    });
+    expect(attachCount(sendCommand)).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(REATTACH_DELAY_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(2);
+    expect(messages.at(-1)).toMatchObject({
+      method: 'Target.attachedToTarget',
+      params: { sessionId: 'pw-tab-2', targetInfo: { targetId: 'target-7', attached: true } },
+    });
+
+    await handler.forwardToExtension('Runtime.evaluate', { expression: '1 + 1' }, 'pw-tab-2');
+    expect(sendCommand).toHaveBeenLastCalledWith('chrome.debugger.sendCommand', [
+      { tabId: 7, sessionId: undefined },
+      'Runtime.evaluate',
+      { expression: '1 + 1' },
+    ]);
+  });
+
+  it('treats "already attached" during recovery as the extension having recovered on its own', async () => {
+    const { handler, sendCommand, messages } = await createAttachedHandler({
+      attach: call => {
+        if (call === 2)
+          throw new Error('Another debugger is already attached to the tab with id: 7.');
+      },
+    });
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    await vi.advanceTimersByTimeAsync(REATTACH_DELAY_MS);
+    await flushMicrotasks();
+
+    expect(attachCount(sendCommand)).toBe(2);
+    expect(messages.at(-1)).toMatchObject({
+      method: 'Target.attachedToTarget',
+      params: { sessionId: 'pw-tab-2', targetInfo: { targetId: 'target-7', attached: true } },
+    });
+  });
+
+  it('keeps "already attached" fatal outside of recovery', async () => {
+    vi.useFakeTimers();
+    onTestFinished(() => vi.useRealTimers());
+    const sendCommand = vi.fn(async (method: string) => {
+      if (method === 'chrome.debugger.attach')
+        throw new Error('Another debugger is already attached to the tab with id: 7.');
+      return {};
+    });
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [
+      { id: 7, index: 0, windowId: 1, active: true, pinned: false },
+    ]);
+
+    await expect(handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined))
+        .rejects.toThrow('already attached');
+  });
+
+  it('gives up instead of looping when the page keeps forcing detaches within the cooldown', async () => {
+    const { handler, sendCommand, messages } = await createAttachedHandler();
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    await vi.advanceTimersByTimeAsync(REATTACH_DELAY_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(2);
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    expect(messages.at(-1)).toMatchObject({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId: 'pw-tab-2' },
+    });
+    await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(2);
+
+    await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+    expect(attachCount(sendCommand)).toBe(3);
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    await vi.advanceTimersByTimeAsync(REATTACH_DELAY_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(4);
+  });
+
+  it('does not re-attach when the tab closes before the recovery delay elapses', async () => {
+    const { handler, sendCommand, messages } = await createAttachedHandler();
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    handler.handleExtensionEvent('chrome.tabs.onRemoved', [7, { windowId: 1, isWindowClosing: false }]);
+
+    await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(1);
+    expect(messages.filter(message => message.method === 'Target.attachedToTarget')).toHaveLength(1);
+  });
+
+  it('cancels a pending recovery when auto-attach is disabled', async () => {
+    const { handler, sendCommand } = await createAttachedHandler();
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: false }, undefined);
+
+    await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(1);
+  });
+
+  it('cancels a pending recovery when the extension disconnects', async () => {
+    const { handler, sendCommand } = await createAttachedHandler();
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    handler.onExtensionDisconnect('extension websocket closed');
+
+    await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(1);
+  });
+
+  it('drops the session when the recovery attach fails for another reason', async () => {
+    const { handler, sendCommand, messages } = await createAttachedHandler({
+      attach: call => {
+        if (call === 2)
+          throw new Error('No tab with given id 7.');
+      },
+    });
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    await vi.advanceTimersByTimeAsync(REATTACH_DELAY_MS);
+    await flushMicrotasks();
+
+    expect(attachCount(sendCommand)).toBe(2);
+    expect(messages.filter(message => message.method === 'Target.attachedToTarget')).toHaveLength(1);
+    await expect(handler.forwardToExtension('Runtime.evaluate', {}, 'pw-tab-1'))
+        .rejects.toThrow('No tab found for sessionId: pw-tab-1');
   });
 });
 
