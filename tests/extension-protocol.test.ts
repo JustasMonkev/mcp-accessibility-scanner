@@ -594,7 +594,7 @@ describe('involuntary debugger detach recovery', () => {
     let failDetach!: () => void;
     const detachGate = new Promise<void>((_, reject) =>
       failDetach = () => reject(new Error('Debugger is not attached to the tab with id: 7.')));
-    const { handler, sendCommand } = await createAttachedHandler({ detach: () => detachGate });
+    const { handler, sendCommand, messages } = await createAttachedHandler({ detach: () => detachGate });
 
     const disabling = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: false }, undefined);
     await flushMicrotasks();
@@ -605,10 +605,32 @@ describe('involuntary debugger detach recovery', () => {
     handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
     failDetach();
     await expect(disabling).rejects.toThrow('Debugger is not attached');
+    expect(messages.filter(message => message.method === 'Target.detachedFromTarget'))
+        .toEqual([expect.objectContaining({ params: expect.objectContaining({ sessionId: 'pw-tab-1' }) })]);
 
     await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS);
     await flushMicrotasks();
     expect(attachCount(sendCommand)).toBe(1);
+  });
+
+  it('drops the local session even when the voluntary detach RPC rejects', async () => {
+    const { handler, messages } = await createAttachedHandler({
+      detach: async () => {
+        throw new Error('Debugger is not attached to the tab with id: 7.');
+      },
+    });
+
+    // No detach event arrives — Chrome force-detached earlier without the
+    // extension noticing — so only the RPC failure reveals the dead session.
+    await expect(handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: false }, undefined))
+        .rejects.toThrow('Debugger is not attached');
+
+    expect(messages.at(-1)).toMatchObject({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId: 'pw-tab-1', targetId: 'target-7' },
+    });
+    await expect(handler.forwardToExtension('Runtime.evaluate', {}, 'pw-tab-1'))
+        .rejects.toThrow('No tab found for sessionId: pw-tab-1');
   });
 
   it('rolls back and retries when recovery attaches but session setup fails', async () => {
@@ -637,6 +659,34 @@ describe('involuntary debugger detach recovery', () => {
       method: 'Target.attachedToTarget',
       params: { sessionId: 'pw-tab-2', targetInfo: { targetId: 'target-7', attached: true } },
     });
+  });
+
+  it('enforces the retry budget when detaches race each failing attempt', async () => {
+    let failAttach!: () => void;
+    const { handler, sendCommand } = await createAttachedHandler({
+      attach: call => {
+        if (call === 1)
+          return undefined;
+        return new Promise<void>((_, reject) =>
+          failAttach = () => reject(new Error('No tab with given id 7.')));
+      },
+    });
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    for (let attempt = 1; attempt <= REATTACH_MAX_ATTEMPTS; attempt++) {
+      await vi.advanceTimersByTimeAsync(attempt === 1 ? REATTACH_DELAY_MS : REATTACH_COOLDOWN_MS);
+      await flushMicrotasks();
+      expect(attachCount(sendCommand)).toBe(1 + attempt);
+      // Another force-detach lands while the failing attach is still in
+      // flight, so the deferred recovery races the failure accounting.
+      handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+      failAttach();
+      await flushMicrotasks();
+    }
+
+    await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS * 2);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(1 + REATTACH_MAX_ATTEMPTS);
   });
 
   it('stops retrying recovery once the attempt budget is spent', async () => {

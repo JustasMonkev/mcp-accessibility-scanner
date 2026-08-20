@@ -165,6 +165,8 @@ export class BrowserModel {
   private _scheduleReattach(tabId: number): void {
     if (this._disposed || !this._knownTabs.has(tabId) || this._reattachTimers.has(tabId))
       return;
+    if (this._reattachBudgetSpent(tabId))
+      return;
     // Wait out whatever remains of the cooldown since the last attempt, so a
     // page that keeps forcing detaches is retried at most once per cooldown
     // instead of in a tight loop.
@@ -176,23 +178,30 @@ export class BrowserModel {
       this._reattachTimers.delete(tabId);
       if (this._disposed || !this._knownTabs.has(tabId) || this._tabSessions.has(tabId))
         return;
+      // The budget can run out after this timer was scheduled — a detach
+      // event racing a failing attempt schedules the next timer before that
+      // attempt's failure is counted — so re-check at fire time.
+      if (this._reattachBudgetSpent(tabId))
+        return;
       this._lastReattachAttempt.set(tabId, Date.now());
       void this._attachTab(tabId, { tolerateAlreadyAttached: true }).then(
           () => this._reattachFailures.delete(tabId),
           error => {
             logUnhandledError(error);
-            const failures = (this._reattachFailures.get(tabId) ?? 0) + 1;
-            this._reattachFailures.set(tabId, failures);
+            this._reattachFailures.set(tabId, (this._reattachFailures.get(tabId) ?? 0) + 1);
             // A failed attempt may be transient (e.g. another navigation raced
             // the re-attach), so retry after the cooldown until the budget for
-            // this recovery episode is spent.
-            if (failures < REATTACH_MAX_ATTEMPTS)
-              this._scheduleReattach(tabId);
+            // this recovery episode is spent (_scheduleReattach enforces it).
+            this._scheduleReattach(tabId);
           },
       );
     }, Math.max(REATTACH_DELAY_MS, cooldownRemaining));
     timer.unref?.();
     this._reattachTimers.set(tabId, timer);
+  }
+
+  private _reattachBudgetSpent(tabId: number): boolean {
+    return (this._reattachFailures.get(tabId) ?? 0) >= REATTACH_MAX_ATTEMPTS;
   }
 
   private _cancelReattach(tabId: number): void {
@@ -218,8 +227,13 @@ export class BrowserModel {
       await Promise.allSettled(this._tabAttachmentPromises.values());
       try {
         await Promise.all([...this._tabSessions.keys()].map(async tabId => {
-          await this._sendToExtension('chrome.debugger.detach', [{ tabId }]);
-          this._detachTab(tabId);
+          try {
+            await this._sendToExtension('chrome.debugger.detach', [{ tabId }]);
+          } finally {
+            // The detach RPC rejects when Chrome already force-detached; the
+            // session is dead either way, so tell the client and drop it.
+            this._detachTab(tabId);
+          }
         }));
       } finally {
         // A target_closed event arriving during the awaits above can schedule
@@ -335,9 +349,10 @@ export class BrowserModel {
       // The debugger is attached but no session tracks it, so nothing would
       // ever detach it or observe its detach events. Roll the attach back
       // (unless disposed — then no RPC may leave this model) so the tab stays
-      // re-attachable.
+      // re-attachable, and await it so no retry can adopt the half-attached
+      // debugger before the detach has settled.
       if (!this._disposed)
-        void this._sendToExtension('chrome.debugger.detach', [{ tabId }]).catch(logUnhandledError);
+        await this._sendToExtension('chrome.debugger.detach', [{ tabId }]).catch(logUnhandledError);
       throw error;
     }
   }
