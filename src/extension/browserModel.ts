@@ -63,6 +63,11 @@ export class BrowserModel {
   private _reattachTimers = new Map<number, NodeJS.Timeout>();
   private _lastReattachAttempt = new Map<number, number>();
   private _reattachFailures = new Map<number, number>();
+  // Bumped when disableAutoAttach completes: it deliberately detaches every
+  // tab, so recovery callbacks captured before that (deferred .then handlers
+  // and retry handlers that outlive the timer-cancellation passes) must not
+  // resurrect tabs afterwards.
+  private _recoveryEpoch = 0;
   private _autoAttachOperation = Promise.resolve();
   private _autoAttach = false;
   private _disposed = false;
@@ -141,6 +146,7 @@ export class BrowserModel {
   private _recoverAfterInvoluntaryDetach(tabId: number): void {
     if (this._disposed)
       return;
+    const epoch = this._recoveryEpoch;
     const inFlightAttach = this._tabAttachmentPromises.get(tabId);
     if (inFlightAttach) {
       // The debugger detached while an attach was still completing. If that
@@ -148,8 +154,14 @@ export class BrowserModel {
       // observe the detach, so recover once the attempt settles instead of
       // losing the tab.
       void inFlightAttach.then(
-          () => this._recoverAfterInvoluntaryDetach(tabId),
-          () => this._scheduleReattach(tabId),
+          () => {
+            if (epoch === this._recoveryEpoch)
+              this._recoverAfterInvoluntaryDetach(tabId);
+          },
+          () => {
+            if (epoch === this._recoveryEpoch)
+              this._scheduleReattach(tabId);
+          },
       );
       return;
     }
@@ -174,9 +186,12 @@ export class BrowserModel {
     const cooldownRemaining = lastAttempt === undefined
       ? 0
       : Math.max(0, lastAttempt + REATTACH_COOLDOWN_MS - Date.now());
+    const epoch = this._recoveryEpoch;
     const timer = setTimeout(() => {
       this._reattachTimers.delete(tabId);
-      if (this._disposed || !this._knownTabs.has(tabId) || this._tabSessions.has(tabId))
+      if (this._disposed || epoch !== this._recoveryEpoch)
+        return;
+      if (!this._knownTabs.has(tabId) || this._tabSessions.has(tabId))
         return;
       // The budget can run out after this timer was scheduled — a detach
       // event racing a failing attempt schedules the next timer before that
@@ -191,13 +206,22 @@ export class BrowserModel {
             this._reattachFailures.set(tabId, (this._reattachFailures.get(tabId) ?? 0) + 1);
             // A failed attempt may be transient (e.g. another navigation raced
             // the re-attach), so retry after the cooldown until the budget for
-            // this recovery episode is spent (_scheduleReattach enforces it).
-            this._scheduleReattach(tabId);
+            // this recovery episode is spent (_scheduleReattach enforces it) —
+            // unless the episode ended (auto-attach was disabled) meanwhile.
+            if (epoch === this._recoveryEpoch)
+              this._scheduleReattach(tabId);
           },
       );
     }, Math.max(REATTACH_DELAY_MS, cooldownRemaining));
     timer.unref?.();
     this._reattachTimers.set(tabId, timer);
+  }
+
+  private _throwIfAttachInvalidated(tabId: number): void {
+    if (this._disposed)
+      throw new Error('Browser model was disposed while attaching');
+    if (!this._knownTabs.has(tabId))
+      throw new Error(`Tab ${tabId} was removed while attaching`);
   }
 
   private _reattachBudgetSpent(tabId: number): boolean {
@@ -241,6 +265,11 @@ export class BrowserModel {
         // force-detached — so cancel once more however the operation settles.
         for (const tabId of [...this._reattachTimers.keys()])
           this._cancelReattach(tabId);
+        // Recovery callbacks can outlive both cancellation passes (they chain
+        // on the attach wrapper, which settles after the raw promise this
+        // operation awaited); ending the epoch makes them stand down instead
+        // of re-attaching a tab the client just tore down.
+        this._recoveryEpoch++;
       }
     });
   }
@@ -339,11 +368,12 @@ export class BrowserModel {
         throw error;
     }
     try {
-      // Re-check after every await: the model may have been disposed while
-      // the extension round trip was in flight, and the send closure would
-      // otherwise act over whatever connection replaced the disconnected one.
-      if (this._disposed)
-        throw new Error('Browser model was disposed while attaching');
+      // Re-check after every await: the model may have been disposed (the
+      // send closure would otherwise act over whatever connection replaced
+      // the disconnected one) or the tab removed (chrome.tabs.onRemoved
+      // cannot cancel an operation already past its timer) while the
+      // extension round trip was in flight.
+      this._throwIfAttachInvalidated(tabId);
       return await this._createTabSession(tabId);
     } catch (error) {
       // The debugger is attached but no session tracks it, so nothing would
@@ -362,8 +392,7 @@ export class BrowserModel {
       { tabId },
       'Target.getTargetInfo',
     ]);
-    if (this._disposed)
-      throw new Error('Browser model was disposed while attaching');
+    this._throwIfAttachInvalidated(tabId);
     const targetInfo = result?.targetInfo;
     const sessionId = `pw-tab-${this._nextSessionId++}`;
     const tabSession: TabSession = { tabId, sessionId, targetInfo, childSessions: new Set() };

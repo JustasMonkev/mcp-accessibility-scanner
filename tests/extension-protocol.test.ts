@@ -391,7 +391,7 @@ describe('involuntary debugger detach recovery', () => {
   async function createAttachedHandler(overrides: {
     attach?: (call: number) => void | Promise<void>,
     detach?: () => Promise<void>,
-    targetInfo?: (call: number) => void,
+    targetInfo?: (call: number) => void | Promise<void>,
   } = {}) {
     vi.useFakeTimers();
     onTestFinished(() => vi.useRealTimers());
@@ -407,7 +407,7 @@ describe('involuntary debugger detach recovery', () => {
         await overrides.detach?.();
       if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
         targetInfoCalls++;
-        overrides.targetInfo?.(targetInfoCalls);
+        await overrides.targetInfo?.(targetInfoCalls);
         return { targetInfo: { targetId: `target-${params[0].tabId}`, type: 'page' } };
       }
       return {};
@@ -659,6 +659,60 @@ describe('involuntary debugger detach recovery', () => {
       method: 'Target.attachedToTarget',
       params: { sessionId: 'pw-tab-2', targetInfo: { targetId: 'target-7', attached: true } },
     });
+  });
+
+  it('does not adopt a tab removed while its recovery attach is in flight', async () => {
+    let releaseTargetInfo!: () => void;
+    const targetInfoGate = new Promise<void>(resolve => releaseTargetInfo = resolve);
+    const { handler, sendCommand, messages } = await createAttachedHandler({
+      targetInfo: call => call === 2 ? targetInfoGate : undefined,
+    });
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    await vi.advanceTimersByTimeAsync(REATTACH_DELAY_MS);
+    expect(attachCount(sendCommand)).toBe(2);
+
+    // The tab closes while the recovery's Target.getTargetInfo is pending;
+    // onTabRemoved can no longer cancel the timer (it already fired), so the
+    // in-flight operation itself must notice and abort.
+    handler.handleExtensionEvent('chrome.tabs.onRemoved', [7, { windowId: 1, isWindowClosing: false }]);
+    releaseTargetInfo();
+    await flushMicrotasks();
+
+    expect(messages.filter(message => message.method === 'Target.attachedToTarget')).toHaveLength(1);
+    await expect(handler.forwardToExtension('Runtime.evaluate', {}, 'pw-tab-2'))
+        .rejects.toThrow('No tab found for sessionId: pw-tab-2');
+
+    await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(2);
+  });
+
+  it('does not schedule recovery after auto-attach is disabled mid-attempt', async () => {
+    let failAttach!: () => void;
+    const { handler, sendCommand } = await createAttachedHandler({
+      attach: call => {
+        if (call === 1)
+          return undefined;
+        return new Promise<void>((_, reject) =>
+          failAttach = () => reject(new Error('No tab with given id 7.')));
+      },
+    });
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    await vi.advanceTimersByTimeAsync(REATTACH_DELAY_MS);
+    expect(attachCount(sendCommand)).toBe(2);
+
+    // Disable while the recovery attach is in flight; its rejection handler
+    // runs after the disable's cancellation passes and must not schedule a
+    // retry into the ended episode.
+    const disabling = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: false }, undefined);
+    failAttach();
+    await expect(disabling).resolves.toEqual({ result: {} });
+
+    await vi.advanceTimersByTimeAsync(REATTACH_COOLDOWN_MS * 2);
+    await flushMicrotasks();
+    expect(attachCount(sendCommand)).toBe(2);
   });
 
   it('enforces the retry budget when detaches race each failing attempt', async () => {
