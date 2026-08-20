@@ -39,6 +39,7 @@ export class ExtensionProtocolV2 {
   }
 
   onExtensionDisconnect(reason: string): void {
+    this._model.dispose();
     if (!this._ready.isDone())
       this._ready.reject(new Error(`Extension disconnected before initialization: ${reason}`));
   }
@@ -51,8 +52,8 @@ export class ExtensionProtocolV2 {
         break;
       }
       case 'chrome.debugger.onDetach': {
-        const [source] = params as ExtensionEventsV2['chrome.debugger.onDetach']['params'];
-        this._model.onDebuggerDetach(source);
+        const [source, reason] = params as ExtensionEventsV2['chrome.debugger.onDetach']['params'];
+        this._model.onDebuggerDetach(source, reason);
         break;
       }
       case 'chrome.tabs.onCreated': {
