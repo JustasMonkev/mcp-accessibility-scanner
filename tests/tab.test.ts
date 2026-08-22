@@ -15,7 +15,8 @@
  */
 
 import path from 'node:path';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { chromium, type Browser } from 'playwright';
 import { Tab, renderModalStates } from '../src/tab.js';
 import type { Context } from '../src/context.js';
 import { EventEmitter } from 'events';
@@ -763,6 +764,17 @@ describe('Tab', () => {
       expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
     });
 
+    it('reuses a cached aria-hidden ref when validation carries the same marker', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      locatorSnapshot = 'generic [aria-hidden] [ref=1]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('generic [aria-hidden] [ref=1]');
+      await tab.captureSnapshot();
+
+      await tab.refLocators([{ element: 'Hidden subtree', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
     it('reuses a cached ref whose long name is omitted from the snapshot', async () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
       locatorSnapshot = 'button [ref=1]';
@@ -931,6 +943,57 @@ describe('Tab', () => {
       await tab.waitForTimeout(2750);
       expect(mockPage.waitForTimeout).toHaveBeenCalledWith(2750);
     });
+  });
+});
+
+const hasBundledChromium = await chromium.launch({ headless: true, chromiumSandbox: false })
+    .then(async browser => {
+      await browser.close();
+      return true;
+    })
+    .catch(() => false);
+
+describe.skipIf(!hasBundledChromium)('Playwright AI snapshot compatibility', () => {
+  let browser: Browser;
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+  });
+
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it('surfaces one aria-hidden boundary marker without invalidating its cached ref', async () => {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <h2>Visible heading</h2>
+      <div aria-hidden="true">
+        <h1>Hidden heading</h1>
+        <p>Hidden content</p>
+      </div>
+    `);
+    const context = {
+      config: { timeouts: { navigationTimeout: 30000, defaultTimeout: 6000 } },
+      tools: [],
+    } as Context;
+    expect(await page.locator('body').ariaSnapshot()).not.toContain('Hidden content');
+    const snapshotSpy = vi.spyOn(page, 'ariaSnapshot');
+    const tab = new Tab(context, page, () => {});
+
+    try {
+      const { ariaSnapshot } = await tab.captureSnapshot();
+      const hiddenBoundary = ariaSnapshot.match(/generic \[aria-hidden\] \[ref=([^\]]+)\]/);
+
+      expect(hiddenBoundary).not.toBeNull();
+      expect(ariaSnapshot.match(/\[aria-hidden\]/g)).toHaveLength(1);
+
+      const capturesBeforeValidation = snapshotSpy.mock.calls.length;
+      await tab.refLocators([{ element: 'Hidden subtree', ref: hiddenBoundary![1] }]);
+      expect(snapshotSpy).toHaveBeenCalledTimes(capturesBeforeValidation);
+    } finally {
+      await page.close();
+    }
   });
 });
 

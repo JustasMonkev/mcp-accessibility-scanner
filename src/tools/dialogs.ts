@@ -17,12 +17,10 @@
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 
-// A dialog closed out of band (dismissed manually in headed mode, or through a
-// CDP side-channel) fails accept()/dismiss() with one of these messages — the
-// protocol error on the first attempt, the client-side guard on a repeat
-// (both verified against Playwright 1.62.0 Chromium). The pinned Playwright
-// has no dialogclosed event to observe the close directly, so this error is
-// the only remaining signal that the dialog is already gone.
+// A dialog closed out of band can race with the dialogclosed event handler and
+// fail accept()/dismiss() with one of these messages — the protocol error on
+// the first attempt, or the client-side guard on a repeat. Treat either as a
+// successful close so the transient race cannot leave a stale modal state.
 const dialogAlreadyClosedError = /no dialog is showing|dialog which is already handled/i;
 
 const handleDialog = defineTabTool({
