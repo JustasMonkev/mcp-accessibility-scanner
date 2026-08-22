@@ -262,7 +262,7 @@ This works out of the box in every mode, including the default persistent-profil
 Record a session once with Playwright's codegen, then hand the file to the server:
 
 ```bash
-npx playwright@1.62.1 codegen --save-storage=auth.json https://example.com/login
+npx playwright@1.63.0-alpha-2026-08-22 codegen --save-storage=auth.json https://example.com/login
 ```
 
 Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.
@@ -494,6 +494,7 @@ Set default operation timeout for existing tabs.
 #### `browser_snapshot`
 Capture accessibility snapshot of the current page (better than screenshot for analysis).
 Large `data:` URL payloads in snapshot output are truncated to their media type prefix.
+AI snapshots mark a visually present subtree excluded from accessibility queries with `[aria-hidden]` on its boundary element. Descendants are not marked again.
 - Parameters: `compress` (optional boolean, default false)
   - When true, repeated non-interactive ARIA snapshot nodes are collapsed in the rendered response when a repeated structural pattern appears more than 100 times. The first 10 examples of each collapsed pattern are kept.
   - Use `browser_evaluate()` to retrieve the full uncompressed list when needed.

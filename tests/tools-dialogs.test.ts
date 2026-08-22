@@ -106,7 +106,7 @@ const hasBundledChromium = await chromium.launch({ headless: true, chromiumSandb
     })
     .catch(() => false);
 
-describe.skipIf(!hasBundledChromium)('phantom dialog recovery in a real browser', () => {
+describe.skipIf(!hasBundledChromium)('out-of-band dialog close in a real browser', () => {
   let browser: Browser | undefined;
   let browserContext: BrowserContext | undefined;
   let backend: BrowserServerBackend | undefined;
@@ -118,7 +118,7 @@ describe.skipIf(!hasBundledChromium)('phantom dialog recovery in a real browser'
     browser = browserContext = backend = undefined;
   });
 
-  it('unblocks the session after a dialog is closed through a CDP side-channel', async () => {
+  it('unblocks the session when a dialog is closed through a CDP side-channel', async () => {
     const config = await resolveConfig({
       browser: {
         browserName: 'chromium',
@@ -164,23 +164,13 @@ describe.skipIf(!hasBundledChromium)('phantom dialog recovery in a real browser'
     // Close the dialog behind the tab's back, as a human would in headed mode.
     await cdp.send('Page.handleJavaScriptDialog', { accept: false });
 
-    // The tab never learns of the close on Playwright 1.62 (no dialogclosed
-    // event), so the stale modal state still starves snapshot-bearing tools:
-    // the response shows only the phantom dialog, never the page content.
-    const blockedResult = await backend.callTool('browser_snapshot', {});
-    const blockedText = (blockedResult.content[0] as any).text as string;
-    expect(blockedText).toContain('"confirm" dialog with message "out of band?"');
-    expect(blockedText).not.toContain('button "Ok"');
-
-    // ...but handling the phantom dialog recovers instead of dead-ending.
-    const handleResult = await backend.callTool('browser_handle_dialog', { accept: true });
-    expect(handleResult.isError).not.toBe(true);
-    expect((handleResult.content[0] as any).text).toContain('already closed out of band');
-
-    const recoveredResult = await backend.callTool('browser_snapshot', {});
-    expect(recoveredResult.isError).not.toBe(true);
-    const recoveredText = (recoveredResult.content[0] as any).text as string;
-    expect(recoveredText).toContain('button "Ok"');
-    expect(recoveredText).not.toContain('"confirm" dialog');
+    let snapshotText = '';
+    await vi.waitFor(async () => {
+      const snapshotResult = await backend!.callTool('browser_snapshot', {});
+      expect(snapshotResult.isError).not.toBe(true);
+      snapshotText = (snapshotResult.content[0] as any).text as string;
+      expect(snapshotText).toContain('button "Ok"');
+    });
+    expect(snapshotText).not.toContain('"confirm" dialog');
   });
 });
