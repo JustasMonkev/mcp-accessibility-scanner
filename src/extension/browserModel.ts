@@ -122,7 +122,16 @@ export class BrowserModel {
     if (tab?.id === undefined)
       throw new Error('Failed to create tab');
     this._knownTabs.set(tab.id, tab);
-    const tabSession = await this._attachTab(tab.id);
+    // A detach can cancel the attach of the tab we just made. Retry once
+    // rather than failing the command: the tab is still there, so the second
+    // attempt either attaches or fails with why the tab is really gone. Do not
+    // wait for the extension to replay the tab instead — it only schedules a
+    // replay for an involuntary detach, and a voluntary one never arrives.
+    const tabSession = await this._attachTab(tab.id).catch(error => {
+      if (!(error instanceof TabDetachedWhileAttachingError))
+        throw error;
+      return this._attachTab(tab.id);
+    });
     if (this._connectPagePrefix) {
       const connectPagePrefix = this._connectPagePrefix;
       await Promise.allSettled([...this._knownTabs]

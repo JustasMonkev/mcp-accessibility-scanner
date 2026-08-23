@@ -306,6 +306,77 @@ describe('extension protocol v2', () => {
     expect(messages[0]).toMatchObject({ method: 'Target.attachedToTarget', params: { sessionId: 'pw-tab-1' } });
   });
 
+  it('retries an attachment that a detach cancelled while creating a target', async () => {
+    let targetInfoCalls = 0;
+    let releaseFirstTargetInfo!: () => void;
+    const firstTargetInfo = new Promise<void>(resolve => releaseFirstTargetInfo = resolve);
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.tabs.create')
+        return { id: 8, index: 0, windowId: 1, url: params[0].url, active: true, pinned: false };
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
+        if (++targetInfoCalls === 1)
+          await firstTargetInfo;
+        return { targetInfo: { targetId: 'target-8', type: 'page' } };
+      }
+      return {};
+    });
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.connectOverCDP(() => {});
+
+    const created = handler.handleCDPCommand('Target.createTarget', { url: 'https://example.com' }, undefined);
+    await vi.waitFor(() => expect(targetInfoCalls).toBe(1));
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 8 }, 'target_closed']);
+    releaseFirstTargetInfo();
+
+    await expect(created).resolves.toEqual({ result: { targetId: 'target-8' } });
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toEqual([
+      ['chrome.debugger.attach', [{ tabId: 8 }, '1.3']],
+      ['chrome.debugger.attach', [{ tabId: 8 }, '1.3']],
+    ]);
+  });
+
+  it('retries a cancelled createTarget attachment once and surfaces why the retry failed', async () => {
+    let targetInfoCalls = 0;
+    let releaseFirstTargetInfo!: () => void;
+    const firstTargetInfo = new Promise<void>(resolve => releaseFirstTargetInfo = resolve);
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.tabs.create')
+        return { id: 8, index: 0, windowId: 1, url: params[0].url, active: true, pinned: false };
+      if (method === 'chrome.debugger.attach' && targetInfoCalls > 0)
+        throw new Error('No tab with given id: 8');
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
+        if (++targetInfoCalls === 1)
+          await firstTargetInfo;
+        return { targetInfo: { targetId: 'target-8', type: 'page' } };
+      }
+      return {};
+    });
+    const handler = new ExtensionProtocolV2(sendCommand);
+
+    const created = handler.handleCDPCommand('Target.createTarget', { url: 'https://example.com' }, undefined);
+    await vi.waitFor(() => expect(targetInfoCalls).toBe(1));
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 8 }, 'target_closed']);
+    releaseFirstTargetInfo();
+
+    await expect(created).rejects.toThrow('No tab with given id: 8');
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(2);
+  });
+
+  it('does not retry a createTarget attachment that failed for its own reason', async () => {
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.tabs.create')
+        return { id: 8, index: 0, windowId: 1, url: params[0].url, active: true, pinned: false };
+      if (method === 'chrome.debugger.attach')
+        throw new Error('Another debugger is already attached');
+      return {};
+    });
+    const handler = new ExtensionProtocolV2(sendCommand);
+
+    await expect(handler.handleCDPCommand('Target.createTarget', { url: 'https://example.com' }, undefined))
+        .rejects.toThrow('Another debugger is already attached');
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(1);
+  });
+
   it('accepts a replacement extension connection after disconnect', async () => {
     vi.mocked(spawn).mockClear();
     const server = http.createServer();
