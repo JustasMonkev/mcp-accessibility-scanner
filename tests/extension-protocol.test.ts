@@ -328,9 +328,13 @@ describe('extension protocol v2', () => {
     const failure = await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined)
         .then(() => undefined, (error: unknown) => error);
     expect(failure).toBeInstanceOf(Error);
-    expect(`${failure}`).toContain('Another debugger is already attached');
     // SAFETY: asserted to be an Error on the line above.
-    expect(`${(failure as Error).cause}`).toContain('Target.getTargetInfo timed out');
+    const error = failure as Error;
+    // The relay forwards only Error.message, so both failures have to be in it
+    // for Playwright to see why the attach started failing.
+    expect(error.message).toContain('Another debugger is already attached');
+    expect(error.message).toContain('Target.getTargetInfo timed out');
+    expect(`${error.cause}`).toContain('Target.getTargetInfo timed out');
   });
 
   it('recovers when a debugger call fails before the detach event arrives', async () => {
@@ -441,9 +445,11 @@ describe('extension protocol v2', () => {
     const failure = await handler.handleCDPCommand('Target.createTarget', { url: 'https://example.com' }, undefined)
         .then(() => undefined, (error: unknown) => error);
     expect(failure).toBeInstanceOf(Error);
-    expect(`${failure}`).toContain('Another debugger is already attached');
     // SAFETY: asserted to be an Error on the line above.
-    expect(`${(failure as Error).cause}`).toContain('Target.getTargetInfo timed out');
+    const error = failure as Error;
+    expect(error.message).toContain('Another debugger is already attached');
+    expect(error.message).toContain('Target.getTargetInfo timed out');
+    expect(`${error.cause}`).toContain('Target.getTargetInfo timed out');
     expect(attachCalls).toBe(2);
   });
 

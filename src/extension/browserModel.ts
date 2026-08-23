@@ -121,8 +121,9 @@ export class BrowserModel {
             // A first attempt that failed after chrome.debugger.attach had
             // succeeded leaves the debugger attached, so the retry reports
             // "Another debugger is already attached" rather than the reason
-            // anyone needs. Keep that reason reachable as the cause.
-            throw new Error(`Failed to attach tab ${tabId}: ${retryError}`, { cause: firstError });
+            // anyone needs. The relay forwards only Error.message, which never
+            // carries a cause, so name both failures in the message itself.
+            throw new Error(`Failed to attach tab ${tabId}: ${retryError} (first attempt: ${firstError})`, { cause: firstError });
           }
         }
       }));
@@ -159,8 +160,9 @@ export class BrowserModel {
       } catch (retryError) {
         // The first attempt may have left the debugger attached, so the retry
         // reports "Another debugger is already attached" rather than the reason
-        // anyone needs. Keep that reason reachable as the cause.
-        throw new Error(`Failed to attach tab ${tab.id}: ${retryError}`, { cause: firstError });
+        // anyone needs. The relay forwards only Error.message, which never
+        // carries a cause, so name both failures in the message itself.
+        throw new Error(`Failed to attach tab ${tab.id}: ${retryError} (first attempt: ${firstError})`, { cause: firstError });
       }
     });
     if (this._connectPagePrefix) {
