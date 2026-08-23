@@ -175,7 +175,8 @@ export class BrowserModel {
     const inFlight = this._tabAttachmentPromises.get(tabId);
     if (inFlight)
       return inFlight;
-    const promise = Promise.resolve().then(() => this._attachTabImpl(tabId));
+    const promise: Promise<TabSession> = Promise.resolve().then(() =>
+      this._attachTabImpl(tabId, () => this._tabAttachmentPromises.get(tabId) === promise));
     this._tabAttachmentPromises.set(tabId, promise);
     return promise.finally(() => {
       if (this._tabAttachmentPromises.get(tabId) === promise)
@@ -189,12 +190,18 @@ export class BrowserModel {
     return result;
   }
 
-  private async _attachTabImpl(tabId: number): Promise<TabSession> {
+  private async _attachTabImpl(tabId: number, isCurrentAttempt: () => boolean): Promise<TabSession> {
     await this._sendToExtension('chrome.debugger.attach', [{ tabId }, '1.3']);
     const result = await this._sendToExtension('chrome.debugger.sendCommand', [
       { tabId },
       'Target.getTargetInfo',
     ]);
+    // A detach can land between the attach and this reply, either because the
+    // tab went away or because Chrome force-detached the debugger. Installing
+    // the session now would hide a dead debuggee behind a live-looking one and
+    // short-circuit the re-attach the extension is about to ask for.
+    if (!isCurrentAttempt())
+      throw new Error(`Tab ${tabId} was detached while attaching`);
     const targetInfo = result?.targetInfo;
     const sessionId = `pw-tab-${this._nextSessionId++}`;
     const tabSession: TabSession = { tabId, sessionId, targetInfo, childSessions: new Set() };
@@ -211,6 +218,7 @@ export class BrowserModel {
   }
 
   private _detachTab(tabId: number): void {
+    this._tabAttachmentPromises.delete(tabId);
     const tabSession = this._tabSessions.get(tabId);
     if (!tabSession)
       return;

@@ -193,6 +193,80 @@ describe('extension protocol v2', () => {
     expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(2);
   });
 
+  it('re-attaches the tab when the extension recovers from an involuntary detach', async () => {
+    const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')
+        return { targetInfo: { targetId: 'target-7', type: 'page', url: tab.url } };
+      return {};
+    });
+    const messages: CDPMessage[] = [];
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.connectOverCDP(message => messages.push(message));
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
+    await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    expect(messages.at(-1)).toMatchObject({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId: 'pw-tab-1', targetId: 'target-7' },
+    });
+    await expect(handler.forwardToExtension('Page.enable', undefined, 'pw-tab-1'))
+        .rejects.toThrow('No tab found for sessionId: pw-tab-1');
+
+    // The extension re-attaches an involuntarily detached tab by replaying
+    // chrome.tabs.onCreated for it, so recovery runs through the normal
+    // auto-attach path rather than anything keyed off the detach reason.
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
+    await vi.waitFor(() => expect(messages.at(-1)).toMatchObject({
+      method: 'Target.attachedToTarget',
+      params: { sessionId: 'pw-tab-2', targetInfo: { targetId: 'target-7', attached: true } },
+    }));
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toEqual([
+      ['chrome.debugger.attach', [{ tabId: 7 }, '1.3']],
+      ['chrome.debugger.attach', [{ tabId: 7 }, '1.3']],
+    ]);
+    await handler.forwardToExtension('Page.enable', undefined, 'pw-tab-2');
+    expect(sendCommand).toHaveBeenLastCalledWith('chrome.debugger.sendCommand', [
+      { tabId: 7, sessionId: undefined },
+      'Page.enable',
+    ]);
+  });
+
+  it('discards an attach that a detach cancelled while it was in flight', async () => {
+    const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
+    let resolveTargetInfo!: () => void;
+    const targetInfo = new Promise<void>(resolve => resolveTargetInfo = resolve);
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
+        await targetInfo;
+        return { targetInfo: { targetId: 'target-7', type: 'page', url: tab.url } };
+      }
+      return {};
+    });
+    const messages: CDPMessage[] = [];
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.connectOverCDP(message => messages.push(message));
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
+    const autoAttach = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+    await vi.waitFor(() => expect(sendCommand).toHaveBeenLastCalledWith('chrome.debugger.sendCommand', [
+      { tabId: 7 },
+      'Target.getTargetInfo',
+    ]));
+
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    resolveTargetInfo();
+    await expect(autoAttach).rejects.toThrow('Tab 7 was detached while attaching');
+    expect(messages).toEqual([]);
+
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({
+      method: 'Target.attachedToTarget',
+      params: { sessionId: 'pw-tab-1', targetInfo: { targetId: 'target-7', attached: true } },
+    });
+  });
+
   it('accepts a replacement extension connection after disconnect', async () => {
     vi.mocked(spawn).mockClear();
     const server = http.createServer();
