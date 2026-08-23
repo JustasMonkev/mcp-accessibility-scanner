@@ -110,12 +110,20 @@ export class BrowserModel {
       await Promise.all([...this._knownTabs.keys()].map(async tabId => {
         try {
           await attachIgnoringCancellation(tabId);
-        } catch {
+        } catch (firstError) {
           // The failed command can be the detach itself, answered ahead of the
           // onDetach event that would have marked the attempt stale. Retrying
           // separates that from a tab that genuinely cannot be attached,
           // without matching on Chrome's error text, which is not a contract.
-          await attachIgnoringCancellation(tabId);
+          try {
+            await attachIgnoringCancellation(tabId);
+          } catch (retryError) {
+            // A first attempt that failed after chrome.debugger.attach had
+            // succeeded leaves the debugger attached, so the retry reports
+            // "Another debugger is already attached" rather than the reason
+            // anyone needs. Keep that reason reachable as the cause.
+            throw new Error(`Failed to attach tab ${tabId}: ${retryError}`, { cause: firstError });
+          }
         }
       }));
     });

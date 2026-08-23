@@ -306,6 +306,33 @@ describe('extension protocol v2', () => {
     expect(messages[0]).toMatchObject({ method: 'Target.attachedToTarget', params: { sessionId: 'pw-tab-1' } });
   });
 
+  it('keeps the first failure as the cause when the auto-attach retry also fails', async () => {
+    let attachCalls = 0;
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.attach') {
+        if (++attachCalls > 1)
+          throw new Error('Another debugger is already attached');
+        return {};
+      }
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')
+        throw new Error('Target.getTargetInfo timed out');
+      return {};
+    });
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [
+      { id: 7, index: 0, windowId: 1, active: true, pinned: false },
+    ]);
+
+    // The first attempt attached before failing, so the retry hits Chrome's
+    // "already attached" error and would otherwise bury why it started.
+    const failure = await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined)
+        .then(() => undefined, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(`${failure}`).toContain('Another debugger is already attached');
+    // SAFETY: asserted to be an Error on the line above.
+    expect(`${(failure as Error).cause}`).toContain('Target.getTargetInfo timed out');
+  });
+
   it('recovers when a debugger call fails before the detach event arrives', async () => {
     const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
     let targetInfoCalls = 0;
