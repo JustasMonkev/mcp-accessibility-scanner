@@ -145,15 +145,23 @@ export class BrowserModel {
     if (tab?.id === undefined)
       throw new Error('Failed to create tab');
     this._knownTabs.set(tab.id, tab);
-    // A detach can cancel the attach of the tab we just made. Retry once
-    // rather than failing the command: the tab is still there, so the second
-    // attempt either attaches or fails with why the tab is really gone. Do not
-    // wait for the extension to replay the tab instead — it only schedules a
-    // replay for an involuntary detach, and a voluntary one never arrives.
-    const tabSession = await this._attachTab(tab.id).catch(error => {
-      if (!(error instanceof TabDetachedWhileAttachingError))
-        throw error;
-      return this._attachTab(tab.id);
+    // A failed attach of the tab we just made can be a detach either way it
+    // arrives: classified as a cancellation, or answered ahead of the onDetach
+    // event that would have marked the attempt stale. Retry once rather than
+    // failing the command, on the same terms as auto-attach — the tab is still
+    // there, so the second attempt either attaches or fails with why it is
+    // really gone. Do not wait for the extension to replay the tab instead: it
+    // schedules a replay only for an involuntary detach, so a voluntary one
+    // would wait forever.
+    const tabSession = await this._attachTab(tab.id).catch(async firstError => {
+      try {
+        return await this._attachTab(tab.id);
+      } catch (retryError) {
+        // The first attempt may have left the debugger attached, so the retry
+        // reports "Another debugger is already attached" rather than the reason
+        // anyone needs. Keep that reason reachable as the cause.
+        throw new Error(`Failed to attach tab ${tab.id}: ${retryError}`, { cause: firstError });
+      }
     });
     if (this._connectPagePrefix) {
       const connectPagePrefix = this._connectPagePrefix;

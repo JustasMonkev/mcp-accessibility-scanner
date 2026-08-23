@@ -420,19 +420,31 @@ describe('extension protocol v2', () => {
     expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(2);
   });
 
-  it('does not retry a createTarget attachment that failed for its own reason', async () => {
+  it('retries a createTarget attachment that failed for its own reason and keeps the cause', async () => {
+    let attachCalls = 0;
     const sendCommand = vi.fn(async (method: string, params: any[]) => {
       if (method === 'chrome.tabs.create')
         return { id: 8, index: 0, windowId: 1, url: params[0].url, active: true, pinned: false };
-      if (method === 'chrome.debugger.attach')
-        throw new Error('Another debugger is already attached');
+      if (method === 'chrome.debugger.attach') {
+        if (++attachCalls > 1)
+          throw new Error('Another debugger is already attached');
+        return {};
+      }
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')
+        throw new Error('Target.getTargetInfo timed out');
       return {};
     });
     const handler = new ExtensionProtocolV2(sendCommand);
 
-    await expect(handler.handleCDPCommand('Target.createTarget', { url: 'https://example.com' }, undefined))
-        .rejects.toThrow('Another debugger is already attached');
-    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(1);
+    // The failure is unclassified, so it may be the detach answered ahead of
+    // its event; createTarget retries on the same terms as auto-attach.
+    const failure = await handler.handleCDPCommand('Target.createTarget', { url: 'https://example.com' }, undefined)
+        .then(() => undefined, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(`${failure}`).toContain('Another debugger is already attached');
+    // SAFETY: asserted to be an Error on the line above.
+    expect(`${(failure as Error).cause}`).toContain('Target.getTargetInfo timed out');
+    expect(attachCalls).toBe(2);
   });
 
   it('accepts a replacement extension connection after disconnect', async () => {
