@@ -256,7 +256,10 @@ describe('extension protocol v2', () => {
 
     handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
     resolveTargetInfo();
-    await expect(autoAttach).rejects.toThrow('Tab 7 was detached while attaching');
+    // Playwright awaits this command while connecting, and the factory stops
+    // the relay if the connection fails, so a cancelled attach must not fail
+    // it — the tab is simply unattached until the extension replays it.
+    await expect(autoAttach).resolves.toEqual({ result: {} });
     expect(messages).toEqual([]);
 
     handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);

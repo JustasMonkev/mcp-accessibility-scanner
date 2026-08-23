@@ -37,6 +37,11 @@ type TabSession = {
   childSessions: Set<string>;
 };
 
+// A detach that cancels an in-flight attach is recoverable, not a failure:
+// the extension replays chrome.tabs.onCreated for the tab, which starts a
+// fresh attachment. Auto-attach must not fail its initialization over it.
+class TabDetachedWhileAttachingError extends Error {}
+
 export class BrowserModel {
   private _sendToExtension: SendCommand;
   private _sendToCDPClient: SendToCDPClient | null = null;
@@ -94,7 +99,10 @@ export class BrowserModel {
   enableAutoAttach(): Promise<void> {
     return this._runAutoAttachOperation(async () => {
       this._autoAttach = true;
-      await Promise.all([...this._knownTabs.keys()].map(tabId => this._attachTab(tabId)));
+      await Promise.all([...this._knownTabs.keys()].map(tabId => this._attachTab(tabId).catch(error => {
+        if (!(error instanceof TabDetachedWhileAttachingError))
+          throw error;
+      })));
     });
   }
 
@@ -201,7 +209,7 @@ export class BrowserModel {
     // the session now would hide a dead debuggee behind a live-looking one and
     // short-circuit the re-attach the extension is about to ask for.
     if (!isCurrentAttempt())
-      throw new Error(`Tab ${tabId} was detached while attaching`);
+      throw new TabDetachedWhileAttachingError(`Tab ${tabId} was detached while attaching`);
     const targetInfo = result?.targetInfo;
     const sessionId = `pw-tab-${this._nextSessionId++}`;
     const tabSession: TabSession = { tabId, sessionId, targetInfo, childSessions: new Set() };
