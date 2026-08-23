@@ -199,17 +199,25 @@ export class BrowserModel {
   }
 
   private async _attachTabImpl(tabId: number, isCurrentAttempt: () => boolean): Promise<TabSession> {
-    await this._sendToExtension('chrome.debugger.attach', [{ tabId }, '1.3']);
-    const result = await this._sendToExtension('chrome.debugger.sendCommand', [
-      { tabId },
-      'Target.getTargetInfo',
-    ]);
-    // A detach can land between the attach and this reply, either because the
-    // tab went away or because Chrome force-detached the debugger. Installing
-    // the session now would hide a dead debuggee behind a live-looking one and
-    // short-circuit the re-attach the extension is about to ask for.
+    // A detach can land anywhere below, either because the tab went away or
+    // because Chrome force-detached the debugger. Both a call that fails
+    // because of it and a reply that arrives after it are that cancellation,
+    // not an attach failure: installing the session would hide a dead debuggee
+    // behind a live-looking one and short-circuit the re-attach the extension
+    // is about to ask for.
+    const cancelled = () => new TabDetachedWhileAttachingError(`Tab ${tabId} was detached while attaching`);
+    let result: any;
+    try {
+      await this._sendToExtension('chrome.debugger.attach', [{ tabId }, '1.3']);
+      result = await this._sendToExtension('chrome.debugger.sendCommand', [
+        { tabId },
+        'Target.getTargetInfo',
+      ]);
+    } catch (error) {
+      throw isCurrentAttempt() ? error : cancelled();
+    }
     if (!isCurrentAttempt())
-      throw new TabDetachedWhileAttachingError(`Tab ${tabId} was detached while attaching`);
+      throw cancelled();
     const targetInfo = result?.targetInfo;
     const sessionId = `pw-tab-${this._nextSessionId++}`;
     const tabSession: TabSession = { tabId, sessionId, targetInfo, childSessions: new Set() };

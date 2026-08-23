@@ -270,6 +270,42 @@ describe('extension protocol v2', () => {
     });
   });
 
+  it('treats a debugger call that fails after a detach as a cancelled attach', async () => {
+    const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
+    let rejectTargetInfo!: (error: Error) => void;
+    const targetInfo = new Promise<never>((_, reject) => rejectTargetInfo = reject);
+    let targetInfoCalls = 0;
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
+        if (++targetInfoCalls === 1)
+          return await targetInfo;
+        return { targetInfo: { targetId: 'target-7', type: 'page', url: tab.url } };
+      }
+      return {};
+    });
+    const messages: CDPMessage[] = [];
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.connectOverCDP(message => messages.push(message));
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
+    const autoAttach = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+    await vi.waitFor(() => expect(sendCommand).toHaveBeenLastCalledWith('chrome.debugger.sendCommand', [
+      { tabId: 7 },
+      'Target.getTargetInfo',
+    ]));
+
+    // Chrome tears the debuggee down before answering, so the in-flight command
+    // fails rather than replying late. That is still the detach, not a failure
+    // to attach, and it must not take the connection down with it.
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    rejectTargetInfo(new Error('Debugger is not attached to the tab with id: 7'));
+    await expect(autoAttach).resolves.toEqual({ result: {} });
+    expect(messages).toEqual([]);
+
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ method: 'Target.attachedToTarget', params: { sessionId: 'pw-tab-1' } });
+  });
+
   it('accepts a replacement extension connection after disconnect', async () => {
     vi.mocked(spawn).mockClear();
     const server = http.createServer();
