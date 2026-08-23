@@ -306,6 +306,37 @@ describe('extension protocol v2', () => {
     expect(messages[0]).toMatchObject({ method: 'Target.attachedToTarget', params: { sessionId: 'pw-tab-1' } });
   });
 
+  it('recovers when a debugger call fails before the detach event arrives', async () => {
+    const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
+    let targetInfoCalls = 0;
+    let rejectFirstTargetInfo!: (error: Error) => void;
+    const firstTargetInfo = new Promise<never>((_, reject) => rejectFirstTargetInfo = reject);
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
+        if (++targetInfoCalls === 1)
+          return await firstTargetInfo;
+        return { targetInfo: { targetId: 'target-7', type: 'page', url: tab.url } };
+      }
+      return {};
+    });
+    const messages: CDPMessage[] = [];
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.connectOverCDP(message => messages.push(message));
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
+    const autoAttach = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+    await vi.waitFor(() => expect(targetInfoCalls).toBe(1));
+
+    // Chrome answers the in-flight command with the detach's failure before it
+    // delivers onDetach, so the attempt still looks current when it rejects.
+    rejectFirstTargetInfo(new Error('Detached while handling command.'));
+
+    await expect(autoAttach).resolves.toEqual({ result: {} });
+    expect(messages).toMatchObject([{
+      method: 'Target.attachedToTarget',
+      params: { sessionId: 'pw-tab-1', targetInfo: { targetId: 'target-7', attached: true } },
+    }]);
+  });
+
   it('retries an attachment that a detach cancelled while creating a target', async () => {
     let targetInfoCalls = 0;
     let releaseFirstTargetInfo!: () => void;

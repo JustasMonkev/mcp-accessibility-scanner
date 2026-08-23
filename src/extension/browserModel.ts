@@ -99,10 +99,25 @@ export class BrowserModel {
   enableAutoAttach(): Promise<void> {
     return this._runAutoAttachOperation(async () => {
       this._autoAttach = true;
-      await Promise.all([...this._knownTabs.keys()].map(tabId => this._attachTab(tabId).catch(error => {
-        if (!(error instanceof TabDetachedWhileAttachingError))
-          throw error;
-      })));
+      const attachIgnoringCancellation = async (tabId: number) => {
+        try {
+          await this._attachTab(tabId);
+        } catch (error) {
+          if (!(error instanceof TabDetachedWhileAttachingError))
+            throw error;
+        }
+      };
+      await Promise.all([...this._knownTabs.keys()].map(async tabId => {
+        try {
+          await attachIgnoringCancellation(tabId);
+        } catch {
+          // The failed command can be the detach itself, answered ahead of the
+          // onDetach event that would have marked the attempt stale. Retrying
+          // separates that from a tab that genuinely cannot be attached,
+          // without matching on Chrome's error text, which is not a contract.
+          await attachIgnoringCancellation(tabId);
+        }
+      }));
     });
   }
 
