@@ -96,6 +96,81 @@ async function releaseTrace(browserContext: playwright.BrowserContext): Promise<
   await browserContext.tracing.stop();
 }
 
+// Chromium can acknowledge the CDP close request without actually closing the
+// page: when the close races a navigation commit that swaps the main frame
+// host, the pending close dies with the swapped-out frame host and
+// page.close() then waits forever
+// (https://github.com/microsoft/playwright/issues/42366). The pinned
+// Playwright build does not carry the upstream retry fix yet, and calling
+// page.close() again would not help — the server marks the page as closing on
+// the first call and later calls only re-await the close that never comes. So
+// the close a stuck target ignored is re-issued over CDP, which reliably
+// destroys it, and the whole close is bounded so a page that still refuses to
+// die fails the tool call instead of hanging browser_tabs close (or a whole
+// audit_site crawl) indefinitely.
+const closePageAttemptTimeoutMs = 1000;
+const closePageCdpRetries = 3;
+
+async function settleWithinWindow(settled: Promise<void>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      settled,
+      new Promise<void>(resolve => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function reissueCloseOverCdp(page: playwright.Page): Promise<void> {
+  let session: playwright.CDPSession | undefined;
+  try {
+    session = await page.context().newCDPSession(page);
+    const { targetInfo } = await session.send('Target.getTargetInfo');
+    await session.send('Target.closeTarget', { targetId: targetInfo.targetId });
+  } catch (error) {
+    // Non-Chromium browsers (which do not exhibit the hang) reject the CDP
+    // session outright, and a target that died concurrently rejects the
+    // sends; either way the bounded wait in closePageWithCdpFallback remains
+    // the only recovery.
+    logUnhandledError(error);
+  } finally {
+    await session?.detach().catch(() => {});
+  }
+}
+
+async function closePageWithCdpFallback(page: playwright.Page): Promise<void> {
+  const startedAt = Date.now();
+  let outcome: { closed: true } | { closed: false, error: unknown } | undefined;
+  // Both callbacks are attached up front so a close settling while a CDP
+  // re-issue is awaited can never surface as an unhandled rejection.
+  const settled = page.close().then(
+      () => { outcome = { closed: true }; },
+      error => { outcome = { closed: false, error }; },
+  );
+
+  for (let attempt = 0; ; attempt++) {
+    await settleWithinWindow(settled, closePageAttemptTimeoutMs);
+    const current = outcome;
+    if (current) {
+      if (current.closed)
+        return;
+      throw current.error;
+    }
+    if (attempt >= closePageCdpRetries)
+      break;
+    // Raced against the same window: a wedged browser process must not let
+    // the CDP escape hatch reintroduce the very hang it exists to break.
+    // reissueCloseOverCdp handles its own failures, so abandoning it is safe.
+    await settleWithinWindow(reissueCloseOverCdp(page), closePageAttemptTimeoutMs);
+  }
+  throw new Error(`Timed out after ${Date.now() - startedAt}ms while closing the page: the browser acknowledged the close but the page never closed (https://github.com/microsoft/playwright/issues/42366). The close was re-issued ${closePageCdpRetries} times over CDP without effect; retrying the close may still succeed.`);
+}
+
 type ContextOptions = {
   tools: Tool[];
   config: FullConfig;
@@ -246,7 +321,7 @@ export class Context {
     if (!tab)
       throw new Error(`Tab ${index} not found`);
     const url = tab.page.url();
-    await tab.page.close();
+    await closePageWithCdpFallback(tab.page);
     return url;
   }
 

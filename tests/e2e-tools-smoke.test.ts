@@ -345,4 +345,89 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
       },
     });
   }, 120000);
+
+  it('closes a tab during rapid navigation without hanging', async () => {
+    // Regression for the Chromium close/navigation race
+    // (microsoft/playwright#42366): the browser can acknowledge the close
+    // without performing it when the close races a navigation commit, and
+    // Context.closeTab used to await that close forever — hanging
+    // browser_tabs close and audit_site's crawl-tab cleanup. This drives the
+    // real browser_tabs close path against a page that keeps committing
+    // navigations; every close must complete instead of hanging the run.
+    const outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-a11y-e2e-close-'));
+    launchResources.push(async () => {
+      await fs.promises.rm(outputDir, { recursive: true, force: true });
+    });
+
+    const config = await resolveConfig({
+      outputDir,
+      browser: {
+        browserName: 'chromium',
+        isolated: true,
+        launchOptions: {
+          headless: true,
+          chromiumSandbox: false,
+        },
+      },
+      timeouts: {
+        navigationTimeout: 15000,
+        defaultTimeout: 10000,
+      },
+    });
+
+    let browser: Browser | undefined;
+    let browserContext: BrowserContext | undefined;
+
+    const backend = new BrowserServerBackend(config, {
+      createContext: async () => {
+        browser = await chromium.launch({
+          headless: true,
+          chromiumSandbox: false,
+        });
+        browserContext = await browser.newContext();
+        await installFixtureRoutes(browserContext);
+        await browserContext.route(`${fixtureOrigin}/reload`, async route => {
+          await route.fulfill({
+            status: 200,
+            contentType: 'text/html; charset=utf-8',
+            body: '<!doctype html><html><head><title>Reload loop</title></head><body><script>setTimeout(() => location.reload(), 50);</script></body></html>',
+          });
+        });
+        return {
+          browserContext,
+          close: async () => {
+            await browserContext?.close();
+            await browser?.close();
+          },
+        };
+      },
+    });
+
+    launchResources.push(async () => {
+      backend.serverClosed();
+      await browserContext?.close().catch(() => undefined);
+      await browser?.close().catch(() => undefined);
+    });
+
+    await backend.initialize(
+      {} as any,
+      { name: 'vitest', version: 'e2e-close-race' },
+    );
+
+    // A stable first tab keeps the browser context alive across the cycles.
+    const homeResult = await backend.callTool('browser_navigate', { url: `${fixtureOrigin}/` });
+    expect(homeResult.isError).not.toBe(true);
+
+    for (let cycle = 0; cycle < 3; cycle++) {
+      const opened = await backend.callTool('browser_tabs', { action: 'new' });
+      expect(opened.isError).not.toBe(true);
+      // The navigate result is deliberately not asserted: a reload can
+      // legitimately interrupt goto on a slow machine, and the reload loop
+      // keeps committing navigations either way — which is exactly the state
+      // the close below must survive.
+      await backend.callTool('browser_navigate', { url: `${fixtureOrigin}/reload` });
+      const closed = await backend.callTool('browser_tabs', { action: 'close' });
+      expect(closed.isError).not.toBe(true);
+    }
+  }, 60000);
 });

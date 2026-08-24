@@ -398,6 +398,153 @@ describe('Context', () => {
     });
   });
 
+  describe('closeTab', () => {
+    // Regression coverage for the Chromium close/navigation race
+    // (microsoft/playwright#42366): the browser can acknowledge the close
+    // without performing it when it races a navigation commit, and
+    // page.close() then never resolves — which used to hang browser_tabs
+    // close and audit_site's crawl-tab cleanup forever.
+
+    function makeContext() {
+      return new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+    }
+
+    function createClosablePage() {
+      const page = new EventEmitter() as any;
+      page.setDefaultNavigationTimeout = vi.fn();
+      page.setDefaultTimeout = vi.fn();
+      page.url = () => 'https://example.com/closing';
+      page.context = () => mockBrowserContext;
+      // Well-behaved by default: the close resolves and the page reports
+      // closed. Tests override close() to simulate the stuck target.
+      page.close = vi.fn().mockImplementation(async () => {
+        page.emit('close');
+      });
+      return page;
+    }
+
+    it('closes a well-behaved page without touching CDP', async () => {
+      mockBrowserContext.newCDPSession = vi.fn();
+      const context = makeContext();
+      await context.newTab();
+      const page = createClosablePage();
+      mockBrowserContext.emit('page', page);
+
+      await expect(context.closeTab(undefined)).resolves.toBe('https://example.com/closing');
+      expect(mockBrowserContext.newCDPSession).not.toHaveBeenCalled();
+    });
+
+    it('re-issues the close over CDP when page.close() hangs on a stuck target', async () => {
+      vi.useFakeTimers();
+      try {
+        const context = makeContext();
+        await context.newTab();
+        const page = createClosablePage();
+        // The upstream bug: the close is acknowledged but never performed,
+        // so the close promise stays pending until something re-kills the
+        // target.
+        let destroyTarget = () => {};
+        page.close = vi.fn().mockImplementation(() => new Promise<void>(resolve => {
+          destroyTarget = () => {
+            resolve();
+            page.emit('close');
+          };
+        }));
+        const session = {
+          send: vi.fn().mockImplementation(async (method: string) => {
+            if (method === 'Target.getTargetInfo')
+              return { targetInfo: { targetId: 'TARGET-1' } };
+            if (method === 'Target.closeTarget') {
+              destroyTarget();
+              return { success: true };
+            }
+            throw new Error(`Unexpected CDP method ${method}`);
+          }),
+          detach: vi.fn().mockResolvedValue(undefined),
+        };
+        mockBrowserContext.newCDPSession = vi.fn().mockResolvedValue(session);
+        mockBrowserContext.emit('page', page);
+
+        const closing = context.closeTab(undefined);
+        await vi.advanceTimersByTimeAsync(1000);
+        await expect(closing).resolves.toBe('https://example.com/closing');
+        expect(mockBrowserContext.newCDPSession).toHaveBeenCalledTimes(1);
+        expect(session.send).toHaveBeenCalledWith('Target.closeTarget', { targetId: 'TARGET-1' });
+        expect(session.detach).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('fails the close after bounded CDP retries instead of hanging forever', async () => {
+      vi.useFakeTimers();
+      try {
+        const context = makeContext();
+        await context.newTab();
+        const page = createClosablePage();
+        page.close = vi.fn().mockImplementation(() => new Promise<void>(() => {}));
+        // Even the re-issued closes are ignored: the tool call must fail
+        // with a bounded, descriptive error rather than wait forever.
+        const session = {
+          send: vi.fn().mockImplementation(async (method: string) =>
+            method === 'Target.getTargetInfo' ? { targetInfo: { targetId: 'TARGET-1' } } : { success: true }),
+          detach: vi.fn().mockResolvedValue(undefined),
+        };
+        mockBrowserContext.newCDPSession = vi.fn().mockResolvedValue(session);
+        mockBrowserContext.emit('page', page);
+
+        const closing = context.closeTab(undefined);
+        const assertion = expect(closing).rejects.toThrow('the page never closed');
+        for (let i = 0; i < 5; i++)
+          await vi.advanceTimersByTimeAsync(1000);
+        await assertion;
+        expect(mockBrowserContext.newCDPSession).toHaveBeenCalledTimes(3);
+        // The page genuinely stayed open, so the tab must remain tracked.
+        expect(context.tabs()).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('still bounds a hung close when the CDP re-issue is unavailable', async () => {
+      vi.useFakeTimers();
+      try {
+        const context = makeContext();
+        await context.newTab();
+        const page = createClosablePage();
+        page.close = vi.fn().mockImplementation(() => new Promise<void>(() => {}));
+        // Firefox/WebKit (which do not exhibit the hang) reject CDP sessions;
+        // the fallback must swallow that and keep the close bounded.
+        mockBrowserContext.newCDPSession = vi.fn().mockRejectedValue(new Error('CDP session is only available in Chromium'));
+        mockBrowserContext.emit('page', page);
+
+        const closing = context.closeTab(undefined);
+        const assertion = expect(closing).rejects.toThrow('the page never closed');
+        for (let i = 0; i < 5; i++)
+          await vi.advanceTimersByTimeAsync(1000);
+        await assertion;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('propagates a real close error unchanged', async () => {
+      const context = makeContext();
+      await context.newTab();
+      const page = createClosablePage();
+      page.close = vi.fn().mockRejectedValue(new Error('browser gone'));
+      mockBrowserContext.emit('page', page);
+
+      await expect(context.closeTab(undefined)).rejects.toThrow('browser gone');
+    });
+  });
+
   describe('shared context observers', () => {
     function createMockPage() {
       const page = new EventEmitter() as any;
