@@ -85,7 +85,7 @@ describe('mcp http transport hardening', () => {
     return { server, port: address.port };
   }
 
-  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string, sessionId?: string, accept?: string, body?: string, contentLength?: number }) {
+  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string, sessionId?: string, accept?: string, protocolVersion?: string, body?: string, contentLength?: number }) {
     const response = await new Promise<{ statusCode: number, headers: http.IncomingHttpHeaders, body: string }>((resolve, reject) => {
       const req = http.request({
         host: '127.0.0.1',
@@ -97,6 +97,7 @@ describe('mcp http transport hardening', () => {
           ...(options?.origin ? { origin: options.origin } : {}),
           ...(options?.sessionId ? { 'mcp-session-id': options.sessionId } : {}),
           ...(options?.accept ? { accept: options.accept } : {}),
+          ...(options?.protocolVersion ? { 'mcp-protocol-version': options.protocolVersion } : {}),
           ...(options?.body ? { 'content-type': 'application/json' } : {}),
           ...(options?.contentLength !== undefined ? { 'content-length': String(options.contentLength) } : {}),
         },
@@ -777,6 +778,65 @@ describe('mcp http transport hardening', () => {
 
       expect(listRoots).not.toHaveBeenCalled();
       expect(initialize).toHaveBeenCalledTimes(1);
+      expect(callTool).toHaveBeenCalledTimes(2);
+    } finally {
+      if (previousPingTimeout === undefined)
+        delete process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS;
+      else
+        process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS = previousPingTimeout;
+      await client.close();
+    }
+  });
+
+  // A GET that merely looks like the event stream must not arm the
+  // heartbeat: the transport can still reject it (bad protocol version, a
+  // second stream, aborted setup), and a ping without a delivery channel
+  // closes an otherwise usable POST-only session.
+  it('does not arm the heartbeat off a rejected event-stream GET', async () => {
+    const callTool = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }));
+    const { port } = await startServer({
+      ...testBackendFactory,
+      create: () => ({
+        async initialize() {},
+        async listTools() {
+          return [];
+        },
+        callTool,
+      }),
+    });
+
+    const noStreamFetch: typeof fetch = async (input, init) => {
+      const request = input instanceof Request ? input : undefined;
+      const method = init?.method ?? request?.method;
+      if (method === 'GET') {
+        return await new Promise<Response>((_resolve, reject) => {
+          (init?.signal ?? request?.signal)?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+      }
+      return fetch(input, init);
+    };
+    const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: {} });
+    client.setRequestHandler('ping', () => ({}));
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { fetch: noStreamFetch });
+    const previousPingTimeout = process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS;
+    process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS = '20';
+
+    try {
+      await client.connect(transport);
+
+      const rejectedStream = await sendRequest(port, {
+        sessionId: transport.sessionId,
+        accept: 'text/event-stream',
+        protocolVersion: '0.0.0',
+      });
+      expect(rejectedStream.statusCode).toBe(400);
+
+      await client.callTool({ name: 'probe', arguments: {} });
+      // Outwait the 20ms ping timeout: a heartbeat wrongly armed by the
+      // rejected GET would have pinged, failed for lack of a stream, and
+      // closed the session before the second call.
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await client.callTool({ name: 'probe', arguments: {} });
       expect(callTool).toHaveBeenCalledTimes(2);
     } finally {
       if (previousPingTimeout === undefined)

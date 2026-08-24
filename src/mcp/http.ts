@@ -157,8 +157,23 @@ class SessionStore {
       res.end('Session not found');
       return;
     }
-    if (req.method === 'GET' && req.headers.accept?.split(',').some(type => type.split(';')[0].trim().toLowerCase() === 'text/event-stream'))
-      session.eventStreamReady.resolve();
+    if (req.method === 'GET' && req.headers.accept?.split(',').some(type => type.split(';')[0].trim().toLowerCase() === 'text/event-stream')) {
+      // The transport answers 200 on this GET only when it accepts it as the
+      // standalone event stream, and handleRequest resolves when that stream
+      // ends, not when it opens — so readiness has to be signalled at the
+      // header flush, and only for a stream that actually established.
+      // Resolving on the request's shape alone armed the heartbeat off a GET
+      // the transport then rejected (bad protocol version, second stream,
+      // aborted setup), and the ping had no channel and closed the session.
+      const writeHead = res.writeHead.bind(res);
+      const resolveOnEstablished = (...args: Parameters<http.ServerResponse['writeHead']>) => {
+        if (args[0] === 200)
+          session.eventStreamReady.resolve();
+        return writeHead(...args);
+      };
+      // SAFETY: every writeHead overload takes statusCode first, and the wrapper forwards its arguments unchanged to the original.
+      res.writeHead = resolveOnEstablished as http.ServerResponse['writeHead'];
+    }
     await session.transport.handleRequest(req, res);
   }
 
