@@ -424,6 +424,117 @@ describe('extension protocol v2', () => {
     expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(2);
   });
 
+  it('ignores the stale detach of an attachment the retry replaced', async () => {
+    const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
+    let targetInfoCalls = 0;
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
+        if (++targetInfoCalls === 1)
+          throw new Error('Detached while handling command.');
+        return { targetInfo: { targetId: 'target-7', type: 'page', url: tab.url } };
+      }
+      return {};
+    });
+    const messages: CDPMessage[] = [];
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.connectOverCDP(message => messages.push(message));
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
+    await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+    expect(messages).toMatchObject([{ method: 'Target.attachedToTarget', params: { sessionId: 'pw-tab-1' } }]);
+
+    // The detach behind the first failure is delivered only now, after the
+    // retry attached: it ends the replaced attachment, not the live one.
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    expect(messages.filter(message => message.method === 'Target.detachedFromTarget')).toHaveLength(0);
+    await handler.forwardToExtension('Page.enable', undefined, 'pw-tab-1');
+    expect(sendCommand).toHaveBeenLastCalledWith('chrome.debugger.sendCommand', [
+      { tabId: 7, sessionId: undefined },
+      'Page.enable',
+    ]);
+
+    // Only one stale event is owed; the next detach ends the live attachment.
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    expect(messages.at(-1)).toMatchObject({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId: 'pw-tab-1', targetId: 'target-7' },
+    });
+  });
+
+  it('undoes an attach that completed for an attempt a detach had cancelled', async () => {
+    const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
+    let attachCalls = 0;
+    let releaseSecondAttach!: () => void;
+    const secondAttach = new Promise<void>(resolve => releaseSecondAttach = resolve);
+    let targetInfoCalls = 0;
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.attach') {
+        if (++attachCalls === 2)
+          await secondAttach;
+        return {};
+      }
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
+        if (++targetInfoCalls === 1)
+          throw new Error('Detached while handling command.');
+        return { targetInfo: { targetId: 'target-7', type: 'page', url: tab.url } };
+      }
+      return {};
+    });
+    const messages: CDPMessage[] = [];
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.connectOverCDP(message => messages.push(message));
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
+    const autoAttach = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+    await vi.waitFor(() => expect(attachCalls).toBe(2));
+
+    // The detach behind the first failure is processed while the retry's own
+    // attach is still in flight, cancelling the retry; the attach completes
+    // anyway and must be undone, or the tab stays attached with no session
+    // and every later attach fails.
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    releaseSecondAttach();
+    await expect(autoAttach).resolves.toEqual({ result: {} });
+    expect(messages).toEqual([]);
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.detach')).toEqual([
+      ['chrome.debugger.detach', [{ tabId: 7 }]],
+    ]);
+  });
+
+  it('holds Target.setAutoAttach(false) until a replacement attachment is torn down', async () => {
+    let rejectFirstTargetInfo!: (error: Error) => void;
+    const firstTargetInfo = new Promise<never>((_, reject) => rejectFirstTargetInfo = reject);
+    let targetInfoCalls = 0;
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.tabs.create')
+        return { id: 8, index: 0, windowId: 1, url: params[0].url, active: true, pinned: false };
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
+        if (++targetInfoCalls === 1)
+          return await firstTargetInfo;
+        return { targetInfo: { targetId: 'target-8', type: 'page' } };
+      }
+      return {};
+    });
+    const messages: CDPMessage[] = [];
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.connectOverCDP(message => messages.push(message));
+
+    const created = handler.handleCDPCommand('Target.createTarget', { url: 'https://example.com' }, undefined);
+    await vi.waitFor(() => expect(targetInfoCalls).toBe(1));
+    const disabling = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: false }, undefined);
+
+    // Cancel the original attempt while the disable barrier waits on it; the
+    // retry replacing it registers only once the original settles, which is
+    // exactly when a one-shot snapshot would have stopped waiting.
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 8 }, 'target_closed']);
+    rejectFirstTargetInfo(new Error('Detached while handling command.'));
+
+    await expect(created).resolves.toEqual({ result: { targetId: 'target-8' } });
+    await expect(disabling).resolves.toEqual({ result: {} });
+    expect(messages).toMatchObject([
+      { method: 'Target.attachedToTarget', params: { sessionId: 'pw-tab-1' } },
+      { method: 'Target.detachedFromTarget', params: { sessionId: 'pw-tab-1' } },
+    ]);
+  });
+
   it('retries a createTarget attachment that failed for its own reason and keeps the cause', async () => {
     let attachCalls = 0;
     const sendCommand = vi.fn(async (method: string, params: any[]) => {
