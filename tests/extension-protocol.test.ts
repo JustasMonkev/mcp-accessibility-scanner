@@ -657,6 +657,49 @@ describe('extension protocol v2', () => {
     expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.detach')).toHaveLength(1);
   });
 
+  it('holds Target.setAutoAttach(false) until an abandoned undo settles', async () => {
+    const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
+    let releaseFirstTargetInfo!: () => void;
+    const firstTargetInfo = new Promise<void>(resolve => releaseFirstTargetInfo = resolve);
+    let releaseUndo!: () => void;
+    const undoGate = new Promise<void>(resolve => releaseUndo = resolve);
+    let targetInfoCalls = 0;
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.detach') {
+        await undoGate;
+        return {};
+      }
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
+        if (++targetInfoCalls === 1)
+          await firstTargetInfo;
+        return { targetInfo: { targetId: 'target-7', type: 'page', url: tab.url } };
+      }
+      return {};
+    });
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.connectOverCDP(() => {});
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
+    const autoAttach = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+    await vi.waitFor(() => expect(targetInfoCalls).toBe(1));
+
+    // Cancel the attempt, then let its reply settle: the abandoned attempt
+    // fires an undo detach that is still in flight when disable is queued.
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    releaseFirstTargetInfo();
+    await expect(autoAttach).resolves.toEqual({ result: {} });
+
+    const disabling = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: false }, undefined);
+    let disabled = false;
+    void disabling.then(() => disabled = true);
+    await new Promise(resolve => setImmediate(resolve));
+    // Disable's contract is that nothing is in flight when it resolves, and
+    // the undo is in flight.
+    expect(disabled).toBe(false);
+
+    releaseUndo();
+    await expect(disabling).resolves.toEqual({ result: {} });
+  });
+
   it('holds Target.setAutoAttach(false) until a replacement attachment is torn down', async () => {
     let rejectFirstTargetInfo!: (error: Error) => void;
     const firstTargetInfo = new Promise<never>((_, reject) => rejectFirstTargetInfo = reject);

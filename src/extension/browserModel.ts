@@ -56,6 +56,10 @@ export class BrowserModel {
   // their event was processed. chrome.debugger.onDetach names only the tab,
   // so this is how an event is matched to the attachment it ends.
   private _pendingStaleDetaches = new Map<number, number>();
+  // Undo detaches issued for abandoned attempts, until they settle. The
+  // disable barrier promises nothing in flight when it resolves, and these
+  // are in flight without being attempts.
+  private _pendingUndoDetaches = new Set<Promise<unknown>>();
   private _autoAttachOperation = Promise.resolve();
   private _autoAttach = false;
   private _nextSessionId = 1;
@@ -158,8 +162,8 @@ export class BrowserModel {
       // attempt registers only once the original settles, which is exactly
       // when a one-shot snapshot stops waiting — so drain until nothing is in
       // flight rather than awaiting a snapshot.
-      while (this._inFlightAttachAttempts.size)
-        await Promise.allSettled([...this._inFlightAttachAttempts]);
+      while (this._inFlightAttachAttempts.size || this._pendingUndoDetaches.size)
+        await Promise.allSettled([...this._inFlightAttachAttempts, ...this._pendingUndoDetaches]);
       await Promise.all([...this._tabSessions.keys()].map(async tabId => {
         await this._sendToExtension('chrome.debugger.detach', [{ tabId }]);
         this._detachTab(tabId);
@@ -345,9 +349,11 @@ export class BrowserModel {
       // This attempt attached the debugger but installs no session, so nothing
       // would ever detach it and every later attach for the tab would fail
       // with "Another debugger is already attached". Undo it.
-      void this._sendToExtension('chrome.debugger.detach', [{ tabId }]).catch(() => {
+      const undo = this._sendToExtension('chrome.debugger.detach', [{ tabId }]).catch(() => {
         // Already detached: the cancelling detach ended this attachment too.
       });
+      this._pendingUndoDetaches.add(undo);
+      void undo.then(() => this._pendingUndoDetaches.delete(undo));
     }
     return new TabDetachedWhileAttachingError(`Tab ${tabId} was detached while attaching`);
   }
