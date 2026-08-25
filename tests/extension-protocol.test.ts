@@ -350,15 +350,33 @@ describe('extension protocol v2', () => {
     expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.detach')).toHaveLength(2);
   });
 
-  it('recovers when a debugger call fails before the detach event arrives', async () => {
+  it('does not owe a detach that was consumed during the undo round trip', async () => {
     const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
+    let chromeAttached = false;
+    let releaseUndo!: () => void;
+    const undoGate = new Promise<void>(resolve => releaseUndo = resolve);
+    let detachCalls = 0;
     let targetInfoCalls = 0;
-    let rejectFirstTargetInfo!: (error: Error) => void;
-    const firstTargetInfo = new Promise<never>((_, reject) => rejectFirstTargetInfo = reject);
     const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.attach') {
+        if (chromeAttached)
+          throw new Error('Another debugger is already attached');
+        chromeAttached = true;
+        return {};
+      }
+      if (method === 'chrome.debugger.detach') {
+        if (++detachCalls === 1)
+          await undoGate;
+        if (!chromeAttached)
+          throw new Error('Debugger is not attached to the tab with id: 7');
+        chromeAttached = false;
+        return {};
+      }
       if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
-        if (++targetInfoCalls === 1)
-          return await firstTargetInfo;
+        if (++targetInfoCalls === 1) {
+          chromeAttached = false;
+          throw new Error('Detached while handling command.');
+        }
         return { targetInfo: { targetId: 'target-7', type: 'page', url: tab.url } };
       }
       return {};
@@ -368,17 +386,62 @@ describe('extension protocol v2', () => {
     handler.connectOverCDP(message => messages.push(message));
     handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
     const autoAttach = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
-    await vi.waitFor(() => expect(targetInfoCalls).toBe(1));
+    await vi.waitFor(() => expect(detachCalls).toBe(1));
 
-    // Chrome answers the in-flight command with the detach's failure before it
-    // delivers onDetach, so the attempt still looks current when it rejects.
-    rejectFirstTargetInfo(new Error('Detached while handling command.'));
-
+    // The extension emitted the onDetach before the undo could reach it, so
+    // the event lands during the undo's round trip: it is consumed as real
+    // and cancels the attempt, and the undo's failure must not owe it again.
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    releaseUndo();
     await expect(autoAttach).resolves.toEqual({ result: {} });
-    expect(messages).toMatchObject([{
-      method: 'Target.attachedToTarget',
-      params: { sessionId: 'pw-tab-1', targetInfo: { targetId: 'target-7', attached: true } },
-    }]);
+
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
+    await vi.waitFor(() => expect(messages).toMatchObject([
+      { method: 'Target.attachedToTarget', params: { sessionId: 'pw-tab-1' } },
+    ]));
+
+    // No owed count leaked: the next genuine detach still tears down.
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    expect(messages.at(-1)).toMatchObject({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId: 'pw-tab-1', targetId: 'target-7' },
+    });
+  });
+
+  it('treats the tab closing during the undo as a cancellation, not a failure', async () => {
+    const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
+    let chromeAttached = false;
+    let releaseUndo!: () => void;
+    const undoGate = new Promise<void>(resolve => releaseUndo = resolve);
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.attach') {
+        if (chromeAttached)
+          throw new Error('Another debugger is already attached');
+        chromeAttached = true;
+        return {};
+      }
+      if (method === 'chrome.debugger.detach') {
+        await undoGate;
+        if (!chromeAttached)
+          throw new Error('Debugger is not attached to the tab with id: 7');
+        chromeAttached = false;
+        return {};
+      }
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')
+        throw new Error('Target.getTargetInfo timed out');
+      return {};
+    });
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
+    const autoAttach = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+    await vi.waitFor(() => expect(sendCommand.mock.calls.some(([method]) => method === 'chrome.debugger.detach')).toBe(true));
+
+    // The tab closes while the genuine failure's undo is in flight. Retrying
+    // the raw failure would attach a tab that no longer exists.
+    handler.handleExtensionEvent('chrome.tabs.onRemoved', [7, { windowId: 1, isWindowClosing: false }]);
+    releaseUndo();
+    await expect(autoAttach).resolves.toEqual({ result: {} });
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(1);
   });
 
   it('retries an attachment that a detach cancelled while creating a target', async () => {

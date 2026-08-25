@@ -300,12 +300,23 @@ export class BrowserModel {
           await this._sendToExtension('chrome.debugger.detach', [{ tabId }]);
         } catch {
           // Chrome refuses to detach a detached tab, so this failing means
-          // the original failure WAS the detach, answered ahead of its
-          // onDetach event. That event is still owed and must not tear down
-          // whatever attachment exists when it arrives.
+          // the original failure WAS the detach. Its onDetach may already
+          // have landed during this undo's round trip — the extension emits
+          // the event before the undo can reach it — in which case it was
+          // consumed as real and cancelled this attempt; owing it again
+          // would swallow the tab's next genuine detach.
+          if (!isCurrentAttempt())
+            throw this._abandonAttachAttempt(tabId, false);
+          // Still current: the event is outstanding and owed, and must not
+          // tear down whatever attachment exists when it arrives.
           this._pendingStaleDetaches.set(tabId, (this._pendingStaleDetaches.get(tabId) ?? 0) + 1);
         }
       }
+      // A cancellation that lands during the undo — the tab closing, most
+      // likely — must surface as one: retrying the raw failure would attach
+      // a tab that is gone or no longer ours.
+      if (!isCurrentAttempt())
+        throw this._abandonAttachAttempt(tabId, false);
       throw error;
     }
     if (!isCurrentAttempt())
