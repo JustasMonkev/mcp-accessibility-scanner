@@ -268,6 +268,9 @@ describe('extension protocol v2', () => {
       method: 'Target.attachedToTarget',
       params: { sessionId: 'pw-tab-1', targetInfo: { targetId: 'target-7', attached: true } },
     });
+    // The abandoned attempt's successful attach was undone, so nothing was
+    // left attached with no session behind it.
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.detach').length).toBeGreaterThanOrEqual(1);
   });
 
   it('treats a debugger call that fails after a detach as a cancelled attach', async () => {
@@ -307,15 +310,23 @@ describe('extension protocol v2', () => {
   });
 
   it('keeps the first failure as the cause when the auto-attach retry also fails', async () => {
-    let attachCalls = 0;
+    let chromeAttached = false;
+    let targetInfoCalls = 0;
     const sendCommand = vi.fn(async (method: string, params: any[]) => {
       if (method === 'chrome.debugger.attach') {
-        if (++attachCalls > 1)
+        if (chromeAttached)
           throw new Error('Another debugger is already attached');
+        chromeAttached = true;
+        return {};
+      }
+      if (method === 'chrome.debugger.detach') {
+        if (!chromeAttached)
+          throw new Error('Debugger is not attached to the tab with id: 7');
+        chromeAttached = false;
         return {};
       }
       if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')
-        throw new Error('Target.getTargetInfo timed out');
+        throw new Error(`Target.getTargetInfo timed out (call ${++targetInfoCalls})`);
       return {};
     });
     const handler = new ExtensionProtocolV2(sendCommand);
@@ -323,8 +334,8 @@ describe('extension protocol v2', () => {
       { id: 7, index: 0, windowId: 1, active: true, pinned: false },
     ]);
 
-    // The first attempt attached before failing, so the retry hits Chrome's
-    // "already attached" error and would otherwise bury why it started.
+    // Both failures are the command's own — the debugger stays attached until
+    // the undo detaches it, which is what lets the retry attach at all.
     const failure = await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined)
         .then(() => undefined, (error: unknown) => error);
     expect(failure).toBeInstanceOf(Error);
@@ -332,9 +343,11 @@ describe('extension protocol v2', () => {
     const error = failure as Error;
     // The relay forwards only Error.message, so both failures have to be in it
     // for Playwright to see why the attach started failing.
-    expect(error.message).toContain('Another debugger is already attached');
-    expect(error.message).toContain('Target.getTargetInfo timed out');
-    expect(`${error.cause}`).toContain('Target.getTargetInfo timed out');
+    expect(error.message).toContain('Target.getTargetInfo timed out (call 2)');
+    expect(error.message).toContain('Target.getTargetInfo timed out (call 1)');
+    expect(`${error.cause}`).toContain('Target.getTargetInfo timed out (call 1)');
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(2);
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.detach')).toHaveLength(2);
   });
 
   it('recovers when a debugger call fails before the detach event arrives', async () => {
@@ -426,11 +439,28 @@ describe('extension protocol v2', () => {
 
   it('ignores the stale detach of an attachment the retry replaced', async () => {
     const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
+    let chromeAttached = false;
     let targetInfoCalls = 0;
     const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.attach') {
+        if (chromeAttached)
+          throw new Error('Another debugger is already attached');
+        chromeAttached = true;
+        return {};
+      }
+      if (method === 'chrome.debugger.detach') {
+        if (!chromeAttached)
+          throw new Error('Debugger is not attached to the tab with id: 7');
+        chromeAttached = false;
+        return {};
+      }
       if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
-        if (++targetInfoCalls === 1)
+        if (++targetInfoCalls === 1) {
+          // Chrome force-detaches and answers the in-flight command with the
+          // failure before delivering the onDetach event.
+          chromeAttached = false;
           throw new Error('Detached while handling command.');
+        }
         return { targetInfo: { targetId: 'target-7', type: 'page', url: tab.url } };
       }
       return {};
@@ -460,8 +490,9 @@ describe('extension protocol v2', () => {
     });
   });
 
-  it('undoes an attach that completed for an attempt a detach had cancelled', async () => {
+  it('consumes the owed detach while the retry is still attaching', async () => {
     const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
+    let chromeAttached = false;
     let attachCalls = 0;
     let releaseSecondAttach!: () => void;
     const secondAttach = new Promise<void>(resolve => releaseSecondAttach = resolve);
@@ -470,11 +501,22 @@ describe('extension protocol v2', () => {
       if (method === 'chrome.debugger.attach') {
         if (++attachCalls === 2)
           await secondAttach;
+        if (chromeAttached)
+          throw new Error('Another debugger is already attached');
+        chromeAttached = true;
+        return {};
+      }
+      if (method === 'chrome.debugger.detach') {
+        if (!chromeAttached)
+          throw new Error('Debugger is not attached to the tab with id: 7');
+        chromeAttached = false;
         return {};
       }
       if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
-        if (++targetInfoCalls === 1)
+        if (++targetInfoCalls === 1) {
+          chromeAttached = false;
           throw new Error('Detached while handling command.');
+        }
         return { targetInfo: { targetId: 'target-7', type: 'page', url: tab.url } };
       }
       return {};
@@ -486,17 +528,14 @@ describe('extension protocol v2', () => {
     const autoAttach = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
     await vi.waitFor(() => expect(attachCalls).toBe(2));
 
-    // The detach behind the first failure is processed while the retry's own
-    // attach is still in flight, cancelling the retry; the attach completes
-    // anyway and must be undone, or the tab stays attached with no session
-    // and every later attach fails.
+    // The owed event lands while the retry's own attach is in flight. It ends
+    // the attachment the failed undo already proved gone, so it must not
+    // cancel the retry, which goes on to install the session.
     handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
     releaseSecondAttach();
     await expect(autoAttach).resolves.toEqual({ result: {} });
-    expect(messages).toEqual([]);
-    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.detach')).toEqual([
-      ['chrome.debugger.detach', [{ tabId: 7 }]],
-    ]);
+    expect(messages).toMatchObject([{ method: 'Target.attachedToTarget', params: { sessionId: 'pw-tab-1' } }]);
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.detach')).toHaveLength(1);
   });
 
   it('holds Target.setAutoAttach(false) until a replacement attachment is torn down', async () => {
@@ -536,32 +575,39 @@ describe('extension protocol v2', () => {
   });
 
   it('retries a createTarget attachment that failed for its own reason and keeps the cause', async () => {
-    let attachCalls = 0;
+    let chromeAttached = false;
+    let targetInfoCalls = 0;
     const sendCommand = vi.fn(async (method: string, params: any[]) => {
       if (method === 'chrome.tabs.create')
         return { id: 8, index: 0, windowId: 1, url: params[0].url, active: true, pinned: false };
       if (method === 'chrome.debugger.attach') {
-        if (++attachCalls > 1)
+        if (chromeAttached)
           throw new Error('Another debugger is already attached');
+        chromeAttached = true;
+        return {};
+      }
+      if (method === 'chrome.debugger.detach') {
+        if (!chromeAttached)
+          throw new Error('Debugger is not attached to the tab with id: 8');
+        chromeAttached = false;
         return {};
       }
       if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')
-        throw new Error('Target.getTargetInfo timed out');
+        throw new Error(`Target.getTargetInfo timed out (call ${++targetInfoCalls})`);
       return {};
     });
     const handler = new ExtensionProtocolV2(sendCommand);
 
-    // The failure is unclassified, so it may be the detach answered ahead of
-    // its event; createTarget retries on the same terms as auto-attach.
     const failure = await handler.handleCDPCommand('Target.createTarget', { url: 'https://example.com' }, undefined)
         .then(() => undefined, (error: unknown) => error);
     expect(failure).toBeInstanceOf(Error);
     // SAFETY: asserted to be an Error on the line above.
     const error = failure as Error;
-    expect(error.message).toContain('Another debugger is already attached');
-    expect(error.message).toContain('Target.getTargetInfo timed out');
-    expect(`${error.cause}`).toContain('Target.getTargetInfo timed out');
-    expect(attachCalls).toBe(2);
+    expect(error.message).toContain('Target.getTargetInfo timed out (call 2)');
+    expect(error.message).toContain('Target.getTargetInfo timed out (call 1)');
+    expect(`${error.cause}`).toContain('Target.getTargetInfo timed out (call 1)');
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(2);
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.detach')).toHaveLength(2);
   });
 
   it('accepts a replacement extension connection after disconnect', async () => {

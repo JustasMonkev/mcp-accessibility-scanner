@@ -52,11 +52,9 @@ export class BrowserModel {
   // removing it from _tabAttachmentPromises before it settles, so that map
   // understates what is still running; the disable barrier drains this set.
   private _inFlightAttachAttempts = new Set<Promise<TabSession>>();
-  // Tabs whose debugger we believe Chrome holds attached, and the number of
-  // onDetach events owed for attachments that provably ended before their
-  // event was processed. chrome.debugger.onDetach names only the tab, so this
-  // is how an event is matched to the attachment it ends.
-  private _debuggerAttached = new Set<number>();
+  // onDetach events owed per tab for attachments that provably ended before
+  // their event was processed. chrome.debugger.onDetach names only the tab,
+  // so this is how an event is matched to the attachment it ends.
   private _pendingStaleDetaches = new Map<number, number>();
   private _autoAttachOperation = Promise.resolve();
   private _autoAttach = false;
@@ -84,7 +82,6 @@ export class BrowserModel {
 
   onTabRemoved(tabId: number): void {
     this._knownTabs.delete(tabId);
-    this._debuggerAttached.delete(tabId);
     this._pendingStaleDetaches.delete(tabId);
     this._detachTab(tabId);
   }
@@ -117,7 +114,6 @@ export class BrowserModel {
         this._pendingStaleDetaches.set(source.tabId, staleDetaches - 1);
       return;
     }
-    this._debuggerAttached.delete(source.tabId);
     this._detachTab(source.tabId);
   }
 
@@ -166,7 +162,6 @@ export class BrowserModel {
         await Promise.allSettled([...this._inFlightAttachAttempts]);
       await Promise.all([...this._tabSessions.keys()].map(async tabId => {
         await this._sendToExtension('chrome.debugger.detach', [{ tabId }]);
-        this._debuggerAttached.delete(tabId);
         this._detachTab(tabId);
       }));
     });
@@ -288,21 +283,30 @@ export class BrowserModel {
     let result: any;
     try {
       await this._sendToExtension('chrome.debugger.attach', [{ tabId }, '1.3']);
-      // Chrome only accepts an attach for a detached tab, so succeeding while
-      // we still believe it is attached proves that attachment ended without
-      // its onDetach having been processed yet. That event is now stale: it
-      // ends the replaced attachment, not this one, and onDebuggerDetach must
-      // ignore it when it arrives instead of tearing this attachment down.
-      if (this._debuggerAttached.has(tabId))
-        this._pendingStaleDetaches.set(tabId, (this._pendingStaleDetaches.get(tabId) ?? 0) + 1);
-      this._debuggerAttached.add(tabId);
       debuggerAttached = true;
       result = await this._sendToExtension('chrome.debugger.sendCommand', [
         { tabId },
         'Target.getTargetInfo',
       ]);
     } catch (error) {
-      throw isCurrentAttempt() ? error : this._abandonAttachAttempt(tabId, debuggerAttached);
+      if (!isCurrentAttempt())
+        throw this._abandonAttachAttempt(tabId, debuggerAttached);
+      if (debuggerAttached) {
+        try {
+          // The failure leaves no session behind but may leave the debugger
+          // attached, and a retry would then only ever report "Another
+          // debugger is already attached". Undo the attach before surfacing
+          // the failure, so a retry meets a detached tab.
+          await this._sendToExtension('chrome.debugger.detach', [{ tabId }]);
+        } catch {
+          // Chrome refuses to detach a detached tab, so this failing means
+          // the original failure WAS the detach, answered ahead of its
+          // onDetach event. That event is still owed and must not tear down
+          // whatever attachment exists when it arrives.
+          this._pendingStaleDetaches.set(tabId, (this._pendingStaleDetaches.get(tabId) ?? 0) + 1);
+        }
+      }
+      throw error;
     }
     if (!isCurrentAttempt())
       throw this._abandonAttachAttempt(tabId, debuggerAttached);
@@ -323,7 +327,6 @@ export class BrowserModel {
 
   private _abandonAttachAttempt(tabId: number, debuggerAttached: boolean): TabDetachedWhileAttachingError {
     if (debuggerAttached) {
-      this._debuggerAttached.delete(tabId);
       // This attempt attached the debugger but installs no session, so nothing
       // would ever detach it and every later attach for the tab would fail
       // with "Another debugger is already attached". Undo it.
