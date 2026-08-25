@@ -542,6 +542,8 @@ Press a key on the keyboard.
 #### `browser_start_recording` / `browser_stop_recording`
 Record browser actions and return them as Playwright JavaScript. Start the server with `--caps devtools`, call `browser_start_recording`, perform the flow, then call `browser_stop_recording`.
 
+Multi-tab recordings include the `context.newPage()` declarations needed by generated page aliases.
+
 Handshake-free HTTP clients must first call `browser_session_open`, then pass its `browserSessionId` to both recording tools so the recording survives across requests. Modes that cannot open separate browser sessions, such as `--extension` and non-isolated CDP attach, need a stateful MCP connection for recording.
 
 #### `browser_evaluate`

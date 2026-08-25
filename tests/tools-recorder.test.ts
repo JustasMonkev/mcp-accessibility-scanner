@@ -28,9 +28,8 @@ describe('Recorder tools', () => {
   beforeEach(() => {
     page = { bringToFront: vi.fn().mockResolvedValue(undefined) };
     context = {
-      assertRecordingCanPersist: vi.fn(),
       ensureTab: vi.fn().mockResolvedValue({ page }),
-      startRecording: vi.fn().mockResolvedValue(undefined),
+      startRecordingOnCurrentTab: vi.fn().mockResolvedValue(undefined),
       stopRecording: vi.fn().mockResolvedValue([]),
     };
   });
@@ -40,18 +39,25 @@ describe('Recorder tools', () => {
 
     await startTool.handle(context, {}, response);
 
-    expect(context.startRecording).toHaveBeenCalledTimes(1);
-    expect(page.bringToFront).toHaveBeenCalledTimes(1);
-    expect(page.bringToFront.mock.invocationCallOrder[0]).toBeLessThan(context.startRecording.mock.invocationCallOrder[0]);
+    expect(context.startRecordingOnCurrentTab).toHaveBeenCalledTimes(1);
     expect(response.result()).toContain('Recording started');
   });
 
   it('rejects unsafe stateless recording before opening a tab', async () => {
-    context.assertRecordingCanPersist.mockImplementation(() => { throw new Error('browserSessionId required'); });
+    context.startRecordingOnCurrentTab.mockImplementation(() => { throw new Error('browserSessionId required'); });
 
     await expect(startTool.handle(context, {}, new Response(context, startTool.schema.name, {})))
         .rejects.toThrow('browserSessionId required');
     expect(context.ensureTab).not.toHaveBeenCalled();
+  });
+
+  it('rejects a duplicate start before opening or focusing a tab', async () => {
+    context.startRecordingOnCurrentTab.mockImplementation(() => { throw new Error('Recording is already in progress'); });
+
+    await expect(startTool.handle(context, {}, new Response(context, startTool.schema.name, {})))
+        .rejects.toThrow('Recording is already in progress');
+    expect(context.ensureTab).not.toHaveBeenCalled();
+    expect(page.bringToFront).not.toHaveBeenCalled();
   });
 
   it('returns recorded JavaScript and includes a snapshot', async () => {

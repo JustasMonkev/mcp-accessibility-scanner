@@ -303,9 +303,12 @@ describe('browser sessions', () => {
       page.url = () => 'about:blank';
       created[0].browserContext.emit('page', page);
       const sink = created[0].browserContext._enableRecorder.mock.calls[0][1];
-      sink.actionAdded(page, { action: { name: 'click' } }, 'await page.click();');
+      sink.actionAdded(page, { name: 'click', signals: [] }, 'await page.click();');
+      sink.signalAdded(page, { name: 'navigation', url: 'https://example.com' }, "await page.goto('https://example.com');");
 
-      expect(logUserAction).toHaveBeenCalledTimes(1);
+      expect(logUserAction).toHaveBeenCalledTimes(2);
+      expect(logUserAction.mock.calls[0][0]).toMatchObject({ name: 'click' });
+      expect(logUserAction.mock.calls[1][0]).toMatchObject({ name: 'navigate' });
       const tab = logUserAction.mock.calls[0][1] as any;
       expect(tab.context.options.browserSessionId).toBe(id);
     } finally {

@@ -27,10 +27,7 @@ const startRecording = defineTool({
     type: 'stateChanging',
   },
   handle: async (context, _params, response) => {
-    context.assertRecordingCanPersist();
-    const tab = await context.ensureTab();
-    await tab.page.bringToFront();
-    await context.startRecording();
+    await context.startRecordingOnCurrentTab();
     response.addResult('Recording started. Call browser_stop_recording to retrieve the recorded actions.');
   },
 });
