@@ -42,6 +42,7 @@ describe('Recorder tools', () => {
 
     expect(context.startRecording).toHaveBeenCalledTimes(1);
     expect(page.bringToFront).toHaveBeenCalledTimes(1);
+    expect(page.bringToFront.mock.invocationCallOrder[0]).toBeLessThan(context.startRecording.mock.invocationCallOrder[0]);
     expect(response.result()).toContain('Recording started');
   });
 

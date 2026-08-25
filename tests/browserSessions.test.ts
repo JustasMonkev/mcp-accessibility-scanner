@@ -277,6 +277,7 @@ describe('browser sessions', () => {
     // The backend's one --save-session log is shared by the default context
     // and every session it opens; a session context that does not know its
     // own handle logs recorder actions no different from anyone else's.
+    vi.useFakeTimers();
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const logUserAction = vi.spyOn(SessionLog.prototype, 'logUserAction').mockImplementation(() => {});
     const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-recorder-tag-'));
@@ -293,6 +294,7 @@ describe('browser sessions', () => {
       // First routed call launches the session's browser context (and, with
       // --save-session, its input recorder).
       await backend.callTool('browser_tabs', { action: 'list', browserSessionId: id });
+      await vi.advanceTimersByTimeAsync(501);
 
       // A page joins the session's context and the user acts on it.
       const page = new EventEmitter() as any;
@@ -658,6 +660,7 @@ describe('browser sessions', () => {
     let pendingDownload = true;
     const context = {
       isRunningTool: () => false,
+      recordingActivityAt: () => undefined,
       hasPendingDownloads: () => pendingDownload,
       dispose: vi.fn().mockResolvedValue(undefined),
     } as unknown as Context;
@@ -682,6 +685,7 @@ describe('browser sessions', () => {
     vi.useFakeTimers();
     const context = {
       isRunningTool: () => false,
+      recordingActivityAt: () => undefined,
       hasPendingDownloads: () => true,
       dispose: vi.fn().mockResolvedValue(undefined),
     } as unknown as Context;
@@ -695,6 +699,28 @@ describe('browser sessions', () => {
     // The save never settles: past 2x TTL the session is reaped anyway, and
     // disposal gives the download its own bounded window from there.
     await vi.advanceTimersByTimeAsync(TTL_MS / 2 + 60_000);
+    expect(context.dispose).toHaveBeenCalled();
+  });
+
+  it('holds an active recording while actions continue but expires an abandoned one', async () => {
+    vi.useFakeTimers();
+    let recordingActivityAt = Date.now();
+    const context = {
+      isRunningTool: () => false,
+      recordingActivityAt: () => recordingActivityAt,
+      hasPendingDownloads: () => false,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Context;
+    const registry = new BrowserSessionRegistry(TTL_MS);
+
+    registry.open(() => context);
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(TTL_MS / 2);
+      recordingActivityAt = Date.now();
+      expect(context.dispose).not.toHaveBeenCalled();
+    }
+
+    await vi.advanceTimersByTimeAsync(TTL_MS + 60_000);
     expect(context.dispose).toHaveBeenCalled();
   });
 
