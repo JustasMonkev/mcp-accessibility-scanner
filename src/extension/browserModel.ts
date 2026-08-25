@@ -326,7 +326,11 @@ export class BrowserModel {
   }
 
   private _abandonAttachAttempt(tabId: number, debuggerAttached: boolean): TabDetachedWhileAttachingError {
-    if (debuggerAttached) {
+    // chrome.debugger.detach names only the tab, so once a replacement
+    // attempt or session owns it, the undo would end the replacement's
+    // attachment — and a detach we issue fires no onDetach to tell anyone.
+    const tabTakenOver = this._tabSessions.has(tabId) || this._tabAttachmentPromises.has(tabId);
+    if (debuggerAttached && !tabTakenOver) {
       // This attempt attached the debugger but installs no session, so nothing
       // would ever detach it and every later attach for the tab would fail
       // with "Another debugger is already attached". Undo it.
