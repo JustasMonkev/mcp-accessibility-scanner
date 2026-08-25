@@ -240,7 +240,7 @@ These tools are always available and work in the interactive REPL.
 
 **`--caps vision`:** `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`
 
-**`--caps devtools`:** `browser_start_recording`, `browser_stop_recording` - Record a browser flow as Playwright JavaScript
+**`--caps devtools`:** `browser_start_recording`, `browser_stop_recording` - Record a browser flow as Playwright JavaScript. Handshake-free HTTP clients must open a browser session and pass its `browserSessionId` to both tools; shared-context modes need a stateful MCP connection.
 
 ## Common Recipes
 

@@ -243,6 +243,7 @@ export class Context {
   }
 
   async startRecording(): Promise<void> {
+    this.assertRecordingCanPersist();
     if (this._recording)
       throw new Error('Recording is already in progress.');
     const actions: string[] = [];
@@ -262,13 +263,19 @@ export class Context {
   }
 
   async stopRecording(): Promise<string[] | undefined> {
+    this.assertRecordingCanPersist();
     const recording = this._recording;
     if (!recording)
       return undefined;
     this._recording = undefined;
     const browserContext = await recording.ready;
-    InputRecorder.stopRecording(this, browserContext);
+    await InputRecorder.stopRecording(this, browserContext, recording.actions);
     return recording.actions.map(code => code.trim()).filter(Boolean);
+  }
+
+  assertRecordingCanPersist(): void {
+    if (this.options.browserSession && !this.options.browserSessionId)
+      throw new Error('Recording over stateless HTTP requires a browserSessionId. Call browser_session_open, then pass its browserSessionId to browser_start_recording and browser_stop_recording. Shared-context modes that cannot open browser sessions require a stateful MCP connection.');
   }
 
   async closeTab(index: number | undefined): Promise<string> {
@@ -424,7 +431,8 @@ export class Context {
       // window to finish, so the files tool responses reported as "still
       // downloading" actually materialize.
       await this._waitForPendingDownloads();
-      await this.stopRecording().catch(logUnhandledError);
+      if (this._recording)
+        await this.stopRecording().catch(logUnhandledError);
       this._detachFromBrowserContext();
       // close() is the factory's only cleanup hook — for storage-state
       // sessions it also removes the disposable profile — and this close
@@ -566,13 +574,20 @@ export class InputRecorder {
     try {
       await hub.ready;
     } catch (error) {
-      hub.recordings.delete(context);
+      if (hub.recordings.get(context) === actions)
+        hub.recordings.delete(context);
       throw error;
     }
   }
 
-  static stopRecording(context: Context, browserContext: playwright.BrowserContext): void {
-    recorderHubs.get(browserContext)?.recordings.delete(context);
+  static async stopRecording(context: Context, browserContext: playwright.BrowserContext, actions: string[]): Promise<void> {
+    // Playwright buffers clicks, fills and navigations for 500ms so a later
+    // event can refine them. Keep this recording registered until that last
+    // event arrives; config.timeouts.settle may be shorter or disabled.
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const recordings = recorderHubs.get(browserContext)?.recordings;
+    if (recordings?.get(context) === actions)
+      recordings.delete(context);
   }
 
   dispose() {
@@ -611,6 +626,7 @@ export class InputRecorder {
         recorderMode: 'api',
         omitCallTracking: true,
         language: 'playwright-test',
+        hideToolbar: true,
       }, {
         actionAdded: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
           dispatch(

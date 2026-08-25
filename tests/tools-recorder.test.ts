@@ -15,6 +15,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { toMcpTool } from '../src/mcp/tool.js';
 import { Response } from '../src/response.js';
 import recorderTools from '../src/tools/recorder.js';
 
@@ -27,6 +28,7 @@ describe('Recorder tools', () => {
   beforeEach(() => {
     page = { bringToFront: vi.fn().mockResolvedValue(undefined) };
     context = {
+      assertRecordingCanPersist: vi.fn(),
       ensureTab: vi.fn().mockResolvedValue({ page }),
       startRecording: vi.fn().mockResolvedValue(undefined),
       stopRecording: vi.fn().mockResolvedValue([]),
@@ -41,6 +43,14 @@ describe('Recorder tools', () => {
     expect(context.startRecording).toHaveBeenCalledTimes(1);
     expect(page.bringToFront).toHaveBeenCalledTimes(1);
     expect(response.result()).toContain('Recording started');
+  });
+
+  it('rejects unsafe stateless recording before opening a tab', async () => {
+    context.assertRecordingCanPersist.mockImplementation(() => { throw new Error('browserSessionId required'); });
+
+    await expect(startTool.handle(context, {}, new Response(context, startTool.schema.name, {})))
+        .rejects.toThrow('browserSessionId required');
+    expect(context.ensureTab).not.toHaveBeenCalled();
   });
 
   it('returns recorded JavaScript and includes a snapshot', async () => {
@@ -67,5 +77,16 @@ describe('Recorder tools', () => {
   it('keeps both tools behind the devtools capability', () => {
     expect(recorderTools).toHaveLength(2);
     expect(recorderTools.every(tool => tool.capability === 'devtools')).toBe(true);
+    expect(startTool.schema.type).toBe('stateChanging');
+    expect(stopTool.schema.type).toBe('destructive');
+    expect(toMcpTool(startTool.schema).annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+    });
+    expect(toMcpTool(stopTool.schema).annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+    });
   });
 });

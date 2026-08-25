@@ -174,7 +174,8 @@ configureBaseProgram()
           instructions: serverInstructions,
           // Static per process, same rationale as in startMCPServer above.
           toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
-          create: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry)
+          create: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry),
+          createStateless: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry, { ephemeralDefaultContext: true }),
         };
         await mcpServer.start(serverBackendFactory, config.server);
         return;

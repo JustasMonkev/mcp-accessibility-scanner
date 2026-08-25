@@ -565,6 +565,7 @@ describe('Context', () => {
         recorderMode: 'api',
         omitCallTracking: true,
         language: 'playwright-test',
+        hideToolbar: true,
       });
       const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
 
@@ -610,6 +611,78 @@ describe('Context', () => {
       await context.startRecording();
 
       await expect(context.startRecording()).rejects.toThrow('Recording is already in progress');
+    });
+
+    it('waits for Playwright to deliver its last buffered action', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        await context.startRecording();
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+
+        const stopping = context.stopRecording();
+        await vi.advanceTimersByTimeAsync(499);
+        sink.actionAdded({} as any, { action: { name: 'click' } }, 'last action');
+        await vi.advanceTimersByTimeAsync(1);
+
+        await expect(stopping).resolves.toEqual(['last action']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not let an in-flight stop remove a replacement recording', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveEnable: () => void;
+        mockBrowserContext._enableRecorder = vi.fn().mockImplementation(() => new Promise<void>(resolve => { resolveEnable = resolve; }));
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+
+        const firstStart = context.startRecording();
+        await vi.advanceTimersByTimeAsync(0);
+        const firstStop = context.stopRecording();
+        const secondStart = context.startRecording();
+        resolveEnable!();
+        await Promise.all([firstStart, secondStart]);
+        await vi.advanceTimersByTimeAsync(500);
+        await firstStop;
+
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+        sink.actionAdded({} as any, { action: { name: 'click' } }, 'replacement action');
+        const secondStop = context.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(secondStop).resolves.toEqual(['replacement action']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('requires a browser session for recording in a stateless default context', async () => {
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+        browserSession: true,
+      });
+
+      await expect(context.startRecording()).rejects.toThrow(/browserSessionId/);
+      await expect(context.stopRecording()).rejects.toThrow(/browserSessionId/);
+      expect(mockBrowserContextFactory.createContext).not.toHaveBeenCalled();
     });
 
     it('makes a joining session wait for the in-flight recorder enablement and share its failure', async () => {

@@ -24,9 +24,10 @@ const startRecording = defineTool({
     title: 'Start recording user actions',
     description: 'Start recording actions that the user performs in the browser as Playwright code. Call browser_stop_recording when the user is done.',
     inputSchema: z.object({}),
-    type: 'readOnly',
+    type: 'stateChanging',
   },
   handle: async (context, _params, response) => {
+    context.assertRecordingCanPersist();
     const tab = await context.ensureTab();
     await context.startRecording();
     await tab.page.bringToFront();
@@ -41,7 +42,7 @@ const stopRecording = defineTool({
     title: 'Stop recording user actions',
     description: 'Stop the recording started with browser_start_recording and return the recorded actions as Playwright code.',
     inputSchema: z.object({}),
-    type: 'readOnly',
+    type: 'destructive',
   },
   handle: async (context, _params, response) => {
     const actions = await context.stopRecording();
