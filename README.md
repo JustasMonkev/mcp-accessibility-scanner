@@ -262,7 +262,7 @@ This works out of the box in every mode, including the default persistent-profil
 Record a session once with Playwright's codegen, then hand the file to the server:
 
 ```bash
-npx playwright@1.63.0-alpha-2026-08-22 codegen --save-storage=auth.json https://example.com/login
+npx playwright@1.63.0-alpha-2026-08-25 codegen --save-storage=auth.json https://example.com/login
 ```
 
 Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.
@@ -538,6 +538,9 @@ Fill multiple fields with one call.
 #### `browser_press_key`
 Press a key on the keyboard.
 - Parameters: `key` (e.g., 'ArrowLeft' or 'a')
+
+#### `browser_start_recording` / `browser_stop_recording`
+Record browser actions and return them as Playwright JavaScript. Start the server with `--caps devtools`, call `browser_start_recording`, perform the flow, then call `browser_stop_recording`.
 
 #### `browser_evaluate`
 Evaluate a JavaScript expression on the page, or on a specific element when a `ref` is provided. The function's return value is serialized back as the result.

@@ -26,6 +26,7 @@ import mouse from './tools/mouse.js';
 import navigate from './tools/navigate.js';
 import network from './tools/network.js';
 import pdf from './tools/pdf.js';
+import recorder from './tools/recorder.js';
 import session from './tools/session.js';
 import snapshot from './tools/snapshot.js';
 import tabs from './tools/tabs.js';
@@ -54,6 +55,7 @@ export const allTools: Tool<any>[] = [
   ...network,
   ...mouse,
   ...pdf,
+  ...recorder,
   ...screenshot,
   ...session,
   ...snapshot,

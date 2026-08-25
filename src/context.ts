@@ -160,6 +160,7 @@ export class Context {
   private _abortController = new AbortController();
   private _removePageObserver: (() => void) | undefined;
   private _inputRecorder: InputRecorder | undefined;
+  private _recording: { actions: string[], ready: Promise<playwright.BrowserContext> } | undefined;
   // Resolved from options.sessionLog at the first browser context launch.
   private _sessionLog: SessionLog | undefined;
 
@@ -239,6 +240,35 @@ export class Context {
     if (!this._currentTab)
       await browserContext.newPage();
     return this._currentTab!;
+  }
+
+  async startRecording(): Promise<void> {
+    if (this._recording)
+      throw new Error('Recording is already in progress.');
+    const actions: string[] = [];
+    const ready = this._ensureBrowserContext().then(async ({ browserContext }) => {
+      await InputRecorder.startRecording(this, browserContext, actions);
+      return browserContext;
+    });
+    const recording = { actions, ready };
+    this._recording = recording;
+    try {
+      await ready;
+    } catch (error) {
+      if (this._recording === recording)
+        this._recording = undefined;
+      throw error;
+    }
+  }
+
+  async stopRecording(): Promise<string[] | undefined> {
+    const recording = this._recording;
+    if (!recording)
+      return undefined;
+    this._recording = undefined;
+    const browserContext = await recording.ready;
+    InputRecorder.stopRecording(this, browserContext);
+    return recording.actions.map(code => code.trim()).filter(Boolean);
   }
 
   async closeTab(index: number | undefined): Promise<string> {
@@ -394,6 +424,7 @@ export class Context {
       // window to finish, so the files tool responses reported as "still
       // downloading" actually materialize.
       await this._waitForPendingDownloads();
+      await this.stopRecording().catch(logUnhandledError);
       this._detachFromBrowserContext();
       // close() is the factory's only cleanup hook — for storage-state
       // sessions it also removes the disposable profile — and this close
@@ -492,15 +523,19 @@ export class Context {
 // at once — a second _enableRecorder call would silently replace the first
 // session's callbacks, and a departing session would leave the sink pointing
 // at its disposed Context. The recorder is therefore enabled once per context
-// object with a dispatching sink, and sessions register and deregister their
-// own recorders with it. The hub carries the enablement promise: a session
+// object with a dispatching sink. Session logs and on-demand recordings
+// register and deregister with it. The hub carries the enablement promise: a session
 // joining while (or after) another session's _enableRecorder call is in
 // flight must not report recording as ready before it is, and a failed
 // enablement evicts the hub so the next session retries instead of silently
 // recording nothing. (Ceiling: the recorder itself stays enabled on the
 // shared context once any session got it — with no registered recorders the
 // events just fall on an empty set.)
-type RecorderHub = { recorders: Set<InputRecorder>, ready: Promise<void> };
+type RecorderHub = {
+  recorders: Set<InputRecorder>;
+  recordings: Map<Context, string[]>;
+  ready: Promise<void>;
+};
 const recorderHubs = new WeakMap<playwright.BrowserContext, RecorderHub>();
 
 export class InputRecorder {
@@ -514,47 +549,7 @@ export class InputRecorder {
 
   static async create(context: Context, browserContext: playwright.BrowserContext) {
     const recorder = new InputRecorder(context, browserContext);
-    let hub = recorderHubs.get(browserContext);
-    if (!hub) {
-      const recorders = new Set<InputRecorder>();
-      const dispatch = (handle: (recorder: InputRecorder) => void) => {
-        // A tool call drives the page through Playwright, and the recorder
-        // cannot attribute a DOM event to the session that caused it — so
-        // while any session sharing this context runs a tool, the events are
-        // automation for every session's log, not user actions. (A real user
-        // action racing a sibling's tool call is suppressed with them — the
-        // same trade-off a single session already accepts for its own runs.)
-        for (const registered of recorders) {
-          if (registered._context.isRunningTool())
-            return;
-        }
-        for (const registered of recorders)
-          handle(registered);
-      };
-      const created: RecorderHub = {
-        recorders,
-        ready: (browserContext as any)._enableRecorder({
-          mode: 'recording',
-          recorderMode: 'api',
-        }, {
-          actionAdded: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
-            dispatch(registered => registered._actionAdded(page, data, code));
-          },
-          actionUpdated: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
-            dispatch(registered => registered._actionUpdated(page, data, code));
-          },
-          signalAdded: (page: playwright.Page, data: actions.SignalInContext) => {
-            dispatch(registered => registered._signalAdded(page, data));
-          },
-        }),
-      };
-      created.ready.catch(() => {
-        if (recorderHubs.get(browserContext) === created)
-          recorderHubs.delete(browserContext);
-      });
-      recorderHubs.set(browserContext, created);
-      hub = created;
-    }
+    const hub = InputRecorder._ensureHub(browserContext);
     hub.recorders.add(recorder);
     try {
       await hub.ready;
@@ -565,8 +560,90 @@ export class InputRecorder {
     return recorder;
   }
 
+  static async startRecording(context: Context, browserContext: playwright.BrowserContext, actions: string[]): Promise<void> {
+    const hub = InputRecorder._ensureHub(browserContext);
+    hub.recordings.set(context, actions);
+    try {
+      await hub.ready;
+    } catch (error) {
+      hub.recordings.delete(context);
+      throw error;
+    }
+  }
+
+  static stopRecording(context: Context, browserContext: playwright.BrowserContext): void {
+    recorderHubs.get(browserContext)?.recordings.delete(context);
+  }
+
   dispose() {
     recorderHubs.get(this._browserContext)?.recorders.delete(this);
+  }
+
+  private static _ensureHub(browserContext: playwright.BrowserContext): RecorderHub {
+    const hub = recorderHubs.get(browserContext);
+    if (hub)
+      return hub;
+
+    const recorders = new Set<InputRecorder>();
+    const recordings = new Map<Context, string[]>();
+    const dispatch = (
+      log: (recorder: InputRecorder) => void,
+      record: (actions: string[]) => void,
+    ) => {
+      const contexts = new Set<Context>([...recorders].map(recorder => recorder._context));
+      for (const context of recordings.keys())
+        contexts.add(context);
+      const running = [...contexts].filter(context => context.isRunningTool());
+      if (!running.length) {
+        for (const recorder of recorders)
+          log(recorder);
+      }
+      for (const [context, actions] of recordings) {
+        if (!running.some(runningContext => runningContext !== context))
+          record(actions);
+      }
+    };
+    const created: RecorderHub = {
+      recorders,
+      recordings,
+      ready: (browserContext as any)._enableRecorder({
+        mode: 'recording',
+        recorderMode: 'api',
+        omitCallTracking: true,
+        language: 'playwright-test',
+      }, {
+        actionAdded: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
+          dispatch(
+              recorder => recorder._actionAdded(page, data, code),
+              recorded => recorded.push(code),
+          );
+        },
+        actionUpdated: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
+          dispatch(
+              recorder => recorder._actionUpdated(page, data, code),
+              recorded => {
+                if (recorded.length && code)
+                  recorded[recorded.length - 1] = code;
+              },
+          );
+        },
+        signalAdded: (page: playwright.Page, data: actions.SignalInContext, code: string) => {
+          dispatch(
+              recorder => recorder._signalAdded(page, data),
+              recorded => {
+                if (recorded.length && code)
+                  recorded[recorded.length - 1] = code;
+              },
+          );
+        },
+      }),
+    };
+    created.ready.catch(() => {
+      if (recorderHubs.get(browserContext) === created)
+        recorderHubs.delete(browserContext);
+    });
+    recorderHubs.set(browserContext, created);
+    return created;
   }
 
   private _actionAdded(page: playwright.Page, data: actions.ActionInContext, code: string) {

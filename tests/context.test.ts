@@ -547,6 +547,71 @@ describe('Context', () => {
       expect(log2.logUserAction).toHaveBeenCalledTimes(1);
     });
 
+    it('records its own tool actions but not a sibling session\'s actions', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const makeContext = () => new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      const context1 = makeContext();
+      const context2 = makeContext();
+      await context1.startRecording();
+      await context2.startRecording();
+      expect(mockBrowserContext._enableRecorder.mock.calls[0][0]).toMatchObject({
+        mode: 'recording',
+        recorderMode: 'api',
+        omitCallTracking: true,
+        language: 'playwright-test',
+      });
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+
+      const endContext1Tool = context1.beginToolCall('browser_click');
+      sink.actionAdded({} as any, { action: { name: 'click' } }, 'await page.getByText(\'One\').click();');
+      endContext1Tool();
+
+      expect(await context1.stopRecording()).toEqual(["await page.getByText('One').click();"]);
+      expect(await context2.stopRecording()).toEqual([]);
+    });
+
+    it('updates the last action and starts a fresh recording after stop', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await context.startRecording();
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+      sink.actionAdded({} as any, { action: { name: 'click' } }, 'old code');
+      sink.actionUpdated({} as any, { action: { name: 'click' } }, 'updated code');
+
+      expect(await context.stopRecording()).toEqual(['updated code']);
+
+      await context.startRecording();
+      sink.actionAdded({} as any, { action: { name: 'fill' } }, 'new code');
+      expect(await context.stopRecording()).toEqual(['new code']);
+      expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a second recording while one is active', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await context.startRecording();
+
+      await expect(context.startRecording()).rejects.toThrow('Recording is already in progress');
+    });
+
     it('makes a joining session wait for the in-flight recorder enablement and share its failure', async () => {
       // The first session stores the hub before _enableRecorder resolves; a
       // session joining meanwhile must not report recording ready while the

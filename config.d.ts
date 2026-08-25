@@ -27,6 +27,7 @@ export type ToolCapability =
   | 'testing'
   | 'core-install'
   | 'core-tabs'
+  | 'devtools'
   | 'vision'
   | 'verify';
 
@@ -127,6 +128,7 @@ export type Config = {
    *   - 'wait': Wait and timing utilities.
    *   - 'files': File upload/download support.
    *   - 'install': Browser installation utilities.
+   *   - 'devtools': Browser recording utilities.
    */
   capabilities?: ToolCapability[];
 
