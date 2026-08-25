@@ -37,12 +37,29 @@ type TabSession = {
   childSessions: Set<string>;
 };
 
+// A detach that cancels an in-flight attach is recoverable, not a failure:
+// the extension replays chrome.tabs.onCreated for the tab, which starts a
+// fresh attachment. Auto-attach must not fail its initialization over it.
+class TabDetachedWhileAttachingError extends Error {}
+
 export class BrowserModel {
   private _sendToExtension: SendCommand;
   private _sendToCDPClient: SendToCDPClient | null = null;
   private _knownTabs = new Map<number, Tab>();
   private _tabSessions = new Map<number, TabSession>();
   private _tabAttachmentPromises = new Map<number, Promise<TabSession>>();
+  // Every attempt from start to settlement. A detach cancels an attempt by
+  // removing it from _tabAttachmentPromises before it settles, so that map
+  // understates what is still running; the disable barrier drains this set.
+  private _inFlightAttachAttempts = new Set<Promise<TabSession>>();
+  // onDetach events owed per tab for attachments that provably ended before
+  // their event was processed. chrome.debugger.onDetach names only the tab,
+  // so this is how an event is matched to the attachment it ends.
+  private _pendingStaleDetaches = new Map<number, number>();
+  // Undo detaches issued for abandoned attempts, until they settle. The
+  // disable barrier promises nothing in flight when it resolves, and these
+  // are in flight without being attempts.
+  private _pendingUndoDetaches = new Set<Promise<unknown>>();
   private _autoAttachOperation = Promise.resolve();
   private _autoAttach = false;
   private _nextSessionId = 1;
@@ -69,6 +86,7 @@ export class BrowserModel {
 
   onTabRemoved(tabId: number): void {
     this._knownTabs.delete(tabId);
+    this._pendingStaleDetaches.delete(tabId);
     this._detachTab(tabId);
   }
 
@@ -87,21 +105,65 @@ export class BrowserModel {
   }
 
   onDebuggerDetach(source: Debuggee): void {
-    if (source.tabId !== undefined)
-      this._detachTab(source.tabId);
+    if (source.tabId === undefined)
+      return;
+    const staleDetaches = this._pendingStaleDetaches.get(source.tabId);
+    if (staleDetaches) {
+      // This event ends an attachment that a later attach already replaced —
+      // the attach could not have succeeded while it was alive. The current
+      // attachment is untouched by it.
+      if (staleDetaches === 1)
+        this._pendingStaleDetaches.delete(source.tabId);
+      else
+        this._pendingStaleDetaches.set(source.tabId, staleDetaches - 1);
+      return;
+    }
+    this._detachTab(source.tabId);
   }
 
   enableAutoAttach(): Promise<void> {
     return this._runAutoAttachOperation(async () => {
       this._autoAttach = true;
-      await Promise.all([...this._knownTabs.keys()].map(tabId => this._attachTab(tabId)));
+      const attachIgnoringCancellation = async (tabId: number) => {
+        try {
+          await this._attachTab(tabId);
+        } catch (error) {
+          if (!(error instanceof TabDetachedWhileAttachingError))
+            throw error;
+        }
+      };
+      await Promise.all([...this._knownTabs.keys()].map(async tabId => {
+        try {
+          await attachIgnoringCancellation(tabId);
+        } catch (firstError) {
+          // The failed command can be the detach itself, answered ahead of the
+          // onDetach event that would have marked the attempt stale. Retrying
+          // separates that from a tab that genuinely cannot be attached,
+          // without matching on Chrome's error text, which is not a contract.
+          try {
+            await attachIgnoringCancellation(tabId);
+          } catch (retryError) {
+            // A first attempt that failed after chrome.debugger.attach had
+            // succeeded leaves the debugger attached, so the retry reports
+            // "Another debugger is already attached" rather than the reason
+            // anyone needs. The relay forwards only Error.message, which never
+            // carries a cause, so name both failures in the message itself.
+            throw new Error(`Failed to attach tab ${tabId}: ${retryError} (first attempt: ${firstError})`, { cause: firstError });
+          }
+        }
+      }));
     });
   }
 
   disableAutoAttach(): Promise<void> {
     return this._runAutoAttachOperation(async () => {
       this._autoAttach = false;
-      await Promise.allSettled(this._tabAttachmentPromises.values());
+      // An attempt can register while we wait — a retry replacing a cancelled
+      // attempt registers only once the original settles, which is exactly
+      // when a one-shot snapshot stops waiting — so drain until nothing is in
+      // flight rather than awaiting a snapshot.
+      while (this._inFlightAttachAttempts.size || this._pendingUndoDetaches.size)
+        await Promise.allSettled([...this._inFlightAttachAttempts, ...this._pendingUndoDetaches]);
       await Promise.all([...this._tabSessions.keys()].map(async tabId => {
         await this._sendToExtension('chrome.debugger.detach', [{ tabId }]);
         this._detachTab(tabId);
@@ -114,7 +176,25 @@ export class BrowserModel {
     if (tab?.id === undefined)
       throw new Error('Failed to create tab');
     this._knownTabs.set(tab.id, tab);
-    const tabSession = await this._attachTab(tab.id);
+    // A failed attach of the tab we just made can be a detach either way it
+    // arrives: classified as a cancellation, or answered ahead of the onDetach
+    // event that would have marked the attempt stale. Retry once rather than
+    // failing the command, on the same terms as auto-attach — the tab is still
+    // there, so the second attempt either attaches or fails with why it is
+    // really gone. Do not wait for the extension to replay the tab instead: it
+    // schedules a replay only for an involuntary detach, so a voluntary one
+    // would wait forever.
+    const tabSession = await this._attachTab(tab.id).catch(async firstError => {
+      try {
+        return await this._attachTab(tab.id);
+      } catch (retryError) {
+        // The first attempt may have left the debugger attached, so the retry
+        // reports "Another debugger is already attached" rather than the reason
+        // anyone needs. The relay forwards only Error.message, which never
+        // carries a cause, so name both failures in the message itself.
+        throw new Error(`Failed to attach tab ${tab.id}: ${retryError} (first attempt: ${firstError})`, { cause: firstError });
+      }
+    });
     if (this._connectPagePrefix) {
       const connectPagePrefix = this._connectPagePrefix;
       await Promise.allSettled([...this._knownTabs]
@@ -178,10 +258,16 @@ export class BrowserModel {
     const promise: Promise<TabSession> = Promise.resolve().then(() =>
       this._attachTabImpl(tabId, () => this._tabAttachmentPromises.get(tabId) === promise));
     this._tabAttachmentPromises.set(tabId, promise);
-    return promise.finally(() => {
+    // The barrier tracks the promise callers hold, not the raw attempt: a
+    // caller's catch is attached to it before any drain can be, so a retry it
+    // registers is always in the set by the time the drain re-checks.
+    const settled: Promise<TabSession> = promise.finally(() => {
+      this._inFlightAttachAttempts.delete(settled);
       if (this._tabAttachmentPromises.get(tabId) === promise)
         this._tabAttachmentPromises.delete(tabId);
     });
+    this._inFlightAttachAttempts.add(settled);
+    return settled;
   }
 
   private _runAutoAttachOperation(operation: () => Promise<void>): Promise<void> {
@@ -191,17 +277,54 @@ export class BrowserModel {
   }
 
   private async _attachTabImpl(tabId: number, isCurrentAttempt: () => boolean): Promise<TabSession> {
-    await this._sendToExtension('chrome.debugger.attach', [{ tabId }, '1.3']);
-    const result = await this._sendToExtension('chrome.debugger.sendCommand', [
-      { tabId },
-      'Target.getTargetInfo',
-    ]);
-    // A detach can land between the attach and this reply, either because the
-    // tab went away or because Chrome force-detached the debugger. Installing
-    // the session now would hide a dead debuggee behind a live-looking one and
-    // short-circuit the re-attach the extension is about to ask for.
+    // A detach can land anywhere below, either because the tab went away or
+    // because Chrome force-detached the debugger. Both a call that fails
+    // because of it and a reply that arrives after it are that cancellation,
+    // not an attach failure: installing the session would hide a dead debuggee
+    // behind a live-looking one and short-circuit the re-attach the extension
+    // is about to ask for.
+    let debuggerAttached = false;
+    let result: any;
+    try {
+      await this._sendToExtension('chrome.debugger.attach', [{ tabId }, '1.3']);
+      debuggerAttached = true;
+      result = await this._sendToExtension('chrome.debugger.sendCommand', [
+        { tabId },
+        'Target.getTargetInfo',
+      ]);
+    } catch (error) {
+      if (!isCurrentAttempt())
+        throw this._abandonAttachAttempt(tabId, debuggerAttached);
+      if (debuggerAttached) {
+        try {
+          // The failure leaves no session behind but may leave the debugger
+          // attached, and a retry would then only ever report "Another
+          // debugger is already attached". Undo the attach before surfacing
+          // the failure, so a retry meets a detached tab.
+          await this._sendToExtension('chrome.debugger.detach', [{ tabId }]);
+        } catch {
+          // Chrome refuses to detach a detached tab, so this failing means
+          // the original failure WAS the detach. Its onDetach may already
+          // have landed during this undo's round trip — the extension emits
+          // the event before the undo can reach it — in which case it was
+          // consumed as real and cancelled this attempt; owing it again
+          // would swallow the tab's next genuine detach.
+          if (!isCurrentAttempt())
+            throw this._abandonAttachAttempt(tabId, false);
+          // Still current: the event is outstanding and owed, and must not
+          // tear down whatever attachment exists when it arrives.
+          this._pendingStaleDetaches.set(tabId, (this._pendingStaleDetaches.get(tabId) ?? 0) + 1);
+        }
+      }
+      // A cancellation that lands during the undo — the tab closing, most
+      // likely — must surface as one: retrying the raw failure would attach
+      // a tab that is gone or no longer ours.
+      if (!isCurrentAttempt())
+        throw this._abandonAttachAttempt(tabId, false);
+      throw error;
+    }
     if (!isCurrentAttempt())
-      throw new Error(`Tab ${tabId} was detached while attaching`);
+      throw this._abandonAttachAttempt(tabId, debuggerAttached);
     const targetInfo = result?.targetInfo;
     const sessionId = `pw-tab-${this._nextSessionId++}`;
     const tabSession: TabSession = { tabId, sessionId, targetInfo, childSessions: new Set() };
@@ -215,6 +338,24 @@ export class BrowserModel {
       },
     });
     return tabSession;
+  }
+
+  private _abandonAttachAttempt(tabId: number, debuggerAttached: boolean): TabDetachedWhileAttachingError {
+    // chrome.debugger.detach names only the tab, so once a replacement
+    // attempt or session owns it, the undo would end the replacement's
+    // attachment — and a detach we issue fires no onDetach to tell anyone.
+    const tabTakenOver = this._tabSessions.has(tabId) || this._tabAttachmentPromises.has(tabId);
+    if (debuggerAttached && !tabTakenOver) {
+      // This attempt attached the debugger but installs no session, so nothing
+      // would ever detach it and every later attach for the tab would fail
+      // with "Another debugger is already attached". Undo it.
+      const undo = this._sendToExtension('chrome.debugger.detach', [{ tabId }]).catch(() => {
+        // Already detached: the cancelling detach ended this attachment too.
+      });
+      this._pendingUndoDetaches.add(undo);
+      void undo.then(() => this._pendingUndoDetaches.delete(undo));
+    }
+    return new TabDetachedWhileAttachingError(`Tab ${tabId} was detached while attaching`);
   }
 
   private _detachTab(tabId: number): void {
