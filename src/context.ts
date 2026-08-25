@@ -267,11 +267,12 @@ export class Context {
 
   private async _startRecording(): Promise<void> {
     const actions: RecordedAction[] = [];
+    const target: RecordingTarget = { actions, pageIndexes: new Map(), state: { stopping: false } };
     const ready = this._ensureBrowserContext().then(async ({ browserContext }) => {
-      await InputRecorder.startRecording(this, browserContext, actions);
+      await InputRecorder.startRecording(this, browserContext, target);
       return browserContext;
     });
-    const recording = { actions, ready, lastActivityAt: Date.now() };
+    const recording: Recording = { target, ready, lastActivityAt: Date.now() };
     this._recording = recording;
     try {
       await ready;
@@ -289,13 +290,14 @@ export class Context {
     if (!recording)
       return undefined;
     this._recording = undefined;
+    recording.target.state.stopping = true;
     let finishStop: () => void;
     const stopFinished = new Promise<void>(resolve => finishStop = resolve);
     this._recordingStops.add(stopFinished);
     try {
       const browserContext = await recording.ready;
-      await InputRecorder.stopRecording(this, browserContext, recording.actions);
-      return recording.actions.map(action => action.code.trim()).filter(Boolean);
+      await InputRecorder.stopRecording(this, browserContext, recording.target);
+      return recording.target.actions.map(action => action.code.trim()).filter(Boolean);
     } finally {
       this._recordingStops.delete(stopFinished);
       finishStop!();
@@ -607,8 +609,8 @@ export class Context {
 // shared context once any session got it — with no registered recorders the
 // events just fall on an empty set.)
 type RecordedAction = { page: playwright.Page, code: string };
-type Recording = { actions: RecordedAction[], ready: Promise<playwright.BrowserContext>, lastActivityAt: number };
-type RecordingTarget = { actions: RecordedAction[], pageIndexes: Map<playwright.Page, number> };
+type RecordingTarget = { actions: RecordedAction[], pageIndexes: Map<playwright.Page, number>, state: { stopping: boolean } };
+type Recording = { target: RecordingTarget, ready: Promise<playwright.BrowserContext>, lastActivityAt: number };
 const actionIsBuffered = (action: actions.Action): boolean =>
   action.name === 'click' && action.button === 'left' || action.name === 'fill' || action.name === 'navigate';
 const addMissingPageAlias = (
@@ -665,31 +667,30 @@ export class InputRecorder {
     return () => contexts.delete(context);
   }
 
-  static async startRecording(context: Context, browserContext: playwright.BrowserContext, actions: RecordedAction[]): Promise<void> {
+  static async startRecording(context: Context, browserContext: playwright.BrowserContext, target: RecordingTarget): Promise<void> {
     const existingHub = recorderHubs.get(browserContext);
     const hub = InputRecorder._ensureHub(browserContext);
     try {
       await hub.ready;
       if (existingHub)
         await new Promise(resolve => setTimeout(resolve, recorderBufferMs));
-      hub.recordings.set(context, {
-        actions,
-        pageIndexes: new Map(browserContext.pages().map((page, index) => [page, index])),
-      });
+      for (const [index, page] of browserContext.pages().entries())
+        target.pageIndexes.set(page, index);
+      hub.recordings.set(context, target);
     } catch (error) {
-      if (hub.recordings.get(context)?.actions === actions)
+      if (hub.recordings.get(context) === target)
         hub.recordings.delete(context);
       throw error;
     }
   }
 
-  static async stopRecording(context: Context, browserContext: playwright.BrowserContext, actions: RecordedAction[]): Promise<void> {
+  static async stopRecording(context: Context, browserContext: playwright.BrowserContext, target: RecordingTarget): Promise<void> {
     // Playwright buffers clicks, fills and navigations for 500ms so a later
     // event can refine them. Keep this recording registered until that last
     // event arrives; config.timeouts.settle may be shorter or disabled.
-    await new Promise(resolve => setTimeout(resolve, recorderBufferMs));
     const recordings = recorderHubs.get(browserContext)?.recordings;
-    if (recordings?.get(context)?.actions === actions)
+    await new Promise(resolve => setTimeout(resolve, recorderBufferMs));
+    if (target && recordings?.get(context) === target)
       recordings.delete(context);
   }
 
@@ -706,6 +707,7 @@ export class InputRecorder {
     const recordings = new Map<Context, RecordingTarget>();
     const dispatch = (
       buffered: boolean,
+      flushable: boolean,
       log: (recorder: InputRecorder) => void,
       record: (target: RecordingTarget) => void,
     ) => {
@@ -718,7 +720,7 @@ export class InputRecorder {
           log(recorder);
       }
       for (const [context, target] of recordings) {
-        if (!running.some(runningContext => runningContext !== context)) {
+        if ((!target.state.stopping || flushable) && !running.some(runningContext => runningContext !== context)) {
           record(target);
           context.markRecordingActivity();
         }
@@ -734,8 +736,10 @@ export class InputRecorder {
     const sink = {
         actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
           const action = 'action' in data ? data.action : data;
+          const buffered = actionIsBuffered(action);
           dispatch(
-              actionIsBuffered(action),
+              buffered,
+              buffered || action.name === 'closePage',
               recorder => recorder._actionAdded(page, action, code),
               target => {
                 addMissingPageAlias(target.actions, page, code, target.pageIndexes, browserContext);
@@ -747,6 +751,7 @@ export class InputRecorder {
           const action = 'action' in data ? data.action : data;
           dispatch(
               actionIsBuffered(action),
+              true,
               recorder => recorder._actionUpdated(page, action, code),
               target => {
                 const action = target.actions.findLast(action => action.page === page);
@@ -758,6 +763,7 @@ export class InputRecorder {
         signalAdded: (page: playwright.Page, data: actions.Signal | actions.SignalInContext, code: string) => {
           const signal = 'signal' in data ? data.signal : data;
           dispatch(
+              true,
               true,
               recorder => recorder._signalAdded(page, signal),
               target => {

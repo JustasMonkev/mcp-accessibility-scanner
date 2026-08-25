@@ -831,7 +831,7 @@ describe('Context', () => {
         const stopping = context.stopRecording();
         const closing = context.closeBrowserContext();
         await vi.advanceTimersByTimeAsync(499);
-        sink.actionAdded({} as any, { action: { name: 'click' } }, 'last action');
+        sink.actionAdded({} as any, { action: { name: 'click', button: 'left' } }, 'last action');
         expect(close).not.toHaveBeenCalled();
 
         await vi.advanceTimersByTimeAsync(1);
@@ -942,8 +942,9 @@ describe('Context', () => {
         const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
 
         const stopping = context.stopRecording();
+        sink.actionAdded({} as any, { action: { name: 'press' } }, 'after stop');
         await vi.advanceTimersByTimeAsync(499);
-        sink.actionAdded({} as any, { action: { name: 'click' } }, 'last action');
+        sink.actionAdded({} as any, { action: { name: 'click', button: 'left' } }, 'last action');
         await vi.advanceTimersByTimeAsync(1);
 
         await expect(stopping).resolves.toEqual(['last action']);
