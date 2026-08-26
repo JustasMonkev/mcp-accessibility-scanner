@@ -665,14 +665,14 @@ describe('Context', () => {
         await starting;
         sink.actionAdded(firstPage, { name: 'closePage', signals: [] }, 'await page.close();');
         mockBrowserContext.pages.mockReturnValue([secondPage]);
-        sink.actionAdded(secondPage, { name: 'click', signals: [] }, "await page1.getByText('Still here').click();");
+        sink.actionAdded(secondPage, { name: 'assertTitle', signals: [] }, "await expect(page1).toHaveTitle('Still here');");
 
         stopping = context.stopRecording();
         await vi.advanceTimersByTimeAsync(500);
         await expect(stopping).resolves.toEqual([
           'const page1 = context.pages()[1];',
           'await page.close();',
-          "await page1.getByText('Still here').click();",
+          "await expect(page1).toHaveTitle('Still here');",
         ]);
 
         const thirdPage = {} as any;

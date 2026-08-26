@@ -626,7 +626,8 @@ const addMissingPageAlias = (
   pageIndexes: Map<playwright.Page, number>,
   browserContext: playwright.BrowserContext,
 ) => {
-  const alias = code.match(/^\s*await\s+(?:expect\()?(page\d*)\./m)?.[1];
+  const alias = code.match(/^\s*await\s+(page\d*)\./m)?.[1]
+    ?? code.match(/^\s*await\s+expect\((page\d*)(?:\.|\))/m)?.[1];
   if (!alias || alias === 'page' || code.includes(`const ${alias} = `) || recorded.some(action => action.code.includes(`const ${alias} = `)))
     return;
   const initialPageIndex = pageIndexes.get(page);
