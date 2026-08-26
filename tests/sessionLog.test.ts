@@ -116,12 +116,17 @@ describe('session log folders', () => {
     }
   });
 
-  it('does not append a late action update as a duplicate action', async () => {
+  it('replaces a flushed action with its late signal update', async () => {
     vi.useFakeTimers();
     try {
+      let content = '';
       const storage = {
-        writeFile: vi.fn().mockResolvedValue(undefined),
-        appendFile: vi.fn().mockResolvedValue(undefined),
+        readFile: vi.fn(async () => content),
+        writeFile: vi.fn(async (filePath: string, value: string) => {
+          if (filePath.endsWith('session.md'))
+            content = value;
+        }),
+        appendFile: vi.fn(async (_filePath: string, value: string) => { content += value; }),
       };
       const log = new SessionLog('/unused', storage);
       const context = { options: {} } as any;
@@ -131,11 +136,11 @@ describe('session log folders', () => {
       log.logUserAction(action, tab, 'original action', false);
       await vi.advanceTimersByTimeAsync(1000);
       log.logUserAction(action, tab, 'late signal update', true);
-      await vi.advanceTimersByTimeAsync(1000);
+      await (log as any)._sessionFileQueue;
 
-      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
-      expect(appended.match(/### User action: click/g)).toHaveLength(1);
-      expect(appended).not.toContain('late signal update');
+      expect(content.match(/### User action: click/g)).toHaveLength(1);
+      expect(content).toContain('late signal update');
+      expect(content).not.toContain('original action');
     } finally {
       vi.useRealTimers();
     }

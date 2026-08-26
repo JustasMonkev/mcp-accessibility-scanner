@@ -28,11 +28,16 @@ import type { Context } from './context.js';
 import type { Tab, TabSnapshot } from './tab.js';
 
 export interface IFileStorage {
+  readFile(filePath: string): Promise<string>;
   writeFile(filePath: string, content: string): Promise<void>;
   appendFile(filePath: string, content: string): Promise<void>;
 }
 
 class NodeFileStorage implements IFileStorage {
+  async readFile(filePath: string): Promise<string> {
+    return await fs.promises.readFile(filePath, 'utf-8');
+  }
+
   async writeFile(filePath: string, content: string): Promise<void> {
     await fs.promises.writeFile(filePath, content);
   }
@@ -76,6 +81,7 @@ export class SessionLog {
   private _sessionFileQueue = Promise.resolve();
   private _flushEntriesTimeout: NodeJS.Timeout | undefined;
   private _storage: IFileStorage;
+  private _lastFlushedAction = new WeakMap<Tab, { action: actions.Action; code: string; marker: string }>();
 
   constructor(sessionFolder: string, storage: IFileStorage = new NodeFileStorage()) {
     this._folder = sessionFolder;
@@ -121,10 +127,31 @@ export class SessionLog {
     const source = tab.context;
     const lastEntry = this._lastPendingEntryFor(source, tab);
     if (isUpdate) {
-      if (lastEntry?.userAction?.name !== action.name)
+      if (lastEntry?.userAction?.name === action.name) {
+        lastEntry.userAction = action;
+        lastEntry.code = code;
         return;
-      lastEntry.userAction = action;
-      lastEntry.code = code;
+      }
+      const flushed = this._lastFlushedAction.get(tab);
+      if (flushed?.action.name !== action.name)
+        return;
+      const previous = flushed.code;
+      flushed.action = action;
+      flushed.code = code;
+      this._sessionFileQueue = this._sessionFileQueue
+          .catch(logUnhandledError)
+          .then(async () => {
+            const content = await this._storage.readFile(this._file);
+            const oldBlock = `- Code\n\`\`\`js\n${previous}\n\`\`\``;
+            const newBlock = `- Code\n\`\`\`js\n${flushed.code}\n\`\`\``;
+            const markerIndex = content.indexOf(flushed.marker);
+            if (markerIndex === -1)
+              return;
+            const blockIndex = content.lastIndexOf(oldBlock, markerIndex);
+            if (blockIndex !== -1)
+              await this._storage.writeFile(this._file, content.slice(0, blockIndex) + newBlock + content.slice(blockIndex + oldBlock.length));
+          })
+          .catch(logUnhandledError);
       return;
     }
     if (action.name === 'navigate') {
@@ -229,7 +256,10 @@ export class SessionLog {
       if (entry.tabSnapshot) {
         const fileName = `${ordinal}.snapshot.yml`;
         this._storage.writeFile(path.join(this._folder, fileName), entry.tabSnapshot.ariaSnapshot).catch(logUnhandledError);
-        lines.push(`- Snapshot: ${fileName}`);
+        const marker = `- Snapshot: ${fileName}`;
+        lines.push(marker);
+        if (entry.userAction && entry.tab)
+          this._lastFlushedAction.set(entry.tab, { action: entry.userAction, code: entry.code, marker });
       }
 
       lines.push('', '');
