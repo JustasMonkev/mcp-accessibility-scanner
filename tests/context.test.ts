@@ -611,7 +611,7 @@ describe('Context', () => {
       }
     });
 
-    it('updates the last action and starts a fresh recording after stop', async () => {
+    it('starts a fresh recording after stop', async () => {
       mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
       const context = new Context({
         tools: [],
@@ -624,41 +624,13 @@ describe('Context', () => {
       const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
       const page = {} as any;
       sink.actionAdded(page, { action: { name: 'click' } }, 'old code');
-      sink.actionUpdated(page, { action: { name: 'click' } }, 'updated code');
 
-      expect(await context.stopRecording()).toEqual(['updated code']);
+      expect(await context.stopRecording()).toEqual(['old code']);
 
       await context.startRecording();
       sink.actionAdded({} as any, { action: { name: 'fill' } }, 'new code');
       expect(await context.stopRecording()).toEqual(['new code']);
       expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(1);
-    });
-
-    it('updates the matching page action when tabs interleave', async () => {
-      vi.useFakeTimers();
-      try {
-        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
-        const context = new Context({
-          tools: [],
-          config: { timeouts: {} } as any,
-          browserContextFactory: mockBrowserContextFactory,
-          sessionLog: undefined,
-          clientInfo: {},
-        });
-        await context.startRecording();
-        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
-        const firstPage = {} as any;
-        const secondPage = {} as any;
-        sink.actionAdded(firstPage, { action: { name: 'click' } }, 'first old');
-        sink.actionAdded(secondPage, { action: { name: 'click' } }, 'second');
-        sink.actionUpdated(firstPage, { action: { name: 'click' } }, 'first updated');
-
-        const stopping = context.stopRecording();
-        await vi.advanceTimersByTimeAsync(500);
-        await expect(stopping).resolves.toEqual(['first updated', 'second']);
-      } finally {
-        vi.useRealTimers();
-      }
     });
 
     it('keeps page declarations when recording starts before or after a tab opens', async () => {
@@ -690,14 +662,16 @@ describe('Context', () => {
         const starting = context.startRecording();
         await vi.advanceTimersByTimeAsync(500);
         await starting;
-        mockBrowserContext.pages.mockReturnValue([firstPage]);
-        sink.actionAdded(secondPage, { name: 'closePage', signals: [] }, 'await page1.close();');
+        sink.actionAdded(firstPage, { name: 'closePage', signals: [] }, 'await page.close();');
+        mockBrowserContext.pages.mockReturnValue([secondPage]);
+        sink.actionAdded(secondPage, { name: 'click', signals: [] }, "await page1.getByText('Still here').click();");
 
         stopping = context.stopRecording();
         await vi.advanceTimersByTimeAsync(500);
         await expect(stopping).resolves.toEqual([
           'const page1 = context.pages()[1];',
-          'await page1.close();',
+          'await page.close();',
+          "await page1.getByText('Still here').click();",
         ]);
 
         const thirdPage = {} as any;
@@ -884,30 +858,38 @@ describe('Context', () => {
       await expect(context.startRecording()).rejects.toThrow('Recording is already in progress');
     });
 
-    it('reserves a focused start before awaiting tab work', async () => {
-      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
-      const context = new Context({
-        tools: [],
-        config: { timeouts: {} } as any,
-        browserContextFactory: mockBrowserContextFactory,
-        sessionLog: undefined,
-        clientInfo: {},
-      });
-      let releaseTab: () => void;
-      const tabReady = new Promise<void>(resolve => releaseTab = resolve);
-      const bringToFront = vi.fn().mockResolvedValue(undefined);
-      vi.spyOn(context, 'ensureTab').mockImplementation(async () => {
-        await tabReady;
-        return { page: { bringToFront } } as any;
-      });
+    it('reserves a focused start and lets an overlapping stop wait for it', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        let releaseTab: () => void;
+        const tabReady = new Promise<void>(resolve => releaseTab = resolve);
+        const bringToFront = vi.fn().mockResolvedValue(undefined);
+        vi.spyOn(context, 'ensureTab').mockImplementation(async () => {
+          await tabReady;
+          return { page: { bringToFront } } as any;
+        });
 
-      const first = context.startRecordingOnCurrentTab();
-      await expect(context.startRecordingOnCurrentTab()).rejects.toThrow('Recording is already in progress');
-      expect(context.ensureTab).toHaveBeenCalledTimes(1);
+        const first = context.startRecordingOnCurrentTab();
+        await expect(context.startRecordingOnCurrentTab()).rejects.toThrow('Recording is already in progress');
+        const stopping = context.stopRecording();
+        expect(context.ensureTab).toHaveBeenCalledTimes(1);
 
-      releaseTab!();
-      await first;
-      expect(bringToFront).toHaveBeenCalledTimes(1);
+        releaseTab!();
+        await first;
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual([]);
+        expect(bringToFront).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('releases a focused start reservation when tab focus fails', async () => {
@@ -923,7 +905,10 @@ describe('Context', () => {
           .mockResolvedValueOnce({ page: { bringToFront: vi.fn().mockRejectedValue(new Error('page closed')) } } as any)
           .mockResolvedValueOnce({ page: { bringToFront: vi.fn().mockResolvedValue(undefined) } } as any);
 
-      await expect(context.startRecordingOnCurrentTab()).rejects.toThrow('page closed');
+      const starting = context.startRecordingOnCurrentTab();
+      const stopping = context.stopRecording();
+      await expect(starting).rejects.toThrow('page closed');
+      await expect(stopping).resolves.toBeUndefined();
       await expect(context.startRecordingOnCurrentTab()).resolves.toBeUndefined();
     });
 

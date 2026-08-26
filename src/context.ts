@@ -163,7 +163,7 @@ export class Context {
   private _removePageObserver: (() => void) | undefined;
   private _inputRecorder: InputRecorder | undefined;
   private _removeRecorderContext: (() => void) | undefined;
-  private _recordingStartReserved = false;
+  private _recordingStartFinished: Promise<void> | undefined;
   private _recording: Recording | undefined;
   private _recordingStops = new Set<Promise<void>>();
   private _closeAfterRecording = false;
@@ -255,13 +255,17 @@ export class Context {
 
   async startRecordingOnCurrentTab(): Promise<void> {
     this.assertRecordingCanStart();
-    this._recordingStartReserved = true;
+    let finishStart: () => void;
+    const startFinished = new Promise<void>(resolve => finishStart = resolve);
+    this._recordingStartFinished = startFinished;
     try {
       const tab = await this.ensureTab();
       await tab.page.bringToFront();
       await this._startRecording();
     } finally {
-      this._recordingStartReserved = false;
+      if (this._recordingStartFinished === startFinished)
+        this._recordingStartFinished = undefined;
+      finishStart!();
     }
   }
 
@@ -286,6 +290,8 @@ export class Context {
 
   async stopRecording(): Promise<string[] | undefined> {
     this.assertRecordingCanPersist();
+    if (this._recordingStartFinished)
+      await this._recordingStartFinished;
     const recording = this._recording;
     if (!recording)
       return undefined;
@@ -321,7 +327,7 @@ export class Context {
 
   assertRecordingCanStart(): void {
     this.assertRecordingCanPersist();
-    if (this._recording || this._recordingStartReserved)
+    if (this._recording || this._recordingStartFinished)
       throw new Error('Recording is already in progress.');
   }
 
@@ -623,9 +629,15 @@ const addMissingPageAlias = (
   const alias = code.match(/\b(page\d*)\./)?.[1];
   if (!alias || alias === 'page' || code.includes(`const ${alias} = `) || recorded.some(action => action.code.includes(`const ${alias} = `)))
     return;
-  const pageIndex = pageIndexes.get(page) ?? browserContext.pages().indexOf(page);
-  if (pageIndex !== -1)
-    recorded.push({ page, code: `const ${alias} = context.pages()[${pageIndex}];` });
+  const initialPageIndex = pageIndexes.get(page);
+  const pageIndex = initialPageIndex ?? browserContext.pages().indexOf(page);
+  if (pageIndex === -1)
+    return;
+  const declaration = { page, code: `const ${alias} = context.pages()[${pageIndex}];` };
+  if (initialPageIndex === undefined)
+    recorded.push(declaration);
+  else
+    recorded.unshift(declaration);
 };
 type RecorderHub = {
   recorders: Set<InputRecorder>;
@@ -747,19 +759,6 @@ export class InputRecorder {
               },
           );
         },
-        actionUpdated: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
-          const action = 'action' in data ? data.action : data;
-          dispatch(
-              actionIsBuffered(action),
-              true,
-              recorder => recorder._actionUpdated(page, action, code),
-              target => {
-                const action = target.actions.findLast(action => action.page === page);
-                if (action && code)
-                  action.code = code;
-              },
-          );
-        },
         signalAdded: (page: playwright.Page, data: actions.Signal | actions.SignalInContext, code: string) => {
           const signal = 'signal' in data ? data.signal : data;
           dispatch(
@@ -791,12 +790,6 @@ export class InputRecorder {
     const tab = this._context.tabForPage(page);
     if (tab)
       this._context.sessionLog!.logUserAction(action, tab, code, false);
-  }
-
-  private _actionUpdated(page: playwright.Page, action: actions.Action, code: string) {
-    const tab = this._context.tabForPage(page);
-    if (tab)
-      this._context.sessionLog!.logUserAction(action, tab, code, true);
   }
 
   private _signalAdded(page: playwright.Page, signal: actions.Signal) {
