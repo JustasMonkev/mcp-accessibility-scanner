@@ -32,6 +32,7 @@ import type { SessionLog } from './sessionLog.js';
 
 const testDebug = debug('pw:mcp:test');
 const recorderBufferMs = 500;
+const recorderControlTools = new Set(['browser_start_recording', 'browser_stop_recording']);
 
 class ContextRegistry {
   private readonly _contexts = new Set<Context>();
@@ -399,7 +400,7 @@ export class Context {
   }
 
   isRunningToolForRecording(buffered: boolean): boolean {
-    return this.isRunningTool() || buffered && Date.now() - this._lastToolCallEndedAt <= recorderBufferMs;
+    return this._runningTools.some(name => !recorderControlTools.has(name)) || buffered && Date.now() - this._lastToolCallEndedAt <= recorderBufferMs;
   }
 
   /**
@@ -467,7 +468,8 @@ export class Context {
       const index = this._runningTools.lastIndexOf(name);
       if (index !== -1)
         this._runningTools.splice(index, 1);
-      this._lastToolCallEndedAt = Date.now();
+      if (!recorderControlTools.has(name))
+        this._lastToolCallEndedAt = Date.now();
     };
   }
 
@@ -605,20 +607,26 @@ export class Context {
 // context, and a shared (non-isolated CDP) context can serve several sessions
 // at once — a second _enableRecorder call would silently replace the first
 // session's callbacks, and a departing session would leave the sink pointing
-// at its disposed Context. The recorder is therefore enabled once per context
-// object with a dispatching sink. Session logs and on-demand recordings
-// register and deregister with it. The hub carries the enablement promise: a session
+// at its disposed Context. One hub therefore owns a dispatching sink per
+// context. Session logs and on-demand recordings register and deregister with
+// it. The hub carries the enablement promise: a session
 // joining while (or after) another session's _enableRecorder call is in
 // flight must not report recording as ready before it is, and a failed
 // enablement evicts the hub so the next session retries instead of silently
-// recording nothing. (Ceiling: the recorder itself stays enabled on the
-// shared context once any session got it — with no registered recorders the
-// events just fall on an empty set.)
+// recording nothing. When the last consumer leaves, the recorder returns to
+// standby; the same hub arms it again for the next recording.
 type RecordedAction = { page: playwright.Page, code: string };
-type RecordingTarget = { actions: RecordedAction[], pageIndexes: Map<playwright.Page, number>, state: { stopping: boolean } };
+type RecordingTarget = {
+  actions: RecordedAction[];
+  pageIndexes: Map<playwright.Page, number>;
+  state: { stopping: boolean };
+};
 type Recording = { target: RecordingTarget, ready: Promise<playwright.BrowserContext>, lastActivityAt: number };
 const actionIsBuffered = (action: actions.Action): boolean =>
   action.name === 'click' && action.button === 'left' || action.name === 'fill' || action.name === 'navigate';
+const pageAliasFromCode = (code: string): string | undefined =>
+  code.match(/^\s*await\s+(page\d*)\./m)?.[1]
+    ?? code.match(/^\s*await\s+expect\((page\d*)(?:\.|\))/m)?.[1];
 const addMissingPageAlias = (
   recorded: RecordedAction[],
   page: playwright.Page,
@@ -626,8 +634,7 @@ const addMissingPageAlias = (
   pageIndexes: Map<playwright.Page, number>,
   browserContext: playwright.BrowserContext,
 ) => {
-  const alias = code.match(/^\s*await\s+(page\d*)\./m)?.[1]
-    ?? code.match(/^\s*await\s+expect\((page\d*)(?:\.|\))/m)?.[1];
+  const alias = pageAliasFromCode(code);
   if (!alias || alias === 'page' || code.includes(`const ${alias} = `) || recorded.some(action => action.code.includes(`const ${alias} = `)))
     return;
   const initialPageIndex = pageIndexes.get(page);
@@ -643,8 +650,11 @@ const addMissingPageAlias = (
 type RecorderHub = {
   recorders: Set<InputRecorder>;
   recordings: Map<Context, RecordingTarget>;
+  starting: number;
   ready: Promise<void>;
   arm: () => Promise<void>;
+  ensureArmed: () => Promise<void>;
+  standbyIfIdle: () => Promise<void>;
 };
 const recorderHubs = new WeakMap<playwright.BrowserContext, RecorderHub>();
 const recorderContexts = new WeakMap<playwright.BrowserContext, Set<Context>>();
@@ -660,10 +670,13 @@ export class InputRecorder {
 
   static async create(context: Context, browserContext: playwright.BrowserContext) {
     const recorder = new InputRecorder(context, browserContext);
+    const existingHub = recorderHubs.get(browserContext);
     const hub = InputRecorder._ensureHub(browserContext);
     hub.recorders.add(recorder);
     try {
       await hub.ready;
+      if (existingHub)
+        await hub.ensureArmed();
     } catch (error) {
       hub.recorders.delete(recorder);
       throw error;
@@ -684,6 +697,7 @@ export class InputRecorder {
   static async startRecording(context: Context, browserContext: playwright.BrowserContext, target: RecordingTarget): Promise<void> {
     const existingHub = recorderHubs.get(browserContext);
     const hub = InputRecorder._ensureHub(browserContext);
+    ++hub.starting;
     try {
       await hub.ready;
       if (existingHub) {
@@ -697,6 +711,8 @@ export class InputRecorder {
       if (hub.recordings.get(context) === target)
         hub.recordings.delete(context);
       throw error;
+    } finally {
+      --hub.starting;
     }
   }
 
@@ -706,12 +722,17 @@ export class InputRecorder {
     // event arrives; config.timeouts.settle may be shorter or disabled.
     const recordings = recorderHubs.get(browserContext)?.recordings;
     await new Promise(resolve => setTimeout(resolve, recorderBufferMs));
-    if (target && recordings?.get(context) === target)
+    if (target && recordings?.get(context) === target) {
       recordings.delete(context);
+      const hub = recorderHubs.get(browserContext);
+      await hub?.standbyIfIdle();
+    }
   }
 
   dispose() {
-    recorderHubs.get(this._browserContext)?.recorders.delete(this);
+    const hub = recorderHubs.get(this._browserContext);
+    hub?.recorders.delete(this);
+    void hub?.standbyIfIdle().catch(logUnhandledError);
   }
 
   private static _ensureHub(browserContext: playwright.BrowserContext): RecorderHub {
@@ -721,6 +742,13 @@ export class InputRecorder {
 
     const recorders = new Set<InputRecorder>();
     const recordings = new Map<Context, RecordingTarget>();
+    let armed = false;
+    let transition = Promise.resolve();
+    const enqueue = (callback: () => Promise<void>) => {
+      const result = transition.then(callback, callback);
+      transition = result.catch(() => {});
+      return result;
+    };
     const dispatch = (
       buffered: boolean,
       flushable: boolean,
@@ -751,6 +779,8 @@ export class InputRecorder {
     const sink = {
         actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
           const action = 'action' in data ? data.action : data;
+          if (action.name.startsWith('assert'))
+            code = code.replace(/^(\s*)\/\/ ?/gm, '$1');
           const buffered = actionIsBuffered(action);
           dispatch(
               buffered,
@@ -776,11 +806,27 @@ export class InputRecorder {
           );
         },
     };
+    const arm = async () => {
+      await (browserContext as any)._enableRecorder(params, sink);
+      armed = true;
+    };
     const created: RecorderHub = {
       recorders,
       recordings,
-      ready: (browserContext as any)._enableRecorder(params, sink),
-      arm: () => (browserContext as any)._enableRecorder(params, sink),
+      starting: 0,
+      ready: enqueue(arm),
+      arm: () => enqueue(arm),
+      ensureArmed: () => enqueue(async () => {
+        if (armed)
+          return;
+        await arm();
+      }),
+      standbyIfIdle: () => enqueue(async () => {
+        if (created.starting || recorders.size || recordings.size)
+          return;
+        await (browserContext as any)._disableRecorder();
+        armed = false;
+      }),
     };
     created.ready.catch(() => {
       if (recorderHubs.get(browserContext) === created)
