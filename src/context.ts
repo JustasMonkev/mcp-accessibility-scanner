@@ -635,17 +635,20 @@ const addMissingPageAlias = (
   browserContext: playwright.BrowserContext,
 ) => {
   const alias = pageAliasFromCode(code);
-  if (!alias || alias === 'page' || code.includes(`const ${alias} = `) || recorded.some(action => action.code.includes(`const ${alias} = `)))
+  if (!alias || alias === 'page')
+    return;
+  const declaration = new RegExp(`^\\s*const\\s+${alias}\\s*=`, 'm');
+  if (declaration.test(code) || recorded.some(action => declaration.test(action.code)))
     return;
   const initialPageIndex = pageIndexes.get(page);
   const pageIndex = initialPageIndex ?? browserContext.pages().indexOf(page);
   if (pageIndex === -1)
     return;
-  const declaration = { page, code: `const ${alias} = context.pages()[${pageIndex}];` };
+  const declarationAction = { page, code: `const ${alias} = context.pages()[${pageIndex}];` };
   if (initialPageIndex === undefined)
-    recorded.push(declaration);
+    recorded.push(declarationAction);
   else
-    recorded.unshift(declaration);
+    recorded.unshift(declarationAction);
 };
 type RecorderHub = {
   recorders: Set<InputRecorder>;

@@ -793,13 +793,13 @@ describe('Context', () => {
         await vi.advanceTimersByTimeAsync(500);
         await restarting;
         mockBrowserContext.pages.mockReturnValue([firstPage, thirdPage]);
-        sink.actionAdded(thirdPage, { name: 'click', signals: [] }, "await page2.getByText('New').click();");
+        sink.actionAdded(thirdPage, { name: 'click', signals: [] }, "await page2.getByText('const page2 = ').click();");
 
         stopping = context.stopRecording();
         await vi.advanceTimersByTimeAsync(500);
         await expect(stopping).resolves.toEqual([
           'const page2 = context.pages()[1];',
-          "await page2.getByText('New').click();",
+          "await page2.getByText('const page2 = ').click();",
         ]);
       } finally {
         vi.useRealTimers();
