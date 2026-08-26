@@ -60,6 +60,8 @@ type LogEntry = {
    * another's whenever the action names match.
    */
   source?: Context;
+  /** The tab this user action came from; used only while pending. */
+  tab?: Tab;
   /** Tags a session context's user actions in session.md; see logUserAction. */
   browserSessionId?: string;
   code: string;
@@ -111,13 +113,13 @@ export class SessionLog {
 
   logUserAction(action: actions.Action, tab: Tab, code: string, isUpdate: boolean) {
     code = code.trim();
-    // All bookkeeping is scoped to the context the recorder event came from:
+    // All bookkeeping is scoped to the context and tab the recorder event came from:
     // with the log shared across a backend's contexts, an update matched
     // against the globally-last entry could merge into ANOTHER session's
     // same-named pending action, and a navigate could be deduplicated
     // against another session's location.
     const source = tab.context;
-    const lastEntry = this._lastPendingEntryFor(source);
+    const lastEntry = this._lastPendingEntryFor(source, tab);
     if (isUpdate) {
       if (lastEntry?.userAction?.name === action.name) {
         lastEntry.userAction = action;
@@ -134,6 +136,7 @@ export class SessionLog {
       timestamp: performance.now(),
       userAction: action,
       source,
+      tab,
       // Session contexts' recorded actions carry the handle in session.md,
       // mirroring how routed tool calls log a browserSessionId in their
       // args — otherwise concurrent sessions' user actions would be
@@ -153,10 +156,10 @@ export class SessionLog {
     this._appendEntry(entry);
   }
 
-  /** The last not-yet-flushed entry this context wrote, tool calls included. */
-  private _lastPendingEntryFor(source: Context): LogEntry | undefined {
+  /** The last not-yet-flushed entry this tab wrote. */
+  private _lastPendingEntryFor(source: Context, tab: Tab): LogEntry | undefined {
     for (let i = this._pendingEntries.length - 1; i >= 0; i--) {
-      if (this._pendingEntries[i].source === source)
+      if (this._pendingEntries[i].source === source && this._pendingEntries[i].tab === tab)
         return this._pendingEntries[i];
     }
     return undefined;

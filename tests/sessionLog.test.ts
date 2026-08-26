@@ -89,4 +89,30 @@ describe('session log folders', () => {
       vi.useRealTimers();
     }
   });
+
+  it('applies an action update to its original tab', async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const log = new SessionLog('/unused', storage);
+      const context = { options: {} } as any;
+      const firstTab = { context, page: { url: () => 'https://first.example/' } } as any;
+      const secondTab = { context, page: { url: () => 'https://second.example/' } } as any;
+
+      log.logUserAction({ name: 'click' } as any, firstTab, 'first action', false);
+      log.logUserAction({ name: 'click' } as any, secondTab, 'second action', false);
+      log.logUserAction({ name: 'click' } as any, firstTab, 'first action with popup', true);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
+      expect(appended).toContain('first action with popup');
+      expect(appended).not.toMatch(/```js\nfirst action\n/);
+      expect(appended).toContain('second action');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

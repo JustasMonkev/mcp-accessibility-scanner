@@ -665,6 +665,7 @@ const recorderContexts = new WeakMap<playwright.BrowserContext, Set<Context>>();
 export class InputRecorder {
   private _context: Context;
   private _browserContext: playwright.BrowserContext;
+  private _lastActions = new WeakMap<playwright.Page, actions.Action>();
 
   private constructor(context: Context, browserContext: playwright.BrowserContext) {
     this._context = context;
@@ -728,7 +729,7 @@ export class InputRecorder {
     if (target && recordings?.get(context) === target) {
       recordings.delete(context);
       const hub = recorderHubs.get(browserContext);
-      await hub?.standbyIfIdle();
+      await hub?.standbyIfIdle().catch(logUnhandledError);
     }
   }
 
@@ -800,7 +801,7 @@ export class InputRecorder {
           dispatch(
               true,
               true,
-              recorder => recorder._signalAdded(page, signal),
+              recorder => recorder._signalAdded(page, signal, code),
               target => {
                 const action = target.actions.findLast(action => action.page === page);
                 if (action && code)
@@ -827,8 +828,11 @@ export class InputRecorder {
       standbyIfIdle: () => enqueue(async () => {
         if (created.starting || recorders.size || recordings.size)
           return;
-        await (browserContext as any)._disableRecorder();
-        armed = false;
+        try {
+          await (browserContext as any)._disableRecorder();
+        } finally {
+          armed = false;
+        }
       }),
     };
     created.ready.catch(() => {
@@ -840,15 +844,21 @@ export class InputRecorder {
   }
 
   private _actionAdded(page: playwright.Page, action: actions.Action, code: string) {
+    this._lastActions.set(page, action);
     const tab = this._context.tabForPage(page);
     if (tab)
       this._context.sessionLog!.logUserAction(action, tab, code, false);
   }
 
-  private _signalAdded(page: playwright.Page, signal: actions.Signal) {
+  private _signalAdded(page: playwright.Page, signal: actions.Signal, code: string) {
+    const tab = this._context.tabForPage(page);
+    if (signal.name !== 'navigation' && tab && code) {
+      const action = this._lastActions.get(page);
+      if (action)
+        this._context.sessionLog!.logUserAction(action, tab, code, true);
+    }
     if (signal.name !== 'navigation')
       return;
-    const tab = this._context.tabForPage(page);
     const navigateAction: actions.Action = {
       name: 'navigate',
       url: signal.url,

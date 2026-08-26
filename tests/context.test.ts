@@ -663,6 +663,35 @@ describe('Context', () => {
       );
     });
 
+    it('updates session-log actions with signal-generated code', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const sessionLog = { logUserAction: vi.fn() };
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: () => Promise.resolve(sessionLog),
+        clientInfo: {},
+      });
+      await context.newTab();
+      const page = new EventEmitter() as any;
+      page.setDefaultNavigationTimeout = vi.fn();
+      page.setDefaultTimeout = vi.fn();
+      page.url = () => 'about:blank';
+      mockBrowserContext.emit('page', page);
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+      const action = { name: 'click', selector: 'text=Open', button: 'left', signals: [] };
+      sink.actionAdded(page, action, "await page.getByText('Open').click();");
+      sink.signalAdded(page, { name: 'popup', popupAlias: '1' }, "const page1Promise = page.waitForEvent('popup');\nawait page.getByText('Open').click();");
+
+      expect(sessionLog.logUserAction).toHaveBeenLastCalledWith(
+          action,
+          expect.anything(),
+          "const page1Promise = page.waitForEvent('popup');\nawait page.getByText('Open').click();",
+          true,
+      );
+    });
+
     it('starts a fresh recording after stop', async () => {
       mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
       const context = new Context({
@@ -683,6 +712,23 @@ describe('Context', () => {
       sink.actionAdded({} as any, { action: { name: 'fill' } }, 'new code');
       expect(await context.stopRecording()).toEqual(['new code']);
       expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns captured actions when recorder standby fails', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      mockBrowserContext._disableRecorder = vi.fn().mockRejectedValue(new Error('browser disconnected'));
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await context.startRecording();
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+      sink.actionAdded({} as any, { name: 'press', signals: [] }, "await page.press('Enter');");
+
+      await expect(context.stopRecording()).resolves.toEqual(["await page.press('Enter');"]);
     });
 
     it('re-arms an idle hub when a session logger joins', async () => {
