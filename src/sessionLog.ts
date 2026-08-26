@@ -121,11 +121,11 @@ export class SessionLog {
     const source = tab.context;
     const lastEntry = this._lastPendingEntryFor(source, tab);
     if (isUpdate) {
-      if (lastEntry?.userAction?.name === action.name) {
-        lastEntry.userAction = action;
-        lastEntry.code = code;
+      if (lastEntry?.userAction?.name !== action.name)
         return;
-      }
+      lastEntry.userAction = action;
+      lastEntry.code = code;
+      return;
     }
     if (action.name === 'navigate') {
       // Already logged at this location.

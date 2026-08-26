@@ -116,6 +116,31 @@ describe('session log folders', () => {
     }
   });
 
+  it('does not append a late action update as a duplicate action', async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const log = new SessionLog('/unused', storage);
+      const context = { options: {} } as any;
+      const tab = { context, page: { url: () => 'https://example.com/' } } as any;
+      const action = { name: 'click' } as any;
+
+      log.logUserAction(action, tab, 'original action', false);
+      await vi.advanceTimersByTimeAsync(1000);
+      log.logUserAction(action, tab, 'late signal update', true);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
+      expect(appended.match(/### User action: click/g)).toHaveLength(1);
+      expect(appended).not.toContain('late signal update');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps a return navigation after intervening log entries', async () => {
     vi.useFakeTimers();
     try {
