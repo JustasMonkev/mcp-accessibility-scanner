@@ -115,4 +115,38 @@ describe('session log folders', () => {
       vi.useRealTimers();
     }
   });
+
+  it('keeps a return navigation after intervening log entries', async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const log = new SessionLog('/unused', storage);
+      const context = { options: {} } as any;
+      const tab = { context, page: { url: () => 'https://a.example/' } } as any;
+      const navigate = { name: 'navigate', url: 'https://a.example/' } as any;
+
+      log.logUserAction(navigate, tab, "await page.goto('https://a.example/');", false);
+      log.logResponse({
+        context,
+        toolName: 'browser_navigate',
+        toolArgs: { url: 'https://b.example/' },
+        result: () => '',
+        isError: () => false,
+        code: () => "await page.goto('https://b.example/');",
+        tabSnapshot: () => ({ url: 'https://b.example/' }),
+      } as any);
+      log.logUserAction(navigate, tab, "await page.goto('https://a.example/');", false);
+      log.logUserAction({ name: 'click' } as any, tab, "await page.getByText('Ready').click();", false);
+      log.logUserAction(navigate, tab, "await page.goto('https://a.example/');", false);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
+      expect(appended.match(/### User action: navigate/g)).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

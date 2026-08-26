@@ -33,6 +33,7 @@ import type { SessionLog } from './sessionLog.js';
 const testDebug = debug('pw:mcp:test');
 const recorderBufferMs = 500;
 const recorderControlTools = new Set(['browser_start_recording', 'browser_stop_recording']);
+const expectPrelude = "const { expect } = require('playwright/test');";
 
 class ContextRegistry {
   private readonly _contexts = new Set<Context>();
@@ -783,14 +784,17 @@ export class InputRecorder {
     const sink = {
         actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
           const action = 'action' in data ? data.action : data;
-          if (action.name.startsWith('assert'))
+          const isAssertion = action.name.startsWith('assert');
+          if (isAssertion)
             code = code.replace(/^(\s*)\/\/ ?/gm, '$1');
           const buffered = actionIsBuffered(action);
           dispatch(
               buffered,
               buffered || action.name === 'closePage',
-              recorder => recorder._actionAdded(page, action, code),
+              recorder => recorder._actionAdded(page, action, isAssertion ? `${expectPrelude}\n${code}` : code),
               target => {
+                if (isAssertion && !target.actions.some(action => action.code === expectPrelude))
+                  target.actions.push({ page, code: expectPrelude });
                 addMissingPageAlias(target.actions, page, code, target.pageIndexes, browserContext);
                 target.actions.push({ page, code });
               },

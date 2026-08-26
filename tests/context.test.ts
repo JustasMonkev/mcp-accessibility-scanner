@@ -654,11 +654,14 @@ describe('Context', () => {
       const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
       sink.actionAdded(page, { name: 'assertVisible', selector: 'text=Done', signals: [] }, '// await expect(page.getByText(\'Done\')).toBeVisible();');
 
-      expect(await context.stopRecording()).toEqual(["await expect(page.getByText('Done')).toBeVisible();"]);
+      expect(await context.stopRecording()).toEqual([
+        "const { expect } = require('playwright/test');",
+        "await expect(page.getByText('Done')).toBeVisible();",
+      ]);
       expect(sessionLog.logUserAction).toHaveBeenCalledWith(
           expect.objectContaining({ name: 'assertVisible' }),
           expect.anything(),
-          "await expect(page.getByText('Done')).toBeVisible();",
+          "const { expect } = require('playwright/test');\nawait expect(page.getByText('Done')).toBeVisible();",
           false,
       );
     });
@@ -831,6 +834,7 @@ describe('Context', () => {
         await expect(stopping).resolves.toEqual([
           'const page1 = context.pages()[1];',
           'await page.close();',
+          "const { expect } = require('playwright/test');",
           "await expect(page1).toHaveTitle('Still here');",
         ]);
 

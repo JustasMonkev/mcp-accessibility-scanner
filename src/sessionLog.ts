@@ -129,7 +129,8 @@ export class SessionLog {
     }
     if (action.name === 'navigate') {
       // Already logged at this location.
-      if (lastEntry?.tabSnapshot?.url === action.url)
+      const lastContextEntry = this._lastPendingEntryFor(source);
+      if (lastContextEntry?.userAction?.name === 'navigate' && lastContextEntry.tab === tab && lastContextEntry.tabSnapshot?.url === action.url)
         return;
     }
     const entry: LogEntry = {
@@ -157,9 +158,9 @@ export class SessionLog {
   }
 
   /** The last not-yet-flushed entry this tab wrote. */
-  private _lastPendingEntryFor(source: Context, tab: Tab): LogEntry | undefined {
+  private _lastPendingEntryFor(source: Context, tab?: Tab): LogEntry | undefined {
     for (let i = this._pendingEntries.length - 1; i >= 0; i--) {
-      if (this._pendingEntries[i].source === source && this._pendingEntries[i].tab === tab)
+      if (this._pendingEntries[i].source === source && (!tab || this._pendingEntries[i].tab === tab))
         return this._pendingEntries[i];
     }
     return undefined;
