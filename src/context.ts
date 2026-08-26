@@ -626,7 +626,7 @@ const addMissingPageAlias = (
   pageIndexes: Map<playwright.Page, number>,
   browserContext: playwright.BrowserContext,
 ) => {
-  const alias = code.match(/\b(page\d*)\./)?.[1];
+  const alias = code.match(/^\s*await\s+(?:expect\()?(page\d*)\./m)?.[1];
   if (!alias || alias === 'page' || code.includes(`const ${alias} = `) || recorded.some(action => action.code.includes(`const ${alias} = `)))
     return;
   const initialPageIndex = pageIndexes.get(page);
@@ -643,6 +643,7 @@ type RecorderHub = {
   recorders: Set<InputRecorder>;
   recordings: Map<Context, RecordingTarget>;
   ready: Promise<void>;
+  arm: () => Promise<void>;
 };
 const recorderHubs = new WeakMap<playwright.BrowserContext, RecorderHub>();
 const recorderContexts = new WeakMap<playwright.BrowserContext, Set<Context>>();
@@ -684,8 +685,10 @@ export class InputRecorder {
     const hub = InputRecorder._ensureHub(browserContext);
     try {
       await hub.ready;
-      if (existingHub)
+      if (existingHub) {
         await new Promise(resolve => setTimeout(resolve, recorderBufferMs));
+        await hub.arm();
+      }
       for (const [index, page] of browserContext.pages().entries())
         target.pageIndexes.set(page, index);
       hub.recordings.set(context, target);
@@ -743,7 +746,6 @@ export class InputRecorder {
         recorderMode: 'api',
         omitCallTracking: true,
         language: 'javascript',
-        hideToolbar: true,
     };
     const sink = {
         actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
@@ -777,6 +779,7 @@ export class InputRecorder {
       recorders,
       recordings,
       ready: (browserContext as any)._enableRecorder(params, sink),
+      arm: () => (browserContext as any)._enableRecorder(params, sink),
     };
     created.ready.catch(() => {
       if (recorderHubs.get(browserContext) === created)

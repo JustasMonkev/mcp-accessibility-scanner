@@ -568,7 +568,6 @@ describe('Context', () => {
         recorderMode: 'api',
         omitCallTracking: true,
         language: 'javascript',
-        hideToolbar: true,
       });
       const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
 
@@ -630,7 +629,7 @@ describe('Context', () => {
       await context.startRecording();
       sink.actionAdded({} as any, { action: { name: 'fill' } }, 'new code');
       expect(await context.stopRecording()).toEqual(['new code']);
-      expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(1);
+      expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(2);
     });
 
     it('keeps page declarations when recording starts before or after a tab opens', async () => {
@@ -649,12 +648,14 @@ describe('Context', () => {
         const firstPage = {} as any;
         const secondPage = {} as any;
         mockBrowserContext.pages.mockReturnValue([firstPage, secondPage]);
+        sink.actionAdded(firstPage, { name: 'click', signals: [] }, "await page.getByText('page1.example').click();");
         sink.actionAdded(secondPage, { name: 'openPage', signals: [], url: 'about:blank' }, 'const page1 = await context.newPage();');
         sink.actionAdded(secondPage, { name: 'click', signals: [] }, "await page1.getByText('Next').click();");
 
         let stopping = context.stopRecording();
         await vi.advanceTimersByTimeAsync(500);
         await expect(stopping).resolves.toEqual([
+          "await page.getByText('page1.example').click();",
           'const page1 = await context.newPage();',
           "await page1.getByText('Next').click();",
         ]);
@@ -942,7 +943,9 @@ describe('Context', () => {
       vi.useFakeTimers();
       try {
         let resolveEnable: () => void;
-        mockBrowserContext._enableRecorder = vi.fn().mockImplementation(() => new Promise<void>(resolve => { resolveEnable = resolve; }));
+        mockBrowserContext._enableRecorder = vi.fn()
+            .mockImplementationOnce(() => new Promise<void>(resolve => { resolveEnable = resolve; }))
+            .mockResolvedValue(undefined);
         const context = new Context({
           tools: [],
           config: { timeouts: {} } as any,
