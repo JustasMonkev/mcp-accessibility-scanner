@@ -160,6 +160,20 @@ describe('analyzeScreenReader accessible names', () => {
     ]);
   });
 
+  it('never restores a name for roles that are named by their author, not their contents', () => {
+    // An unnamed listbox still has options beneath it, a textbox its typed
+    // value, an image its caption; none of that is the control's name.
+    expect(checks([
+      node({ role: 'listbox', ref: 'e1', depth: 0 }),
+      node({ role: 'option', ref: 'e2', parent: 0, depth: 1, name: 'Red' }),
+      node({ role: 'option', ref: 'e3', parent: 0, depth: 1, name: 'Green' }),
+      node({ role: 'textbox', ref: 'e4', depth: 0 }),
+      node({ role: 'text', ref: null, parent: 3, depth: 1, text: 'typed value' }),
+      node({ role: 'img', ref: 'e6', depth: 0 }),
+      node({ role: 'text', ref: null, parent: 5, depth: 1, text: 'caption' }),
+    ])).toEqual(['missing-accessible-name', 'missing-accessible-name', 'missing-accessible-name']);
+  });
+
   it('does not flag containers, text nodes or named controls', () => {
     expect(checks([
       node({ role: 'generic', ref: 'e1' }),

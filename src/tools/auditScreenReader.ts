@@ -75,6 +75,14 @@ const namedRoles = new Set([
   'tab', 'treeitem', 'option', 'img', 'image',
 ]);
 
+// The subset of namedRoles that ARIA names from their contents. Only these can
+// have had a name distilled away by Playwright; a listbox, textbox or image is
+// named by its author, so text beneath it is not its name.
+const contentNamedRoles = new Set([
+  'link', 'button', 'checkbox', 'radio', 'switch', 'menuitem', 'menuitemcheckbox',
+  'menuitemradio', 'tab', 'treeitem', 'option',
+]);
+
 // Only roles whose accessible name is expected to start with the visible label;
 // containers are excluded because their text is the concatenation of children.
 const labelInNameRoles = new Set([
@@ -106,8 +114,10 @@ function normalizeText(value: string | null): string {
   return value.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/gu, ' ').trim();
 }
 
-// The text Playwright writes after a node's colon: `- text: Docs`,
-// `- strong [ref=e3]: Docs`, or YAML-quoted when the text needs it.
+/**
+ * The text Playwright writes after a node's colon: `- text: Docs`,
+ * `- strong [ref=e3]: Docs`, or YAML-quoted when the text needs it.
+ */
 function parseInlineText(rest: string): string | null {
   const match = /^(?:\s*\[[^\]]*\])*:\s?(.*)$/.exec(rest);
   if (!match)
@@ -198,15 +208,18 @@ function isLayoutRelevant(node: ScreenReaderNode): boolean {
   return width >= minLayoutSizePx && height >= minLayoutSizePx && x + width > 0 && y + height > 0;
 }
 
-// Playwright's AI snapshot drops a name that was computed from content once
-// that content is rendered as the node's own children (removeRedundantNames
-// in its distiller, since 1.62): `<a><strong>Docs</strong></a>` becomes
-// `- link:` over `- strong: Docs`. The name is still there, one level down,
-// so it is put back from the descendants a screen reader would read. A
-// control with no readable descendants keeps its missing name.
+/**
+ * Playwright's AI snapshot drops a name that was computed from content once
+ * that content is rendered as the node's own children (removeRedundantNames
+ * in its distiller, since 1.62): `<a><strong>Docs</strong></a>` becomes
+ * `- link:` over `- strong: Docs`. The name is still there, one level down,
+ * so it is put back from the descendants a screen reader would read. Only
+ * roles named from content qualify, and a control with no readable
+ * descendants keeps its missing name.
+ */
 function restoreContentNames(nodes: ScreenReaderNode[]): ScreenReaderNode[] {
   return nodes.map((node, index) => {
-    if (node.name !== null || !namedRoles.has(node.role))
+    if (node.name !== null || !contentNamedRoles.has(node.role))
       return node;
     const parts: string[] = [];
     for (let child = index + 1; child < nodes.length && nodes[child].depth > node.depth; child++) {
