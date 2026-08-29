@@ -200,6 +200,41 @@ async function injectAxe(frame: playwright.Frame, source: string): Promise<void>
   await frame.evaluate(source);
 }
 
+// audit_screen_reader runs the accessible-name algorithm in the page rather
+// than a scan. Its copy lives under this global, which collectElementFacts
+// reads by the same literal (it is serialized into the page and cannot import
+// it), so a page's own `window.axe` is left exactly as it was: the build
+// assigns `window.axe`, the copy is moved off it, and the previous value (or
+// its absence) is put back.
+const axeForNamesGlobal = '__mcpAccessibilityScannerAxe';
+// The page's value goes back whatever happens in between. The build runs in
+// sloppy mode, so on a page whose `axe` is not writable its assignment does
+// nothing and `window.axe` is still the page's object afterwards: that is an
+// installation failure, and nothing is published (an earlier copy, if any,
+// stays) rather than a page-owned object being trusted for names.
+const axeForNamesSource = [
+  '(() => {',
+  'const hadAxe = \'axe\' in window;',
+  'const pageAxe = window.axe;',
+  'let installed;',
+  'try {',
+  axe.source,
+  'installed = window.axe;',
+  '} finally {',
+  'if (hadAxe) window.axe = pageAxe; else delete window.axe;',
+  '}',
+  `if (!installed || installed === pageAxe) throw new Error('axe-core was not installed');`,
+  `window[${JSON.stringify(axeForNamesGlobal)}] = installed;`,
+  '})();',
+].join('\n');
+
+// Installed once per frame the audit measures. The wait is bounded like a
+// scan's child-frame injection; false means the frame refused or never
+// answered, and names there stay unmeasured, which the audit reports.
+export async function injectAxeForNames(frame: playwright.Frame): Promise<boolean> {
+  return withFrameTimeout(injectAxe(frame, axeForNamesSource).then(() => true), false);
+}
+
 // A child frame that never answers must not hang the scan. It goes unscanned
 // instead - but not silently: a frame Axe never reached contributes no
 // violations, and an unreported one turns into a clean-looking report.

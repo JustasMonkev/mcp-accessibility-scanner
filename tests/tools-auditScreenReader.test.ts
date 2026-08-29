@@ -11,12 +11,12 @@ import auditScreenReaderTools, {
   type ScreenReaderNode,
 } from '../src/tools/auditScreenReader.js';
 import { Response } from '../src/response.js';
+import { injectAxeForNames } from '../src/tools/axe.js';
 
 function node(overrides: Partial<ScreenReaderNode>): ScreenReaderNode {
   return {
     role: 'generic',
     name: null,
-    text: null,
     level: null,
     ref: 'e1',
     depth: 0,
@@ -25,7 +25,8 @@ function node(overrides: Partial<ScreenReaderNode>): ScreenReaderNode {
     selector: 'div',
     visibleText: null,
     href: null,
-    labelledByText: null,
+    accessibleName: null,
+    nameMeasured: false,
     rect: null,
     direction: 'ltr',
     positionFixed: false,
@@ -64,21 +65,6 @@ describe('parseAriaSnapshot', () => {
     expect(nodes[2]).toMatchObject({ level: 2, ref: 'e3', parent: 0 });
     expect(nodes[3].name).toBe('Say "hi" now');
     expect(nodes[4].ref).toBeNull();
-  });
-
-  it('keeps the inline text of text nodes and of elements the AI snapshot renders as children', () => {
-    const nodes = parseAriaSnapshot([
-      '- link [ref=e1] [cursor=pointer]:',
-      '  - strong [ref=e2]: Docs',
-      '  - text: "quoted: text"',
-      '  - text: \'it\'\'s here\'',
-      '  - emphasis [ref=e3]',
-      '- button "Named" [ref=e4]: Hi',
-    ].join('\n'));
-
-    expect(nodes.map(entry => entry.text)).toEqual([null, 'Docs', 'quoted: text', 'it\'s here', null, 'Hi']);
-    expect(nodes[0].name).toBeNull();
-    expect(nodes[5].name).toBe('Named');
   });
 
   it('parses keys Playwright YAML-quotes because of the accessible name', () => {
@@ -129,73 +115,40 @@ describe('analyzeScreenReader accessible names', () => {
     expect(checks(frame(false))).toEqual(['missing-accessible-name']);
   });
 
-  it('restores a name the AI snapshot moved into rendered children instead of calling it missing', () => {
+  it('takes a name the AI snapshot dropped from the accessible name measured in the page', () => {
     // Playwright 1.62+ distils `<a><strong>Docs</strong></a>` to `- link:` over
-    // `- strong: Docs`; the link is named, the name just lives one level down.
+    // `- strong: Docs`; the link is named, the snapshot just left it out. The
+    // page's accessibility tree still has it, whatever the role and however
+    // the name was built.
     expect(checks([
-      node({ role: 'link', ref: 'e1', href: '/docs', depth: 0 }),
-      node({ role: 'strong', ref: 'e2', parent: 0, depth: 1, text: 'Docs' }),
-      node({ role: 'button', ref: 'e3', depth: 0 }),
-      node({ role: 'generic', ref: 'e4', parent: 2, depth: 1 }),
-      node({ role: 'text', ref: null, parent: 3, depth: 2, text: 'Save' }),
-      node({ role: 'link', ref: 'e5', href: '/logo', depth: 0 }),
-      node({ role: 'img', ref: 'e6', parent: 5, depth: 1, name: 'Company logo' }),
+      node({ role: 'link', ref: 'e1', href: '/docs', depth: 0, accessibleName: 'Docs' }),
+      node({ role: 'strong', ref: 'e2', parent: 0, depth: 1 }),
+      node({ role: 'button', ref: 'e3', depth: 0, accessibleName: 'Save' }),
+      node({ role: 'listbox', ref: 'e4', depth: 0, accessibleName: 'Colors' }),
+      node({ role: 'heading', ref: 'e5', parent: 3, depth: 1, name: 'Colors', level: 3 }),
     ])).toEqual([]);
   });
 
-  it('judges a restored name like any other and ignores hidden descendants when restoring', () => {
+  it('judges a restored name like any other and leaves a control the page names nothing unnamed', () => {
     const findings = analyze([
-      node({ role: 'link', ref: 'e1', href: '/a', depth: 0 }),
-      node({ role: 'strong', ref: 'e2', parent: 0, depth: 1, text: 'Read more' }),
+      node({ role: 'link', ref: 'e1', href: '/a', depth: 0, accessibleName: 'Read more' }),
+      node({ role: 'strong', ref: 'e2', parent: 0, depth: 1 }),
       node({ role: 'button', ref: 'e3', depth: 0 }),
-      node({ role: 'generic', ref: 'e4', parent: 2, depth: 1, ariaHidden: true, text: 'decorative' }),
-      node({ role: 'link', ref: 'e5', href: '/b', depth: 0 }),
-      node({ role: 'link', ref: 'e6', href: '/b', depth: 0 }),
-      node({ role: 'text', ref: null, parent: 5, depth: 1, text: 'Docs' }),
+      node({ role: 'generic', ref: 'e4', parent: 2, depth: 1, ariaHidden: true }),
+      node({ role: 'img', ref: 'e5', depth: 0, accessibleName: 'photo.jpg' }),
     ]).findings;
 
     expect(findings.map(finding => [finding.check, finding.ref, finding.name])).toEqual([
       ['uninformative-accessible-name', 'e1', 'Read more'],
       ['missing-accessible-name', 'e3', null],
-      ['missing-accessible-name', 'e5', null],
+      ['filename-as-accessible-name', 'e5', 'photo.jpg'],
     ]);
   });
 
-  it('never restores a name for roles that are named by their author, not their contents', () => {
-    // An unnamed listbox still has options beneath it, a textbox its typed
-    // value, an image its caption; none of that is the control's name.
+  it('never replaces a name the snapshot carries with the measured one', () => {
     expect(checks([
-      node({ role: 'listbox', ref: 'e1', depth: 0 }),
-      node({ role: 'option', ref: 'e2', parent: 0, depth: 1, name: 'Red' }),
-      node({ role: 'option', ref: 'e3', parent: 0, depth: 1, name: 'Green' }),
-      node({ role: 'textbox', ref: 'e4', depth: 0 }),
-      node({ role: 'text', ref: null, parent: 3, depth: 1, text: 'typed value' }),
-      node({ role: 'img', ref: 'e6', depth: 0 }),
-      node({ role: 'text', ref: null, parent: 5, depth: 1, text: 'caption' }),
-    ])).toEqual(['missing-accessible-name', 'missing-accessible-name', 'missing-accessible-name']);
-  });
-
-  it('rebuilds a dropped aria-labelledby name from its referenced elements only', () => {
-    // `<div role="button" aria-labelledby="l"><h2 id="l">Read more</h2><span>Pricing</span></div>`
-    // is named "Read more"; the snapshot drops that name because the heading
-    // is rendered beneath the button. Rebuilding it from every descendant
-    // would give "Read more Pricing" and hide both the uninformative name and
-    // the label-in-name mismatch against what is actually shown. The same
-    // applies to roles not named from content, such as a listbox or a dialog
-    // labelled by its own heading.
-    const findings = analyze([
-      node({ role: 'button', ref: 'e1', depth: 0, labelledByText: 'Read more', visibleText: 'Read more Pricing' }),
-      node({ role: 'heading', ref: 'e2', parent: 0, depth: 1, name: 'Read more', level: 2 }),
-      node({ role: 'text', ref: null, parent: 0, depth: 1, text: 'Pricing' }),
-      node({ role: 'listbox', ref: 'e3', depth: 0, labelledByText: 'Colors' }),
-      node({ role: 'heading', ref: 'e4', parent: 3, depth: 1, name: 'Colors', level: 3 }),
-      node({ role: 'option', ref: 'e5', parent: 3, depth: 1, name: 'Red' }),
-    ]).findings;
-
-    expect(findings.map(finding => [finding.check, finding.ref, finding.name])).toEqual([
-      ['uninformative-accessible-name', 'e1', 'Read more'],
-      ['label-in-name-mismatch', 'e1', 'Read more'],
-    ]);
+      node({ role: 'link', ref: 'e1', href: '/pricing', name: 'Pricing details', accessibleName: 'click here' }),
+    ])).toEqual([]);
   });
 
   it('does not flag containers, text nodes or named controls', () => {
@@ -449,6 +402,8 @@ const baseFacts: ElementFacts = {
   selector: 'div',
   visibleText: null,
   href: null,
+  accessibleName: null,
+  nameMeasured: false,
   rect: null,
   direction: 'ltr',
   positionFixed: false,
@@ -465,11 +420,24 @@ function createToolHarness(options: {
   factsFor?: (ref: string) => Partial<ElementFacts>;
   staleRefs?: (ref: string) => boolean;
   staleDelayMs?: number;
+  /** What the frame does with the axe installation: accept, reject, or never answer. */
+  installAxe?: 'accept' | 'reject' | 'hang';
 }) {
   const concurrency = { current: 0, max: 0 };
+  const installs = { count: 0 };
   const frame: any = {
-    evaluate: vi.fn(async (_collect: unknown, handles: { ref: string }[]) =>
-      handles.map(handle => ({ ...baseFacts, ...options.factsFor?.(handle.ref) }))),
+    evaluate: vi.fn(async (collect: unknown, input: { elements: { ref: string }[]; measureNames: boolean }) => {
+      if (typeof collect !== 'string') {
+        const measured = input.measureNames && installs.count > 0 && (options.installAxe ?? 'accept') === 'accept';
+        return input.elements.map(handle => ({ ...baseFacts, nameMeasured: measured, ...options.factsFor?.(handle.ref) }));
+      }
+      installs.count++;
+      if (options.installAxe === 'reject')
+        throw new Error('Evaluation failed');
+      if (options.installAxe === 'hang')
+        return new Promise(() => undefined);
+      return undefined;
+    }),
   };
   const page: any = {
     ariaSnapshot: vi.fn(async () => options.snapshot),
@@ -494,7 +462,7 @@ function createToolHarness(options: {
     context: { outputFile: async (name: string) => `/tmp/${name}` },
   };
   const context: any = { currentTabOrDie: () => tab, config: {} };
-  return { context, response: new Response(context, 'audit_screen_reader', {}), concurrency };
+  return { context, response: new Response(context, 'audit_screen_reader', {}), concurrency, installs, frame };
 }
 
 describe('audit_screen_reader tool measurement', () => {
@@ -505,9 +473,9 @@ describe('audit_screen_reader tool measurement', () => {
     vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
   });
 
-  async function run(harness: ReturnType<typeof createToolHarness>, maxElements: number) {
+  async function run(harness: ReturnType<typeof createToolHarness>, maxElements: number, checkNames = true) {
     await tool.handle(harness.context, {
-      checkNames: true,
+      checkNames,
       checkReadingOrder: true,
       maxElements,
       maxFindingsPerCheck: 20,
@@ -584,6 +552,49 @@ describe('audit_screen_reader tool measurement', () => {
     // The five resolved nameless buttons are still reported.
     expect(result).toContain('missing-accessible-name | 5');
   });
+
+  it('installs axe once per frame for the name checks, and not at all without them', async () => {
+    const entries = Array.from({ length: 60 }, (_, index) => ({ role: 'button', ref: `b${index}` }));
+
+    const withNames = createToolHarness({ snapshot: snapshotOf(entries) });
+    await run(withNames, 100);
+    // Two batches of the same frame, one installation.
+    expect(withNames.installs.count).toBe(1);
+
+    const withoutNames = createToolHarness({ snapshot: snapshotOf(entries) });
+    const result = await run(withoutNames, 100, false);
+    expect(withoutNames.installs.count).toBe(0);
+    expect(result).not.toContain('accessible names could not be measured');
+    // The collector is told not to measure, so a copy an earlier audit left
+    // in the page is not used either.
+    expect(withoutNames.frame.evaluate.mock.calls.every(([, input]: any[]) => input.measureNames === false)).toBe(true);
+  });
+
+  it('counts unmeasured names from the measurement itself, not from the installation', async () => {
+    // The copy can be in the frame and still fail to build its tree.
+    const harness = createToolHarness({
+      snapshot: snapshotOf([{ role: 'button', ref: 'b1' }, { role: 'button', ref: 'b2' }, { role: 'button', ref: 'b3' }]),
+      factsFor: ref => ref === 'b2' ? { nameMeasured: false } : {},
+    });
+
+    const result = await run(harness, 50);
+    expect(harness.installs.count).toBe(1);
+    expect(result).toContain('WARNING: accessible names could not be measured for 1 of these');
+  });
+
+  it.each(['reject', 'hang'] as const)('says so when the frame %s the axe installation instead of reporting distilled names as missing', async installAxe => {
+    // Without a measured name a control named through its children looks
+    // unnamed, so a clean-looking count must carry the caveat.
+    const harness = createToolHarness({
+      snapshot: snapshotOf([{ role: 'button', ref: 'b1' }, { role: 'button', ref: 'b2' }]),
+      installAxe,
+    });
+
+    const result = await run(harness, 50);
+    expect(harness.installs.count).toBe(1);
+    expect(result).toContain('WARNING: accessible names could not be measured for 2 of these');
+    expect(result).toContain('missing-accessible-name | 2');
+  });
 });
 
 describe('collectElementFacts in a real page', () => {
@@ -604,24 +615,101 @@ describe('collectElementFacts in a real page', () => {
     return facts.map(fact => fact.visibleText);
   }
 
-  it('names a control from children the AI snapshot renders on their own lines', async () => {
+  it('measures the accessible name the snapshot leaves out, from the tree the page builds', async () => {
     const page = await browser!.newPage();
     await page.setContent(`
       <a id="docs" href="/docs"><strong>Docs</strong></a>
       <button id="save"><span>Save</span><svg aria-hidden="true"><title></title></svg></button>
       <a id="empty" href="/x"><svg aria-hidden="true"></svg></a>`);
-    const nodes = parseAriaSnapshot(await page.ariaSnapshot({ mode: 'ai' }));
+    const controls = parseAriaSnapshot(await page.ariaSnapshot({ mode: 'ai' }))
+        .filter(entry => entry.role === 'link' || entry.role === 'button');
+    const handles = await Promise.all(['#docs', '#save', '#empty'].map(selector => page.$(selector)));
+    // Until axe is in the page nothing is measured and the snapshot stands.
+    const bare = await page.evaluate(collectElementFacts, handles as any);
+    await injectAxeForNames(page.mainFrame());
+    const facts = await page.evaluate(collectElementFacts, handles as any);
     await page.close();
 
-    const facts: ElementFacts = {
-      tagName: null, selector: null, visibleText: null, href: null, rect: null,
-      direction: 'ltr', positionFixed: false, floating: false, ariaHidden: false,
-    };
-    const result = analyze(nodes.map(entry => ({ ...entry, ...facts, childCount: 0 })));
+    // The link's name is distilled into its strong child; the button keeps its
+    // own, its text being rendered inline on the button's line.
+    expect(controls.map(entry => entry.name)).toEqual([null, 'Save', null]);
+    expect(bare.map(fact => [fact.accessibleName, fact.nameMeasured])).toEqual([[null, false], [null, false], [null, false]]);
+    expect(facts.map(fact => [fact.accessibleName, fact.nameMeasured])).toEqual([['Docs', true], ['Save', true], [null, true]]);
 
     // Only the icon-only link is unnamed; the two with distilled names are not.
+    const result = analyze(controls.map((entry, index) => ({ ...entry, ...facts[index], childCount: 0 })));
     expect(result.findings.map(finding => [finding.check, finding.role])).toEqual([['missing-accessible-name', 'link']]);
     expect(result.countByCheck['missing-accessible-name']).toBe(1);
+  });
+
+  it('leaves the page\'s own window.axe alone and keeps its copy to itself', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`<a id="docs" href="/docs"><strong>Docs</strong></a>`);
+    const handle = await page.$('#docs');
+
+    // A page with no axe of its own does not gain one.
+    expect(await injectAxeForNames(page.mainFrame())).toBe(true);
+    expect(await page.evaluate(() => 'axe' in window)).toBe(false);
+    // The literal is the one collectElementFacts reads; a measured name below proves they agree.
+    expect(await page.evaluate(() => typeof (window as any).__mcpAccessibilityScannerAxe)).toBe('object');
+
+    // A page that carries its own keeps it, and names are still measured.
+    await page.evaluate(() => { (window as any).axe = { theirs: true }; });
+    expect(await injectAxeForNames(page.mainFrame())).toBe(true);
+    expect(await page.evaluate(() => (window as any).axe)).toEqual({ theirs: true });
+    const [facts] = await page.evaluate(collectElementFacts, [handle] as any);
+    expect(facts.accessibleName).toBe('Docs');
+
+    // Told not to measure, the collector leaves the copy alone even though it is there.
+    const [unmeasured] = await page.evaluate(collectElementFacts, { elements: [handle], measureNames: false } as any);
+    expect([unmeasured.accessibleName, unmeasured.nameMeasured]).toEqual([null, false]);
+    await page.close();
+  });
+
+  it('does not take a page\'s own axe for its copy when the build cannot replace it', async () => {
+    // The build assigns window.axe in sloppy mode; on a page whose axe is not
+    // writable that assignment does nothing, and the page's object must not
+    // be trusted for names.
+    const page = await browser!.newPage();
+    await page.setContent(`<a id="docs" href="/docs"><strong>Docs</strong></a>`);
+    await page.evaluate(() => {
+      Object.defineProperty(window, 'axe', { value: { theirs: true }, writable: false, configurable: true });
+    });
+    const handle = await page.$('#docs');
+
+    expect(await injectAxeForNames(page.mainFrame())).toBe(false);
+    expect(await page.evaluate(() => [(window as any).axe, typeof (window as any).__mcpAccessibilityScannerAxe])).toEqual([{ theirs: true }, 'undefined']);
+    const [facts] = await page.evaluate(collectElementFacts, [handle] as any);
+    expect([facts.accessibleName, facts.nameMeasured]).toEqual([null, false]);
+    await page.close();
+  });
+
+  it('names a button labelled by its own heading after that heading alone, with the children it really has', async () => {
+    // `<div role="button" aria-labelledby="l"><h2 id="l">Read more</h2><span>Pricing</span></div>`
+    // is named "Read more"; the snapshot drops the name because the heading is
+    // rendered beneath the button. Rebuilt from every descendant it would read
+    // "Read more Pricing" and pass the uninformative-name check. The button
+    // has two children, so the label-in-name check, which reads leaf controls
+    // only, does not apply to it.
+    const page = await browser!.newPage();
+    await page.setContent(`<div id="b" role="button" tabindex="0" aria-labelledby="l"><h2 id="l">Read more</h2><span>Pricing</span></div>`);
+    const snapshot = parseAriaSnapshot(await page.ariaSnapshot({ mode: 'ai' }));
+    const button = snapshot.findIndex(entry => entry.role === 'button');
+    const handle = await page.$('#b');
+    await injectAxeForNames(page.mainFrame());
+    const [facts] = await page.evaluate(collectElementFacts, [handle] as any);
+    await page.close();
+
+    expect(snapshot[button].name).toBeNull();
+    const childCount = snapshot.filter(entry => entry.parent === button).length;
+    expect(childCount).toBe(2);
+
+    const nodes = snapshot.map((entry, index) => index === button
+      ? { ...entry, ...facts, childCount }
+      : { ...entry, ...baseFacts, ref: null, childCount: 0 });
+    expect(analyze(nodes).findings.map(finding => [finding.check, finding.name])).toEqual([
+      ['uninformative-accessible-name', 'Read more'],
+    ]);
   });
 
   it('takes the visible label of button-like inputs from value', async () => {
@@ -744,13 +832,13 @@ describe('collectElementFacts in a real page', () => {
     await page.close();
   });
 
-  it('collects the text of aria-labelledby references in reference order', async () => {
+  it('measures the accessible name of aria-labelledby targets, not their text content', async () => {
     const page = await browser!.newPage();
     await page.setContent(`
       <div id="labelled" role="button" aria-labelledby="l1 l2"><span>Pricing</span><h2 id="l1">Read</h2></div>
-      <span id="l2">more</span>
+      <span id="l2">more <span style="display:none">(hidden)</span><img alt="soon" src="x"></span>
+      <div id="attr" role="button" aria-labelledby="l3 l4"><span id="l3" aria-label="Filter">ignored</span><input id="l4" value="typed"></div>
       <div id="dangling" role="button" aria-labelledby="nowhere"><span>Save</span></div>
-      <div id="plain" role="button"><span>Save</span></div>
       <my-host id="host"></my-host>
       <script>
         customElements.define('my-host', class extends HTMLElement {
@@ -762,15 +850,16 @@ describe('collectElementFacts in a real page', () => {
       </script>`);
     const hostHandle = await page.$('#host');
     const inner = await hostHandle!.evaluateHandle(host => host.shadowRoot!.getElementById('inner'));
-    const handles = [...await Promise.all(['#labelled', '#dangling', '#plain'].map(selector => page.$(selector))), inner];
-
+    const handles = [...await Promise.all(['#labelled', '#attr', '#dangling'].map(selector => page.$(selector))), inner];
+    await injectAxeForNames(page.mainFrame());
     const facts = await page.evaluate(collectElementFacts, handles as any);
-
-    // The name follows the IDREF list, not document order, and may reach
-    // outside the control; a reference to nothing yields no name, and an
-    // IDREF inside a shadow tree resolves against that tree.
-    expect(facts.map(fact => fact.labelledByText)).toEqual(['Read more', null, null, 'Shadow name']);
     await page.close();
+
+    // Reference order rather than document order, hidden text skipped, alt
+    // text, aria-label and an input's value counted, a reference to nothing
+    // falling back to the contents, and an IDREF inside a shadow tree resolved
+    // against that tree: what a screen reader hears, not what textContent holds.
+    expect(facts.map(fact => fact.accessibleName)).toEqual(['Read more soon', 'Filter typed', 'Save', 'Shadow name']);
   });
 
   it('walks content of boxless and collapsed-but-overflowing elements', async () => {
