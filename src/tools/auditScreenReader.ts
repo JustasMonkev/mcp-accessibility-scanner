@@ -25,6 +25,7 @@ export type ElementFacts = {
   selector: string | null;
   visibleText: string | null;
   href: string | null;
+  labelledByText: string | null;
   rect: Rect | null;
   direction: 'ltr' | 'rtl';
   positionFixed: boolean;
@@ -209,17 +210,24 @@ function isLayoutRelevant(node: ScreenReaderNode): boolean {
 }
 
 /**
- * Playwright's AI snapshot drops a name that was computed from content once
- * that content is rendered as the node's own children (removeRedundantNames
- * in its distiller, since 1.62): `<a><strong>Docs</strong></a>` becomes
- * `- link:` over `- strong: Docs`. The name is still there, one level down,
- * so it is put back from the descendants a screen reader would read. Only
- * roles named from content qualify, and a control with no readable
- * descendants keeps its missing name.
+ * Playwright's AI snapshot drops a name once every element that produced it
+ * is rendered as the node's own children (removeRedundantNames in its
+ * distiller, since 1.62): `<a><strong>Docs</strong></a>` becomes `- link:`
+ * over `- strong: Docs`, and a control labelled by one of its own descendants
+ * through aria-labelledby loses its name the same way. The name is still
+ * there, one level down, so it is put back. An aria-labelledby name is
+ * rebuilt from exactly the elements it references, whatever the role; a name
+ * from content is rebuilt from the descendants a screen reader would read,
+ * and only for roles ARIA names that way. A control with neither keeps its
+ * missing name.
  */
 function restoreContentNames(nodes: ScreenReaderNode[]): ScreenReaderNode[] {
   return nodes.map((node, index) => {
-    if (node.name !== null || !contentNamedRoles.has(node.role))
+    if (node.name !== null)
+      return node;
+    if (node.labelledByText)
+      return { ...node, name: node.labelledByText };
+    if (!contentNamedRoles.has(node.role))
       return node;
     const parts: string[] = [];
     for (let child = index + 1; child < nodes.length && nodes[child].depth > node.depth; child++) {
@@ -770,6 +778,24 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
       // The resolved URL, so that "/help" and "https://site/help" are recognised
       // as the same destination rather than reported as ambiguous links.
       href: element instanceof HTMLAnchorElement && element.hasAttribute('href') ? element.href : null,
+      // The text of the elements aria-labelledby points at, in reference
+      // order, so a name the snapshot dropped can be rebuilt from its actual
+      // sources rather than from every descendant. IDREFs resolve in the
+      // element's own tree (document or shadow root); a reference that
+      // resolves to nothing contributes nothing, and an empty result is null
+      // so the content fallback can still apply.
+      labelledByText: (() => {
+        const ids = element.getAttribute('aria-labelledby')?.trim().split(/\s+/).filter(Boolean) ?? [];
+        if (!ids.length)
+          return null;
+        const root = element.getRootNode();
+        const lookup = root instanceof Document || root instanceof ShadowRoot ? root : element.ownerDocument;
+        const text = ids
+            .map(id => lookup.getElementById(id)?.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+            .filter(Boolean)
+            .join(' ');
+        return text ? text.slice(0, 200) : null;
+      })(),
       rect: {
         x: rect.x + window.scrollX,
         y: rect.y + window.scrollY,
@@ -891,6 +917,7 @@ const auditScreenReader = defineTabTool({
       selector: null,
       visibleText: null,
       href: null,
+      labelledByText: null,
       rect: null,
       direction: 'ltr',
       positionFixed: false,

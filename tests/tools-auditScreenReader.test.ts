@@ -25,6 +25,7 @@ function node(overrides: Partial<ScreenReaderNode>): ScreenReaderNode {
     selector: 'div',
     visibleText: null,
     href: null,
+    labelledByText: null,
     rect: null,
     direction: 'ltr',
     positionFixed: false,
@@ -172,6 +173,29 @@ describe('analyzeScreenReader accessible names', () => {
       node({ role: 'img', ref: 'e6', depth: 0 }),
       node({ role: 'text', ref: null, parent: 5, depth: 1, text: 'caption' }),
     ])).toEqual(['missing-accessible-name', 'missing-accessible-name', 'missing-accessible-name']);
+  });
+
+  it('rebuilds a dropped aria-labelledby name from its referenced elements only', () => {
+    // `<div role="button" aria-labelledby="l"><h2 id="l">Read more</h2><span>Pricing</span></div>`
+    // is named "Read more"; the snapshot drops that name because the heading
+    // is rendered beneath the button. Rebuilding it from every descendant
+    // would give "Read more Pricing" and hide both the uninformative name and
+    // the label-in-name mismatch against what is actually shown. The same
+    // applies to roles not named from content, such as a listbox or a dialog
+    // labelled by its own heading.
+    const findings = analyze([
+      node({ role: 'button', ref: 'e1', depth: 0, labelledByText: 'Read more', visibleText: 'Read more Pricing' }),
+      node({ role: 'heading', ref: 'e2', parent: 0, depth: 1, name: 'Read more', level: 2 }),
+      node({ role: 'text', ref: null, parent: 0, depth: 1, text: 'Pricing' }),
+      node({ role: 'listbox', ref: 'e3', depth: 0, labelledByText: 'Colors' }),
+      node({ role: 'heading', ref: 'e4', parent: 3, depth: 1, name: 'Colors', level: 3 }),
+      node({ role: 'option', ref: 'e5', parent: 3, depth: 1, name: 'Red' }),
+    ]).findings;
+
+    expect(findings.map(finding => [finding.check, finding.ref, finding.name])).toEqual([
+      ['uninformative-accessible-name', 'e1', 'Read more'],
+      ['label-in-name-mismatch', 'e1', 'Read more'],
+    ]);
   });
 
   it('does not flag containers, text nodes or named controls', () => {
@@ -717,6 +741,35 @@ describe('collectElementFacts in a real page', () => {
     // ancestor: the first span renders, so "Send" really is the visible label;
     // the second inherits hidden and shows nothing.
     expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
+    await page.close();
+  });
+
+  it('collects the text of aria-labelledby references in reference order', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div id="labelled" role="button" aria-labelledby="l1 l2"><span>Pricing</span><h2 id="l1">Read</h2></div>
+      <span id="l2">more</span>
+      <div id="dangling" role="button" aria-labelledby="nowhere"><span>Save</span></div>
+      <div id="plain" role="button"><span>Save</span></div>
+      <my-host id="host"></my-host>
+      <script>
+        customElements.define('my-host', class extends HTMLElement {
+          connectedCallback() {
+            this.attachShadow({ mode: 'open' }).innerHTML =
+              '<div id="inner" role="button" aria-labelledby="shadow-label"><span id="shadow-label">Shadow name</span></div>';
+          }
+        });
+      </script>`);
+    const hostHandle = await page.$('#host');
+    const inner = await hostHandle!.evaluateHandle(host => host.shadowRoot!.getElementById('inner'));
+    const handles = [...await Promise.all(['#labelled', '#dangling', '#plain'].map(selector => page.$(selector))), inner];
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // The name follows the IDREF list, not document order, and may reach
+    // outside the control; a reference to nothing yields no name, and an
+    // IDREF inside a shadow tree resolves against that tree.
+    expect(facts.map(fact => fact.labelledByText)).toEqual(['Read more', null, null, 'Shadow name']);
     await page.close();
   });
 
