@@ -426,6 +426,8 @@ function createToolHarness(options: {
   const concurrency = { current: 0, max: 0 };
   const installs = { count: 0 };
   const frame: any = {
+    // A child frame, so a hung installation is bounded by the child-frame budget.
+    parentFrame: () => ({}),
     evaluate: vi.fn(async (collect: unknown, input: { elements: { ref: string }[]; measureNames: boolean }) => {
       if (typeof collect !== 'string') {
         const measured = input.measureNames && installs.count > 0 && (options.installAxe ?? 'accept') === 'accept';

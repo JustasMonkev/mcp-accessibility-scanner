@@ -228,11 +228,17 @@ const axeForNamesSource = [
   '})();',
 ].join('\n');
 
-// Installed once per frame the audit measures. The wait is bounded like a
-// scan's child-frame injection; false means the frame refused or never
-// answered, and names there stay unmeasured, which the audit reports.
+// Evaluating the whole bundle in a busy main frame can outlast a child
+// frame's budget, and a scan leaves the main frame unbounded for that reason.
+// Here it is bounded too, so a frozen page ends in a warning rather than a
+// hung audit, but with far more patience than a child frame gets.
+const mainFrameInjectionTimeoutMs = 10_000;
+
+// Installed once per frame the audit measures. false means the frame refused
+// or never answered, and names there stay unmeasured, which the audit reports.
 export async function injectAxeForNames(frame: playwright.Frame): Promise<boolean> {
-  return withFrameTimeout(injectAxe(frame, axeForNamesSource).then(() => true), false);
+  const timeoutMs = frame.parentFrame() === null ? mainFrameInjectionTimeoutMs : childFrameInjectionTimeoutMs;
+  return withFrameTimeout(injectAxe(frame, axeForNamesSource).then(() => true), false, timeoutMs);
 }
 
 // A child frame that never answers must not hang the scan. It goes unscanned
@@ -244,7 +250,7 @@ const childFrameInjectionTimeoutMs = 1000;
 // unresponsive renderer answers neither, and `frame.evaluate` has no timeout of
 // its own, so an unbounded probe would hang the whole scan rather than produce
 // the partial-coverage warning it exists to produce.
-async function withFrameTimeout<T>(work: Promise<T>, fallback: T): Promise<T> {
+async function withFrameTimeout<T>(work: Promise<T>, fallback: T, timeoutMs = childFrameInjectionTimeoutMs): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     // Both branches resolve: a rejected loser of the race would surface as an
@@ -252,7 +258,7 @@ async function withFrameTimeout<T>(work: Promise<T>, fallback: T): Promise<T> {
     return await Promise.race([
       work.catch(() => fallback),
       new Promise<T>(resolve => {
-        timeoutId = setTimeout(() => resolve(fallback), childFrameInjectionTimeoutMs);
+        timeoutId = setTimeout(() => resolve(fallback), timeoutMs);
       }),
     ]);
   } finally {
