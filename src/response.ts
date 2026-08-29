@@ -47,6 +47,8 @@ export class Response {
   private _tabSnapshot: TabSnapshot | undefined;
   private _requestContext: CallToolRequestContext | undefined;
   private _structuredContent: Record<string, unknown> | undefined;
+  private _traceWarningAtStart: string | undefined;
+  private _traceDamageCountAtStart: number | undefined;
 
   readonly toolName: string;
   readonly toolArgs: Record<string, any>;
@@ -57,6 +59,8 @@ export class Response {
     this.toolName = toolName;
     this.toolArgs = toolArgs;
     this._requestContext = requestContext;
+    this._traceWarningAtStart = context.traceWarning?.();
+    this._traceDamageCountAtStart = context.traceDamageCount?.();
   }
 
   /**
@@ -190,6 +194,13 @@ export class Response {
     if (this._result.length) {
       response.push('### Result');
       response.push(this._result.join('\n'));
+      response.push('');
+    }
+
+    const traceWarning = this._traceWarningAtStart ?? this._context.traceWarning?.(this._traceDamageCountAtStart);
+    if (traceWarning) {
+      response.push('### Warning');
+      response.push(traceWarning);
       response.push('');
     }
 

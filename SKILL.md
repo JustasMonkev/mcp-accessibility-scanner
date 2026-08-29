@@ -79,7 +79,7 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--navigation-timeout <ms>` | Page navigation timeout (default: 60000) |
 | `--default-timeout <ms>` | Default Playwright operation timeout (default: 5000) |
 | `--save-session` | Save session to output directory |
-| `--save-trace` | Save Playwright trace to output directory |
+| `--save-trace` | Save Playwright trace; crashes or save failures warn until a fresh browser context is used |
 | `--no-sandbox` | Disable browser sandboxing |
 | `--image-responses <mode>` | `"allow"` or `"omit"` image responses (default: allow) |
 

@@ -19,6 +19,15 @@ import { Context } from '../src/context.js';
 import type { BrowserContextFactory } from '../src/browserContextFactory.js';
 import { EventEmitter } from 'events';
 
+function crashPage(browserContext: EventEmitter) {
+  const page: any = new EventEmitter();
+  page.context = () => browserContext;
+  page.setDefaultNavigationTimeout = vi.fn();
+  page.setDefaultTimeout = vi.fn();
+  browserContext.emit('page', page);
+  page.emit('crash');
+}
+
 describe('Context', () => {
   let mockBrowserContextFactory: BrowserContextFactory;
   let mockBrowserContext: any;
@@ -237,6 +246,58 @@ describe('Context', () => {
       await context.closeBrowserContext();
 
       expect(close).toHaveBeenCalledTimes(1);
+      expect(context.traceWarning()).toContain('saved trace may be incomplete');
+    });
+  });
+
+  describe('trace crash warning', () => {
+    it('warns after a traced page crashes until a different browser context is created', async () => {
+      const replacement: any = new EventEmitter();
+      replacement.newPage = vi.fn().mockResolvedValue({});
+      replacement.pages = vi.fn().mockReturnValue([]);
+      replacement.route = vi.fn().mockResolvedValue(undefined);
+      replacement.tracing = {
+        start: vi.fn().mockResolvedValue(undefined),
+        stop: vi.fn().mockResolvedValue(undefined),
+      };
+      (mockBrowserContextFactory.createContext as any)
+          .mockResolvedValueOnce({ browserContext: mockBrowserContext, close: vi.fn().mockResolvedValue(undefined) })
+          .mockResolvedValueOnce({ browserContext: mockBrowserContext, close: vi.fn().mockResolvedValue(undefined) })
+          .mockResolvedValueOnce({ browserContext: replacement, close: vi.fn().mockResolvedValue(undefined) });
+      const context = new Context({
+        tools: [],
+        config: { saveTrace: true, timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      await context.newTab();
+      crashPage(mockBrowserContext);
+      expect(context.traceWarning()).toContain('saved trace may be incomplete');
+
+      await context.closeBrowserContext();
+      await context.newTab();
+      expect(context.traceWarning()).toContain('saved trace may be incomplete');
+
+      await context.closeBrowserContext();
+      await context.newTab();
+      expect(context.traceWarning()).toBeUndefined();
+    });
+
+    it('does not warn about trace loss when tracing is disabled', async () => {
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      await context.newTab();
+      crashPage(mockBrowserContext);
+
+      expect(context.traceWarning()).toBeUndefined();
     });
   });
 

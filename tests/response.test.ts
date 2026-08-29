@@ -63,6 +63,8 @@ describe('Response', () => {
       currentTab: () => mockTab,
       currentTabOrDie: () => mockTab,
       tabs: () => [mockTab],
+      traceWarning: () => undefined,
+      traceDamageCount: () => 0,
       config: {
         imageResponses: 'include',
       },
@@ -90,6 +92,29 @@ describe('Response', () => {
       response.addResult('Result 2');
       expect(response.result()).toBe('Result 1\nResult 2');
     });
+  });
+
+  it('surfaces a trace warning in the tool result', () => {
+    mockContext.traceWarning = () => 'The saved Playwright trace may be incomplete.';
+    const response = new Response(mockContext, 'test_tool', {});
+
+    const text = expectTextContent(response.serialize().content[0]).text;
+
+    expect(text).toContain('### Warning');
+    expect(text).toContain('The saved Playwright trace may be incomplete.');
+  });
+
+  it('keeps a warning when a crash and recovery overlap the tool call', () => {
+    let damageCount = 0;
+    mockContext.traceDamageCount = () => damageCount;
+    mockContext.traceWarning = sinceDamageCount =>
+      sinceDamageCount !== undefined && damageCount > sinceDamageCount ? 'The saved Playwright trace may be incomplete.' : undefined;
+    const response = new Response(mockContext, 'test_tool', {});
+
+    damageCount++;
+    const text = expectTextContent(response.serialize().content[0]).text;
+
+    expect(text).toContain('The saved Playwright trace may be incomplete.');
   });
 
   describe('addError', () => {

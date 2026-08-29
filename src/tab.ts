@@ -92,6 +92,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     });
     listen('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
     listen('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
+    listen('crash', () => this.context.pageCrashed(this.page));
     listen('request', request => this._requests.set(request, null));
     listen('response', response => this._handleResponse(response));
     listen('close', () => this._onClose());

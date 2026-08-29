@@ -52,6 +52,9 @@ const contextRegistry = new ContextRegistry();
 
 type TraceHub = { users: number, ready: Promise<void> };
 const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
+const damagedTraceContexts = new WeakSet<playwright.BrowserContext>();
+
+const traceDamageWarning = 'A page crashed or Playwright failed to stop tracing while --save-trace was enabled, so the saved trace may be incomplete. Start a fresh browser context before relying on another trace; in modes that reuse an attached browser context, restart the attached browser.';
 
 async function acquireTrace(browserContext: playwright.BrowserContext): Promise<void> {
   let hub = traceHubs.get(browserContext);
@@ -160,6 +163,8 @@ export class Context {
   private _abortController = new AbortController();
   private _removePageObserver: (() => void) | undefined;
   private _inputRecorder: InputRecorder | undefined;
+  private _traceBrowserContext: playwright.BrowserContext | undefined;
+  private _traceDamageCount = 0;
   // Resolved from options.sessionLog at the first browser context launch.
   private _sessionLog: SessionLog | undefined;
 
@@ -216,6 +221,26 @@ export class Context {
     if (!this._currentTab)
       throw new Error('No open pages available. Use the "browser_navigate" tool to navigate to a page first.');
     return this._currentTab;
+  }
+
+  traceWarning(sinceDamageCount?: number): string | undefined {
+    const activeTraceDamaged = this.config.saveTrace && this._traceBrowserContext !== undefined && damagedTraceContexts.has(this._traceBrowserContext);
+    return activeTraceDamaged || (sinceDamageCount !== undefined && this._traceDamageCount > sinceDamageCount) ? traceDamageWarning : undefined;
+  }
+
+  traceDamageCount(): number {
+    return this._traceDamageCount;
+  }
+
+  pageCrashed(page: playwright.Page): void {
+    if (!this.config.saveTrace)
+      return;
+    this._markTraceDamaged(page.context());
+  }
+
+  private _markTraceDamaged(browserContext: playwright.BrowserContext): void {
+    damagedTraceContexts.add(browserContext);
+    this._traceDamageCount++;
   }
 
   async newTab(): Promise<Tab> {
@@ -407,8 +432,10 @@ export class Context {
         // a shared context the sibling that closed first already stopped the
         // one recording, which is an expected shutdown, not an error worth
         // logging. Anything else still surfaces.
-        if (!(error instanceof Error && /already stopped|Must start tracing before stopping/i.test(error.message)))
+        if (!(error instanceof Error && /already stopped|Must start tracing before stopping/i.test(error.message))) {
+          this._markTraceDamaged(browserContext);
           throw error;
+        }
       } finally {
         await close();
       }
@@ -463,6 +490,9 @@ export class Context {
     // pinned forever.
     try {
       const { browserContext } = result;
+      // A new wrapper is not necessarily a new context: shared CDP/extension
+      // modes can hand the same damaged context back after browser_close.
+      this._traceBrowserContext = browserContext;
       await this._setupRequestInterception(browserContext);
       // First real use of this context: resolve — and, once per backend,
       // create — the session log before deciding whether to record input.
