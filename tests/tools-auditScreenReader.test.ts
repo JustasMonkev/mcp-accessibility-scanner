@@ -420,15 +420,25 @@ function createToolHarness(options: {
   factsFor?: (ref: string) => Partial<ElementFacts>;
   staleRefs?: (ref: string) => boolean;
   staleDelayMs?: number;
-  /** What the frame does with the axe installation: accept, reject, or never answer. */
+  /**
+   * What the frame does with the axe installation: accept, reject, or never
+   * answer within its budget. 'hang' alone is a busy frame that answers the
+   * evaluations after it; with `frozen` the frame answers nothing at all.
+   */
   installAxe?: 'accept' | 'reject' | 'hang';
+  frozen?: boolean;
+  /** Model the page's main frame instead of a child frame. */
+  mainFrame?: boolean;
 }) {
   const concurrency = { current: 0, max: 0 };
   const installs = { count: 0 };
   const frame: any = {
-    // A child frame, so a hung installation is bounded by the child-frame budget.
-    parentFrame: () => ({}),
+    // A child frame unless asked otherwise, so a hung installation is bounded
+    // by the child-frame budget.
+    parentFrame: () => options.mainFrame ? null : ({}),
     evaluate: vi.fn(async (collect: unknown, input: { elements: { ref: string }[]; measureNames: boolean }) => {
+      if (options.frozen)
+        return new Promise(() => undefined);
       if (typeof collect !== 'string') {
         const measured = input.measureNames && installs.count > 0 && (options.installAxe ?? 'accept') === 'accept';
         return input.elements.map(handle => ({ ...baseFacts, nameMeasured: measured, ...options.factsFor?.(handle.ref) }));
@@ -586,7 +596,9 @@ describe('audit_screen_reader tool measurement', () => {
 
   it.each(['reject', 'hang'] as const)('says so when the frame %s the axe installation instead of reporting distilled names as missing', async installAxe => {
     // Without a measured name a control named through its children looks
-    // unnamed, so a clean-looking count must carry the caveat.
+    // unnamed, so a clean-looking count must carry the caveat. The hanging
+    // case is a frame too busy to take the copy within its budget that
+    // answers the reads after it; one that answers nothing is the test below.
     const harness = createToolHarness({
       snapshot: snapshotOf([{ role: 'button', ref: 'b1' }, { role: 'button', ref: 'b2' }]),
       installAxe,
@@ -596,6 +608,69 @@ describe('audit_screen_reader tool measurement', () => {
     expect(harness.installs.count).toBe(1);
     expect(result).toContain('WARNING: accessible names could not be measured for 2 of these');
     expect(result).toContain('missing-accessible-name | 2');
+  });
+
+  it('does not ask a frame that refused the axe copy to measure names', async () => {
+    // Every batch of that frame is collected without names, not just the one
+    // whose installation failed: the copy is not there to read from.
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 60 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      installAxe: 'reject',
+    });
+
+    const result = await run(harness, 60);
+    const collects = harness.frame.evaluate.mock.calls.filter(([collect]: [unknown]) => typeof collect !== 'string');
+    expect(collects.length).toBeGreaterThan(1);
+    expect(collects.every(([, input]: [unknown, { measureNames: boolean }]) => input.measureNames === false)).toBe(true);
+    expect(result).toContain('WARNING: accessible names could not be measured for 60 of these');
+  });
+
+  it('ends instead of hanging when a frame never answers anything', async () => {
+    // The installation timeout does not stop the work inside the frame; the
+    // measurement that follows would queue behind it forever unless bounded.
+    // With nothing measured the audit ends the way an all-stale page does:
+    // an error that says nothing was evaluated, not a clean report.
+    const harness = createToolHarness({
+      snapshot: snapshotOf([{ role: 'button', ref: 'b1' }, { role: 'button', ref: 'b2' }]),
+      installAxe: 'hang',
+      frozen: true,
+    });
+
+    await expect(run(harness, 50)).rejects.toThrow('None of the 2 accessibility tree elements could be resolved');
+  });
+
+  it('is bounded on a child frame that stops answering even when names are not checked', async () => {
+    // Without an installation there is no refusal to learn from, so a child
+    // frame is read under the scan's budget on every read.
+    const harness = createToolHarness({
+      snapshot: snapshotOf([{ role: 'button', ref: 'b1' }]),
+      frozen: true,
+    });
+
+    await expect(run(harness, 50, false)).rejects.toThrow('None of the 1 accessibility tree elements could be resolved');
+    expect(harness.installs.count).toBe(0);
+  });
+
+  it('is bounded on a main frame that stops answering, under its larger budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf([{ role: 'button', ref: 'b1' }]),
+        frozen: true,
+        mainFrame: true,
+      });
+
+      const audit = run(harness, 50, false);
+      const outcome = audit.then(() => 'resolved', () => 'rejected');
+      // The child budget alone is not enough for the main frame.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(harness.frame.evaluate).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(await outcome).toBe('rejected');
+      await expect(audit).rejects.toThrow('None of the 1 accessibility tree elements could be resolved');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

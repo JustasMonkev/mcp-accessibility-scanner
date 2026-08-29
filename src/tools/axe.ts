@@ -234,11 +234,23 @@ const axeForNamesSource = [
 // hung audit, but with far more patience than a child frame gets.
 const mainFrameInjectionTimeoutMs = 10_000;
 
-// Installed once per frame the audit measures. false means the frame refused
-// or never answered, and names there stay unmeasured, which the audit reports.
+/**
+ * How long a screen-reader audit waits on one read of a frame: the patient
+ * main-frame budget, or the scan's child-frame budget. The audit bounds every
+ * read with it, not only the installation, because a timed-out evaluation is
+ * still running in the frame and every later read queues behind it.
+ */
+export function frameReadTimeoutMs(frame: playwright.Frame): number {
+  return frame.parentFrame() === null ? mainFrameInjectionTimeoutMs : childFrameInjectionTimeoutMs;
+}
+
+/**
+ * Installs the audit's own axe copy in a frame, once per frame the audit
+ * measures. Resolves false when the frame refused or never answered within
+ * its budget; names there stay unmeasured, which the audit reports.
+ */
 export async function injectAxeForNames(frame: playwright.Frame): Promise<boolean> {
-  const timeoutMs = frame.parentFrame() === null ? mainFrameInjectionTimeoutMs : childFrameInjectionTimeoutMs;
-  return withFrameTimeout(injectAxe(frame, axeForNamesSource).then(() => true), false, timeoutMs);
+  return withFrameTimeout(injectAxe(frame, axeForNamesSource).then(() => true), false, frameReadTimeoutMs(frame));
 }
 
 // A child frame that never answers must not hang the scan. It goes unscanned
@@ -246,11 +258,16 @@ export async function injectAxeForNames(frame: playwright.Frame): Promise<boolea
 // violations, and an unreported one turns into a clean-looking report.
 const childFrameInjectionTimeoutMs = 1000;
 
-// Every read from a child frame is bounded by it, not just the injection: an
-// unresponsive renderer answers neither, and `frame.evaluate` has no timeout of
-// its own, so an unbounded probe would hang the whole scan rather than produce
-// the partial-coverage warning it exists to produce.
-async function withFrameTimeout<T>(work: Promise<T>, fallback: T, timeoutMs = childFrameInjectionTimeoutMs): Promise<T> {
+/**
+ * Resolves `work`, or `fallback` once `timeoutMs` has passed. Every read from
+ * a child frame is bounded by it, not just the injection: an unresponsive
+ * renderer answers neither, and `frame.evaluate` has no timeout of its own, so
+ * an unbounded probe would hang the whole scan rather than produce the
+ * partial-coverage warning it exists to produce. The timeout does not stop
+ * the work inside the frame; a caller that gives up on a frame must bound
+ * every later read from it too.
+ */
+export async function withFrameTimeout<T>(work: Promise<T>, fallback: T, timeoutMs = childFrameInjectionTimeoutMs): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     // Both branches resolve: a rejected loser of the race would surface as an
