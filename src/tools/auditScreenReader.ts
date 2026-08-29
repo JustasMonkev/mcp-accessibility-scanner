@@ -11,6 +11,8 @@ export type Rect = { x: number; y: number; width: number; height: number };
 type AriaTreeNode = {
   role: string;
   name: string | null;
+  /** Inline text after the node's colon, e.g. the "Docs" of `- strong: Docs`. */
+  text: string | null;
   level: number | null;
   ref: string | null;
   depth: number;
@@ -104,6 +106,22 @@ function normalizeText(value: string | null): string {
   return value.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/gu, ' ').trim();
 }
 
+// The text Playwright writes after a node's colon: `- text: Docs`,
+// `- strong [ref=e3]: Docs`, or YAML-quoted when the text needs it.
+function parseInlineText(rest: string): string | null {
+  const match = /^(?:\s*\[[^\]]*\])*:\s?(.*)$/.exec(rest);
+  if (!match)
+    return null;
+  const value = match[1].trim();
+  const doubleQuoted = /^"((?:[^"\\]|\\.)*)"$/.exec(value);
+  if (doubleQuoted)
+    return doubleQuoted[1].replace(/\\(.)/g, '$1') || null;
+  const singleQuoted = /^'((?:[^']|'')*)'$/.exec(value);
+  if (singleQuoted)
+    return singleQuoted[1].replace(/''/g, '\'') || null;
+  return value || null;
+}
+
 /** @public */
 export function parseAriaSnapshot(snapshot: string): AriaTreeNode[] {
   const nodes: AriaTreeNode[] = [];
@@ -125,6 +143,7 @@ export function parseAriaSnapshot(snapshot: string): AriaTreeNode[] {
     nodes.push({
       role: match[2],
       name: match[3] === undefined ? null : match[3].replace(/\\(.)/g, '$1'),
+      text: parseInlineText(rest),
       level: levelMatch ? Number(levelMatch[1]) : null,
       ref: /\[ref=([^\]]+)\]/.exec(rest)?.[1] ?? null,
       depth,
@@ -177,6 +196,30 @@ function isLayoutRelevant(node: ScreenReaderNode): boolean {
   // Off-canvas and clipped boxes are the standard visually-hidden techniques:
   // they have no visual order to compare the reading order against.
   return width >= minLayoutSizePx && height >= minLayoutSizePx && x + width > 0 && y + height > 0;
+}
+
+// Playwright's AI snapshot drops a name that was computed from content once
+// that content is rendered as the node's own children (removeRedundantNames
+// in its distiller, since 1.62): `<a><strong>Docs</strong></a>` becomes
+// `- link:` over `- strong: Docs`. The name is still there, one level down,
+// so it is put back from the descendants a screen reader would read. A
+// control with no readable descendants keeps its missing name.
+function restoreContentNames(nodes: ScreenReaderNode[]): ScreenReaderNode[] {
+  return nodes.map((node, index) => {
+    if (node.name !== null || !namedRoles.has(node.role))
+      return node;
+    const parts: string[] = [];
+    for (let child = index + 1; child < nodes.length && nodes[child].depth > node.depth; child++) {
+      const descendant = nodes[child];
+      if (descendant.ariaHidden)
+        continue;
+      const part = (descendant.name ?? descendant.text)?.trim();
+      if (part)
+        parts.push(part);
+    }
+    const name = parts.join(' ').trim();
+    return name ? { ...node, name } : node;
+  });
 }
 
 // An image inside a named link or button is announced through that control, so
@@ -369,11 +412,11 @@ export function analyzeScreenReader(
   // Hidden state is inherited down the tree instead; a parent always precedes
   // its children in snapshot order.
   const inheritedHidden = rawNodes.map(node => node.ariaHidden);
-  const nodes = rawNodes.map((node, index) => {
+  const nodes = restoreContentNames(rawNodes.map((node, index) => {
     if (node.parent !== null && inheritedHidden[node.parent])
       inheritedHidden[index] = true;
     return inheritedHidden[index] === node.ariaHidden ? node : { ...node, ariaHidden: true };
-  });
+  }));
 
   const findings: ScreenReaderFinding[] = [];
   const countByCheck = {

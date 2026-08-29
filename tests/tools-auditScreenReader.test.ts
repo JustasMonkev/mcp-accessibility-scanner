@@ -16,6 +16,7 @@ function node(overrides: Partial<ScreenReaderNode>): ScreenReaderNode {
   return {
     role: 'generic',
     name: null,
+    text: null,
     level: null,
     ref: 'e1',
     depth: 0,
@@ -64,6 +65,21 @@ describe('parseAriaSnapshot', () => {
     expect(nodes[4].ref).toBeNull();
   });
 
+  it('keeps the inline text of text nodes and of elements the AI snapshot renders as children', () => {
+    const nodes = parseAriaSnapshot([
+      '- link [ref=e1] [cursor=pointer]:',
+      '  - strong [ref=e2]: Docs',
+      '  - text: "quoted: text"',
+      '  - text: \'it\'\'s here\'',
+      '  - emphasis [ref=e3]',
+      '- button "Named" [ref=e4]: Hi',
+    ].join('\n'));
+
+    expect(nodes.map(entry => entry.text)).toEqual([null, 'Docs', 'quoted: text', 'it\'s here', null, 'Hi']);
+    expect(nodes[0].name).toBeNull();
+    expect(nodes[5].name).toBe('Named');
+  });
+
   it('parses keys Playwright YAML-quotes because of the accessible name', () => {
     // Verified against Playwright 1.61.1: yamlEscapeKeyIfNeeded single-quotes the
     // whole key (role, name, ref) for ": ", " #", braces and backticks.
@@ -110,6 +126,38 @@ describe('analyzeScreenReader accessible names', () => {
     ];
     expect(checks(frame(true))).toEqual([]);
     expect(checks(frame(false))).toEqual(['missing-accessible-name']);
+  });
+
+  it('restores a name the AI snapshot moved into rendered children instead of calling it missing', () => {
+    // Playwright 1.62+ distils `<a><strong>Docs</strong></a>` to `- link:` over
+    // `- strong: Docs`; the link is named, the name just lives one level down.
+    expect(checks([
+      node({ role: 'link', ref: 'e1', href: '/docs', depth: 0 }),
+      node({ role: 'strong', ref: 'e2', parent: 0, depth: 1, text: 'Docs' }),
+      node({ role: 'button', ref: 'e3', depth: 0 }),
+      node({ role: 'generic', ref: 'e4', parent: 2, depth: 1 }),
+      node({ role: 'text', ref: null, parent: 3, depth: 2, text: 'Save' }),
+      node({ role: 'link', ref: 'e5', href: '/logo', depth: 0 }),
+      node({ role: 'img', ref: 'e6', parent: 5, depth: 1, name: 'Company logo' }),
+    ])).toEqual([]);
+  });
+
+  it('judges a restored name like any other and ignores hidden descendants when restoring', () => {
+    const findings = analyze([
+      node({ role: 'link', ref: 'e1', href: '/a', depth: 0 }),
+      node({ role: 'strong', ref: 'e2', parent: 0, depth: 1, text: 'Read more' }),
+      node({ role: 'button', ref: 'e3', depth: 0 }),
+      node({ role: 'generic', ref: 'e4', parent: 2, depth: 1, ariaHidden: true, text: 'decorative' }),
+      node({ role: 'link', ref: 'e5', href: '/b', depth: 0 }),
+      node({ role: 'link', ref: 'e6', href: '/b', depth: 0 }),
+      node({ role: 'text', ref: null, parent: 5, depth: 1, text: 'Docs' }),
+    ]).findings;
+
+    expect(findings.map(finding => [finding.check, finding.ref, finding.name])).toEqual([
+      ['uninformative-accessible-name', 'e1', 'Read more'],
+      ['missing-accessible-name', 'e3', null],
+      ['missing-accessible-name', 'e5', null],
+    ]);
   });
 
   it('does not flag containers, text nodes or named controls', () => {
@@ -517,6 +565,26 @@ describe('collectElementFacts in a real page', () => {
     await page.close();
     return facts.map(fact => fact.visibleText);
   }
+
+  it('names a control from children the AI snapshot renders on their own lines', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <a id="docs" href="/docs"><strong>Docs</strong></a>
+      <button id="save"><span>Save</span><svg aria-hidden="true"><title></title></svg></button>
+      <a id="empty" href="/x"><svg aria-hidden="true"></svg></a>`);
+    const nodes = parseAriaSnapshot(await page.ariaSnapshot({ mode: 'ai' }));
+    await page.close();
+
+    const facts: ElementFacts = {
+      tagName: null, selector: null, visibleText: null, href: null, rect: null,
+      direction: 'ltr', positionFixed: false, floating: false, ariaHidden: false,
+    };
+    const result = analyze(nodes.map(entry => ({ ...entry, ...facts, childCount: 0 })));
+
+    // Only the icon-only link is unnamed; the two with distilled names are not.
+    expect(result.findings.map(finding => [finding.check, finding.role])).toEqual([['missing-accessible-name', 'link']]);
+    expect(result.countByCheck['missing-accessible-name']).toBe(1);
+  });
 
   it('takes the visible label of button-like inputs from value', async () => {
     const page = await browser!.newPage();
