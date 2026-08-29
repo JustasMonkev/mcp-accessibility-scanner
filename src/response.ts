@@ -45,6 +45,8 @@ export class Response {
   private _includeSnapshotCompress: boolean | undefined;
   private _includeTabs = false;
   private _tabSnapshot: TabSnapshot | undefined;
+  // Stateless teardown clears Context tabs before serialize().
+  private _tabsMarkdownAtFinish: string[] | undefined;
   private _requestContext: CallToolRequestContext | undefined;
   private _structuredContent: Record<string, unknown> | undefined;
   private _traceWarningAtStart: string | undefined;
@@ -181,6 +183,12 @@ export class Response {
       Promise.allSettled(tabsToUpdate.map(tab => tab.updateTitle())),
     ]);
     this._tabSnapshot = snapshot;
+    this.captureTabsForSerialization();
+  }
+
+  captureTabsForSerialization(): void {
+    if (!this._tabsMarkdownAtFinish && (this._includeSnapshot || this._includeTabs))
+      this._tabsMarkdownAtFinish = renderTabsMarkdown(this._context.tabs(), this._includeTabs);
   }
 
   tabSnapshot(): TabSnapshot | undefined {
@@ -213,9 +221,9 @@ ${this._code.join('\n')}
       response.push('');
     }
 
-    // List browser tabs.
+    // Use the pre-teardown tab state captured by finish().
     if (this._includeSnapshot || this._includeTabs)
-      response.push(...renderTabsMarkdown(this._context.tabs(), this._includeTabs));
+      response.push(...(this._tabsMarkdownAtFinish ?? renderTabsMarkdown(this._context.tabs(), this._includeTabs)));
 
     // Add snapshot if provided.
     if (this._tabSnapshot?.modalStates.length) {

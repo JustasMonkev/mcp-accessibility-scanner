@@ -492,7 +492,7 @@ export interface BrowserContextFactory {
    * The persistent factory uses it to tell a stable-profile holder that is
    * closing apart from one that is concurrently alive.
    */
-  createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined, options?: CreateContextOptions): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void>, closeStarting?: () => void }>;
+  createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined, options?: CreateContextOptions): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void>, closeStarting?: () => void, attachedBrowserKey?: string }>;
 }
 
 abstract class BaseContextFactory implements BrowserContextFactory {
@@ -735,7 +735,74 @@ class CdpContextFactory extends BaseContextFactory {
     return remaining === 0;
   }
 
-  override async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  // One connection cannot change its browser process id.
+  private _attachedBrowserKeys = new WeakMap<playwright.Browser, Promise<string | undefined>>();
+
+  private _attachedBrowserKey(browser: playwright.Browser): Promise<string | undefined> {
+    let key = this._attachedBrowserKeys.get(browser);
+    if (!key) {
+      key = (async () => {
+        const timeoutMs = this.config.browser.cdpTimeout ?? 30_000;
+        try {
+          if (timeoutMs === 0) {
+            const session = await browser.newBrowserCDPSession();
+            try {
+              const info = await session.send('SystemInfo.getProcessInfo');
+              const browserProcess = info.processInfo.find(process => process.type === 'browser');
+              return browserProcess ? String(browserProcess.id) : undefined;
+            } finally {
+              await session.detach().catch(() => {});
+            }
+          }
+          const deadline = Date.now() + timeoutMs;
+          const withinDeadline = async <T>(promise: Promise<T>): Promise<T | undefined> => {
+            const remaining = deadline - Date.now();
+            if (remaining <= 0)
+              return undefined;
+            let timer: number | undefined;
+            try {
+              return await Promise.race([
+                promise,
+                new Promise<undefined>(resolve => {
+                  timer = setTimeout(resolve, remaining);
+                }),
+              ]);
+            } finally {
+              clearTimeout(timer);
+            }
+          };
+          const sessionPromise = browser.newBrowserCDPSession();
+          const session = await withinDeadline(sessionPromise);
+          // A session that resolves only after the deadline gave up is not
+          // tracked by the finally below (it sees `undefined`) — detach it
+          // late, or the probe session leaks on the shared connection.
+          if (!session)
+            void sessionPromise.then(session => session.detach().catch(() => {}), () => {});
+          try {
+            if (!session)
+              return undefined;
+            const probe = session.send('SystemInfo.getProcessInfo').then(
+                info => {
+                  const browserProcess = info.processInfo.find(process => process.type === 'browser');
+                  return browserProcess ? String(browserProcess.id) : undefined;
+                },
+                () => undefined);
+            return await withinDeadline(probe);
+          } finally {
+            const detach = session ? session.detach().catch(() => {}) : Promise.resolve();
+            await withinDeadline(detach);
+          }
+        } catch {
+          // Older or restricted endpoints may not support this probe.
+          return undefined;
+        }
+      })();
+      this._attachedBrowserKeys.set(browser, key);
+    }
+    return key;
+  }
+
+  override async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void>, attachedBrowserKey?: string }> {
     testDebug('create browser context (cdp)');
     // `obtainedPromise` guards the eager `_browserPromise` evictions below —
     // same pattern as the base class: after an external disconnect a NEW
@@ -762,8 +829,12 @@ class CdpContextFactory extends BaseContextFactory {
       throw error;
     }
     let released = false;
+    const attachedBrowserKey = this.config.saveTrace && !this.config.browser.isolated
+      ? await this._attachedBrowserKey(browser)
+      : undefined;
     return {
       browserContext,
+      attachedBrowserKey,
       close: async () => {
         if (released)
           return;

@@ -229,6 +229,17 @@ describe('Response', () => {
       expect(text).toContain('[data:text/html;base64,...]');
       expect(text).not.toContain(payload);
     });
+
+    it('keeps tabs captured before stateless teardown', () => {
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeTabs();
+      response.captureTabsForSerialization();
+      mockContext.tabs = () => [];
+
+      const text = expectTextContent(response.serialize().content[0]).text;
+
+      expect(text).toContain('Example Page');
+    });
   });
 
   describe('finish', () => {

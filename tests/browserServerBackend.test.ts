@@ -17,11 +17,14 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { BrowserSessionRegistry } from '../src/browserSessions.js';
 import { resolveConfig } from '../src/config.js';
+import type { BrowserContextFactory } from '../src/browserContextFactory.js';
+import type * as playwright from 'playwright';
 
 const unusedFactory = {
   createContext: async () => {
@@ -111,5 +114,90 @@ describe('BrowserServerBackend.callTool', () => {
     } finally {
       fs.rmSync(outputDir, { recursive: true, force: true });
     }
+  });
+
+  it('returns the trace warning from per-request teardown in the same stateless response', async () => {
+    // Teardown trace damage must be visible before the response is serialized.
+    const config = await resolveConfig({ saveTrace: true });
+    const page = Object.assign(new EventEmitter(), {
+      context: vi.fn(),
+      setDefaultNavigationTimeout: vi.fn(),
+      setDefaultTimeout: vi.fn(),
+    });
+    const browserContext = Object.assign(new EventEmitter(), {
+      newPage: vi.fn().mockResolvedValue(page),
+      pages: vi.fn().mockReturnValue([]),
+      route: vi.fn().mockResolvedValue(undefined),
+      tracing: {
+        start: vi.fn().mockResolvedValue(undefined),
+        stop: vi.fn().mockRejectedValue(new Error('browser disconnected')),
+      },
+    });
+    page.context.mockReturnValue(browserContext);
+    const close = vi.fn().mockResolvedValue(undefined);
+    const factory: BrowserContextFactory = {
+      // SAFETY: this test double implements every BrowserContext member read by Context.
+      createContext: vi.fn().mockResolvedValue({ browserContext: browserContext as playwright.BrowserContext, close }),
+    };
+    const backend = new BrowserServerBackend(config, factory, undefined, { ephemeralDefaultContext: true });
+    await backend.initialize({ notifyToolListChanged: vi.fn() }, { name: 'vitest', version: '1.0.0' });
+
+    const result = await backend.callTool('browser_tabs', { action: 'new' });
+
+    const content = result.content[0];
+    expect(content.type).toBe('text');
+    if (content.type !== 'text')
+      throw new Error('Expected text content');
+    expect(content.text).toContain('saved trace may be incomplete');
+    expect(browserContext.tracing.stop).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+    backend.serverClosed();
+    await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+  });
+
+  it('waits for overlapping stateless calls before tearing down their shared default context', async () => {
+    const config = await resolveConfig({});
+    const browserContext = new EventEmitter();
+    const pages: playwright.Page[] = [];
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>(resolve => releaseSecond = resolve);
+    const newPage = vi.fn(async () => {
+      const page = Object.assign(new EventEmitter(), {
+        context: () => browserContext,
+        setDefaultNavigationTimeout: vi.fn(),
+        setDefaultTimeout: vi.fn(),
+        title: vi.fn().mockResolvedValue('title'),
+        url: () => 'about:blank',
+        // SAFETY: this test double implements every Page member read by Tab.
+      }) as playwright.Page;
+      pages.push(page);
+      browserContext.emit('page', page);
+      if (pages.length === 2)
+        await secondGate;
+      return page;
+    });
+    Object.assign(browserContext, {
+      newPage,
+      pages: () => [],
+      route: vi.fn().mockResolvedValue(undefined),
+    });
+    const close = vi.fn().mockResolvedValue(undefined);
+    const factory: BrowserContextFactory = {
+      // SAFETY: this test double implements every BrowserContext member read by Context.
+      createContext: vi.fn().mockResolvedValue({ browserContext: browserContext as playwright.BrowserContext, close }),
+    };
+    const backend = new BrowserServerBackend(config, factory, undefined, { ephemeralDefaultContext: true });
+    await backend.initialize({ notifyToolListChanged: vi.fn() }, { name: 'vitest', version: '1.0.0' });
+
+    let firstSettled = false;
+    const first = backend.callTool('browser_tabs', { action: 'new' }).finally(() => firstSettled = true);
+    const second = backend.callTool('browser_tabs', { action: 'new' });
+    await vi.waitFor(() => expect(newPage).toHaveBeenCalledTimes(2));
+
+    expect(firstSettled).toBe(false);
+    expect(close).not.toHaveBeenCalled();
+    releaseSecond();
+    await Promise.all([first, second]);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });

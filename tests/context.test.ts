@@ -16,7 +16,9 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Context } from '../src/context.js';
+import { resolveConfig } from '../src/config.js';
 import type { BrowserContextFactory } from '../src/browserContextFactory.js';
+import type * as playwright from 'playwright';
 import { EventEmitter } from 'events';
 
 function crashPage(browserContext: EventEmitter) {
@@ -280,6 +282,55 @@ describe('Context', () => {
       await context.newTab();
       expect(context.traceWarning()).toContain('saved trace may be incomplete');
 
+      await context.closeBrowserContext();
+      await context.newTab();
+      expect(context.traceWarning()).toBeUndefined();
+    });
+
+    it('keeps the warning across a shared-CDP reconnect and recovers only on a new attached browser', async () => {
+      // Non-isolated --cdp-endpoint re-wraps the SAME attached context under a
+      // new BrowserContext object on every reconnect; the wrapper WeakSet
+      // cannot see that the browser — and its damaged trace — survived. The
+      // factory-provided attachedBrowserKey (browser process id) is the
+      // identity that does.
+      const makeMockContext = () => {
+        const browserContext = Object.assign(new EventEmitter(), {
+          newPage: vi.fn().mockResolvedValue({}),
+          pages: vi.fn().mockReturnValue([]),
+          route: vi.fn().mockResolvedValue(undefined),
+          tracing: {
+            start: vi.fn().mockResolvedValue(undefined),
+            stop: vi.fn().mockResolvedValue(undefined),
+          },
+        });
+        // SAFETY: this test double implements every BrowserContext member read by Context.
+        return browserContext as EventEmitter & playwright.BrowserContext;
+      };
+      const wrapperA = makeMockContext();
+      const wrapperB = makeMockContext();
+      const wrapperC = makeMockContext();
+      vi.mocked(mockBrowserContextFactory.createContext)
+          .mockResolvedValueOnce({ browserContext: wrapperA, close: vi.fn().mockResolvedValue(undefined), attachedBrowserKey: 'cdp-test-pid-1' })
+          .mockResolvedValueOnce({ browserContext: wrapperB, close: vi.fn().mockResolvedValue(undefined), attachedBrowserKey: 'cdp-test-pid-1' })
+          .mockResolvedValueOnce({ browserContext: wrapperC, close: vi.fn().mockResolvedValue(undefined), attachedBrowserKey: 'cdp-test-pid-2' });
+      const context = new Context({
+        tools: [],
+        config: await resolveConfig({ saveTrace: true }),
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      await context.newTab();
+      crashPage(wrapperA);
+      expect(context.traceWarning()).toContain('saved trace may be incomplete');
+
+      // Ordinary reconnect: same attached browser, fresh wrapper — still damaged.
+      await context.closeBrowserContext();
+      await context.newTab();
+      expect(context.traceWarning()).toContain('saved trace may be incomplete');
+
+      // Genuinely new attached browser: recovered.
       await context.closeBrowserContext();
       await context.newTab();
       expect(context.traceWarning()).toBeUndefined();

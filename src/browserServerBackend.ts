@@ -24,6 +24,7 @@ import { Response } from './response.js';
 import { SessionLog } from './sessionLog.js';
 import { filteredTools } from './tools.js';
 import { toMcpTool } from './mcp/tool.js';
+import { ManualPromise } from './mcp/manualPromise.js';
 
 import type { Tool } from './tools/tool.js';
 import type { BrowserContextFactory } from './browserContextFactory.js';
@@ -43,6 +44,7 @@ export class BrowserServerBackend implements ServerBackend {
   private _browserContextFactory: BrowserContextFactory;
   private _sharedSessionRegistry: BrowserSessionRegistry | undefined;
   private _ephemeralDefaultContext: boolean;
+  private _ephemeralDefaultContextDisposed: ManualPromise | undefined;
 
   constructor(config: FullConfig, factory: BrowserContextFactory, sharedSessionRegistry?: BrowserSessionRegistry, options?: {
     /**
@@ -213,6 +215,9 @@ export class BrowserServerBackend implements ServerBackend {
       }
     }
     const response = new Response(context, name, responseArguments, requestContext);
+    const ephemeralDefaultCall = routedSessionId === undefined && this._ephemeralDefaultContext;
+    if (ephemeralDefaultCall)
+      this._ephemeralDefaultContextDisposed ??= new ManualPromise();
     // Per-call token, not a single slot: two overlapping calls on one session
     // must keep isRunningTool() true until BOTH finish, or the TTL reaper (and
     // browser_session_close) could dispose the browser under the slower call.
@@ -251,6 +256,17 @@ export class BrowserServerBackend implements ServerBackend {
       // one reaper tick from expiry.
       if (routedSessionId !== undefined)
         this._sessionRegistry?.touch(routedSessionId);
+    }
+    // Stateless teardown must finish before serialize() reads trace damage.
+    // serverClosed() can safely call dispose() again.
+    if (ephemeralDefaultCall) {
+      response.captureTabsForSerialization();
+      if (!context.isRunningTool()) {
+        await context.dispose().catch(logUnhandledError);
+        this._ephemeralDefaultContextDisposed!.resolve();
+      } else {
+        await this._ephemeralDefaultContextDisposed;
+      }
     }
     return response.serialize();
   }

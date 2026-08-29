@@ -181,6 +181,202 @@ describe('browserContextFactory', () => {
     expect(browserContext.close).not.toHaveBeenCalled();
   });
 
+  it('exposes the attached browser process id as the reconnect-stable identity for non-isolated CDP contexts', async () => {
+    const browserContext = createMockBrowserContext();
+    const cdpSession = {
+      send: vi.fn().mockResolvedValue({
+        processInfo: [
+          { type: 'renderer', id: 7 },
+          { type: 'browser', id: 4242 },
+        ],
+      }),
+      detach: vi.fn().mockResolvedValue(undefined),
+    };
+    const browser = {
+      ...createMockBrowser(browserContext),
+      newBrowserCDPSession: vi.fn().mockResolvedValue(cdpSession),
+    };
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      saveTrace: true,
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+      },
+    });
+
+    const factory = contextFactory(config);
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+
+    expect(result.attachedBrowserKey).toBe('4242');
+    expect(cdpSession.send).toHaveBeenCalledWith('SystemInfo.getProcessInfo');
+    expect(cdpSession.detach).toHaveBeenCalled();
+    // The identity is per connection, not per context: a second context on
+    // the same live connection shares the browser, hence the same process id
+    // without another CDP roundtrip.
+    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    expect(second.attachedBrowserKey).toBe('4242');
+    expect(browser.newBrowserCDPSession).toHaveBeenCalledTimes(1);
+
+    await result.close();
+    await second.close();
+  });
+
+  // A CDP endpoint that accepts the session but never answers
+  // SystemInfo.getProcessInfo used to hang createContext forever: the identity
+  // probe had no deadline. It must resolve (to undefined, like any other probe
+  // failure) within the configured cdpTimeout.
+  it('returns a non-resolving identity probe as undefined after the configured CDP timeout', async () => {
+    const browserContext = createMockBrowserContext();
+    const cdpSession = {
+      send: vi.fn(() => new Promise<never>(() => {})),
+      detach: vi.fn().mockResolvedValue(undefined),
+    };
+    const browser = {
+      ...createMockBrowser(browserContext),
+      newBrowserCDPSession: vi.fn().mockResolvedValue(cdpSession),
+    };
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      saveTrace: true,
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        cdpTimeout: 250,
+      },
+    });
+
+    const factory = contextFactory(config);
+    vi.useFakeTimers();
+    try {
+      const pendingKey = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)
+          .then(result => result.attachedBrowserKey);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(await pendingKey).toBeUndefined();
+      expect(cdpSession.send).toHaveBeenCalledWith('SystemInfo.getProcessInfo');
+      expect(cdpSession.detach).toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // newBrowserCDPSession() itself is part of the bounded flow: an endpoint
+  // that accepts the CDP connection but never hands back the probe session
+  // must also resolve to undefined at the configured deadline, not hang
+  // forever waiting for the session.
+  it('returns a never-resolving newBrowserCDPSession as undefined after the configured CDP timeout', async () => {
+    const browserContext = createMockBrowserContext();
+    const browser = {
+      ...createMockBrowser(browserContext),
+      newBrowserCDPSession: vi.fn(() => new Promise<never>(() => {})),
+    };
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      saveTrace: true,
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        cdpTimeout: 250,
+      },
+    });
+
+    const factory = contextFactory(config);
+    vi.useFakeTimers();
+    try {
+      const pendingKey = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)
+          .then(result => result.attachedBrowserKey);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(await pendingKey).toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A session creation that misses the deadline resolves the lookup to
+  // undefined (fail-open) — but when the promise later resolves anyway, the
+  // late session must still be detached instead of leaking on the shared
+  // connection.
+  it('detaches a CDP session whose creation resolved only after the deadline', async () => {
+    const browserContext = createMockBrowserContext();
+    const cdpSession = {
+      send: vi.fn().mockResolvedValue({
+        processInfo: [{ type: 'browser', id: 4242 }],
+      }),
+      detach: vi.fn().mockResolvedValue(undefined),
+    };
+    let releaseSession!: (session: typeof cdpSession) => void;
+    const browser = {
+      ...createMockBrowser(browserContext),
+      newBrowserCDPSession: vi.fn(() => new Promise<typeof cdpSession>(resolve => { releaseSession = resolve; })),
+    };
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      saveTrace: true,
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        cdpTimeout: 250,
+      },
+    });
+
+    const factory = contextFactory(config);
+    vi.useFakeTimers();
+    try {
+      const pendingKey = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)
+          .then(result => result.attachedBrowserKey);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(await pendingKey).toBeUndefined();
+      expect(cdpSession.detach).not.toHaveBeenCalled();
+
+      // The late session arrives after the deadline gave up.
+      releaseSession!(cdpSession);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cdpSession.detach).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // One shared deadline spans session creation, the probe and the detach: a
+  // step that stalls must not hand the next step a fresh full cdpTimeout, or
+  // the whole lookup could run for 2x the configured time.
+  it('bounds the whole identity flow by one shared deadline instead of one per step', async () => {
+    const browserContext = createMockBrowserContext();
+    const cdpSession = {
+      send: vi.fn(() => new Promise<never>(() => {})),
+      detach: vi.fn(() => new Promise<never>(() => {})),
+    };
+    const browser = {
+      ...createMockBrowser(browserContext),
+      newBrowserCDPSession: vi.fn().mockResolvedValue(cdpSession),
+    };
+    connectOverCDP.mockResolvedValue(browser);
+
+    const config = await resolveConfig({
+      saveTrace: true,
+      browser: {
+        cdpEndpoint: 'http://127.0.0.1:9222',
+        cdpTimeout: 400,
+      },
+    });
+
+    const factory = contextFactory(config);
+    vi.useFakeTimers();
+    try {
+      const pendingKey = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)
+          .then(result => result.attachedBrowserKey);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(cdpSession.send).toHaveBeenCalledWith('SystemInfo.getProcessInfo');
+      expect(await pendingKey).toBeUndefined();
+      expect(cdpSession.detach).toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('forwards configured CDP headers and timeout when attaching to an endpoint', async () => {
     const browserContext = createMockBrowserContext();
     const browser = createMockBrowser(browserContext);

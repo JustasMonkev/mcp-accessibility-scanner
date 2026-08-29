@@ -53,6 +53,10 @@ const contextRegistry = new ContextRegistry();
 type TraceHub = { users: number, ready: Promise<void> };
 const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
 const damagedTraceContexts = new WeakSet<playwright.BrowserContext>();
+// A CDP reconnect creates a new Playwright wrapper for the same browser.
+// Keep trace damage by browser process, scoped to its factory.
+type AttachedBrowserTraceState = { key: string, damaged: boolean };
+const attachedBrowserTraceStates = new WeakMap<BrowserContextFactory, AttachedBrowserTraceState>();
 
 const traceDamageWarning = 'A page crashed or Playwright failed to stop tracing while --save-trace was enabled, so the saved trace may be incomplete. Start a fresh browser context before relying on another trace; in modes that reuse an attached browser context, restart the attached browser.';
 
@@ -164,6 +168,7 @@ export class Context {
   private _removePageObserver: (() => void) | undefined;
   private _inputRecorder: InputRecorder | undefined;
   private _traceBrowserContext: playwright.BrowserContext | undefined;
+  private _traceBrowserKey: string | undefined;
   private _traceDamageCount = 0;
   // Resolved from options.sessionLog at the first browser context launch.
   private _sessionLog: SessionLog | undefined;
@@ -224,7 +229,10 @@ export class Context {
   }
 
   traceWarning(sinceDamageCount?: number): string | undefined {
-    const activeTraceDamaged = this.config.saveTrace && this._traceBrowserContext !== undefined && damagedTraceContexts.has(this._traceBrowserContext);
+    const attachedState = this._traceBrowserKey ? attachedBrowserTraceStates.get(this._browserContextFactory) : undefined;
+    const activeTraceDamaged = this.config.saveTrace && this._traceBrowserContext !== undefined &&
+        (damagedTraceContexts.has(this._traceBrowserContext) ||
+          (!!attachedState && attachedState.key === this._traceBrowserKey && attachedState.damaged));
     return activeTraceDamaged || (sinceDamageCount !== undefined && this._traceDamageCount > sinceDamageCount) ? traceDamageWarning : undefined;
   }
 
@@ -240,6 +248,9 @@ export class Context {
 
   private _markTraceDamaged(browserContext: playwright.BrowserContext): void {
     damagedTraceContexts.add(browserContext);
+    const attachedState = attachedBrowserTraceStates.get(this._browserContextFactory);
+    if (attachedState && attachedState.key === this._traceBrowserKey)
+      attachedState.damaged = true;
     this._traceDamageCount++;
   }
 
@@ -489,10 +500,12 @@ export class Context {
     // running — and, for storage-state sessions, the disposable profile
     // pinned forever.
     try {
-      const { browserContext } = result;
-      // A new wrapper is not necessarily a new context: shared CDP/extension
-      // modes can hand the same damaged context back after browser_close.
+      const { browserContext, attachedBrowserKey } = result;
+      const attachedState = attachedBrowserTraceStates.get(this._browserContextFactory);
+      if (attachedBrowserKey && attachedState?.key !== attachedBrowserKey)
+        attachedBrowserTraceStates.set(this._browserContextFactory, { key: attachedBrowserKey, damaged: false });
       this._traceBrowserContext = browserContext;
+      this._traceBrowserKey = attachedBrowserKey;
       await this._setupRequestInterception(browserContext);
       // First real use of this context: resolve — and, once per backend,
       // create — the session log before deciding whether to record input.
