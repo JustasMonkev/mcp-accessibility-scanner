@@ -901,6 +901,35 @@ describe('audit_screen_reader tool measurement', () => {
       vi.useRealTimers();
     }
   });
+
+  it('gives a hanging main-frame installation the main frame\'s budget, not a child\'s', async () => {
+    // The installation carries no timeout of its own: the frame-work pool
+    // supplies it, from the frame the call names. Named the wrong frame, a
+    // main frame that is merely slow to install would be abandoned after the
+    // child budget and its names reported unmeasured.
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf([{ role: 'button', ref: 'b1' }]),
+        installAxe: 'hang',
+      });
+
+      const audit = run(harness, 50);
+      let settled = false;
+      const outcome = audit.then(() => 'resolved', () => 'rejected').then(value => {
+        settled = true;
+        return value;
+      });
+      // Well past the child budget, still waiting on the installation alone.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect([settled, harness.installs.count]).toEqual([false, 1]);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(await outcome).toBe('rejected');
+      await expect(audit).rejects.toThrow('None of the 1 accessibility tree elements could be resolved');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('collectElementFacts in a real page', () => {
