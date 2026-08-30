@@ -429,31 +429,48 @@ function createToolHarness(options: {
   frozen?: boolean;
   /** Model the page's main frame instead of a child frame. */
   mainFrame?: boolean;
+  frameCount?: number;
+  frameReadDelayMs?: number;
+  frameReadDelayFor?: (frameIndex: number) => number;
+  ownerFrameDelayMs?: number;
 }) {
   const concurrency = { current: 0, max: 0 };
+  const frameConcurrency = { current: 0, max: 0 };
+  const ownerFrames = { calls: 0, current: 0, max: 0 };
+  const disposals = { count: 0 };
   const installs = { count: 0 };
-  const frame: any = {
+  const frames: any[] = Array.from({ length: options.frameCount ?? 1 }, (_, frameIndex) => ({
     // A child frame unless asked otherwise, so a hung installation is bounded
     // by the child-frame budget.
     parentFrame: () => options.mainFrame ? null : ({}),
     evaluate: vi.fn(async (collect: unknown, input: { elements: { ref: string }[]; measureNames: boolean }) => {
-      if (options.frozen)
-        return new Promise(() => undefined);
-      if (typeof collect !== 'string') {
-        const measured = input.measureNames && installs.count > 0 && (options.installAxe ?? 'accept') === 'accept';
-        return input.elements.map(handle => ({ ...baseFacts, nameMeasured: measured, ...options.factsFor?.(handle.ref) }));
+      frameConcurrency.current++;
+      try {
+        frameConcurrency.max = Math.max(frameConcurrency.max, frameConcurrency.current);
+        if (options.frozen)
+          await new Promise(() => undefined);
+        if (typeof collect !== 'string') {
+          const delay = options.frameReadDelayFor?.(frameIndex) ?? options.frameReadDelayMs;
+          if (delay)
+            await new Promise(resolve => setTimeout(resolve, delay));
+          const measured = input.measureNames && installs.count > 0 && (options.installAxe ?? 'accept') === 'accept';
+          return input.elements.map(handle => ({ ...baseFacts, nameMeasured: measured, ...options.factsFor?.(handle.ref) }));
+        }
+        installs.count++;
+        if (options.installAxe === 'reject')
+          throw new Error('Evaluation failed');
+        if (options.installAxe === 'hang')
+          await new Promise(() => undefined);
+        return undefined;
+      } finally {
+        frameConcurrency.current--;
       }
-      installs.count++;
-      if (options.installAxe === 'reject')
-        throw new Error('Evaluation failed');
-      if (options.installAxe === 'hang')
-        return new Promise(() => undefined);
-      return undefined;
     }),
-  };
+  }));
+  const frame = frames[0];
   const page: any = {
     ariaSnapshot: vi.fn(async () => options.snapshot),
-    frames: vi.fn(() => [frame]),
+    frames: vi.fn(() => frames),
     mainFrame: vi.fn(() => frame),
     url: vi.fn(() => 'https://example.com/'),
     locator: vi.fn((selector: string) => ({
@@ -464,7 +481,26 @@ function createToolHarness(options: {
         concurrency.max = Math.max(concurrency.max, concurrency.current);
         await new Promise(resolve => setTimeout(resolve, stale ? options.staleDelayMs ?? 0 : 0));
         concurrency.current--;
-        return stale ? null : { ref, ownerFrame: async () => frame, dispose: async () => undefined };
+        const owner = frames[Number(ref.replace(/\D/g, '')) % frames.length];
+        return stale ? null : {
+          ref,
+          ownerFrame: async () => {
+            ownerFrames.calls++;
+            ownerFrames.current++;
+            frameConcurrency.current++;
+            try {
+              ownerFrames.max = Math.max(ownerFrames.max, ownerFrames.current);
+              frameConcurrency.max = Math.max(frameConcurrency.max, frameConcurrency.current);
+              if (options.ownerFrameDelayMs)
+                await new Promise(resolve => setTimeout(resolve, options.ownerFrameDelayMs));
+              return owner;
+            } finally {
+              ownerFrames.current--;
+              frameConcurrency.current--;
+            }
+          },
+          dispose: async () => { disposals.count++; },
+        };
       },
     })),
   };
@@ -474,7 +510,7 @@ function createToolHarness(options: {
     context: { outputFile: async (name: string) => `/tmp/${name}` },
   };
   const context: any = { currentTabOrDie: () => tab, config: {} };
-  return { context, response: new Response(context, 'audit_screen_reader', {}), concurrency, installs, frame };
+  return { context, concurrency, frameConcurrency, ownerFrames, disposals, installs, frame, frames };
 }
 
 describe('audit_screen_reader tool measurement', () => {
@@ -486,13 +522,14 @@ describe('audit_screen_reader tool measurement', () => {
   });
 
   async function run(harness: ReturnType<typeof createToolHarness>, maxElements: number, checkNames = true) {
+    const response = new Response(harness.context, 'audit_screen_reader', {});
     await tool.handle(harness.context, {
       checkNames,
       checkReadingOrder: true,
       maxElements,
       maxFindingsPerCheck: 20,
-    } as any, harness.response);
-    return harness.response.result();
+    } as any, response);
+    return response.result();
   }
 
   it('spends the element budget on elements a screen reader can reach', async () => {
@@ -550,6 +587,162 @@ describe('audit_screen_reader tool measurement', () => {
     expect(harness.concurrency.max).toBe(50);
   });
 
+  it('measures frame batches through the bounded concurrency pool', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      frameCount: 8,
+      frameReadDelayMs: 10,
+    });
+
+    await run(harness, 8, false);
+    expect(harness.frameConcurrency.max).toBe(4);
+  });
+
+  it.each([
+    { name: 'fact reads', checkNames: false, frameReadDelayMs: 1_500 },
+    { name: 'axe installations', checkNames: true, installAxe: 'hang' as const },
+  ])('does not replace four timed-out $name with more frame work', async ({ checkNames, ...options }) => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        ...options,
+      });
+
+      const audit = run(harness, 8, checkNames);
+      const outcome = audit.then(() => 'resolved', () => 'rejected');
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(harness.frameConcurrency.max).toBe(4);
+      expect(harness.frameConcurrency.current).toBe(4);
+      expect(harness.frames.reduce((sum, frame) => sum + frame.evaluate.mock.calls.length, 0)).toBe(4);
+      expect(await outcome).toBe('rejected');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps timed-out owner-frame lookups inside the shared limit', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        ownerFrameDelayMs: 1_500,
+      });
+
+      const outcome = run(harness, 8, false).then(() => 'resolved', () => 'rejected');
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(harness.ownerFrames.calls).toBe(4);
+      expect(harness.ownerFrames.current).toBe(4);
+      expect(harness.ownerFrames.max).toBe(4);
+      expect(harness.disposals.count).toBe(4);
+      expect(await outcome).toBe('rejected');
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.disposals.count).toBe(8);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shares the frame-work limit across overlapping audits of one page', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        frameReadDelayMs: 1_500,
+      });
+
+      const outcomes = [run(harness, 8, false), run(harness, 8, false)]
+          .map(audit => audit.then(() => 'resolved', () => 'rejected'));
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(harness.frameConcurrency.max).toBe(4);
+      expect(harness.frameConcurrency.current).toBe(4);
+      expect(harness.frames.reduce((sum, frame) => sum + frame.evaluate.mock.calls.length, 0)).toBe(4);
+      expect(await Promise.all(outcomes)).toEqual(['rejected', 'rejected']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits for healthy frame work from an overlapping audit', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      frameCount: 8,
+      frameReadDelayMs: 10,
+    });
+
+    const results = await Promise.all([run(harness, 8, false), run(harness, 8, false)]);
+    expect(results.every(result => result.includes('Elements analyzed: 8'))).toBe(true);
+    expect(harness.frameConcurrency.max).toBe(4);
+    expect(harness.frames.reduce((sum, frame) => sum + frame.evaluate.mock.calls.length, 0)).toBe(16);
+  });
+
+  it('reports where measurement stopped when timed-out work fills the pool', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 60 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        frameReadDelayFor: frameIndex => frameIndex < 2 ? 0 : 1_500,
+      });
+
+      const audit = run(harness, 60, false);
+      await vi.advanceTimersByTimeAsync(1_100);
+      const result = await audit;
+      expect(result).toContain('stopped after 50 of 60: timed-out frame work reached the 4-operation limit');
+      expect(result).toContain('WARNING: 36 of these went stale before measurement');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not retry a frame that timed out in an earlier chunk', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 200 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameReadDelayMs: 1_500,
+      });
+
+      const outcome = run(harness, 200, false).then(() => 'resolved', () => 'rejected');
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(harness.frame.evaluate).toHaveBeenCalledTimes(1);
+      expect(harness.frameConcurrency.current).toBe(1);
+      expect(harness.disposals.count).toBe(150);
+      expect(await outcome).toBe('rejected');
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.disposals.count).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports saturation and cleans up when it happens in the final chunk', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        frameReadDelayFor: frameIndex => frameIndex < 2 ? 0 : 1_500,
+      });
+
+      const audit = run(harness, 8, false);
+      await vi.advanceTimersByTimeAsync(1_100);
+      const result = await audit;
+      expect(result).toContain('stopped after 8 of 8: timed-out frame work reached the 4-operation limit');
+      expect(result).toContain('WARNING: 6 of these went stale before measurement');
+      expect(harness.disposals.count).toBe(4);
+      const report = JSON.parse(vi.mocked(fs.promises.writeFile).mock.calls[0][1] as string);
+      expect(report.elements.truncated).toBe(true);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.disposals.count).toBe(8);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('warns when part of the snapshot went stale instead of silently skipping it', async () => {
     // A partial rerender: the resolved half is still audited, but the result
     // must say the other half was never evaluated.
@@ -594,14 +787,12 @@ describe('audit_screen_reader tool measurement', () => {
     expect(result).toContain('WARNING: accessible names could not be measured for 1 of these');
   });
 
-  it.each(['reject', 'hang'] as const)('says so when the frame %s the axe installation instead of reporting distilled names as missing', async installAxe => {
+  it('says so when the frame rejects the axe installation instead of reporting distilled names as missing', async () => {
     // Without a measured name a control named through its children looks
-    // unnamed, so a clean-looking count must carry the caveat. The hanging
-    // case is a frame too busy to take the copy within its budget that
-    // answers the reads after it; one that answers nothing is the test below.
+    // unnamed, so a clean-looking count must carry the caveat.
     const harness = createToolHarness({
       snapshot: snapshotOf([{ role: 'button', ref: 'b1' }, { role: 'button', ref: 'b2' }]),
-      installAxe,
+      installAxe: 'reject',
     });
 
     const result = await run(harness, 50);
@@ -627,9 +818,8 @@ describe('audit_screen_reader tool measurement', () => {
 
   it('ends instead of hanging when a frame never answers anything', async () => {
     // The installation timeout does not stop the work inside the frame; the
-    // measurement that follows would queue behind it forever unless bounded.
-    // With nothing measured the audit ends the way an all-stale page does:
-    // an error that says nothing was evaluated, not a clean report.
+    // audit must not queue measurement behind it. With nothing measured it
+    // ends the way an all-stale page does: an error, not a clean report.
     const harness = createToolHarness({
       snapshot: snapshotOf([{ role: 'button', ref: 'b1' }, { role: 'button', ref: 'b2' }]),
       installAxe: 'hang',

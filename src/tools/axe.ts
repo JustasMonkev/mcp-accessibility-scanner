@@ -234,6 +234,8 @@ const axeForNamesSource = [
 // hung audit, but with far more patience than a child frame gets.
 const mainFrameInjectionTimeoutMs = 10_000;
 
+export const frameConcurrency = 4;
+
 /**
  * How long a screen-reader audit waits on one read of a frame: the patient
  * main-frame budget, or the scan's child-frame budget. The audit bounds every
@@ -249,8 +251,12 @@ export function frameReadTimeoutMs(frame: playwright.Frame): number {
  * measures. Resolves false when the frame refused or never answered within
  * its budget; names there stay unmeasured, which the audit reports.
  */
-export async function injectAxeForNames(frame: playwright.Frame): Promise<boolean> {
-  return withFrameTimeout(injectAxe(frame, axeForNamesSource).then(() => true), false, frameReadTimeoutMs(frame));
+export async function injectAxeForNames(frame: playwright.Frame, onSettled?: () => void): Promise<boolean> {
+  return withFrameTimeout(
+      injectAxe(frame, axeForNamesSource).finally(onSettled).then(() => true),
+      false,
+      frameReadTimeoutMs(frame),
+  );
 }
 
 // A child frame that never answers must not hang the scan. It goes unscanned
@@ -283,23 +289,21 @@ export async function withFrameTimeout<T>(work: Promise<T>, fallback: T, timeout
   }
 }
 
-// Injections run a few at a time rather than all at once. Frames sharing a
-// renderer run their evaluations on one thread, so launching every injection
-// together starts every timeout clock together too, and a frame still queued
-// behind its siblings is timed out for being slow before it has had a turn -
-// the budget is meant to catch an unresponsive renderer, not a busy one.
-//
-// A pool fixes that because a frame's clock starts when a slot frees, never
-// while it waits. Measured on a page of 48 same-origin frames: launching them
-// all at once reported 28 healthy frames as unscanned and 96 frames reported
-// every one of them; through the pool, none, at every size tried.
-const frameInjectionConcurrency = 4;
-
-async function withConcurrency<T, R>(items: readonly T[], run: (item: T) => Promise<R>): Promise<R[]> {
+/**
+ * Runs frame evaluations a few at a time. Frames sharing a renderer run their
+ * evaluations on one thread, so launching every evaluation together starts
+ * every timeout clock together too. A frame still queued behind its siblings
+ * is then timed out for being slow before it has had a turn.
+ *
+ * A pool starts a frame's clock when a slot frees. On a page of 48 same-origin
+ * frames, launching every injection together reported 28 healthy frames as
+ * unscanned; through the pool, none were missed.
+ */
+export async function withConcurrency<T, R>(items: readonly T[], run: (item: T) => Promise<R>): Promise<R[]> {
   let next = 0;
   const results: R[] = [];
   await Promise.all(Array.from(
-      { length: Math.min(frameInjectionConcurrency, items.length) },
+      { length: Math.min(frameConcurrency, items.length) },
       async () => {
         while (next < items.length) {
           const index = next++;
