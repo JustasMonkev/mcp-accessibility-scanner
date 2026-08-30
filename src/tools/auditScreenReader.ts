@@ -929,19 +929,23 @@ const auditScreenReader = defineTabTool({
       void Promise.all(handles.map(handle => handle.dispose().catch(() => undefined)));
     };
 
-    const injectFrameAxe = async (frame: playwright.Frame) => {
+    const injectFrameAxe = async (
+      frame: playwright.Frame,
+      onSettled?: (installed: boolean, timedOut: boolean) => void,
+    ) => {
       if (!await reserveFrameWork(frameWork)) {
         frameWorkSaturated = true;
         return { value: false, timedOut: false, started: false };
       }
       let settled = false;
       let timedOut = false;
-      const value = await injectAxeForNames(frame, () => {
+      const value = await injectAxeForNames(frame, installed => {
         settled = true;
         frameWork.inFlight--;
         if (timedOut)
           frameWork.timedOut--;
         wakeFrameWork(frameWork);
+        onSettled?.(installed, timedOut);
       });
       if (!settled) {
         timedOut = true;
@@ -1009,7 +1013,12 @@ const auditScreenReader = defineTabTool({
         if (measureNames) {
           let installed = axeByFrame.get(frame);
           if (installed === undefined) {
-            const installation = await injectFrameAxe(frame);
+            const installation = await injectFrameAxe(frame, (installed, timedOut) => {
+              if (timedOut) {
+                axeByFrame.set(frame, installed);
+                unavailableFrames.delete(frame);
+              }
+            });
             if (!installation.started || installation.timedOut) {
               if (installation.timedOut)
                 unavailableFrames.add(frame);
@@ -1028,7 +1037,11 @@ const auditScreenReader = defineTabTool({
         // frames cannot build an unbounded queue behind them.
         const collected = await runFrameWork(
             () => frame.evaluate(collectElementFacts, { elements: batch.map(entry => entry.handle), measureNames }), null, frame,
-            () => disposeHandles(batch.map(entry => entry.handle)));
+            (facts, timedOut) => {
+              if (facts && timedOut)
+                unavailableFrames.delete(frame);
+              disposeHandles(batch.map(entry => entry.handle));
+            });
         if (!collected.started) {
           disposeHandles(batch.map(entry => entry.handle));
           return;

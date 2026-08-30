@@ -426,9 +426,10 @@ function createToolHarness(options: {
    * evaluations after it; with `frozen` the frame answers nothing at all.
    */
   installAxe?: 'accept' | 'reject' | 'hang';
+  installAxeDelayFor?: (frameIndex: number) => number;
   frozen?: boolean;
-  /** Model the page's main frame instead of a child frame. */
-  mainFrame?: boolean;
+  /** Give every fake frame the child-frame timeout instead of modeling frame 0 as the main frame. */
+  childFrames?: boolean;
   frameCount?: number;
   frameReadDelayMs?: number;
   frameReadDelayFor?: (frameIndex: number) => number;
@@ -440,9 +441,7 @@ function createToolHarness(options: {
   const disposals = { count: 0 };
   const installs = { count: 0 };
   const frames: any[] = Array.from({ length: options.frameCount ?? 1 }, (_, frameIndex) => ({
-    // A child frame unless asked otherwise, so a hung installation is bounded
-    // by the child-frame budget.
-    parentFrame: () => options.mainFrame ? null : ({}),
+    parentFrame: () => options.childFrames || frameIndex > 0 ? ({}) : null,
     evaluate: vi.fn(async (collect: unknown, input: { elements: { ref: string }[]; measureNames: boolean }) => {
       frameConcurrency.current++;
       try {
@@ -457,6 +456,9 @@ function createToolHarness(options: {
           return input.elements.map(handle => ({ ...baseFacts, nameMeasured: measured, ...options.factsFor?.(handle.ref) }));
         }
         installs.count++;
+        const installDelay = options.installAxeDelayFor?.(frameIndex);
+        if (installDelay)
+          await new Promise(resolve => setTimeout(resolve, installDelay));
         if (options.installAxe === 'reject')
           throw new Error('Evaluation failed');
         if (options.installAxe === 'hang')
@@ -607,6 +609,7 @@ describe('audit_screen_reader tool measurement', () => {
       const harness = createToolHarness({
         snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
         frameCount: 8,
+        childFrames: true,
         ...options,
       });
 
@@ -628,11 +631,11 @@ describe('audit_screen_reader tool measurement', () => {
       const harness = createToolHarness({
         snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
         frameCount: 8,
-        ownerFrameDelayMs: 1_500,
+        ownerFrameDelayMs: 10_500,
       });
 
       const outcome = run(harness, 8, false).then(() => 'resolved', () => 'rejected');
-      await vi.advanceTimersByTimeAsync(1_100);
+      await vi.advanceTimersByTimeAsync(10_100);
       expect(harness.ownerFrames.calls).toBe(4);
       expect(harness.ownerFrames.current).toBe(4);
       expect(harness.ownerFrames.max).toBe(4);
@@ -651,6 +654,7 @@ describe('audit_screen_reader tool measurement', () => {
       const harness = createToolHarness({
         snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
         frameCount: 8,
+        childFrames: true,
         frameReadDelayMs: 1_500,
       });
 
@@ -685,6 +689,7 @@ describe('audit_screen_reader tool measurement', () => {
       const harness = createToolHarness({
         snapshot: snapshotOf(Array.from({ length: 60 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
         frameCount: 8,
+        childFrames: true,
         frameReadDelayFor: frameIndex => frameIndex < 2 ? 0 : 1_500,
       });
 
@@ -703,6 +708,7 @@ describe('audit_screen_reader tool measurement', () => {
     try {
       const harness = createToolHarness({
         snapshot: snapshotOf(Array.from({ length: 200 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        childFrames: true,
         frameReadDelayMs: 1_500,
       });
 
@@ -719,12 +725,44 @@ describe('audit_screen_reader tool measurement', () => {
     }
   });
 
+  it.each([
+    { name: 'fact read', checkNames: false, installAxe: undefined },
+    { name: 'axe installation', checkNames: true, installAxe: undefined },
+    { name: 'rejected axe installation', checkNames: true, installAxe: 'reject' as const },
+  ])('retries a frame after a timed-out $name settles', async ({ checkNames, installAxe }) => {
+    vi.useFakeTimers();
+    try {
+      let slowCalls = 0;
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 100 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        childFrames: true,
+        installAxe,
+        installAxeDelayFor: frameIndex => checkNames && frameIndex === 0 && slowCalls++ === 0 ? 1_500 : 0,
+        frameReadDelayFor: frameIndex => !checkNames && frameIndex === 0 && slowCalls++ === 0 ? 1_500 : frameIndex ? 900 : 0,
+      });
+
+      const audit = run(harness, 100, checkNames);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await audit).toContain('Elements analyzed: 100');
+      const frameZeroReads = harness.frames[0].evaluate.mock.calls
+          .filter(([collect]: [unknown]) => typeof collect !== 'string');
+      expect(frameZeroReads).toHaveLength(checkNames ? 1 : 2);
+      const frameZeroInstalls = harness.frames[0].evaluate.mock.calls
+          .filter(([collect]: [unknown]) => typeof collect === 'string');
+      expect(frameZeroInstalls).toHaveLength(checkNames ? 1 : 0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports saturation and cleans up when it happens in the final chunk', async () => {
     vi.useFakeTimers();
     try {
       const harness = createToolHarness({
         snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
         frameCount: 8,
+        childFrames: true,
         frameReadDelayFor: frameIndex => frameIndex < 2 ? 0 : 1_500,
       });
 
@@ -824,6 +862,7 @@ describe('audit_screen_reader tool measurement', () => {
       snapshot: snapshotOf([{ role: 'button', ref: 'b1' }, { role: 'button', ref: 'b2' }]),
       installAxe: 'hang',
       frozen: true,
+      childFrames: true,
     });
 
     await expect(run(harness, 50)).rejects.toThrow('None of the 2 accessibility tree elements could be resolved');
@@ -835,6 +874,7 @@ describe('audit_screen_reader tool measurement', () => {
     const harness = createToolHarness({
       snapshot: snapshotOf([{ role: 'button', ref: 'b1' }]),
       frozen: true,
+      childFrames: true,
     });
 
     await expect(run(harness, 50, false)).rejects.toThrow('None of the 1 accessibility tree elements could be resolved');
@@ -847,7 +887,6 @@ describe('audit_screen_reader tool measurement', () => {
       const harness = createToolHarness({
         snapshot: snapshotOf([{ role: 'button', ref: 'b1' }]),
         frozen: true,
-        mainFrame: true,
       });
 
       const audit = run(harness, 50, false);

@@ -251,9 +251,18 @@ export function frameReadTimeoutMs(frame: playwright.Frame): number {
  * measures. Resolves false when the frame refused or never answered within
  * its budget; names there stay unmeasured, which the audit reports.
  */
-export async function injectAxeForNames(frame: playwright.Frame, onSettled?: () => void): Promise<boolean> {
+export async function injectAxeForNames(frame: playwright.Frame, onSettled?: (installed: boolean) => void): Promise<boolean> {
   return withFrameTimeout(
-      injectAxe(frame, axeForNamesSource).finally(onSettled).then(() => true),
+      injectAxe(frame, axeForNamesSource).then(
+          () => {
+            onSettled?.(true);
+            return true;
+          },
+          () => {
+            onSettled?.(false);
+            return false;
+          },
+      ),
       false,
       frameReadTimeoutMs(frame),
   );
