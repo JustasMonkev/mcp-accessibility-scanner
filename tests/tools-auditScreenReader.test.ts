@@ -489,7 +489,7 @@ function createToolHarness(options: {
     context: { outputFile: async (name: string) => `/tmp/${name}` },
   };
   const context: any = { currentTabOrDie: () => tab, config: {} };
-  return { context, response: new Response(context, 'audit_screen_reader', {}), concurrency, frameConcurrency, installs, frame, frames };
+  return { context, concurrency, frameConcurrency, installs, frame, frames };
 }
 
 describe('audit_screen_reader tool measurement', () => {
@@ -501,13 +501,14 @@ describe('audit_screen_reader tool measurement', () => {
   });
 
   async function run(harness: ReturnType<typeof createToolHarness>, maxElements: number, checkNames = true) {
+    const response = new Response(harness.context, 'audit_screen_reader', {});
     await tool.handle(harness.context, {
       checkNames,
       checkReadingOrder: true,
       maxElements,
       maxFindingsPerCheck: 20,
-    } as any, harness.response);
-    return harness.response.result();
+    } as any, response);
+    return response.result();
   }
 
   it('spends the element budget on elements a screen reader can reach', async () => {
@@ -595,6 +596,27 @@ describe('audit_screen_reader tool measurement', () => {
       expect(harness.frameConcurrency.current).toBe(4);
       expect(harness.frames.reduce((sum, frame) => sum + frame.evaluate.mock.calls.length, 0)).toBe(4);
       expect(await outcome).toBe('rejected');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shares the frame-work limit across overlapping audits of one page', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        frameReadDelayMs: 1_500,
+      });
+
+      const outcomes = [run(harness, 8, false), run(harness, 8, false)]
+          .map(audit => audit.then(() => 'resolved', () => 'rejected'));
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(harness.frameConcurrency.max).toBe(4);
+      expect(harness.frameConcurrency.current).toBe(4);
+      expect(harness.frames.reduce((sum, frame) => sum + frame.evaluate.mock.calls.length, 0)).toBe(4);
+      expect(await Promise.all(outcomes)).toEqual(['rejected', 'rejected']);
     } finally {
       vi.useRealTimers();
     }

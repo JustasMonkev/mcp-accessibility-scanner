@@ -818,6 +818,7 @@ const auditScreenReaderSchema = z.object({
   reportFile: z.string().optional().describe('Output JSON report file name.'),
 });
 
+const frameWorkByPage = new WeakMap<playwright.Page, { inFlight: number }>();
 
 const auditScreenReader = defineTabTool({
   capability: 'core',
@@ -854,23 +855,24 @@ const auditScreenReader = defineTabTool({
     const analyzedIndexes: number[] = [];
     let resolvedCount = 0;
     let reachable = 0;
-    let frameWorkInFlight = 0;
+    const frameWork = frameWorkByPage.get(tab.page) ?? { inFlight: 0 };
+    frameWorkByPage.set(tab.page, frameWork);
     let frameWorkSaturated = false;
 
     const runFrameWork = async <T>(start: () => Promise<T>, fallback: T, frame: playwright.Frame) => {
-      if (frameWorkInFlight >= frameConcurrency) {
+      if (frameWork.inFlight >= frameConcurrency) {
         frameWorkSaturated = true;
         return { value: fallback, timedOut: false, started: false };
       }
-      frameWorkInFlight++;
+      frameWork.inFlight++;
       let settled = false;
       const work = Promise.resolve().then(start).then(value => {
         settled = true;
-        frameWorkInFlight--;
+        frameWork.inFlight--;
         return value;
       }, () => {
         settled = true;
-        frameWorkInFlight--;
+        frameWork.inFlight--;
         return fallback;
       });
       const value = await withFrameTimeout(work, fallback, frameReadTimeoutMs(frame));
@@ -878,15 +880,15 @@ const auditScreenReader = defineTabTool({
     };
 
     const injectFrameAxe = async (frame: playwright.Frame) => {
-      if (frameWorkInFlight >= frameConcurrency) {
+      if (frameWork.inFlight >= frameConcurrency) {
         frameWorkSaturated = true;
         return { value: false, timedOut: false, started: false };
       }
-      frameWorkInFlight++;
+      frameWork.inFlight++;
       let settled = false;
       const value = await injectAxeForNames(frame, () => {
         settled = true;
-        frameWorkInFlight--;
+        frameWork.inFlight--;
       });
       return { value, timedOut: !settled, started: true };
     };
