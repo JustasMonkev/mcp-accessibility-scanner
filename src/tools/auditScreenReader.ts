@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
+import { frameReadTimeoutMs, injectAxeForNames, withFrameTimeout } from './axe.js';
 import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
 
 import type * as playwright from 'playwright';
@@ -23,6 +24,13 @@ export type ElementFacts = {
   selector: string | null;
   visibleText: string | null;
   href: string | null;
+  /**
+   * The accessible name the page's accessibility tree computes for the
+   * element (see collectElementFacts), or null when it is empty or was not
+   * measured; nameMeasured tells those two apart.
+   */
+  accessibleName: string | null;
+  nameMeasured: boolean;
   rect: Rect | null;
   direction: 'ltr' | 'rtl';
   positionFixed: boolean;
@@ -177,6 +185,20 @@ function isLayoutRelevant(node: ScreenReaderNode): boolean {
   // Off-canvas and clipped boxes are the standard visually-hidden techniques:
   // they have no visual order to compare the reading order against.
   return width >= minLayoutSizePx && height >= minLayoutSizePx && x + width > 0 && y + height > 0;
+}
+
+/**
+ * Playwright's AI snapshot drops a name once every element that produced it
+ * is rendered as the node's own children (removeRedundantNames in its
+ * distiller, since 1.62): `<a><strong>Docs</strong></a>` becomes `- link:`
+ * over `- strong: Docs`, and a control labelled through aria-labelledby by
+ * one of its own descendants loses its name the same way. The accessibility
+ * tree still has the name, so it is taken from the one measured in the page.
+ * A control the page names nothing keeps its missing name, and a name the
+ * snapshot does carry is never replaced.
+ */
+function restoreDistilledNames(nodes: ScreenReaderNode[]): ScreenReaderNode[] {
+  return nodes.map(node => node.name === null && node.accessibleName ? { ...node, name: node.accessibleName } : node);
 }
 
 // An image inside a named link or button is announced through that control, so
@@ -369,11 +391,11 @@ export function analyzeScreenReader(
   // Hidden state is inherited down the tree instead; a parent always precedes
   // its children in snapshot order.
   const inheritedHidden = rawNodes.map(node => node.ariaHidden);
-  const nodes = rawNodes.map((node, index) => {
+  const nodes = restoreDistilledNames(rawNodes.map((node, index) => {
     if (node.parent !== null && inheritedHidden[node.parent])
       inheritedHidden[index] = true;
     return inheritedHidden[index] === node.ariaHidden ? node : { ...node, ariaHidden: true };
-  });
+  }));
 
   const findings: ScreenReaderFinding[] = [];
   const countByCheck = {
@@ -404,8 +426,15 @@ export function analyzeScreenReader(
 }
 
 // Runs inside the page: no imports, no closures over module scope.
+// Names are measured unless the caller says otherwise: an audit that checks
+// only reading order skips that work, even when an earlier audit left the
+// axe copy in the page.
 /** @public */
-export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): ElementFacts[] {
+export function collectElementFacts(
+  input: (SVGElement | HTMLElement)[] | { elements: (SVGElement | HTMLElement)[]; measureNames: boolean }
+): ElementFacts[] {
+  const elements = Array.isArray(input) ? input : input.elements;
+  const measureNames = Array.isArray(input) ? true : input.measureNames;
   // innerText counts visually hidden (clipped) labels as visible, which makes
   // icon-only controls look like text. Walk the subtree instead and skip the
   // usual visually-hidden techniques; the cache keeps nested elements linear.
@@ -694,7 +723,39 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
   // so without this they look like icon-only controls to every text check.
   const buttonInputTypes = ['submit', 'button', 'reset'];
 
-  return elements.map(element => {
+  // The accessible name comes from the axe-core build the audit installs in
+  // the frame under its own global (axeForNamesGlobal in axe.ts; the literal
+  // is repeated here because this function is serialized into the page and
+  // cannot import it). Playwright's AI snapshot leaves out a
+  // name its rendered children carry, and rebuilding one by hand from
+  // textContent is not what a screen reader hears: hidden text is skipped,
+  // alt text and aria-label on a referenced element count, an input
+  // contributes its value. axe's tree is built for the document once per
+  // batch and released after, so a page that changed since the last batch is
+  // read fresh; the build costs about 40 ms on a 3,600-node article page, a
+  // third of a second over the eight batches of a default audit. Without the
+  // copy (not installed, or the page removed it) every name is null and the
+  // snapshot's own stands.
+  const axe = measureNames ? (window as any).__mcpAccessibilityScannerAxe : undefined;
+  let measureName = (_element: Element): { accessibleName: string | null; nameMeasured: boolean } => ({ accessibleName: null, nameMeasured: false });
+  let ownsAxeTree = false;
+  if (typeof axe?.setup === 'function' && typeof axe?.commons?.text?.accessibleText === 'function') {
+    try {
+      axe.setup(document);
+      ownsAxeTree = true;
+      measureName = element => {
+        try {
+          return { accessibleName: axe.commons.text.accessibleText(element).replace(/\s+/g, ' ').trim() || null, nameMeasured: true };
+        } catch {
+          return { accessibleName: null, nameMeasured: false };
+        }
+      };
+    } catch {
+      // A tree the copy already holds belongs to an earlier, interrupted batch; it is neither read nor released here.
+    }
+  }
+
+  const collect = (element: SVGElement | HTMLElement): ElementFacts => {
     const rect = element.getBoundingClientRect();
     const style = window.getComputedStyle(element);
     // The visibility predicate must include the element itself, not only its
@@ -714,6 +775,7 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
       // The resolved URL, so that "/help" and "https://site/help" are recognised
       // as the same destination rather than reported as ambiguous links.
       href: element instanceof HTMLAnchorElement && element.hasAttribute('href') ? element.href : null,
+      ...measureName(element),
       rect: {
         x: rect.x + window.scrollX,
         y: rect.y + window.scrollY,
@@ -738,7 +800,14 @@ export function collectElementFacts(elements: (SVGElement | HTMLElement)[]): Ele
         return false;
       })(),
     };
-  });
+  };
+
+  try {
+    return elements.map(collect);
+  } finally {
+    if (ownsAxeTree)
+      axe.teardown();
+  }
 }
 
 const auditScreenReaderSchema = z.object({
@@ -774,6 +843,14 @@ const auditScreenReader = defineTabTool({
     type Measured = { index: number; handle: playwright.ElementHandle<SVGElement | HTMLElement> };
     const onlyFrame = tab.page.frames().length === 1 ? tab.page.mainFrame() : null;
     const factsByIndex = new Map<number, ElementFacts>();
+    // The accessible-name algorithm runs in the page (see collectElementFacts),
+    // so a frame gets this server's axe-core build before its first batch,
+    // and only when names are checked at all. A frame that refuses it, never
+    // answers, or cannot build the tree is measured without names; the result
+    // says so, because a name the snapshot distilled into children would be
+    // reported missing there. The map holds the installation result per frame.
+    const axeByFrame = new Map<playwright.Frame, boolean>();
+    let unmeasuredNames = 0;
     const analyzedIndexes: number[] = [];
     let resolvedCount = 0;
     let reachable = 0;
@@ -794,11 +871,26 @@ const auditScreenReader = defineTabTool({
       start += size;
       const handles = await Promise.all(chunk.map(index =>
         tab.page.locator(`aria-ref=${ariaNodes[index].ref}`).elementHandle({ timeout: 1000 }).catch(() => null)));
+      // The owner lookup is a renderer round-trip too, so a frame that stopped
+      // answering since the resolution above would hold the audit here. It is
+      // bounded, and since the owner is what the lookup finds, given the larger
+      // budget; run together, a frame that stopped answering costs one budget
+      // per chunk rather than one per element.
+      const owners = onlyFrame
+        ? handles.map(handle => handle ? onlyFrame : null)
+        : await Promise.all(handles.map(handle => handle
+          ? withFrameTimeout(handle.ownerFrame().catch(() => null), null, frameReadTimeoutMs(tab.page.mainFrame()))
+          : null));
       const byFrame = new Map<playwright.Frame, Measured[]>();
       for (const [position, handle] of handles.entries()) {
-        const frame = handle ? onlyFrame ?? await handle.ownerFrame().catch(() => null) : null;
-        if (!handle || !frame)
+        const frame = owners[position];
+        if (!handle)
           continue;
+        if (!frame) {
+          // Released like a measured handle is, on the same bound.
+          void withFrameTimeout(handle.dispose().catch(() => undefined), undefined);
+          continue;
+        }
         const batch = byFrame.get(frame);
         if (batch)
           batch.push({ index: chunk[position], handle });
@@ -806,13 +898,35 @@ const auditScreenReader = defineTabTool({
           byFrame.set(frame, [{ index: chunk[position], handle }]);
       }
       for (const [frame, batch] of byFrame) {
-        const facts = await frame.evaluate(collectElementFacts, batch.map(entry => entry.handle)).catch(() => null);
+        let measureNames = params.checkNames;
+        if (measureNames) {
+          let installed = axeByFrame.get(frame);
+          if (installed === undefined) {
+            installed = await injectAxeForNames(frame);
+            axeByFrame.set(frame, installed);
+          }
+          measureNames = installed;
+        }
+        // frame.evaluate has no timeout of its own, and a timeout only stops
+        // the wait: a timed-out installation is still running in the frame and
+        // every later read queues behind it on the same renderer task. So every
+        // read is bounded by the frame's budget, and a frozen frame costs one
+        // budget per read rather than the whole audit.
+        const bounded = <T>(work: Promise<T>, fallback: T) => withFrameTimeout(work, fallback, frameReadTimeoutMs(frame));
+        const facts = await bounded(frame.evaluate(collectElementFacts, { elements: batch.map(entry => entry.handle), measureNames }).catch(() => null), null);
         if (facts) {
+          // Counted from the measurement itself, not from the installation:
+          // the copy can be there and still fail to build its tree.
+          if (params.checkNames)
+            unmeasuredNames += facts.filter(fact => !fact.nameMeasured).length;
           batch.forEach((entry, position) => factsByIndex.set(entry.index, facts[position]));
           resolvedCount += batch.length;
           reachable += facts.filter(fact => !fact.ariaHidden).length;
         }
-        await Promise.all(batch.map(entry => entry.handle.dispose().catch(() => undefined)));
+        // A batch its frame did not answer is not waited on again to release.
+        const disposal = bounded(Promise.all(batch.map(entry => entry.handle.dispose().catch(() => undefined))), undefined);
+        if (facts)
+          await disposal;
       }
       analyzedIndexes.push(...chunk);
       await response.reportProgress({
@@ -828,13 +942,15 @@ const auditScreenReader = defineTabTool({
     // "Findings: 0" for a page it never actually evaluated.
     const unresolvedCount = analyzedIndexes.length - resolvedCount;
     if (analyzedIndexes.length && !resolvedCount)
-      throw new Error(`None of the ${analyzedIndexes.length} accessibility tree elements could be resolved to DOM nodes — the page re-rendered between the snapshot and measurement, so nothing was evaluated. Wait for the page to settle (or trigger the rerender first) and run audit_screen_reader again.`);
+      throw new Error(`None of the ${analyzedIndexes.length} accessibility tree elements could be resolved to DOM nodes — the page re-rendered between the snapshot and measurement, or stopped answering, so nothing was evaluated. Wait for the page to settle (or trigger the rerender first) and run audit_screen_reader again.`);
 
     const emptyFacts: ElementFacts = {
       tagName: null,
       selector: null,
       visibleText: null,
       href: null,
+      accessibleName: null,
+      nameMeasured: false,
       rect: null,
       direction: 'ltr',
       positionFixed: false,
@@ -872,6 +988,7 @@ const auditScreenReader = defineTabTool({
         total: refIndexes.length,
         analyzed: analyzedIndexes.length,
         unresolved: analyzedIndexes.length - resolvedCount,
+        unmeasuredNames,
         truncated: truncatedElements > 0,
       },
       countByCheck: result.countByCheck,
@@ -905,6 +1022,7 @@ const auditScreenReader = defineTabTool({
         elementsTotal: refIndexes.length,
         elementsAnalyzed: analyzedIndexes.length,
         elementsUnresolved: unresolvedCount,
+        elementsWithoutMeasuredName: unmeasuredNames,
         elementsTruncated: truncatedElements,
         totalFindings,
         countByCheck: result.countByCheck,
@@ -923,7 +1041,12 @@ const auditScreenReader = defineTabTool({
       // Unresolved elements were skipped by every check, so a clean result
       // covering only part of the page must say so rather than read as clean.
       ...(unresolvedCount > 0
-        ? [`WARNING: ${unresolvedCount} of these went stale before measurement (the page re-rendered mid-audit) and were not evaluated; findings may be incomplete. Re-run once the page is stable.`]
+        ? [`WARNING: ${unresolvedCount} of these went stale before measurement (the page re-rendered mid-audit, or their frame stopped answering) and were not evaluated; findings may be incomplete. Re-run once the page is stable.`]
+        : []),
+      // Without a measured name, a control whose name the snapshot distilled
+      // into its children is reported as unnamed, so that must be said too.
+      ...(unmeasuredNames > 0
+        ? [`WARNING: accessible names could not be measured for ${unmeasuredNames} of these (axe-core could not be installed or run in their frame); a control named only through its children may be reported there as missing a name.`]
         : []),
       `Findings: ${totalFindings}`,
       'Check | Findings',

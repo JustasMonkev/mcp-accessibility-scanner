@@ -200,16 +200,74 @@ async function injectAxe(frame: playwright.Frame, source: string): Promise<void>
   await frame.evaluate(source);
 }
 
+// audit_screen_reader runs the accessible-name algorithm in the page rather
+// than a scan. Its copy lives under this global, which collectElementFacts
+// reads by the same literal (it is serialized into the page and cannot import
+// it), so a page's own `window.axe` is left exactly as it was: the build
+// assigns `window.axe`, the copy is moved off it, and the previous value (or
+// its absence) is put back.
+const axeForNamesGlobal = '__mcpAccessibilityScannerAxe';
+// The page's value goes back whatever happens in between. The build runs in
+// sloppy mode, so on a page whose `axe` is not writable its assignment does
+// nothing and `window.axe` is still the page's object afterwards: that is an
+// installation failure, and nothing is published (an earlier copy, if any,
+// stays) rather than a page-owned object being trusted for names.
+const axeForNamesSource = [
+  '(() => {',
+  'const hadAxe = \'axe\' in window;',
+  'const pageAxe = window.axe;',
+  'let installed;',
+  'try {',
+  axe.source,
+  'installed = window.axe;',
+  '} finally {',
+  'if (hadAxe) window.axe = pageAxe; else delete window.axe;',
+  '}',
+  `if (!installed || installed === pageAxe) throw new Error('axe-core was not installed');`,
+  `window[${JSON.stringify(axeForNamesGlobal)}] = installed;`,
+  '})();',
+].join('\n');
+
+// Evaluating the whole bundle in a busy main frame can outlast a child
+// frame's budget, and a scan leaves the main frame unbounded for that reason.
+// Here it is bounded too, so a frozen page ends in a warning rather than a
+// hung audit, but with far more patience than a child frame gets.
+const mainFrameInjectionTimeoutMs = 10_000;
+
+/**
+ * How long a screen-reader audit waits on one read of a frame: the patient
+ * main-frame budget, or the scan's child-frame budget. The audit bounds every
+ * read with it, not only the installation, because a timed-out evaluation is
+ * still running in the frame and every later read queues behind it.
+ */
+export function frameReadTimeoutMs(frame: playwright.Frame): number {
+  return frame.parentFrame() === null ? mainFrameInjectionTimeoutMs : childFrameInjectionTimeoutMs;
+}
+
+/**
+ * Installs the audit's own axe copy in a frame, once per frame the audit
+ * measures. Resolves false when the frame refused or never answered within
+ * its budget; names there stay unmeasured, which the audit reports.
+ */
+export async function injectAxeForNames(frame: playwright.Frame): Promise<boolean> {
+  return withFrameTimeout(injectAxe(frame, axeForNamesSource).then(() => true), false, frameReadTimeoutMs(frame));
+}
+
 // A child frame that never answers must not hang the scan. It goes unscanned
 // instead - but not silently: a frame Axe never reached contributes no
 // violations, and an unreported one turns into a clean-looking report.
 const childFrameInjectionTimeoutMs = 1000;
 
-// Every read from a child frame is bounded by it, not just the injection: an
-// unresponsive renderer answers neither, and `frame.evaluate` has no timeout of
-// its own, so an unbounded probe would hang the whole scan rather than produce
-// the partial-coverage warning it exists to produce.
-async function withFrameTimeout<T>(work: Promise<T>, fallback: T): Promise<T> {
+/**
+ * Resolves `work`, or `fallback` once `timeoutMs` has passed. Every read from
+ * a child frame is bounded by it, not just the injection: an unresponsive
+ * renderer answers neither, and `frame.evaluate` has no timeout of its own, so
+ * an unbounded probe would hang the whole scan rather than produce the
+ * partial-coverage warning it exists to produce. The timeout does not stop
+ * the work inside the frame; a caller that gives up on a frame must bound
+ * every later read from it too.
+ */
+export async function withFrameTimeout<T>(work: Promise<T>, fallback: T, timeoutMs = childFrameInjectionTimeoutMs): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     // Both branches resolve: a rejected loser of the race would surface as an
@@ -217,7 +275,7 @@ async function withFrameTimeout<T>(work: Promise<T>, fallback: T): Promise<T> {
     return await Promise.race([
       work.catch(() => fallback),
       new Promise<T>(resolve => {
-        timeoutId = setTimeout(() => resolve(fallback), childFrameInjectionTimeoutMs);
+        timeoutId = setTimeout(() => resolve(fallback), timeoutMs);
       }),
     ]);
   } finally {
