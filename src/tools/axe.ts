@@ -234,7 +234,7 @@ const axeForNamesSource = [
 // hung audit, but with far more patience than a child frame gets.
 const mainFrameInjectionTimeoutMs = 10_000;
 
-const frameConcurrency = 4;
+export const frameConcurrency = 4;
 
 /**
  * How long a screen-reader audit waits on one read of a frame: the patient
@@ -251,8 +251,12 @@ export function frameReadTimeoutMs(frame: playwright.Frame): number {
  * measures. Resolves false when the frame refused or never answered within
  * its budget; names there stay unmeasured, which the audit reports.
  */
-export async function injectAxeForNames(frame: playwright.Frame): Promise<boolean> {
-  return withFrameTimeout(injectAxe(frame, axeForNamesSource).then(() => true), false, frameReadTimeoutMs(frame));
+export async function injectAxeForNames(frame: playwright.Frame, onSettled?: () => void): Promise<boolean> {
+  return withFrameTimeout(
+      injectAxe(frame, axeForNamesSource).finally(onSettled).then(() => true),
+      false,
+      frameReadTimeoutMs(frame),
+  );
 }
 
 // A child frame that never answers must not hang the scan. It goes unscanned

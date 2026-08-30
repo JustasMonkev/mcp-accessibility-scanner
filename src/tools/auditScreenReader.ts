@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
-import { frameReadTimeoutMs, injectAxeForNames, withConcurrency, withFrameTimeout } from './axe.js';
+import { frameConcurrency, frameReadTimeoutMs, injectAxeForNames, withConcurrency, withFrameTimeout } from './axe.js';
 import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
 
 import type * as playwright from 'playwright';
@@ -845,15 +845,51 @@ const auditScreenReader = defineTabTool({
     const factsByIndex = new Map<number, ElementFacts>();
     // The accessible-name algorithm runs in the page (see collectElementFacts),
     // so a frame gets this server's axe-core build before its first batch,
-    // and only when names are checked at all. A frame that refuses it, never
-    // answers, or cannot build the tree is measured without names; the result
-    // says so, because a name the snapshot distilled into children would be
-    // reported missing there. The map holds the installation result per frame.
+    // and only when names are checked at all. A frame that refuses it or cannot
+    // build the tree is measured without names; one that never answers is left
+    // unresolved. The result says which happened. The map holds the settled
+    // installation result per frame.
     const axeByFrame = new Map<playwright.Frame, boolean>();
     let unmeasuredNames = 0;
     const analyzedIndexes: number[] = [];
     let resolvedCount = 0;
     let reachable = 0;
+    let frameWorkInFlight = 0;
+    let frameWorkSaturated = false;
+
+    const runFrameWork = async <T>(start: () => Promise<T>, fallback: T, frame: playwright.Frame) => {
+      if (frameWorkInFlight >= frameConcurrency) {
+        frameWorkSaturated = true;
+        return { value: fallback, timedOut: false, started: false };
+      }
+      frameWorkInFlight++;
+      let settled = false;
+      const work = Promise.resolve().then(start).then(value => {
+        settled = true;
+        frameWorkInFlight--;
+        return value;
+      }, () => {
+        settled = true;
+        frameWorkInFlight--;
+        return fallback;
+      });
+      const value = await withFrameTimeout(work, fallback, frameReadTimeoutMs(frame));
+      return { value, timedOut: !settled, started: true };
+    };
+
+    const injectFrameAxe = async (frame: playwright.Frame) => {
+      if (frameWorkInFlight >= frameConcurrency) {
+        frameWorkSaturated = true;
+        return { value: false, timedOut: false, started: false };
+      }
+      frameWorkInFlight++;
+      let settled = false;
+      const value = await injectAxeForNames(frame, () => {
+        settled = true;
+        frameWorkInFlight--;
+      });
+      return { value, timedOut: !settled, started: true };
+    };
 
     // maxElements budgets the elements a screen reader can actually reach: the
     // AI snapshot also refs aria-hidden subtrees, and slicing the raw ref list
@@ -898,22 +934,30 @@ const auditScreenReader = defineTabTool({
           byFrame.set(frame, [{ index: chunk[position], handle }]);
       }
       await withConcurrency([...byFrame], async ([frame, batch]) => {
+        if (frameWorkSaturated)
+          return;
         let measureNames = params.checkNames;
         if (measureNames) {
           let installed = axeByFrame.get(frame);
           if (installed === undefined) {
-            installed = await injectAxeForNames(frame);
+            const installation = await injectFrameAxe(frame);
+            if (!installation.started || installation.timedOut)
+              return;
+            installed = installation.value;
             axeByFrame.set(frame, installed);
           }
           measureNames = installed;
         }
         // frame.evaluate has no timeout of its own, and a timeout only stops
         // the wait: a timed-out installation is still running in the frame and
-        // every later read queues behind it on the same renderer task. So every
-        // read is bounded by the frame's budget, and a frozen frame costs one
-        // budget per read rather than the whole audit.
-        const bounded = <T>(work: Promise<T>, fallback: T) => withFrameTimeout(work, fallback, frameReadTimeoutMs(frame));
-        const facts = await bounded(frame.evaluate(collectElementFacts, { elements: batch.map(entry => entry.handle), measureNames }).catch(() => null), null);
+        // every later read queues behind it on the same renderer task. Every
+        // read is bounded, and timed-out work keeps its pool slot so frozen
+        // frames cannot build an unbounded queue behind them.
+        const collected = await runFrameWork(
+            () => frame.evaluate(collectElementFacts, { elements: batch.map(entry => entry.handle), measureNames }), null, frame);
+        if (!collected.started || collected.timedOut)
+          return;
+        const facts = collected.value;
         if (facts) {
           // Counted from the measurement itself, not from the installation:
           // the copy can be there and still fail to build its tree.
@@ -923,10 +967,11 @@ const auditScreenReader = defineTabTool({
           resolvedCount += batch.length;
           reachable += facts.filter(fact => !fact.ariaHidden).length;
         }
-        // A batch its frame did not answer is not waited on again to release.
-        const disposal = bounded(Promise.all(batch.map(entry => entry.handle.dispose().catch(() => undefined))), undefined);
-        if (facts)
-          await disposal;
+        // A batch its frame did not answer is not asked again to release.
+        if (facts) {
+          await runFrameWork(
+              () => Promise.all(batch.map(entry => entry.handle.dispose())).then(() => undefined), undefined, frame);
+        }
       });
       analyzedIndexes.push(...chunk);
       await response.reportProgress({
@@ -934,6 +979,8 @@ const auditScreenReader = defineTabTool({
         total: measureCeiling,
         message: `Measured ${analyzedIndexes.length} accessibility tree elements (${Math.min(reachable, params.maxElements)}/${params.maxElements} screen-reader-reachable)`,
       });
+      if (frameWorkSaturated)
+        break;
     }
 
     // A ref goes stale when the page rerenders between ariaSnapshot() and
@@ -973,7 +1020,9 @@ const auditScreenReader = defineTabTool({
 
     const truncatedElements = refIndexes.length - analyzedIndexes.length;
     const elementCountSuffix = truncatedElements > 0
-      ? ` (truncated: analyzed the first ${analyzedIndexes.length} of ${refIndexes.length}; raise maxElements to see the rest)`
+      ? frameWorkSaturated
+        ? ` (stopped after ${analyzedIndexes.length} of ${refIndexes.length}: timed-out frame work reached the ${frameConcurrency}-operation limit; re-run once the page is stable)`
+        : ` (truncated: analyzed the first ${analyzedIndexes.length} of ${refIndexes.length}; raise maxElements to see the rest)`
       : '';
     const totalFindings = Object.values(result.countByCheck).reduce((sum, count) => sum + count, 0);
 
