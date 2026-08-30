@@ -886,7 +886,12 @@ const auditScreenReader = defineTabTool({
     frameWorkByPage.set(tab.page, frameWork);
     let frameWorkSaturated = false;
 
-    const runFrameWork = async <T>(start: () => Promise<T>, fallback: T, frame: playwright.Frame) => {
+    const runFrameWork = async <T>(
+      start: () => Promise<T>,
+      fallback: T,
+      frame: playwright.Frame,
+      onSettled?: (value: T, timedOut: boolean) => void,
+    ) => {
       if (!await reserveFrameWork(frameWork)) {
         frameWorkSaturated = true;
         return { value: fallback, timedOut: false, started: false };
@@ -899,6 +904,7 @@ const auditScreenReader = defineTabTool({
         if (timedOut)
           frameWork.timedOut--;
         wakeFrameWork(frameWork);
+        onSettled?.(value, timedOut);
         return value;
       }, () => {
         settled = true;
@@ -906,6 +912,7 @@ const auditScreenReader = defineTabTool({
         if (timedOut)
           frameWork.timedOut--;
         wakeFrameWork(frameWork);
+        onSettled?.(fallback, timedOut);
         return fallback;
       });
       const value = await withFrameTimeout(work, fallback, frameReadTimeoutMs(frame));
@@ -915,6 +922,10 @@ const auditScreenReader = defineTabTool({
         wakeFrameWork(frameWork);
       }
       return { value, timedOut: !settled, started: true };
+    };
+
+    const disposeHandles = (handles: readonly playwright.ElementHandle[]) => {
+      void Promise.all(handles.map(handle => handle.dispose().catch(() => undefined)));
     };
 
     const injectFrameAxe = async (frame: playwright.Frame) => {
@@ -962,19 +973,26 @@ const auditScreenReader = defineTabTool({
       // per chunk rather than one per element.
       const owners = onlyFrame
         ? handles.map(handle => handle ? onlyFrame : null)
-        : await Promise.all(handles.map(handle => handle
-          ? withFrameTimeout(handle.ownerFrame().catch(() => null), null, frameReadTimeoutMs(tab.page.mainFrame()))
-          : null));
+        : await withConcurrency(handles, async handle => {
+          if (!handle)
+            return null;
+          const lookup = await runFrameWork(
+              () => handle.ownerFrame(), null, tab.page.mainFrame(),
+              (owner, timedOut) => {
+                if (!owner || timedOut)
+                  disposeHandles([handle]);
+              });
+          if (!lookup.started)
+            disposeHandles([handle]);
+          return lookup.started && !lookup.timedOut ? lookup.value : null;
+        });
       const byFrame = new Map<playwright.Frame, Measured[]>();
       for (const [position, handle] of handles.entries()) {
         const frame = owners[position];
         if (!handle)
           continue;
-        if (!frame) {
-          // Released like a measured handle is, on the same bound.
-          void withFrameTimeout(handle.dispose().catch(() => undefined), undefined);
+        if (!frame)
           continue;
-        }
         const batch = byFrame.get(frame);
         if (batch)
           batch.push({ index: chunk[position], handle });
@@ -982,15 +1000,19 @@ const auditScreenReader = defineTabTool({
           byFrame.set(frame, [{ index: chunk[position], handle }]);
       }
       await withConcurrency([...byFrame], async ([frame, batch]) => {
-        if (frameWorkSaturated)
+        if (frameWorkSaturated) {
+          disposeHandles(batch.map(entry => entry.handle));
           return;
+        }
         let measureNames = params.checkNames;
         if (measureNames) {
           let installed = axeByFrame.get(frame);
           if (installed === undefined) {
             const installation = await injectFrameAxe(frame);
-            if (!installation.started || installation.timedOut)
+            if (!installation.started || installation.timedOut) {
+              disposeHandles(batch.map(entry => entry.handle));
               return;
+            }
             installed = installation.value;
             axeByFrame.set(frame, installed);
           }
@@ -1002,8 +1024,13 @@ const auditScreenReader = defineTabTool({
         // read is bounded, and timed-out work keeps its pool slot so frozen
         // frames cannot build an unbounded queue behind them.
         const collected = await runFrameWork(
-            () => frame.evaluate(collectElementFacts, { elements: batch.map(entry => entry.handle), measureNames }), null, frame);
-        if (!collected.started || collected.timedOut)
+            () => frame.evaluate(collectElementFacts, { elements: batch.map(entry => entry.handle), measureNames }), null, frame,
+            () => disposeHandles(batch.map(entry => entry.handle)));
+        if (!collected.started) {
+          disposeHandles(batch.map(entry => entry.handle));
+          return;
+        }
+        if (collected.timedOut)
           return;
         const facts = collected.value;
         if (facts) {
@@ -1014,11 +1041,6 @@ const auditScreenReader = defineTabTool({
           batch.forEach((entry, position) => factsByIndex.set(entry.index, facts[position]));
           resolvedCount += batch.length;
           reachable += facts.filter(fact => !fact.ariaHidden).length;
-        }
-        // A batch its frame did not answer is not asked again to release.
-        if (facts) {
-          await runFrameWork(
-              () => Promise.all(batch.map(entry => entry.handle.dispose())).then(() => undefined), undefined, frame);
         }
       });
       analyzedIndexes.push(...chunk);
@@ -1067,11 +1089,11 @@ const auditScreenReader = defineTabTool({
     });
 
     const truncatedElements = refIndexes.length - analyzedIndexes.length;
-    const elementCountSuffix = truncatedElements > 0
-      ? frameWorkSaturated
-        ? ` (stopped after ${analyzedIndexes.length} of ${refIndexes.length}: timed-out frame work reached the ${frameConcurrency}-operation limit; re-run once the page is stable)`
-        : ` (truncated: analyzed the first ${analyzedIndexes.length} of ${refIndexes.length}; raise maxElements to see the rest)`
-      : '';
+    const elementCountSuffix = frameWorkSaturated
+      ? ` (stopped after ${analyzedIndexes.length} of ${refIndexes.length}: timed-out frame work reached the ${frameConcurrency}-operation limit; re-run once the page is stable)`
+      : truncatedElements > 0
+        ? ` (truncated: analyzed the first ${analyzedIndexes.length} of ${refIndexes.length}; raise maxElements to see the rest)`
+        : '';
     const totalFindings = Object.values(result.countByCheck).reduce((sum, count) => sum + count, 0);
 
     const report = {
@@ -1086,7 +1108,7 @@ const auditScreenReader = defineTabTool({
         analyzed: analyzedIndexes.length,
         unresolved: analyzedIndexes.length - resolvedCount,
         unmeasuredNames,
-        truncated: truncatedElements > 0,
+        truncated: truncatedElements > 0 || frameWorkSaturated,
       },
       countByCheck: result.countByCheck,
       totalFindings,

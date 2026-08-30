@@ -432,9 +432,12 @@ function createToolHarness(options: {
   frameCount?: number;
   frameReadDelayMs?: number;
   frameReadDelayFor?: (frameIndex: number) => number;
+  ownerFrameDelayMs?: number;
 }) {
   const concurrency = { current: 0, max: 0 };
   const frameConcurrency = { current: 0, max: 0 };
+  const ownerFrames = { calls: 0, current: 0, max: 0 };
+  const disposals = { count: 0 };
   const installs = { count: 0 };
   const frames: any[] = Array.from({ length: options.frameCount ?? 1 }, (_, frameIndex) => ({
     // A child frame unless asked otherwise, so a hung installation is bounded
@@ -479,7 +482,25 @@ function createToolHarness(options: {
         await new Promise(resolve => setTimeout(resolve, stale ? options.staleDelayMs ?? 0 : 0));
         concurrency.current--;
         const owner = frames[Number(ref.replace(/\D/g, '')) % frames.length];
-        return stale ? null : { ref, ownerFrame: async () => owner, dispose: async () => undefined };
+        return stale ? null : {
+          ref,
+          ownerFrame: async () => {
+            ownerFrames.calls++;
+            ownerFrames.current++;
+            frameConcurrency.current++;
+            try {
+              ownerFrames.max = Math.max(ownerFrames.max, ownerFrames.current);
+              frameConcurrency.max = Math.max(frameConcurrency.max, frameConcurrency.current);
+              if (options.ownerFrameDelayMs)
+                await new Promise(resolve => setTimeout(resolve, options.ownerFrameDelayMs));
+              return owner;
+            } finally {
+              ownerFrames.current--;
+              frameConcurrency.current--;
+            }
+          },
+          dispose: async () => { disposals.count++; },
+        };
       },
     })),
   };
@@ -489,7 +510,7 @@ function createToolHarness(options: {
     context: { outputFile: async (name: string) => `/tmp/${name}` },
   };
   const context: any = { currentTabOrDie: () => tab, config: {} };
-  return { context, concurrency, frameConcurrency, installs, frame, frames };
+  return { context, concurrency, frameConcurrency, ownerFrames, disposals, installs, frame, frames };
 }
 
 describe('audit_screen_reader tool measurement', () => {
@@ -601,6 +622,29 @@ describe('audit_screen_reader tool measurement', () => {
     }
   });
 
+  it('keeps timed-out owner-frame lookups inside the shared limit', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        ownerFrameDelayMs: 1_500,
+      });
+
+      const outcome = run(harness, 8, false).then(() => 'resolved', () => 'rejected');
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(harness.ownerFrames.calls).toBe(4);
+      expect(harness.ownerFrames.current).toBe(4);
+      expect(harness.ownerFrames.max).toBe(4);
+      expect(harness.disposals.count).toBe(4);
+      expect(await outcome).toBe('rejected');
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.disposals.count).toBe(8);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shares the frame-work limit across overlapping audits of one page', async () => {
     vi.useFakeTimers();
     try {
@@ -649,6 +693,30 @@ describe('audit_screen_reader tool measurement', () => {
       const result = await audit;
       expect(result).toContain('stopped after 50 of 60: timed-out frame work reached the 4-operation limit');
       expect(result).toContain('WARNING: 36 of these went stale before measurement');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports saturation and cleans up when it happens in the final chunk', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        frameReadDelayFor: frameIndex => frameIndex < 2 ? 0 : 1_500,
+      });
+
+      const audit = run(harness, 8, false);
+      await vi.advanceTimersByTimeAsync(1_100);
+      const result = await audit;
+      expect(result).toContain('stopped after 8 of 8: timed-out frame work reached the 4-operation limit');
+      expect(result).toContain('WARNING: 6 of these went stale before measurement');
+      expect(harness.disposals.count).toBe(4);
+      const report = JSON.parse(vi.mocked(fs.promises.writeFile).mock.calls[0][1] as string);
+      expect(report.elements.truncated).toBe(true);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.disposals.count).toBe(8);
     } finally {
       vi.useRealTimers();
     }
