@@ -818,7 +818,34 @@ const auditScreenReaderSchema = z.object({
   reportFile: z.string().optional().describe('Output JSON report file name.'),
 });
 
-const frameWorkByPage = new WeakMap<playwright.Page, { inFlight: number }>();
+type FrameWork = {
+  inFlight: number;
+  timedOut: number;
+  waiters: Set<() => void>;
+};
+
+const frameWorkByPage = new WeakMap<playwright.Page, FrameWork>();
+
+function wakeFrameWork(frameWork: FrameWork) {
+  for (const wake of [...frameWork.waiters])
+    wake();
+}
+
+async function reserveFrameWork(frameWork: FrameWork): Promise<boolean> {
+  while (frameWork.inFlight >= frameConcurrency) {
+    if (frameWork.timedOut >= frameConcurrency)
+      return false;
+    await new Promise<void>(resolve => {
+      const wake = () => {
+        frameWork.waiters.delete(wake);
+        resolve();
+      };
+      frameWork.waiters.add(wake);
+    });
+  }
+  frameWork.inFlight++;
+  return true;
+}
 
 const auditScreenReader = defineTabTool({
   capability: 'core',
@@ -855,41 +882,60 @@ const auditScreenReader = defineTabTool({
     const analyzedIndexes: number[] = [];
     let resolvedCount = 0;
     let reachable = 0;
-    const frameWork = frameWorkByPage.get(tab.page) ?? { inFlight: 0 };
+    const frameWork = frameWorkByPage.get(tab.page) ?? { inFlight: 0, timedOut: 0, waiters: new Set() };
     frameWorkByPage.set(tab.page, frameWork);
     let frameWorkSaturated = false;
 
     const runFrameWork = async <T>(start: () => Promise<T>, fallback: T, frame: playwright.Frame) => {
-      if (frameWork.inFlight >= frameConcurrency) {
+      if (!await reserveFrameWork(frameWork)) {
         frameWorkSaturated = true;
         return { value: fallback, timedOut: false, started: false };
       }
-      frameWork.inFlight++;
       let settled = false;
+      let timedOut = false;
       const work = Promise.resolve().then(start).then(value => {
         settled = true;
         frameWork.inFlight--;
+        if (timedOut)
+          frameWork.timedOut--;
+        wakeFrameWork(frameWork);
         return value;
       }, () => {
         settled = true;
         frameWork.inFlight--;
+        if (timedOut)
+          frameWork.timedOut--;
+        wakeFrameWork(frameWork);
         return fallback;
       });
       const value = await withFrameTimeout(work, fallback, frameReadTimeoutMs(frame));
+      if (!settled) {
+        timedOut = true;
+        frameWork.timedOut++;
+        wakeFrameWork(frameWork);
+      }
       return { value, timedOut: !settled, started: true };
     };
 
     const injectFrameAxe = async (frame: playwright.Frame) => {
-      if (frameWork.inFlight >= frameConcurrency) {
+      if (!await reserveFrameWork(frameWork)) {
         frameWorkSaturated = true;
         return { value: false, timedOut: false, started: false };
       }
-      frameWork.inFlight++;
       let settled = false;
+      let timedOut = false;
       const value = await injectAxeForNames(frame, () => {
         settled = true;
         frameWork.inFlight--;
+        if (timedOut)
+          frameWork.timedOut--;
+        wakeFrameWork(frameWork);
       });
+      if (!settled) {
+        timedOut = true;
+        frameWork.timedOut++;
+        wakeFrameWork(frameWork);
+      }
       return { value, timedOut: !settled, started: true };
     };
 

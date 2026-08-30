@@ -622,6 +622,19 @@ describe('audit_screen_reader tool measurement', () => {
     }
   });
 
+  it('waits for healthy frame work from an overlapping audit', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      frameCount: 8,
+      frameReadDelayMs: 10,
+    });
+
+    const results = await Promise.all([run(harness, 8, false), run(harness, 8, false)]);
+    expect(results.every(result => result.includes('Elements analyzed: 8'))).toBe(true);
+    expect(harness.frameConcurrency.max).toBe(4);
+    expect(harness.frames.reduce((sum, frame) => sum + frame.evaluate.mock.calls.length, 0)).toBe(16);
+  });
+
   it('reports where measurement stopped when timed-out work fills the pool', async () => {
     vi.useFakeTimers();
     try {
