@@ -248,24 +248,13 @@ export function frameReadTimeoutMs(frame: playwright.Frame): number {
 
 /**
  * Installs the audit's own axe copy in a frame, once per frame the audit
- * measures. Resolves false when the frame refused or never answered within
- * its budget; names there stay unmeasured, which the audit reports.
+ * measures. Resolves false when the frame refused it; names there stay
+ * unmeasured, which the audit reports. Unbounded on purpose: the caller runs
+ * it through the frame-work pool, which owns the budget and needs to see the
+ * install actually settle, not a timeout resolving in its place.
  */
-export async function injectAxeForNames(frame: playwright.Frame, onSettled?: (installed: boolean) => void): Promise<boolean> {
-  return withFrameTimeout(
-      injectAxe(frame, axeForNamesSource).then(
-          () => {
-            onSettled?.(true);
-            return true;
-          },
-          () => {
-            onSettled?.(false);
-            return false;
-          },
-      ),
-      false,
-      frameReadTimeoutMs(frame),
-  );
+export async function injectAxeForNames(frame: playwright.Frame): Promise<boolean> {
+  return injectAxe(frame, axeForNamesSource).then(() => true, () => false);
 }
 
 // A child frame that never answers must not hang the scan. It goes unscanned

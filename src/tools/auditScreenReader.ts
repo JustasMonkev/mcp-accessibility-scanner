@@ -899,7 +899,7 @@ const auditScreenReader = defineTabTool({
       }
       let settled = false;
       let timedOut = false;
-      const work = Promise.resolve().then(start).then(value => {
+      const work = Promise.resolve().then(start).catch(() => fallback).then(value => {
         settled = true;
         frameWork.inFlight--;
         if (timedOut)
@@ -907,14 +907,6 @@ const auditScreenReader = defineTabTool({
         wakeFrameWork(frameWork);
         onSettled?.(value, timedOut);
         return value;
-      }, () => {
-        settled = true;
-        frameWork.inFlight--;
-        if (timedOut)
-          frameWork.timedOut--;
-        wakeFrameWork(frameWork);
-        onSettled?.(fallback, timedOut);
-        return fallback;
       });
       const value = await withFrameTimeout(work, fallback, frameReadTimeoutMs(frame));
       if (!settled) {
@@ -927,32 +919,6 @@ const auditScreenReader = defineTabTool({
 
     const disposeHandles = (handles: readonly playwright.ElementHandle[]) => {
       void Promise.all(handles.map(handle => handle.dispose().catch(() => undefined)));
-    };
-
-    const injectFrameAxe = async (
-      frame: playwright.Frame,
-      onSettled?: (installed: boolean, timedOut: boolean) => void,
-    ) => {
-      if (!await reserveFrameWork(frameWork)) {
-        frameWorkSaturated = true;
-        return { value: false, timedOut: false, started: false };
-      }
-      let settled = false;
-      let timedOut = false;
-      const value = await injectAxeForNames(frame, installed => {
-        settled = true;
-        frameWork.inFlight--;
-        if (timedOut)
-          frameWork.timedOut--;
-        wakeFrameWork(frameWork);
-        onSettled?.(installed, timedOut);
-      });
-      if (!settled) {
-        timedOut = true;
-        frameWork.timedOut++;
-        wakeFrameWork(frameWork);
-      }
-      return { value, timedOut: !settled, started: true };
     };
 
     // maxElements budgets the elements a screen reader can actually reach: the
@@ -994,9 +960,7 @@ const auditScreenReader = defineTabTool({
       const byFrame = new Map<playwright.Frame, Measured[]>();
       for (const [position, handle] of handles.entries()) {
         const frame = owners[position];
-        if (!handle)
-          continue;
-        if (!frame)
+        if (!handle || !frame)
           continue;
         const batch = byFrame.get(frame);
         if (batch)
@@ -1013,12 +977,14 @@ const auditScreenReader = defineTabTool({
         if (measureNames) {
           let installed = axeByFrame.get(frame);
           if (installed === undefined) {
-            const installation = await injectFrameAxe(frame, (installed, timedOut) => {
-              if (timedOut) {
-                axeByFrame.set(frame, installed);
-                unavailableFrames.delete(frame);
-              }
-            });
+            const installation = await runFrameWork(
+                () => injectAxeForNames(frame), false, frame,
+                (installed, timedOut) => {
+                  if (timedOut) {
+                    axeByFrame.set(frame, installed);
+                    unavailableFrames.delete(frame);
+                  }
+                });
             if (!installation.started || installation.timedOut) {
               if (installation.timedOut)
                 unavailableFrames.add(frame);
