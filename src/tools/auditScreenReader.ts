@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
-import { frameReadTimeoutMs, injectAxeForNames, withFrameTimeout } from './axe.js';
+import { frameReadTimeoutMs, injectAxeForNames, withConcurrency, withFrameTimeout } from './axe.js';
 import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
 
 import type * as playwright from 'playwright';
@@ -897,7 +897,7 @@ const auditScreenReader = defineTabTool({
         else
           byFrame.set(frame, [{ index: chunk[position], handle }]);
       }
-      for (const [frame, batch] of byFrame) {
+      await withConcurrency([...byFrame], async ([frame, batch]) => {
         let measureNames = params.checkNames;
         if (measureNames) {
           let installed = axeByFrame.get(frame);
@@ -927,7 +927,7 @@ const auditScreenReader = defineTabTool({
         const disposal = bounded(Promise.all(batch.map(entry => entry.handle.dispose().catch(() => undefined))), undefined);
         if (facts)
           await disposal;
-      }
+      });
       analyzedIndexes.push(...chunk);
       await response.reportProgress({
         progress: analyzedIndexes.length,

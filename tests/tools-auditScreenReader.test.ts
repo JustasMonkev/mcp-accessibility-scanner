@@ -429,10 +429,13 @@ function createToolHarness(options: {
   frozen?: boolean;
   /** Model the page's main frame instead of a child frame. */
   mainFrame?: boolean;
+  frameCount?: number;
+  frameReadDelayMs?: number;
 }) {
   const concurrency = { current: 0, max: 0 };
+  const frameConcurrency = { current: 0, max: 0 };
   const installs = { count: 0 };
-  const frame: any = {
+  const frames: any[] = Array.from({ length: options.frameCount ?? 1 }, () => ({
     // A child frame unless asked otherwise, so a hung installation is bounded
     // by the child-frame budget.
     parentFrame: () => options.mainFrame ? null : ({}),
@@ -440,6 +443,11 @@ function createToolHarness(options: {
       if (options.frozen)
         return new Promise(() => undefined);
       if (typeof collect !== 'string') {
+        frameConcurrency.current++;
+        frameConcurrency.max = Math.max(frameConcurrency.max, frameConcurrency.current);
+        if (options.frameReadDelayMs)
+          await new Promise(resolve => setTimeout(resolve, options.frameReadDelayMs));
+        frameConcurrency.current--;
         const measured = input.measureNames && installs.count > 0 && (options.installAxe ?? 'accept') === 'accept';
         return input.elements.map(handle => ({ ...baseFacts, nameMeasured: measured, ...options.factsFor?.(handle.ref) }));
       }
@@ -450,10 +458,11 @@ function createToolHarness(options: {
         return new Promise(() => undefined);
       return undefined;
     }),
-  };
+  }));
+  const frame = frames[0];
   const page: any = {
     ariaSnapshot: vi.fn(async () => options.snapshot),
-    frames: vi.fn(() => [frame]),
+    frames: vi.fn(() => frames),
     mainFrame: vi.fn(() => frame),
     url: vi.fn(() => 'https://example.com/'),
     locator: vi.fn((selector: string) => ({
@@ -464,7 +473,8 @@ function createToolHarness(options: {
         concurrency.max = Math.max(concurrency.max, concurrency.current);
         await new Promise(resolve => setTimeout(resolve, stale ? options.staleDelayMs ?? 0 : 0));
         concurrency.current--;
-        return stale ? null : { ref, ownerFrame: async () => frame, dispose: async () => undefined };
+        const owner = frames[Number(ref.replace(/\D/g, '')) % frames.length];
+        return stale ? null : { ref, ownerFrame: async () => owner, dispose: async () => undefined };
       },
     })),
   };
@@ -474,7 +484,7 @@ function createToolHarness(options: {
     context: { outputFile: async (name: string) => `/tmp/${name}` },
   };
   const context: any = { currentTabOrDie: () => tab, config: {} };
-  return { context, response: new Response(context, 'audit_screen_reader', {}), concurrency, installs, frame };
+  return { context, response: new Response(context, 'audit_screen_reader', {}), concurrency, frameConcurrency, installs, frame };
 }
 
 describe('audit_screen_reader tool measurement', () => {
@@ -548,6 +558,17 @@ describe('audit_screen_reader tool measurement', () => {
     // here would present an unaudited page as clean.
     await expect(run(harness, 50)).rejects.toThrow(/None of the 100 accessibility tree elements could be resolved/);
     expect(harness.concurrency.max).toBe(50);
+  });
+
+  it('measures frame batches through the bounded concurrency pool', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      frameCount: 8,
+      frameReadDelayMs: 10,
+    });
+
+    await run(harness, 8, false);
+    expect(harness.frameConcurrency.max).toBe(4);
   });
 
   it('warns when part of the snapshot went stale instead of silently skipping it', async () => {
