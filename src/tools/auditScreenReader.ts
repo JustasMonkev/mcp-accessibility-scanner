@@ -878,6 +878,7 @@ const auditScreenReader = defineTabTool({
     // unresolved. The result says which happened. The map holds the settled
     // installation result per frame.
     const axeByFrame = new Map<playwright.Frame, boolean>();
+    const unavailableFrames = new Set<playwright.Frame>();
     let unmeasuredNames = 0;
     const analyzedIndexes: number[] = [];
     let resolvedCount = 0;
@@ -1000,7 +1001,7 @@ const auditScreenReader = defineTabTool({
           byFrame.set(frame, [{ index: chunk[position], handle }]);
       }
       await withConcurrency([...byFrame], async ([frame, batch]) => {
-        if (frameWorkSaturated) {
+        if (frameWorkSaturated || unavailableFrames.has(frame)) {
           disposeHandles(batch.map(entry => entry.handle));
           return;
         }
@@ -1010,6 +1011,8 @@ const auditScreenReader = defineTabTool({
           if (installed === undefined) {
             const installation = await injectFrameAxe(frame);
             if (!installation.started || installation.timedOut) {
+              if (installation.timedOut)
+                unavailableFrames.add(frame);
               disposeHandles(batch.map(entry => entry.handle));
               return;
             }
@@ -1030,8 +1033,10 @@ const auditScreenReader = defineTabTool({
           disposeHandles(batch.map(entry => entry.handle));
           return;
         }
-        if (collected.timedOut)
+        if (collected.timedOut) {
+          unavailableFrames.add(frame);
           return;
+        }
         const facts = collected.value;
         if (facts) {
           // Counted from the measurement itself, not from the installation:

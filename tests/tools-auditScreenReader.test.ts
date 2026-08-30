@@ -698,6 +698,27 @@ describe('audit_screen_reader tool measurement', () => {
     }
   });
 
+  it('does not retry a frame that timed out in an earlier chunk', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 200 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameReadDelayMs: 1_500,
+      });
+
+      const outcome = run(harness, 200, false).then(() => 'resolved', () => 'rejected');
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(harness.frame.evaluate).toHaveBeenCalledTimes(1);
+      expect(harness.frameConcurrency.current).toBe(1);
+      expect(harness.disposals.count).toBe(150);
+      expect(await outcome).toBe('rejected');
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.disposals.count).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports saturation and cleans up when it happens in the final chunk', async () => {
     vi.useFakeTimers();
     try {
