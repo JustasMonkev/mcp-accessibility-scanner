@@ -206,6 +206,9 @@ Create a `config.json` file with the following options:
   "network": {
     "allowedOrigins": ["example.com", "trusted-site.com"],
     "blockedOrigins": ["ads.example.com"]
+  },
+  "snapshot": {
+    "boxes": true
   }
 }
 ```
@@ -226,6 +229,7 @@ Create a `config.json` file with the following options:
 - `timeouts.settle`: How long to wait after every action before responding (default: `500`). An action that finishes quietly is first watched for up to 100ms (or the settle delay, whichever is shorter) so scheduled network work can still be awaited before the settle delay.
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
+- `snapshot.boxes`: Include each element's viewport-relative bounding box as `[box=x,y,width,height]` in snapshots (default: `false`; CLI: `--snapshot-boxes`, env: `PLAYWRIGHT_MCP_SNAPSHOT_BOXES=1`)
 - `outputDir`: Directory for output files — reports, screenshots, traces, and session logs (CLI: `--output-dir`, env: `PLAYWRIGHT_MCP_OUTPUT_DIR`). Defaults to a fresh directory under the system temp folder, resolved once per server run so all of a run's artifacts land together. The output location is always server configuration; the deprecated MCP roots capability (client workspace folders) is no longer consulted.
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
@@ -497,9 +501,10 @@ Set default operation timeout for existing tabs.
 Capture accessibility snapshot of the current page (better than screenshot for analysis).
 Large `data:` URL payloads in snapshot output are truncated to their media type prefix.
 AI snapshots mark a visually present subtree excluded from accessibility queries with `[aria-hidden]` on its boundary element. Descendants are not marked again.
-- Parameters: `compress` (optional boolean, default false)
-  - When true, repeated non-interactive ARIA snapshot nodes are collapsed in the rendered response when a repeated structural pattern appears more than 100 times. The first 10 examples of each collapsed pattern are kept.
+- Parameters: `compress` (optional boolean, default false), `boxes` (optional boolean; overrides `snapshot.boxes` for this call)
+  - When `compress` is true, repeated non-interactive ARIA snapshot nodes are collapsed in the rendered response when a repeated structural pattern appears more than 100 times. The first 10 examples of each collapsed pattern are kept.
   - Use `browser_evaluate()` to retrieve the full uncompressed list when needed.
+  - When `boxes` is true, each element includes `[box=x,y,width,height]` in viewport-relative CSS pixels.
 
 #### `browser_find`
 Search the current page accessibility snapshot without returning the full snapshot.

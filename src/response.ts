@@ -43,6 +43,7 @@ export class Response {
   private _context: Context;
   private _includeSnapshot = false;
   private _includeSnapshotCompress: boolean | undefined;
+  private _includeSnapshotBoxes: boolean | undefined;
   private _includeTabs = false;
   private _tabSnapshot: TabSnapshot | undefined;
   private _requestContext: CallToolRequestContext | undefined;
@@ -134,9 +135,10 @@ export class Response {
     return this._structuredContent;
   }
 
-  setIncludeSnapshot(compress?: boolean) {
+  setIncludeSnapshot(compress?: boolean, boxes?: boolean) {
     this._includeSnapshot = true;
     this._includeSnapshotCompress = compress;
+    this._includeSnapshotBoxes = boxes ?? this._context.config.snapshot?.boxes;
   }
 
   setIncludeTabs() {
@@ -173,7 +175,7 @@ export class Response {
       ? this._context.tabs().filter(tab => !this._includeSnapshot || tab !== currentTab)
       : currentTab && !this._includeSnapshot ? [currentTab] : [];
     const [snapshot] = await Promise.all([
-      this._includeSnapshot && currentTab ? currentTab.captureSnapshot() : undefined,
+      this._includeSnapshot && currentTab ? currentTab.captureSnapshot(this._includeSnapshotBoxes) : undefined,
       Promise.allSettled(tabsToUpdate.map(tab => tab.updateTitle())),
     ]);
     this._tabSnapshot = snapshot;

@@ -80,6 +80,7 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--default-timeout <ms>` | Default Playwright operation timeout (default: 5000) |
 | `--save-session` | Save session to output directory |
 | `--save-trace` | Save Playwright trace to output directory |
+| `--snapshot-boxes` | Include viewport-relative `[box=x,y,width,height]` metadata in snapshots |
 | `--no-sandbox` | Disable browser sandboxing |
 | `--image-responses <mode>` | `"allow"` or `"omit"` image responses (default: allow) |
 
@@ -194,7 +195,7 @@ These tools are always available and work in the interactive REPL.
 | `browser_navigate_back` | Go back to previous page |
 | `browser_close` | Close the page |
 | `browser_resize` | Resize window: `{"width": 1280, "height": 720}` |
-| `browser_snapshot` | Capture accessibility snapshot |
+| `browser_snapshot` | Capture accessibility snapshot; pass `{"boxes": true}` to include element bounds |
 | `browser_take_screenshot` | Take screenshot (png/jpeg/webp, fullPage option) |
 | `browser_wait_for` | Wait for text/time: `{"text": "loaded"}` or `{"time": 5}` |
 

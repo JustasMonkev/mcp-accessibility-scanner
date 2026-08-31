@@ -305,14 +305,14 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this._withPageStateTimeout(promise, description);
   }
 
-  async captureSnapshot(): Promise<TabSnapshot> {
+  async captureSnapshot(boxes?: boolean): Promise<TabSnapshot> {
     let tabSnapshot: TabSnapshot | undefined;
     const capture = { valid: true };
     const snapshotGeneration = this._ariaSnapshotGeneration;
     const modalStates = await this._raceAgainstModalStates(async () => {
       const [snapshot, title] = await Promise.all([
         this._withPageStateTimeout(
-            this._captureAriaSnapshot(capture),
+            this._captureAriaSnapshot(capture, boxes),
             'capturing page accessibility snapshot',
         ).catch(error => {
           // Nothing describes the page any more, and the refs of an older
@@ -445,14 +445,14 @@ export class Tab extends EventEmitter<TabEventsInterface> {
           .catch(() => '');
       // Refs are assigned from the full role and name before long names are
       // omitted from rendering, so a semantic change still changes this line.
-      return current.split('\n', 1)[0]?.trim() === cached.trim();
+      return withoutSnapshotBox(current.split('\n', 1)[0]?.trim() ?? '') === withoutSnapshotBox(cached.trim());
     }));
     return pageGeneration === this._pageGeneration && matches.every(Boolean);
   }
 
-  private async _captureAriaSnapshot(capture = { valid: true }): Promise<string> {
+  private async _captureAriaSnapshot(capture = { valid: true }, boxes?: boolean): Promise<string> {
     const pageGeneration = this._pageGeneration;
-    const snapshot = await this.page.ariaSnapshot({ mode: 'ai' });
+    const snapshot = await this.page.ariaSnapshot({ mode: 'ai', boxes });
     if (!capture.valid || pageGeneration !== this._pageGeneration)
       throw new StaleAriaSnapshotError('Page changed while capturing accessibility snapshot.');
     ++this._ariaSnapshotGeneration;
@@ -468,6 +468,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
     await callOnPageNoTrace(this.page, page => page.waitForTimeout(time));
   }
+}
+
+function withoutSnapshotBox(line: string): string {
+  return line.replace(/ \[box=[^\]]+\](?='?(?::|$))/, '');
 }
 
 export type ConsoleMessage = {

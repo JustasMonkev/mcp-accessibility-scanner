@@ -58,6 +58,7 @@ const scanPageSchema = z.object({
 
 const snapshotSchema = z.object({
   compress: z.boolean().optional().describe('Collapse repeated non-interactive ARIA nodes in large snapshots when a repeated structural pattern appears more than 100 times. Keeps the first 10 examples of each collapsed pattern. Use browser_evaluate() to retrieve the full list if needed.'),
+  boxes: z.boolean().optional().describe('Include each element\'s bounding box as [box=x,y,width,height]. Coordinates are viewport-relative, in CSS pixels (Element.getBoundingClientRect). Overrides snapshot.boxes for this call.'),
 });
 
 const findSchema = z.object({
@@ -327,7 +328,7 @@ const snapshot = defineTool({
 
   handle: async (context, params, response) => {
     await context.ensureTab();
-    response.setIncludeSnapshot(params.compress);
+    response.setIncludeSnapshot(params.compress, params.boxes);
   },
 });
 

@@ -150,6 +150,19 @@ describe('Response', () => {
       expect(mockTab.captureSnapshot).toHaveBeenCalled();
     });
 
+    it('uses configured boxes unless the tool explicitly disables them', async () => {
+      mockContext.config.snapshot = { boxes: true };
+      const configured = new Response(mockContext, 'test_tool', {});
+      configured.setIncludeSnapshot();
+      await configured.finish();
+      expect(mockTab.captureSnapshot).toHaveBeenLastCalledWith(true);
+
+      const disabled = new Response(mockContext, 'test_tool', {});
+      disabled.setIncludeSnapshot(undefined, false);
+      await disabled.finish();
+      expect(mockTab.captureSnapshot).toHaveBeenLastCalledWith(false);
+    });
+
     it('renders non-2xx HTTP status in page state only', async () => {
       mockTab.captureSnapshot = vi.fn().mockResolvedValue({
         url: 'https://example.com/locked',

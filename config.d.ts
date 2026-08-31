@@ -167,6 +167,14 @@ export type Config = {
    */
   imageResponses?: 'allow' | 'omit' | 'auto';
 
+  snapshot?: {
+    /**
+     * Include each element's bounding box as [box=x,y,width,height] in snapshots.
+     * Coordinates are viewport-relative CSS pixels.
+     */
+    boxes?: boolean;
+  };
+
   /**
    * Timeout settings for Playwright operations.
    */
