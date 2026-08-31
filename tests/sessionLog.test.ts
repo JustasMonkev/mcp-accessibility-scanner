@@ -116,7 +116,7 @@ describe('session log folders', () => {
     }
   });
 
-  it('replaces a flushed action with its late signal update', async () => {
+  it('replaces a flushed action and its arguments with a late update', async () => {
     vi.useFakeTimers();
     try {
       let content = '';
@@ -131,16 +131,19 @@ describe('session log folders', () => {
       const log = new SessionLog('/unused', storage);
       const context = { options: {} } as any;
       const tab = { context, page: { url: () => 'https://example.com/' } } as any;
-      const action = { name: 'click' } as any;
+      const initial = { name: 'fill', text: 'H' } as any;
+      const updated = { name: 'fill', text: 'Hi' } as any;
 
-      log.logUserAction(action, tab, 'original action', false);
+      log.logUserAction(initial, tab, "await page.fill('#name', 'H');", false);
       await vi.advanceTimersByTimeAsync(1000);
-      log.logUserAction(action, tab, 'late signal update', true);
+      log.logUserAction(updated, tab, "await page.fill('#name', 'Hi');", true);
       await (log as any)._sessionFileQueue;
 
-      expect(content.match(/### User action: click/g)).toHaveLength(1);
-      expect(content).toContain('late signal update');
-      expect(content).not.toContain('original action');
+      expect(content.match(/### User action: fill/g)).toHaveLength(1);
+      expect(content).toContain('"text": "Hi"');
+      expect(content).toContain("await page.fill('#name', 'Hi');");
+      expect(content).not.toContain('"text": "H"');
+      expect(content).not.toContain("await page.fill('#name', 'H');");
     } finally {
       vi.useRealTimers();
     }

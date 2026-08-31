@@ -73,6 +73,26 @@ type LogEntry = {
   tabSnapshot?: TabSnapshot;
 };
 
+function renderUserAction(action: actions.Action, browserSessionId: string | undefined, code: string): string[] {
+  const actionData: Record<string, unknown> = { ...action };
+  delete actionData.ariaSnapshot;
+  delete actionData.selector;
+  delete actionData.signals;
+  const loggedAction = browserSessionId !== undefined
+    ? { browserSessionId, ...actionData }
+    : actionData;
+  const lines = [
+    `### User action: ${action.name}`,
+    `- Args`,
+    '```json',
+    JSON.stringify(loggedAction, null, 2),
+    '```',
+  ];
+  if (code)
+    lines.push(`- Code`, '```js', code, '```');
+  return lines;
+}
+
 export class SessionLog {
   private _folder: string;
   private _file: string;
@@ -81,7 +101,7 @@ export class SessionLog {
   private _sessionFileQueue = Promise.resolve();
   private _flushEntriesTimeout: NodeJS.Timeout | undefined;
   private _storage: IFileStorage;
-  private _lastFlushedAction = new WeakMap<Tab, { action: actions.Action; code: string; marker: string }>();
+  private _lastFlushedAction = new WeakMap<Tab, { action: actions.Action; browserSessionId?: string; code: string; marker: string }>();
 
   constructor(sessionFolder: string, storage: IFileStorage = new NodeFileStorage()) {
     this._folder = sessionFolder;
@@ -135,15 +155,16 @@ export class SessionLog {
       const flushed = this._lastFlushedAction.get(tab);
       if (flushed?.action.name !== action.name)
         return;
-      const previous = flushed.code;
+      const previousAction = flushed.action;
+      const previousCode = flushed.code;
       flushed.action = action;
       flushed.code = code;
       this._sessionFileQueue = this._sessionFileQueue
           .catch(logUnhandledError)
           .then(async () => {
             const content = await this._storage.readFile(this._file);
-            const oldBlock = `- Code\n\`\`\`js\n${previous}\n\`\`\``;
-            const newBlock = `- Code\n\`\`\`js\n${flushed.code}\n\`\`\``;
+            const oldBlock = renderUserAction(previousAction, flushed.browserSessionId, previousCode).join('\n');
+            const newBlock = renderUserAction(flushed.action, flushed.browserSessionId, flushed.code).join('\n');
             const markerIndex = content.indexOf(flushed.marker);
             if (markerIndex === -1)
               return;
@@ -226,40 +247,24 @@ export class SessionLog {
         }
       }
 
-      if (entry.userAction) {
-        const actionData = { ...entry.userAction } as any;
-        delete actionData.ariaSnapshot;
-        delete actionData.selector;
-        delete actionData.signals;
-        // Leads the args like a routed tool call's browserSessionId does.
-        const loggedAction = entry.browserSessionId !== undefined
-          ? { browserSessionId: entry.browserSessionId, ...actionData }
-          : actionData;
-
-        lines.push(
-            `### User action: ${entry.userAction.name}`,
-            `- Args`,
-            '```json',
-            JSON.stringify(loggedAction, null, 2),
-            '```',
-        );
-      }
-
-      if (entry.code) {
-        lines.push(
-            `- Code`,
-            '```js',
-            entry.code,
-            '```');
-      }
+      if (entry.userAction)
+        lines.push(...renderUserAction(entry.userAction, entry.browserSessionId, entry.code));
+      else if (entry.code)
+        lines.push(`- Code`, '```js', entry.code, '```');
 
       if (entry.tabSnapshot) {
         const fileName = `${ordinal}.snapshot.yml`;
         this._storage.writeFile(path.join(this._folder, fileName), entry.tabSnapshot.ariaSnapshot).catch(logUnhandledError);
         const marker = `- Snapshot: ${fileName}`;
         lines.push(marker);
-        if (entry.userAction && entry.tab)
-          this._lastFlushedAction.set(entry.tab, { action: entry.userAction, code: entry.code, marker });
+        if (entry.userAction && entry.tab) {
+          this._lastFlushedAction.set(entry.tab, {
+            action: entry.userAction,
+            browserSessionId: entry.browserSessionId,
+            code: entry.code,
+            marker,
+          });
+        }
       }
 
       lines.push('', '');

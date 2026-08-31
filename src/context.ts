@@ -616,7 +616,7 @@ export class Context {
 // enablement evicts the hub so the next session retries instead of silently
 // recording nothing. When the last consumer leaves, the recorder returns to
 // standby; the same hub arms it again for the next recording.
-type RecordedAction = { page: playwright.Page, code: string };
+type RecordedAction = { page: playwright.Page, code: string, sequence?: number };
 type RecordingTarget = {
   actions: RecordedAction[];
   pageIndexes: Map<playwright.Page, number>;
@@ -624,7 +624,7 @@ type RecordingTarget = {
 };
 type Recording = { target: RecordingTarget, ready: Promise<playwright.BrowserContext>, lastActivityAt: number };
 const actionIsBuffered = (action: actions.Action): boolean =>
-  action.name === 'click' && action.button === 'left' || action.name === 'fill' || action.name === 'navigate';
+  action.name === 'click' && action.button === 'left' || action.name === 'navigate';
 const pageAliasFromCode = (code: string): string | undefined =>
   code.match(/^\s*await\s+(page\d*)\./m)?.[1]
     ?? code.match(/^\s*await\s+expect\((page\d*)(?:\.|\))/m)?.[1];
@@ -666,7 +666,7 @@ const recorderContexts = new WeakMap<playwright.BrowserContext, Set<Context>>();
 export class InputRecorder {
   private _context: Context;
   private _browserContext: playwright.BrowserContext;
-  private _lastActions = new WeakMap<playwright.Page, actions.Action>();
+  private _lastActions = new WeakMap<playwright.Page, { action: actions.Action, sequence: number }>();
 
   private constructor(context: Context, browserContext: playwright.BrowserContext) {
     this._context = context;
@@ -722,7 +722,7 @@ export class InputRecorder {
   }
 
   static async stopRecording(context: Context, browserContext: playwright.BrowserContext, target: RecordingTarget): Promise<void> {
-    // Playwright buffers clicks, fills and navigations for 500ms so a later
+    // Playwright buffers clicks and navigations for 500ms so a later
     // event can refine them. Keep this recording registered until that last
     // event arrives; config.timeouts.settle may be shorter or disabled.
     const recordings = recorderHubs.get(browserContext)?.recordings;
@@ -747,6 +747,8 @@ export class InputRecorder {
 
     const recorders = new Set<InputRecorder>();
     const recordings = new Map<Context, RecordingTarget>();
+    let actionSequence = 0;
+    const lastActionSequence = new WeakMap<playwright.Page, number>();
     let armed = false;
     let transition = Promise.resolve();
     const enqueue = (callback: () => Promise<void>) => {
@@ -783,6 +785,8 @@ export class InputRecorder {
     };
     const sink = {
         actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
+          const sequence = ++actionSequence;
+          lastActionSequence.set(page, sequence);
           const action = 'action' in data ? data.action : data;
           const isAssertion = action.name.startsWith('assert');
           if (isAssertion)
@@ -791,12 +795,28 @@ export class InputRecorder {
           dispatch(
               buffered,
               buffered || action.name === 'closePage',
-              recorder => recorder._actionAdded(page, action, isAssertion ? `${expectPrelude}\n${code}` : code),
+              recorder => recorder._actionAdded(page, action, isAssertion ? `${expectPrelude}\n${code}` : code, sequence),
               target => {
                 if (isAssertion && !target.actions.some(action => action.code === expectPrelude))
                   target.actions.push({ page, code: expectPrelude });
                 addMissingPageAlias(target.actions, page, code, target.pageIndexes, browserContext);
-                target.actions.push({ page, code });
+                target.actions.push({ page, code, sequence });
+              },
+          );
+        },
+        actionUpdated: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
+          const sequence = lastActionSequence.get(page);
+          if (sequence === undefined)
+            return;
+          const action = 'action' in data ? data.action : data;
+          dispatch(
+              true,
+              true,
+              recorder => recorder._actionUpdated(page, action, code, sequence),
+              target => {
+                const recorded = target.actions.findLast(action => action.sequence === sequence);
+                if (recorded)
+                  recorded.code = code;
               },
           );
         },
@@ -847,17 +867,26 @@ export class InputRecorder {
     return created;
   }
 
-  private _actionAdded(page: playwright.Page, action: actions.Action, code: string) {
-    this._lastActions.set(page, action);
+  private _actionAdded(page: playwright.Page, action: actions.Action, code: string, sequence: number) {
+    this._lastActions.set(page, { action, sequence });
     const tab = this._context.tabForPage(page);
     if (tab)
       this._context.sessionLog!.logUserAction(action, tab, code, false);
   }
 
+  private _actionUpdated(page: playwright.Page, action: actions.Action, code: string, sequence: number) {
+    if (this._lastActions.get(page)?.sequence !== sequence)
+      return;
+    this._lastActions.set(page, { action, sequence });
+    const tab = this._context.tabForPage(page);
+    if (tab)
+      this._context.sessionLog!.logUserAction(action, tab, code, true);
+  }
+
   private _signalAdded(page: playwright.Page, signal: actions.Signal, code: string) {
     const tab = this._context.tabForPage(page);
     if (signal.name !== 'navigation' && tab && code) {
-      const action = this._lastActions.get(page);
+      const action = this._lastActions.get(page)?.action;
       if (action)
         this._context.sessionLog!.logUserAction(action, tab, code, true);
     }
