@@ -46,7 +46,7 @@ const stopRecording = defineTool({
     if (!actions)
       throw new Error('No recording in progress, use browser_start_recording to start one.');
     response.addResult(actions.length
-      ? `Recording stopped. Recorded actions:\n\n\`\`\`js\n${actions.join('\n')}\n\`\`\``
+      ? `Recording stopped. Recorded actions:\n\n~~~js\n${actions.join('\n')}\n~~~`
       : 'Recording stopped. No actions were recorded.');
     response.setIncludeSnapshot();
   },

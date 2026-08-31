@@ -17,6 +17,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { toMcpTool } from '../src/mcp/tool.js';
 import { Response } from '../src/response.js';
+import { SessionLog } from '../src/sessionLog.js';
 import recorderTools from '../src/tools/recorder.js';
 
 describe('Recorder tools', () => {
@@ -67,8 +68,33 @@ describe('Recorder tools', () => {
 
     await stopTool.handle(context, {}, response);
 
-    expect(response.result()).toContain("```js\nawait page.getByRole('button').click();\n```");
+    expect(response.result()).toContain("~~~js\nawait page.getByRole('button').click();\n~~~");
+    expect(response.code()).toBe('');
     expect(includeSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not close the session-log result fence around recorded JavaScript', async () => {
+    vi.useFakeTimers();
+    try {
+      context.stopRecording.mockResolvedValue(["await page.getByRole('button').click();"]);
+      const response = new Response(context, stopTool.schema.name, {});
+      await stopTool.handle(context, {}, response);
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const sessionLog = new SessionLog('/unused', storage);
+
+      sessionLog.logResponse(response);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const entry = storage.appendFile.mock.calls[0][1];
+      expect(entry).toContain("- Result\n```\nRecording stopped. Recorded actions:\n\n~~~js\nawait page.getByRole('button').click();\n~~~\n```");
+      expect(entry.match(/```/g)).toHaveLength(4);
+      expect(entry).not.toContain('\n```js\n');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reports an empty recording and rejects stop without start', async () => {

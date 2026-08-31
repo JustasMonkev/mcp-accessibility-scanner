@@ -15,6 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
 import type { BrowserContextFactory } from '../src/browserContextFactory.js';
 import { EventEmitter } from 'events';
@@ -693,6 +694,68 @@ describe('Context', () => {
           "const page1Promise = page.waitForEvent('popup');\nawait page.getByText('Open').click();",
           true,
       );
+    });
+
+    it('ignores signals whose initial action was suppressed', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const sessionLog = { logUserAction: vi.fn() };
+        const config = await resolveConfig({});
+        const recordingContext = new Context({
+          tools: [],
+          config,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: () => Promise.resolve(sessionLog),
+          clientInfo: {},
+        });
+        const siblingContext = new Context({
+          tools: [],
+          config,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        const starting = recordingContext.startRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await starting;
+        await siblingContext.newTab();
+        const createPage = (url: string) => Object.assign(new EventEmitter(), {
+          setDefaultNavigationTimeout: vi.fn(),
+          setDefaultTimeout: vi.fn(),
+          url: () => url,
+        });
+        const page = createPage('about:blank');
+        mockBrowserContext.emit('page', page);
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+        const manualAction = { name: 'fill', selector: '#query', text: 'manual' };
+        sink.actionAdded(page, manualAction, 'manual fill');
+
+        const endSiblingTool = siblingContext.beginToolCall('browser_fill_form');
+        sink.actionAdded(page, { name: 'fill', selector: '#query', text: 'tool' }, 'suppressed fill');
+        endSiblingTool();
+        await vi.advanceTimersByTimeAsync(501);
+        sink.signalAdded(page, { name: 'popup', popupAlias: '1' }, 'late suppressed popup');
+        sink.signalAdded(page, { name: 'navigation', url: 'https://tool.example/' }, 'late suppressed navigation');
+        const standalonePage = createPage('https://standalone.example/');
+        mockBrowserContext.emit('page', standalonePage);
+        sink.signalAdded(standalonePage, { name: 'navigation', url: 'https://standalone.example/' }, '');
+
+        const stopping = recordingContext.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual(['manual fill']);
+        expect(sessionLog.logUserAction).toHaveBeenCalledTimes(2);
+        expect(sessionLog.logUserAction).toHaveBeenNthCalledWith(1, manualAction, expect.anything(), 'manual fill', false);
+        expect(sessionLog.logUserAction).toHaveBeenNthCalledWith(
+            2,
+            expect.objectContaining({ name: 'navigate', url: 'https://standalone.example/' }),
+            expect.anything(),
+            "await page.goto('https://standalone.example/');",
+            false,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('replaces coalesced fills in recordings and session logs', async () => {

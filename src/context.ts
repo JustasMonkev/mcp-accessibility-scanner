@@ -821,13 +821,16 @@ export class InputRecorder {
           );
         },
         signalAdded: (page: playwright.Page, data: actions.Signal | actions.SignalInContext, code: string) => {
+          const sequence = lastActionSequence.get(page);
           const signal = 'signal' in data ? data.signal : data;
           dispatch(
               true,
               true,
-              recorder => recorder._signalAdded(page, signal, code),
+              recorder => recorder._signalAdded(page, signal, code, sequence),
               target => {
-                const action = target.actions.findLast(action => action.page === page);
+                if (sequence === undefined)
+                  return;
+                const action = target.actions.findLast(action => action.sequence === sequence);
                 if (action && code)
                   action.code = code;
               },
@@ -883,13 +886,13 @@ export class InputRecorder {
       this._context.sessionLog!.logUserAction(action, tab, code, true);
   }
 
-  private _signalAdded(page: playwright.Page, signal: actions.Signal, code: string) {
+  private _signalAdded(page: playwright.Page, signal: actions.Signal, code: string, sequence?: number) {
+    const lastAction = this._lastActions.get(page);
+    if (sequence !== undefined && lastAction?.sequence !== sequence)
+      return;
     const tab = this._context.tabForPage(page);
-    if (signal.name !== 'navigation' && tab && code) {
-      const action = this._lastActions.get(page)?.action;
-      if (action)
-        this._context.sessionLog!.logUserAction(action, tab, code, true);
-    }
+    if (signal.name !== 'navigation' && tab && code && lastAction)
+      this._context.sessionLog!.logUserAction(lastAction.action, tab, code, true);
     if (signal.name !== 'navigation')
       return;
     const navigateAction: actions.Action = {
