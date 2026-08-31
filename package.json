@@ -51,8 +51,8 @@
 		"axe-core": "4.13.0",
 		"commander": "^15.0.0",
 		"debug": "^4.4.3",
-		"playwright": "1.63.0-alpha-2026-08-22",
-		"playwright-core": "1.63.0-alpha-2026-08-22",
+		"playwright": "1.63.0-alpha-2026-08-29",
+		"playwright-core": "1.63.0-alpha-2026-08-29",
 		"re2": "^1.26.1",
 		"ws": "^8.21.3",
 		"zod": "^4.4.3"

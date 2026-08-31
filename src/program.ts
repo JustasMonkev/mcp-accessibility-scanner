@@ -107,7 +107,7 @@ function configureBaseProgram() {
       .option('--blocked-origins <origins>', 'semicolon-separated list of origins to block the browser from requesting. Blocklist is evaluated before allowlist. If used without the allowlist, requests not matching the blocklist are still allowed.', semicolonSeparatedList)
       .option('--block-service-workers', 'block service workers')
       .option('--browser <browser>', 'browser or chrome channel to use, possible values: chrome, firefox, webkit, msedge.')
-      .option('--caps <caps>', 'comma-separated list of additional capabilities to enable, possible values: vision, pdf.', commaSeparatedList)
+      .option('--caps <caps>', 'comma-separated list of additional capabilities to enable, possible values: vision, pdf, verify, devtools.', commaSeparatedList)
       .option('--cdp-launch-command <command>', 'launch a desktop app command and connect to its CDP endpoint.')
       .option('--cdp-launch-args <args>', 'comma-separated arguments passed to the CDP launch command.', commaSeparatedList)
       .option('--cdp-launch-cwd <path>', 'working directory for the CDP launch command.')
@@ -175,7 +175,8 @@ configureBaseProgram()
           instructions: serverInstructions,
           // Static per process, same rationale as in startMCPServer above.
           toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
-          create: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry)
+          create: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry),
+          createStateless: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry, { ephemeralDefaultContext: true }),
         };
         await mcpServer.start(serverBackendFactory, config.server);
         return;

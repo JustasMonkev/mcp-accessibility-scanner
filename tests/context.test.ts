@@ -15,6 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
 import type { BrowserContextFactory } from '../src/browserContextFactory.js';
 import { EventEmitter } from 'events';
@@ -28,6 +29,7 @@ describe('Context', () => {
     mockBrowserContext.newPage = vi.fn().mockResolvedValue({});
     mockBrowserContext.pages = vi.fn().mockReturnValue([]);
     mockBrowserContext.route = vi.fn().mockResolvedValue(undefined);
+    mockBrowserContext._disableRecorder = vi.fn().mockResolvedValue(undefined);
     mockBrowserContext.tracing = {
       start: vi.fn().mockResolvedValue(undefined),
       stop: vi.fn().mockResolvedValue(undefined),
@@ -511,6 +513,7 @@ describe('Context', () => {
     });
 
     it('suppresses recorder events for every session while a sibling runs a tool', async () => {
+      vi.useFakeTimers();
       // The recorder cannot attribute a DOM event to the session that caused
       // it, so a tool call in one session must not be recorded as another
       // session's user action.
@@ -542,9 +545,752 @@ describe('Context', () => {
       expect(log2.logUserAction).not.toHaveBeenCalled();
 
       endToolCall();
+      await vi.advanceTimersByTimeAsync(501);
       sink.actionAdded(page, { action: { name: 'click' } }, 'await page.click();');
       expect(log1.logUserAction).toHaveBeenCalledTimes(1);
       expect(log2.logUserAction).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+
+    it('records its own tool actions but not a sibling session\'s actions', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const makeContext = () => new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      const context1 = makeContext();
+      const context2 = makeContext();
+      await context1.startRecording();
+      await context2.startRecording();
+      expect(mockBrowserContext._enableRecorder.mock.calls[0][0]).toMatchObject({
+        mode: 'recording',
+        recorderMode: 'api',
+        omitCallTracking: true,
+        language: 'javascript',
+      });
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+
+      const endContext1Tool = context1.beginToolCall('browser_click');
+      sink.actionAdded({} as any, { action: { name: 'click' } }, 'await page.getByText(\'One\').click();');
+      endContext1Tool();
+
+      expect(await context1.stopRecording()).toEqual(["await page.getByText('One').click();"]);
+      expect(mockBrowserContext._disableRecorder).not.toHaveBeenCalled();
+      expect(await context2.stopRecording()).toEqual([]);
+      expect(mockBrowserContext._disableRecorder).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a sibling tool action excluded through the recorder buffer', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const makeContext = () => new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        const recordingContext = makeContext();
+        const siblingContext = makeContext();
+        await recordingContext.startRecording();
+        await siblingContext.newTab();
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+
+        const endSiblingTool = siblingContext.beginToolCall('browser_click');
+        endSiblingTool();
+        await vi.advanceTimersByTimeAsync(499);
+        sink.actionAdded({} as any, { action: { name: 'click', button: 'left' } }, 'sibling action');
+        sink.actionAdded({} as any, { action: { name: 'press' } }, 'manual press');
+
+        const stopping = recordingContext.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual(['manual press']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not suppress user actions while a sibling controls recording', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const makeContext = () => new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      const recordingContext = makeContext();
+      const siblingContext = makeContext();
+      await recordingContext.startRecording();
+      await siblingContext.newTab();
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+
+      const endControlCall = siblingContext.beginToolCall('browser_start_recording');
+      sink.actionAdded({} as any, { action: { name: 'click', button: 'left' } }, 'manual click');
+      endControlCall();
+
+      expect(await recordingContext.stopRecording()).toEqual(['manual click']);
+    });
+
+    it('keeps generated assertions executable for recordings and session logs', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const sessionLog = { logUserAction: vi.fn() };
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: () => Promise.resolve(sessionLog),
+        clientInfo: {},
+      });
+      await context.startRecording();
+      const page = new EventEmitter() as any;
+      page.setDefaultNavigationTimeout = vi.fn();
+      page.setDefaultTimeout = vi.fn();
+      page.url = () => 'about:blank';
+      mockBrowserContext.emit('page', page);
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+      sink.actionAdded(page, { name: 'assertVisible', selector: 'text=Done', signals: [] }, '// await expect(page.getByText(\'Done\')).toBeVisible();');
+
+      expect(await context.stopRecording()).toEqual([
+        "const { expect } = require('playwright/test');",
+        "await expect(page.getByText('Done')).toBeVisible();",
+      ]);
+      expect(sessionLog.logUserAction).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'assertVisible' }),
+          expect.anything(),
+          "const { expect } = require('playwright/test');\nawait expect(page.getByText('Done')).toBeVisible();",
+          false,
+      );
+    });
+
+    it('updates session-log actions with signal-generated code', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const sessionLog = { logUserAction: vi.fn() };
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: () => Promise.resolve(sessionLog),
+        clientInfo: {},
+      });
+      await context.newTab();
+      const page = new EventEmitter() as any;
+      page.setDefaultNavigationTimeout = vi.fn();
+      page.setDefaultTimeout = vi.fn();
+      page.url = () => 'about:blank';
+      mockBrowserContext.emit('page', page);
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+      const action = { name: 'click', selector: 'text=Open', button: 'left', signals: [] };
+      sink.actionAdded(page, action, "await page.getByText('Open').click();");
+      sink.signalAdded(page, { name: 'popup', popupAlias: '1' }, "const page1Promise = page.waitForEvent('popup');\nawait page.getByText('Open').click();");
+
+      expect(sessionLog.logUserAction).toHaveBeenLastCalledWith(
+          action,
+          expect.anything(),
+          "const page1Promise = page.waitForEvent('popup');\nawait page.getByText('Open').click();",
+          true,
+      );
+    });
+
+    it('ignores signals whose initial action was suppressed', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const sessionLog = { logUserAction: vi.fn() };
+        const config = await resolveConfig({});
+        const recordingContext = new Context({
+          tools: [],
+          config,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: () => Promise.resolve(sessionLog),
+          clientInfo: {},
+        });
+        const siblingContext = new Context({
+          tools: [],
+          config,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        const starting = recordingContext.startRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await starting;
+        await siblingContext.newTab();
+        const createPage = (url: string) => Object.assign(new EventEmitter(), {
+          setDefaultNavigationTimeout: vi.fn(),
+          setDefaultTimeout: vi.fn(),
+          url: () => url,
+        });
+        const page = createPage('about:blank');
+        mockBrowserContext.emit('page', page);
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+        const manualAction = { name: 'fill', selector: '#query', text: 'manual' };
+        sink.actionAdded(page, manualAction, 'manual fill');
+
+        const endSiblingTool = siblingContext.beginToolCall('browser_fill_form');
+        sink.actionAdded(page, { name: 'fill', selector: '#query', text: 'tool' }, 'suppressed fill');
+        endSiblingTool();
+        await vi.advanceTimersByTimeAsync(501);
+        sink.signalAdded(page, { name: 'popup', popupAlias: '1' }, 'late suppressed popup');
+        sink.signalAdded(page, { name: 'navigation', url: 'https://tool.example/' }, 'late suppressed navigation');
+        const standalonePage = createPage('https://standalone.example/');
+        mockBrowserContext.emit('page', standalonePage);
+        sink.signalAdded(standalonePage, { name: 'navigation', url: 'https://standalone.example/' }, '');
+
+        const stopping = recordingContext.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual(['manual fill']);
+        expect(sessionLog.logUserAction).toHaveBeenCalledTimes(2);
+        expect(sessionLog.logUserAction).toHaveBeenNthCalledWith(1, manualAction, expect.anything(), 'manual fill', false);
+        expect(sessionLog.logUserAction).toHaveBeenNthCalledWith(
+            2,
+            expect.objectContaining({ name: 'navigate', url: 'https://standalone.example/' }),
+            expect.anything(),
+            "await page.goto('https://standalone.example/');",
+            false,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('replaces coalesced fills in recordings and session logs', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const sessionLog = { logUserAction: vi.fn() };
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: () => Promise.resolve(sessionLog),
+          clientInfo: {},
+        });
+        const starting = context.startRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await starting;
+        const page = new EventEmitter() as any;
+        page.setDefaultNavigationTimeout = vi.fn();
+        page.setDefaultTimeout = vi.fn();
+        page.url = () => 'about:blank';
+        mockBrowserContext.emit('page', page);
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+        const initial = { name: 'fill', selector: '#query', text: 'a', signals: [] };
+        const updated = { ...initial, text: 'answer' };
+
+        sink.actionAdded(page, initial, "await page.locator('#query').fill('a');");
+        sink.actionAdded({} as any, { name: 'press', selector: '#other' }, "await page.locator('#other').press('Enter');");
+        sink.actionUpdated(page, updated, "await page.locator('#query').fill('answer');");
+
+        const stopping = context.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual([
+          "await page.locator('#query').fill('answer');",
+          "await page.locator('#other').press('Enter');",
+        ]);
+        expect(sessionLog.logUserAction).toHaveBeenLastCalledWith(
+            updated,
+            expect.anything(),
+            "await page.locator('#query').fill('answer');",
+            true,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not apply an update whose initial action was suppressed', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const makeContext = () => new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        const recordingContext = makeContext();
+        const siblingContext = makeContext();
+        await recordingContext.startRecording();
+        await siblingContext.newTab();
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+        const page = {} as any;
+        sink.actionAdded(page, { name: 'fill', selector: '#query' }, 'manual fill');
+
+        const endSiblingTool = siblingContext.beginToolCall('browser_fill_form');
+        sink.actionAdded(page, { name: 'fill', selector: '#query' }, 'suppressed fill');
+        endSiblingTool();
+        await vi.advanceTimersByTimeAsync(501);
+        sink.actionUpdated(page, { name: 'fill', selector: '#query' }, 'late suppressed update');
+
+        const stopping = recordingContext.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual(['manual fill']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('starts a fresh recording after stop', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await context.startRecording();
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+      const page = {} as any;
+      sink.actionAdded(page, { action: { name: 'click' } }, 'old code');
+
+      expect(await context.stopRecording()).toEqual(['old code']);
+
+      await context.startRecording();
+      sink.actionAdded({} as any, { action: { name: 'fill' } }, 'new code');
+      expect(await context.stopRecording()).toEqual(['new code']);
+      expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns captured actions when recorder standby fails', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      mockBrowserContext._disableRecorder = vi.fn().mockRejectedValue(new Error('browser disconnected'));
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await context.startRecording();
+      const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+      sink.actionAdded({} as any, { name: 'press', signals: [] }, "await page.press('Enter');");
+
+      await expect(context.stopRecording()).resolves.toEqual(["await page.press('Enter');"]);
+    });
+
+    it('re-arms an idle hub when a session logger joins', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const recordingContext = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await recordingContext.startRecording();
+      await recordingContext.stopRecording();
+      expect(mockBrowserContext._disableRecorder).toHaveBeenCalledTimes(1);
+
+      const loggingContext = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: () => Promise.resolve({ logUserAction: vi.fn() } as any),
+        clientInfo: {},
+      });
+      await loggingContext.newTab();
+      expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(2);
+    });
+
+    it('re-arms only after an idle recorder has reached standby', async () => {
+      vi.useFakeTimers();
+      try {
+        let finishStandby: () => void;
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        mockBrowserContext._disableRecorder = vi.fn().mockImplementation(() => new Promise<void>(resolve => { finishStandby = resolve; }));
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        await context.startRecording();
+        const firstStop = context.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        expect(mockBrowserContext._disableRecorder).toHaveBeenCalledTimes(1);
+
+        const secondStart = context.startRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(1);
+        finishStandby!();
+        await firstStop;
+        await secondStart;
+        expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(2);
+
+        const secondStop = context.stopRecording();
+        finishStandby = () => {};
+        mockBrowserContext._disableRecorder.mockResolvedValue(undefined);
+        await vi.advanceTimersByTimeAsync(500);
+        await secondStop;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps page declarations when recording starts before or after a tab opens', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        await context.startRecording();
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+        const firstPage = {} as any;
+        const secondPage = {} as any;
+        mockBrowserContext.pages.mockReturnValue([firstPage, secondPage]);
+        sink.actionAdded(firstPage, { name: 'click', signals: [] }, "await page.getByText('page1.example').click();");
+        sink.actionAdded(secondPage, { name: 'openPage', signals: [], url: 'about:blank' }, 'const page1 = await context.newPage();');
+        sink.actionAdded(secondPage, { name: 'click', signals: [] }, "await page1.getByText('Next').click();");
+
+        let stopping = context.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual([
+          "await page.getByText('page1.example').click();",
+          'const page1 = await context.newPage();',
+          "await page1.getByText('Next').click();",
+        ]);
+
+        const starting = context.startRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await starting;
+        sink.actionAdded(firstPage, { name: 'closePage', signals: [] }, 'await page.close();');
+        mockBrowserContext.pages.mockReturnValue([secondPage]);
+        sink.actionAdded(secondPage, { name: 'assertTitle', signals: [] }, "await expect(page1).toHaveTitle('Still here');");
+
+        stopping = context.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual([
+          'const page1 = context.pages()[1];',
+          'await page.close();',
+          "const { expect } = require('playwright/test');",
+          "await expect(page1).toHaveTitle('Still here');",
+        ]);
+
+        const thirdPage = {} as any;
+        const restarting = context.startRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await restarting;
+        mockBrowserContext.pages.mockReturnValue([firstPage, thirdPage]);
+        sink.actionAdded(thirdPage, { name: 'click', signals: [] }, "await page2.getByText('const page2 = ').click();");
+
+        stopping = context.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual([
+          'const page2 = context.pages()[1];',
+          "await page2.getByText('const page2 = ').click();",
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('ignores empty signal code from an earlier tab', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        await context.startRecording();
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+        const firstPage = {} as any;
+        const secondPage = {} as any;
+        sink.actionAdded(firstPage, { name: 'click', signals: [] }, 'first action');
+        sink.actionAdded(secondPage, { name: 'click', signals: [] }, 'second action');
+        sink.signalAdded(firstPage, { name: 'popup', popupAlias: '1' }, '');
+
+        const stopping = context.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual(['first action', 'second action']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not include an action buffered before a repeated start', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        await context.startRecording();
+        let stopping = context.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await stopping;
+
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+        const starting = context.startRecording();
+        await vi.advanceTimersByTimeAsync(499);
+        sink.actionAdded({} as any, { action: { name: 'click' } }, 'before start');
+        await vi.advanceTimersByTimeAsync(1);
+        await starting;
+        sink.actionAdded({} as any, { action: { name: 'click' } }, 'after start');
+
+        stopping = context.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual(['after start']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps a last-tab close action until recording is stopped', async () => {
+      vi.useFakeTimers();
+      try {
+        const page = new EventEmitter() as any;
+        page.setDefaultNavigationTimeout = vi.fn();
+        page.setDefaultTimeout = vi.fn();
+        page.url = () => 'about:blank';
+        mockBrowserContext.pages.mockReturnValue([page]);
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const close = vi.fn().mockResolvedValue(undefined);
+        (mockBrowserContextFactory.createContext as any).mockResolvedValue({ browserContext: mockBrowserContext, close });
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        await context.startRecording();
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+
+        const stopping = context.stopRecording();
+        page.emit('close');
+        await vi.advanceTimersByTimeAsync(0);
+        sink.actionAdded(page, { action: { name: 'closePage' } }, 'await page.close();');
+        expect(close).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual(['await page.close();']);
+        await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('waits for an in-flight recording stop before closing the browser', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const close = vi.fn().mockResolvedValue(undefined);
+        (mockBrowserContextFactory.createContext as any).mockResolvedValue({ browserContext: mockBrowserContext, close });
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        await context.startRecording();
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+
+        const stopping = context.stopRecording();
+        const closing = context.closeBrowserContext();
+        await vi.advanceTimersByTimeAsync(499);
+        sink.actionAdded({} as any, { action: { name: 'click', button: 'left' } }, 'last action');
+        expect(close).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(stopping).resolves.toEqual(['last action']);
+        await closing;
+        expect(close).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('closes a last-tab context when recorder startup fails', async () => {
+      const page = new EventEmitter() as any;
+      page.setDefaultNavigationTimeout = vi.fn();
+      page.setDefaultTimeout = vi.fn();
+      page.url = () => 'about:blank';
+      mockBrowserContext.pages.mockReturnValue([page]);
+      let rejectEnable: (error: Error) => void;
+      mockBrowserContext._enableRecorder = vi.fn().mockImplementation(() => new Promise((_, reject) => { rejectEnable = reject; }));
+      const close = vi.fn().mockResolvedValue(undefined);
+      (mockBrowserContextFactory.createContext as any).mockResolvedValue({ browserContext: mockBrowserContext, close });
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      const starting = context.startRecording();
+      await vi.waitFor(() => expect(mockBrowserContext._enableRecorder).toHaveBeenCalledTimes(1));
+      page.emit('close');
+      rejectEnable!(new Error('recorder unavailable'));
+
+      await expect(starting).rejects.toThrow('recorder unavailable');
+      await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+    });
+
+    it('rejects a second recording while one is active', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      await context.startRecording();
+
+      await expect(context.startRecording()).rejects.toThrow('Recording is already in progress');
+    });
+
+    it('reserves a focused start and lets an overlapping stop wait for it', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        let releaseTab: () => void;
+        const tabReady = new Promise<void>(resolve => releaseTab = resolve);
+        const bringToFront = vi.fn().mockResolvedValue(undefined);
+        vi.spyOn(context, 'ensureTab').mockImplementation(async () => {
+          await tabReady;
+          return { page: { bringToFront } } as any;
+        });
+
+        const first = context.startRecordingOnCurrentTab();
+        await expect(context.startRecordingOnCurrentTab()).rejects.toThrow('Recording is already in progress');
+        const stopping = context.stopRecording();
+        expect(context.ensureTab).toHaveBeenCalledTimes(1);
+
+        releaseTab!();
+        await first;
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(stopping).resolves.toEqual([]);
+        expect(bringToFront).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('releases a focused start reservation when tab focus fails', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      vi.spyOn(context, 'ensureTab')
+          .mockResolvedValueOnce({ page: { bringToFront: vi.fn().mockRejectedValue(new Error('page closed')) } } as any)
+          .mockResolvedValueOnce({ page: { bringToFront: vi.fn().mockResolvedValue(undefined) } } as any);
+
+      const starting = context.startRecordingOnCurrentTab();
+      const stopping = context.stopRecording();
+      await expect(starting).rejects.toThrow('page closed');
+      await expect(stopping).resolves.toBeUndefined();
+      await expect(context.startRecordingOnCurrentTab()).resolves.toBeUndefined();
+    });
+
+    it('waits for Playwright to deliver its last buffered action', async () => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+        await context.startRecording();
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+
+        const stopping = context.stopRecording();
+        sink.actionAdded({} as any, { action: { name: 'press' } }, 'after stop');
+        await vi.advanceTimersByTimeAsync(499);
+        sink.actionAdded({} as any, { action: { name: 'click', button: 'left' } }, 'last action');
+        await vi.advanceTimersByTimeAsync(1);
+
+        await expect(stopping).resolves.toEqual(['last action']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not let an in-flight stop remove a replacement recording', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolveEnable: () => void;
+        mockBrowserContext._enableRecorder = vi.fn()
+            .mockImplementationOnce(() => new Promise<void>(resolve => { resolveEnable = resolve; }))
+            .mockResolvedValue(undefined);
+        const context = new Context({
+          tools: [],
+          config: { timeouts: {} } as any,
+          browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined,
+          clientInfo: {},
+        });
+
+        const firstStart = context.startRecording();
+        await vi.advanceTimersByTimeAsync(0);
+        const firstStop = context.stopRecording();
+        const secondStart = context.startRecording();
+        resolveEnable!();
+        await firstStart;
+        await vi.advanceTimersByTimeAsync(500);
+        await secondStart;
+        await firstStop;
+
+        const sink = mockBrowserContext._enableRecorder.mock.calls[0][1];
+        sink.actionAdded({} as any, { action: { name: 'click' } }, 'replacement action');
+        const secondStop = context.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await expect(secondStop).resolves.toEqual(['replacement action']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('requires a browser session for recording in a stateless default context', async () => {
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+        browserSession: true,
+      });
+
+      await expect(context.startRecording()).rejects.toThrow(/browserSessionId/);
+      await expect(context.stopRecording()).rejects.toThrow(/browserSessionId/);
+      expect(mockBrowserContextFactory.createContext).not.toHaveBeenCalled();
     });
 
     it('makes a joining session wait for the in-flight recorder enablement and share its failure', async () => {

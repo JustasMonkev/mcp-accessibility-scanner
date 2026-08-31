@@ -50,7 +50,7 @@ npx mcp-accessibility-scanner --headless --browser chrome
 |--------|-------------|
 | `--browser <browser>` | Browser to use: `chrome`, `firefox`, `webkit`, `msedge` |
 | `--headless` | Run browser in headless mode (headed by default) |
-| `--caps <caps>` | Comma-separated extra capabilities: `vision`, `pdf`, `verify` |
+| `--caps <caps>` | Comma-separated extra capabilities: `vision`, `pdf`, `verify`, `devtools` |
 | `--viewport-size <size>` | Browser viewport, e.g. `"1280, 720"` |
 | `--device <device>` | Device emulation, e.g. `"iPhone 15"` |
 | `--output-dir <path>` | Directory for output files (reports, screenshots) |
@@ -124,7 +124,7 @@ Crawl and aggregate accessibility violations across multiple pages. Writes a JSO
 - `excludePathPatterns` - Regex patterns to skip (default: `logout|signout`)
 - `reportFile` - Custom output filename
 
-**Behind a login:** the crawl shares the browser context, so signing in with `browser_navigate` / `browser_fill_form` first is enough. Alternatively record a session with `npx playwright@1.63.0-alpha-2026-08-22 codegen --save-storage=auth.json <login-url>` (pinned to the server's own Playwright, so the recorded state matches what it replays) and start the server with `--storage-state ./auth.json` — every mode applies it (fresh contexts receive it at creation; the persistent profile runs in a fresh disposable profile built from the state and removed when the session closes, so it cannot combine with `--user-data-dir`; plain CDP attach installs it with `setStorageState()`, which resets cookies fully and origin storage for the state's origins plus any origins the connection has seen — origins from older history it never saw survive) except `--extension`, which errors out rather than wiping the browser you are already running. Extend `excludePathPatterns` with anything else that ends the session (account deletion, session revocation, account/locale switchers) — it replaces the default, so keep `logout|signout` in the list. If the crawl loses cookies it started with, the result opens with `WARNING: cookie(s) …` lines and the report carries a `sessionLosses` list naming, per lost cookie, the page reached after any redirect, even when that page failed to load; if one of them was the session cookie, everything scanned after that page was audited signed-out. Monitoring continues past the first loss (each cookie is reported once, where it vanished), and URLs discovered mid-crawl join cookie tracking before being visited. Cookie values are not compared and a cookie the browser dropped at its own expiry is ignored, but any other cookie the crawl started with and lost is reported — nothing marks a cookie as an authentication one.
+**Behind a login:** the crawl shares the browser context, so signing in with `browser_navigate` / `browser_fill_form` first is enough. Alternatively record a session with `npx playwright@1.63.0-alpha-2026-08-29 codegen --save-storage=auth.json <login-url>` (pinned to the server's own Playwright, so the recorded state matches what it replays) and start the server with `--storage-state ./auth.json` — every mode applies it (fresh contexts receive it at creation; the persistent profile runs in a fresh disposable profile built from the state and removed when the session closes, so it cannot combine with `--user-data-dir`; plain CDP attach installs it with `setStorageState()`, which resets cookies fully and origin storage for the state's origins plus any origins the connection has seen — origins from older history it never saw survive) except `--extension`, which errors out rather than wiping the browser you are already running. Extend `excludePathPatterns` with anything else that ends the session (account deletion, session revocation, account/locale switchers) — it replaces the default, so keep `logout|signout` in the list. If the crawl loses cookies it started with, the result opens with `WARNING: cookie(s) …` lines and the report carries a `sessionLosses` list naming, per lost cookie, the page reached after any redirect, even when that page failed to load; if one of them was the session cookie, everything scanned after that page was audited signed-out. Monitoring continues past the first loss (each cookie is reported once, where it vanished), and URLs discovered mid-crawl join cookie tracking before being visited. Cookie values are not compared and a cookie the browser dropped at its own expiry is ignored, but any other cookie the crawl started with and lost is reported — nothing marks a cookie as an authentication one.
 
 ### scan_page_matrix
 
@@ -240,6 +240,8 @@ These tools are always available and work in the interactive REPL.
 **`--caps verify`:** `browser_verify_element_visible`, `browser_verify_text_visible`, `browser_verify_list_visible`, `browser_verify_value`
 
 **`--caps vision`:** `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`
+
+**`--caps devtools`:** `browser_start_recording`, `browser_stop_recording` - Record a browser flow as Playwright JavaScript. Handshake-free HTTP clients must open a browser session and pass its `browserSessionId` to both tools; shared-context modes need a stateful MCP connection.
 
 ## Common Recipes
 

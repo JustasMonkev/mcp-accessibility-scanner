@@ -187,6 +187,9 @@ export class BrowserSessionRegistry {
         entry.lastUsedAt = now;
         continue;
       }
+      const recordingActivityAt = entry.context.recordingActivityAt();
+      if (recordingActivityAt !== undefined && now - recordingActivityAt < this._ttlMs)
+        continue;
       const idleFor = now - entry.lastUsedAt;
       if (idleFor < this._ttlMs)
         continue;

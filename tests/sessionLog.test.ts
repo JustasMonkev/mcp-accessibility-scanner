@@ -89,4 +89,97 @@ describe('session log folders', () => {
       vi.useRealTimers();
     }
   });
+
+  it('applies an action update to its original tab', async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const log = new SessionLog('/unused', storage);
+      const context = { options: {} } as any;
+      const firstTab = { context, page: { url: () => 'https://first.example/' } } as any;
+      const secondTab = { context, page: { url: () => 'https://second.example/' } } as any;
+
+      log.logUserAction({ name: 'click' } as any, firstTab, 'first action', false);
+      log.logUserAction({ name: 'click' } as any, secondTab, 'second action', false);
+      log.logUserAction({ name: 'click' } as any, firstTab, 'first action with popup', true);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
+      expect(appended).toContain('first action with popup');
+      expect(appended).not.toMatch(/```js\nfirst action\n/);
+      expect(appended).toContain('second action');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('replaces a flushed action and its arguments with a late update', async () => {
+    vi.useFakeTimers();
+    try {
+      let content = '';
+      const storage = {
+        readFile: vi.fn(async () => content),
+        writeFile: vi.fn(async (filePath: string, value: string) => {
+          if (filePath.endsWith('session.md'))
+            content = value;
+        }),
+        appendFile: vi.fn(async (_filePath: string, value: string) => { content += value; }),
+      };
+      const log = new SessionLog('/unused', storage);
+      const context = { options: {} } as any;
+      const tab = { context, page: { url: () => 'https://example.com/' } } as any;
+      const initial = { name: 'fill', text: 'H' } as any;
+      const updated = { name: 'fill', text: 'Hi' } as any;
+
+      log.logUserAction(initial, tab, "await page.fill('#name', 'H');", false);
+      await vi.advanceTimersByTimeAsync(1000);
+      log.logUserAction(updated, tab, "await page.fill('#name', 'Hi');", true);
+      await (log as any)._sessionFileQueue;
+
+      expect(content.match(/### User action: fill/g)).toHaveLength(1);
+      expect(content).toContain('"text": "Hi"');
+      expect(content).toContain("await page.fill('#name', 'Hi');");
+      expect(content).not.toContain('"text": "H"');
+      expect(content).not.toContain("await page.fill('#name', 'H');");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a return navigation after intervening log entries', async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const log = new SessionLog('/unused', storage);
+      const context = { options: {} } as any;
+      const tab = { context, page: { url: () => 'https://a.example/' } } as any;
+      const navigate = { name: 'navigate', url: 'https://a.example/' } as any;
+
+      log.logUserAction(navigate, tab, "await page.goto('https://a.example/');", false);
+      log.logResponse({
+        context,
+        toolName: 'browser_navigate',
+        toolArgs: { url: 'https://b.example/' },
+        result: () => '',
+        isError: () => false,
+        code: () => "await page.goto('https://b.example/');",
+        tabSnapshot: () => ({ url: 'https://b.example/' }),
+      } as any);
+      log.logUserAction(navigate, tab, "await page.goto('https://a.example/');", false);
+      log.logUserAction({ name: 'click' } as any, tab, "await page.getByText('Ready').click();", false);
+      log.logUserAction(navigate, tab, "await page.goto('https://a.example/');", false);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
+      expect(appended.match(/### User action: navigate/g)).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
