@@ -24,6 +24,9 @@ import type { JSONSchema7 } from 'json-schema';
 import snapshotTools from '../src/tools/snapshot.js';
 import { toMcpTool } from '../src/mcp/tool.js';
 import * as axe from '../src/tools/axe.js';
+import { Tab } from '../src/tab.js';
+import { Response } from '../src/response.js';
+import type { Context } from '../src/context.js';
 
 describe('Snapshot Tools', () => {
   const snapshotTool = snapshotTools.find(tool => tool.schema.name === 'browser_snapshot')!;
@@ -238,6 +241,47 @@ describe('Snapshot Tools', () => {
 
     expect(response.addError).toHaveBeenCalledWith('Provide either "text" or "regex" to search for.');
     expect(response.addError).toHaveBeenCalledWith('Provide only one of "text" or "regex", not both.');
+  });
+
+  describe.skipIf(!fs.existsSync(chromium.executablePath()))('Playwright accessible-name compatibility', () => {
+    let browser: Browser;
+
+    beforeAll(async () => {
+      browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    });
+
+    afterAll(async () => {
+      await browser?.close();
+    });
+
+    it('includes searchbox values in snapshots and browser_find', async () => {
+      const browserContext = await browser.newContext();
+      const page = await browserContext.newPage();
+      // SAFETY: This controlled page cannot download; only config and currentTabOrDie are used.
+      const tabContext = { config: { timeouts: {} }, currentTabOrDie: () => tab } as Context;
+      const tab = new Tab(tabContext, page, () => {});
+      try {
+        await page.setContent(`
+          <button aria-labelledby="text-label"></button>
+          <div id="text-label" hidden><input type="text" value="Query"></div>
+          <button aria-labelledby="search-label"></button>
+          <div id="search-label" hidden><input type="search" value="Query"></div>
+          <label for="flash">Flash the screen <input type="search" value="5"> times.</label>
+          <input type="checkbox" id="flash">
+        `);
+
+        const snapshot = await tab.captureSnapshot();
+        expect(snapshot.ariaSnapshot.match(/button "Query"/g)).toHaveLength(2);
+        expect(snapshot.ariaSnapshot).toContain('checkbox "Flash the screen 5 times."');
+
+        const response = new Response(tabContext, 'browser_find', { text: 'Flash the screen 5 times.' });
+        await findTool.handle(tabContext, { text: 'Flash the screen 5 times.' }, response);
+        expect(response.result()).toContain('Found 1 match for "Flash the screen 5 times.":');
+      } finally {
+        tab.dispose();
+        await browserContext.close();
+      }
+    });
   });
 
   describe('scan_page', () => {
