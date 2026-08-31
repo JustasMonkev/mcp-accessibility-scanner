@@ -450,7 +450,15 @@ describe('Tab', () => {
       expect(snapshot.url).toBe('https://example.com');
       expect(snapshot.title).toBe('Example Page');
       expect(snapshot.ariaSnapshot).toBe('button "Submit" [ref=1]');
-      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: undefined });
+    });
+
+    it('should include element boxes when requested', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      await tab.captureSnapshot(true);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: true });
     });
 
     it('should include console messages in snapshot', async () => {
@@ -640,7 +648,7 @@ describe('Tab', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
       await tab.refLocator({ element: 'Submit button', ref: '1' });
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
-      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: undefined });
     });
 
     it('should throw error if ref not found', async () => {
@@ -650,7 +658,7 @@ describe('Tab', () => {
       await expect(
           tab.refLocator({ element: 'Submit button', ref: '999' })
       ).rejects.toThrow('Ref 999 not found');
-      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: undefined });
     });
   });
 
@@ -667,7 +675,7 @@ describe('Tab', () => {
       expect(locators).toHaveLength(2);
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=2');
-      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: undefined });
     });
 
     it('resolves refs against the snapshot already returned to the caller', async () => {
@@ -681,6 +689,28 @@ describe('Tab', () => {
       // The ref came from that snapshot, so re-reading the page adds nothing.
       expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
+    });
+
+    it('reuses refs from boxed snapshots without treating geometry as semantics', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- 'button "Submit" [ref=1] [box=10,20,80,30]'`);
+      locatorSnapshot = `- 'button "Submit" [ref=1]'`;
+      await tab.captureSnapshot(true);
+
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('reuses a boxed ref whose YAML key has an inline value', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- 'heading "Welcome" [ref=1] [box=10,20,80,30]': Label`);
+      locatorSnapshot = `- 'heading "Welcome" [ref=1]': Label`;
+      await tab.captureSnapshot(true);
+
+      await tab.refLocators([{ element: 'Welcome', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
     });
 
     it('re-captures when a cached ref no longer resolves to an element', async () => {
@@ -807,7 +837,7 @@ describe('Tab', () => {
 
       await tab.refLocators([{ element: 'Added', ref: '2' }]);
 
-      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: undefined });
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=2');
     });
 

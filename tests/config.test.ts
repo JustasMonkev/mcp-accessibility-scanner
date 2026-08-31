@@ -125,6 +125,30 @@ describe('Config', () => {
     }
   });
 
+  describe('snapshot boxes', () => {
+    const saved = process.env.PLAYWRIGHT_MCP_SNAPSHOT_BOXES;
+
+    afterEach(() => {
+      if (saved === undefined)
+        delete process.env.PLAYWRIGHT_MCP_SNAPSHOT_BOXES;
+      else
+        process.env.PLAYWRIGHT_MCP_SNAPSHOT_BOXES = saved;
+    });
+
+    it('accepts a default in the config object', async () => {
+      expect((await resolveConfig({ snapshot: { boxes: true } })).snapshot?.boxes).toBe(true);
+    });
+
+    it('applies config file, environment, and CLI precedence', async () => {
+      const configFile = await writeConfigFile({ snapshot: { boxes: true } });
+      expect((await resolveCLIConfig({ config: configFile })).snapshot?.boxes).toBe(true);
+
+      process.env.PLAYWRIGHT_MCP_SNAPSHOT_BOXES = '0';
+      expect((await resolveCLIConfig({ config: configFile })).snapshot?.boxes).toBe(false);
+      expect((await resolveCLIConfig({ config: configFile, snapshotBoxes: true })).snapshot?.boxes).toBe(true);
+    });
+  });
+
   describe('parseCdpHeaders', () => {
     it('parses "Name: Value" entries, keeping colons inside the value', () => {
       expect(parseCdpHeaders(['X-Forwarded-Proto: value:with:colons'])).toEqual({

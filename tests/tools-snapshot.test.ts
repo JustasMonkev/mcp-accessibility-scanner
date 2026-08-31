@@ -29,10 +29,11 @@ describe('Snapshot Tools', () => {
   const snapshotTool = snapshotTools.find(tool => tool.schema.name === 'browser_snapshot')!;
   const findTool = snapshotTools.find(tool => tool.schema.name === 'browser_find')!;
 
-  it('should expose browser_snapshot with optional compression', () => {
+  it('should expose browser_snapshot with optional compression and boxes', () => {
     const mcpTool = toMcpTool(snapshotTool.schema);
     const jsonSchema = mcpTool.inputSchema as JSONSchema7;
     const compressSchema = jsonSchema.properties?.compress as JSONSchema7;
+    const boxesSchema = jsonSchema.properties?.boxes as JSONSchema7;
 
     expect(snapshotTool).toBeDefined();
     expect(snapshotTool.schema.type).toBe('readOnly');
@@ -40,9 +41,13 @@ describe('Snapshot Tools', () => {
     expect(jsonSchema.required ?? []).toEqual([]);
     expect(compressSchema.type).toBe('boolean');
     expect(compressSchema.description).toContain('more than 100 times');
+    expect(boxesSchema.type).toBe('boolean');
+    expect(boxesSchema.description).toContain('viewport-relative');
     expect(snapshotTool.schema.inputSchema.parse({})).toEqual({});
     expect(snapshotTool.schema.inputSchema.parse({ compress: true })).toEqual({ compress: true });
     expect(snapshotTool.schema.inputSchema.parse({ compress: false })).toEqual({ compress: false });
+    expect(snapshotTool.schema.inputSchema.parse({ boxes: true })).toEqual({ boxes: true });
+    expect(snapshotTool.schema.inputSchema.parse({ boxes: false })).toEqual({ boxes: false });
   });
 
   it('should request the current snapshot flow with compression disabled by default', async () => {
@@ -56,7 +61,7 @@ describe('Snapshot Tools', () => {
     await snapshotTool.handle(context as any, {}, response as any);
 
     expect(context.ensureTab).toHaveBeenCalled();
-    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(undefined);
+    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(undefined, undefined);
   });
 
   it('should pass the compression option to the snapshot response', async () => {
@@ -70,7 +75,7 @@ describe('Snapshot Tools', () => {
     await snapshotTool.handle(context as any, { compress: true }, response as any);
 
     expect(context.ensureTab).toHaveBeenCalled();
-    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(true);
+    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(true, undefined);
   });
 
   it('should pass explicit compression opt-out to the snapshot response', async () => {
@@ -84,7 +89,21 @@ describe('Snapshot Tools', () => {
     await snapshotTool.handle(context as any, { compress: false }, response as any);
 
     expect(context.ensureTab).toHaveBeenCalled();
-    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(false);
+    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(false, undefined);
+  });
+
+  it('should pass the boxes option to the snapshot response', async () => {
+    const context = {
+      ensureTab: vi.fn().mockResolvedValue(undefined),
+    };
+    const response = {
+      setIncludeSnapshot: vi.fn(),
+    };
+
+    await snapshotTool.handle(context as any, { boxes: true }, response as any);
+
+    expect(context.ensureTab).toHaveBeenCalled();
+    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(undefined, true);
   });
 
   it('should expose browser_find with text and regex search options', () => {
