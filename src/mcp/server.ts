@@ -82,8 +82,8 @@ export type ServerBackendFactory = ServerMetadata & {
   createStateless?: () => ServerBackend;
 };
 
-export async function connect(factory: ServerBackendFactory, transport: Transport, runHeartbeat: boolean) {
-  const server = createServer(factory.name, factory.version, factory.create(), runHeartbeat, factory);
+export async function connect(factory: ServerBackendFactory, transport: Transport, runHeartbeat: boolean, heartbeatReady: Promise<void> = Promise.resolve()) {
+  const server = createServer(factory.name, factory.version, factory.create(), runHeartbeat, factory, heartbeatReady);
   await server.connect(transport);
 }
 
@@ -92,7 +92,7 @@ export async function wrapInProcess(backend: ServerBackend): Promise<Transport> 
   return new InProcessTransport(server);
 }
 
-export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean, metadata?: ServerMetadata): Server {
+export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean, metadata?: ServerMetadata, heartbeatReady: Promise<void> = Promise.resolve()): Server {
   const server = new Server({ name, version, title: metadata?.title }, {
     capabilities: {
       tools: {
@@ -153,7 +153,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
 
     if (runHeartbeat && !heartbeatRunning) {
       heartbeatRunning = true;
-      startHeartbeat(server);
+      void heartbeatReady.then(() => startHeartbeat(server)).catch(errorsDebug);
     }
 
     const requestContext: CallToolRequestContext = {
