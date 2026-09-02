@@ -17,7 +17,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders, resolveOutputDir } from '../src/config.js';
 import type { Config } from '../config.js';
 
@@ -108,6 +108,31 @@ describe('Config', () => {
       expect(config.browser.browserName).toBe('webkit');
       expect(config.timeouts.navigationTimeout).toBe(60000);
       expect(config.saveTrace).toBe(false);
+    });
+  });
+
+  describe('sandbox defaults', () => {
+    const savedSandbox = process.env.PLAYWRIGHT_MCP_SANDBOX;
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      if (savedSandbox === undefined)
+        delete process.env.PLAYWRIGHT_MCP_SANDBOX;
+      else
+        process.env.PLAYWRIGHT_MCP_SANDBOX = savedSandbox;
+    });
+
+    it('disables only the default sandbox for bundled Chromium on Linux', async () => {
+      vi.spyOn(os, 'platform').mockReturnValue('linux');
+
+      expect((await resolveCLIConfig({ browser: 'chromium' })).browser.launchOptions.chromiumSandbox).toBe(false);
+      expect((await resolveCLIConfig({ browser: 'chrome' })).browser.launchOptions.chromiumSandbox).toBe(true);
+      expect((await resolveConfig({
+        browser: { launchOptions: { channel: 'chromium', chromiumSandbox: true } },
+      })).browser.launchOptions.chromiumSandbox).toBe(true);
+
+      process.env.PLAYWRIGHT_MCP_SANDBOX = 'true';
+      expect((await resolveCLIConfig({ browser: 'chromium' })).browser.launchOptions.chromiumSandbox).toBe(true);
     });
   });
 
