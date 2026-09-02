@@ -45,7 +45,9 @@ export class VSCodeBrowserContextFactory implements BrowserContextFactory {
     // already refuses to do. Checked before connecting, so the contradiction
     // fails fast without ever reaching the browser.
     assertStorageStateDoesNotResetUserProfile(this._config, vscodeProfileConflictRemedy);
-    let launchOptions: any = this._config.browser.launchOptions;
+    let launchOptions: Record<string, unknown> = { ...this._config.browser.launchOptions };
+    if (this._config.browser.chromiumSandboxDefaulted)
+      delete launchOptions.chromiumSandbox;
     if (this._config.browser.userDataDir) {
       launchOptions = {
         ...launchOptions,

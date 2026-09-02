@@ -70,7 +70,6 @@ const defaultConfig: FullConfig = {
     launchOptions: {
       channel: 'chrome',
       headless: os.platform() === 'linux' && !process.env.DISPLAY,
-      chromiumSandbox: true,
     },
     contextOptions: {
       viewport: null,
@@ -94,6 +93,7 @@ type BrowserUserConfig = NonNullable<Config['browser']>;
 export type FullConfig = Config & {
     browser: Omit<BrowserUserConfig, 'browserName'> & {
         browserName: 'chromium' | 'firefox' | 'webkit';
+        chromiumSandboxDefaulted?: boolean;
         launchOptions: NonNullable<BrowserUserConfig['launchOptions']>;
         contextOptions: NonNullable<BrowserUserConfig['contextOptions']>;
     },
@@ -110,7 +110,7 @@ export async function resolveConfig(config: Config): Promise<FullConfig> {
 export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConfig> {
   const configInFile = await loadConfig(cliOptions.config);
   const envOptions = cliOptionsFromEnv();
-  const envOverrides = configFromCLIOptions(envOptions);
+  const envOverrides = configFromCLIOptions(envOptions, true);
   const cliOverrides = configFromCLIOptions(cliOptions);
   const result = mergeCLIConfigSources(configInFile, envOverrides, cliOverrides);
   return validateResolvedConfig(applyMobileConfig(result, configInFile, envOverrides, cliOverrides, envOptions, cliOptions));
@@ -128,6 +128,13 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
 function validateResolvedConfig(config: FullConfig): FullConfig {
   if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
     throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
+  if (config.browser.browserName === 'chromium' && !config.browser.remoteEndpoint && config.browser.launchOptions.chromiumSandbox === undefined) {
+    const { channel, executablePath } = config.browser.launchOptions;
+    config.browser.launchOptions.chromiumSandbox = os.platform() !== 'linux'
+      || executablePath !== undefined
+      || (channel !== undefined && channel !== 'chromium' && channel !== 'chrome-for-testing');
+    config.browser.chromiumSandboxDefaulted = true;
+  }
   return config;
 }
 
@@ -168,7 +175,7 @@ function applyMobileConfig(resolved: FullConfig, configInFile: Config, envOverri
   return mergeCLIConfigSources(configInFile, envOverrides, cliOverrides, mobileOverride, source);
 }
 
-function configFromCLIOptions(cliOptions: CLIOptions): Config {
+function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = false): Config {
   let browserName: 'chromium' | 'firefox' | 'webkit' | undefined;
   let channel: string | undefined;
   switch (cliOptions.browser) {
@@ -199,9 +206,10 @@ function configFromCLIOptions(cliOptions: CLIOptions): Config {
     headless: cliOptions.headless,
   };
 
-  // --no-sandbox was passed, disable the sandbox
-  if (cliOptions.sandbox === false)
-    launchOptions.chromiumSandbox = false;
+  // Commander reports true when --no-sandbox is omitted, while true from the
+  // environment is explicit and must override the platform default.
+  if (cliOptions.sandbox === false || (sandboxTrueIsExplicit && cliOptions.sandbox === true))
+    launchOptions.chromiumSandbox = cliOptions.sandbox;
 
   if (cliOptions.proxyServer) {
     launchOptions.proxy = {
