@@ -191,11 +191,11 @@ class SessionStore {
     } catch (error) {
       if (error instanceof BodyTooLargeError) {
         // The cap tripped before the body was buffered; the request stream is
-        // already destroyed, so close the connection instead of draining the
-        // rest of the upload.
+        // drained without retaining more bytes so the 413 is not lost to a
+        // connection reset while the client is still uploading.
+        req.resume();
         res.statusCode = 413;
         res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Connection', 'close');
         res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32600, message: `Request body exceeded maximum size of ${maxJsonBodyBytes} bytes` }, id: null }));
         return;
       }
@@ -298,12 +298,11 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
     throw new BodyTooLargeError();
   const chunks: Buffer[] = [];
   let totalBytes = 0;
-  for await (const chunk of req) {
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     totalBytes += buffer.length;
-    // Thrown mid-iteration this destroys the request stream, so reading
-    // stops at the cap instead of draining an arbitrarily large upload;
-    // the 413 response still goes out on the not-yet-destroyed response.
+    // Leave the request intact so the caller can discard the rest without
+    // retaining it; destroying unread input can reset the 413 response.
     if (totalBytes > maxJsonBodyBytes)
       throw new BodyTooLargeError();
     chunks.push(buffer);
