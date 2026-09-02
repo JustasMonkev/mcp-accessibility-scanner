@@ -17,7 +17,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders, resolveOutputDir } from '../src/config.js';
 import type { Config } from '../config.js';
 
@@ -114,6 +114,10 @@ describe('Config', () => {
   describe('sandbox defaults', () => {
     const savedSandbox = process.env.PLAYWRIGHT_MCP_SANDBOX;
 
+    beforeEach(() => {
+      delete process.env.PLAYWRIGHT_MCP_SANDBOX;
+    });
+
     afterEach(() => {
       vi.restoreAllMocks();
       if (savedSandbox === undefined)
@@ -127,6 +131,10 @@ describe('Config', () => {
 
       expect((await resolveCLIConfig({ browser: 'chromium' })).browser.launchOptions.chromiumSandbox).toBe(false);
       expect((await resolveCLIConfig({ browser: 'chrome' })).browser.launchOptions.chromiumSandbox).toBe(true);
+      expect((await resolveCLIConfig({ browser: 'chromium', executablePath: '/usr/bin/chromium' })).browser.launchOptions.chromiumSandbox).toBe(true);
+      expect((await resolveConfig({
+        browser: { browserName: 'chromium', remoteEndpoint: 'ws://remote.example', launchOptions: { channel: 'chromium' } },
+      })).browser.launchOptions.chromiumSandbox).toBeUndefined();
       expect((await resolveConfig({
         browser: { launchOptions: { channel: 'chromium', chromiumSandbox: true } },
       })).browser.launchOptions.chromiumSandbox).toBe(true);

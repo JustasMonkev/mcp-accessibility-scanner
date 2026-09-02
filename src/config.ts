@@ -127,9 +127,10 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
 function validateResolvedConfig(config: FullConfig): FullConfig {
   if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
     throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
-  if (config.browser.browserName === 'chromium' && config.browser.launchOptions.chromiumSandbox === undefined) {
-    const { channel } = config.browser.launchOptions;
+  if (config.browser.browserName === 'chromium' && !config.browser.remoteEndpoint && config.browser.launchOptions.chromiumSandbox === undefined) {
+    const { channel, executablePath } = config.browser.launchOptions;
     config.browser.launchOptions.chromiumSandbox = os.platform() !== 'linux'
+      || executablePath !== undefined
       || (channel !== undefined && channel !== 'chromium' && channel !== 'chrome-for-testing');
   }
   return config;
