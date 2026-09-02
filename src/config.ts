@@ -93,6 +93,7 @@ type BrowserUserConfig = NonNullable<Config['browser']>;
 export type FullConfig = Config & {
     browser: Omit<BrowserUserConfig, 'browserName'> & {
         browserName: 'chromium' | 'firefox' | 'webkit';
+        chromiumSandboxDefaulted?: boolean;
         launchOptions: NonNullable<BrowserUserConfig['launchOptions']>;
         contextOptions: NonNullable<BrowserUserConfig['contextOptions']>;
     },
@@ -132,6 +133,7 @@ function validateResolvedConfig(config: FullConfig): FullConfig {
     config.browser.launchOptions.chromiumSandbox = os.platform() !== 'linux'
       || executablePath !== undefined
       || (channel !== undefined && channel !== 'chromium' && channel !== 'chrome-for-testing');
+    config.browser.chromiumSandboxDefaulted = true;
   }
   return config;
 }

@@ -2445,6 +2445,23 @@ describe('VSCodeBrowserContextFactory', () => {
     return { chromium: { connect: vi.fn().mockResolvedValue(browser) } } as any;
   }
 
+  it('lets the VS Code endpoint choose the sandbox default but forwards explicit values', async () => {
+    const browser = createMockBrowser(createMockBrowserContext());
+    const vscodePlaywright = createVSCodePlaywright(browser);
+
+    for (const [config, expected] of [
+      [await resolveConfig({}), undefined],
+      [await resolveConfig({ browser: { launchOptions: { chromiumSandbox: false } } }), false],
+      [await resolveConfig({ browser: { launchOptions: { chromiumSandbox: true } } }), true],
+    ] as const) {
+      const factory = new VSCodeBrowserContextFactory(config, vscodePlaywright, 'ws://127.0.0.1:1234/');
+      await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
+      const endpoint = new URL(vscodePlaywright.chromium.connect.mock.calls.at(-1)[0]);
+      const launchOptions = JSON.parse(endpoint.searchParams.get('launch-options')!);
+      expect(launchOptions.chromiumSandbox).toBe(expected);
+    }
+  });
+
   it('rejects a storage state aimed at a user-supplied profile before connecting', async () => {
     // The configured --user-data-dir is forwarded to the extension's launch,
     // so the reused context lives inside the user's own profile — the same
