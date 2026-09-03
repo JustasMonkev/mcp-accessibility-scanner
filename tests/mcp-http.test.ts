@@ -16,6 +16,7 @@
 
 import { EventEmitter } from 'events';
 import http from 'http';
+import net, { type Socket } from 'net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
@@ -85,13 +86,14 @@ describe('mcp http transport hardening', () => {
     return { server, port: address.port };
   }
 
-  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string, sessionId?: string, accept?: string, protocolVersion?: string, body?: string, contentLength?: number }) {
+  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string, sessionId?: string, accept?: string, protocolVersion?: string, body?: string, contentLength?: number, agent?: http.Agent, onSocket?: (socket: Socket) => void }) {
     const response = await new Promise<{ statusCode: number, headers: http.IncomingHttpHeaders, body: string }>((resolve, reject) => {
       const req = http.request({
         host: '127.0.0.1',
         port,
         path: options?.path ?? '/mcp',
         method: options?.method ?? 'GET',
+        agent: options?.agent,
         headers: {
           ...(options?.hostHeader ? { host: options.hostHeader } : {}),
           ...(options?.origin ? { origin: options.origin } : {}),
@@ -112,10 +114,23 @@ describe('mcp http transport hardening', () => {
           });
         });
       });
+      if (options?.onSocket)
+        req.once('socket', options.onSocket);
       req.on('error', reject);
       req.end(options?.body);
     });
     return response;
+  }
+
+  function expectCompleteRaw413(response: string) {
+    const separator = response.indexOf('\r\n\r\n');
+    expect(separator).toBeGreaterThan(0);
+    const headers = response.slice(0, separator);
+    const body = response.slice(separator + 4);
+    expect(headers).toMatch(/^HTTP\/1\.1 413/);
+    expect(headers).toMatch(/\r\nConnection: close\r\n/i);
+    expect(Buffer.byteLength(body)).toBe(Number(headers.match(/\r\nContent-Length: (\d+)\r\n/i)?.[1]));
+    expect(JSON.parse(body)).toMatchObject({ error: { code: -32600 } });
   }
 
   // Opens a request and resolves as soon as response headers arrive, then
@@ -455,46 +470,188 @@ describe('mcp http transport hardening', () => {
       // enforce the message-size cap itself: without one, a single large (or
       // slow) request holds arbitrary memory, multiplied by concurrency.
       const { port } = await startServer(probeFactory);
-
-      const response = await new Promise<{ statusCode: number, body: string }>((resolve, reject) => {
-        const req = http.request({
-          host: '127.0.0.1',
-          port,
-          path: '/mcp',
-          method: 'POST',
-          headers: { 'content-type': 'application/json', 'accept': 'application/json, text/event-stream' },
-        }, res => {
-          const chunks: Buffer[] = [];
-          res.on('data', chunk => chunks.push(chunk));
-          const settle = () => resolve({ statusCode: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') });
-          res.on('end', settle);
-          res.on('close', settle);
-        });
-        // The server destroys the request at the cap, so the client may see
-        // EPIPE/ECONNRESET while still uploading — after the 413 arrived.
-        // Promise settle-once semantics ignore the late rejection.
-        req.on('error', reject);
-        // Stream 11 MB chunked (no Content-Length) to exercise the byte
-        // counter, not the header short-circuit.
-        const filler = Buffer.alloc(64 * 1024, 'a');
-        let sent = 0;
-        req.write('{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"pad":"');
-        const pump = () => {
-          while (sent < 11 * 1024 * 1024) {
-            sent += filler.length;
-            if (!req.write(filler)) {
-              req.once('drain', pump);
+      const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+      let firstSocket: Socket | undefined;
+      try {
+        const response = await new Promise<{ statusCode: number, body: string }>((resolve, reject) => {
+          let responseResult: { statusCode: number, body: string } | undefined;
+          let responseStarted = false;
+          let requestClosed = false;
+          const maybeResolve = () => {
+            if (responseResult && requestClosed)
+              resolve(responseResult);
+          };
+          const req = http.request({
+            host: '127.0.0.1',
+            port,
+            path: '/mcp',
+            method: 'POST',
+            agent,
+            headers: { 'content-type': 'application/json', 'accept': 'application/json, text/event-stream' },
+          }, res => {
+            responseStarted = true;
+            const chunks: Buffer[] = [];
+            res.on('data', chunk => chunks.push(chunk));
+            res.on('end', () => {
+              if (!res.complete) {
+                reject(new Error('413 response ended before it was complete'));
+                return;
+              }
+              responseResult = { statusCode: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') };
+              maybeResolve();
+            });
+            res.on('error', reject);
+          });
+          req.once('socket', socket => firstSocket = socket);
+          req.on('error', reject);
+          req.on('close', () => {
+            if (!responseStarted) {
+              reject(new Error('Request closed before the 413 response started'));
               return;
             }
-          }
-          req.end('"}');
-        };
-        pump();
-      });
+            requestClosed = true;
+            maybeResolve();
+          });
+          // Stream 11 MB chunked (no Content-Length) to exercise the byte
+          // counter, not the header short-circuit.
+          const filler = Buffer.alloc(64 * 1024, 'a');
+          let sent = 0;
+          req.write('{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"pad":"');
+          const pump = () => {
+            while (sent < 11 * 1024 * 1024) {
+              sent += filler.length;
+              if (!req.write(filler)) {
+                req.once('drain', pump);
+                return;
+              }
+            }
+            req.end('"}');
+          };
+          pump();
+        });
 
-      expect(response.statusCode).toBe(413);
-      expect(JSON.parse(response.body)).toMatchObject({ error: { code: -32600 } });
+        expect(response.statusCode).toBe(413);
+        expect(JSON.parse(response.body)).toMatchObject({ error: { code: -32600 } });
+        expect(firstSocket).toBeDefined();
+
+        let followUpSocket: Socket | undefined;
+        const followUp = await sendRequest(port, {
+          method: 'POST',
+          agent,
+          onSocket: socket => followUpSocket = socket,
+          accept: 'application/json, text/event-stream',
+          body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+        });
+        resultOf(followUp, 2);
+        expect(followUpSocket).toBe(firstSocket);
+      } finally {
+        agent.destroy();
+      }
     });
+
+    it('delivers 413 before closing a large chunked upload', async () => {
+      const { server, port } = await startServer(probeFactory);
+      const requestCompleted = new Promise<boolean>(resolve => {
+        server.once('request', request => request.once('close', () => resolve(request.complete)));
+      });
+      const client = net.connect(port, '127.0.0.1');
+      try {
+        const responseChunks: Buffer[] = [];
+        const response = new Promise<string>((resolve, reject) => {
+          client.on('data', chunk => responseChunks.push(chunk));
+          client.once('error', reject);
+          client.once('close', () => resolve(Buffer.concat(responseChunks).toString('utf8')));
+        });
+        client.pause();
+        await new Promise<void>((resolve, reject) => {
+          const onError = (error: Error) => reject(error);
+          client.once('error', onError);
+          client.once('connect', () => {
+            client.off('error', onError);
+            resolve();
+          });
+        });
+        client.write(`POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n`);
+        const filler = Buffer.alloc(64 * 1024, 'a');
+        const chunkHeader = `${filler.length.toString(16)}\r\n`;
+        for (let sent = 0; sent < 21 * 1024 * 1024; sent += filler.length) {
+          client.write(chunkHeader);
+          client.write(filler);
+          client.write('\r\n');
+        }
+        client.end('0\r\n\r\n');
+        setTimeout(() => client.resume(), 100);
+
+        expectCompleteRaw413(await response);
+        expect(await requestCompleted).toBe(true);
+      } finally {
+        client.destroy();
+      }
+    });
+
+    it('closes a chunked upload at the exact discard limit', async () => {
+      const { server, port } = await startServer(probeFactory);
+      const requestCompleted = new Promise<boolean>(resolve => {
+        server.once('request', request => request.once('close', () => resolve(request.complete)));
+      });
+      const client = net.connect(port, '127.0.0.1');
+      try {
+        await new Promise<void>((resolve, reject) => {
+          client.once('error', reject);
+          client.once('connect', resolve);
+        });
+        const responseChunks: Buffer[] = [];
+        const response = new Promise<string>((resolve, reject) => {
+          client.on('data', chunk => responseChunks.push(chunk));
+          client.once('error', reject);
+          client.once('close', () => resolve(Buffer.concat(responseChunks).toString('utf8')));
+        });
+        const writeChunk = async (chunk: Buffer) => {
+          if (!client.write(`${chunk.length.toString(16)}\r\n`))
+            await new Promise<void>(resolve => client.once('drain', resolve));
+          if (!client.write(chunk))
+            await new Promise<void>(resolve => client.once('drain', resolve));
+          if (!client.write('\r\n'))
+            await new Promise<void>(resolve => client.once('drain', resolve));
+        };
+        client.write(`POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n`);
+        await writeChunk(Buffer.alloc(10 * 1024 * 1024, 'a'));
+        await writeChunk(Buffer.from('a'));
+        await writeChunk(Buffer.alloc(10 * 1024 * 1024, 'a'));
+        client.end('0\r\n\r\n');
+
+        expectCompleteRaw413(await response);
+        expect(await requestCompleted).toBe(true);
+      } finally {
+        client.destroy();
+      }
+    }, 3000);
+
+    it('delivers 413 when an oversized chunked upload stalls', async () => {
+      const { port } = await startServer(probeFactory);
+      const client = net.connect(port, '127.0.0.1');
+      try {
+        await new Promise<void>((resolve, reject) => {
+          client.once('error', reject);
+          client.once('connect', resolve);
+        });
+        const responseChunks: Buffer[] = [];
+        const response = new Promise<string>((resolve, reject) => {
+          client.on('data', chunk => responseChunks.push(chunk));
+          client.once('error', reject);
+          client.once('close', () => resolve(Buffer.concat(responseChunks).toString('utf8')));
+        });
+        client.write(`POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n`);
+        const body = Buffer.alloc(10 * 1024 * 1024 + 1, 'a');
+        client.write(`${body.length.toString(16)}\r\n`);
+        client.write(body);
+        client.write('\r\n');
+
+        expectCompleteRaw413(await response);
+      } finally {
+        client.destroy();
+      }
+    }, 4000);
 
     it('rejects a declared oversize from its Content-Length without reading the body', async () => {
       const { port } = await startServer(probeFactory);
@@ -508,6 +665,7 @@ describe('mcp http transport hardening', () => {
       });
 
       expect(response.statusCode).toBe(413);
+      expect(response.headers.connection).toBe('close');
       expect(JSON.parse(response.body)).toMatchObject({ error: { code: -32600 } });
     });
 

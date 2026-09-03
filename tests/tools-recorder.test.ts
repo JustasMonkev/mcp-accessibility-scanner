@@ -29,6 +29,7 @@ describe('Recorder tools', () => {
   beforeEach(() => {
     page = { bringToFront: vi.fn().mockResolvedValue(undefined) };
     context = {
+      config: {},
       ensureTab: vi.fn().mockResolvedValue({ page }),
       startRecordingOnCurrentTab: vi.fn().mockResolvedValue(undefined),
       stopRecording: vi.fn().mockResolvedValue([]),
