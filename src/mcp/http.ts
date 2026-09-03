@@ -190,13 +190,41 @@ class SessionStore {
       body = await readJsonBody(req);
     } catch (error) {
       if (error instanceof BodyTooLargeError) {
-        // The cap tripped before the body was buffered; the request stream is
-        // drained without retaining more bytes so the 413 is not lost to a
-        // connection reset while the client is still uploading.
-        req.resume();
+        // Chunked bodies get one bounded discard window. A completed request
+        // stays reusable; a declared or still-incomplete request is closed.
+        const reusable = req.headers['content-length'] === undefined && await discardRequestBody(req);
+        if (res.destroyed)
+          return;
         res.statusCode = 413;
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32600, message: `Request body exceeded maximum size of ${maxJsonBodyBytes} bytes` }, id: null }));
+        const responseBody = JSON.stringify({ jsonrpc: '2.0', error: { code: -32600, message: `Request body exceeded maximum size of ${maxJsonBodyBytes} bytes` }, id: null });
+        if (reusable) {
+          res.end(responseBody);
+          return;
+        }
+        res.setHeader('Connection', 'close');
+        res.setHeader('Content-Length', Buffer.byteLength(responseBody));
+        let closed = false;
+        const closeResponse = (destroyRequest: boolean) => {
+          if (closed)
+            return;
+          closed = true;
+          clearTimeout(closeTimer);
+          req.off('end', onRequestEnd);
+          res.end();
+          if (destroyRequest)
+            req.destroy();
+        };
+        const onRequestEnd = () => closeResponse(false);
+        const closeTimer = setTimeout(() => closeResponse(true), 1000);
+        closeTimer.unref();
+        req.once('end', onRequestEnd);
+        res.once('close', () => {
+          clearTimeout(closeTimer);
+          req.off('end', onRequestEnd);
+        });
+        res.write(responseBody);
+        req.resume();
         return;
       }
       // The stream is consumed, so the transport could no longer produce its
@@ -290,6 +318,35 @@ class BodyTooLargeError extends Error {
   constructor() {
     super(`Request body exceeded maximum size of ${maxJsonBodyBytes} bytes`);
   }
+}
+
+function discardRequestBody(req: http.IncomingMessage): Promise<boolean> {
+  if (req.destroyed)
+    return Promise.resolve(false);
+  if (req.complete)
+    return Promise.resolve(true);
+  return new Promise(resolve => {
+    let discardedBytes = 0;
+    const finish = (reusable: boolean) => {
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('close', onClose);
+      if (!reusable)
+        req.pause();
+      resolve(reusable);
+    };
+    const onData = (chunk: Buffer) => {
+      discardedBytes += chunk.length;
+      if (discardedBytes >= maxJsonBodyBytes)
+        finish(false);
+    };
+    const onEnd = () => finish(true);
+    const onClose = () => finish(false);
+    req.on('data', onData);
+    req.once('end', onEnd);
+    req.once('close', onClose);
+    req.resume();
+  });
 }
 
 async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
