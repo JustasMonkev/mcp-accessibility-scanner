@@ -1,18 +1,18 @@
-import fs from 'node:fs';
 import { z } from 'zod';
 import type * as playwright from 'playwright';
 import { defineTabTool } from './tool.js';
-import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
+import { writeJsonReport } from './report.js';
+import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 import {
   assertRuleOptionsValid,
   axeRuleSchemaShape,
+  axeScanOptions,
+  axeScanSchemaShape,
   axeScopeSchemaShape,
-  axeTagValues,
-  defaultAxeTags,
   prepareAxeResults,
   runAxeScan,
   summarizeAxeViolations,
-  type AxeTag,
+  unscannedFrameLines,
   type AxeViolation,
 } from './axe.js';
 
@@ -88,12 +88,10 @@ const defaultVariants: z.output<typeof variantSchema>[] = [
 
 const scanPageMatrixSchema = z.object({
   variants: z.array(variantSchema).min(1).optional().describe('Variant list to run. Defaults to baseline/mobile/desktop/forced-colors/reduced-motion/zoom-200.'),
-  violationsTag: z.array(z.enum(axeTagValues)).min(1).default([...defaultAxeTags]).describe('Axe tags to include in scans.'),
   includeIncomplete: z.boolean().default(true).describe('Also collect Axe "incomplete" results per variant — checks Axe could not decide automatically.'),
-  maxNodesPerViolation: z.number().int().min(1).max(50).default(10).describe('Maximum nodes kept per violation in the report.'),
   waitAfterApplyMs: z.number().int().min(0).max(5000).default(250).describe('Wait after applying each variant before scanning.'),
   reloadBetweenVariants: z.boolean().default(false).describe('Reload page between variants.'),
-  reportFile: z.string().optional().describe('Output JSON report file name.'),
+  ...axeScanSchemaShape,
   ...axeScopeSchemaShape,
   ...axeRuleSchemaShape,
 });
@@ -218,13 +216,7 @@ const scanPageMatrix = defineTabTool({
 
         await tab.waitForTimeout(params.waitAfterApplyMs);
 
-        const axeResult = await runAxeScan(tab.page, {
-          tags: params.violationsTag as AxeTag[],
-          rules: params.withRules,
-          disableRules: params.disableRules,
-          include: params.includeSelectors,
-          exclude: params.excludeSelectors,
-        });
+        const axeResult = await runAxeScan(tab.page, axeScanOptions(params));
         const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
         const nodeCountByRuleId = countNodesByRule(violations.deduped);
 
@@ -297,25 +289,15 @@ const scanPageMatrix = defineTabTool({
       variants: variantResults,
     };
 
-    const reportFileName = sanitizeForFilePath(params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`);
-    const reportPath = await tab.context.outputFile(reportFileName);
-    await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
-    const reportResourceLink = response.addFileResourceLink(reportPath, {
+    const reportResource = await writeJsonReport(tab.context, response, params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`, report, {
       name: 'scan-page-matrix-report',
       title: 'Scan page matrix JSON report',
       description: 'JSON report containing per-variant Axe results and baseline deltas.',
-      mimeType: 'application/json',
     });
     response.setStructuredContent({
       kind: 'scan_page_matrix',
       version: 'v2',
-      report: {
-        path: reportPath,
-        uri: reportResourceLink.uri,
-        name: reportResourceLink.name,
-        title: reportResourceLink.title ?? null,
-        mimeType: reportResourceLink.mimeType ?? null,
-      },
+      report: reportResource,
       page: {
         url: tab.page.url(),
       },
@@ -337,18 +319,22 @@ const scanPageMatrix = defineTabTool({
         newViolationIds: result.diffFromBaseline?.newViolationIds ?? null,
         resolvedViolationIds: result.diffFromBaseline?.resolvedViolationIds ?? null,
         changedRuleIds: result.diffFromBaseline ? Object.keys(result.diffFromBaseline.changedCounts) : null,
-        reportUri: reportResourceLink.uri,
+        reportUri: reportResource.uri,
       })),
     });
 
     const variantsWithUnscannedFrames = variantResults.filter(result => result.unscannedFrames.length);
     const lines = [
-      ...(variantsWithUnscannedFrames.length ? [
-        `WARNING: Axe could not be installed in frames on ${variantsWithUnscannedFrames.length} variant(s); their contents were not scanned and contribute no findings below.`,
-        ...variantsWithUnscannedFrames.map(result => `- ${result.name}: ${result.unscannedFrames.join(', ')}`),
-        'Baseline deltas are reported as "n/a" wherever the two scans did not cover the same documents.',
-        '',
-      ] : []),
+      ...unscannedFrameLines(
+          variantsWithUnscannedFrames.map(result => `${result.name}: ${result.unscannedFrames.join(', ')}`),
+          {
+            unit: 'variant(s)',
+            trailingLines: [
+              'Baseline deltas are reported as "n/a" wherever the two scans did not cover the same documents.',
+              '',
+            ],
+          }
+      ),
       'Variant | Violations | Nodes | Incomplete | Top new vs baseline',
       '--- | --- | --- | --- | ---',
       ...variantResults.map(result => {
@@ -366,7 +352,7 @@ const scanPageMatrix = defineTabTool({
         return `${result.name} | ${result.summary.totalRules} | ${result.summary.totalNodes} | ${incomplete} | ${topNew}`;
       }),
       '',
-      `JSON report: ${reportPath}`,
+      `JSON report: ${reportResource.path}`,
     ];
     response.addCode('// Applied viewport/media/zoom variants and compared Axe deltas against baseline.');
     response.addResult(lines.join('\n'));

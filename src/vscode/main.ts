@@ -18,9 +18,24 @@ import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import * as mcpServer from '../mcp/server.js';
 import { BrowserServerBackend } from '../browserServerBackend.js';
 import { VSCodeBrowserContextFactory } from './browserContextFactory.js';
+import { validateBrowserConnectConnectionString, validateBrowserConnectLib } from './validation.js';
 import type { FullConfig } from '../config.js';
 
 async function main(config: FullConfig, connectionString: string, lib: string) {
+  // Defense-in-depth: the child must not trust parent argv blindly — the
+  // host already validated both values before spawning (see validation.ts).
+  const libError = validateBrowserConnectLib(lib);
+  if (libError) {
+    // eslint-disable-next-line no-console
+    console.error(`browser_connect: ${libError}`);
+    process.exit(1);
+  }
+  const connectionError = validateBrowserConnectConnectionString(connectionString);
+  if (connectionError) {
+    // eslint-disable-next-line no-console
+    console.error(`browser_connect: ${connectionError}`);
+    process.exit(1);
+  }
   const playwright = await import(lib).then(mod => mod.default ?? mod);
   const factory = new VSCodeBrowserContextFactory(config, playwright, connectionString);
   await mcpServer.connect(

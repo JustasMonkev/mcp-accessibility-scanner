@@ -1,6 +1,6 @@
-import fs from 'node:fs';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
+import { writeJsonReport } from './report.js';
 import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
 
 type PressableKey = 'Tab' | 'Shift+Tab' | 'Enter';
@@ -125,6 +125,11 @@ function isLikelySkipLink(point: FocusPoint): boolean {
 
 // WCAG 2.2 SC 2.5.8 Target Size (Minimum), in CSS pixels.
 const MIN_TARGET_SIZE_PX = 24;
+
+// Payload caps for the in-page focus probe; passed as evaluate args because
+// the serialized function cannot close over module scope.
+const maxNeighborTargets = 32;
+const maxFocusTextLength = 200;
 
 function rectCenter(rect: TargetRect) {
   return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
@@ -284,7 +289,7 @@ export async function runKeyboardFocusAudit(
         skipLinkActivation = {
           attempted: true,
           hashChanged,
-          focusChanged: buildFingerprint(beforeActivation) !== buildFingerprint(afterActivation),
+          focusChanged: beforeActivation.fingerprint !== buildFingerprint(afterActivation),
           scrollChanged: beforeActivation.scrollY !== afterActivation.scrollY || beforeActivation.scrollX !== afterActivation.scrollX,
           navigationOccurred,
           urlBefore,
@@ -374,8 +379,9 @@ const auditKeyboard = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
+    const { reportFile, ...auditOptions } = params;
     const getActiveElementInfo = async (): Promise<FocusPoint> => {
-      return await tab.page.evaluate(() => {
+      return await tab.page.evaluate(({ checkTargetSize, checkFocusObscured, minTargetSize, maxNeighborTargets, maxTextLength }) => {
         const current = document.activeElement as HTMLElement | null;
         const scrollX = window.scrollX;
         const scrollY = window.scrollY;
@@ -401,7 +407,7 @@ const auditKeyboard = defineTabTool({
 
         const role = current.getAttribute('role') || current.tagName.toLowerCase();
         const labelledBy = current.getAttribute('aria-labelledby');
-        const text = current.textContent?.trim().slice(0, 200) || null;
+        const text = current.textContent?.trim().slice(0, maxTextLength) || null;
         const name = current.getAttribute('aria-label')
           || labelledBy && document.getElementById(labelledBy)?.textContent?.trim()
           || current.getAttribute('title')
@@ -420,8 +426,6 @@ const auditKeyboard = defineTabTool({
           && rect.top <= window.innerHeight
           && rect.left <= window.innerWidth;
 
-        // Kept in sync with MIN_TARGET_SIZE_PX; page.evaluate cannot close over it.
-        const minTargetSize = 24;
         // ponytail: target size comes from the layout box, so a target whose visible
         // area is cut down by an overflow or clip-path ancestor is under-reported.
         // Intersecting with clipping ancestors was measured against ordinary markup and
@@ -459,7 +463,7 @@ const auditKeyboard = defineTabTool({
         const inlineTarget = isPointerTarget && style.display.startsWith('inline') && hasSentenceText;
 
         const neighborTargets: { x: number; y: number; width: number; height: number }[] = [];
-        if (isPointerTarget && (rect.width < minTargetSize || rect.height < minTargetSize)) {
+        if (checkTargetSize && isPointerTarget && (rect.width < minTargetSize || rect.height < minTargetSize)) {
           for (const candidate of document.querySelectorAll<HTMLElement>(targetSelector)) {
             if (candidate === current)
               continue;
@@ -477,7 +481,7 @@ const auditKeyboard = defineTabTool({
             neighborTargets.push({ x: other.x, y: other.y, width: other.width, height: other.height });
             // ponytail: payload cap. A cluster denser than 32 neighbors within 48px
             // would under-report rather than over-report; raise the cap if that appears.
-            if (neighborTargets.length >= 32)
+            if (neighborTargets.length >= maxNeighborTargets)
               break;
           }
         }
@@ -490,7 +494,7 @@ const auditKeyboard = defineTabTool({
         // SC 2.4.11 applies to anything that receives focus, so this is deliberately not
         // gated on isPointerTarget: contenteditable, iframes and tabindex-only widgets
         // are sampled too.
-        if (rect.width > 0 && rect.height > 0 && clipRight >= clipLeft && clipBottom >= clipTop) {
+        if (checkFocusObscured && rect.width > 0 && rect.height > 0 && clipRight >= clipLeft && clipBottom >= clipTop) {
           const inset = (low: number, high: number, value: number) => Math.min(Math.max(value, low), high);
           const samples: [number, number][] = [
             [inset(clipLeft, clipRight, clipLeft + 1), inset(clipTop, clipBottom, clipTop + 1)],
@@ -547,7 +551,7 @@ const auditKeyboard = defineTabTool({
 
         return {
           role,
-          name: name ? name.slice(0, 200) : null,
+          name: name ? name.slice(0, maxTextLength) : null,
           tagName: current.tagName,
           id: current.id || null,
           href: current instanceof HTMLAnchorElement ? current.href : null,
@@ -567,6 +571,12 @@ const auditKeyboard = defineTabTool({
           scrollX,
           scrollY,
         };
+      }, {
+        checkTargetSize: auditOptions.checkTargetSize,
+        checkFocusObscured: auditOptions.checkFocusObscured,
+        minTargetSize: MIN_TARGET_SIZE_PX,
+        maxNeighborTargets,
+        maxTextLength: maxFocusTextLength,
       });
     };
 
@@ -576,7 +586,6 @@ const auditKeyboard = defineTabTool({
       return fileName;
     };
 
-    const { reportFile, ...auditOptions } = params;
     const result = await runKeyboardFocusAudit(auditOptions, {
       pressKey: async key => {
         await tab.waitForCompletion(async () => {
@@ -608,14 +617,10 @@ const auditKeyboard = defineTabTool({
       ...result,
     };
 
-    const reportFileName = sanitizeForFilePath(reportFile ?? `audit-keyboard-${safeIsoTimestampForFileName()}.json`);
-    const reportPath = await tab.context.outputFile(reportFileName);
-    await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
-    const reportResourceLink = response.addFileResourceLink(reportPath, {
+    const reportResource = await writeJsonReport(tab.context, response, reportFile ?? `audit-keyboard-${safeIsoTimestampForFileName()}.json`, report, {
       name: 'audit-keyboard-report',
       title: 'Audit keyboard JSON report',
       description: 'JSON report for keyboard navigation, focus, and skip-link findings.',
-      mimeType: 'application/json',
     });
     const screenshotResources = result.screenshots.map((screenshotPath, index) => {
       const link = response.addFileResourceLink(screenshotPath, {
@@ -634,13 +639,7 @@ const auditKeyboard = defineTabTool({
     });
     response.setStructuredContent({
       kind: 'audit_keyboard',
-      report: {
-        path: reportPath,
-        uri: reportResourceLink.uri,
-        name: reportResourceLink.name,
-        title: reportResourceLink.title ?? null,
-        mimeType: reportResourceLink.mimeType ?? null,
-      },
+      report: reportResource,
       page: {
         url: tab.page.url(),
       },
@@ -658,7 +657,7 @@ const auditKeyboard = defineTabTool({
         screenshotCount: result.screenshots.length,
       },
       screenshots: screenshotResources,
-      reportUri: reportResourceLink.uri,
+      reportUri: reportResource.uri,
     });
 
     const focusVisibilityPreview = result.focusVisibilityIssues.slice(0, 10).map(stop => (
@@ -695,7 +694,7 @@ const auditKeyboard = defineTabTool({
       ...(focusObscuredPreview.length ? focusObscuredPreview : ['- None']),
       ...(result.screenshots.length ? ['', 'Issue screenshots:', ...result.screenshots.map(path => `- ${path}`)] : []),
       '',
-      `JSON report: ${reportPath}`,
+      `JSON report: ${reportResource.path}`,
     ].join('\n'));
   },
 });

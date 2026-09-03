@@ -96,7 +96,24 @@ async function releaseTrace(browserContext: playwright.BrowserContext): Promise<
   if (!hub || --hub.users)
     return;
   traceHubs.delete(browserContext);
-  await browserContext.tracing.stop();
+  try {
+    await browserContext.tracing.stop();
+  } catch (originalError) {
+    // Playwright's stop sends the server-side tracingStop only after the
+    // chunk export succeeds, so a stop that fails midway (an unwritable
+    // export target, a channel hiccup) leaves tracing started while the
+    // hub above is already gone — every later session on this browser
+    // context would fail its start with "Tracing has been already started".
+    // One bare retry ends the recording; when it succeeds the session
+    // recovered (the original failure is not worth surfacing), and when it
+    // also fails the original error is the real one to report. try/catch,
+    // not a .catch() chain, so a synchronously throwing stop is retried too.
+    try {
+      await browserContext.tracing.stop();
+    } catch {
+      throw originalError;
+    }
+  }
 }
 
 type ContextOptions = {

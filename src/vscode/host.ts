@@ -33,6 +33,7 @@ import { BrowserServerBackend } from '../browserServerBackend.js';
 import { BrowserSessionRegistry } from '../browserSessions.js';
 import { assertStorageStateDoesNotResetUserProfile, contextFactory } from '../browserContextFactory.js';
 import { vscodeProfileConflictRemedy } from './browserContextFactory.js';
+import { validateBrowserConnectConnectionString, validateBrowserConnectLib } from './validation.js';
 import type { Transport } from '@modelcontextprotocol/client';
 import type { ClientVersion, ServerBackend, ServerBackendContext, Tool, CallToolResult, CallToolRequest } from '../mcp/server.js';
 
@@ -159,6 +160,25 @@ export class VSCodeProxyBackend implements ServerBackend {
       };
     }
 
+    // Strict allowlist validation before spawning: `lib` flows into a bare
+    // `import()` in the child and `connectionString` into `connect()`, so an
+    // unconstrained value gives any MCP caller server-side RCE/SSRF. Rejected
+    // here, before the working provider is torn down.
+    const libError = validateBrowserConnectLib(params.lib);
+    if (libError) {
+      return {
+        content: [{ type: 'text', text: `### Result\n${libError}\n` }],
+        isError: true,
+      };
+    }
+    const connectionError = validateBrowserConnectConnectionString(params.connectionString);
+    if (connectionError) {
+      return {
+        content: [{ type: 'text', text: `### Result\n${connectionError}\n` }],
+        isError: true,
+      };
+    }
+
     // The child's factory would only surface this on the first browser
     // operation — after the working provider has already been torn down,
     // leaving the session attached to a provider that can never create a
@@ -241,7 +261,10 @@ export class VSCodeProxyBackend implements ServerBackend {
       inputSchema: z.toJSONSchema(contextSwitchOptions) as Tool['inputSchema'],
       annotations: {
         title: 'Connect to a browser running in VS Code.',
-        readOnlyHint: true,
+        // Spawns a provider child process and tears down the working one —
+        // decidedly not read-only.
+        readOnlyHint: false,
+        destructiveHint: true,
         openWorldHint: false,
       },
     };

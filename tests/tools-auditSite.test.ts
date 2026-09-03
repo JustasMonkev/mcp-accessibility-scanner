@@ -812,6 +812,78 @@ describe('audit_site tool', () => {
     expect(report.pages.map((page: any) => page.url)).toEqual(['https://example.com/one', 'https://example.com/two']);
   });
 
+  it('rejects a sitemap URL outside the allowed crawl scope before fetching it', async () => {
+    const { context, response, temporaryTab } = createHarness({}, {
+      sitemapXmlByUrl: {
+        'https://169.254.169.254/latest/sitemap.xml': '<urlset><url><loc>https://example.com/one</loc></url></urlset>',
+      },
+    });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl: 'https://169.254.169.254/latest/sitemap.xml',
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/outside the allowed crawl scope/);
+
+    expect(temporaryTab.page.request.get).not.toHaveBeenCalled();
+    expect(context.newTab).not.toHaveBeenCalled();
+  });
+
+  it('rejects a sitemap URL with a non-http scheme', async () => {
+    const { context, response } = createHarness({});
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl: 'file:///etc/sitemap.xml',
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/Sitemap URL must use http/);
+  });
+
+  it('allows a subdomain sitemap when includeSubdomains is set', async () => {
+    const { context, response, temporaryTab } = createHarness({
+      'https://example.com/one': [],
+    }, {
+      sitemapXmlByUrl: {
+        'https://blog.example.com/sitemap.xml': '<urlset><url><loc>https://example.com/one</loc></url></urlset>',
+      },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl: 'https://blog.example.com/sitemap.xml',
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: true,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(temporaryTab.page.request.get).toHaveBeenCalledWith('https://blog.example.com/sitemap.xml', { timeout: 15000 });
+  });
+
   it('records errored pages while continuing to scan remaining URLs', async () => {
     const { context, response, crawlTab } = createHarness({
       'https://example.com/good': [],

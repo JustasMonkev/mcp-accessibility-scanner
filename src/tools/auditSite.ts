@@ -1,18 +1,18 @@
-import fs from 'node:fs';
 import RE2 from 're2';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
-import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
+import { writeJsonReport } from './report.js';
+import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 import {
   assertRuleOptionsValid,
   axeRuleSchemaShape,
+  axeScanOptions,
+  axeScanSchemaShape,
   axeScopeSchemaShape,
-  axeTagValues,
-  defaultAxeTags,
   prepareAxeResults,
   runAxeScan,
   summarizeAxeViolations,
-  type AxeTag,
+  unscannedFrameLines,
   type AxeViolation,
 } from './axe.js';
 
@@ -121,11 +121,9 @@ const auditSiteSchema = z.object({
   includeSubdomains: z.boolean().default(false).describe('Only applies when sameOriginOnly=true. When enabled, also allows subdomains of the start host (e.g. blog.example.com when start host is example.com). Ignored when sameOriginOnly=false.'),
   excludePathPatterns: z.array(z.string()).default(defaultExcludePathPatterns).describe('Regex patterns applied to pathname+query. Avoid complex nested quantifiers to prevent performance issues.'),
   ignoreQueryParams: z.array(z.string()).default(defaultIgnoreQueryParams).describe('Query parameters dropped during URL normalization.'),
-  violationsTag: z.array(z.enum(axeTagValues)).min(1).default([...defaultAxeTags]).describe('Axe tags to include in scans.'),
   includeIncomplete: z.boolean().default(true).describe('Also collect Axe "incomplete" results — checks Axe could not decide automatically. They are reported separately from violations.'),
-  maxNodesPerViolation: z.number().int().min(1).max(50).default(10).describe('Maximum nodes kept per violation in the report.'),
   waitAfterNavigationMs: z.number().int().min(0).max(5000).default(250).describe('Extra wait after navigation before scanning.'),
-  reportFile: z.string().optional().describe('Output JSON report file name.'),
+  ...axeScanSchemaShape,
   ...axeScopeSchemaShape,
   ...axeRuleSchemaShape,
 }).superRefine((value, context) => {
@@ -224,13 +222,10 @@ function normalizeUrl(rawUrl: string, baseUrl: URL, ignoredParams: Set<string>):
       url.searchParams.delete(key);
   }
 
-  const sortedParams = [...url.searchParams.entries()].sort(([first], [second]) => first.localeCompare(second));
+  const sortedParams = [...url.searchParams.entries()].sort(([first], [second]) => (first < second ? -1 : first > second ? 1 : 0));
   url.search = '';
   for (const [key, value] of sortedParams)
     url.searchParams.append(key, value);
-
-  if (url.pathname !== '/' && url.pathname.endsWith('/'))
-    url.pathname = url.pathname.slice(0, -1);
 
   return url;
 }
@@ -321,6 +316,25 @@ async function extractSitemapUrls(page: import('playwright').Page, sitemapUrl: s
   const xmlText = await response.text();
   const matches = [...xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)];
   return matches.map(match => match[1].replace('<![CDATA[', '').replace(']]>', '').trim()).filter(Boolean);
+}
+
+// The sitemap fetch goes through page.request — a server-side Node client
+// that shares the context's cookies but not its route interception — so the
+// origin policy governing crawl URLs must admit the sitemap URL too, or
+// sitemapUrl becomes a server-side request forgery vector to internal hosts
+// (cloud metadata, intranet) that the network policy never sees.
+function parseSitemapUrl(sitemapUrlInput: string, startUrl: URL, sameOriginOnly: boolean, includeSubdomains: boolean): string {
+  let sitemapUrl: URL;
+  try {
+    sitemapUrl = new URL(sitemapUrlInput, startUrl);
+  } catch {
+    throw new Error(`Invalid sitemap URL "${sitemapUrlInput}".`);
+  }
+  if (sitemapUrl.protocol !== 'http:' && sitemapUrl.protocol !== 'https:')
+    throw new Error(`Sitemap URL must use http:// or https://. Received "${sitemapUrlInput}".`);
+  if (!isAllowedByOrigin(sitemapUrl, startUrl, sameOriginOnly, includeSubdomains))
+    throw new Error(`Sitemap URL "${sitemapUrlInput}" is outside the allowed crawl scope (start origin ${startUrl.origin}). Use a sitemap on an allowed origin, or adjust sameOriginOnly/includeSubdomains deliberately.`);
+  return sitemapUrl.toString();
 }
 
 function aggregateIntoSummary(
@@ -450,6 +464,12 @@ const auditSite = defineTabTool({
         return;
       }
 
+      // Cookie matching is path-boundary aware, so the cookie scope URL keeps
+      // the trailing slash that crawl-key normalization strips below.
+      const cookieUrl = normalizedUrl.toString();
+      if (normalizedUrl.pathname !== '/' && normalizedUrl.pathname.endsWith('/'))
+        normalizedUrl.pathname = normalizedUrl.pathname.slice(0, -1);
+
       if (!isAllowedByOrigin(normalizedUrl, startUrl, params.sameOriginOnly, params.includeSubdomains)) {
         skippedUrls++;
         return;
@@ -471,11 +491,9 @@ const auditSite = defineTabTool({
         return;
       }
 
-      const cookieUrl = new URL(rawUrl, startUrl);
-      cookieUrl.hash = '';
       queue.push({
         url: normalizedUrlString,
-        cookieUrl: cookieUrl.toString(),
+        cookieUrl,
         depth,
         discoveredFrom,
       });
@@ -486,7 +504,7 @@ const auditSite = defineTabTool({
       for (const url of params.urls ?? [])
         enqueueUrl(url, 0, null);
     } else if (params.strategy === 'sitemap') {
-      const sitemapUrl = params.sitemapUrl ?? new URL('sitemap.xml', startUrl).toString();
+      const sitemapUrl = parseSitemapUrl(params.sitemapUrl ?? new URL('sitemap.xml', startUrl).toString(), startUrl, params.sameOriginOnly, params.includeSubdomains);
       const temporaryTab = await context.newTab();
       try {
         const sitemapUrls = await extractSitemapUrls(temporaryTab.page, sitemapUrl);
@@ -587,13 +605,7 @@ const auditSite = defineTabTool({
           for (const link of links)
             enqueueUrl(link, item.depth + 1, item.url);
 
-          const axeResult = await runAxeScan(crawlTab.page, {
-            tags: params.violationsTag as AxeTag[],
-            rules: params.withRules,
-            disableRules: params.disableRules,
-            include: params.includeSelectors,
-            exclude: params.excludeSelectors,
-          });
+          const axeResult = await runAxeScan(crawlTab.page, axeScanOptions(params));
           const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
 
           pageReport.status = 'scanned';
@@ -701,27 +713,17 @@ const auditSite = defineTabTool({
       sessionLosses,
     };
 
-    const reportFileName = sanitizeForFilePath(params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`);
-    const reportPath = await context.outputFile(reportFileName);
-    await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
-    const reportResourceLink = response.addFileResourceLink(reportPath, {
+    const reportResource = await writeJsonReport(context, response, params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`, report, {
       name: 'audit-site-report',
       title: 'Audit site JSON report',
       description: 'Aggregated JSON report for the site accessibility crawl.',
-      mimeType: 'application/json',
     });
     response.setStructuredContent({
       kind: 'audit_site',
       // Mirrors the JSON report version: v2 replaced the singular sessionLoss
       // object with the sessionLosses list on both surfaces.
       version: 'v2',
-      report: {
-        path: reportPath,
-        uri: reportResourceLink.uri,
-        name: reportResourceLink.name,
-        title: reportResourceLink.title ?? null,
-        mimeType: reportResourceLink.mimeType ?? null,
-      },
+      report: reportResource,
       crawl: {
         startUrl: report.metadata.startUrl,
         strategy: report.metadata.strategy,
@@ -760,11 +762,10 @@ const auditSite = defineTabTool({
     const topViolations = summarizeTopViolations(summaryViolations, 10);
     const topIncomplete = summarizeTopViolations(summaryIncomplete, 10);
     const topPages = summarizeTopPages(scannedPagesByViolations, 20);
-    const frameWarning = pagesWithUnscannedFrames.length ? [
-      `WARNING: Axe could not be installed in frames on ${pagesWithUnscannedFrames.length} page(s); their contents were not scanned and contribute no findings below.`,
-      ...pagesWithUnscannedFrames.slice(0, 10).map(page => `- ${page.url}: ${page.unscannedFrames.join(', ')}`),
-      '',
-    ] : [];
+    const frameWarning = unscannedFrameLines(
+        pagesWithUnscannedFrames.map(page => `${page.url}: ${page.unscannedFrames.join(', ')}`),
+        { unit: 'page(s)', maxEntries: 10, trailingLines: [''] }
+    );
     const sessionWarning = sessionLosses.length ? [
       ...sessionLosses.map(loss => `WARNING: cookie(s) ${loss.cookies.join(', ')} present when the crawl started disappeared while loading ${loss.url}.`),
       'If one of these was a session cookie, pages scanned after the URL that dropped it were audited as a signed-out user. Add that URL to excludePathPatterns, sign in again, and re-run.',
@@ -789,7 +790,7 @@ const auditSite = defineTabTool({
       'Per-page summary (top 20 by violation count):',
       ...(topPages.length ? topPages : ['- None']),
       '',
-      `JSON report: ${reportPath}`,
+      `JSON report: ${reportResource.path}`,
     ].join('\n'));
   },
 });

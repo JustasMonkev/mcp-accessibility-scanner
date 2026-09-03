@@ -18,10 +18,12 @@ import { applyStorageStateToReusedContext, assertStorageStateDoesNotResetUserPro
 import type { BrowserContextFactory, ClientInfo } from '../browserContextFactory.js';
 import type { FullConfig } from '../config.js';
 import type { BrowserContext } from 'playwright-core';
+import { validateBrowserConnectConnectionString } from './validation.js';
 
-// Shared with the host's browser_connect validation so the two never drift:
-// the host checks the combination before tearing down the working provider,
-// and the factory keeps the same check as the last line of defense.
+// Shared with the host's browser_connect validation (see validation.ts) so
+// the two never drift: the host checks the combination before tearing down
+// the working provider, and the factory keeps the same check as the last
+// line of defense.
 export const vscodeProfileConflictRemedy = 'Drop --user-data-dir (the state is applied inside the extension\'s own browser profile), or drop the storage state and sign in in that profile instead.';
 
 export class VSCodeBrowserContextFactory implements BrowserContextFactory {
@@ -55,6 +57,9 @@ export class VSCodeBrowserContextFactory implements BrowserContextFactory {
         userDataDir: this._config.browser.userDataDir,
       };
     }
+    const connectionError = validateBrowserConnectConnectionString(this._connectionString);
+    if (connectionError)
+      throw new Error(connectionError);
     const connectionString = new URL(this._connectionString);
     connectionString.searchParams.set('launch-options', JSON.stringify(launchOptions));
 

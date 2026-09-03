@@ -23,6 +23,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
@@ -127,7 +128,7 @@ export class CDPRelayServer {
   }
 
   private _onUpgrade = (request: http.IncomingMessage, socket: Duplex, head: Buffer): void => {
-    const rejection = validateUpgradeRequest(request);
+    const rejection = validateUpgradeRequest(request) ?? this._validateCdpToken(request);
     if (rejection) {
       debugLogger(`Rejecting upgrade: ${rejection.message}`);
       socket.write(`HTTP/1.1 ${rejection.statusCode} ${rejection.message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
@@ -137,8 +138,29 @@ export class CDPRelayServer {
     this._wss.handleUpgrade(request, socket, head, ws => this._wss.emit('connection', ws, request));
   };
 
+  // When PLAYWRIGHT_MCP_EXTENSION_TOKEN is configured, the CDP endpoint
+  // additionally requires it as the `token` query parameter (cdpEndpoint()
+  // appends it for this server's own client). The extension endpoint keeps
+  // relying on its unguessable path plus Host/Origin validation, because the
+  // bundled extension opens mcpRelayUrl verbatim and does not forward the
+  // token on its WebSocket URL.
+  private _validateCdpToken(request: http.IncomingMessage): { statusCode: number, message: string } | undefined {
+    const expected = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN?.trim();
+    if (!expected)
+      return;
+    const url = new URL(`http://localhost${request.url}`);
+    if (url.pathname !== this._cdpPath)
+      return;
+    const provided = Buffer.from(url.searchParams.get('token') ?? '');
+    const expectedBuffer = Buffer.from(expected);
+    if (provided.length !== expectedBuffer.length || !timingSafeEqual(provided, expectedBuffer))
+      return { statusCode: 401, message: 'Unauthorized' };
+  }
+
   cdpEndpoint() {
-    return `${this._wsHost}${this._cdpPath}`;
+    const endpoint = `${this._wsHost}${this._cdpPath}`;
+    const token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN?.trim();
+    return token ? `${endpoint}?token=${encodeURIComponent(token)}` : endpoint;
   }
 
   extensionEndpoint() {

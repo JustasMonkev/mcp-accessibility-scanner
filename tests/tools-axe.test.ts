@@ -393,8 +393,12 @@ describe('axe helpers', () => {
     expect(result.unscannedFrames).toEqual(['https://example.com/widget']);
   });
 
-  it('rechecks a frame that navigates during its reachability probe', async () => {
+  it('does not re-probe a frame that navigates during its reachability probe', async () => {
     resetScan();
+    // hasReachableAxe no longer probes the marker a second time after the
+    // reachability check: the round loop only rechecks a frame that was missed
+    // or whose tree changed, so a same-frame navigation inside the
+    // reachability probe's window is accepted rather than reported here.
     const navigated = makeFrame({}, 'https://example.com/widget');
     const evaluate = navigated.evaluate;
     let navigatedAway = false;
@@ -409,7 +413,7 @@ describe('axe helpers', () => {
     });
 
     expect((await runAxeScan(pageWithSelectorCounts({}, [navigated]))).unscannedFrames)
-        .toEqual(['https://example.com/widget']);
+        .toEqual([]);
   });
 
   it('does not report a failed frame that detached during coverage checks', async () => {

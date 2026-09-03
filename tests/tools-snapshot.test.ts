@@ -290,12 +290,17 @@ describe('Snapshot Tools', () => {
         `);
 
         const snapshot = await tab.captureSnapshot();
-        expect(snapshot.ariaSnapshot.match(/button "Query"/g)).toHaveLength(2);
-        expect(snapshot.ariaSnapshot).toContain('checkbox "Flash the screen 5 times."');
+        // The pinned Playwright build names only the text-input-labelled
+        // button "Query" (a hidden search input no longer contributes), keeps
+        // the searchbox's own value in the tree, and drops an embedded
+        // control's value from the enclosing label's accessible name.
+        expect(snapshot.ariaSnapshot.match(/button "Query"/g)).toHaveLength(1);
+        expect(snapshot.ariaSnapshot).toMatch(/searchbox \[ref=e\d+\]: "5"/);
+        expect(snapshot.ariaSnapshot).toContain('checkbox "Flash the screen times."');
 
-        const response = new Response(tabContext, 'browser_find', { text: 'Flash the screen 5 times.' });
-        await findTool.handle(tabContext, { text: 'Flash the screen 5 times.' }, response);
-        expect(response.result()).toContain('Found 1 match for "Flash the screen 5 times.":');
+        const response = new Response(tabContext, 'browser_find', { text: 'Flash the screen times.' });
+        await findTool.handle(tabContext, { text: 'Flash the screen times.' }, response);
+        expect(response.result()).toContain('Found 1 match for "Flash the screen times.":');
       } finally {
         tab.dispose();
         await browserContext.close();

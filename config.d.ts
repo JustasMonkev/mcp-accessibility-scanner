@@ -105,6 +105,16 @@ export type Config = {
      * Remote endpoint to connect to an existing Playwright server.
      */
     remoteEndpoint?: string;
+
+    /**
+     * Directories that browser_file_upload may read upload files from.
+     * When unset (default), any absolute path is allowed; when set, upload
+     * paths must resolve inside one of these directories, which prevents a
+     * rogue client from exfiltrating arbitrary local files through a page's
+     * file chooser. Can also be provided via the PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS
+     * environment variable or --allowed-upload-dirs.
+     */
+    allowedUploadDirs?: string[];
   },
 
   server?: {
@@ -117,6 +127,13 @@ export type Config = {
      * The host to bind the server to. Default is localhost. Use 0.0.0.0 to bind to all interfaces.
      */
     host?: string;
+
+    /**
+     * When set, HTTP transport requests must carry `Authorization: Bearer <token>`.
+     * Recommended whenever the server is bound to a non-loopback host. Can also
+     * be provided via the PLAYWRIGHT_MCP_AUTH_TOKEN environment variable.
+     */
+    authToken?: string;
   },
 
   /**

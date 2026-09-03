@@ -60,17 +60,39 @@ export function httpAddressToString(address: string | net.AddressInfo | null): s
   return `http://${resolvedHost}:${resolvedPort}`;
 }
 
-export async function installHttpTransport(httpServer: http.Server, serverBackendFactory: ServerBackendFactory) {
+export async function installHttpTransport(httpServer: http.Server, serverBackendFactory: ServerBackendFactory, options?: { authToken?: string }) {
   const sessions = new SessionStore(serverBackendFactory);
+  const authToken = options?.authToken?.trim() || undefined;
   httpServer.on('request', async (req, res) => {
-    const validationError = validateRequestHeaders(httpServer, req) ?? validateRequestRouting(req);
+    const validationError = validateRequestHeaders(httpServer, req) ?? validateAuthorization(req, authToken) ?? validateRequestRouting(req);
     if (validationError) {
       res.statusCode = validationError.statusCode;
+      if (validationError.statusCode === 401) {
+        res.setHeader('WWW-Authenticate', 'Bearer');
+        res.setHeader('Connection', 'close');
+      }
       res.end(validationError.message);
       return;
     }
     await sessions.handleRequest(req, res);
   });
+}
+
+// Optional bearer-token gate for the HTTP transport. The loopback Host/Origin
+// validation above stops remote and cross-site callers, but every local
+// process can still reach the endpoint; an configured token closes that gap
+// for operators who want it (recommended for non-loopback binds).
+function validateAuthorization(req: http.IncomingMessage, authToken: string | undefined): { statusCode: number, message: string } | undefined {
+  if (!authToken)
+    return;
+  const header = req.headers.authorization;
+  const provided = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice('Bearer '.length) : undefined;
+  if (provided === undefined)
+    return { statusCode: 401, message: 'Unauthorized: missing Authorization: Bearer <token> header.' };
+  const providedBuffer = Buffer.from(provided);
+  const expectedBuffer = Buffer.from(authToken);
+  if (providedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(providedBuffer, expectedBuffer))
+    return { statusCode: 401, message: 'Unauthorized: invalid token.' };
 }
 
 // ─── Sessionful 2025-era serving ─────────────────────────────────────────────

@@ -25,6 +25,8 @@ import type { Config, ToolCapability } from '../config.js';
 
 export type CLIOptions = {
     allowedOrigins?: string[];
+    allowedUploadDirs?: string[];
+    authToken?: string;
     blockedOrigins?: string[];
     blockServiceWorkers?: boolean;
     browser?: string;
@@ -100,7 +102,9 @@ export type FullConfig = Config & {
     network: NonNullable<Config['network']>,
     saveTrace: boolean;
     server: NonNullable<Config['server']>,
-    timeouts: NonNullable<Config['timeouts']>,
+    // mergeConfig() always materializes all three from defaultConfig, so a
+    // resolved config never has a missing timeout to fall back on.
+    timeouts: Required<NonNullable<Config['timeouts']>>,
 };
 
 export async function resolveConfig(config: Config): Promise<FullConfig> {
@@ -263,6 +267,7 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
       browserName,
       isolated: cliOptions.isolated,
       userDataDir: cliOptions.userDataDir,
+      allowedUploadDirs: cliOptions.allowedUploadDirs,
       launchOptions,
       contextOptions,
       cdpLaunch,
@@ -273,6 +278,7 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
     server: {
       port: cliOptions.port,
       host: cliOptions.host,
+      authToken: cliOptions.authToken,
     },
     capabilities: cliOptions.caps as ToolCapability[],
     network: {
@@ -295,6 +301,8 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
 function cliOptionsFromEnv(): CLIOptions {
   const options: CLIOptions = {};
   options.allowedOrigins = semicolonSeparatedList(process.env.PLAYWRIGHT_MCP_ALLOWED_ORIGINS);
+  options.allowedUploadDirs = semicolonSeparatedList(process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS);
+  options.authToken = envToString(process.env.PLAYWRIGHT_MCP_AUTH_TOKEN);
   options.blockedOrigins = semicolonSeparatedList(process.env.PLAYWRIGHT_MCP_BLOCKED_ORIGINS);
   options.blockServiceWorkers = envToBoolean(process.env.PLAYWRIGHT_MCP_BLOCK_SERVICE_WORKERS);
   options.browser = envToString(process.env.PLAYWRIGHT_MCP_BROWSER);
@@ -376,9 +384,21 @@ export function resolveOutputDir(config: FullConfig): string {
   return outputDir;
 }
 
+// One recursive mkdir per resolved output dir, shared by every artifact
+// write (screenshots, downloads, reports) — it only needs to succeed once.
+// A rejected mkdir is forgotten so a later write retries instead of
+// replaying the failure.
+const ensuredOutputDirs = new Map<string, Promise<string | undefined>>();
+
 export async function outputFile(config: FullConfig, name: string): Promise<string> {
   const outputDir = resolveOutputDir(config);
-  await fs.promises.mkdir(outputDir, { recursive: true });
+  let ensured = ensuredOutputDirs.get(outputDir);
+  if (!ensured) {
+    ensured = fs.promises.mkdir(outputDir, { recursive: true });
+    ensuredOutputDirs.set(outputDir, ensured);
+    ensured.catch(() => ensuredOutputDirs.delete(outputDir));
+  }
+  await ensured;
   const fileName = sanitizeForFilePath(name);
   return path.join(outputDir, fileName);
 }

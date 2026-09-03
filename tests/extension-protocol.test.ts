@@ -881,6 +881,44 @@ describe('extension protocol v2', () => {
     }
   });
 
+  it('requires the configured token on the CDP endpoint upgrade', async () => {
+    vi.stubEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', 'test-token');
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
+    const cdpEndpoint = relay.cdpEndpoint();
+    const cdpPath = cdpEndpoint.slice(0, cdpEndpoint.indexOf('?token='));
+    expect(new URL(cdpEndpoint).searchParams.get('token')).toBe('test-token');
+
+    const expectRejected = (url: string) => new Promise<void>(resolve => {
+      const socket = new WebSocket(url);
+      socket.once('unexpected-response', () => resolve());
+      socket.once('error', () => resolve());
+      socket.once('open', () => {
+        socket.close();
+        throw new Error(`Expected the upgrade to ${url} to be rejected`);
+      });
+    });
+    try {
+      await expectRejected(cdpPath);
+      await expectRejected(`${cdpPath}?token=wrong`);
+      const authorized = new WebSocket(cdpEndpoint);
+      // The upgrade itself proves the token gate; the relay may already be
+      // closing this connection ("extension not connected") by the time the
+      // open event is observed, so readyState must not be asserted here.
+      await once(authorized, 'open');
+      authorized.close();
+      await once(authorized, 'close');
+    } finally {
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('launches the profile containing the extension', async () => {
     vi.mocked(spawn).mockClear();
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
