@@ -327,7 +327,10 @@ function discardRequestBody(req: http.IncomingMessage): Promise<boolean> {
     return Promise.resolve(true);
   return new Promise(resolve => {
     let discardedBytes = 0;
+    const discardTimer = setTimeout(() => finish(false), 1000);
+    discardTimer.unref();
     const finish = (reusable: boolean) => {
+      clearTimeout(discardTimer);
       req.off('data', onData);
       req.off('end', onEnd);
       req.off('close', onClose);

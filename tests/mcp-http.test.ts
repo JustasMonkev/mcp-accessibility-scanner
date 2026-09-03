@@ -627,6 +627,32 @@ describe('mcp http transport hardening', () => {
       }
     }, 3000);
 
+    it('delivers 413 when an oversized chunked upload stalls', async () => {
+      const { port } = await startServer(probeFactory);
+      const client = net.connect(port, '127.0.0.1');
+      try {
+        await new Promise<void>((resolve, reject) => {
+          client.once('error', reject);
+          client.once('connect', resolve);
+        });
+        const responseChunks: Buffer[] = [];
+        const response = new Promise<string>((resolve, reject) => {
+          client.on('data', chunk => responseChunks.push(chunk));
+          client.once('error', reject);
+          client.once('close', () => resolve(Buffer.concat(responseChunks).toString('utf8')));
+        });
+        client.write(`POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n`);
+        const body = Buffer.alloc(10 * 1024 * 1024 + 1, 'a');
+        client.write(`${body.length.toString(16)}\r\n`);
+        client.write(body);
+        client.write('\r\n');
+
+        expectCompleteRaw413(await response);
+      } finally {
+        client.destroy();
+      }
+    }, 4000);
+
     it('rejects a declared oversize from its Content-Length without reading the body', async () => {
       const { port } = await startServer(probeFactory);
 
