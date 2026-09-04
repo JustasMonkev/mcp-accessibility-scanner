@@ -93,12 +93,19 @@ describe('closePage', () => {
     }
   });
 
-  it('fails within the operation timeout without overlapping close attempts', async () => {
+  it('reuses a timed-out close request when another tool call retries', async () => {
     vi.useFakeTimers();
+    let closed = false;
+    let finishClose = () => {};
     const page = {
       url: () => 'https://example.com',
-      close: vi.fn(() => new Promise<void>(() => {})),
-      isClosed: vi.fn(() => false),
+      close: vi.fn(() => new Promise<void>(resolve => {
+        finishClose = () => {
+          closed = true;
+          resolve();
+        };
+      })),
+      isClosed: vi.fn(() => closed),
     };
     const context = await contextFor(page);
 
@@ -106,7 +113,11 @@ describe('closePage', () => {
       const failure = expect(context.closeTab(undefined)).rejects.toThrow('Timed out after 5000ms');
       await vi.advanceTimersByTimeAsync(5000);
       await failure;
+
+      const retry = context.closeTab(undefined);
       expect(page.close).toHaveBeenCalledTimes(1);
+      finishClose();
+      await expect(retry).resolves.toBe('https://example.com');
     } finally {
       vi.useRealTimers();
       await context.dispose();

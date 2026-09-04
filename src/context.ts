@@ -34,6 +34,21 @@ const testDebug = debug('pw:mcp:test');
 const recorderBufferMs = 500;
 const recorderControlTools = new Set(['browser_start_recording', 'browser_stop_recording']);
 const expectPrelude = "const { expect } = require('playwright/test');";
+const pendingPageCloses = new WeakMap<playwright.Page, Promise<void>>();
+
+function pendingPageClose(page: playwright.Page): Promise<void> {
+  const pending = pendingPageCloses.get(page);
+  if (pending)
+    return pending;
+  const close = page.close();
+  pendingPageCloses.set(page, close);
+  const clear = () => {
+    if (pendingPageCloses.get(page) === close)
+      pendingPageCloses.delete(page);
+  };
+  void close.then(clear, clear);
+  return close;
+}
 
 /**
  * Chromium can acknowledge Target.closeTarget while a racing navigation keeps
@@ -49,7 +64,7 @@ async function closePage(page: playwright.Page, timeoutMs: number): Promise<void
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        page.close(),
+        pendingPageClose(page),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms while closing the page.`)), remaining);
           timer.unref?.();

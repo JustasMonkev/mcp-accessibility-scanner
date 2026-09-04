@@ -382,6 +382,19 @@ describe('Tab', () => {
       expect(path.basename(download.saveAs.mock.calls[0][0] as string)).toMatch(/^download-.+$/);
     });
 
+    it.each([
+      ['report.', /^report-.+$/],
+      ['report.txt ', /^report-.+\.txt$/],
+    ])('normalizes a generated download name ending in a dot or space: %s', async (suggested, expected) => {
+      new Tab(mockContext, mockPage, onPageClose);
+      const download = makeDownload(suggested);
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+      const savedName = path.basename(download.saveAs.mock.calls[0][0]);
+      expect(savedName).toMatch(expected);
+      expect(savedName).not.toMatch(/[. ]$/);
+    });
+
     it('keeps a long suggested name within the 255-byte filename limit', async () => {
       // A long but valid Content-Disposition name plus the uniqueness suffix
       // used to exceed the filesystem's 255-byte component cap and fail

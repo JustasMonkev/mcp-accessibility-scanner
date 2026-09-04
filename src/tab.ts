@@ -165,7 +165,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     // default artifact names carry goes in before the extension, keeping the
     // suggested name as the recognizable part; responses print the suggested
     // name next to the saved path, so the file stays attributable.
-    const suggested = download.suggestedFilename() || 'download';
+    const suggested = download.suggestedFilename().replace(/[. ]+$/, '') || 'download';
     const separator = suggested.lastIndexOf('.');
     let base = separator > 0 ? suggested.slice(0, separator) : suggested;
     let extension = separator > 0 ? suggested.slice(separator) : '';
