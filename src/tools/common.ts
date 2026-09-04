@@ -73,6 +73,7 @@ const emulateMedia = defineTabTool({
       media: z.enum(['screen', 'print']).optional().describe('Changes the CSS media type'),
     }),
     type: 'stateChanging',
+    idempotent: true,
   },
 
   handle: async (tab, params, response) => {
@@ -89,7 +90,9 @@ const emulateMedia = defineTabTool({
       return;
     }
     response.addCode(`await page.emulateMedia(${javascript.formatObject(options)});`);
-    await tab.page.emulateMedia(options);
+    await tab.waitForCompletion(async () => {
+      await tab.page.emulateMedia(options);
+    });
   },
 });
 

@@ -244,6 +244,11 @@ export class BrowserServerBackend implements ServerBackend {
         sessionLog?.logResponse(response);
       }
     } catch (error: any) {
+      try {
+        await response.cleanupFilesOnError();
+      } catch (cleanupError) {
+        logUnhandledError(cleanupError);
+      }
       response.addError(String(error));
     } finally {
       endToolCall();

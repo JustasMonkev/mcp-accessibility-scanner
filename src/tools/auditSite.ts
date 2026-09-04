@@ -422,6 +422,10 @@ const auditSite = defineTabTool({
     assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
 
     const context = tab.context;
+    const reportFileName = params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`;
+    const reportPath = await context.outputFile(reportFileName, params.reportFile !== undefined);
+    if (params.reportFile !== undefined)
+      response.deleteFileOnError(reportPath);
     const originalTab = tab;
     const queue: CrawlItem[] = [];
     const queued = new Set<string>();
@@ -701,8 +705,6 @@ const auditSite = defineTabTool({
       sessionLosses,
     };
 
-    const reportFileName = params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`;
-    const reportPath = await context.outputFile(reportFileName, params.reportFile !== undefined);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
     const reportResourceLink = response.addFileResourceLink(reportPath, {
       name: 'audit-site-report',

@@ -22,14 +22,23 @@ export type ToolSchema<Input extends z.Schema> = {
   title: string;
   description: string;
   inputSchema: Input;
-  // 'stateChanging' is an additive update: it creates state a retry would
-  // duplicate (readOnlyHint false) without destroying anything
-  // (destructiveHint false) — e.g. browser_session_open, which mints a new
-  // live session and bearer handle on every call.
+  // State-changing tools default to non-idempotent; convergent setters can
+  // explicitly opt into safe retries.
   type: 'readOnly' | 'stateChanging' | 'destructive';
+  idempotent?: boolean;
 };
 
 export function toMcpTool(tool: ToolSchema<any>): mcpServer.Tool {
+  const annotations: NonNullable<mcpServer.Tool['annotations']> = {
+    title: tool.title,
+    readOnlyHint: tool.type === 'readOnly',
+    destructiveHint: tool.type === 'destructive',
+    openWorldHint: true,
+  };
+  if (tool.idempotent !== undefined)
+    annotations.idempotentHint = tool.idempotent;
+  else if (tool.type === 'stateChanging')
+    annotations.idempotentHint = false;
   return {
     name: tool.name,
     // Top-level title takes precedence over annotations.title on spec
@@ -37,15 +46,7 @@ export function toMcpTool(tool: ToolSchema<any>): mcpServer.Tool {
     title: tool.title,
     description: tool.description,
     inputSchema: z.toJSONSchema(tool.inputSchema) as mcpServer.Tool['inputSchema'],
-    annotations: {
-      title: tool.title,
-      readOnlyHint: tool.type === 'readOnly',
-      destructiveHint: tool.type === 'destructive',
-      // stateChanging tools are non-idempotent by nature (each call creates
-      // fresh state), so clients must not silently retry them.
-      ...(tool.type === 'stateChanging' ? { idempotentHint: false } : {}),
-      openWorldHint: true,
-    },
+    annotations,
   };
 }
 

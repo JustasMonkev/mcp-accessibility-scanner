@@ -36,25 +36,20 @@ describe('closePage', () => {
   };
 
   it('retries when Chromium acknowledges a close but leaves the target alive', async () => {
-    vi.useFakeTimers();
     let closed = false;
     const page = {
       url: () => 'https://example.com',
       close: vi.fn()
-          .mockImplementationOnce(() => new Promise(() => {}))
+          .mockResolvedValueOnce(undefined)
           .mockImplementationOnce(async () => { closed = true; }),
       isClosed: vi.fn(() => closed),
     };
     const context = contextFor(page);
 
     try {
-      const closing = expect(context.closeTab(undefined)).resolves.toBe('https://example.com');
-      await vi.advanceTimersByTimeAsync(1000);
-      await closing;
-
+      await expect(context.closeTab(undefined)).resolves.toBe('https://example.com');
       expect(page.close).toHaveBeenCalledTimes(2);
     } finally {
-      vi.useRealTimers();
       await context.dispose();
     }
   });

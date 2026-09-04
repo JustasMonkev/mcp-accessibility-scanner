@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import fs from 'node:fs';
 import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import debug from 'debug';
@@ -48,6 +49,7 @@ export class Response {
   private _tabSnapshot: TabSnapshot | undefined;
   private _requestContext: CallToolRequestContext | undefined;
   private _structuredContent: Record<string, unknown> | undefined;
+  private _filesToDeleteOnError = new Set<string>();
 
   readonly toolName: string;
   readonly toolArgs: Record<string, any>;
@@ -121,6 +123,16 @@ export class Response {
       description: options?.description,
       mimeType: options?.mimeType,
     });
+  }
+
+  deleteFileOnError(filePath: string) {
+    this._filesToDeleteOnError.add(filePath);
+  }
+
+  async cleanupFilesOnError() {
+    const files = [...this._filesToDeleteOnError];
+    this._filesToDeleteOnError.clear();
+    await Promise.all(files.map(file => fs.promises.rm(file, { force: true })));
   }
 
   resourceLinks() {

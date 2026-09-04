@@ -76,10 +76,12 @@ describe('Screenshot Tools', () => {
   });
 
   it('reserves a caller-supplied filename without clobbering it', async () => {
+    const deleteFileOnError = vi.spyOn(response, 'deleteFileOnError');
     const params = screenshotTool.schema.inputSchema.parse({ filename: 'shot.png' });
     await screenshotTool.handle(mockContext, params, response);
 
     expect(mockTab.context.outputFile).toHaveBeenCalledWith('shot.png', true);
+    expect(deleteFileOnError).toHaveBeenCalledWith('/out/page.png');
   });
 
   it('should default the image format to png', () => {

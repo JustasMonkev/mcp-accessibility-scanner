@@ -45,14 +45,14 @@ async function closePage(page: playwright.Page, attemptTimeoutMs = pageCloseAtte
   for (let attempt = 0; attempt < 3; attempt++) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const closed = await Promise.race([
-        page.close().then(() => true),
-        new Promise<false>(resolve => {
-          timer = setTimeout(() => resolve(false), attemptTimeoutMs);
+      await Promise.race([
+        page.close(),
+        new Promise<void>(resolve => {
+          timer = setTimeout(resolve, attemptTimeoutMs);
           timer.unref?.();
         }),
       ]);
-      if (closed || page.isClosed())
+      if (page.isClosed())
         return;
     } catch (error) {
       if (page.isClosed())

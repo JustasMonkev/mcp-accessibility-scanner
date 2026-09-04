@@ -178,6 +178,16 @@ describe('audit_site tool', () => {
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
   });
 
+  it('reserves an explicit report before opening the crawl tab', async () => {
+    const { context, response } = createHarness({ 'https://example.com/': [] });
+    context.outputFile.mockRejectedValue(new Error('Output file already exists'));
+
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ reportFile: 'taken.json' }), response))
+        .rejects.toThrow('Output file already exists');
+
+    expect(context.newTab).not.toHaveBeenCalled();
+  });
+
   it('warns about pages whose frames the scan could not reach', async () => {
     // A page scanned with a frame missing reports fewer violations, so a reader
     // counting them has to know which pages those numbers are incomplete for.

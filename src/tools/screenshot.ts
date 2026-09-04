@@ -59,6 +59,8 @@ const screenshot = defineTabTool({
     // otherwise overwrite each other. User-specified filenames are reserved
     // exclusively so an existing artifact is never replaced.
     const fileName = await tab.context.outputFile(params.filename ?? `page-${safeIsoTimestampForFileName()}.${fileType}`, params.filename !== undefined);
+    if (params.filename !== undefined)
+      response.deleteFileOnError(fileName);
     const options: playwright.PageScreenshotOptions = {
       type: fileType,
       quality: fileType === 'png' ? undefined : 90,

@@ -183,6 +183,10 @@ const scanPageMatrix = defineTabTool({
     // by the time the per-scan check would reject the argument.
     assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
 
+    const reportFileName = params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`;
+    const reportPath = await tab.context.outputFile(reportFileName, params.reportFile !== undefined);
+    if (params.reportFile !== undefined)
+      response.deleteFileOnError(reportPath);
     const variants = params.variants ?? defaultVariants;
     const originalViewport = tab.page.viewportSize() ?? await tab.page.evaluate(() => ({
       width: window.innerWidth,
@@ -297,8 +301,6 @@ const scanPageMatrix = defineTabTool({
       variants: variantResults,
     };
 
-    const reportFileName = params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`;
-    const reportPath = await tab.context.outputFile(reportFileName, params.reportFile !== undefined);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
     const reportResourceLink = response.addFileResourceLink(reportPath, {
       name: 'scan-page-matrix-report',
