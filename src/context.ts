@@ -34,6 +34,36 @@ const testDebug = debug('pw:mcp:test');
 const recorderBufferMs = 500;
 const recorderControlTools = new Set(['browser_start_recording', 'browser_stop_recording']);
 const expectPrelude = "const { expect } = require('playwright/test');";
+const pageCloseAttemptTimeoutMs = 1000;
+
+/**
+ * Chromium can acknowledge Target.closeTarget while a racing navigation keeps
+ * the target alive. Retry the public close call instead of letting one tool or
+ * an entire crawl wait forever.
+ */
+async function closePage(page: playwright.Page, attemptTimeoutMs = pageCloseAttemptTimeoutMs): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const closed = await Promise.race([
+        page.close().then(() => true),
+        new Promise<false>(resolve => {
+          timer = setTimeout(() => resolve(false), attemptTimeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+      if (closed || page.isClosed())
+        return;
+    } catch (error) {
+      if (page.isClosed())
+        return;
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error('Timed out while closing the page after 3 attempts.');
+}
 
 class ContextRegistry {
   private readonly _contexts = new Set<Context>();
@@ -338,12 +368,12 @@ export class Context {
     if (!tab)
       throw new Error(`Tab ${index} not found`);
     const url = tab.page.url();
-    await tab.page.close();
+    await closePage(tab.page);
     return url;
   }
 
-  async outputFile(name: string): Promise<string> {
-    return outputFile(this.config, name);
+  async outputFile(name: string, exclusive = false): Promise<string> {
+    return outputFile(this.config, name, exclusive);
   }
 
   /**

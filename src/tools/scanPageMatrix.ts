@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { z } from 'zod';
 import type * as playwright from 'playwright';
 import { defineTabTool } from './tool.js';
-import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
+import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 import {
   assertRuleOptionsValid,
   axeRuleSchemaShape,
@@ -297,8 +297,8 @@ const scanPageMatrix = defineTabTool({
       variants: variantResults,
     };
 
-    const reportFileName = sanitizeForFilePath(params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`);
-    const reportPath = await tab.context.outputFile(reportFileName);
+    const reportFileName = params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`;
+    const reportPath = await tab.context.outputFile(reportFileName, params.reportFile !== undefined);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
     const reportResourceLink = response.addFileResourceLink(reportPath, {
       name: 'scan-page-matrix-report',

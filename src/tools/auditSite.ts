@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import RE2 from 're2';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
-import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
+import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 import {
   assertRuleOptionsValid,
   axeRuleSchemaShape,
@@ -701,8 +701,8 @@ const auditSite = defineTabTool({
       sessionLosses,
     };
 
-    const reportFileName = sanitizeForFilePath(params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`);
-    const reportPath = await context.outputFile(reportFileName);
+    const reportFileName = params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`;
+    const reportPath = await context.outputFile(reportFileName, params.reportFile !== undefined);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
     const reportResourceLink = response.addFileResourceLink(reportPath, {
       name: 'audit-site-report',

@@ -417,6 +417,45 @@ describe('Config', () => {
       expect(result).not.toContain('../');
     });
 
+    it('rejects non-portable Windows reserved names on every platform', async () => {
+      const outputDir = path.join(os.tmpdir(), `mcp-invalid-output-${Date.now()}-${Math.random()}`);
+      const config = await resolveConfig({ outputDir });
+
+      await expect(outputFile(config, 'NUL.png')).rejects.toThrow('portable, non-reserved');
+      await expect(outputFile(config, 'report.')).rejects.toThrow('portable, non-reserved');
+      await expect(outputFile(config, 'report.json ')).rejects.toThrow('portable, non-reserved');
+      expect(fs.existsSync(outputDir)).toBe(false);
+    });
+
+    it('atomically refuses to reserve an existing explicit filename', async () => {
+      const outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-output-collision-'));
+      try {
+        const config = await resolveConfig({ outputDir });
+        const existing = path.join(outputDir, 'report.json');
+        await fs.promises.writeFile(existing, 'keep me');
+
+        await expect(outputFile(config, 'report.json', true)).rejects.toThrow('Output file already exists');
+        expect(await fs.promises.readFile(existing, 'utf-8')).toBe('keep me');
+      } finally {
+        await fs.promises.rm(outputDir, { recursive: true, force: true });
+      }
+    });
+
+    it('allows only one concurrent reservation for an explicit filename', async () => {
+      const outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-output-race-'));
+      try {
+        const config = await resolveConfig({ outputDir });
+        const results = await Promise.allSettled([
+          outputFile(config, 'report.json', true),
+          outputFile(config, 'report.json', true),
+        ]);
+
+        expect(results.map(result => result.status).sort()).toEqual(['fulfilled', 'rejected']);
+      } finally {
+        await fs.promises.rm(outputDir, { recursive: true, force: true });
+      }
+    });
+
     it('keeps every artifact of one server in one fallback directory', async () => {
       // The timestamped fallback used to be recomputed per call, scattering
       // one audit's screenshots, reports, traces and session logs across a

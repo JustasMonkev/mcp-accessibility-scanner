@@ -608,8 +608,8 @@ const auditKeyboard = defineTabTool({
       ...result,
     };
 
-    const reportFileName = sanitizeForFilePath(reportFile ?? `audit-keyboard-${safeIsoTimestampForFileName()}.json`);
-    const reportPath = await tab.context.outputFile(reportFileName);
+    const reportFileName = reportFile ?? `audit-keyboard-${safeIsoTimestampForFileName()}.json`;
+    const reportPath = await tab.context.outputFile(reportFileName, reportFile !== undefined);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
     const reportResourceLink = response.addFileResourceLink(reportPath, {
       name: 'audit-keyboard-report',

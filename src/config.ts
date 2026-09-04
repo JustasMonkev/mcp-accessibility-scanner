@@ -376,11 +376,24 @@ export function resolveOutputDir(config: FullConfig): string {
   return outputDir;
 }
 
-export async function outputFile(config: FullConfig, name: string): Promise<string> {
+export async function outputFile(config: FullConfig, name: string, exclusive = false): Promise<string> {
+  const fileName = sanitizeForFilePath(name);
+  if (!fileName || fileName === '.' || fileName === '..' || /[. ]$/.test(name) || /[. ]$/.test(fileName) || /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/i.test(fileName))
+    throw new Error(`Invalid output filename "${name}": use a portable, non-reserved file name.`);
   const outputDir = resolveOutputDir(config);
   await fs.promises.mkdir(outputDir, { recursive: true });
-  const fileName = sanitizeForFilePath(name);
-  return path.join(outputDir, fileName);
+  const filePath = path.join(outputDir, fileName);
+  if (!exclusive)
+    return filePath;
+  try {
+    const handle = await fs.promises.open(filePath, 'wx');
+    await handle.close();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+      throw new Error(`Output file already exists: ${filePath}. Choose a different filename.`, { cause: error });
+    throw error;
+  }
+  return filePath;
 }
 
 function pickDefined<T extends object>(obj: T | undefined): Partial<T> {

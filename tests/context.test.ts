@@ -20,6 +20,66 @@ import { Context } from '../src/context.js';
 import type { BrowserContextFactory } from '../src/browserContextFactory.js';
 import { EventEmitter } from 'events';
 
+describe('closePage', () => {
+  const contextFor = (page: any) => {
+    const context = new Context({
+      tools: [],
+      config: {} as any,
+      browserContextFactory: {} as any,
+      sessionLog: undefined,
+      clientInfo: {},
+    });
+    const tab = { page };
+    (context as any)._tabs = [tab];
+    (context as any)._currentTab = tab;
+    return context;
+  };
+
+  it('retries when Chromium acknowledges a close but leaves the target alive', async () => {
+    vi.useFakeTimers();
+    let closed = false;
+    const page = {
+      url: () => 'https://example.com',
+      close: vi.fn()
+          .mockImplementationOnce(() => new Promise(() => {}))
+          .mockImplementationOnce(async () => { closed = true; }),
+      isClosed: vi.fn(() => closed),
+    };
+    const context = contextFor(page);
+
+    try {
+      const closing = expect(context.closeTab(undefined)).resolves.toBe('https://example.com');
+      await vi.advanceTimersByTimeAsync(1000);
+      await closing;
+
+      expect(page.close).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      await context.dispose();
+    }
+  });
+
+  it('fails within a bounded number of attempts when the target never closes', async () => {
+    vi.useFakeTimers();
+    const page = {
+      url: () => 'https://example.com',
+      close: vi.fn(() => new Promise(() => {})),
+      isClosed: vi.fn(() => false),
+    };
+    const context = contextFor(page);
+
+    try {
+      const failure = expect(context.closeTab(undefined)).rejects.toThrow('after 3 attempts');
+      await vi.advanceTimersByTimeAsync(3000);
+      await failure;
+      expect(page.close).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+      await context.dispose();
+    }
+  });
+});
+
 describe('Context', () => {
   let mockBrowserContextFactory: BrowserContextFactory;
   let mockBrowserContext: any;

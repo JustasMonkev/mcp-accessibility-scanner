@@ -75,6 +75,13 @@ describe('Screenshot Tools', () => {
     expect(mockPage.screenshot).toHaveBeenCalledWith(expect.objectContaining({ scale: 'device' }));
   });
 
+  it('reserves a caller-supplied filename without clobbering it', async () => {
+    const params = screenshotTool.schema.inputSchema.parse({ filename: 'shot.png' });
+    await screenshotTool.handle(mockContext, params, response);
+
+    expect(mockTab.context.outputFile).toHaveBeenCalledWith('shot.png', true);
+  });
+
   it('should default the image format to png', () => {
     const params = screenshotTool.schema.inputSchema.parse({});
     expect(params.type).toBe('png');
