@@ -165,7 +165,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     // default artifact names carry goes in before the extension, keeping the
     // suggested name as the recognizable part; responses print the suggested
     // name next to the saved path, so the file stays attributable.
-    const suggested = download.suggestedFilename() || 'download';
+    const suggested = download.suggestedFilename().replace(/[. ]+$/, '') || 'download';
     const separator = suggested.lastIndexOf('.');
     let base = separator > 0 ? suggested.slice(0, separator) : suggested;
     let extension = separator > 0 ? suggested.slice(separator) : '';
@@ -246,6 +246,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   setDefaultTimeout(timeout: number) {
     this._defaultTimeout = timeout;
     this.page.setDefaultTimeout(timeout);
+  }
+
+  operationTimeout(): number {
+    return this._defaultTimeout > 0 ? this._defaultTimeout : 5000;
   }
 
   isCurrentTab(): boolean {
@@ -369,7 +373,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   private _pageStateTimeoutMs(): number {
-    return this._defaultTimeout > 0 ? this._defaultTimeout : 5000;
+    return this.operationTimeout();
   }
 
   private async _withPageStateTimeout<T>(promise: Promise<T>, description: string, timeoutMs = this._pageStateTimeoutMs()): Promise<T> {

@@ -34,6 +34,54 @@ const testDebug = debug('pw:mcp:test');
 const recorderBufferMs = 500;
 const recorderControlTools = new Set(['browser_start_recording', 'browser_stop_recording']);
 const expectPrelude = "const { expect } = require('playwright/test');";
+const pendingPageCloses = new WeakMap<playwright.Page, Promise<void>>();
+
+function pendingPageClose(page: playwright.Page): Promise<void> {
+  const pending = pendingPageCloses.get(page);
+  if (pending)
+    return pending;
+  const close = page.close();
+  pendingPageCloses.set(page, close);
+  const clear = () => {
+    if (pendingPageCloses.get(page) === close)
+      pendingPageCloses.delete(page);
+  };
+  void close.then(clear, clear);
+  return close;
+}
+
+/**
+ * Chromium can acknowledge Target.closeTarget while a racing navigation keeps
+ * the target alive. Retry the public close call instead of letting one tool or
+ * an entire crawl wait forever.
+ */
+async function closePage(page: playwright.Page, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0)
+      break;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        pendingPageClose(page),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms while closing the page.`)), remaining);
+          timer.unref?.();
+        }),
+      ]);
+      if (page.isClosed())
+        return;
+    } catch (error) {
+      if (page.isClosed())
+        return;
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error(`Failed to close the page after 3 attempts within ${timeoutMs}ms.`);
+}
 
 class ContextRegistry {
   private readonly _contexts = new Set<Context>();
@@ -338,12 +386,12 @@ export class Context {
     if (!tab)
       throw new Error(`Tab ${index} not found`);
     const url = tab.page.url();
-    await tab.page.close();
+    await closePage(tab.page, tab.operationTimeout());
     return url;
   }
 
-  async outputFile(name: string): Promise<string> {
-    return outputFile(this.config, name);
+  async outputFile(name: string, exclusive = false): Promise<string> {
+    return outputFile(this.config, name, exclusive);
   }
 
   /**

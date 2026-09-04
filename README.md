@@ -236,6 +236,8 @@ Create a `config.json` file with the following options:
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
+Caller-supplied screenshot, PDF, scan-page-matrix, and audit report filenames use a no-clobber policy: an existing file causes the tool call to fail instead of being overwritten. Windows-reserved basenames and names ending in a dot or space are rejected on every platform so configured names behave consistently across hosts.
+
 Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies after every action so delayed DOM-only updates are included in the response; a short observation window also catches scheduled requests and waits for them before that delay.
 
 #### HTTP Heartbeat
@@ -588,6 +590,10 @@ Close the page.
 #### `browser_resize`
 Resize the browser window.
 - Parameters: `width`, `height`
+
+#### `browser_emulate_media`
+Emulate CSS media features on the current page without resetting omitted features.
+- Parameters: `colorScheme` (`light` or `dark`), `reducedMotion` (`reduce` or `no-preference`), `forcedColors` (`active` or `none`), `contrast` (`more` or `no-preference`), and `media` (`screen` or `print`); provide at least one.
 
 ### Tab Management
 

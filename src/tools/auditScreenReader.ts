@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { frameConcurrency, frameReadTimeoutMs, injectAxeForNames, withConcurrency, withFrameTimeout } from './axe.js';
-import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
+import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 
 import type * as playwright from 'playwright';
 
@@ -858,6 +858,10 @@ const auditScreenReader = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
+    const reportFileName = params.reportFile ?? `audit-screen-reader-${safeIsoTimestampForFileName()}.json`;
+    const reportPath = await tab.context.outputFile(reportFileName, params.reportFile !== undefined);
+    if (params.reportFile !== undefined)
+      response.deleteFileOnError(reportPath);
     const ariaNodes = parseAriaSnapshot(await tab.page.ariaSnapshot({ mode: 'ai' }));
     const refIndexes = ariaNodes.map((node, index) => node.ref ? index : -1).filter(index => index >= 0);
     const childCounts = new Map<number, number>();
@@ -1100,8 +1104,6 @@ const auditScreenReader = defineTabTool({
       findings: result.findings,
     };
 
-    const reportFileName = sanitizeForFilePath(params.reportFile ?? `audit-screen-reader-${safeIsoTimestampForFileName()}.json`);
-    const reportPath = await tab.context.outputFile(reportFileName);
     await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
     const reportResourceLink = response.addFileResourceLink(reportPath, {
       name: 'audit-screen-reader-report',

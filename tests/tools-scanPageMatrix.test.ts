@@ -57,11 +57,12 @@ function createMatrixHarness(outputFile: string) {
     evaluate: vi.fn().mockResolvedValueOnce(pageState('')).mockResolvedValue(undefined),
     reload: vi.fn(async () => undefined),
   };
+  const resolveOutputFile = vi.fn(async () => outputFile);
   const mockTab = {
     page: mockPage,
     waitForTimeout: vi.fn(async () => undefined),
     modalStates: vi.fn(() => []),
-    context: { outputFile: vi.fn(async () => outputFile) },
+    context: { outputFile: resolveOutputFile },
   };
   const context = { currentTabOrDie: vi.fn(() => mockTab), config: {} };
   return { context, mockPage, response: new Response(context as any, 'scan_page_matrix', {}) };
@@ -74,6 +75,16 @@ describe('scan_page_matrix tool', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
+  });
+
+  it('reserves an explicit report before changing the page', async () => {
+    const { context, mockPage, response } = createMatrixHarness('/tmp/taken.json');
+    context.currentTabOrDie().context.outputFile.mockRejectedValue(new Error('Output file already exists'));
+
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ reportFile: 'taken.json' }), response))
+        .rejects.toThrow('Output file already exists');
+
+    expect(mockPage.viewportSize).not.toHaveBeenCalled();
   });
 
   it('passes tags, rule filters and scope selectors through to the axe scan', async () => {

@@ -79,6 +79,20 @@ describe('mcp/tool', () => {
     expect(tool.annotations?.idempotentHint).toBe(false);
   });
 
+  it('allows a state-changing tool to declare idempotent retries', () => {
+    const tool = toMcpTool(defineToolSchema({
+      name: 'idempotent_state_change',
+      title: 'Idempotent state change',
+      description: 'Converges to the requested state',
+      inputSchema: z.object({}),
+      type: 'stateChanging',
+      idempotent: true,
+    }));
+
+    expect(tool.annotations?.readOnlyHint).toBe(false);
+    expect(tool.annotations?.idempotentHint).toBe(true);
+  });
+
   it('defineToolSchema is identity helper', () => {
     const schema = defineToolSchema({
       name: 'identity',

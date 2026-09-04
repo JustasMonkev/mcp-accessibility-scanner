@@ -30,6 +30,7 @@ describe('Common Tools', () => {
     mockPage = {
       url: () => 'https://example.com',
       setViewportSize: vi.fn().mockResolvedValue(undefined),
+      emulateMedia: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
     };
 
@@ -101,6 +102,27 @@ describe('Common Tools', () => {
       expect(response.code()).toContain('setViewportSize');
       expect(response.code()).toContain('800');
       expect(response.code()).toContain('600');
+    });
+  });
+
+  describe('browser_emulate_media tool', () => {
+    const emulateMediaTool = commonTools.find(t => t.schema.name === 'browser_emulate_media')!;
+
+    it('emulates only the supplied media features', async () => {
+      expect(emulateMediaTool.schema.idempotent).toBe(true);
+      const params = { colorScheme: 'dark', reducedMotion: 'reduce', browserSessionId: 'bs_test' } as const;
+      await emulateMediaTool.handle(mockContext, params, response);
+
+      expect(mockPage.emulateMedia).toHaveBeenCalledWith({ colorScheme: 'dark', reducedMotion: 'reduce' });
+      expect(mockTab.waitForCompletion).toHaveBeenCalledTimes(1);
+      expect(response.code()).toContain('page.emulateMedia');
+    });
+
+    it('rejects a call with no media feature', async () => {
+      await emulateMediaTool.handle(mockContext, {}, response);
+
+      expect(mockPage.emulateMedia).not.toHaveBeenCalled();
+      expect(response.result()).toContain('Specify at least one media feature to emulate.');
     });
   });
 
