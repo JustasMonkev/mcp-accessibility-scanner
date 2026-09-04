@@ -76,5 +76,7 @@ export function validateBrowserConnectConnectionString(connectionString: unknown
     return 'Invalid `connectionString`: missing hostname.';
   if (!isRemoteBrowserConnectAllowed() && !isLoopbackHostname(url.hostname))
     return 'Invalid `connectionString`: only loopback hosts (localhost, 127.0.0.1, ::1) are allowed. Set PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE=1 to allow remote hosts.';
+  if (!isLoopbackHostname(url.hostname) && url.protocol !== 'wss:')
+    return 'Invalid `connectionString`: remote hosts require wss: to protect connection credentials.';
   return undefined;
 }

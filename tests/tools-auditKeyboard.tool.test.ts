@@ -57,13 +57,12 @@ function createHarness(sequence: FocusPoint[], requestContext?: any) {
     screenshot: vi.fn(async () => undefined),
   };
 
+  const outputFile = vi.fn(async (name: string) => `/tmp/${name}`);
   const tab: any = {
     modalStates: vi.fn(() => []),
     waitForCompletion: vi.fn(async (callback: () => Promise<void>) => await callback()),
     page,
-    context: {
-      outputFile: vi.fn(async (name: string) => `/tmp/${name}`),
-    },
+    context: { outputFile },
   };
 
   const context: any = {
@@ -72,7 +71,7 @@ function createHarness(sequence: FocusPoint[], requestContext?: any) {
   };
 
   const response = new Response(context, 'audit_keyboard', {}, requestContext);
-  return { context, tab, page, response };
+  return { context, tab, page, outputFile, response };
 }
 
 describe('audit_keyboard tool', () => {
@@ -82,6 +81,16 @@ describe('audit_keyboard tool', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
+  });
+
+  it('reserves an explicit report before pressing a key', async () => {
+    const { page, outputFile, response } = createHarness([]);
+    outputFile.mockRejectedValue(new Error('Output file already exists'));
+
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ reportFile: 'taken.json' }), response))
+        .rejects.toThrow('Output file already exists');
+
+    expect(page.keyboard.press).not.toHaveBeenCalled();
   });
 
   it('writes report with custom reportFile name', async () => {

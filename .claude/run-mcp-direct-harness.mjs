@@ -81,6 +81,20 @@ const tests = [
     assertText(result, /"width":\s*640|"height":\s*480/);
   }),
 
+  test('browser_emulate_media', async () => {
+    await navigate('<title>Media</title><h1>Media</h1>');
+    try {
+      await callTool('browser_emulate_media', { colorScheme: 'dark', reducedMotion: 'reduce' });
+      const result = await callTool('browser_evaluate', {
+        function: '() => ({ dark: matchMedia("(prefers-color-scheme: dark)").matches, reduced: matchMedia("(prefers-reduced-motion: reduce)").matches })',
+      });
+      assertText(result, /"dark":\s*true/);
+      assertText(result, /"reduced":\s*true/);
+    } finally {
+      await callTool('browser_emulate_media', { colorScheme: 'light', reducedMotion: 'no-preference' });
+    }
+  }),
+
   test('browser_console_messages', async () => {
     await navigate('<title>Console</title><script>console.log("mcp-console-ok")</script><h1>Console</h1>');
     const result = await callTool('browser_console_messages', {});

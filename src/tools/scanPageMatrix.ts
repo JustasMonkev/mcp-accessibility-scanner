@@ -181,6 +181,10 @@ const scanPageMatrix = defineTabTool({
     // by the time the per-scan check would reject the argument.
     assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
 
+    const reportFileName = params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`;
+    const reportPath = await tab.context.outputFile(reportFileName, params.reportFile !== undefined);
+    if (params.reportFile !== undefined)
+      response.deleteFileOnError(reportPath);
     const variants = params.variants ?? defaultVariants;
     const originalViewport = tab.page.viewportSize() ?? await tab.page.evaluate(() => ({
       width: window.innerWidth,
@@ -289,7 +293,7 @@ const scanPageMatrix = defineTabTool({
       variants: variantResults,
     };
 
-    const reportResource = await writeJsonReport(tab.context, response, params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`, report, {
+    const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'scan-page-matrix-report',
       title: 'Scan page matrix JSON report',
       description: 'JSON report containing per-variant Axe results and baseline deltas.',

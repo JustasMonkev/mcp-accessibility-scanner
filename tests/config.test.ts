@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
-import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders, resolveOutputDir } from '../src/config.js';
+import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders, resolveOutputDir, uploadDirectoryList } from '../src/config.js';
 import type { Config } from '../config.js';
 
 async function writeConfigFile(config: Config): Promise<string> {
@@ -108,6 +108,43 @@ describe('Config', () => {
       expect(config.browser.browserName).toBe('webkit');
       expect(config.timeouts.navigationTimeout).toBe(60000);
       expect(config.saveTrace).toBe(false);
+    });
+  });
+
+  describe('security-sensitive string configuration', () => {
+    const savedAuthToken = process.env.PLAYWRIGHT_MCP_AUTH_TOKEN;
+    const savedUploadDirs = process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS;
+
+    afterEach(() => {
+      if (savedAuthToken === undefined)
+        delete process.env.PLAYWRIGHT_MCP_AUTH_TOKEN;
+      else
+        process.env.PLAYWRIGHT_MCP_AUTH_TOKEN = savedAuthToken;
+      if (savedUploadDirs === undefined)
+        delete process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS;
+      else
+        process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS = savedUploadDirs;
+    });
+
+    it('rejects blank auth tokens from config, CLI, and environment', async () => {
+      await expect(resolveConfig({ server: { authToken: '' } })).rejects.toThrow(/authToken.*blank/i);
+      await expect(resolveConfig({ server: { authToken: '   ' } })).rejects.toThrow(/authToken.*blank/i);
+      await expect(resolveCLIConfig({ authToken: '   ' })).rejects.toThrow(/authToken.*blank/i);
+      const configFile = await writeConfigFile({ server: { authToken: '   ' } });
+      await expect(resolveCLIConfig({ config: configFile })).rejects.toThrow(/authToken.*blank/i);
+
+      process.env.PLAYWRIGHT_MCP_AUTH_TOKEN = '   ';
+      await expect(resolveCLIConfig({})).rejects.toThrow(/authToken.*blank/i);
+    });
+
+    it('keeps an explicitly empty upload directory list as deny-all', async () => {
+      expect(uploadDirectoryList('')).toEqual([]);
+      process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS = '';
+      expect((await resolveCLIConfig({})).browser.allowedUploadDirs).toEqual([]);
+
+      process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS = '/safe; ;/also-safe';
+      await expect(resolveCLIConfig({})).rejects.toThrow(/allowedUploadDirs.*blank/i);
+      await expect(resolveConfig({ browser: { allowedUploadDirs: ['/safe', ' '] } })).rejects.toThrow(/allowedUploadDirs.*blank/i);
     });
   });
 
@@ -417,6 +454,52 @@ describe('Config', () => {
       expect(result).not.toContain('../');
     });
 
+    it('rejects non-portable Windows reserved names on every platform', async () => {
+      const outputDir = path.join(os.tmpdir(), `mcp-invalid-output-${Date.now()}-${Math.random()}`);
+      const config = await resolveConfig({ outputDir });
+
+      await expect(outputFile(config, 'NUL.png')).rejects.toThrow('portable, non-reserved');
+      await expect(outputFile(config, 'report.')).rejects.toThrow('portable, non-reserved');
+      await expect(outputFile(config, 'report.json ')).rejects.toThrow('portable, non-reserved');
+      await expect(outputFile(config, '   ')).rejects.toThrow('portable, non-reserved');
+      expect(fs.existsSync(outputDir)).toBe(false);
+    });
+
+    it('atomically refuses to reserve an existing explicit filename', async () => {
+      const outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-output-collision-'));
+      try {
+        const config = await resolveConfig({ outputDir });
+        const existing = path.join(outputDir, 'report.json');
+        await fs.promises.writeFile(existing, 'keep me');
+
+        await expect(outputFile(config, 'report.json', true)).rejects.toThrow('Output file already exists');
+        expect(await fs.promises.readFile(existing, 'utf-8')).toBe('keep me');
+      } finally {
+        await fs.promises.rm(outputDir, { recursive: true, force: true });
+      }
+    });
+
+    it('allows only one concurrent reservation for an explicit filename', async () => {
+      const outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-output-race-'));
+      try {
+        const config = await resolveConfig({ outputDir });
+        const results = await Promise.allSettled([
+          outputFile(config, 'report.json', true),
+          outputFile(config, 'report.json', true),
+        ]);
+
+        expect(results.map(result => result.status).sort()).toEqual(['fulfilled', 'rejected']);
+        expect(results).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            status: 'rejected',
+            reason: expect.objectContaining({ message: expect.stringContaining('Output file already exists') }),
+          }),
+        ]));
+      } finally {
+        await fs.promises.rm(outputDir, { recursive: true, force: true });
+      }
+    });
+
     it('keeps every artifact of one server in one fallback directory', async () => {
       // The timestamped fallback used to be recomputed per call, scattering
       // one audit's screenshots, reports, traces and session logs across a
@@ -473,6 +556,22 @@ describe('Config', () => {
       expect(config.outputDir).toBeUndefined();
       const result = await outputFile(config, 'artifact.txt');
       expect(path.dirname(result)).toContain('playwright-mcp-output');
+    });
+
+    it('recreates an output directory removed after an earlier artifact', async () => {
+      const outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-output-recreate-'));
+      try {
+        const config = await resolveConfig({ outputDir });
+        await outputFile(config, 'first.txt');
+        await fs.promises.rm(outputDir, { recursive: true });
+        expect(fs.existsSync(outputDir)).toBe(false);
+
+        const recreated = await outputFile(config, 'second.txt');
+        expect(recreated).toBe(path.join(outputDir, 'second.txt'));
+        expect(fs.existsSync(outputDir)).toBe(true);
+      } finally {
+        await fs.promises.rm(outputDir, { recursive: true, force: true });
+      }
     });
   });
 });

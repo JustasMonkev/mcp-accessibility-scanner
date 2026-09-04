@@ -424,24 +424,19 @@ async function isFrameInScope(
         });
         const roots: (Document | ShadowRoot)[] = [document];
         const modals: Element[] = [];
-        // The element-and-shadow-root walk exists only to find `dialog:modal`
-        // inside shadow trees, so a document without a light-DOM <dialog> skips
-        // the full querySelectorAll('*') enumeration.
-        if (document.querySelector('dialog')) {
-          for (const root of roots) {
-            modals.push(...[...root.querySelectorAll('dialog:modal')].filter(modal => {
-              const style = getComputedStyle(modal);
-              const rect = modal.getBoundingClientRect();
-              const visible = modal.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) ??
-                (style.display !== 'none' && !['hidden', 'collapse'].includes(style.visibility) && style.opacity !== '0');
-              return visible &&
-                rect.width > 0 && rect.height > 0 &&
-                (modal.getRootNode() as Document | ShadowRoot).elementsFromPoint(rect.left + 1, rect.top + 1).includes(modal);
-            }));
-            for (const element of root.querySelectorAll('*')) {
-              if (element.shadowRoot)
-                roots.push(element.shadowRoot);
-            }
+        for (const root of roots) {
+          modals.push(...[...root.querySelectorAll('dialog:modal')].filter(modal => {
+            const style = getComputedStyle(modal);
+            const rect = modal.getBoundingClientRect();
+            const visible = modal.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) ??
+              (style.display !== 'none' && !['hidden', 'collapse'].includes(style.visibility) && style.opacity !== '0');
+            return visible &&
+              rect.width > 0 && rect.height > 0 &&
+              (modal.getRootNode() as Document | ShadowRoot).elementsFromPoint(rect.left + 1, rect.top + 1).includes(modal);
+          }));
+          for (const element of root.querySelectorAll('*')) {
+            if (element.shadowRoot)
+              roots.push(element.shadowRoot);
           }
         }
         const insideModal = modals.some(modal => {
@@ -593,7 +588,7 @@ async function hasReachableAxe(frame: playwright.Frame, token: string): Promise<
   } finally {
     await element.dispose().catch(() => {});
   }
-  return reachable;
+  return reachable && await hasAxe(frame, token);
 }
 
 // Runs in the page. Keeps axe's own result shape minus the parts nothing reads:

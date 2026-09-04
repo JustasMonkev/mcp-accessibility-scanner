@@ -130,6 +130,9 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
 // env, CLI, programmatic Config) is covered. Only undefined/null count as
 // omitted — the nullish semantics the fallback historically used.
 function validateResolvedConfig(config: FullConfig): FullConfig {
+  validateAuthToken(config.server.authToken);
+  if (config.browser.allowedUploadDirs?.some(dir => typeof dir !== 'string' || !dir.trim()))
+    throw new Error('allowedUploadDirs must not contain blank directory entries. Use [] to deny all uploads.');
   if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
     throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
   if (config.browser.browserName === 'chromium' && !config.browser.remoteEndpoint && config.browser.launchOptions.chromiumSandbox === undefined) {
@@ -301,8 +304,8 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
 function cliOptionsFromEnv(): CLIOptions {
   const options: CLIOptions = {};
   options.allowedOrigins = semicolonSeparatedList(process.env.PLAYWRIGHT_MCP_ALLOWED_ORIGINS);
-  options.allowedUploadDirs = semicolonSeparatedList(process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS);
-  options.authToken = envToString(process.env.PLAYWRIGHT_MCP_AUTH_TOKEN);
+  options.allowedUploadDirs = uploadDirectoryList(process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS);
+  options.authToken = process.env.PLAYWRIGHT_MCP_AUTH_TOKEN;
   options.blockedOrigins = semicolonSeparatedList(process.env.PLAYWRIGHT_MCP_BLOCKED_ORIGINS);
   options.blockServiceWorkers = envToBoolean(process.env.PLAYWRIGHT_MCP_BLOCK_SERVICE_WORKERS);
   options.browser = envToString(process.env.PLAYWRIGHT_MCP_BROWSER);
@@ -384,23 +387,24 @@ export function resolveOutputDir(config: FullConfig): string {
   return outputDir;
 }
 
-// One recursive mkdir per resolved output dir, shared by every artifact
-// write (screenshots, downloads, reports) — it only needs to succeed once.
-// A rejected mkdir is forgotten so a later write retries instead of
-// replaying the failure.
-const ensuredOutputDirs = new Map<string, Promise<string | undefined>>();
-
-export async function outputFile(config: FullConfig, name: string): Promise<string> {
+export async function outputFile(config: FullConfig, name: string, exclusive = false): Promise<string> {
+  const fileName = name.trim() ? sanitizeForFilePath(name) : '';
+  if (!fileName || fileName === '.' || fileName === '..' || /[. ]$/.test(name) || /[. ]$/.test(fileName) || /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/i.test(fileName))
+    throw new Error(`Invalid output filename "${name}": use a portable, non-reserved file name.`);
   const outputDir = resolveOutputDir(config);
-  let ensured = ensuredOutputDirs.get(outputDir);
-  if (!ensured) {
-    ensured = fs.promises.mkdir(outputDir, { recursive: true });
-    ensuredOutputDirs.set(outputDir, ensured);
-    ensured.catch(() => ensuredOutputDirs.delete(outputDir));
+  await fs.promises.mkdir(outputDir, { recursive: true });
+  const filePath = path.join(outputDir, fileName);
+  if (!exclusive)
+    return filePath;
+  try {
+    const handle = await fs.promises.open(filePath, 'wx');
+    await handle.close();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+      throw new Error(`Output file already exists: ${filePath}. Choose a different filename.`, { cause: error });
+    throw error;
   }
-  await ensured;
-  const fileName = sanitizeForFilePath(name);
-  return path.join(outputDir, fileName);
+  return filePath;
 }
 
 function pickDefined<T extends object>(obj: T | undefined): Partial<T> {
@@ -453,6 +457,17 @@ export function semicolonSeparatedList(value: string | undefined): string[] | un
   if (!value)
     return undefined;
   return value.split(';').map(v => v.trim());
+}
+
+export function uploadDirectoryList(value: string | undefined): string[] | undefined {
+  if (value === undefined)
+    return undefined;
+  return value === '' ? [] : value.split(';').map(dir => dir.trim());
+}
+
+export function validateAuthToken(token: string | undefined): void {
+  if (token !== undefined && (typeof token !== 'string' || !/^[A-Za-z0-9._~+/-]+=*$/.test(token)))
+    throw new Error('server.authToken must be a non-blank Bearer token without whitespace.');
 }
 
 export function commaSeparatedList(value: string | undefined): string[] | undefined {

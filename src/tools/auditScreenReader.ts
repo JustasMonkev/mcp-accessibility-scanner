@@ -874,6 +874,10 @@ const auditScreenReader = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
+    const reportFileName = params.reportFile ?? `audit-screen-reader-${safeIsoTimestampForFileName()}.json`;
+    const reportPath = await tab.context.outputFile(reportFileName, params.reportFile !== undefined);
+    if (params.reportFile !== undefined)
+      response.deleteFileOnError(reportPath);
     const ariaNodes = parseAriaSnapshot(await tab.page.ariaSnapshot({ mode: 'ai' }));
     const refIndexes = ariaNodes.map((node, index) => node.ref ? index : -1).filter(index => index >= 0);
     const childCounts = new Map<number, number>();
@@ -1116,7 +1120,7 @@ const auditScreenReader = defineTabTool({
       findings: result.findings,
     };
 
-    const reportResource = await writeJsonReport(tab.context, response, params.reportFile ?? `audit-screen-reader-${safeIsoTimestampForFileName()}.json`, report, {
+    const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'audit-screen-reader-report',
       title: 'Audit screen reader JSON report',
       description: 'JSON report for accessible name quality and reading order findings.',

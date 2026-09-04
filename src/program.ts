@@ -18,7 +18,7 @@ import readline from 'node:readline';
 
 import { program, Option } from 'commander';
 import * as mcpServer from './mcp/server.js';
-import { commaSeparatedList, resolveCLIConfig, semicolonSeparatedList } from './config.js';
+import { commaSeparatedList, resolveCLIConfig, semicolonSeparatedList, uploadDirectoryList } from './config.js';
 import { packageJSON } from './utils/package.js';
 import { Context } from './context.js';
 import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported, contextFactory, PersistentContextFactory, persistentProfileConflictRemedy } from './browserContextFactory.js';
@@ -104,7 +104,7 @@ function configureBaseProgram() {
       .version('Version ' + packageJSON.version)
       .name(packageJSON.name)
       .option('--allowed-origins <origins>', 'semicolon-separated list of origins to allow the browser to request. Default is to allow all.', semicolonSeparatedList)
-      .option('--allowed-upload-dirs <dirs>', 'semicolon-separated list of directories that browser_file_upload may upload files from. Default is to allow any path; setting this restricts uploads (and blocks local-file exfiltration through a page\'s file chooser) to the given directories.', semicolonSeparatedList)
+      .option('--allowed-upload-dirs <dirs>', 'semicolon-separated list of directories that browser_file_upload may upload files from. An empty list denies all uploads.', uploadDirectoryList)
       .option('--blocked-origins <origins>', 'semicolon-separated list of origins to block the browser from requesting. Blocklist is evaluated before allowlist. If used without the allowlist, requests not matching the blocklist are still allowed.', semicolonSeparatedList)
       .option('--block-service-workers', 'block service workers')
       .option('--browser <browser>', 'browser or chrome channel to use, possible values: chrome, firefox, webkit, msedge.')

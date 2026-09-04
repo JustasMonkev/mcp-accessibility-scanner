@@ -34,9 +34,9 @@ function runCLI(args: string): string {
   });
 }
 
-function collectOutput(args: string[], timeoutMs = 3000): Promise<{ stdout: string; stderr: string }> {
+function collectOutput(args: string[], timeoutMs = 3000, environment?: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
   return new Promise(resolve => {
-    const child = spawn(process.execPath, [...cliArgs, ...args], { stdio: 'pipe' });
+    const child = spawn(process.execPath, [...cliArgs, ...args], { stdio: 'pipe', env: environment ? { ...process.env, ...environment } : undefined });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
@@ -78,6 +78,16 @@ describe('CLI command dispatch contract', () => {
       const { stdout } = await collectOutput([], 2000);
       expect(stdout).not.toContain('Interactive mode');
     });
+  });
+
+  it('prints usable auth setup without exposing the configured token', async () => {
+    const secret = 'startup-secret-do-not-print';
+    const { stderr } = await collectOutput(['--port', '0'], 3000, { PLAYWRIGHT_MCP_AUTH_TOKEN: secret });
+
+    expect(stderr).toContain('Listening on');
+    expect(stderr).not.toContain(secret);
+    expect(stderr).toContain('replace <YOUR_AUTH_TOKEN> locally');
+    expect(stderr).toContain('"Authorization": "Bearer <YOUR_AUTH_TOKEN>"');
   });
 
   describe('list-tools subcommand', () => {

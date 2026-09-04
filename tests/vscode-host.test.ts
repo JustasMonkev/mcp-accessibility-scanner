@@ -74,7 +74,7 @@ describe('VSCodeProxyBackend', () => {
     // round-trip into the spawned VS Code provider mints a new object, so an
     // unmaterialized config gave the child a second temp root and scattered
     // one run's artifacts across the provider switch.
-    const config = await resolveConfig({});
+    const config = await resolveConfig({ server: { authToken: 'child-argv-secret' } });
     const parentFile = await outputFile(config, 'parent.txt');
 
     const backend = new VSCodeProxyBackend(config, vi.fn(async () => ({ id: 'default-transport' } as any)));
@@ -86,6 +86,8 @@ describe('VSCodeProxyBackend', () => {
     const transport = setCurrentClient.mock.calls[0][0] as any;
     const childConfig = JSON.parse(transport._serverParams.args[1]);
     expect(childConfig.outputDir).toBe(path.dirname(parentFile));
+    expect(childConfig.server?.authToken).toBeUndefined();
+    expect(JSON.stringify(transport._serverParams.args)).not.toContain('child-argv-secret');
     // The deserialized child config writes into the parent's directory.
     const childFile = await outputFile(childConfig, 'child.txt');
     expect(path.dirname(childFile)).toBe(path.dirname(parentFile));

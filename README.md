@@ -217,7 +217,7 @@ Create a `config.json` file with the following options:
 **Available Options:**
 
 - `browser.browserName`: Browser to use (`chromium`, `firefox`, `webkit`)
-- `browser.allowedUploadDirs`: List of directories that `browser_file_upload` may upload files from. Default (unset) allows any absolute path; setting this confines uploads to the given directories, blocking local-file exfiltration through a page's file chooser (CLI: `--allowed-upload-dirs`, semicolon-separated; env: `PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS`)
+- `browser.allowedUploadDirs`: Restrict `browser_file_upload` to regular files inside these directories, including resolved symlink targets. Restricted uploads use a checked file handle and accept up to 50 MiB total per call. Unset allows any path; `[]` denies all uploads. Blank list entries are rejected. CLI: `--allowed-upload-dirs` (semicolon-separated; `""` denies all), env: `PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS` (empty string denies all).
 - `browser.launchOptions.headless`: Run browser in headless mode (default: `true` on Linux without display, `false` otherwise)
 - `browser.launchOptions.channel`: Browser channel (`chrome`, `chrome-beta`, `msedge`, etc.)
 - `browser.launchOptions.chromiumSandbox`: Defaults to `false` for downloaded Chromium builds on Linux because they lack the setuid sandbox helper, and `true` otherwise. Remote and VS Code endpoints choose on the remote host. An explicit config or `PLAYWRIGHT_MCP_SANDBOX` value wins; `--no-sandbox` always disables it.
@@ -233,12 +233,16 @@ Create a `config.json` file with the following options:
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
 - `snapshot.boxes`: Include each element's viewport-relative bounding box as `[box=x,y,width,height]` in snapshots (default: `false`; CLI: `--snapshot-boxes`, env: `PLAYWRIGHT_MCP_SNAPSHOT_BOXES=1`)
-- `server.authToken`: When set, Streamable HTTP requests (`--port`) must carry `Authorization: Bearer <token>` or they are rejected with `401` (env: `PLAYWRIGHT_MCP_AUTH_TOKEN`). Recommended whenever the server is bound to a non-loopback `--host`; without it every local process can reach the endpoint.
+- `server.authToken`: When set, Streamable HTTP requests (`--port`) require `Authorization: Bearer <token>` or return `401` (env: `PLAYWRIGHT_MCP_AUTH_TOKEN`). Blank or malformed tokens fail at startup. The scheme is case-insensitive; the token is exact. Bearer auth does not encrypt traffic: authenticated listeners must bind to loopback, such as `--host 127.0.0.1`; use a TLS reverse proxy for remote access. The printed client config includes a header placeholder to replace locally, without logging the secret. Unset keeps unauthenticated access.
 - `outputDir`: Directory for output files — reports, screenshots, traces, and session logs (CLI: `--output-dir`, env: `PLAYWRIGHT_MCP_OUTPUT_DIR`). Defaults to a fresh directory under the system temp folder, resolved once per server run so all of a run's artifacts land together. The output location is always server configuration; the deprecated MCP roots capability (client workspace folders) is no longer consulted.
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
+Caller-supplied screenshot, PDF, scan-page-matrix, and audit report filenames use a no-clobber policy: an existing file causes the tool call to fail instead of being overwritten. Windows-reserved basenames and names ending in a dot or space are rejected on every platform so configured names behave consistently across hosts.
+
 Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies after every action so delayed DOM-only updates are included in the response; a short observation window also catches scheduled requests and waits for them before that delay.
+
+The VS Code `browser_connect` tool accepts only `playwright` or `playwright-core` libraries and loopback WebSocket URLs. Set `PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE=1` to allow remote endpoints, which must use `wss:`. URL userinfo credentials are rejected.
 
 #### HTTP Heartbeat
 
@@ -388,6 +392,7 @@ A frame you scoped out yourself is not reported: with `excludeSelectors: ["ifram
 Crawls and scans multiple internal pages, then aggregates violations across the site.
 - Default strategy: link-based BFS from the current URL
 - Supports `links`, `nav`, `sitemap`, and `provided` URL strategies
+- Sitemap URLs and every redirect must pass the server network policy and crawl scope. Fetches use HTTP(S) without browser cookies or auth headers, with a 15-second total timeout, 20 redirects, and a 10 MiB response limit. Browser proxy settings are rejected for this strategy; use `provided` URLs when a proxy is required. Sitemap TLS certificates must be valid even when browser HTTPS errors are ignored.
 - Always writes a JSON report (default filename: `audit-site-{timestamp}-{token}.json`)
 - Warns and records `sessionLosses` if the crawl loses cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 
@@ -590,6 +595,10 @@ Close the page.
 #### `browser_resize`
 Resize the browser window.
 - Parameters: `width`, `height`
+
+#### `browser_emulate_media`
+Emulate CSS media features on the current page without resetting omitted features.
+- Parameters: `colorScheme` (`light` or `dark`), `reducedMotion` (`reduce` or `no-preference`), `forcedColors` (`active` or `none`), `contrast` (`more` or `no-preference`), and `media` (`screen` or `print`); provide at least one.
 
 ### Tab Management
 

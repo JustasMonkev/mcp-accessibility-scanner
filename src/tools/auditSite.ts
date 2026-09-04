@@ -1,4 +1,6 @@
 import RE2 from 're2';
+import coreBundle from 'playwright-core/lib/coreBundle';
+import type { FullConfig } from '../config.js';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { writeJsonReport } from './report.js';
@@ -299,8 +301,8 @@ async function readPage(page: import('playwright').Page, linkSelector: string): 
   return await page.evaluate(selector => ({
     title: document.title,
     links: selector
-      ? Array.from(document.querySelectorAll(selector))
-          .map(anchor => (anchor as HTMLAnchorElement).href)
+      ? Array.from(document.querySelectorAll<HTMLAnchorElement>(selector))
+          .map(anchor => anchor.href)
           .filter(Boolean)
       : [],
   }), linkSelector);
@@ -309,32 +311,63 @@ async function readPage(page: import('playwright').Page, linkSelector: string): 
 const allLinksSelector = 'a[href]';
 const navLinksSelector = 'nav a[href], header a[href], [role="navigation"] a[href]';
 
-async function extractSitemapUrls(page: import('playwright').Page, sitemapUrl: string): Promise<string[]> {
-  const response = await page.request.get(sitemapUrl, { timeout: 15000 });
-  if (!response.ok())
-    throw new Error(`Failed to fetch sitemap ${sitemapUrl}: ${response.status()} ${response.statusText()}`);
-  const xmlText = await response.text();
-  const matches = [...xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)];
-  return matches.map(match => match[1].replace('<![CDATA[', '').replace(']]>', '').trim()).filter(Boolean);
+async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: string, base: URL) => string): Promise<string[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    for (let redirects = 0; ; redirects++) {
+      const response = await fetch(sitemapUrl, { redirect: 'manual', signal: controller.signal, credentials: 'omit' });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        await response.body?.cancel();
+        const location = response.headers.get('location');
+        if (!location || redirects >= 20)
+          throw new Error('Sitemap redirect is missing Location or exceeds 20 redirects.');
+        sitemapUrl = validateUrl(location, new URL(sitemapUrl));
+        continue;
+      }
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new Error(`Failed to fetch sitemap ${sitemapUrl}: ${response.status} ${response.statusText}`);
+      }
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      if (response.body) {
+        for await (const chunk of response.body) {
+          size += chunk.length;
+          if (size > 10 * 1024 * 1024)
+            throw new Error('Sitemap exceeds the 10 MiB limit.');
+          chunks.push(chunk);
+        }
+      }
+      const xmlText = Buffer.concat(chunks).toString('utf8');
+      return [...xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)]
+          .map(match => match[1].replace('<![CDATA[', '').replace(']]>', '').trim()).filter(Boolean);
+    }
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
 }
 
-// The sitemap fetch goes through page.request — a server-side Node client
-// that shares the context's cookies but not its route interception — so the
-// origin policy governing crawl URLs must admit the sitemap URL too, or
-// sitemapUrl becomes a server-side request forgery vector to internal hosts
-// (cloud metadata, intranet) that the network policy never sees.
-function parseSitemapUrl(sitemapUrlInput: string, startUrl: URL, sameOriginOnly: boolean, includeSubdomains: boolean): string {
-  let sitemapUrl: URL;
+function parseSitemapUrl(input: string, base: URL, startUrl: URL, sameOriginOnly: boolean, includeSubdomains: boolean, config: FullConfig): string {
+  let url: URL;
   try {
-    sitemapUrl = new URL(sitemapUrlInput, startUrl);
+    url = new URL(input, base);
   } catch {
-    throw new Error(`Invalid sitemap URL "${sitemapUrlInput}".`);
+    throw new Error(`Invalid sitemap URL "${input}".`);
   }
-  if (sitemapUrl.protocol !== 'http:' && sitemapUrl.protocol !== 'https:')
-    throw new Error(`Sitemap URL must use http:// or https://. Received "${sitemapUrlInput}".`);
-  if (!isAllowedByOrigin(sitemapUrl, startUrl, sameOriginOnly, includeSubdomains))
-    throw new Error(`Sitemap URL "${sitemapUrlInput}" is outside the allowed crawl scope (start origin ${startUrl.origin}). Use a sitemap on an allowed origin, or adjust sameOriginOnly/includeSubdomains deliberately.`);
-  return sitemapUrl.toString();
+  if (url.protocol !== 'http:' && url.protocol !== 'https:')
+    throw new Error(`Sitemap URL must use http:// or https://. Received "${input}".`);
+  if (url.username || url.password)
+    throw new Error('Sitemap URL must not contain credentials.');
+  if (!isAllowedByOrigin(url, startUrl, sameOriginOnly, includeSubdomains))
+    throw new Error(`Sitemap URL "${input}" is outside the allowed crawl scope (start origin ${startUrl.origin}).`);
+  // Use the same glob matcher as context.route(), with block rules taking priority.
+  const matches = (origin: string) => coreBundle.iso.urlMatches(undefined, url.href, `*://${origin}/**`);
+  if (config.network.blockedOrigins?.some(matches) ||
+      (config.network.allowedOrigins?.length && !config.network.allowedOrigins.some(matches)))
+    throw new Error(`Sitemap URL "${input}" is blocked by the server network policy.`);
+  return url.href;
 }
 
 function aggregateIntoSummary(
@@ -436,6 +469,10 @@ const auditSite = defineTabTool({
     assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
 
     const context = tab.context;
+    const reportFileName = params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`;
+    const reportPath = await context.outputFile(reportFileName, params.reportFile !== undefined);
+    if (params.reportFile !== undefined)
+      response.deleteFileOnError(reportPath);
     const originalTab = tab;
     const queue: CrawlItem[] = [];
     const queued = new Set<string>();
@@ -504,17 +541,13 @@ const auditSite = defineTabTool({
       for (const url of params.urls ?? [])
         enqueueUrl(url, 0, null);
     } else if (params.strategy === 'sitemap') {
-      const sitemapUrl = parseSitemapUrl(params.sitemapUrl ?? new URL('sitemap.xml', startUrl).toString(), startUrl, params.sameOriginOnly, params.includeSubdomains);
-      const temporaryTab = await context.newTab();
-      try {
-        const sitemapUrls = await extractSitemapUrls(temporaryTab.page, sitemapUrl);
-        for (const url of sitemapUrls)
-          enqueueUrl(url, 0, sitemapUrl);
-      } finally {
-        const tabIndex = context.tabs().indexOf(temporaryTab);
-        if (tabIndex !== -1)
-          await context.closeTab(tabIndex);
-      }
+      if (context.config.browser.launchOptions.proxy || context.config.browser.contextOptions.proxy)
+        throw new Error('Sitemap fetches do not support browser proxies. Use the provided URL strategy when a proxy is required.');
+      const validateUrl = (input: string, base: URL) => parseSitemapUrl(input, base, startUrl, params.sameOriginOnly, params.includeSubdomains, context.config);
+      const sitemapUrl = validateUrl(params.sitemapUrl ?? new URL('sitemap.xml', startUrl).toString(), startUrl);
+      const sitemapUrls = await extractSitemapUrls(sitemapUrl, validateUrl);
+      for (const url of sitemapUrls)
+        enqueueUrl(url, 0, sitemapUrl);
     } else {
       enqueueUrl(startUrl.toString(), 0, null);
     }
@@ -713,7 +746,7 @@ const auditSite = defineTabTool({
       sessionLosses,
     };
 
-    const reportResource = await writeJsonReport(context, response, params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`, report, {
+    const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'audit-site-report',
       title: 'Audit site JSON report',
       description: 'Aggregated JSON report for the site accessibility crawl.',

@@ -195,6 +195,7 @@ These tools are always available and work in the interactive REPL.
 | `browser_navigate_back` | Go back to previous page |
 | `browser_close` | Close the page |
 | `browser_resize` | Resize window: `{"width": 1280, "height": 720}` |
+| `browser_emulate_media` | Emulate color scheme, reduced motion, forced colors, contrast, or print/screen media |
 | `browser_snapshot` | Capture accessibility snapshot; pass `{"boxes": true}` to include element bounds |
 | `browser_take_screenshot` | Take screenshot (png/jpeg/webp, fullPage option) |
 | `browser_wait_for` | Wait for text/time: `{"text": "loaded"}` or `{"time": 5}` |

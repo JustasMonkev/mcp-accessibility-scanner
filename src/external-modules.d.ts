@@ -25,6 +25,8 @@ declare module 'playwright-core/lib/coreBundle' {
   interface CoreBundle {
     readonly iso: {
       asLocator(lang: string, selector: string): string;
+      urlMatches(baseURL: string | undefined, urlString: string, match: string): boolean;
+      getMimeTypeForPath(path: string): string;
     };
     readonly registry: {
       readonly registryDirectory: string;

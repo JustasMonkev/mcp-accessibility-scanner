@@ -249,16 +249,23 @@ export async function start(serverBackendFactory: ServerBackendFactory, options:
   }
 
   const httpServer = await startHttpServer(options);
-  await installHttpTransport(httpServer, serverBackendFactory, { authToken: options.authToken });
+  try {
+    await installHttpTransport(httpServer, serverBackendFactory, { authToken: options.authToken });
+  } catch (error) {
+    await new Promise<void>(resolve => httpServer.close(() => resolve()));
+    throw error;
+  }
   const url = httpAddressToString(httpServer.address());
 
-  const mcpConfig: any = { mcpServers: { } };
-  mcpConfig.mcpServers[serverBackendFactory.nameInConfig] = {
+  const clientConfig: { url: string; headers?: { Authorization: string } } = {
     url: `${url}/mcp`
   };
+  if (options.authToken !== undefined)
+    clientConfig.headers = { Authorization: 'Bearer <YOUR_AUTH_TOKEN>' };
+  const mcpConfig = { mcpServers: { [serverBackendFactory.nameInConfig]: clientConfig } };
   const message = [
     `Listening on ${url}`,
-    'Put this in your client config:',
+    options.authToken !== undefined ? 'Put this in your client config and replace <YOUR_AUTH_TOKEN> locally with your configured token:' : 'Put this in your client config:',
     JSON.stringify(mcpConfig, undefined, 2),
   ].join('\n');
     // eslint-disable-next-line no-console

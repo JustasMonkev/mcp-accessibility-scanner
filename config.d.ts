@@ -109,10 +109,10 @@ export type Config = {
     /**
      * Directories that browser_file_upload may read upload files from.
      * When unset (default), any absolute path is allowed; when set, upload
-     * paths must resolve inside one of these directories, which prevents a
-     * rogue client from exfiltrating arbitrary local files through a page's
-     * file chooser. Can also be provided via the PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS
-     * environment variable or --allowed-upload-dirs.
+     * canonical file paths must stay inside these directories. Restricted
+     * uploads accept regular files up to 50 MiB total per call. [] denies all;
+     * blank entries are invalid. Also PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS or
+     * --allowed-upload-dirs (semicolon-separated; empty string means []).
      */
     allowedUploadDirs?: string[];
   },
@@ -130,8 +130,9 @@ export type Config = {
 
     /**
      * When set, HTTP transport requests must carry `Authorization: Bearer <token>`.
-     * Recommended whenever the server is bound to a non-loopback host. Can also
-     * be provided via the PLAYWRIGHT_MCP_AUTH_TOKEN environment variable.
+     * Blank or malformed tokens are rejected. Requires a loopback listener;
+     * remote access must use a TLS reverse proxy. Also configurable through
+     * PLAYWRIGHT_MCP_AUTH_TOKEN.
      */
     authToken?: string;
   },

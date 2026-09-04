@@ -22,6 +22,7 @@ import { ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { BrowserSessionRegistry } from '../src/browserSessions.js';
 import { resolveConfig } from '../src/config.js';
+import { allTools } from '../src/tools.js';
 
 const unusedFactory = {
   createContext: async () => {
@@ -46,6 +47,30 @@ describe('BrowserServerBackend.callTool', () => {
     const backend = new BrowserServerBackend(config, unusedFactory);
     await expect(backend.callTool('browser_navigate', { url: 123 }))
         .rejects.toThrow(/Invalid input for tool "browser_navigate"/);
+  });
+
+  it('removes reserved output files when a tool fails', async () => {
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-reservation-'));
+    const tool = allTools.find(candidate => candidate.schema.name === 'browser_default_timeout')!;
+    const originalHandle = tool.handle;
+    try {
+      tool.handle = async (context, _params, response) => {
+        const filePath = await context.outputFile('reserved.json', true);
+        response.deleteFileOnError(filePath);
+        throw new Error('write failed');
+      };
+      const config = await resolveConfig({ outputDir });
+      const backend = new BrowserServerBackend(config, unusedFactory);
+      await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'vitest', version: '1.0.0' });
+
+      const result = await backend.callTool('browser_default_timeout', { timeout: 30000 });
+
+      expect(result.isError).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, 'reserved.json'))).toBe(false);
+    } finally {
+      tool.handle = originalHandle;
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
   });
 
   it('registers no session when the --save-session log cannot be created', async () => {

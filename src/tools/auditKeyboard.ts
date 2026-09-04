@@ -380,6 +380,10 @@ const auditKeyboard = defineTabTool({
 
   handle: async (tab, params, response) => {
     const { reportFile, ...auditOptions } = params;
+    const reportFileName = reportFile ?? `audit-keyboard-${safeIsoTimestampForFileName()}.json`;
+    const reportPath = await tab.context.outputFile(reportFileName, reportFile !== undefined);
+    if (reportFile !== undefined)
+      response.deleteFileOnError(reportPath);
     const getActiveElementInfo = async (): Promise<FocusPoint> => {
       return await tab.page.evaluate(({ checkTargetSize, checkFocusObscured, minTargetSize, maxNeighborTargets, maxTextLength }) => {
         const current = document.activeElement as HTMLElement | null;
@@ -617,7 +621,7 @@ const auditKeyboard = defineTabTool({
       ...result,
     };
 
-    const reportResource = await writeJsonReport(tab.context, response, reportFile ?? `audit-keyboard-${safeIsoTimestampForFileName()}.json`, report, {
+    const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'audit-keyboard-report',
       title: 'Audit keyboard JSON report',
       description: 'JSON report for keyboard navigation, focus, and skip-link findings.',

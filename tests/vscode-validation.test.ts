@@ -102,10 +102,13 @@ describe('browser_connect validation', () => {
 
     it('allows remote hosts only when the operator opts in', () => {
       expect(validateBrowserConnectConnectionString('ws://192.168.1.10:1234/')).toBeDefined();
-      process.env.PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE = '1';
-      expect(validateBrowserConnectConnectionString('ws://192.168.1.10:1234/')).toBeUndefined();
+      for (const optIn of ['1', 'true', 'yes']) {
+        process.env.PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE = optIn;
+        expect(validateBrowserConnectConnectionString('ws://192.168.1.10:1234/')).toBeDefined();
+        expect(validateBrowserConnectConnectionString('wss://192.168.1.10:1234/')).toBeUndefined();
+      }
       // Userinfo stays rejected even with remote opt-in.
-      expect(validateBrowserConnectConnectionString('ws://user:pass@192.168.1.10:1234/')).toBeDefined();
+      expect(validateBrowserConnectConnectionString('wss://user:pass@192.168.1.10:1234/')).toBeDefined();
       // Non-ws schemes stay rejected even with remote opt-in.
       expect(validateBrowserConnectConnectionString('http://192.168.1.10:1234/')).toBeDefined();
     });

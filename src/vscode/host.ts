@@ -213,7 +213,7 @@ export class VSCodeProxyBackend implements ServerBackend {
         // materializing the resolved dir here, the spawned provider would
         // open a second temp root and scatter one run's artifacts across
         // the provider switch.
-        JSON.stringify({ ...this._config, outputDir: resolveOutputDir(this._config) }),
+        JSON.stringify({ ...this._config, server: { ...this._config.server, authToken: undefined }, outputDir: resolveOutputDir(this._config) }),
         connectionString,
         lib,
       ],

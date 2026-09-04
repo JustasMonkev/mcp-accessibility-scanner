@@ -20,6 +20,111 @@ import { Context } from '../src/context.js';
 import type { BrowserContextFactory } from '../src/browserContextFactory.js';
 import { EventEmitter } from 'events';
 
+describe('closePage', () => {
+  type CloseablePage = {
+    url: () => string;
+    close: () => Promise<void>;
+    isClosed: () => boolean;
+  };
+
+  const browserContextFactory: BrowserContextFactory = {
+    createContext: async () => { throw new Error('Not used by closeTab tests.'); },
+  };
+
+  const contextFor = async (page: CloseablePage) => {
+    const context = new Context({
+      tools: [],
+      config: await resolveConfig({}),
+      browserContextFactory,
+      sessionLog: undefined,
+      clientInfo: {},
+    });
+    const tab = { page, operationTimeout: () => 5000 };
+    Object.assign(context, { _tabs: [tab], _currentTab: tab });
+    return context;
+  };
+
+  it('retries when Chromium acknowledges a close but leaves the target alive', async () => {
+    let closed = false;
+    const page = {
+      url: () => 'https://example.com',
+      close: vi.fn()
+          .mockResolvedValueOnce(undefined)
+          .mockImplementationOnce(async () => { closed = true; }),
+      isClosed: vi.fn(() => closed),
+    };
+    const context = await contextFor(page);
+
+    try {
+      await expect(context.closeTab(undefined)).resolves.toBe('https://example.com');
+      expect(page.close).toHaveBeenCalledTimes(2);
+    } finally {
+      await context.dispose();
+    }
+  });
+
+  it('allows a slow remote page to close within the operation timeout', async () => {
+    vi.useFakeTimers();
+    let closed = false;
+    let finishClose = () => {};
+    const page = {
+      url: () => 'https://example.com',
+      close: vi.fn(() => new Promise<void>(resolve => {
+        finishClose = () => {
+          closed = true;
+          resolve();
+        };
+      })),
+      isClosed: vi.fn(() => closed),
+    };
+    const context = await contextFor(page);
+
+    try {
+      const closing = context.closeTab(undefined);
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(page.close).toHaveBeenCalledTimes(1);
+
+      finishClose();
+      await expect(closing).resolves.toBe('https://example.com');
+      expect(page.close).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      await context.dispose();
+    }
+  });
+
+  it('reuses a timed-out close request when another tool call retries', async () => {
+    vi.useFakeTimers();
+    let closed = false;
+    let finishClose = () => {};
+    const page = {
+      url: () => 'https://example.com',
+      close: vi.fn(() => new Promise<void>(resolve => {
+        finishClose = () => {
+          closed = true;
+          resolve();
+        };
+      })),
+      isClosed: vi.fn(() => closed),
+    };
+    const context = await contextFor(page);
+
+    try {
+      const failure = expect(context.closeTab(undefined)).rejects.toThrow('Timed out after 5000ms');
+      await vi.advanceTimersByTimeAsync(5000);
+      await failure;
+
+      const retry = context.closeTab(undefined);
+      expect(page.close).toHaveBeenCalledTimes(1);
+      finishClose();
+      await expect(retry).resolves.toBe('https://example.com');
+    } finally {
+      vi.useRealTimers();
+      await context.dispose();
+    }
+  });
+});
+
 describe('Context', () => {
   let mockBrowserContextFactory: BrowserContextFactory;
   let mockBrowserContext: any;

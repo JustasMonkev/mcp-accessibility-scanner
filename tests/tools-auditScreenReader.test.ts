@@ -506,13 +506,14 @@ function createToolHarness(options: {
       },
     })),
   };
+  const outputFile = vi.fn(async (name: string) => `/tmp/${name}`);
   const tab: any = {
     modalStates: () => [],
     page,
-    context: { outputFile: async (name: string) => `/tmp/${name}` },
+    context: { outputFile },
   };
   const context: any = { currentTabOrDie: () => tab, config: {} };
-  return { context, concurrency, frameConcurrency, ownerFrames, disposals, installs, frame, frames };
+  return { context, concurrency, frameConcurrency, ownerFrames, disposals, installs, frame, frames, outputFile };
 }
 
 describe('audit_screen_reader tool measurement', () => {
@@ -533,6 +534,17 @@ describe('audit_screen_reader tool measurement', () => {
     } as any, response);
     return response.result();
   }
+
+  it('reserves an explicit report before reading the accessibility tree', async () => {
+    const harness = createToolHarness({ snapshot: '- button "Save" [ref=e1]' });
+    harness.outputFile.mockRejectedValue(new Error('Output file already exists'));
+    const response = new Response(harness.context, 'audit_screen_reader', {});
+
+    await expect(tool.handle(harness.context, tool.schema.inputSchema.parse({ reportFile: 'taken.json' }), response))
+        .rejects.toThrow('Output file already exists');
+
+    expect(harness.context.currentTabOrDie().page.ariaSnapshot).not.toHaveBeenCalled();
+  });
 
   it('spends the element budget on elements a screen reader can reach', async () => {
     // The AI snapshot also refs aria-hidden subtrees: slicing the raw ref list

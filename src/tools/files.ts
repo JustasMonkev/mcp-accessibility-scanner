@@ -15,33 +15,55 @@
  */
 
 import path from 'node:path';
+import fs from 'node:fs';
+import coreBundle from 'playwright-core/lib/coreBundle';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 
 import type { FullConfig } from '../config.js';
 
-// setFiles() reads the given local paths into the page's upload, so with no
-// restriction a rogue client can push arbitrary local files (e.g. ~/.ssh/)
-// to whatever origin the page posts to. An configured allowlist confines
-// uploads to operator-chosen directories; unset keeps the historical
-// any-path behavior.
-function assertUploadPathsAllowed(config: FullConfig, paths: string[]): void {
+async function prepareUploadFiles(config: FullConfig, paths: string[]) {
   const allowedDirs = config.browser.allowedUploadDirs;
-  // Unset keeps the historical any-path behavior; an explicitly empty list
-  // allows nothing, so it can never silently widen back to "any path".
-  if (allowedDirs === undefined)
-    return;
-  const resolvedRoots = allowedDirs.map(dir => path.resolve(dir));
-  const withinAllowed = (target: string) => {
-    const resolved = path.resolve(target);
-    return resolvedRoots.some(root => {
-      const relative = path.relative(root, resolved);
-      return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-    });
-  };
-  const rejected = paths.filter(target => !withinAllowed(target));
-  if (rejected.length)
-    throw new Error(`Upload path(s) outside the allowed upload directories (${allowedDirs.join('; ')}): ${rejected.join('; ')}. Restart with --allowed-upload-dirs covering them, or pick files inside the allowed directories.`);
+  if (allowedDirs === undefined || !paths.length)
+    return paths;
+  const rejected = () => new Error('Upload path(s) outside the allowed upload directories.');
+  if (!allowedDirs.length)
+    throw rejected();
+  const roots = await Promise.all(allowedDirs.map(dir => fs.promises.realpath(dir)));
+  const payloads: { name: string; mimeType: string; buffer: Buffer }[] = [];
+  let totalBytes = 0;
+  for (const target of paths) {
+    const canonical = await fs.promises.realpath(target);
+    if (!roots.some(root => {
+      const relative = path.relative(root, canonical);
+      return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+    }))
+      throw rejected();
+    const before = await fs.promises.stat(canonical);
+    if (!before.isFile())
+      throw new Error('Restricted uploads require regular files, not directories or devices.');
+    const handle = await fs.promises.open(canonical, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    try {
+      const opened = await handle.stat();
+      if (opened.dev !== before.dev || opened.ino !== before.ino || await fs.promises.realpath(canonical) !== canonical)
+        throw new Error('Upload file changed during validation. Retry with a stable file.');
+      const checked = await fs.promises.stat(canonical);
+      if (opened.dev !== checked.dev || opened.ino !== checked.ino)
+        throw new Error('Upload file changed during validation. Retry with a stable file.');
+      // Read the checked descriptor; setFiles must never reopen an attacker-replaceable path.
+      const chunks: Buffer[] = [];
+      for await (const chunk of handle.createReadStream({ autoClose: false })) {
+        totalBytes += chunk.length;
+        if (totalBytes > 50 * 1024 * 1024)
+          throw new Error('Restricted uploads exceed the 50 MiB total limit.');
+        chunks.push(chunk);
+      }
+      payloads.push({ name: path.basename(target), mimeType: coreBundle.iso.getMimeTypeForPath(target), buffer: Buffer.concat(chunks) });
+    } finally {
+      await handle.close();
+    }
+  }
+  return payloads;
 }
 
 const uploadFile = defineTabTool({
@@ -64,13 +86,13 @@ const uploadFile = defineTabTool({
     if (!modalState)
       throw new Error('No file chooser visible');
 
-    assertUploadPathsAllowed(tab.context.config, params.paths);
+    const files = await prepareUploadFiles(tab.context.config, params.paths);
 
     response.addCode(`await fileChooser.setFiles(${JSON.stringify(params.paths)})`);
 
     tab.clearModalState(modalState);
     await tab.waitForCompletion(async () => {
-      await modalState.fileChooser.setFiles(params.paths);
+      await modalState.fileChooser.setFiles(files);
     });
   },
   clearsModalState: 'fileChooser',
