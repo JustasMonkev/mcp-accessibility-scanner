@@ -45,6 +45,8 @@ function createHarness(
     network?: { allowedOrigins?: string[], blockedOrigins?: string[] };
     sitemapFetch?: typeof globalThis.fetch;
     browserProxy?: boolean;
+    remoteEndpoint?: string;
+    browserContextFactoryName?: string;
     requestContext?: any;
     cookiesForUrl?: (url: string) => { name: string, domain?: string, path?: string, expires?: number }[];
     navigationFailsFor?: (url: string) => boolean;
@@ -141,8 +143,12 @@ function createHarness(
       browser: {
         launchOptions: options?.browserProxy ? { proxy: { server: 'http://proxy.example' } } : {},
         contextOptions: {},
+        remoteEndpoint: options?.remoteEndpoint,
       },
       network: options?.network ?? {},
+    },
+    options: {
+      browserContextFactory: { name: options?.browserContextFactoryName ?? 'chromium' },
     },
   };
 
@@ -812,6 +818,57 @@ describe('audit_site tool', () => {
     expect(fetchMock).toHaveBeenCalledWith(sitemapUrl, expect.objectContaining({ redirect: 'manual', credentials: 'omit' }));
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     expect(report.pages.map((page: any) => page.url)).toEqual(['https://example.com/one', 'https://example.com/two']);
+  });
+
+  it('rejects sitemap strategy when the browser runs on a remote endpoint', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      remoteEndpoint: 'ws://remote.example/browser',
+    });
+
+    await expect(tool.handle(context as any, tool.schema.inputSchema.parse({
+      strategy: 'sitemap',
+      sitemapUrl,
+      sameOriginOnly: false,
+    }), response)).rejects.toThrow(/remoteEndpoint/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.newTab).not.toHaveBeenCalled();
+  });
+
+  it('rejects sitemap strategy for the browser_connect provider', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      browserContextFactoryName: 'vscode',
+    });
+
+    await expect(tool.handle(context as any, tool.schema.inputSchema.parse({
+      strategy: 'sitemap',
+      sitemapUrl,
+      sameOriginOnly: false,
+    }), response)).rejects.toThrow(/remoteEndpoint|browser_connect/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.newTab).not.toHaveBeenCalled();
+  });
+
+  it('keeps provided URL strategy available with a remote endpoint', async () => {
+    const pageUrl = 'https://example.com/page';
+    const { context, response, crawlTab } = createHarness({ [pageUrl]: [] }, {
+      remoteEndpoint: 'ws://remote.example/browser',
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({
+      strategy: 'provided',
+      urls: [pageUrl],
+      maxPages: 1,
+      maxDepth: 0,
+    }), response);
+
+    expect(crawlTab.navigate).toHaveBeenCalledWith(pageUrl);
   });
 
   it('rejects a sitemap URL outside the allowed crawl scope before fetching it', async () => {

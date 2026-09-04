@@ -541,6 +541,8 @@ const auditSite = defineTabTool({
       for (const url of params.urls ?? [])
         enqueueUrl(url, 0, null);
     } else if (params.strategy === 'sitemap') {
+      if (context.config.browser.remoteEndpoint || ('name' in context.options.browserContextFactory && context.options.browserContextFactory.name === 'vscode'))
+        throw new Error('Sitemap fetches run on the MCP host and do not support remoteEndpoint or browser_connect providers. Use the provided URL strategy with a remote browser.');
       if (context.config.browser.launchOptions.proxy || context.config.browser.contextOptions.proxy)
         throw new Error('Sitemap fetches do not support browser proxies. Use the provided URL strategy when a proxy is required.');
       const validateUrl = (input: string, base: URL) => parseSitemapUrl(input, base, startUrl, params.sameOriginOnly, params.includeSubdomains, context.config);
