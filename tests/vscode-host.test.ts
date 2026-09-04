@@ -42,6 +42,7 @@ function makeFakeContextFactory(sessionsUnsupportedReason?: string) {
 describe('VSCodeProxyBackend', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     await Context.disposeAll();
   });
 
@@ -91,6 +92,22 @@ describe('VSCodeProxyBackend', () => {
     // The deserialized child config writes into the parent's directory.
     const childFile = await outputFile(childConfig, 'child.txt');
     expect(path.dirname(childFile)).toBe(path.dirname(parentFile));
+  });
+
+  it.each(['1', 'true', 'yes', '', undefined])('passes remote opt-in %s to the real child without leaking other settings', async optIn => {
+    vi.stubEnv('PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE', optIn);
+    vi.stubEnv('PLAYWRIGHT_MCP_AUTH_TOKEN', 'parent-only-secret');
+    const backend = new VSCodeProxyBackend(await resolveConfig({}), vi.fn());
+    const transport = await (backend as any)._createSwitchTransport('ws://localhost:1234/', 'playwright');
+    // Probe the real transport's child environment without starting a browser.
+    transport._serverParams.args = ['-e', `console.log(JSON.stringify({jsonrpc:'2.0',id:1,result:{optIn:process.env.PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE,secret:process.env.PLAYWRIGHT_MCP_AUTH_TOKEN}}))`];
+    const message = new Promise(resolve => { transport.onmessage = resolve; });
+    try {
+      await transport.start();
+      await expect(message).resolves.toEqual({ jsonrpc: '2.0', id: 1, result: { optIn: optIn ?? '' } });
+    } finally {
+      await transport.close();
+    }
   });
 
   it('rejects a profile-conflicted browser_connect without tearing down the working provider', async () => {

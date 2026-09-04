@@ -71,6 +71,19 @@ describe('browser_file_upload allowedUploadDirs', () => {
     }
   });
 
+  it.each(['upload', 'upload.unknown-extension'])('uploads %s with a fallback MIME type', async name => {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-upload-'));
+    const file = path.join(dir, name);
+    const { context, response, setFiles } = createHarness([dir]);
+    try {
+      await fs.promises.writeFile(file, 'upload');
+      await uploadFile.handle(context as any, { paths: [file] }, response as any);
+      expect(setFiles).toHaveBeenCalledWith([{ name, mimeType: 'application/octet-stream', buffer: Buffer.from('upload') }]);
+    } finally {
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects paths outside the configured directories before touching the file chooser', async () => {
     const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-upload-'));
     const { context, response, setFiles, tab } = createHarness([dir]);

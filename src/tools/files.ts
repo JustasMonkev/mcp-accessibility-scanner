@@ -58,7 +58,7 @@ async function prepareUploadFiles(config: FullConfig, paths: string[]) {
           throw new Error('Restricted uploads exceed the 50 MiB total limit.');
         chunks.push(chunk);
       }
-      payloads.push({ name: path.basename(target), mimeType: coreBundle.iso.getMimeTypeForPath(target), buffer: Buffer.concat(chunks) });
+      payloads.push({ name: path.basename(target), mimeType: coreBundle.iso.getMimeTypeForPath(target) ?? 'application/octet-stream', buffer: Buffer.concat(chunks) });
     } finally {
       await handle.close();
     }

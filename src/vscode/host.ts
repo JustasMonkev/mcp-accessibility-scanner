@@ -206,6 +206,7 @@ export class VSCodeProxyBackend implements ServerBackend {
     return new StdioClientTransport({
       command: process.execPath,
       cwd: process.cwd(),
+      env: { PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE: process.env.PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE ?? '' },
       args: [
         path.join(fileURLToPath(import.meta.url), '..', 'main.js'),
         // The fallback output dir is memoized on the config OBJECT, and
