@@ -21,17 +21,26 @@ import type { BrowserContextFactory } from '../src/browserContextFactory.js';
 import { EventEmitter } from 'events';
 
 describe('closePage', () => {
-  const contextFor = (page: any) => {
+  type CloseablePage = {
+    url: () => string;
+    close: () => Promise<void>;
+    isClosed: () => boolean;
+  };
+
+  const browserContextFactory: BrowserContextFactory = {
+    createContext: async () => { throw new Error('Not used by closeTab tests.'); },
+  };
+
+  const contextFor = async (page: CloseablePage) => {
     const context = new Context({
       tools: [],
-      config: {} as any,
-      browserContextFactory: {} as any,
+      config: await resolveConfig({}),
+      browserContextFactory,
       sessionLog: undefined,
       clientInfo: {},
     });
-    const tab = { page };
-    (context as any)._tabs = [tab];
-    (context as any)._currentTab = tab;
+    const tab = { page, operationTimeout: () => 5000 };
+    Object.assign(context, { _tabs: [tab], _currentTab: tab });
     return context;
   };
 
@@ -44,7 +53,7 @@ describe('closePage', () => {
           .mockImplementationOnce(async () => { closed = true; }),
       isClosed: vi.fn(() => closed),
     };
-    const context = contextFor(page);
+    const context = await contextFor(page);
 
     try {
       await expect(context.closeTab(undefined)).resolves.toBe('https://example.com');
@@ -54,20 +63,50 @@ describe('closePage', () => {
     }
   });
 
-  it('fails within a bounded number of attempts when the target never closes', async () => {
+  it('allows a slow remote page to close within the operation timeout', async () => {
+    vi.useFakeTimers();
+    let closed = false;
+    let finishClose = () => {};
+    const page = {
+      url: () => 'https://example.com',
+      close: vi.fn(() => new Promise<void>(resolve => {
+        finishClose = () => {
+          closed = true;
+          resolve();
+        };
+      })),
+      isClosed: vi.fn(() => closed),
+    };
+    const context = await contextFor(page);
+
+    try {
+      const closing = context.closeTab(undefined);
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(page.close).toHaveBeenCalledTimes(1);
+
+      finishClose();
+      await expect(closing).resolves.toBe('https://example.com');
+      expect(page.close).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      await context.dispose();
+    }
+  });
+
+  it('fails within the operation timeout without overlapping close attempts', async () => {
     vi.useFakeTimers();
     const page = {
       url: () => 'https://example.com',
-      close: vi.fn(() => new Promise(() => {})),
+      close: vi.fn(() => new Promise<void>(() => {})),
       isClosed: vi.fn(() => false),
     };
-    const context = contextFor(page);
+    const context = await contextFor(page);
 
     try {
-      const failure = expect(context.closeTab(undefined)).rejects.toThrow('after 3 attempts');
-      await vi.advanceTimersByTimeAsync(3000);
+      const failure = expect(context.closeTab(undefined)).rejects.toThrow('Timed out after 5000ms');
+      await vi.advanceTimersByTimeAsync(5000);
       await failure;
-      expect(page.close).toHaveBeenCalledTimes(3);
+      expect(page.close).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
       await context.dispose();

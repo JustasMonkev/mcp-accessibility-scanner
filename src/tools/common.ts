@@ -84,6 +84,7 @@ const emulateMedia = defineTabTool({
       media: params.media,
       reducedMotion: params.reducedMotion,
     };
+    // SAFETY: filtering removes only undefined values and preserves every key and value type from requested.
     const options = Object.fromEntries(Object.entries(requested).filter(([, value]) => value !== undefined)) as NonNullable<Parameters<playwright.Page['emulateMedia']>[0]>;
     if (!Object.keys(options).length) {
       response.addError('Specify at least one media feature to emulate.');

@@ -34,21 +34,24 @@ const testDebug = debug('pw:mcp:test');
 const recorderBufferMs = 500;
 const recorderControlTools = new Set(['browser_start_recording', 'browser_stop_recording']);
 const expectPrelude = "const { expect } = require('playwright/test');";
-const pageCloseAttemptTimeoutMs = 1000;
 
 /**
  * Chromium can acknowledge Target.closeTarget while a racing navigation keeps
  * the target alive. Retry the public close call instead of letting one tool or
  * an entire crawl wait forever.
  */
-async function closePage(page: playwright.Page, attemptTimeoutMs = pageCloseAttemptTimeoutMs): Promise<void> {
+async function closePage(page: playwright.Page, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   for (let attempt = 0; attempt < 3; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0)
+      break;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         page.close(),
-        new Promise<void>(resolve => {
-          timer = setTimeout(resolve, attemptTimeoutMs);
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms while closing the page.`)), remaining);
           timer.unref?.();
         }),
       ]);
@@ -62,7 +65,7 @@ async function closePage(page: playwright.Page, attemptTimeoutMs = pageCloseAtte
       clearTimeout(timer);
     }
   }
-  throw new Error('Timed out while closing the page after 3 attempts.');
+  throw new Error(`Failed to close the page after 3 attempts within ${timeoutMs}ms.`);
 }
 
 class ContextRegistry {
@@ -368,7 +371,7 @@ export class Context {
     if (!tab)
       throw new Error(`Tab ${index} not found`);
     const url = tab.page.url();
-    await closePage(tab.page);
+    await closePage(tab.page, tab.operationTimeout());
     return url;
   }
 

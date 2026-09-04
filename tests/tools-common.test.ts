@@ -110,7 +110,8 @@ describe('Common Tools', () => {
 
     it('emulates only the supplied media features', async () => {
       expect(emulateMediaTool.schema.idempotent).toBe(true);
-      await emulateMediaTool.handle(mockContext, { colorScheme: 'dark', reducedMotion: 'reduce', browserSessionId: 'bs_test' } as any, response);
+      const params = { colorScheme: 'dark', reducedMotion: 'reduce', browserSessionId: 'bs_test' } as const;
+      await emulateMediaTool.handle(mockContext, params, response);
 
       expect(mockPage.emulateMedia).toHaveBeenCalledWith({ colorScheme: 'dark', reducedMotion: 'reduce' });
       expect(mockTab.waitForCompletion).toHaveBeenCalledTimes(1);

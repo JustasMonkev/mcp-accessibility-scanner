@@ -289,6 +289,7 @@ describe('Tab', () => {
       await updatePromise;
 
       expect(finished).toBe(true);
+      expect(tab.operationTimeout()).toBe(75);
       expect(mockPage.setDefaultTimeout).toHaveBeenLastCalledWith(75);
     });
   });

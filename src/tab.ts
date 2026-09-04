@@ -248,6 +248,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this.page.setDefaultTimeout(timeout);
   }
 
+  operationTimeout(): number {
+    return this._defaultTimeout > 0 ? this._defaultTimeout : 5000;
+  }
+
   isCurrentTab(): boolean {
     return this === this.context.currentTab();
   }
@@ -369,7 +373,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   private _pageStateTimeoutMs(): number {
-    return this._defaultTimeout > 0 ? this._defaultTimeout : 5000;
+    return this.operationTimeout();
   }
 
   private async _withPageStateTimeout<T>(promise: Promise<T>, description: string, timeoutMs = this._pageStateTimeoutMs()): Promise<T> {
