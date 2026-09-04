@@ -424,6 +424,7 @@ describe('Config', () => {
       await expect(outputFile(config, 'NUL.png')).rejects.toThrow('portable, non-reserved');
       await expect(outputFile(config, 'report.')).rejects.toThrow('portable, non-reserved');
       await expect(outputFile(config, 'report.json ')).rejects.toThrow('portable, non-reserved');
+      await expect(outputFile(config, '   ')).rejects.toThrow('portable, non-reserved');
       expect(fs.existsSync(outputDir)).toBe(false);
     });
 
@@ -451,6 +452,12 @@ describe('Config', () => {
         ]);
 
         expect(results.map(result => result.status).sort()).toEqual(['fulfilled', 'rejected']);
+        expect(results).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            status: 'rejected',
+            reason: expect.objectContaining({ message: expect.stringContaining('Output file already exists') }),
+          }),
+        ]));
       } finally {
         await fs.promises.rm(outputDir, { recursive: true, force: true });
       }

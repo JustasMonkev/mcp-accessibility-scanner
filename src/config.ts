@@ -377,7 +377,7 @@ export function resolveOutputDir(config: FullConfig): string {
 }
 
 export async function outputFile(config: FullConfig, name: string, exclusive = false): Promise<string> {
-  const fileName = sanitizeForFilePath(name);
+  const fileName = name.trim() ? sanitizeForFilePath(name) : '';
   if (!fileName || fileName === '.' || fileName === '..' || /[. ]$/.test(name) || /[. ]$/.test(fileName) || /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/i.test(fileName))
     throw new Error(`Invalid output filename "${name}": use a portable, non-reserved file name.`);
   const outputDir = resolveOutputDir(config);
