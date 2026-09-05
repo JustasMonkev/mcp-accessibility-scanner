@@ -22,6 +22,11 @@ coverage/
 
 .DS_Store
 .idea/
-# Ignore local Claude state, but track repository-owned skills
-.claude/*
-!.claude/skills/
+# Ignore local Codex run state, but track repository-owned harness files and skills
+.codex/*
+!.codex/luna-result.schema.json
+!.codex/mcp-tool-prompts.tsv
+!.codex/run-mcp-direct-harness.mjs
+!.codex/run-mcp-tool-loop.mjs
+!.codex/skills/
+!.codex/skills/**

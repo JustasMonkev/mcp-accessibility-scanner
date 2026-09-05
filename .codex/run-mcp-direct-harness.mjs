@@ -1,7 +1,21 @@
 #!/usr/bin/env node
+/**
+ * Copyright (c) Microsoft Corporation.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +28,7 @@ const projectRoot = path.resolve(scriptDir, '..');
 const options = parseArgs(process.argv.slice(2));
 
 const runId = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
-const resultsDir = path.join(scriptDir, 'mcp-direct-harness-results', runId);
+const resultsDir = path.join(path.resolve(process.env.MCP_HARNESS_RESULTS_DIR || path.join(projectRoot, 'test-results')), 'mcp-direct-harness-results', runId);
 fs.mkdirSync(resultsDir, { recursive: true });
 
 const uploadFile = path.join(resultsDir, 'mcp-upload.txt');
@@ -734,9 +748,8 @@ const tests = [
     // overflow ancestor clips to 10x10 is not reported.
     assertNoText(result, /(Clipped|Roomy) control is \d+x\d+/);
     const summary = result.structuredContent?.summary ?? {};
-    if (summary.targetSizeIssueCount !== 6 || summary.focusObscuredIssueCount !== 2) {
+    if (summary.targetSizeIssueCount !== 6 || summary.focusObscuredIssueCount !== 2)
       throw new Error(`Expected 6 target-size and 2 obscured findings, got ${JSON.stringify(summary)}`);
-    }
   }),
 
   test('audit_screen_reader', async () => {
@@ -805,8 +818,9 @@ if (options.list) {
   process.exit(0);
 }
 
+let closeFixtureServer;
 try {
-  var closeFixtureServer = await startFixtureServer();
+  closeFixtureServer = await startFixtureServer();
   await client.connect(transport);
   const { tools } = await client.listTools();
   state.toolNames = tools.map(t => t.name);
@@ -1132,10 +1146,10 @@ function parseArgs(args) {
     } else if (arg === '--list') {
       parsed.list = true;
     } else if (arg === '-h' || arg === '--help') {
-      console.log(`Usage: .claude/run-mcp-direct-harness.mjs [options]
+      console.log(`Usage: .codex/run-mcp-direct-harness.mjs [options]
 
 Directly calls every exposed mcp-accessibility-scanner MCP tool with prepared
-fixtures. Results are written to .claude/mcp-direct-harness-results/.
+fixtures. Results are written to test-results/mcp-direct-harness-results/.
 
 Options:
   --only TOOL          Run one tool test.

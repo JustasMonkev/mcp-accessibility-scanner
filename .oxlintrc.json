@@ -241,6 +241,15 @@
       "rules": {
         "notice/notice": "off"
       }
+    },
+    {
+      "files": [
+        ".codex/run-mcp-direct-harness.mjs",
+        ".codex/run-mcp-tool-loop.mjs"
+      ],
+      "rules": {
+        "no-console": "off"
+      }
     }
   ]
 }
