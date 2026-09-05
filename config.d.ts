@@ -112,6 +112,7 @@ export type Config = {
      * canonical file paths must stay inside these directories. Restricted
      * uploads accept regular files up to 50 MiB total per call. [] denies all;
      * non-empty lists require macOS or Linux with /proc/self/fd available.
+     * Roots must exist and are canonicalized once at startup. null is invalid.
      * blank entries are invalid. Also PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS or
      * --allowed-upload-dirs (semicolon-separated; empty string means []).
      */

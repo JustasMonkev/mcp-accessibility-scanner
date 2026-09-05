@@ -31,12 +31,11 @@ export async function prepareUploadFiles(config: FullConfig, paths: string[]) {
     throw rejected();
   if (process.platform !== 'darwin' && process.platform !== 'linux')
     throw new Error('Restricted file uploads and drops require macOS or Linux with /proc/self/fd.');
-  const roots = await Promise.all(allowedDirs.map(dir => fs.promises.realpath(dir)));
   const payloads: { name: string; mimeType: string; buffer: Buffer }[] = [];
   let totalBytes = 0;
   for (const target of paths) {
     const canonical = await fs.promises.realpath(target);
-    if (!roots.some(root => {
+    if (!allowedDirs.some(root => {
       const relative = path.relative(root, canonical);
       return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
     }))

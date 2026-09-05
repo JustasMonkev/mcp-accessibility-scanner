@@ -129,10 +129,17 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
 // config validations, on the merged result so every source (config file,
 // env, CLI, programmatic Config) is covered. Only undefined/null count as
 // omitted — the nullish semantics the fallback historically used.
-function validateResolvedConfig(config: FullConfig): FullConfig {
+async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   validateAuthToken(config.server.authToken);
-  if (config.browser.allowedUploadDirs?.some(dir => typeof dir !== 'string' || !dir.trim()))
-    throw new Error('allowedUploadDirs must not contain blank directory entries. Use [] to deny all uploads.');
+  const uploadDirs = config.browser.allowedUploadDirs;
+  if (uploadDirs !== undefined) {
+    if (!Array.isArray(uploadDirs))
+      throw new Error('allowedUploadDirs must be an array of directory paths. Use [] to deny all uploads.');
+    if (uploadDirs.some(dir => typeof dir !== 'string' || !dir.trim()))
+      throw new Error('allowedUploadDirs must not contain blank directory entries. Use [] to deny all uploads.');
+    // Resolve once at trusted startup; uploads must not follow a retargeted root.
+    config.browser.allowedUploadDirs = await Promise.all(uploadDirs.map(dir => fs.promises.realpath(dir)));
+  }
   if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
     throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
   if (config.browser.browserName === 'chromium' && !config.browser.remoteEndpoint && config.browser.launchOptions.chromiumSandbox === undefined) {

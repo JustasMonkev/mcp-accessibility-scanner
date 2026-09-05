@@ -146,6 +146,18 @@ describe('Config', () => {
       await expect(resolveCLIConfig({})).rejects.toThrow(/allowedUploadDirs.*blank/i);
       await expect(resolveConfig({ browser: { allowedUploadDirs: ['/safe', ' '] } })).rejects.toThrow(/allowedUploadDirs.*blank/i);
     });
+
+    it.each(['null', '{}', '"/safe"', '1', 'false', '[1]'])('rejects malformed upload directories from JSON: %s', async value => {
+      delete process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS;
+      const malformed = JSON.parse(`{"browser":{"allowedUploadDirs":${value}}}`);
+      const configFile = await writeConfigFile(malformed);
+      try {
+        await expect(resolveConfig(malformed)).rejects.toThrow(/allowedUploadDirs/);
+        await expect(resolveCLIConfig({ config: configFile })).rejects.toThrow(/allowedUploadDirs/);
+      } finally {
+        await fs.promises.rm(path.dirname(configFile), { recursive: true, force: true });
+      }
+    });
   });
 
   describe('sandbox defaults', () => {

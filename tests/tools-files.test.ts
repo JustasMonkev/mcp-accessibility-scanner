@@ -23,12 +23,12 @@ import { resolveConfig } from '../src/config.js';
 
 const uploadFile = uploadFileTools.find(entry => entry.schema.name === 'browser_file_upload')!;
 
-function createHarness(allowedUploadDirs?: string[], setFilesImpl: (files: unknown) => Promise<void> = async () => undefined) {
+async function createHarness(allowedUploadDirs?: string[], setFilesImpl: (files: unknown) => Promise<void> = async () => undefined) {
   const setFiles = vi.fn(setFilesImpl);
   const modalState = { type: 'fileChooser', fileChooser: { setFiles } };
   const context = {
     currentTabOrDie: vi.fn(),
-    config: { browser: { allowedUploadDirs } },
+    config: await resolveConfig({ browser: { allowedUploadDirs } }),
   };
   const tab = {
     modalStates: vi.fn(() => [modalState]),
@@ -46,7 +46,7 @@ function createHarness(allowedUploadDirs?: string[], setFilesImpl: (files: unkno
 
 describe('browser_file_upload allowedUploadDirs', () => {
   it('allows any path when no allowlist is configured', async () => {
-    const { context, response, setFiles } = createHarness(undefined);
+    const { context, response, setFiles } = await createHarness(undefined);
 
     await uploadFile.handle(context as any, { paths: ['/etc/passwd'] }, response as any);
 
@@ -57,7 +57,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
     const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-upload-'));
     const inside = path.join(dir, 'upload.txt');
     await fs.promises.writeFile(inside, 'upload');
-    const { context, response, setFiles } = createHarness([dir]);
+    const { context, response, setFiles } = await createHarness([dir]);
 
     try {
       await uploadFile.handle(context as any, { paths: [inside] }, response as any);
@@ -75,7 +75,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
   it.each(['upload', 'upload.unknown-extension'])('uploads %s with a fallback MIME type', async name => {
     const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-upload-'));
     const file = path.join(dir, name);
-    const { context, response, setFiles } = createHarness([dir]);
+    const { context, response, setFiles } = await createHarness([dir]);
     try {
       await fs.promises.writeFile(file, 'upload');
       await uploadFile.handle(context as any, { paths: [file] }, response as any);
@@ -87,7 +87,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
 
   it('rejects paths outside the configured directories before touching the file chooser', async () => {
     const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-upload-'));
-    const { context, response, setFiles, tab } = createHarness([dir]);
+    const { context, response, setFiles, tab } = await createHarness([dir]);
 
     try {
       await expect(uploadFile.handle(context as any, { paths: ['/etc/passwd', '/etc/hosts'] }, response as any))
@@ -106,7 +106,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
     await fs.promises.mkdir(dir);
     const outside = path.join(root, 'outside.txt');
     await fs.promises.writeFile(outside, 'outside');
-    const { context, response, setFiles } = createHarness([dir]);
+    const { context, response, setFiles } = await createHarness([dir]);
     const escaping = path.join(dir, '..', 'outside.txt');
 
     try {
@@ -129,7 +129,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
     const secondFile = path.join(second, 'b.txt');
     await fs.promises.writeFile(firstFile, 'a');
     await fs.promises.writeFile(secondFile, 'b');
-    const { context, response, setFiles } = createHarness([first, second]);
+    const { context, response, setFiles } = await createHarness([first, second]);
 
     try {
       await expect(uploadFile.handle(context as any, { paths: [firstFile, secondFile] }, response as any))
@@ -151,7 +151,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
     await fs.promises.symlink(realRoot, linkedRoot, 'dir');
     const inside = path.join(realRoot, 'inside.txt');
     await fs.promises.writeFile(inside, 'safe');
-    const { context, response, setFiles } = createHarness([linkedRoot]);
+    const { context, response, setFiles } = await createHarness([linkedRoot]);
 
     try {
       await uploadFile.handle(context as any, { paths: [path.join(linkedRoot, 'inside.txt')] }, response as any);
@@ -173,7 +173,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
     await fs.promises.mkdir(allowed);
     await fs.promises.writeFile(outside, 'secret');
     await fs.promises.symlink(outside, link);
-    const { context, response, setFiles } = createHarness([allowed]);
+    const { context, response, setFiles } = await createHarness([allowed]);
 
     try {
       await expect(uploadFile.handle(context as any, { paths: [link] }, response as any))
@@ -199,7 +199,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
       const uploaded = files as Array<{ buffer: Uint8Array }>;
       expect(Buffer.from(uploaded[0].buffer).toString()).toBe('safe');
     };
-    const { context, response, setFiles } = createHarness([allowed], setFilesImpl);
+    const { context, response, setFiles } = await createHarness([allowed], setFilesImpl);
 
     try {
       await uploadFile.handle(context as any, { paths: [target] }, response as any);
@@ -245,7 +245,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
         await restoreAncestor();
       return await originalRealpath(filePath);
     });
-    const { context, response, setFiles } = createHarness([allowed]);
+    const { context, response, setFiles } = await createHarness([allowed]);
 
     try {
       await expect(uploadFile.handle(context as any, { paths: [target] }, response as any))
@@ -290,7 +290,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
   });
 
   it('rejects restricted files on unsupported platforms without breaking deny-all or unrestricted mode', async () => {
-    const config = await resolveConfig({ browser: { allowedUploadDirs: ['/allowed'] } });
+    const config = await resolveConfig({ browser: { allowedUploadDirs: [os.tmpdir()] } });
     const denied = await resolveConfig({ browser: { allowedUploadDirs: [] } });
     const unrestricted = await resolveConfig({});
     const platform = process.platform;
@@ -305,12 +305,38 @@ describe('browser_file_upload allowedUploadDirs', () => {
     }
   });
 
+  it.each([false, true])('retains startup roots after a configured path is retargeted (symlink: %s)', async symlink => {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-upload-roots-'));
+    const allowed = path.join(dir, 'allowed');
+    const outside = path.join(dir, 'outside');
+    const configured = symlink ? path.join(dir, 'alias') : allowed;
+    await fs.promises.mkdir(allowed);
+    await fs.promises.mkdir(outside);
+    const secret = path.join(outside, 'secret.txt');
+    await fs.promises.writeFile(secret, 'secret');
+    if (symlink)
+      await fs.promises.symlink(allowed, configured, 'dir');
+    try {
+      const config = await resolveConfig({ browser: { allowedUploadDirs: [configured] } });
+      if (symlink)
+        await fs.promises.unlink(configured);
+      else
+        await fs.promises.rename(allowed, path.join(dir, 'parked'));
+      await fs.promises.symlink(outside, configured, 'dir');
+
+      for (const target of [secret, path.join(configured, 'secret.txt')])
+        await expect(prepareUploadFiles(config, [target])).rejects.toThrow(/outside the allowed upload directories/);
+    } finally {
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects directories under a restricted upload root', async () => {
     const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-upload-'));
     const allowed = path.join(root, 'allowed');
     const directory = path.join(allowed, 'folder');
     await fs.promises.mkdir(directory, { recursive: true });
-    const { context, response, setFiles } = createHarness([allowed]);
+    const { context, response, setFiles } = await createHarness([allowed]);
 
     try {
       await expect(uploadFile.handle(context as any, { paths: [directory] }, response as any))
@@ -326,7 +352,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
     const target = path.join(root, 'large.bin');
     await fs.promises.writeFile(target, '');
     await fs.promises.truncate(target, 50 * 1024 * 1024 + 1);
-    const { context, response, setFiles } = createHarness([root]);
+    const { context, response, setFiles } = await createHarness([root]);
 
     try {
       await expect(uploadFile.handle(context as any, { paths: [target] }, response as any))
@@ -338,7 +364,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
   });
 
   it('rejects every path when the allowlist is explicitly empty', async () => {
-    const { context, response, setFiles } = createHarness([]);
+    const { context, response, setFiles } = await createHarness([]);
 
     await expect(uploadFile.handle(context as any, { paths: [path.join(os.tmpdir(), 'x.txt')] }, response as any))
         .rejects.toThrow(/outside the allowed upload directories/);
@@ -347,7 +373,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
   });
 
   it('preserves empty uploads as the file chooser clear operation', async () => {
-    const { context, response, setFiles } = createHarness([]);
+    const { context, response, setFiles } = await createHarness([]);
 
     await uploadFile.handle(context as any, { paths: [] }, response as any);
 
