@@ -139,6 +139,18 @@ describe('CLI command dispatch contract', () => {
       const { stderr } = await collectOutput(['--extension', '--profile-dir-name', 'Profile 1']);
       expect(stderr).toContain('--profile-dir-name requires --user-data-dir');
     });
+
+    it('rejects --connect-tool interactive without --extension instead of starting a REPL', async () => {
+      const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-connect-tool-'));
+      const { stderr } = await collectOutput(['--connect-tool', '--profile-dir-name', 'Profile 1', '--user-data-dir', profileDir, 'interactive']);
+      expect(stderr).toContain('--profile-dir-name is only supported in extension mode');
+    });
+
+    it('rejects --connect-tool --vscode instead of starting the VS Code host', async () => {
+      const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-vscode-'));
+      const { stderr } = await collectOutput(['--connect-tool', '--vscode', '--profile-dir-name', 'Profile 1', '--user-data-dir', profileDir]);
+      expect(stderr).toContain('--profile-dir-name is only supported in extension mode');
+    });
   });
 
   describe('--vscode with a profile-conflicting storage state', () => {

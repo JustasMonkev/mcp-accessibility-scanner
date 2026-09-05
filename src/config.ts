@@ -144,8 +144,8 @@ async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
     throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
   const profileDirName = config.browser.profileDirName;
-  if (profileDirName !== undefined && !/^(?:Default|Profile \d+)$/.test(profileDirName))
-    throw new Error(`Invalid browser profile directory name "${profileDirName}": must be a Chrome profile directory name such as "Default" or "Profile 1" (see "Profile Path" at chrome://version).`);
+  if (profileDirName !== undefined && (typeof profileDirName !== 'string' || !/^(?:Default|Profile \d+)$/.test(profileDirName)))
+    throw new Error(`Invalid browser profile directory name ${JSON.stringify(profileDirName)}: must be a Chrome profile directory name such as "Default" or "Profile 1" (see "Profile Path" at chrome://version).`);
   if (config.browser.browserName === 'chromium' && !config.browser.remoteEndpoint && config.browser.launchOptions.chromiumSandbox === undefined) {
     const { channel, executablePath } = config.browser.launchOptions;
     config.browser.launchOptions.chromiumSandbox = os.platform() !== 'linux'

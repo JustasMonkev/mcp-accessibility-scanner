@@ -271,6 +271,20 @@ describe('Config', () => {
     it.each(['my-profile', 'Default/../../etc', 'Profile 1 ', ''])('rejects an invalid profile directory name from the CLI: %s', async profileDirName => {
       await expect(resolveCLIConfig({ profileDirName })).rejects.toThrow(/Invalid browser profile directory name/);
     });
+
+    it.each([
+      ['["Default"]', 'Invalid browser profile directory name ["Default"]'],
+      ['null', 'Invalid browser profile directory name null'],
+    ])('rejects a non-string profile directory name from a config file: %s', async (value, message) => {
+      const malformed = JSON.parse(`{"browser":{"profileDirName":${value}}}`);
+      const configFile = await writeConfigFile(malformed);
+      try {
+        await expect(resolveConfig(malformed)).rejects.toThrow(message);
+        await expect(resolveCLIConfig({ config: configFile })).rejects.toThrow(message);
+      } finally {
+        await fs.promises.rm(path.dirname(configFile), { recursive: true, force: true });
+      }
+    });
   });
 
   describe('parseCdpHeaders', () => {

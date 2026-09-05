@@ -392,12 +392,40 @@ export class CDPRelayServer {
 }
 
 async function isExtensionInstalledInProfile(userDataDir: string, profile: string): Promise<boolean> {
+  const profileDir = path.join(userDataDir, profile);
+  // Web store installs unpack into <profile>/Extensions/<id>; --load-extension
+  // only leaves a settings record in the preferences.
+  if (await pathExists(path.join(profileDir, 'Extensions', protocol.EXTENSION_ID)))
+    return true;
+  // `extensions.settings` lives in Preferences or Secure Preferences depending on the platform.
+  for (const fileName of ['Preferences', 'Secure Preferences']) {
+    if (await hasExtensionSettingsRecord(path.join(profileDir, fileName)))
+      return true;
+  }
+  return false;
+}
+
+async function hasExtensionSettingsRecord(prefsPath: string): Promise<boolean> {
+  let prefs: { extensions?: { settings?: Record<string, unknown> } };
   try {
-    await fs.access(path.join(userDataDir, profile, 'Extensions', protocol.EXTENSION_ID));
+    prefs = JSON.parse(await fs.readFile(prefsPath, 'utf8'));
+  } catch {
+    // A missing or unreadable preferences file carries no extension record,
+    // which is the answer the caller needs.
+    return false;
+  }
+  // Uninstalling leaves an orphaned empty settings record behind, so require a
+  // populated one; JSON values are untyped, so a null or non-object record
+  // must not reach Object.keys.
+  const record = prefs?.extensions?.settings?.[protocol.EXTENSION_ID];
+  return typeof record === 'object' && record !== null && Object.keys(record).length > 0;
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
     return true;
   } catch {
-    // Any access failure — missing or unreadable — means the extension cannot
-    // be confirmed in this profile, which is the answer the callers need.
     return false;
   }
 }

@@ -41,12 +41,15 @@ type ProgramContext = {
   extensionContextFactory: ExtensionContextFactory;
 };
 
-async function resolveProgramContext(options: Record<string, unknown>): Promise<ProgramContext> {
+async function resolveProgramContext(options: Record<string, unknown>, extensionProviderReachable?: boolean): Promise<ProgramContext> {
   const config = await resolveCLIConfig(options);
   // The extension factory — the only profileDirName consumer — is selected by
-  // --extension, or reachable via the --connect-tool 'extension' provider.
+  // --extension, or reachable via the --connect-tool 'extension' provider; VS
+  // Code branches before that provider and the interactive subcommand picks
+  // its own factory, so those callers pass reachability explicitly.
   if (config.browser.profileDirName) {
-    if (!(options.extension || options.connectTool))
+    const reachable = extensionProviderReachable ?? (options.extension || (options.connectTool && !options.vscode));
+    if (!reachable)
       throw new Error('--profile-dir-name is only supported in extension mode (--extension or --connect-tool).');
     if (!config.browser.userDataDir)
       throw new Error('--profile-dir-name requires --user-data-dir to name the profile directory inside it.');
@@ -271,7 +274,7 @@ program
     .description('Start an interactive REPL for manual tool execution')
     .action(async () => {
       const parentOptions = program.opts();
-      const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(parentOptions);
+      const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(parentOptions, Boolean(parentOptions.extension));
       const backend = new BrowserServerBackend(config, parentOptions.extension ? extensionContextFactory : browserContextFactory);
       const handleExit = setupExitWatchdog();
       await backend.initialize(
