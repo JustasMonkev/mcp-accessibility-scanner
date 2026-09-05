@@ -9,5 +9,5 @@
     ".codex/run-mcp-direct-harness.mjs",
     ".codex/run-mcp-tool-loop.mjs"
   ],
-  "ignore": [".codex/worktrees/**"]
+  "ignore": [".codex/worktrees/**", ".claude/worktrees/**"]
 }
