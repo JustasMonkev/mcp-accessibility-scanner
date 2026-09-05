@@ -230,4 +230,20 @@ fs.createWriteStream = (file, ...args) => String(file).endsWith('.stderr') ? new
     expect(result.code).toBe(2);
     expect(result.pid).toBeUndefined();
   });
+
+  it.each(['cli', 'env'])('enforces the Node timer boundary for %s timeouts', async source => {
+    for (const value of ['2147483.647', '2147483.648']) {
+      const result = await run('success', source === 'cli' ? ['--timeout', value] : [], false,
+          source === 'env' ? { EXEC_TIMEOUT_SECONDS: value } : {});
+      if (value === '2147483.647') {
+        expect(result.code).toBe(0);
+        expect(result.output).toContain('Passed: 1');
+      } else {
+        expect(result.code).toBe(2);
+        expect(result.output).toContain('Node timer limit');
+        expect(result.pid).toBeUndefined();
+      }
+      expect(result.output).not.toContain('TimeoutOverflowWarning');
+    }
+  });
 });

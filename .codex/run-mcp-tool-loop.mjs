@@ -167,6 +167,8 @@ function parseArgs(args) {
 
   if (!Number.isFinite(parsed.timeoutSeconds) || parsed.timeoutSeconds <= 0)
     fail('--timeout must be a positive number of seconds.');
+  if (parsed.timeoutSeconds > 2_147_483.647)
+    fail('--timeout must not exceed 2147483.647 seconds (Node timer limit).');
   return parsed;
 }
 
