@@ -46,6 +46,7 @@ function createHarness(
     sitemapFetch?: typeof globalThis.fetch;
     browserProxy?: boolean;
     remoteEndpoint?: string;
+    cdpEndpoint?: string;
     browserContextFactoryName?: string;
     requestContext?: any;
     cookiesForUrl?: (url: string) => { name: string, domain?: string, path?: string, expires?: number }[];
@@ -144,6 +145,7 @@ function createHarness(
         launchOptions: options?.browserProxy ? { proxy: { server: 'http://proxy.example' } } : {},
         contextOptions: {},
         remoteEndpoint: options?.remoteEndpoint,
+        cdpEndpoint: options?.cdpEndpoint,
       },
       network: options?.network ?? {},
     },
@@ -820,21 +822,27 @@ describe('audit_site tool', () => {
     expect(report.pages.map((page: any) => page.url)).toEqual(['https://example.com/one', 'https://example.com/two']);
   });
 
-  it('rejects sitemap strategy when the browser runs on a remote endpoint', async () => {
+  it.each([
+    { remoteEndpoint: 'ws://remote.example/browser' },
+    { cdpEndpoint: 'https://remote.example:9222' },
+    { cdpEndpoint: 'wss://remote.example/devtools/browser/session' },
+    { cdpEndpoint: 'http://127.0.0.1:9222' },
+  ])('rejects sitemap strategy for an attached browser: %j', async endpoint => {
     const sitemapUrl = 'https://example.com/sitemap.xml';
     const { context, response, fetchMock } = createHarness({}, {
       sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
-      remoteEndpoint: 'ws://remote.example/browser',
+      ...endpoint,
     });
 
     await expect(tool.handle(context as any, tool.schema.inputSchema.parse({
       strategy: 'sitemap',
       sitemapUrl,
       sameOriginOnly: false,
-    }), response)).rejects.toThrow(/remoteEndpoint/);
+    }), response)).rejects.toThrow(/Use the provided URL strategy/);
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(context.newTab).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
   });
 
   it('rejects sitemap strategy for the browser_connect provider', async () => {
@@ -854,10 +862,13 @@ describe('audit_site tool', () => {
     expect(context.newTab).not.toHaveBeenCalled();
   });
 
-  it('keeps provided URL strategy available with a remote endpoint', async () => {
+  it.each([
+    { remoteEndpoint: 'ws://remote.example/browser' },
+    { cdpEndpoint: 'https://remote.example:9222' },
+  ])('keeps provided URL strategy available with an attached browser: %j', async endpoint => {
     const pageUrl = 'https://example.com/page';
     const { context, response, crawlTab } = createHarness({ [pageUrl]: [] }, {
-      remoteEndpoint: 'ws://remote.example/browser',
+      ...endpoint,
     });
     vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
 
