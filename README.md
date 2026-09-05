@@ -218,6 +218,8 @@ Create a `config.json` file with the following options:
 
 - `browser.browserName`: Browser to use (`chromium`, `firefox`, `webkit`)
 - `browser.allowedUploadDirs`: Restrict files sent by `browser_file_upload` and `browser_drop` to regular files inside these directories, including resolved symlink targets. Restricted uploads and drops use a checked file handle and accept up to 50 MiB total per call. Unset allows any path; `[]` denies all file uploads and drops (text-only drops still work). Blank list entries are rejected. CLI: `--allowed-upload-dirs` (semicolon-separated; `""` denies all), env: `PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS` (empty string denies all).
+
+  Non-empty upload allowlists require macOS or Linux with `/proc/self/fd` available. macOS blocks ancestor symlinks during the file open; Linux checks the opened descriptor's path. Other platforms reject restricted file uploads and drops rather than rely on race-prone pathname checks. Unrestricted uploads, deny-all lists, and text-only drops keep working on all platforms.
 - `browser.launchOptions.headless`: Run browser in headless mode (default: `true` on Linux without display, `false` otherwise)
 - `browser.launchOptions.channel`: Browser channel (`chrome`, `chrome-beta`, `msedge`, etc.)
 - `browser.launchOptions.chromiumSandbox`: Defaults to `false` for downloaded Chromium builds on Linux because they lack the setuid sandbox helper, and `true` otherwise. Remote and VS Code endpoints choose on the remote host. An explicit config or `PLAYWRIGHT_MCP_SANDBOX` value wins; `--no-sandbox` always disables it.

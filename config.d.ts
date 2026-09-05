@@ -111,6 +111,7 @@ export type Config = {
      * When unset (default), any absolute path is allowed; when set, upload
      * canonical file paths must stay inside these directories. Restricted
      * uploads accept regular files up to 50 MiB total per call. [] denies all;
+     * non-empty lists require macOS or Linux with /proc/self/fd available.
      * blank entries are invalid. Also PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS or
      * --allowed-upload-dirs (semicolon-separated; empty string means []).
      */

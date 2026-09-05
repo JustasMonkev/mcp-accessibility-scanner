@@ -29,6 +29,8 @@ export async function prepareUploadFiles(config: FullConfig, paths: string[]) {
   const rejected = () => new Error('Upload path(s) outside the allowed upload directories.');
   if (!allowedDirs.length)
     throw rejected();
+  if (process.platform !== 'darwin' && process.platform !== 'linux')
+    throw new Error('Restricted file uploads and drops require macOS or Linux with /proc/self/fd.');
   const roots = await Promise.all(allowedDirs.map(dir => fs.promises.realpath(dir)));
   const payloads: { name: string; mimeType: string; buffer: Buffer }[] = [];
   let totalBytes = 0;
@@ -42,13 +44,18 @@ export async function prepareUploadFiles(config: FullConfig, paths: string[]) {
     const before = await fs.promises.stat(canonical);
     if (!before.isFile())
       throw new Error('Restricted uploads require regular files, not directories or devices.');
-    const handle = await fs.promises.open(canonical, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    // Darwin's O_NOFOLLOW_ANY rejects symlinks in every path component during
+    // open; Node does not expose the flag from sys/fcntl.h.
+    const noFollow = process.platform === 'darwin' ? 0x20000000 : fs.constants.O_NOFOLLOW;
+    const handle = await fs.promises.open(canonical, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | noFollow);
     try {
       const opened = await handle.stat();
-      if (opened.dev !== before.dev || opened.ino !== before.ino || await fs.promises.realpath(canonical) !== canonical)
-        throw new Error('Upload file changed during validation. Retry with a stable file.');
-      const checked = await fs.promises.stat(canonical);
-      if (opened.dev !== checked.dev || opened.ino !== checked.ino)
+      if (!opened.isFile())
+        throw new Error('Restricted uploads require regular files, not directories or devices.');
+      // Linux resolves this link from the open descriptor, not the mutable
+      // pathname. Do not replace it with another stat/realpath of canonical.
+      if (opened.dev !== before.dev || opened.ino !== before.ino ||
+          (process.platform === 'linux' && await fs.promises.readlink(`/proc/self/fd/${handle.fd}`) !== canonical))
         throw new Error('Upload file changed during validation. Retry with a stable file.');
       // Read the checked descriptor; setFiles must never reopen an attacker-replaceable path.
       const chunks: Buffer[] = [];

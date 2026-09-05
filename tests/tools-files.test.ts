@@ -18,7 +18,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import uploadFileTools from '../src/tools/files.js';
+import uploadFileTools, { prepareUploadFiles } from '../src/tools/files.js';
+import { resolveConfig } from '../src/config.js';
 
 const uploadFile = uploadFileTools.find(entry => entry.schema.name === 'browser_file_upload')!;
 
@@ -208,7 +209,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
     }
   });
 
-  it('rejects an ancestor replacement detected after the descriptor opens', async () => {
+  it('rejects an ancestor swap even when each pathname recheck is raced', async () => {
     const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-upload-'));
     const allowed = path.join(root, 'allowed');
     const parked = path.join(root, 'allowed-parked');
@@ -221,13 +222,11 @@ describe('browser_file_upload allowedUploadDirs', () => {
     const originalRealpath = fs.promises.realpath.bind(fs.promises);
     const originalStat = fs.promises.stat.bind(fs.promises);
     let ancestorSwapped = false;
-    let hasSwapped = false;
     const isTargetPath = (filePath: string | Buffer | URL) => String(filePath).endsWith(`${path.sep}allowed${path.sep}upload.txt`);
     const swapAncestor = async () => {
       await fs.promises.rename(allowed, parked);
       await fs.promises.symlink(outside, allowed, 'dir');
       ancestorSwapped = true;
-      hasSwapped = true;
     };
     const restoreAncestor = async () => {
       if (ancestorSwapped) {
@@ -237,7 +236,7 @@ describe('browser_file_upload allowedUploadDirs', () => {
       }
     };
     vi.spyOn(fs.promises, 'stat').mockImplementation(async filePath => {
-      if (!hasSwapped && isTargetPath(filePath))
+      if (!ancestorSwapped && isTargetPath(filePath))
         await swapAncestor();
       return await originalStat(filePath);
     });
@@ -250,12 +249,59 @@ describe('browser_file_upload allowedUploadDirs', () => {
 
     try {
       await expect(uploadFile.handle(context as any, { paths: [target] }, response as any))
-          .rejects.toThrow(/changed during validation/);
+          .rejects.toThrow(/changed during validation|ELOOP/);
       expect(setFiles).not.toHaveBeenCalled();
     } finally {
       vi.restoreAllMocks();
       await restoreAncestor();
       await fs.promises.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['allowed', 'outside', 'unavailable'])('checks the Linux descriptor path when it is %s', async result => {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-upload-fd-'));
+    const file = path.join(dir, 'upload.txt');
+    await fs.promises.writeFile(file, 'safe');
+    const canonical = await fs.promises.realpath(file);
+    const config = await resolveConfig({ browser: { allowedUploadDirs: [dir] } });
+    const platform = process.platform;
+    const readlink = vi.spyOn(fs.promises, 'readlink').mockImplementation(async () => {
+      if (result === 'unavailable')
+        throw new Error('proc unavailable');
+      return result === 'allowed' ? canonical : '/outside/upload.txt';
+    });
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    try {
+      if (result === 'allowed') {
+        expect(await prepareUploadFiles(config, [file])).toEqual([
+          { name: 'upload.txt', mimeType: 'text/plain', buffer: Buffer.from('safe') },
+        ]);
+      } else {
+        await expect(prepareUploadFiles(config, [file])).rejects.toThrow(/changed during validation|proc unavailable/);
+      }
+      const descriptorPath = String(readlink.mock.calls[0][0]);
+      expect(descriptorPath).toMatch(/^\/proc\/self\/fd\/\d+$/);
+      expect(() => fs.fstatSync(Number(descriptorPath.split('/').at(-1)))).toThrow(/EBADF/);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: platform });
+      readlink.mockRestore();
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects restricted files on unsupported platforms without breaking deny-all or unrestricted mode', async () => {
+    const config = await resolveConfig({ browser: { allowedUploadDirs: ['/allowed'] } });
+    const denied = await resolveConfig({ browser: { allowedUploadDirs: [] } });
+    const unrestricted = await resolveConfig({});
+    const platform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      await expect(prepareUploadFiles(config, ['/allowed/file'])).rejects.toThrow(/require macOS or Linux/);
+      await expect(prepareUploadFiles(denied, ['/allowed/file'])).rejects.toThrow(/outside the allowed upload directories/);
+      expect(await prepareUploadFiles(denied, [])).toEqual([]);
+      expect(await prepareUploadFiles(unrestricted, ['/any/file'])).toEqual(['/any/file']);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: platform });
     }
   });
 
