@@ -93,6 +93,7 @@ export class CDPRelayServer {
   private _browserChannel: string;
   private _userDataDir?: string;
   private _executablePath?: string;
+  private _profileDirName?: string;
   private readonly _token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
   private _cdpPath: string;
   private readonly _cdpToken = crypto.randomUUID();
@@ -104,12 +105,13 @@ export class CDPRelayServer {
   private _handler!: ExtensionProtocolV2;
   private _extensionConnectionPromise!: ManualPromise<void>;
 
-  constructor(server: http.Server, browserChannel: string, userDataDir?: string, executablePath?: string) {
+  constructor(server: http.Server, browserChannel: string, userDataDir?: string, executablePath?: string, profileDirName?: string) {
     this._server = server;
     this._wsHost = httpAddressToString(server.address()).replace(/^http/, 'ws');
     this._browserChannel = browserChannel;
     this._userDataDir = userDataDir;
     this._executablePath = executablePath;
+    this._profileDirName = profileDirName;
 
     const uuid = crypto.randomUUID();
     this._cdpPath = `/cdp/${uuid}`;
@@ -222,7 +224,12 @@ export class CDPRelayServer {
     const args: string[] = [];
     if (this._userDataDir) {
       args.push(`--user-data-dir=${this._userDataDir}`);
-      const profileDirectory = await findPlaywrightExtensionProfile(this._userDataDir);
+      // An explicit profile wins over last-used auto-selection; with a custom
+      // executable the data dir may live on another filesystem (e.g. WSL2),
+      // so its contents cannot be checked from here.
+      const profileDirectory = this._profileDirName ?? await findPlaywrightExtensionProfile(this._userDataDir);
+      if (this._profileDirName && !this._executablePath && !await isExtensionInstalledInProfile(this._userDataDir, this._profileDirName))
+        throw new Error(`Playwright Extension is not installed in profile "${this._profileDirName}" of ${this._userDataDir}. Install it in that profile or pass the directory name of a profile that has it.`);
       if (profileDirectory)
         args.push(`--profile-directory=${profileDirectory}`);
     }
@@ -384,6 +391,17 @@ export class CDPRelayServer {
   }
 }
 
+async function isExtensionInstalledInProfile(userDataDir: string, profile: string): Promise<boolean> {
+  try {
+    await fs.access(path.join(userDataDir, profile, 'Extensions', protocol.EXTENSION_ID));
+    return true;
+  } catch {
+    // Any access failure — missing or unreadable — means the extension cannot
+    // be confirmed in this profile, which is the answer the callers need.
+    return false;
+  }
+}
+
 async function findPlaywrightExtensionProfile(userDataDir: string): Promise<string | undefined> {
   let profiles: string[];
   try {
@@ -405,12 +423,8 @@ async function findPlaywrightExtensionProfile(userDataDir: string): Promise<stri
   }
 
   for (const profile of profiles) {
-    try {
-      await fs.access(path.join(userDataDir, profile, 'Extensions', protocol.EXTENSION_ID));
+    if (await isExtensionInstalledInProfile(userDataDir, profile))
       return profile;
-    } catch {
-      continue;
-    }
   }
 }
 

@@ -58,6 +58,13 @@ export type Config = {
     userDataDir?: string;
 
     /**
+     * Chrome profile directory name used in extension mode (for example
+     * "Default" or "Profile 1"); defaults to the last-used profile that
+     * has the extension installed.
+     */
+    profileDirName?: string;
+
+    /**
      * Launch options passed to
      * @see https://playwright.dev/docs/api/class-browsertype#browser-type-launch-persistent-context
      *

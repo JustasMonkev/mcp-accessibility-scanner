@@ -1023,6 +1023,77 @@ describe('extension protocol v2', () => {
     }
   });
 
+  it('launches the explicitly requested profile instead of the last-used one', async () => {
+    vi.mocked(spawn).mockClear();
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
+    await fs.mkdir(path.join(userDataDir, 'Default', 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.mkdir(path.join(userDataDir, 'Profile 1', 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.writeFile(path.join(userDataDir, 'Local State'), JSON.stringify({ profile: { last_used: 'Default' } }));
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome', 'Profile 1');
+    let extension: WebSocket | undefined;
+    try {
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          new AbortController().signal,
+          undefined,
+      );
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+      expect(vi.mocked(spawn).mock.calls[0][1]).toContain('--profile-directory=Profile 1');
+      expect(vi.mocked(spawn).mock.calls[0][1]).not.toContain('--profile-directory=Default');
+
+      extension = new WebSocket(relay.extensionEndpoint());
+      await once(extension, 'open');
+      extension.send(JSON.stringify({ method: 'extension.initialized', params: [] }));
+      await expect(connecting).resolves.toBeUndefined();
+    } finally {
+      extension?.close();
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await fs.rm(userDataDir, { recursive: true });
+    }
+  });
+
+  it('launches an explicit profile without an installed-extension check when the executable is custom', async () => {
+    // With a custom executable the data dir may live on another filesystem
+    // (e.g. WSL2), so its profiles cannot be inspected from here by design.
+    vi.mocked(spawn).mockClear();
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
+    await fs.mkdir(path.join(userDataDir, 'Default', 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.mkdir(path.join(userDataDir, 'Profile 1'), { recursive: true });
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome', 'Profile 1');
+    let extension: WebSocket | undefined;
+    try {
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          new AbortController().signal,
+          undefined,
+      );
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+      expect(vi.mocked(spawn).mock.calls[0][1]).toContain('--profile-directory=Profile 1');
+      expect(vi.mocked(spawn).mock.calls[0][1]).not.toContain('--profile-directory=Default');
+
+      extension = new WebSocket(relay.extensionEndpoint());
+      await once(extension, 'open');
+      extension.send(JSON.stringify({ method: 'extension.initialized', params: [] }));
+      await expect(connecting).resolves.toBeUndefined();
+    } finally {
+      extension?.close();
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await fs.rm(userDataDir, { recursive: true });
+    }
+  });
+
   it('does not launch Chrome when cancelled during profile discovery', async () => {
     vi.mocked(spawn).mockClear();
     let finishScan!: () => void;

@@ -71,6 +71,11 @@ describe('CLI command dispatch contract', () => {
       expect(help).toContain('--snapshot-boxes');
       expect(help).toContain('--timeout-settle');
     });
+
+    it('shows --profile-dir-name with its value placeholder', () => {
+      const help = runCLI('--help');
+      expect(help).toContain('--profile-dir-name <name>');
+    });
   });
 
   describe('default command (no subcommand)', () => {
@@ -121,6 +126,18 @@ describe('CLI command dispatch contract', () => {
       const profileDir = path.join(stateDir, 'profile');
       const { stderr } = await collectOutput(['--connect-tool', '--storage-state', stateFile, '--user-data-dir', profileDir]);
       expect(stderr).toContain('--storage-state and --user-data-dir contradict each other');
+    });
+  });
+
+  describe('--profile-dir-name outside extension mode', () => {
+    it('rejects at startup instead of ignoring the option', async () => {
+      const { stderr } = await collectOutput(['--profile-dir-name', 'Profile 1']);
+      expect(stderr).toContain('--profile-dir-name is only supported in extension mode');
+    });
+
+    it('rejects at startup without --user-data-dir', async () => {
+      const { stderr } = await collectOutput(['--extension', '--profile-dir-name', 'Profile 1']);
+      expect(stderr).toContain('--profile-dir-name requires --user-data-dir');
     });
   });
 

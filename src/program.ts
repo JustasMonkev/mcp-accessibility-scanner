@@ -43,7 +43,15 @@ type ProgramContext = {
 
 async function resolveProgramContext(options: Record<string, unknown>): Promise<ProgramContext> {
   const config = await resolveCLIConfig(options);
-  const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath);
+  // The extension factory — the only profileDirName consumer — is selected by
+  // --extension, or reachable via the --connect-tool 'extension' provider.
+  if (config.browser.profileDirName) {
+    if (!(options.extension || options.connectTool))
+      throw new Error('--profile-dir-name is only supported in extension mode (--extension or --connect-tool).');
+    if (!config.browser.userDataDir)
+      throw new Error('--profile-dir-name requires --user-data-dir to name the profile directory inside it.');
+  }
+  const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath, config.browser.profileDirName);
   // --extension runs every tool through the extension factory, not the one
   // contextFactory() builds, so validate the factory that will actually create
   // the context. Checked first because contextFactory() would otherwise
@@ -130,6 +138,7 @@ function configureBaseProgram() {
       .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
       .option('--output-dir <path>', 'path to the directory for output files.')
       .option('--port <port>', 'port to listen on for MCP Streamable HTTP transport.')
+      .option('--profile-dir-name <name>', 'name of the Chrome profile directory to connect to with --extension, for example "Profile 1". Requires --user-data-dir. Defaults to the last-used profile that has the extension installed.')
       .option('--proxy-bypass <bypass>', 'comma-separated domains to bypass proxy, for example ".com,chromium.org,.domain.com"')
       .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128" or "socks5://myproxy:8080"')
       .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')

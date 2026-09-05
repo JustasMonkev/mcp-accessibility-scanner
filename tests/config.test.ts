@@ -109,6 +109,11 @@ describe('Config', () => {
       expect(config.timeouts.navigationTimeout).toBe(60000);
       expect(config.saveTrace).toBe(false);
     });
+
+    it('should reject an invalid browser profile directory name', async () => {
+      await expect(resolveConfig({ browser: { profileDirName: 'my-profile' } }))
+          .rejects.toThrow(/Invalid browser profile directory name/);
+    });
   });
 
   describe('security-sensitive string configuration', () => {
@@ -228,6 +233,43 @@ describe('Config', () => {
       process.env.PLAYWRIGHT_MCP_SNAPSHOT_BOXES = '0';
       expect((await resolveCLIConfig({ config: configFile })).snapshot?.boxes).toBe(false);
       expect((await resolveCLIConfig({ config: configFile, snapshotBoxes: true })).snapshot?.boxes).toBe(true);
+    });
+  });
+
+  describe('resolveCLIConfig browser.profileDirName', () => {
+    const saved = process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME;
+
+    afterEach(() => {
+      if (saved === undefined)
+        delete process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME;
+      else
+        process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = saved;
+    });
+
+    it('resolves the profile directory name from the CLI option', async () => {
+      expect((await resolveCLIConfig({
+        extension: true,
+        userDataDir: '/tmp/x',
+        profileDirName: 'Profile 7',
+      })).browser.profileDirName).toBe('Profile 7');
+    });
+
+    it('applies config file, environment, and CLI precedence', async () => {
+      const configFile = await writeConfigFile({ browser: { profileDirName: 'Default' } });
+      expect((await resolveCLIConfig({ config: configFile })).browser.profileDirName).toBe('Default');
+
+      process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = 'Profile 1';
+      expect((await resolveCLIConfig({ config: configFile })).browser.profileDirName).toBe('Profile 1');
+      expect((await resolveCLIConfig({ config: configFile, profileDirName: 'Profile 2' })).browser.profileDirName).toBe('Profile 2');
+    });
+
+    it('treats an empty environment value as unset', async () => {
+      process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = '';
+      expect((await resolveCLIConfig({})).browser.profileDirName).toBeUndefined();
+    });
+
+    it.each(['my-profile', 'Default/../../etc', 'Profile 1 ', ''])('rejects an invalid profile directory name from the CLI: %s', async profileDirName => {
+      await expect(resolveCLIConfig({ profileDirName })).rejects.toThrow(/Invalid browser profile directory name/);
     });
   });
 
