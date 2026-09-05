@@ -42,6 +42,7 @@ function makeFakeContextFactory(sessionsUnsupportedReason?: string) {
 describe('VSCodeProxyBackend', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     await Context.disposeAll();
   });
 
@@ -74,7 +75,7 @@ describe('VSCodeProxyBackend', () => {
     // round-trip into the spawned VS Code provider mints a new object, so an
     // unmaterialized config gave the child a second temp root and scattered
     // one run's artifacts across the provider switch.
-    const config = await resolveConfig({});
+    const config = await resolveConfig({ server: { authToken: 'child-argv-secret' } });
     const parentFile = await outputFile(config, 'parent.txt');
 
     const backend = new VSCodeProxyBackend(config, vi.fn(async () => ({ id: 'default-transport' } as any)));
@@ -86,9 +87,27 @@ describe('VSCodeProxyBackend', () => {
     const transport = setCurrentClient.mock.calls[0][0] as any;
     const childConfig = JSON.parse(transport._serverParams.args[1]);
     expect(childConfig.outputDir).toBe(path.dirname(parentFile));
+    expect(childConfig.server?.authToken).toBeUndefined();
+    expect(JSON.stringify(transport._serverParams.args)).not.toContain('child-argv-secret');
     // The deserialized child config writes into the parent's directory.
     const childFile = await outputFile(childConfig, 'child.txt');
     expect(path.dirname(childFile)).toBe(path.dirname(parentFile));
+  });
+
+  it.each(['1', 'true', 'yes', '', undefined])('passes remote opt-in %s to the real child without leaking other settings', async optIn => {
+    vi.stubEnv('PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE', optIn);
+    vi.stubEnv('PLAYWRIGHT_MCP_AUTH_TOKEN', 'parent-only-secret');
+    const backend = new VSCodeProxyBackend(await resolveConfig({}), vi.fn());
+    const transport = await (backend as any)._createSwitchTransport('ws://localhost:1234/', 'playwright');
+    // Probe the real transport's child environment without starting a browser.
+    transport._serverParams.args = ['-e', `console.log(JSON.stringify({jsonrpc:'2.0',id:1,result:{optIn:process.env.PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE,secret:process.env.PLAYWRIGHT_MCP_AUTH_TOKEN}}))`];
+    const message = new Promise(resolve => { transport.onmessage = resolve; });
+    try {
+      await transport.start();
+      await expect(message).resolves.toEqual({ jsonrpc: '2.0', id: 1, result: { optIn: optIn ?? '' } });
+    } finally {
+      await transport.close();
+    }
   });
 
   it('rejects a profile-conflicted browser_connect without tearing down the working provider', async () => {

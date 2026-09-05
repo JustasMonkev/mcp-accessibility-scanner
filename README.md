@@ -137,7 +137,7 @@ Use `--extension` to connect through the current [Playwright Extension](https://
 npx mcp-accessibility-scanner --extension
 ```
 
-Set `PLAYWRIGHT_MCP_EXTENSION_TOKEN` to the token shown by the extension to bypass the connection approval dialog.
+Set `PLAYWRIGHT_MCP_EXTENSION_TOKEN` to the token shown by the extension to bypass the connection approval dialog. The relay's CDP WebSocket endpoint always requires a separate random token, generated per relay and appended automatically for the server's own connection. This CDP token is never passed in Chrome's launch arguments or extension URL; the extension approval token cannot authenticate a CDP client.
 Token-bypass connections are not background-safe: Chrome focuses the connection tab and window, and client-created tabs remain open after disconnect ([upstream limitation](https://github.com/microsoft/playwright/issues/42343)).
 When `--user-data-dir` contains multiple Chrome profiles, the profile with the extension installed is selected automatically, preferring Chrome's last-used profile.
 
@@ -217,6 +217,9 @@ Create a `config.json` file with the following options:
 **Available Options:**
 
 - `browser.browserName`: Browser to use (`chromium`, `firefox`, `webkit`)
+- `browser.allowedUploadDirs`: Restrict files sent by `browser_file_upload` and `browser_drop` to regular files inside these directories, including resolved symlink targets. Restricted uploads and drops use a checked file handle and accept up to 50 MiB total per call. Unset allows any path; `[]` denies all file uploads and drops (text-only drops still work). Blank list entries are rejected. CLI: `--allowed-upload-dirs` (semicolon-separated; `""` denies all), env: `PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS` (empty string denies all).
+
+  The list must be an array, not `null`. Roots must exist at startup: their canonical paths are resolved once and retained for the server's lifetime, so retargeting a configured symlink does not grant access to a new tree. Non-empty upload allowlists require macOS or Linux with `/proc/self/fd` available. macOS blocks ancestor symlinks during the file open; Linux checks the opened descriptor's path. Other platforms reject restricted file uploads and drops rather than rely on race-prone pathname checks. Unrestricted uploads, deny-all lists, and text-only drops keep working on all platforms.
 - `browser.launchOptions.headless`: Run browser in headless mode (default: `true` on Linux without display, `false` otherwise)
 - `browser.launchOptions.channel`: Browser channel (`chrome`, `chrome-beta`, `msedge`, etc.)
 - `browser.launchOptions.chromiumSandbox`: Defaults to `false` for downloaded Chromium builds on Linux because they lack the setuid sandbox helper, and `true` otherwise. Remote and VS Code endpoints choose on the remote host. An explicit config or `PLAYWRIGHT_MCP_SANDBOX` value wins; `--no-sandbox` always disables it.
@@ -232,13 +235,25 @@ Create a `config.json` file with the following options:
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
 - `snapshot.boxes`: Include each element's viewport-relative bounding box as `[box=x,y,width,height]` in snapshots (default: `false`; CLI: `--snapshot-boxes`, env: `PLAYWRIGHT_MCP_SNAPSHOT_BOXES=1`)
+- `server.authToken`: When set, Streamable HTTP requests (`--port`) require `Authorization: Bearer <token>` or return `401` (env: `PLAYWRIGHT_MCP_AUTH_TOKEN`). Blank or malformed tokens fail at startup. The scheme is case-insensitive; the token is exact. Bearer auth does not encrypt traffic: authenticated listeners must bind to loopback, such as `--host 127.0.0.1`; use a TLS reverse proxy for remote access. The printed client config includes a header placeholder to replace locally, without logging the secret. Unset keeps unauthenticated access.
 - `outputDir`: Directory for output files — reports, screenshots, traces, and session logs (CLI: `--output-dir`, env: `PLAYWRIGHT_MCP_OUTPUT_DIR`). Defaults to a fresh directory under the system temp folder, resolved once per server run so all of a run's artifacts land together. The output location is always server configuration; the deprecated MCP roots capability (client workspace folders) is no longer consulted.
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
+For remote HTTP access, configure the TLS reverse proxy explicitly. For example, with the MCP server bound using `--host 127.0.0.1 --port 8931` and `PLAYWRIGHT_MCP_AUTH_TOKEN` set:
+
+- Accept only your configured public hostname over HTTPS and forward `/mcp` to `http://127.0.0.1:8931/mcp`.
+- Set the upstream `Host` header to `127.0.0.1:8931`, not the public hostname. Forward the client's `Authorization` header unchanged; do not inject a shared token for unauthenticated clients.
+- Before removing `Origin`, reject any non-empty value outside your explicit trusted HTTPS origin list (for example, `https://mcp.example.com`). Allow absent `Origin` for non-browser clients. Then remove `Origin` upstream, or rewrite it to `http://127.0.0.1:8931`. Never strip arbitrary origins without checking them first.
+- Disable response buffering for SSE streams. Browser clients on a different origin also need a narrowly scoped CORS policy at the proxy.
+
+The server does not trust `Forwarded` or `X-Forwarded-*` to bypass its checks. Preserving the public `Host` or HTTPS `Origin` upstream returns `403`, even with a valid bearer token.
+
 Caller-supplied screenshot, PDF, scan-page-matrix, and audit report filenames use a no-clobber policy: an existing file causes the tool call to fail instead of being overwritten. Windows-reserved basenames and names ending in a dot or space are rejected on every platform so configured names behave consistently across hosts.
 
 Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies after every action so delayed DOM-only updates are included in the response; a short observation window also catches scheduled requests and waits for them before that delay.
+
+The VS Code `browser_connect` tool accepts only `playwright` or `playwright-core` libraries and loopback WebSocket URLs. Set `PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE=1` to allow remote endpoints, which must use `wss:`. URL userinfo credentials are rejected.
 
 #### HTTP Heartbeat
 
@@ -388,6 +403,7 @@ A frame you scoped out yourself is not reported: with `excludeSelectors: ["ifram
 Crawls and scans multiple internal pages, then aggregates violations across the site.
 - Default strategy: link-based BFS from the current URL
 - Supports `links`, `nav`, `sitemap`, and `provided` URL strategies
+- Sitemap URLs and every redirect must pass the server network policy and crawl scope. Fetches run on the MCP host, use HTTP(S) without browser cookies or auth headers, and have a 15-second total timeout, 20-redirect cap, and 10 MiB response limit. Browser proxy settings, `browser.remoteEndpoint`, `browser.cdpEndpoint` (including loopback endpoints, which may tunnel to remote browsers), and switched `browser_connect` providers are rejected for this strategy; use `provided` URLs in these modes. Sitemap TLS certificates must be valid even when browser HTTPS errors are ignored.
 - Always writes a JSON report (default filename: `audit-site-{timestamp}-{token}.json`)
 - Warns and records `sessionLosses` if the crawl loses cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 

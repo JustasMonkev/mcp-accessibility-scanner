@@ -105,6 +105,18 @@ export type Config = {
      * Remote endpoint to connect to an existing Playwright server.
      */
     remoteEndpoint?: string;
+
+    /**
+     * Directories that browser_file_upload and browser_drop may read files from.
+     * When unset (default), any absolute path is allowed; when set, upload
+     * canonical file paths must stay inside these directories. Restricted
+     * uploads accept regular files up to 50 MiB total per call. [] denies all;
+     * non-empty lists require macOS or Linux with /proc/self/fd available.
+     * Roots must exist and are canonicalized once at startup. null is invalid.
+     * blank entries are invalid. Also PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS or
+     * --allowed-upload-dirs (semicolon-separated; empty string means []).
+     */
+    allowedUploadDirs?: string[];
   },
 
   server?: {
@@ -117,6 +129,14 @@ export type Config = {
      * The host to bind the server to. Default is localhost. Use 0.0.0.0 to bind to all interfaces.
      */
     host?: string;
+
+    /**
+     * When set, HTTP transport requests must carry `Authorization: Bearer <token>`.
+     * Blank or malformed tokens are rejected. Requires a loopback listener;
+     * remote access must use a TLS reverse proxy. Also configurable through
+     * PLAYWRIGHT_MCP_AUTH_TOKEN.
+     */
+    authToken?: string;
   },
 
   /**

@@ -91,6 +91,33 @@ export const axeRuleSchemaShape = {
   disableRules: z.array(z.string().min(1)).optional().describe('Axe rule ids to skip, e.g. ["color-contrast"]. Unlike withRules this narrows whatever is already selected, so it applies to violationsTag and withRules alike. Disabling every rule in withRules is an error, not an empty scan. Unknown rule ids are rejected rather than silently skipped.'),
 };
 
+// Shared by the tools that run repeated whole-page scans (site crawl, variant
+// matrix) so the scan knobs mean the same thing in each.
+export const axeScanSchemaShape = {
+  violationsTag: z.array(z.enum(axeTagValues)).min(1).default([...defaultAxeTags]).describe('Axe tags to include in scans.'),
+  maxNodesPerViolation: z.number().int().min(1).max(50).default(10).describe('Maximum nodes kept per violation in the report.'),
+  reportFile: z.string().optional().describe('Output JSON report file name.'),
+};
+
+// Builds the runAxeScan options every scan tool passes from its schema
+// params, so the field mapping (violationsTag -> tags, includeSelectors ->
+// include, ...) lives in one place.
+export function axeScanOptions(params: {
+  violationsTag: readonly AxeTag[];
+  withRules?: readonly string[];
+  disableRules?: readonly string[];
+  includeSelectors?: readonly string[];
+  excludeSelectors?: readonly string[];
+}): AxeScanOptions {
+  return {
+    tags: params.violationsTag,
+    rules: params.withRules,
+    disableRules: params.disableRules,
+    include: params.includeSelectors,
+    exclude: params.excludeSelectors,
+  };
+}
+
 // The rule catalogue comes from the very axe-core build injected into the page
 // (`axe.source` below), so ids can never drift from what the scan supports and
 // no extra injection is needed to check them.
@@ -616,15 +643,24 @@ export async function runAxeScan(page: playwright.Page, options: AxeScanOptions 
 }
 
 // A scan that could not reach a frame covered less than it looks like it did,
-// so every tool that reports results says so in the same words.
-export function unscannedFrameLines(unscannedFrames: string[]): string[] {
-  if (!unscannedFrames.length)
+// so every tool that reports results says so in the same words. Tools that
+// aggregate several pages or variants pass `unit` ('page(s)', 'variant(s)')
+// and one entry per unit describing the frames it missed; `trailingLines`
+// replaces the single-frame closing advice with whatever that tool needs.
+export function unscannedFrameLines(
+  frames: readonly string[],
+  options: { unit?: string, maxEntries?: number, trailingLines?: readonly string[] } = {}
+): string[] {
+  if (!frames.length)
     return [];
+  const entries = frames.slice(0, options.maxEntries ?? frames.length);
   return [
-    '',
-    `WARNING: Axe could not be installed in ${unscannedFrames.length} frame(s), whose contents were not scanned and contribute no findings above:`,
-    ...unscannedFrames.map(url => `- ${url}`),
-    'A frame that is still loading may succeed on a re-run; one that consistently fails must be audited on its own.',
+    ...(options.unit ? [] : ['']),
+    options.unit
+      ? `WARNING: Axe could not be installed in frames on ${frames.length} ${options.unit}; their contents were not scanned and contribute no findings below.`
+      : `WARNING: Axe could not be installed in ${frames.length} frame(s), whose contents were not scanned and contribute no findings above:`,
+    ...entries.map(frame => `- ${frame}`),
+    ...(options.trailingLines ?? ['A frame that is still loading may succeed on a re-run; one that consistently fails must be audited on its own.']),
   ];
 }
 

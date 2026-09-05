@@ -19,7 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { chromium, type Browser, type BrowserContext } from 'playwright';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
@@ -39,11 +39,21 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('trace recovery in a 
 
       browser = await chromium.launch({ headless: true, chromiumSandbox: false });
       browserContext = await browser.newContext();
+      // Direct assignment rather than vi.spyOn: the spy's wrapper does not
+      // settle Playwright's API-call promise under the vitest worker.
       const stop = browserContext.tracing.stop.bind(browserContext.tracing);
       let stopCount = 0;
-      vi.spyOn(browserContext.tracing, 'stop').mockImplementation(() => stop({
-        path: ++stopCount === 1 ? path.join(notADirectory, 'failed.zip') : recoveredTrace,
-      }));
+      browserContext.tracing.stop = () => {
+        ++stopCount;
+        // Stop 1 models a failing save (unwritable target). The recovery
+        // retry inside releaseTrace is bare — no path — which is what ends
+        // the still-started server-side recording. Stop 3 is the second
+        // session's release, exporting to the recovered path.
+        const target = stopCount === 1
+            ? path.join(notADirectory, 'failed.zip')
+            : stopCount === 3 ? recoveredTrace : undefined;
+        return stop(target ? { path: target } : undefined);
+      };
       const factory: BrowserContextFactory = {
         createContext: async () => ({ browserContext, close: async () => {} }),
       };
@@ -65,11 +75,14 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('trace recovery in a 
       await second.closeBrowserContext();
 
       const archive = await fs.promises.readFile(recoveredTrace);
-      expect(stopCount).toBe(2);
+      // Three stops: the first context's failed save, the bare retry that
+      // ends the still-started recording, and the second context's release —
+      // whose export lands on the recovered path.
+      expect(stopCount).toBe(3);
       expect(archive.subarray(0, 4)).toEqual(Buffer.from('PK\x03\x04'));
       expect(archive.includes(Buffer.from('trace.trace'))).toBe(true);
     } finally {
-      vi.restoreAllMocks();
+
       await Context.disposeAll();
       await browserContext?.close();
       await browser?.close();

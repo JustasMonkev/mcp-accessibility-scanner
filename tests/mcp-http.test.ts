@@ -76,17 +76,17 @@ describe('mcp http transport hardening', () => {
     }),
   };
 
-  async function startServer(serverBackendFactory = testBackendFactory) {
+  async function startServer(serverBackendFactory = testBackendFactory, authToken?: string) {
     const server = await startHttpServer({ host: '127.0.0.1', port: 0 });
     servers.add(server);
-    await installHttpTransport(server, serverBackendFactory);
+    await installHttpTransport(server, serverBackendFactory, { authToken });
     const address = server.address();
     if (!address || typeof address === 'string')
       throw new Error('Expected TCP server address');
     return { server, port: address.port };
   }
 
-  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string, sessionId?: string, accept?: string, protocolVersion?: string, body?: string, contentLength?: number, agent?: http.Agent, onSocket?: (socket: Socket) => void }) {
+  async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string, sessionId?: string, accept?: string, protocolVersion?: string, body?: string, contentLength?: number, authorization?: string, agent?: http.Agent, onSocket?: (socket: Socket) => void }) {
     const response = await new Promise<{ statusCode: number, headers: http.IncomingHttpHeaders, body: string }>((resolve, reject) => {
       const req = http.request({
         host: '127.0.0.1',
@@ -102,6 +102,7 @@ describe('mcp http transport hardening', () => {
           ...(options?.protocolVersion ? { 'mcp-protocol-version': options.protocolVersion } : {}),
           ...(options?.body ? { 'content-type': 'application/json' } : {}),
           ...(options?.contentLength !== undefined ? { 'content-length': String(options.contentLength) } : {}),
+          ...(options?.authorization ? { authorization: options.authorization } : {}),
         },
       }, res => {
         const chunks: Buffer[] = [];
@@ -238,6 +239,89 @@ describe('mcp http transport hardening', () => {
 
     expect(response.statusCode).toBe(405);
     expect(JSON.parse(response.body)).toEqual(methodNotAllowedBody);
+  });
+
+  describe('bearer token authentication', () => {
+    async function postToolsList(port: number, authorization?: string) {
+      return await sendRequest(port, {
+        method: 'POST',
+        hostHeader: `127.0.0.1:${port}`,
+        accept: 'application/json, text/event-stream',
+        authorization,
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+      });
+    }
+
+    it('rejects requests without an Authorization header when authToken is configured', async () => {
+      const { port } = await startServer(probeFactory, 'secret-token');
+
+      const response = await postToolsList(port);
+
+      expect(response.statusCode).toBe(401);
+      expect(response.headers['www-authenticate']).toBe('Bearer');
+    });
+
+    it('rejects requests with a wrong token', async () => {
+      const { port } = await startServer(probeFactory, 'secret-token');
+
+      const response = await postToolsList(port, 'Bearer wrong-token');
+
+      expect(response.statusCode).toBe(401);
+    });
+
+    it('serves requests carrying the configured token', async () => {
+      const { port } = await startServer(probeFactory, 'secret-token');
+
+      const response = await postToolsList(port, 'Bearer secret-token');
+
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toContain('probe');
+    });
+
+    it('accepts bearer scheme casing but compares the token exactly', async () => {
+      const { port } = await startServer(probeFactory, 'secret-token');
+
+      for (const scheme of ['bearer', 'BEARER', 'bEaReR']) {
+        const response = await postToolsList(port, `${scheme} secret-token`);
+        expect(response.statusCode, scheme).toBe(200);
+      }
+      const wrongCaseToken = await postToolsList(port, 'bearer Secret-token');
+      expect(wrongCaseToken.statusCode).toBe(401);
+    });
+
+    it('rejects a blank token before installing the request handler', async () => {
+      const server = await startHttpServer({ host: '127.0.0.1', port: 0 });
+      servers.add(server);
+
+      await expect(installHttpTransport(server, probeFactory, { authToken: '   ' }))
+          .rejects.toThrow(/authToken.*blank/i);
+    });
+
+    it('rejects bearer auth on a non-loopback listener before attaching a handler', async () => {
+      const server = await startHttpServer({ host: '127.0.0.1', port: 0 });
+      servers.add(server);
+      const address = server.address();
+      if (!address || typeof address === 'string')
+        throw new Error('Expected TCP server address');
+      vi.spyOn(server, 'address').mockReturnValue({ ...address, address: '0.0.0.0' });
+
+      await expect(installHttpTransport(server, probeFactory, { authToken: 'secret-token' }))
+          .rejects.toThrow(/loopback.*TLS reverse proxy/i);
+      expect(server.listeners('request')).toHaveLength(0);
+    });
+
+    it('applies the same gate to sessionful initialize requests', async () => {
+      const { port } = await startServer(testBackendFactory, 'secret-token');
+
+      const response = await sendRequest(port, {
+        method: 'POST',
+        hostHeader: `127.0.0.1:${port}`,
+        accept: 'application/json, text/event-stream',
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } }),
+      });
+
+      expect(response.statusCode).toBe(401);
+    });
   });
 
   it('answers sessionless non-POST methods with 405 like the SDK stateless mode', async () => {

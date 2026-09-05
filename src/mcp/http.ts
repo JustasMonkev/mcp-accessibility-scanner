@@ -18,6 +18,7 @@ import assert from 'node:assert';
 import net from 'node:net';
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { validateAuthToken } from '../config.js';
 
 import debug from 'debug';
 
@@ -60,17 +61,44 @@ export function httpAddressToString(address: string | net.AddressInfo | null): s
   return `http://${resolvedHost}:${resolvedPort}`;
 }
 
-export async function installHttpTransport(httpServer: http.Server, serverBackendFactory: ServerBackendFactory) {
+export async function installHttpTransport(httpServer: http.Server, serverBackendFactory: ServerBackendFactory, options?: { authToken?: string }) {
+  validateAuthToken(options?.authToken);
+  const address = httpServer.address();
+  if (options?.authToken !== undefined && (!address || typeof address !== 'object' ||
+    !(allowedLoopbackHostnamePattern.test(address.address) || address.address === '::1' || address.address === '::ffff:127.0.0.1')))
+    throw new Error('Bearer authentication requires a loopback HTTP listener. Use --host 127.0.0.1 behind a TLS reverse proxy for remote access.');
   const sessions = new SessionStore(serverBackendFactory);
+  const authToken = options?.authToken;
   httpServer.on('request', async (req, res) => {
-    const validationError = validateRequestHeaders(httpServer, req) ?? validateRequestRouting(req);
+    const validationError = validateRequestHeaders(httpServer, req) ?? validateAuthorization(req, authToken) ?? validateRequestRouting(req);
     if (validationError) {
       res.statusCode = validationError.statusCode;
+      if (validationError.statusCode === 401) {
+        res.setHeader('WWW-Authenticate', 'Bearer');
+        res.setHeader('Connection', 'close');
+      }
       res.end(validationError.message);
       return;
     }
     await sessions.handleRequest(req, res);
   });
+}
+
+// Optional bearer-token gate for the HTTP transport. The loopback Host/Origin
+// validation above stops remote and cross-site callers, but every local
+// process can still reach the endpoint; a configured token restricts access.
+// Remote access requires TLS in front of the loopback listener.
+function validateAuthorization(req: http.IncomingMessage, authToken: string | undefined): { statusCode: number, message: string } | undefined {
+  if (!authToken)
+    return;
+  const header = req.headers.authorization;
+  const provided = typeof header === 'string' ? /^Bearer +(.+)$/i.exec(header)?.[1] : undefined;
+  if (provided === undefined)
+    return { statusCode: 401, message: 'Unauthorized: missing Authorization: Bearer <token> header.' };
+  const providedBuffer = Buffer.from(provided);
+  const expectedBuffer = Buffer.from(authToken);
+  if (providedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(providedBuffer, expectedBuffer))
+    return { statusCode: 401, message: 'Unauthorized: invalid token.' };
 }
 
 // ─── Sessionful 2025-era serving ─────────────────────────────────────────────

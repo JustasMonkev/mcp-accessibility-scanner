@@ -1,3 +1,4 @@
+import { createServer } from 'node:http';
 import fs from 'fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import auditSiteTools from '../src/tools/auditSite.js';
@@ -40,6 +41,13 @@ function createHarness(
     navLinkMap?: Record<string, string[]>;
     redirectMap?: Record<string, string>;
     sitemapXmlByUrl?: Record<string, string>;
+    sitemapRedirectMap?: Record<string, string>;
+    network?: { allowedOrigins?: string[], blockedOrigins?: string[] };
+    sitemapFetch?: typeof globalThis.fetch;
+    browserProxy?: boolean;
+    remoteEndpoint?: string;
+    cdpEndpoint?: string;
+    browserContextFactoryName?: string;
     requestContext?: any;
     cookiesForUrl?: (url: string) => { name: string, domain?: string, path?: string, expires?: number }[];
     navigationFailsFor?: (url: string) => boolean;
@@ -100,29 +108,16 @@ function createHarness(
     waitForTimeout: vi.fn(async () => undefined),
   };
 
-  const temporaryTab: any = {
-    page: {
-      request: {
-        get: vi.fn(async (sitemapUrl: string) => {
-          const xmlText = options?.sitemapXmlByUrl?.[sitemapUrl];
-          if (!xmlText) {
-            return {
-              ok: () => false,
-              status: () => 404,
-              statusText: () => 'Not Found',
-              text: async () => '',
-            };
-          }
-          return {
-            ok: () => true,
-            status: () => 200,
-            statusText: () => 'OK',
-            text: async () => xmlText,
-          };
-        }),
-      },
-    },
+  const defaultFetch = async (input: string | URL) => {
+    const url = String(input);
+    const redirect = options?.sitemapRedirectMap?.[url];
+    if (redirect)
+      return new globalThis.Response(null, { status: 302, headers: { location: redirect } });
+    const xmlText = options?.sitemapXmlByUrl?.[url];
+    return new globalThis.Response(xmlText ?? '', { status: xmlText ? 200 : 404 });
   };
+  const fetchMock = vi.fn(options?.sitemapFetch ?? defaultFetch);
+  vi.stubGlobal('fetch', fetchMock);
 
   const originalTab: any = {
     page: {
@@ -132,16 +127,10 @@ function createHarness(
   };
 
   const tabs: any[] = [originalTab];
-  let createdSitemapTab = false;
   const context = {
     currentTabOrDie: vi.fn(() => originalTab),
     tabs: vi.fn(() => tabs),
     newTab: vi.fn(async () => {
-      if (options?.sitemapXmlByUrl && !createdSitemapTab) {
-        createdSitemapTab = true;
-        tabs.push(temporaryTab);
-        return temporaryTab;
-      }
       tabs.push(crawlTab);
       return crawlTab;
     }),
@@ -151,12 +140,22 @@ function createHarness(
     }),
     selectTab: vi.fn(async () => undefined),
     outputFile: vi.fn(async () => '/tmp/audit-site.json'),
-    config: {},
+    config: {
+      browser: {
+        launchOptions: options?.browserProxy ? { proxy: { server: 'http://proxy.example' } } : {},
+        contextOptions: {},
+        remoteEndpoint: options?.remoteEndpoint,
+        cdpEndpoint: options?.cdpEndpoint,
+      },
+      network: options?.network ?? {},
+    },
+    options: {
+      browserContextFactory: { name: options?.browserContextFactoryName ?? 'chromium' },
+    },
   };
 
   originalTab.context = context;
   crawlTab.context = context;
-  temporaryTab.context = context;
 
   const response = new Response(context as any, 'audit_site', {}, options?.requestContext);
 
@@ -164,7 +163,7 @@ function createHarness(
     context,
     response,
     crawlTab,
-    temporaryTab,
+    fetchMock,
     cookiesMock,
   };
 }
@@ -175,6 +174,7 @@ describe('audit_site tool', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
   });
 
@@ -204,7 +204,7 @@ describe('audit_site tool', () => {
       strategy: 'links',
       maxPages: 5,
       maxDepth: 1,
-      sameOriginOnly: true,
+      sameOriginOnly: false,
       includeSubdomains: false,
       excludePathPatterns: [],
       ignoreQueryParams: [],
@@ -791,7 +791,7 @@ describe('audit_site tool', () => {
 
   it('supports sitemap strategy by parsing loc entries', async () => {
     const sitemapUrl = 'https://example.com/sitemap.xml';
-    const { context, response, temporaryTab } = createHarness({
+    const { context, response, fetchMock } = createHarness({
       'https://example.com/one': [],
       'https://example.com/two': [],
     }, {
@@ -817,9 +817,361 @@ describe('audit_site tool', () => {
       waitAfterNavigationMs: 0,
     } as any, response);
 
-    expect(temporaryTab.page.request.get).toHaveBeenCalledWith(sitemapUrl, { timeout: 15000 });
+    expect(fetchMock).toHaveBeenCalledWith(sitemapUrl, expect.objectContaining({ redirect: 'manual', credentials: 'omit' }));
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     expect(report.pages.map((page: any) => page.url)).toEqual(['https://example.com/one', 'https://example.com/two']);
+  });
+
+  it.each([
+    { remoteEndpoint: 'ws://remote.example/browser' },
+    { cdpEndpoint: 'https://remote.example:9222' },
+    { cdpEndpoint: 'wss://remote.example/devtools/browser/session' },
+    { cdpEndpoint: 'http://127.0.0.1:9222' },
+  ])('rejects sitemap strategy for an attached browser: %j', async endpoint => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      ...endpoint,
+    });
+
+    await expect(tool.handle(context as any, tool.schema.inputSchema.parse({
+      strategy: 'sitemap',
+      sitemapUrl,
+      sameOriginOnly: false,
+    }), response)).rejects.toThrow(/Use the provided URL strategy/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.newTab).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects sitemap strategy for the browser_connect provider', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      browserContextFactoryName: 'vscode',
+    });
+
+    await expect(tool.handle(context as any, tool.schema.inputSchema.parse({
+      strategy: 'sitemap',
+      sitemapUrl,
+      sameOriginOnly: false,
+    }), response)).rejects.toThrow(/remoteEndpoint|browser_connect/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.newTab).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { remoteEndpoint: 'ws://remote.example/browser' },
+    { cdpEndpoint: 'https://remote.example:9222' },
+  ])('keeps provided URL strategy available with an attached browser: %j', async endpoint => {
+    const pageUrl = 'https://example.com/page';
+    const { context, response, crawlTab } = createHarness({ [pageUrl]: [] }, {
+      ...endpoint,
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({
+      strategy: 'provided',
+      urls: [pageUrl],
+      maxPages: 1,
+      maxDepth: 0,
+    }), response);
+
+    expect(crawlTab.navigate).toHaveBeenCalledWith(pageUrl);
+  });
+
+  it('rejects a sitemap URL outside the allowed crawl scope before fetching it', async () => {
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: {
+        'https://169.254.169.254/latest/sitemap.xml': '<urlset><url><loc>https://example.com/one</loc></url></urlset>',
+      },
+    });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl: 'https://169.254.169.254/latest/sitemap.xml',
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/outside the allowed crawl scope/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.newTab).not.toHaveBeenCalled();
+  });
+
+  it('rejects a sitemap URL with a non-http scheme', async () => {
+    const { context, response } = createHarness({});
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl: 'file:///etc/sitemap.xml',
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/Sitemap URL must use http/);
+  });
+
+  it('allows a subdomain sitemap when includeSubdomains is set', async () => {
+    const { context, response, fetchMock } = createHarness({
+      'https://example.com/one': [],
+    }, {
+      sitemapXmlByUrl: {
+        'https://blog.example.com/sitemap.xml': '<urlset><url><loc>https://example.com/one</loc></url></urlset>',
+      },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl: 'https://blog.example.com/sitemap.xml',
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: true,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(fetchMock).toHaveBeenCalledWith('https://blog.example.com/sitemap.xml', expect.objectContaining({ redirect: 'manual', credentials: 'omit' }));
+  });
+
+  it('applies the server network blocklist even when the caller disables crawl scoping', async () => {
+    const sitemapUrl = 'https://blocked.example/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      network: { blockedOrigins: ['blocked.example'] },
+    });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: false,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/blocked|network|policy|origin/i);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.newTab).not.toHaveBeenCalled();
+  });
+
+  it('rejects a sitemap redirect to a private or blocked origin before following it', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const redirectTarget = 'https://169.254.169.254/latest/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapRedirectMap: { [sitemapUrl]: redirectTarget },
+      network: { blockedOrigins: ['169.254.169.254'] },
+    });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: false,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/outside|blocked|network|policy|origin/i);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the server allowlist when the caller disables crawl scoping', async () => {
+    const sitemapUrl = 'https://allowed.example/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      network: { allowedOrigins: ['allowed.example'] },
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: false,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('follows an approved sitemap redirect', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const redirectTarget = 'https://example.com/sitemap-redirected.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapRedirectMap: { [sitemapUrl]: redirectTarget },
+      sitemapXmlByUrl: { [redirectTarget]: '<urlset />' },
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual([sitemapUrl, redirectTarget]);
+  });
+
+  it('rejects sitemap fetching when the browser uses a proxy', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      browserProxy: true,
+    });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/proxy/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('stops following a sitemap redirect chain after 20 hops', async () => {
+    const sitemapUrl = 'https://example.com/sitemap-0.xml';
+    const sitemapRedirectMap: Record<string, string> = {};
+    for (let index = 0; index <= 20; index++)
+      sitemapRedirectMap[`https://example.com/sitemap-${index}.xml`] = `https://example.com/sitemap-${index + 1}.xml`;
+    const { context, response, fetchMock } = createHarness({}, { sitemapRedirectMap });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/exceeds 20 redirects/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(21);
+  });
+
+  it('rejects a sitemap body larger than 10 MiB', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: 'x'.repeat(10 * 1024 * 1024 + 1) },
+    });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/10 MiB/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps browser cookies out of an HTTP sitemap request', async () => {
+    let receivedCookie: string | undefined;
+    let sitemapBody = '<urlset />';
+    const server = createServer((request, response) => {
+      receivedCookie = request.headers.cookie;
+      response.setHeader('content-type', 'application/xml');
+      response.end(sitemapBody);
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string')
+        throw new Error('Test server did not expose an address.');
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      const pageUrl = `${baseUrl}/page`;
+      const sitemapUrl = `${baseUrl}/sitemap.xml`;
+      sitemapBody = `<urlset><url><loc>${pageUrl}</loc></url></urlset>`;
+      const realFetch = globalThis.fetch;
+      const { context, response, fetchMock } = createHarness({ [pageUrl]: [] }, {
+        startUrl: `${baseUrl}/`,
+        sitemapFetch: realFetch,
+        cookiesForUrl: () => [{ name: 'sid' }],
+      });
+
+      await tool.handle(context as any, {
+        startUrl: `${baseUrl}/`,
+        strategy: 'sitemap',
+        sitemapUrl,
+        maxPages: 10,
+        maxDepth: 0,
+        sameOriginOnly: true,
+        includeSubdomains: false,
+        excludePathPatterns: [],
+        ignoreQueryParams: [],
+        violationsTag: ['wcag2aa'],
+        maxNodesPerViolation: 10,
+        waitAfterNavigationMs: 0,
+      } as any, response);
+
+      expect(fetchMock).toHaveBeenCalledWith(sitemapUrl, expect.objectContaining({ credentials: 'omit' }));
+      expect(receivedCookie).toBeUndefined();
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
   });
 
   it('records errored pages while continuing to scan remaining URLs', async () => {

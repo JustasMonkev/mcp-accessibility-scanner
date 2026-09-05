@@ -26,6 +26,7 @@ import { toMcpTool } from '../src/mcp/tool.js';
 import * as axe from '../src/tools/axe.js';
 import { Tab } from '../src/tab.js';
 import { Response } from '../src/response.js';
+import { resolveConfig } from '../src/config.js';
 import type { Context } from '../src/context.js';
 
 describe('Snapshot Tools', () => {
@@ -811,10 +812,11 @@ function dropResponse() {
 describe('browser_drop', () => {
   const dropTool = snapshotTools.find(tool => tool.schema.name === 'browser_drop')!;
 
-  function dropHarness() {
+  async function dropHarness(allowedUploadDirs?: string[]) {
     const drop = vi.fn().mockResolvedValue(undefined);
     const locator = { drop, normalize: async () => ({ toString: () => `getByTestId('zone')` }) };
     const tab = {
+      context: { config: await resolveConfig({ browser: { allowedUploadDirs } }) },
       modalStates: vi.fn().mockReturnValue([]),
       refLocator: vi.fn().mockResolvedValue(locator),
       waitForCompletion: vi.fn(async (callback: () => Promise<void>) => await callback()),
@@ -833,7 +835,7 @@ describe('browser_drop', () => {
   });
 
   it('should drop files onto the element', async () => {
-    const harness = dropHarness();
+    const harness = await dropHarness();
 
     await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', paths: ['/tmp/a.txt'] }, harness.response as any);
 
@@ -844,7 +846,7 @@ describe('browser_drop', () => {
   });
 
   it('should drop clipboard-like data onto the element', async () => {
-    const harness = dropHarness();
+    const harness = await dropHarness([]);
 
     await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', data: { 'text/plain': 'hello' } }, harness.response as any);
 
@@ -852,11 +854,51 @@ describe('browser_drop', () => {
   });
 
   it('should drop files and data together', async () => {
-    const harness = dropHarness();
+    const harness = await dropHarness();
 
     await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', paths: ['/tmp/a.txt'], data: { 'text/plain': 'hello' } }, harness.response as any);
 
     expect(harness.drop).toHaveBeenCalledWith({ files: ['/tmp/a.txt'], data: { 'text/plain': 'hello' } });
+  });
+
+  it('enforces upload directories before resolving the drop target', async () => {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-drop-'));
+    const outside = path.join(dir, 'outside.txt');
+    const allowed = path.join(dir, 'allowed');
+    await fs.promises.mkdir(allowed);
+    await fs.promises.writeFile(outside, 'private');
+    try {
+      for (const dirs of [[], [allowed]]) {
+        const harness = await dropHarness(dirs);
+        await expect(dropTool.handle(harness.context as any, {
+          element: 'Dropzone', ref: 'e1', paths: [outside], data: { 'text/plain': 'hello' },
+        }, harness.response as any)).rejects.toThrow(/outside the allowed upload directories/);
+        expect(harness.tab.refLocator).not.toHaveBeenCalled();
+        expect(harness.drop).not.toHaveBeenCalled();
+      }
+    } finally {
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('drops checked file bytes while keeping paths in the replay code', async () => {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-drop-'));
+    const file = path.join(dir, 'note.txt');
+    await fs.promises.writeFile(file, 'hello');
+    const harness = await dropHarness([dir]);
+    try {
+      await dropTool.handle(harness.context as any, {
+        element: 'Dropzone', ref: 'e1', paths: [file], data: { 'text/plain': 'hello' },
+      }, harness.response as any);
+      expect(harness.drop).toHaveBeenCalledWith({
+        files: [{ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('hello') }],
+        data: { 'text/plain': 'hello' },
+      });
+      expect(harness.response.addCode).toHaveBeenCalledWith(
+          `await page.getByTestId('zone').drop(${JSON.stringify({ files: [file], data: { 'text/plain': 'hello' } })});`);
+    } finally {
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('should reject a drop with no payload at the schema', () => {
@@ -872,7 +914,7 @@ describe('browser_drop', () => {
   });
 
   it('should refuse to drop while a modal state is pending', async () => {
-    const harness = dropHarness();
+    const harness = await dropHarness();
     harness.tab.modalStates = vi.fn().mockReturnValue([{ type: 'dialog', description: 'alert' }]);
     harness.tab.modalStatesMarkdown = vi.fn().mockReturnValue(['- alert']);
 
@@ -883,7 +925,7 @@ describe('browser_drop', () => {
   });
 
   it('should settle the page through waitForCompletion', async () => {
-    const harness = dropHarness();
+    const harness = await dropHarness();
 
     await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', data: { 'text/plain': 'hi' } }, harness.response as any);
 
@@ -922,11 +964,12 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('browser_drop in a re
     await fs.promises.rm(scratchDir, { recursive: true, force: true });
   });
 
-  async function runDrop(html: string, params: Record<string, unknown>) {
+  async function runDrop(html: string, params: Record<string, unknown>, allowedUploadDirs?: string[]) {
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.setContent(html);
     const tab = {
+      context: { config: await resolveConfig({ browser: { allowedUploadDirs } }) },
       modalStates: () => [],
       refLocator: async () => page.locator('#zone'),
       waitForCompletion: async (callback: () => Promise<void>) => await callback(),
@@ -947,11 +990,11 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('browser_drop in a re
     expect(code).toContain('.drop(');
   });
 
-  it('drops a real file onto a real drop zone', async () => {
+  it.each([false, true])('drops a real file onto a real drop zone with restrictions %s', async restricted => {
     const filePath = path.join(scratchDir, 'note.txt');
     await fs.promises.writeFile(filePath, 'hello');
 
-    const { dropped } = await runDrop(dropzone, { paths: [filePath] });
+    const { dropped } = await runDrop(dropzone, { paths: [filePath] }, restricted ? [scratchDir] : undefined);
 
     expect(dropped.files).toEqual([{ name: 'note.txt', type: 'text/plain' }]);
   });

@@ -393,8 +393,10 @@ describe('axe helpers', () => {
     expect(result.unscannedFrames).toEqual(['https://example.com/widget']);
   });
 
-  it('rechecks a frame that navigates during its reachability probe', async () => {
+  it('reports a frame that loses Axe during its reachability probe', async () => {
     resetScan();
+    // The frame navigates after the iframe element is resolved. The final
+    // marker check must observe that the new document has no injected Axe.
     const navigated = makeFrame({}, 'https://example.com/widget');
     const evaluate = navigated.evaluate;
     let navigatedAway = false;
@@ -743,6 +745,29 @@ describe('axe helpers', () => {
 });
 
 describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage in a real browser', () => {
+  it('does not warn about a failed frame outside a modal found only in a shadow root', async () => {
+    const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<div id="modal-host"></div><iframe id="outside" sandbox srcdoc="<button>inside</button>"></iframe>');
+      await page.evaluate(() => {
+        const host = document.querySelector('#modal-host')!;
+        const root = host.attachShadow({ mode: 'open' });
+        const dialog = document.createElement('dialog');
+        dialog.textContent = 'Modal';
+        dialog.style.cssText = 'width: 100px; height: 100px';
+        root.append(dialog);
+        dialog.showModal();
+      });
+      // A frame outside the shadow-root modal is inert while the modal is open.
+      // Axe injection fails for this empty frame, so it must be omitted from
+      // the unscanned list once modal discovery walks the composed tree.
+      expect((await runAxeScan(page)).unscannedFrames).toEqual([]);
+    } finally {
+      await browser.close();
+    }
+  });
+
   it('reports a hidden iframe made visible by author CSS outside a CSS-hidden modal', async () => {
     const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
     try {

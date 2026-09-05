@@ -1,7 +1,7 @@
-import fs from 'node:fs';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { frameConcurrency, frameReadTimeoutMs, injectAxeForNames, withConcurrency, withFrameTimeout } from './axe.js';
+import { writeJsonReport } from './report.js';
 import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 
 import type * as playwright from 'playwright';
@@ -101,6 +101,10 @@ const cameraFileNamePattern = /^(img|dsc|dscn|pxl|screenshot|image|photo)[-_ ]?\
 // Refs are resolved and measured in chunks of this size.
 const measureChunkSize = 50;
 
+// Budget for resolving one ref to an element handle: a ref gone stale must
+// not cost a full frame read per element, so it is bounded separately.
+const refResolutionTimeoutMs = 1000;
+
 // Bands narrower than this are noise (sr-only clip boxes, 1px spacers).
 const minLayoutSizePx = 2;
 const layoutTolerancePx = 1;
@@ -160,7 +164,19 @@ function overlapRatio(a: Rect, b: Rect, axis: 'x' | 'y'): number {
 
 function countBands(rects: Rect[], axis: 'x' | 'y'): number {
   const band = rects.map((_, index) => index);
-  const rootOf = (index: number): number => band[index] === index ? index : rootOf(band[index]);
+  // Iterative find with write-back path compression, so a long union chain
+  // costs O(1) per lookup instead of a walk each time.
+  const rootOf = (index: number): number => {
+    let root = index;
+    while (band[root] !== root)
+      root = band[root];
+    while (band[index] !== root) {
+      const next = band[index];
+      band[index] = root;
+      index = next;
+    }
+    return root;
+  };
   for (let i = 0; i < rects.length; i++) {
     for (let j = i + 1; j < rects.length; j++) {
       if (overlapRatio(rects[i], rects[j], axis) >= bandOverlapRatio)
@@ -940,7 +956,7 @@ const auditScreenReader = defineTabTool({
       const chunk = refIndexes.slice(start, start + size);
       start += size;
       const handles = await Promise.all(chunk.map(index =>
-        tab.page.locator(`aria-ref=${ariaNodes[index].ref}`).elementHandle({ timeout: 1000 }).catch(() => null)));
+        tab.page.locator(`aria-ref=${ariaNodes[index].ref}`).elementHandle({ timeout: refResolutionTimeoutMs }).catch(() => null)));
       // The owner lookup is a renderer round-trip too, so a frame that stopped
       // answering since the resolution above would hold the audit here. It is
       // bounded, and since the owner is what the lookup finds, given the larger
@@ -1104,22 +1120,14 @@ const auditScreenReader = defineTabTool({
       findings: result.findings,
     };
 
-    await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
-    const reportResourceLink = response.addFileResourceLink(reportPath, {
+    const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'audit-screen-reader-report',
       title: 'Audit screen reader JSON report',
       description: 'JSON report for accessible name quality and reading order findings.',
-      mimeType: 'application/json',
     });
     response.setStructuredContent({
       kind: 'audit_screen_reader',
-      report: {
-        path: reportPath,
-        uri: reportResourceLink.uri,
-        name: reportResourceLink.name,
-        title: reportResourceLink.title ?? null,
-        mimeType: reportResourceLink.mimeType ?? null,
-      },
+      report: reportResource,
       page: {
         url: tab.page.url(),
       },
@@ -1134,7 +1142,7 @@ const auditScreenReader = defineTabTool({
         truncatedChecks: result.truncatedChecks,
       },
       findings: result.findings,
-      reportUri: reportResourceLink.uri,
+      reportUri: reportResource.uri,
     });
 
     const findingLines = result.findings.map(finding => (
@@ -1163,7 +1171,7 @@ const auditScreenReader = defineTabTool({
       '',
       ...(findingLines.length ? findingLines : ['- No screen-reader-level issues detected.']),
       '',
-      `JSON report: ${reportPath}`,
+      `JSON report: ${reportResource.path}`,
     ].join('\n'));
   },
 });

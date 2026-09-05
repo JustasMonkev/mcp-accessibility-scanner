@@ -25,6 +25,8 @@ import type { Config, ToolCapability } from '../config.js';
 
 export type CLIOptions = {
     allowedOrigins?: string[];
+    allowedUploadDirs?: string[];
+    authToken?: string;
     blockedOrigins?: string[];
     blockServiceWorkers?: boolean;
     browser?: string;
@@ -100,7 +102,9 @@ export type FullConfig = Config & {
     network: NonNullable<Config['network']>,
     saveTrace: boolean;
     server: NonNullable<Config['server']>,
-    timeouts: NonNullable<Config['timeouts']>,
+    // mergeConfig() always materializes all three from defaultConfig, so a
+    // resolved config never has a missing timeout to fall back on.
+    timeouts: Required<NonNullable<Config['timeouts']>>,
 };
 
 export async function resolveConfig(config: Config): Promise<FullConfig> {
@@ -125,7 +129,17 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
 // config validations, on the merged result so every source (config file,
 // env, CLI, programmatic Config) is covered. Only undefined/null count as
 // omitted — the nullish semantics the fallback historically used.
-function validateResolvedConfig(config: FullConfig): FullConfig {
+async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
+  validateAuthToken(config.server.authToken);
+  const uploadDirs = config.browser.allowedUploadDirs;
+  if (uploadDirs !== undefined) {
+    if (!Array.isArray(uploadDirs))
+      throw new Error('allowedUploadDirs must be an array of directory paths. Use [] to deny all uploads.');
+    if (uploadDirs.some(dir => typeof dir !== 'string' || !dir.trim()))
+      throw new Error('allowedUploadDirs must not contain blank directory entries. Use [] to deny all uploads.');
+    // Resolve once at trusted startup; uploads must not follow a retargeted root.
+    config.browser.allowedUploadDirs = await Promise.all(uploadDirs.map(dir => fs.promises.realpath(dir)));
+  }
   if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
     throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
   if (config.browser.browserName === 'chromium' && !config.browser.remoteEndpoint && config.browser.launchOptions.chromiumSandbox === undefined) {
@@ -263,6 +277,7 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
       browserName,
       isolated: cliOptions.isolated,
       userDataDir: cliOptions.userDataDir,
+      allowedUploadDirs: cliOptions.allowedUploadDirs,
       launchOptions,
       contextOptions,
       cdpLaunch,
@@ -273,6 +288,7 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
     server: {
       port: cliOptions.port,
       host: cliOptions.host,
+      authToken: cliOptions.authToken,
     },
     capabilities: cliOptions.caps as ToolCapability[],
     network: {
@@ -295,6 +311,8 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
 function cliOptionsFromEnv(): CLIOptions {
   const options: CLIOptions = {};
   options.allowedOrigins = semicolonSeparatedList(process.env.PLAYWRIGHT_MCP_ALLOWED_ORIGINS);
+  options.allowedUploadDirs = uploadDirectoryList(process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS);
+  options.authToken = process.env.PLAYWRIGHT_MCP_AUTH_TOKEN;
   options.blockedOrigins = semicolonSeparatedList(process.env.PLAYWRIGHT_MCP_BLOCKED_ORIGINS);
   options.blockServiceWorkers = envToBoolean(process.env.PLAYWRIGHT_MCP_BLOCK_SERVICE_WORKERS);
   options.browser = envToString(process.env.PLAYWRIGHT_MCP_BROWSER);
@@ -446,6 +464,17 @@ export function semicolonSeparatedList(value: string | undefined): string[] | un
   if (!value)
     return undefined;
   return value.split(';').map(v => v.trim());
+}
+
+export function uploadDirectoryList(value: string | undefined): string[] | undefined {
+  if (value === undefined)
+    return undefined;
+  return value === '' ? [] : value.split(';').map(dir => dir.trim());
+}
+
+export function validateAuthToken(token: string | undefined): void {
+  if (token !== undefined && (typeof token !== 'string' || !/^[A-Za-z0-9._~+/-]+=*$/.test(token)))
+    throw new Error('server.authToken must be a non-blank Bearer token without whitespace.');
 }
 
 export function commaSeparatedList(value: string | undefined): string[] | undefined {

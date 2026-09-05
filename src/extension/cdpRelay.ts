@@ -23,6 +23,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
@@ -93,6 +94,7 @@ export class CDPRelayServer {
   private _userDataDir?: string;
   private _executablePath?: string;
   private _cdpPath: string;
+  private readonly _cdpToken = crypto.randomUUID();
   private _extensionPath: string;
   private _connectPagePrefix: string;
   private _wss: WebSocketServer;
@@ -127,7 +129,7 @@ export class CDPRelayServer {
   }
 
   private _onUpgrade = (request: http.IncomingMessage, socket: Duplex, head: Buffer): void => {
-    const rejection = validateUpgradeRequest(request);
+    const rejection = validateUpgradeRequest(request) ?? this._validateCdpToken(request);
     if (rejection) {
       debugLogger(`Rejecting upgrade: ${rejection.message}`);
       socket.write(`HTTP/1.1 ${rejection.statusCode} ${rejection.message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
@@ -137,8 +139,20 @@ export class CDPRelayServer {
     this._wss.handleUpgrade(request, socket, head, ws => this._wss.emit('connection', ws, request));
   };
 
+  // The extension approval token is passed in Chrome argv. The CDP credential
+  // must stay separate and only reach the in-process Playwright client.
+  private _validateCdpToken(request: http.IncomingMessage): { statusCode: number, message: string } | undefined {
+    const url = new URL(`http://localhost${request.url}`);
+    if (url.pathname !== this._cdpPath)
+      return;
+    const provided = Buffer.from(url.searchParams.get('token') ?? '');
+    const expectedBuffer = Buffer.from(this._cdpToken);
+    if (provided.length !== expectedBuffer.length || !timingSafeEqual(provided, expectedBuffer))
+      return { statusCode: 401, message: 'Unauthorized' };
+  }
+
   cdpEndpoint() {
-    return `${this._wsHost}${this._cdpPath}`;
+    return `${this._wsHost}${this._cdpPath}?token=${this._cdpToken}`;
   }
 
   extensionEndpoint() {
