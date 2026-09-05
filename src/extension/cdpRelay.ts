@@ -426,7 +426,15 @@ async function hasExtensionSettingsRecord(prefsPath: string): Promise<boolean> {
   // require that directory to still exist; a relative path is only usable
   // through the Extensions/<id> directory the caller already checked.
   const recordPath = 'path' in record ? record.path : undefined;
-  return typeof recordPath === 'string' && path.isAbsolute(recordPath) && await pathExists(recordPath);
+  if (typeof recordPath !== 'string' || !path.isAbsolute(recordPath) || !await pathExists(recordPath))
+    return false;
+  // The record carries the extension's enabled state (1 = enabled; 0 disabled,
+  // 2 uninstalled). Chromium loads the manifest from the unpacked directory,
+  // so a missing manifest.json is as dead as a deleted one.
+  const state = 'state' in record ? record.state : undefined;
+  if (state !== undefined && state !== 1)
+    return false;
+  return await pathExists(path.join(recordPath, 'manifest.json'));
 }
 
 async function pathExists(p: string): Promise<boolean> {

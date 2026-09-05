@@ -540,5 +540,5 @@ function envToBoolean(value: string | undefined): boolean | undefined {
 }
 
 function envToString(value: string | undefined): string | undefined {
-  return value ? value.trim() : undefined;
+  return value?.trim() || undefined;
 }

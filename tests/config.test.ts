@@ -269,6 +269,11 @@ describe('Config', () => {
       expect((await resolveCLIConfig({})).browser.profileDirName).toBeUndefined();
     });
 
+    it('treats a whitespace-only environment value as unset', async () => {
+      process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = '   ';
+      expect((await resolveCLIConfig({})).browser.profileDirName).toBeUndefined();
+    });
+
     it.each(['my-profile', 'Default/../../etc', 'Profile 1 ', ''])('rejects an invalid profile directory name from the CLI: %s', async profileDirName => {
       await expect(resolveCLIConfig({ profileDirName })).rejects.toThrow(/Invalid browser profile directory name/);
     });

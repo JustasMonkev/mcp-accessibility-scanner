@@ -53,6 +53,8 @@ async function resolveProgramContext(options: Record<string, unknown>, extension
       throw new Error('--profile-dir-name is only supported in extension mode (--extension or --connect-tool).');
     if (!config.browser.userDataDir)
       throw new Error('--profile-dir-name requires --user-data-dir to name the profile directory inside it.');
+    if (config.browser.contextOptions?.storageState && !options.extension)
+      throw new Error('--profile-dir-name cannot reach the extension provider with a storage state: the --connect-tool extension provider refuses storage states at switch time. Drop the storage state, or run --extension without it.');
   }
   const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath, config.browser.profileDirName);
   // --extension runs every tool through the extension factory, not the one
