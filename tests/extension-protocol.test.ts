@@ -1097,9 +1097,10 @@ describe('extension protocol v2', () => {
   it('launches the profile whose preferences hold an unpacked extension record', async () => {
     vi.mocked(spawn).mockClear();
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
+    const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-unpacked-'));
     await fs.mkdir(path.join(userDataDir, 'Default'));
     await fs.writeFile(path.join(userDataDir, 'Default', 'Preferences'), JSON.stringify({
-      extensions: { settings: { [EXTENSION_ID]: { path: '/ext', state: {} } } },
+      extensions: { settings: { [EXTENSION_ID]: { path: extensionDir, state: {} } } },
     }));
     const server = http.createServer();
     await new Promise<void>((resolve, reject) => {
@@ -1123,18 +1124,22 @@ describe('extension protocol v2', () => {
       relay.stop();
       await new Promise<void>(resolve => server.close(() => resolve()));
       await fs.rm(userDataDir, { recursive: true });
+      await fs.rm(extensionDir, { recursive: true });
     }
   });
 
-  it.each([
-    ['an empty settings record', {}],
-    ['a null settings record', null],
-  ])('does not launch a profile with only %s left from an uninstall', async (_label, record) => {
+  const uninstallRecords: [string, (userDataDir: string) => unknown][] = [
+    ['an empty settings record', () => ({})],
+    ['a null settings record', () => null],
+    ['a stale record pointing at a deleted unpacked directory', userDataDir => ({ path: path.join(userDataDir, 'gone'), state: 1 })],
+    ['a record whose path is relative to a store install without the Extensions directory', () => ({ path: 'mfjhbgfplnigmagldckm/1.0.0_0', state: 1 })],
+  ];
+  it.each(uninstallRecords)('does not launch a profile with only %s left from an uninstall', async (_label, makeRecord) => {
     vi.mocked(spawn).mockClear();
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
     await fs.mkdir(path.join(userDataDir, 'Default'));
     await fs.writeFile(path.join(userDataDir, 'Default', 'Preferences'), JSON.stringify({
-      extensions: { settings: { [EXTENSION_ID]: record } },
+      extensions: { settings: { [EXTENSION_ID]: makeRecord(userDataDir) } },
     }));
     const server = http.createServer();
     await new Promise<void>((resolve, reject) => {

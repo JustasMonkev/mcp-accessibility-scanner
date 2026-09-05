@@ -17,12 +17,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, onTestFinished, vi } from 'vitest';
 import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders, resolveOutputDir, uploadDirectoryList } from '../src/config.js';
 import type { Config } from '../config.js';
 
 async function writeConfigFile(config: Config): Promise<string> {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-config-test-'));
+  onTestFinished(() => fs.promises.rm(dir, { recursive: true, force: true }));
   const configFile = path.join(dir, 'config.json');
   await fs.promises.writeFile(configFile, JSON.stringify(config), 'utf-8');
   return configFile;

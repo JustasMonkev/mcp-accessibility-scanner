@@ -418,7 +418,15 @@ async function hasExtensionSettingsRecord(prefsPath: string): Promise<boolean> {
   // populated one; JSON values are untyped, so a null or non-object record
   // must not reach Object.keys.
   const record = prefs?.extensions?.settings?.[protocol.EXTENSION_ID];
-  return typeof record === 'object' && record !== null && Object.keys(record).length > 0;
+  if (typeof record !== 'object' || record === null || Object.keys(record).length === 0)
+    return false;
+  // Chrome writes the install location into the record: an absolute path for
+  // an unpacked extension, a path relative to Extensions/<id> for a store
+  // install. A record can outlive a deleted unpacked source directory, so
+  // require that directory to still exist; a relative path is only usable
+  // through the Extensions/<id> directory the caller already checked.
+  const recordPath = 'path' in record ? record.path : undefined;
+  return typeof recordPath === 'string' && path.isAbsolute(recordPath) && await pathExists(recordPath);
 }
 
 async function pathExists(p: string): Promise<boolean> {
