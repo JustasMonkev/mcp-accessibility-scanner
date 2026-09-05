@@ -93,6 +93,7 @@ export class CDPRelayServer {
   private _browserChannel: string;
   private _userDataDir?: string;
   private _executablePath?: string;
+  private readonly _token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
   private _cdpPath: string;
   private readonly _cdpToken = crypto.randomUUID();
   private _extensionPath: string;
@@ -164,6 +165,7 @@ export class CDPRelayServer {
     if (abortSignal.aborted)
       throw abortSignal.reason;
     let abortListener = () => {};
+    let connectionTimer: ReturnType<typeof setTimeout> | undefined;
     const abortPromise = new Promise<never>((_, reject) => {
       abortListener = () => reject(abortSignal.reason);
       abortSignal.addEventListener('abort', abortListener, { once: true });
@@ -173,12 +175,22 @@ export class CDPRelayServer {
       if (!this._extensionConnection)
         await Promise.race([this._connectBrowser(clientInfo, abortSignal), abortPromise]);
       debugLogger('Waiting for incoming extension connection');
-      // Manual approval is intentionally unbounded; callers cancel it through the abort signal.
+      // Token connections need no human approval, so a missing/rejected token must not hang forever.
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        if (this._token) {
+          connectionTimer = setTimeout(() => reject(new Error(
+              'Playwright extension did not connect within 30s after opening the connect page. Make sure the extension is installed in the selected Chrome profile and PLAYWRIGHT_MCP_EXTENSION_TOKEN matches its token.'
+          )), 30_000);
+        }
+      });
+      // Without a token, manual approval remains unbounded and cancellable.
       await Promise.race([
         Promise.all([this._extensionConnectionPromise, this._handler.ready()]),
         abortPromise,
+        timeoutPromise,
       ]);
     } finally {
+      clearTimeout(connectionTimer);
       abortSignal.removeEventListener('abort', abortListener);
     }
     debugLogger('Extension connection established');
@@ -193,9 +205,8 @@ export class CDPRelayServer {
     };
     url.searchParams.set('client', JSON.stringify(client));
     url.searchParams.set('protocolVersion', process.env.PWMCP_TEST_PROTOCOL_VERSION ?? protocol.VERSION.toString());
-    const token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
-    if (token)
-      url.searchParams.set('token', token);
+    if (this._token)
+      url.searchParams.set('token', this._token);
     const href = url.toString();
 
     let executablePath = this._executablePath;
