@@ -41,9 +41,22 @@ type ProgramContext = {
   extensionContextFactory: ExtensionContextFactory;
 };
 
-async function resolveProgramContext(options: Record<string, unknown>): Promise<ProgramContext> {
+async function resolveProgramContext(options: Record<string, unknown>, extensionProviderReachable?: boolean): Promise<ProgramContext> {
   const config = await resolveCLIConfig(options);
-  const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath);
+  // The extension factory — the only profileDirName consumer — is selected by
+  // --extension, or reachable via the --connect-tool 'extension' provider; VS
+  // Code branches before that provider and the interactive subcommand picks
+  // its own factory, so those callers pass reachability explicitly.
+  if (config.browser.profileDirName) {
+    const reachable = extensionProviderReachable ?? (options.extension || (options.connectTool && !options.vscode));
+    if (!reachable)
+      throw new Error('--profile-dir-name is only supported in extension mode (--extension or --connect-tool).');
+    if (!config.browser.userDataDir)
+      throw new Error('--profile-dir-name requires --user-data-dir to name the profile directory inside it.');
+    if (config.browser.contextOptions?.storageState && !options.extension)
+      throw new Error('--profile-dir-name cannot reach the extension provider with a storage state: the --connect-tool extension provider refuses storage states at switch time. Drop the storage state, or run --extension without it.');
+  }
+  const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath, config.browser.profileDirName);
   // --extension runs every tool through the extension factory, not the one
   // contextFactory() builds, so validate the factory that will actually create
   // the context. Checked first because contextFactory() would otherwise
@@ -130,6 +143,7 @@ function configureBaseProgram() {
       .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
       .option('--output-dir <path>', 'path to the directory for output files.')
       .option('--port <port>', 'port to listen on for MCP Streamable HTTP transport.')
+      .option('--profile-dir-name <name>', 'name of the Chrome profile directory to connect to with --extension, for example "Profile 1". Requires --user-data-dir. Defaults to the last-used profile that has the extension installed.')
       .option('--proxy-bypass <bypass>', 'comma-separated domains to bypass proxy, for example ".com,chromium.org,.domain.com"')
       .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128" or "socks5://myproxy:8080"')
       .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')
@@ -262,7 +276,7 @@ program
     .description('Start an interactive REPL for manual tool execution')
     .action(async () => {
       const parentOptions = program.opts();
-      const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(parentOptions);
+      const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(parentOptions, Boolean(parentOptions.extension));
       const backend = new BrowserServerBackend(config, parentOptions.extension ? extensionContextFactory : browserContextFactory);
       const handleExit = setupExitWatchdog();
       await backend.initialize(

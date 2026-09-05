@@ -52,6 +52,7 @@ export type CLIOptions = {
     sandbox?: boolean;
     outputDir?: string;
     port?: number;
+    profileDirName?: string;
     proxyBypass?: string;
     proxyServer?: string;
     saveSession?: boolean;
@@ -142,6 +143,9 @@ async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   }
   if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
     throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
+  const profileDirName = config.browser.profileDirName;
+  if (profileDirName !== undefined && (typeof profileDirName !== 'string' || !/^(?:Default|Profile \d+)$/.test(profileDirName)))
+    throw new Error(`Invalid browser profile directory name ${JSON.stringify(profileDirName)}: must be a Chrome profile directory name such as "Default" or "Profile 1" (see "Profile Path" at chrome://version).`);
   if (config.browser.browserName === 'chromium' && !config.browser.remoteEndpoint && config.browser.launchOptions.chromiumSandbox === undefined) {
     const { channel, executablePath } = config.browser.launchOptions;
     config.browser.launchOptions.chromiumSandbox = os.platform() !== 'linux'
@@ -277,6 +281,7 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
       browserName,
       isolated: cliOptions.isolated,
       userDataDir: cliOptions.userDataDir,
+      profileDirName: cliOptions.profileDirName,
       allowedUploadDirs: cliOptions.allowedUploadDirs,
       launchOptions,
       contextOptions,
@@ -345,6 +350,7 @@ function cliOptionsFromEnv(): CLIOptions {
   options.storageState = envToString(process.env.PLAYWRIGHT_MCP_STORAGE_STATE);
   options.userAgent = envToString(process.env.PLAYWRIGHT_MCP_USER_AGENT);
   options.userDataDir = envToString(process.env.PLAYWRIGHT_MCP_USER_DATA_DIR);
+  options.profileDirName = envToString(process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME);
   options.viewportSize = envToString(process.env.PLAYWRIGHT_MCP_VIEWPORT_SIZE);
   options.navigationTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT);
   options.defaultTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_DEFAULT_TIMEOUT);
@@ -534,5 +540,5 @@ function envToBoolean(value: string | undefined): boolean | undefined {
 }
 
 function envToString(value: string | undefined): string | undefined {
-  return value ? value.trim() : undefined;
+  return value?.trim() || undefined;
 }

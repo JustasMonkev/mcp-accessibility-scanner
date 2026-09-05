@@ -19,6 +19,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createConnection } from '../src/index.js';
 
 const rootDir = path.resolve(__dirname, '..');
 const cliArgs = [path.join(rootDir, 'cli.js')];
@@ -71,6 +72,11 @@ describe('CLI command dispatch contract', () => {
       expect(help).toContain('--snapshot-boxes');
       expect(help).toContain('--timeout-settle');
     });
+
+    it('shows --profile-dir-name with its value placeholder', () => {
+      const help = runCLI('--help');
+      expect(help).toContain('--profile-dir-name <name>');
+    });
   });
 
   describe('default command (no subcommand)', () => {
@@ -121,6 +127,50 @@ describe('CLI command dispatch contract', () => {
       const profileDir = path.join(stateDir, 'profile');
       const { stderr } = await collectOutput(['--connect-tool', '--storage-state', stateFile, '--user-data-dir', profileDir]);
       expect(stderr).toContain('--storage-state and --user-data-dir contradict each other');
+    });
+  });
+
+  describe('--profile-dir-name outside extension mode', () => {
+    it('rejects at startup instead of ignoring the option', async () => {
+      const { stderr } = await collectOutput(['--profile-dir-name', 'Profile 1']);
+      expect(stderr).toContain('--profile-dir-name is only supported in extension mode');
+    });
+
+    it('rejects at startup without --user-data-dir', async () => {
+      const { stderr } = await collectOutput(['--extension', '--profile-dir-name', 'Profile 1']);
+      expect(stderr).toContain('--profile-dir-name requires --user-data-dir');
+    });
+
+    it('rejects --connect-tool interactive without --extension instead of starting a REPL', async () => {
+      const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-connect-tool-'));
+      const { stderr } = await collectOutput(['--connect-tool', '--profile-dir-name', 'Profile 1', '--user-data-dir', profileDir, 'interactive']);
+      expect(stderr).toContain('--profile-dir-name is only supported in extension mode');
+    });
+
+    it('rejects --connect-tool --vscode instead of starting the VS Code host', async () => {
+      const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-vscode-'));
+      const { stderr } = await collectOutput(['--connect-tool', '--vscode', '--profile-dir-name', 'Profile 1', '--user-data-dir', profileDir]);
+      expect(stderr).toContain('--profile-dir-name is only supported in extension mode');
+    });
+
+    it('rejects --connect-tool with a storage state instead of advertising an unreachable provider', async () => {
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-connect-tool-'));
+      const stateFile = path.join(stateDir, 'auth.json');
+      fs.writeFileSync(stateFile, JSON.stringify({}));
+      const { stderr } = await collectOutput(['--connect-tool', '--storage-state', stateFile, '--profile-dir-name', 'Profile 1', '--user-data-dir', path.join(stateDir, 'profile')]);
+      expect(stderr).toContain('--profile-dir-name cannot reach the extension provider with a storage state');
+    });
+  });
+
+  describe('createConnection browser.profileDirName guard', () => {
+    it('rejects a config carrying browser.profileDirName', async () => {
+      await expect(createConnection({ browser: { profileDirName: 'Profile 1' } }))
+          .rejects.toThrow(/browser\.profileDirName is only applied by the CLI's extension mode/);
+    });
+
+    it('constructs a server without the field', async () => {
+      const server = await createConnection();
+      await server.close();
     });
   });
 
