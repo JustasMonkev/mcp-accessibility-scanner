@@ -22,7 +22,7 @@ import { defineTabTool } from './tool.js';
 
 import type { FullConfig } from '../config.js';
 
-async function prepareUploadFiles(config: FullConfig, paths: string[]) {
+export async function prepareUploadFiles(config: FullConfig, paths: string[]) {
   const allowedDirs = config.browser.allowedUploadDirs;
   if (allowedDirs === undefined || !paths.length)
     return paths;

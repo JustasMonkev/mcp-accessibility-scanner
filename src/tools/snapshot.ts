@@ -20,6 +20,7 @@ import { z } from 'zod';
 import { defineTabTool, defineTool } from './tool.js';
 import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
+import { prepareUploadFiles } from './files.js';
 import { axeRuleSchemaShape, axeScopeSchemaShape, axeTagValues, dedupeAxeNodes, defaultAxeTags, prepareAxeResults, runAxeScan, unscannedFrameLines } from './axe.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
@@ -561,6 +562,7 @@ const drop = defineTabTool({
     if (Object.keys(params.data ?? {}).length)
       payload.data = params.data;
 
+    const files = payload.files ? await prepareUploadFiles(tab.context.config, payload.files) : undefined;
     const locator = await tab.refLocator(params);
     response.addCode(`await page.${await generateLocator(locator)}.drop(${JSON.stringify(payload)});`);
 
@@ -568,7 +570,7 @@ const drop = defineTabTool({
       // `drop` rejects when the target's dragover listener never calls
       // preventDefault(), which is Playwright's way of saying the element does
       // not accept the payload.
-      await locator.drop(payload);
+      await locator.drop(files ? { ...payload, files } : payload);
     });
   },
 });

@@ -107,7 +107,7 @@ export type Config = {
     remoteEndpoint?: string;
 
     /**
-     * Directories that browser_file_upload may read upload files from.
+     * Directories that browser_file_upload and browser_drop may read files from.
      * When unset (default), any absolute path is allowed; when set, upload
      * canonical file paths must stay inside these directories. Restricted
      * uploads accept regular files up to 50 MiB total per call. [] denies all;

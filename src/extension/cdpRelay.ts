@@ -94,6 +94,7 @@ export class CDPRelayServer {
   private _userDataDir?: string;
   private _executablePath?: string;
   private _cdpPath: string;
+  private readonly _cdpToken = crypto.randomUUID();
   private _extensionPath: string;
   private _connectPagePrefix: string;
   private _wss: WebSocketServer;
@@ -138,29 +139,20 @@ export class CDPRelayServer {
     this._wss.handleUpgrade(request, socket, head, ws => this._wss.emit('connection', ws, request));
   };
 
-  // When PLAYWRIGHT_MCP_EXTENSION_TOKEN is configured, the CDP endpoint
-  // additionally requires it as the `token` query parameter (cdpEndpoint()
-  // appends it for this server's own client). The extension endpoint keeps
-  // relying on its unguessable path plus Host/Origin validation, because the
-  // bundled extension opens mcpRelayUrl verbatim and does not forward the
-  // token on its WebSocket URL.
+  // The extension approval token is passed in Chrome argv. The CDP credential
+  // must stay separate and only reach the in-process Playwright client.
   private _validateCdpToken(request: http.IncomingMessage): { statusCode: number, message: string } | undefined {
-    const expected = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN?.trim();
-    if (!expected)
-      return;
     const url = new URL(`http://localhost${request.url}`);
     if (url.pathname !== this._cdpPath)
       return;
     const provided = Buffer.from(url.searchParams.get('token') ?? '');
-    const expectedBuffer = Buffer.from(expected);
+    const expectedBuffer = Buffer.from(this._cdpToken);
     if (provided.length !== expectedBuffer.length || !timingSafeEqual(provided, expectedBuffer))
       return { statusCode: 401, message: 'Unauthorized' };
   }
 
   cdpEndpoint() {
-    const endpoint = `${this._wsHost}${this._cdpPath}`;
-    const token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN?.trim();
-    return token ? `${endpoint}?token=${encodeURIComponent(token)}` : endpoint;
+    return `${this._wsHost}${this._cdpPath}?token=${this._cdpToken}`;
   }
 
   extensionEndpoint() {

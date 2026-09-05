@@ -104,7 +104,7 @@ function configureBaseProgram() {
       .version('Version ' + packageJSON.version)
       .name(packageJSON.name)
       .option('--allowed-origins <origins>', 'semicolon-separated list of origins to allow the browser to request. Default is to allow all.', semicolonSeparatedList)
-      .option('--allowed-upload-dirs <dirs>', 'semicolon-separated list of directories that browser_file_upload may upload files from. An empty list denies all uploads.', uploadDirectoryList)
+      .option('--allowed-upload-dirs <dirs>', 'semicolon-separated list of directories that browser_file_upload and browser_drop may read files from. An empty list denies all file uploads and drops.', uploadDirectoryList)
       .option('--blocked-origins <origins>', 'semicolon-separated list of origins to block the browser from requesting. Blocklist is evaluated before allowlist. If used without the allowlist, requests not matching the blocklist are still allowed.', semicolonSeparatedList)
       .option('--block-service-workers', 'block service workers')
       .option('--browser <browser>', 'browser or chrome channel to use, possible values: chrome, firefox, webkit, msedge.')

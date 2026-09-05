@@ -868,6 +868,10 @@ describe('extension protocol v2', () => {
 
       const args = vi.mocked(spawn).mock.calls[0][1] as string[];
       expect(new URL(args.at(-1)!).searchParams.get('token')).toBe('test-token');
+      const cdpToken = new URL(relay.cdpEndpoint()).searchParams.get('token');
+      expect(cdpToken).toBeTruthy();
+      expect(args.join(' ')).not.toContain(cdpToken!);
+      expect(relay.extensionEndpoint()).not.toContain(cdpToken!);
 
       extension = new WebSocket(relay.extensionEndpoint());
       await once(extension, 'open');
@@ -881,8 +885,8 @@ describe('extension protocol v2', () => {
     }
   });
 
-  it('requires the configured token on the CDP endpoint upgrade', async () => {
-    vi.stubEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', 'test-token');
+  it.each([undefined, 'test-token'])('requires a separate CDP token with extension token %s', async extensionToken => {
+    vi.stubEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', extensionToken);
     const server = http.createServer();
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
@@ -891,20 +895,29 @@ describe('extension protocol v2', () => {
     const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
     const cdpEndpoint = relay.cdpEndpoint();
     const cdpPath = cdpEndpoint.slice(0, cdpEndpoint.indexOf('?token='));
-    expect(new URL(cdpEndpoint).searchParams.get('token')).toBe('test-token');
-
-    const expectRejected = (url: string) => new Promise<void>(resolve => {
+    const cdpToken = new URL(cdpEndpoint).searchParams.get('token');
+    const rejectedStatus = (url: string) => new Promise<number | undefined>((resolve, reject) => {
       const socket = new WebSocket(url);
-      socket.once('unexpected-response', () => resolve());
-      socket.once('error', () => resolve());
+      socket.once('unexpected-response', (_request, response) => {
+        response.resume();
+        resolve(response.statusCode);
+        socket.terminate();
+      });
+      socket.once('error', reject);
       socket.once('open', () => {
         socket.close();
-        throw new Error(`Expected the upgrade to ${url} to be rejected`);
+        reject(new Error('Expected the CDP upgrade to be rejected'));
       });
     });
     try {
-      await expectRejected(cdpPath);
-      await expectRejected(`${cdpPath}?token=wrong`);
+      expect(cdpToken).toBeTruthy();
+      expect(cdpToken).not.toBe(extensionToken);
+      expect(relay.cdpEndpoint()).toBe(cdpEndpoint);
+      expect(await rejectedStatus(cdpPath)).toBe(401);
+      expect(await rejectedStatus(`${cdpPath}?token=wrong`)).toBe(401);
+      expect(await rejectedStatus(`${cdpPath}?token=${'0'.repeat(cdpToken!.length)}`)).toBe(401);
+      if (extensionToken)
+        expect(await rejectedStatus(`${cdpPath}?token=${extensionToken}`)).toBe(401);
       const authorized = new WebSocket(cdpEndpoint);
       // The upgrade itself proves the token gate; the relay may already be
       // closing this connection ("extension not connected") by the time the
