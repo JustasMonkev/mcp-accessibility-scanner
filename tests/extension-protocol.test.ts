@@ -825,9 +825,11 @@ describe('extension protocol v2', () => {
     expect(() => relay.stop()).not.toThrow();
   });
 
-  it('stops the relay when CDP attachment fails', async () => {
+  it.each(['extension connection', 'CDP attachment'])('stops the relay and retries when %s fails', async phase => {
     onTestFinished(() => vi.restoreAllMocks());
     const ensure = vi.spyOn(CDPRelayServer.prototype, 'ensureExtensionConnectionForMCPContext').mockResolvedValue(undefined);
+    if (phase === 'extension connection')
+      ensure.mockRejectedValue(new Error('attach failed'));
     const stop = vi.spyOn(CDPRelayServer.prototype, 'stop');
     vi.spyOn(playwright.chromium, 'connectOverCDP').mockRejectedValue(new Error('attach failed'));
     onTestFinished(() => (ensure.mock.instances[0] as CDPRelayServer | undefined)?.stop());
@@ -836,12 +838,67 @@ describe('extension protocol v2', () => {
     await expect(factory.createContext(
         { name: 'test-client', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow('attach failed');
     expect(stop).toHaveBeenCalledTimes(1);
+    await expect(factory.createContext(
+        { name: 'test-client', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow('attach failed');
+    expect(stop).toHaveBeenCalledTimes(2);
+    expect(ensure.mock.instances[1]).not.toBe(ensure.mock.instances[0]);
+  });
+
+  it.each(['no connection', 'no initialization', 'success', 'manual approval', 'cancel'])('bounds token approval and clears timers: %s', async phase => {
+    vi.stubEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', phase === 'manual approval' ? '' : 'test-token');
+    const server = http.createServer();
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
+    const controller = new AbortController();
+    const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
+    // SAFETY: This real relay owns these private fields; the test drives setup without launching Chrome.
+    const relayState = relay as unknown as {
+      _connectBrowser: () => Promise<void>;
+      _extensionConnectionPromise: { resolve(): void };
+      _handler: ExtensionProtocolV2;
+    };
+    vi.spyOn(relayState, '_connectBrowser').mockResolvedValue(undefined);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' }, controller.signal, undefined);
+      let settled = false;
+      void connecting.then(() => settled = true, () => settled = true);
+      await vi.advanceTimersByTimeAsync(0);
+      if (phase === 'no initialization' || phase === 'success')
+        relayState._extensionConnectionPromise.resolve();
+      if (phase === 'success') {
+        relayState._handler.handleExtensionEvent('extension.initialized', []);
+        await expect(connecting).resolves.toBeUndefined();
+      } else if (phase === 'cancel' || phase === 'manual approval') {
+        if (phase === 'manual approval') {
+          await vi.advanceTimersByTimeAsync(60_000);
+          expect(settled).toBe(false);
+          expect(vi.getTimerCount()).toBe(0);
+        }
+        controller.abort(new Error('cancelled'));
+        await expect(connecting).rejects.toThrow('cancelled');
+      } else {
+        await vi.advanceTimersByTimeAsync(29_999);
+        expect(settled).toBe(false);
+        const failure = expect(connecting).rejects.toThrow('did not connect within 30s');
+        await vi.advanceTimersByTimeAsync(1);
+        await failure;
+      }
+      expect(vi.getTimerCount()).toBe(0);
+      expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+    } finally {
+      vi.useRealTimers();
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    }
   });
 
   it('waits for extension approval and forwards the configured token', async () => {
     vi.mocked(spawn).mockClear();
     vi.stubEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', 'test-token');
-    vi.stubEnv('PWMCP_TEST_CONNECTION_TIMEOUT', '1');
     const server = http.createServer();
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);

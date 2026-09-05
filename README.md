@@ -139,6 +139,7 @@ npx mcp-accessibility-scanner --extension
 
 Set `PLAYWRIGHT_MCP_EXTENSION_TOKEN` to the token shown by the extension to bypass the connection approval dialog. The relay's CDP WebSocket endpoint always requires a separate random token, generated per relay and appended automatically for the server's own connection. This CDP token is never passed in Chrome's launch arguments or extension URL; the extension approval token cannot authenticate a CDP client.
 Token-bypass connections are not background-safe: Chrome focuses the connection tab and window, and client-created tabs remain open after disconnect ([upstream limitation](https://github.com/microsoft/playwright/issues/42343)).
+With a token, the extension must connect and finish setup within 30 seconds after the connection page opens. Failed attempts release the relay so the next tool call can retry. Without a token, manual approval waits until you approve or cancel the call.
 When `--user-data-dir` contains multiple Chrome profiles, the profile with the extension installed is selected automatically, preferring Chrome's last-used profile.
 
 ### Discovering available tools (`list-tools` subcommand)
