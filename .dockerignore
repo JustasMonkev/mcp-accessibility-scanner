@@ -1,6 +1,7 @@
 .git
 .github
 .idea
+.claude
 .codex
 node_modules
 coverage

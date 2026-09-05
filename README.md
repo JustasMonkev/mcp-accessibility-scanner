@@ -793,11 +793,14 @@ npm run test:mcp:luna -- --skip-optional --limit 1
 
 Results are written under `test-results/mcp-direct-harness-results/` or
 `test-results/mcp-tool-loop-results/`. Set `MCP_HARNESS_RESULTS_DIR` to use another output root.
-The Luna harness needs a logged-in Codex CLI.
+The Luna harness checks Codex login before starting any prompts. Its site-audit
+prompt uses a local HTTP fixture, not a public website.
 PASS requires a completed target MCP call, no failed or unfinished MCP calls,
 and a successful structured result. Invalid logs, failed turns, and timeouts
 fail the run. Non-fatal startup notices about ignored malformed local agent
-roles remain in the logs; they do not count as tool failures.
+roles remain in the logs; they do not count as tool failures. Recovered Codex
+connection retries are accepted only when the turn completes successfully.
+Canceling the run exits with status 130.
 
 ### Benchmarking tool latency
 

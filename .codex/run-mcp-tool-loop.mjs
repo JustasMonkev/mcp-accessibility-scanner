@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import process from 'node:process';
 import { spawn, spawnSync } from 'node:child_process';
@@ -46,8 +47,11 @@ if (!selected.length)
 
 const codex = process.env.CODEX_BIN || 'codex';
 checkCodex(codex);
+const loginStatus = checkCodexLogin(codex);
+if (!loginStatus.ok)
+  fail(loginStatus.message);
 
-const runId = `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}-${process.pid}`;
+const runId = `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const resultsDir = path.join(path.resolve(process.env.MCP_HARNESS_RESULTS_DIR || path.join(projectRoot, 'test-results')), 'mcp-tool-loop-results', runId);
 fs.mkdirSync(resultsDir, { recursive: true });
 const uploadPath = path.join(resultsDir, 'mcp-upload.txt');
@@ -66,6 +70,8 @@ let passed = 0;
 let failed = 0;
 let activeKill;
 let interrupted = false;
+const needsFixture = selected.some(entry => entry.prompt.includes('__FIXTURE_URL__'));
+const fixture = needsFixture ? await startFixtureServer() : undefined;
 
 const forwardSignal = signal => {
   interrupted = true;
@@ -74,39 +80,45 @@ const forwardSignal = signal => {
 process.on('SIGINT', forwardSignal);
 process.on('SIGTERM', forwardSignal);
 
-for (const [index, entry] of selected.entries()) {
-  if (interrupted)
-    break;
-  const safeTool = entry.tool.replace(/[^A-Za-z0-9_.-]/g, '_');
-  const prefix = `${String(index + 1).padStart(2, '0')}-${safeTool}`;
-  const logPath = path.join(resultsDir, `${prefix}.jsonl`);
-  const errorPath = path.join(resultsDir, `${prefix}.stderr`);
-  const finalPath = path.join(resultsDir, `${prefix}.result.json`);
-  const prompt = `${entry.prompt.replaceAll('__UPLOAD_FILE__', uploadPath).replaceAll('__RESULTS_DIR__', resultsDir)}
+try {
+  for (const [index, entry] of selected.entries()) {
+    if (interrupted)
+      break;
+    const safeTool = entry.tool.replace(/[^A-Za-z0-9_.-]/g, '_');
+    const prefix = `${String(index + 1).padStart(2, '0')}-${safeTool}`;
+    const logPath = path.join(resultsDir, `${prefix}.jsonl`);
+    const errorPath = path.join(resultsDir, `${prefix}.stderr`);
+    const finalPath = path.join(resultsDir, `${prefix}.result.json`);
+    const prompt = `${entry.prompt.replaceAll('__UPLOAD_FILE__', uploadPath).replaceAll('__RESULTS_DIR__', resultsDir).replaceAll('__FIXTURE_URL__', fixture?.url || '')}
 
 Harness result contract (takes precedence over the requested display format): perform the requested MCP calls, then return a JSON object matching the supplied schema. Set status to PASS only when the requested check really passed. Set tool to exactly ${JSON.stringify(entry.tool)}. Put concrete observed output or state in evidence. Set status to FAIL when the check fails.`;
 
-  process.stdout.write(`[${index + 1}/${selected.length}] ${entry.tool} ... `);
-  const execution = await runCodex(codex, prompt, {
-    logPath,
-    errorPath,
-    finalPath,
-    resultsDir,
-    uploadPath,
-  });
-  const result = summarize(execution, entry.tool, logPath, finalPath);
-  const detail = result.evidence.replace(/\s+/g, ' ').slice(0, 300);
-  fs.appendFileSync(summaryPath, `${entry.tool}\t${entry.category}\t${result.status}\t${execution.exitCode ?? ''}\t${logPath}\t${detail}\n`);
+    process.stdout.write(`[${index + 1}/${selected.length}] ${entry.tool} ... `);
+    const execution = await runCodex(codex, prompt, {
+      logPath,
+      errorPath,
+      finalPath,
+      resultsDir,
+      uploadPath,
+    });
+    const result = summarize(execution, entry.tool, logPath, finalPath);
+    const detail = result.evidence.replace(/\s+/g, ' ').slice(0, 300);
+    fs.appendFileSync(summaryPath, `${entry.tool}\t${entry.category}\t${result.status}\t${execution.exitCode ?? ''}\t${logPath}\t${detail}\n`);
 
-  if (result.status === 'PASS') {
-    passed++;
-    console.log('PASS');
-  } else {
-    failed++;
-    console.log(`FAIL (${result.status})`);
-    if (options.failFast)
-      break;
+    if (result.status === 'PASS') {
+      passed++;
+      console.log('PASS');
+    } else {
+      failed++;
+      console.log(`FAIL (${result.status})`);
+      if (options.failFast)
+        break;
+    }
   }
+} finally {
+  process.off('SIGINT', forwardSignal);
+  process.off('SIGTERM', forwardSignal);
+  await fixture?.close();
 }
 
 console.log('');
@@ -117,11 +129,9 @@ console.log(`Failed: ${failed}`);
 if (interrupted) {
   console.log('Interrupted');
   process.exitCode = 130;
-}
-if (failed)
+} else if (failed) {
   process.exitCode = 1;
-process.off('SIGINT', forwardSignal);
-process.off('SIGTERM', forwardSignal);
+}
 
 function parseArgs(args) {
   const parsed = {
@@ -213,6 +223,67 @@ function checkCodex(command) {
     if (!`${help.stdout}\n${help.stderr}`.includes(flag))
       fail(`Codex CLI is missing required flag ${flag}.`);
   }
+}
+
+function checkCodexLogin(command) {
+  const status = spawnSync(command, ['login', 'status'], {
+    cwd: projectRoot,
+    env: process.env,
+    encoding: 'utf8',
+    timeout: 5000,
+    killSignal: 'SIGKILL',
+  });
+  if (status.error?.code === 'ETIMEDOUT')
+    return { ok: false, message: 'Codex login status did not finish within 5 seconds.' };
+  if (status.error)
+    return { ok: false, message: `Codex login status failed: ${status.error.message}` };
+  if (status.signal)
+    return { ok: false, message: `Codex login status did not finish (${status.signal}).` };
+  if (status.status !== 0) {
+    const detail = `${status.stdout}\n${status.stderr}`.trim();
+    return { ok: false, message: `Codex login status failed (exit ${status.status})${detail ? `: ${detail}` : '.'}` };
+  }
+  return { ok: true };
+}
+
+function startFixtureServer() {
+  const body = '<!doctype html><html><head><title>Luna audit fixture</title></head><body><main><h1>Luna audit fixture</h1></main></body></html>';
+  const server = http.createServer((request, response) => {
+    if (request.url !== '/audit-site') {
+      response.writeHead(404, { connection: 'close' });
+      response.end();
+      return;
+    }
+    response.writeHead(200, { 'connection': 'close', 'content-type': 'text/html; charset=utf-8' });
+    response.end(body);
+  });
+  return new Promise((resolve, reject) => {
+    const onError = error => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        reject(new Error('Fixture server did not expose a TCP port.'));
+        return;
+      }
+      resolve({ url: `http://127.0.0.1:${address.port}/audit-site`, close: () => closeFixtureServer(server) });
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(0, '127.0.0.1');
+  });
+}
+
+function closeFixtureServer(server) {
+  if (!server.listening)
+    return Promise.resolve();
+  return new Promise(resolve => {
+    server.close(resolve);
+    server.closeAllConnections?.();
+  });
 }
 
 async function runCodex(command, prompt, paths) {
@@ -333,13 +404,16 @@ function summarize(execution, tool, logPath, finalPath) {
   const targetCalls = mcpCalls.filter(call => call.server === serverName && call.tool === tool);
   const successfulTarget = targetCalls.some(call => call.completed && !call.failed && call.result);
   const failedMcp = mcpCalls.some(call => call.failed || call.result?.isError === true || !call.completed);
+  const turnCompleted = events.some(event => event.type === 'turn.completed');
   let turnStarted = false;
   const globalFailure = events.some(event => {
     if (event.type === 'turn.started')
       turnStarted = true;
-    return event.type === 'error' || event.type === 'turn.failed' ||
+    if (event.type === 'error')
+      return !turnCompleted || !isTransientReconnecting(event);
+    return event.type === 'turn.failed' ||
       (event.item?.type === 'error' && (turnStarted || !isAllowedStartupWarning(event.item.message)));
-  }) || !events.some(event => event.type === 'turn.completed');
+  }) || !turnCompleted;
   let final;
   try {
     final = JSON.parse(fs.readFileSync(finalPath, 'utf8'));
@@ -385,6 +459,14 @@ function collectMcpCalls(events) {
 
 function isAllowedStartupWarning(message) {
   return typeof message === 'string' && message.startsWith('Ignoring malformed agent role definition:');
+}
+
+function isTransientReconnecting(event) {
+  if (event.type !== 'error')
+    return false;
+  const message = typeof event.message === 'string' ? event.message :
+    typeof event.error?.message === 'string' ? event.error.message : event.error;
+  return typeof message === 'string' && /^Reconnecting\.\.\.\s+\d+\/\d+(?:\b|$)/.test(message.trim());
 }
 
 function readJsonLines(filePath) {
