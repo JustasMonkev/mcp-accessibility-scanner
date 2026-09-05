@@ -286,7 +286,7 @@ This works out of the box in every mode, including the default persistent-profil
 Record a session once with Playwright's codegen, then hand the file to the server:
 
 ```bash
-npx playwright@1.63.0-alpha-2026-08-29 codegen --save-storage=auth.json https://example.com/login
+npx playwright@1.63.0 codegen --save-storage=auth.json https://example.com/login
 ```
 
 Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.
@@ -770,6 +770,37 @@ git clone https://github.com/JustasMonkev/mcp-accessibility-scanner.git
 cd mcp-accessibility-scanner
 npm install
 ```
+
+### MCP harnesses
+
+The npm wrappers build first, then the direct harness calls every exposed MCP
+tool with prepared fixtures:
+
+```bash
+npm run test:mcp
+npm run test:mcp:install
+```
+
+The Luna wrapper runs each prompt through Codex `gpt-5.6-luna` with xhigh
+reasoning. It uses a repo-scoped scanner MCP server, read-only Codex sandbox,
+structured PASS/FAIL evidence, and a per-prompt timeout:
+
+```bash
+npm run test:mcp:luna
+npm run test:mcp:luna -- --only browser_snapshot
+npm run test:mcp:luna -- --skip-optional --limit 1
+```
+
+Results are written under `test-results/mcp-direct-harness-results/` or
+`test-results/mcp-tool-loop-results/`. Set `MCP_HARNESS_RESULTS_DIR` to use another output root.
+The Luna harness checks Codex login before starting any prompts. Its site-audit
+prompt uses a local HTTP fixture, not a public website.
+PASS requires a completed target MCP call, no failed or unfinished MCP calls,
+and a successful structured result. Invalid logs, failed turns, and timeouts
+fail the run. Non-fatal startup notices about ignored malformed local agent
+roles remain in the logs; they do not count as tool failures. Recovered Codex
+connection retries are accepted only when the turn completes successfully.
+Canceling the run exits with status 130.
 
 ### Benchmarking tool latency
 

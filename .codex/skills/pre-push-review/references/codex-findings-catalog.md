@@ -13,7 +13,7 @@ Codex's review behavior, for calibration: it re-reviews after every fix commit a
 5. [Races, timers, cancellation, shared state](#5-races-timers-cancellation-shared-state)
 6. [Caps and limits](#6-caps-and-limits)
 7. [Generated code and output validity](#7-generated-code-and-output-validity)
-8. [DOM/a11y heuristic edge cases](#8-domally-heuristic-edge-cases)
+8. [DOM/a11y heuristic edge cases](#8-doma11y-heuristic-edge-cases)
 9. [Refactor and dependency-bump regressions](#9-refactor-and-dependency-bump-regressions)
 10. [CLI robustness](#10-cli-robustness)
 11. [Docs drift](#11-docs-drift)

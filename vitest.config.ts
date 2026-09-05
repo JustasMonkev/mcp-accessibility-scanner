@@ -19,9 +19,9 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    // Agent worktrees live under .claude/worktrees and carry their own copy of
-    // tests/; without this they are collected alongside the real suite.
-    exclude: [...configDefaults.exclude, '.claude/worktrees/**'],
+    // Current and legacy agent worktrees carry their own tests; do not collect
+    // those copies alongside the active checkout's suite.
+    exclude: [...configDefaults.exclude, '.codex/worktrees/**', '.claude/worktrees/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html', 'lcov'],
