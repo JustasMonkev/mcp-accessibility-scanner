@@ -1,6 +1,6 @@
 {
 	"name": "mcp-accessibility-scanner",
-	"version": "3.3.2",
+	"version": "3.4.0",
 	"mcpName": "io.github.JustasMonkev/mcp-accessibility-scanner",
 	"description": "A Model Context Protocol (MCP) server for performing automated accessibility scans of web pages using Playwright and Axe-core",
 	"type": "module",
@@ -37,7 +37,7 @@
 		"test:docker": "bash ./tests/docker-smoke.sh",
 		"test:mcp": "npm run build && node .codex/run-mcp-direct-harness.mjs",
 		"test:mcp:install": "npm run build && node .codex/run-mcp-direct-harness.mjs --include-install",
-		"test:mcp:luna": "npm run build && node .codex/run-mcp-tool-loop.mjs",
+		"test:mcp:luna": "node .codex/run-mcp-tool-loop.mjs",
 		"bench": "node bench/mcp-bench.mjs",
 		"bench:compare": "node bench/mcp-bench.mjs --compare",
 		"test:watch": "vitest",
