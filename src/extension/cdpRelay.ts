@@ -395,7 +395,8 @@ async function isExtensionInstalledInProfile(userDataDir: string, profile: strin
   const profileDir = path.join(userDataDir, profile);
   // Web store installs unpack into <profile>/Extensions/<id>; --load-extension
   // only leaves a settings record in the preferences.
-  let installed = await pathExists(path.join(profileDir, 'Extensions', protocol.EXTENSION_ID));
+  const packedDirectoryExists = await pathExists(path.join(profileDir, 'Extensions', protocol.EXTENSION_ID));
+  let installed = false;
   // `extensions.settings` lives in Preferences or Secure Preferences depending on the platform.
   for (const fileName of ['Preferences', 'Secure Preferences']) {
     let prefs: { extensions?: { settings?: Record<string, unknown> } };
@@ -413,6 +414,9 @@ async function isExtensionInstalledInProfile(userDataDir: string, profile: strin
     const state = 'state' in record ? record.state : undefined;
     if (state !== undefined && state !== 1)
       return false;
+    // Packed files may survive uninstall; only an enabled registration counts.
+    if (packedDirectoryExists && state === 1)
+      installed = true;
     // Unpacked records can outlive their source directory. Store-relative
     // paths are covered by the Extensions/<id> check above.
     const recordPath = 'path' in record ? record.path : undefined;

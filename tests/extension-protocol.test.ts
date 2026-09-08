@@ -989,11 +989,14 @@ describe('extension protocol v2', () => {
     }
   });
 
-  it('launches the profile containing the extension', async () => {
+  it.each(['Preferences', 'Secure Preferences'] as const)('launches the profile containing the extension registered in %s', async preferenceFile => {
     vi.mocked(spawn).mockClear();
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
     await fs.mkdir(path.join(userDataDir, 'Default', 'Extensions', EXTENSION_ID), { recursive: true });
     await fs.mkdir(path.join(userDataDir, 'Profile 1', 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.writeFile(path.join(userDataDir, 'Profile 1', preferenceFile), JSON.stringify({
+      extensions: { settings: { [EXTENSION_ID]: { state: 1 } } },
+    }));
     await fs.writeFile(path.join(userDataDir, 'Local State'), JSON.stringify({ profile: { last_used: 'Profile 1' } }));
     const server = http.createServer();
     await new Promise<void>((resolve, reject) => {
@@ -1028,6 +1031,9 @@ describe('extension protocol v2', () => {
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
     await fs.mkdir(path.join(userDataDir, 'Default', 'Extensions', EXTENSION_ID), { recursive: true });
     await fs.mkdir(path.join(userDataDir, 'Profile 1', 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.writeFile(path.join(userDataDir, 'Profile 1', 'Preferences'), JSON.stringify({
+      extensions: { settings: { [EXTENSION_ID]: { state: 1 } } },
+    }));
     await fs.writeFile(path.join(userDataDir, 'Local State'), JSON.stringify({ profile: { last_used: 'Default' } }));
     const server = http.createServer();
     await new Promise<void>((resolve, reject) => {
@@ -1096,13 +1102,38 @@ describe('extension protocol v2', () => {
     }
   });
 
-  it('skips a disabled packed extension in the last-used profile', async () => {
+  const packedOrphanPreferences: [string, (profileDir: string) => Promise<void>][] = [
+    ['a disabled registration', async profileDir => {
+      await fs.writeFile(path.join(profileDir, 'Preferences'), JSON.stringify({
+        extensions: { settings: { [EXTENSION_ID]: { state: 0 } } },
+      }));
+    }],
+    ['no preferences file', async () => {}],
+    ['an empty settings record', async profileDir => {
+      await fs.writeFile(path.join(profileDir, 'Preferences'), JSON.stringify({
+        extensions: { settings: { [EXTENSION_ID]: {} } },
+      }));
+    }],
+    ['a null settings record', async profileDir => {
+      await fs.writeFile(path.join(profileDir, 'Preferences'), JSON.stringify({
+        extensions: { settings: { [EXTENSION_ID]: null } },
+      }));
+    }],
+    ['malformed preferences', async profileDir => {
+      await fs.writeFile(path.join(profileDir, 'Preferences'), '{');
+    }],
+  ];
+
+  it.each(packedOrphanPreferences)('skips a packed extension directory with %s in the last-used profile', async (_label, writePreferences) => {
     vi.mocked(spawn).mockClear();
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
-    await fs.mkdir(path.join(userDataDir, 'Default', 'Extensions', EXTENSION_ID), { recursive: true });
-    await fs.mkdir(path.join(userDataDir, 'Profile 1', 'Extensions', EXTENSION_ID), { recursive: true });
-    await fs.writeFile(path.join(userDataDir, 'Default', 'Preferences'), JSON.stringify({
-      extensions: { settings: { [EXTENSION_ID]: { state: 0 } } },
+    const lastUsedProfile = path.join(userDataDir, 'Default');
+    const validProfile = path.join(userDataDir, 'Profile 1');
+    await fs.mkdir(path.join(lastUsedProfile, 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.mkdir(path.join(validProfile, 'Extensions', EXTENSION_ID), { recursive: true });
+    await writePreferences(lastUsedProfile);
+    await fs.writeFile(path.join(validProfile, 'Preferences'), JSON.stringify({
+      extensions: { settings: { [EXTENSION_ID]: { state: 1 } } },
     }));
     await fs.writeFile(path.join(userDataDir, 'Local State'), JSON.stringify({ profile: { last_used: 'Default' } }));
     const server = http.createServer();
@@ -1124,6 +1155,37 @@ describe('extension protocol v2', () => {
       expect(vi.mocked(spawn).mock.calls[0][1]).toContain('--profile-directory=Profile 1');
       expect(vi.mocked(spawn).mock.calls[0][1]).not.toContain('--profile-directory=Default');
     } finally {
+      controller.abort(new Error('test cleanup'));
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await fs.rm(userDataDir, { recursive: true });
+    }
+  });
+
+  it.each(packedOrphanPreferences)('rejects an explicitly selected packed extension with %s', async (_label, writePreferences) => {
+    vi.mocked(spawn).mockClear();
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
+    const profileDir = path.join(userDataDir, 'Profile 1');
+    await fs.mkdir(path.join(profileDir, 'Extensions', EXTENSION_ID), { recursive: true });
+    await writePreferences(profileDir);
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', userDataDir, undefined, 'Profile 1');
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(new Error('test timeout')), 250);
+    try {
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          controller.signal,
+          undefined,
+      );
+      await expect(connecting).rejects.toThrow('Playwright Extension is not installed in profile "Profile 1"');
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(abortTimer);
       controller.abort(new Error('test cleanup'));
       relay.stop();
       await new Promise<void>(resolve => server.close(() => resolve()));
