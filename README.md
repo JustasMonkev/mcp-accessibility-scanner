@@ -340,6 +340,8 @@ The check compares which cookies the crawled URLs carry, not their values, so a 
 
 ## Available Tools
 
+Page-registered WebMCP tools are not currently exposed. See the [WebMCP adoption decision](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/decisions/001-webmcp-adoption.md) for the deferral and conditions for revisiting an opt-in capability.
+
 The MCP server provides comprehensive browser automation and accessibility scanning tools:
 
 ### Core Accessibility Tool
