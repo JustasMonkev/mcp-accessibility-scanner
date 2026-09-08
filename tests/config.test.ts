@@ -17,12 +17,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, onTestFinished, vi } from 'vitest';
 import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders, resolveOutputDir, uploadDirectoryList } from '../src/config.js';
 import type { Config } from '../config.js';
 
 async function writeConfigFile(config: Config): Promise<string> {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-config-test-'));
+  onTestFinished(() => fs.promises.rm(dir, { recursive: true, force: true }));
   const configFile = path.join(dir, 'config.json');
   await fs.promises.writeFile(configFile, JSON.stringify(config), 'utf-8');
   return configFile;
@@ -109,11 +110,17 @@ describe('Config', () => {
       expect(config.timeouts.navigationTimeout).toBe(60000);
       expect(config.saveTrace).toBe(false);
     });
+
+    it('should reject an invalid browser profile directory name', async () => {
+      await expect(resolveConfig({ browser: { profileDirName: 'my-profile' } }))
+          .rejects.toThrow(/Invalid browser profile directory name/);
+    });
   });
 
   describe('security-sensitive string configuration', () => {
     const savedAuthToken = process.env.PLAYWRIGHT_MCP_AUTH_TOKEN;
     const savedUploadDirs = process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS;
+    const savedOutputDir = process.env.PLAYWRIGHT_MCP_OUTPUT_DIR;
 
     afterEach(() => {
       if (savedAuthToken === undefined)
@@ -124,6 +131,10 @@ describe('Config', () => {
         delete process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS;
       else
         process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS = savedUploadDirs;
+      if (savedOutputDir === undefined)
+        delete process.env.PLAYWRIGHT_MCP_OUTPUT_DIR;
+      else
+        process.env.PLAYWRIGHT_MCP_OUTPUT_DIR = savedOutputDir;
     });
 
     it('rejects blank auth tokens from config, CLI, and environment', async () => {
@@ -145,6 +156,11 @@ describe('Config', () => {
       process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS = '/safe; ;/also-safe';
       await expect(resolveCLIConfig({})).rejects.toThrow(/allowedUploadDirs.*blank/i);
       await expect(resolveConfig({ browser: { allowedUploadDirs: ['/safe', ' '] } })).rejects.toThrow(/allowedUploadDirs.*blank/i);
+    });
+
+    it('rejects a whitespace-only output directory from the environment', async () => {
+      process.env.PLAYWRIGHT_MCP_OUTPUT_DIR = '   ';
+      await expect(resolveCLIConfig({})).rejects.toThrow(/outputDir.*blank/i);
     });
 
     it.each(['null', '{}', '"/safe"', '1', 'false', '[1]'])('rejects malformed upload directories from JSON: %s', async value => {
@@ -228,6 +244,63 @@ describe('Config', () => {
       process.env.PLAYWRIGHT_MCP_SNAPSHOT_BOXES = '0';
       expect((await resolveCLIConfig({ config: configFile })).snapshot?.boxes).toBe(false);
       expect((await resolveCLIConfig({ config: configFile, snapshotBoxes: true })).snapshot?.boxes).toBe(true);
+    });
+  });
+
+  describe('resolveCLIConfig browser.profileDirName', () => {
+    const saved = process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME;
+
+    afterEach(() => {
+      if (saved === undefined)
+        delete process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME;
+      else
+        process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = saved;
+    });
+
+    it('resolves the profile directory name from the CLI option', async () => {
+      expect((await resolveCLIConfig({
+        extension: true,
+        userDataDir: '/tmp/x',
+        profileDirName: 'Profile 7',
+      })).browser.profileDirName).toBe('Profile 7');
+    });
+
+    it('applies config file, environment, and CLI precedence', async () => {
+      const configFile = await writeConfigFile({ browser: { profileDirName: 'Default' } });
+      expect((await resolveCLIConfig({ config: configFile })).browser.profileDirName).toBe('Default');
+
+      process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = 'Profile 1';
+      expect((await resolveCLIConfig({ config: configFile })).browser.profileDirName).toBe('Profile 1');
+      expect((await resolveCLIConfig({ config: configFile, profileDirName: 'Profile 2' })).browser.profileDirName).toBe('Profile 2');
+    });
+
+    it('treats an empty environment value as unset', async () => {
+      process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = '';
+      expect((await resolveCLIConfig({})).browser.profileDirName).toBeUndefined();
+    });
+
+    it('treats a whitespace-only environment value as unset and keeps the file fallback', async () => {
+      const configFile = await writeConfigFile({ browser: { profileDirName: 'Profile 1' } });
+      process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = '   ';
+      expect((await resolveCLIConfig({ config: configFile })).browser.profileDirName).toBe('Profile 1');
+    });
+
+    it.each(['my-profile', 'Default/../../etc', 'Profile 1 ', ''])('rejects an invalid profile directory name from the CLI: %s', async profileDirName => {
+      await expect(resolveCLIConfig({ profileDirName })).rejects.toThrow(/Invalid browser profile directory name/);
+    });
+
+    it.each([
+      ['["Default"]', 'Invalid browser profile directory name ["Default"]'],
+      ['null', 'Invalid browser profile directory name null'],
+    ])('rejects a non-string profile directory name from a config file: %s', async (value, message) => {
+      const malformed = JSON.parse(`{"browser":{"profileDirName":${value}}}`);
+      const configFile = await writeConfigFile(malformed);
+      try {
+        await expect(resolveConfig(malformed)).rejects.toThrow(message);
+        await expect(resolveCLIConfig({ config: configFile })).rejects.toThrow(message);
+      } finally {
+        await fs.promises.rm(path.dirname(configFile), { recursive: true, force: true });
+      }
     });
   });
 

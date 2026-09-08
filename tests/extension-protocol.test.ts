@@ -989,11 +989,14 @@ describe('extension protocol v2', () => {
     }
   });
 
-  it('launches the profile containing the extension', async () => {
+  it.each(['Preferences', 'Secure Preferences'] as const)('launches the profile containing the extension registered in %s', async preferenceFile => {
     vi.mocked(spawn).mockClear();
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
     await fs.mkdir(path.join(userDataDir, 'Default', 'Extensions', EXTENSION_ID), { recursive: true });
     await fs.mkdir(path.join(userDataDir, 'Profile 1', 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.writeFile(path.join(userDataDir, 'Profile 1', preferenceFile), JSON.stringify({
+      extensions: { settings: { [EXTENSION_ID]: { state: 1 } } },
+    }));
     await fs.writeFile(path.join(userDataDir, 'Local State'), JSON.stringify({ profile: { last_used: 'Profile 1' } }));
     const server = http.createServer();
     await new Promise<void>((resolve, reject) => {
@@ -1017,6 +1020,294 @@ describe('extension protocol v2', () => {
       await expect(connecting).resolves.toBeUndefined();
     } finally {
       extension?.close();
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await fs.rm(userDataDir, { recursive: true });
+    }
+  });
+
+  it('launches the explicitly requested profile instead of the last-used one', async () => {
+    vi.mocked(spawn).mockClear();
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
+    await fs.mkdir(path.join(userDataDir, 'Default', 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.mkdir(path.join(userDataDir, 'Profile 1', 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.writeFile(path.join(userDataDir, 'Profile 1', 'Preferences'), JSON.stringify({
+      extensions: { settings: { [EXTENSION_ID]: { state: 1 } } },
+    }));
+    await fs.writeFile(path.join(userDataDir, 'Local State'), JSON.stringify({ profile: { last_used: 'Default' } }));
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome', 'Profile 1');
+    let extension: WebSocket | undefined;
+    try {
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          new AbortController().signal,
+          undefined,
+      );
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+      expect(vi.mocked(spawn).mock.calls[0][1]).toContain('--profile-directory=Profile 1');
+      expect(vi.mocked(spawn).mock.calls[0][1]).not.toContain('--profile-directory=Default');
+
+      extension = new WebSocket(relay.extensionEndpoint());
+      await once(extension, 'open');
+      extension.send(JSON.stringify({ method: 'extension.initialized', params: [] }));
+      await expect(connecting).resolves.toBeUndefined();
+    } finally {
+      extension?.close();
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await fs.rm(userDataDir, { recursive: true });
+    }
+  });
+
+  it.each([
+    ['Preferences', 'Secure Preferences', 0],
+    ['Preferences', 'Secure Preferences', 2],
+    ['Secure Preferences', 'Preferences', 0],
+    ['Secure Preferences', 'Preferences', 2],
+  ] as const)('rejects an explicitly selected packed extension when %s disables it even if %s enables it', async (disabledFile, enabledFile, disabledState) => {
+    vi.mocked(spawn).mockClear();
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
+    const profileDir = path.join(userDataDir, 'Profile 1');
+    await fs.mkdir(path.join(profileDir, 'Extensions', EXTENSION_ID), { recursive: true });
+    const settings = (state: number) => ({ extensions: { settings: { [EXTENSION_ID]: { state } } } });
+    await fs.writeFile(path.join(profileDir, disabledFile), JSON.stringify(settings(disabledState)));
+    await fs.writeFile(path.join(profileDir, enabledFile), JSON.stringify(settings(1)));
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', userDataDir, undefined, 'Profile 1');
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(new Error('test timeout')), 1000);
+    try {
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          controller.signal,
+          undefined,
+      );
+      await expect(connecting).rejects.toThrow('Playwright Extension is not installed in profile "Profile 1"');
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(abortTimer);
+      controller.abort(new Error('test cleanup'));
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await fs.rm(userDataDir, { recursive: true });
+    }
+  });
+
+  const packedOrphanPreferences: [string, (profileDir: string) => Promise<void>][] = [
+    ['a disabled registration', async profileDir => {
+      await fs.writeFile(path.join(profileDir, 'Preferences'), JSON.stringify({
+        extensions: { settings: { [EXTENSION_ID]: { state: 0 } } },
+      }));
+    }],
+    ['no preferences file', async () => {}],
+    ['an empty settings record', async profileDir => {
+      await fs.writeFile(path.join(profileDir, 'Preferences'), JSON.stringify({
+        extensions: { settings: { [EXTENSION_ID]: {} } },
+      }));
+    }],
+    ['a null settings record', async profileDir => {
+      await fs.writeFile(path.join(profileDir, 'Preferences'), JSON.stringify({
+        extensions: { settings: { [EXTENSION_ID]: null } },
+      }));
+    }],
+    ['malformed preferences', async profileDir => {
+      await fs.writeFile(path.join(profileDir, 'Preferences'), '{');
+    }],
+  ];
+
+  it.each(packedOrphanPreferences)('skips a packed extension directory with %s in the last-used profile', async (_label, writePreferences) => {
+    vi.mocked(spawn).mockClear();
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
+    const lastUsedProfile = path.join(userDataDir, 'Default');
+    const validProfile = path.join(userDataDir, 'Profile 1');
+    await fs.mkdir(path.join(lastUsedProfile, 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.mkdir(path.join(validProfile, 'Extensions', EXTENSION_ID), { recursive: true });
+    await writePreferences(lastUsedProfile);
+    await fs.writeFile(path.join(validProfile, 'Preferences'), JSON.stringify({
+      extensions: { settings: { [EXTENSION_ID]: { state: 1 } } },
+    }));
+    await fs.writeFile(path.join(userDataDir, 'Local State'), JSON.stringify({ profile: { last_used: 'Default' } }));
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome');
+    const controller = new AbortController();
+    try {
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          controller.signal,
+          undefined,
+      );
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+      controller.abort(new Error('done asserting'));
+      await expect(connecting).rejects.toThrow('done asserting');
+      expect(vi.mocked(spawn).mock.calls[0][1]).toContain('--profile-directory=Profile 1');
+      expect(vi.mocked(spawn).mock.calls[0][1]).not.toContain('--profile-directory=Default');
+    } finally {
+      controller.abort(new Error('test cleanup'));
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await fs.rm(userDataDir, { recursive: true });
+    }
+  });
+
+  it.each(packedOrphanPreferences)('rejects an explicitly selected packed extension with %s', async (_label, writePreferences) => {
+    vi.mocked(spawn).mockClear();
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
+    const profileDir = path.join(userDataDir, 'Profile 1');
+    await fs.mkdir(path.join(profileDir, 'Extensions', EXTENSION_ID), { recursive: true });
+    await writePreferences(profileDir);
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', userDataDir, undefined, 'Profile 1');
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(new Error('test timeout')), 250);
+    try {
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          controller.signal,
+          undefined,
+      );
+      await expect(connecting).rejects.toThrow('Playwright Extension is not installed in profile "Profile 1"');
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(abortTimer);
+      controller.abort(new Error('test cleanup'));
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await fs.rm(userDataDir, { recursive: true });
+    }
+  });
+
+  it('launches an explicit profile without an installed-extension check when the executable is custom', async () => {
+    // With a custom executable the data dir may live on another filesystem
+    // (e.g. WSL2), so its profiles cannot be inspected from here by design.
+    vi.mocked(spawn).mockClear();
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
+    await fs.mkdir(path.join(userDataDir, 'Default', 'Extensions', EXTENSION_ID), { recursive: true });
+    await fs.mkdir(path.join(userDataDir, 'Profile 1'), { recursive: true });
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome', 'Profile 1');
+    let extension: WebSocket | undefined;
+    try {
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          new AbortController().signal,
+          undefined,
+      );
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+      expect(vi.mocked(spawn).mock.calls[0][1]).toContain('--profile-directory=Profile 1');
+      expect(vi.mocked(spawn).mock.calls[0][1]).not.toContain('--profile-directory=Default');
+
+      extension = new WebSocket(relay.extensionEndpoint());
+      await once(extension, 'open');
+      extension.send(JSON.stringify({ method: 'extension.initialized', params: [] }));
+      await expect(connecting).resolves.toBeUndefined();
+    } finally {
+      extension?.close();
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await fs.rm(userDataDir, { recursive: true });
+    }
+  });
+
+  it.each([1, undefined])('launches the profile whose preferences hold an unpacked extension record with state %s', async state => {
+    vi.mocked(spawn).mockClear();
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
+    const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-unpacked-'));
+    await fs.writeFile(path.join(extensionDir, 'manifest.json'), '{}');
+    await fs.mkdir(path.join(userDataDir, 'Default'));
+    const record: { path: string, state?: number } = { path: extensionDir };
+    if (state !== undefined)
+      record.state = state;
+    await fs.writeFile(path.join(userDataDir, 'Default', 'Preferences'), JSON.stringify({
+      extensions: { settings: { [EXTENSION_ID]: record } },
+    }));
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome');
+    try {
+      const controller = new AbortController();
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          controller.signal,
+          undefined,
+      );
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+      expect(vi.mocked(spawn).mock.calls[0][1]).toContain('--profile-directory=Default');
+
+      controller.abort(new Error('done asserting'));
+      await expect(connecting).rejects.toThrow('done asserting');
+    } finally {
+      relay.stop();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await fs.rm(userDataDir, { recursive: true });
+      await fs.rm(extensionDir, { recursive: true });
+    }
+  });
+
+  const uninstallRecords: [string, (userDataDir: string) => Promise<unknown>][] = [
+    ['an empty settings record', async () => ({})],
+    ['a null settings record', async () => null],
+    ['a stale record pointing at a deleted unpacked directory', async userDataDir => ({ path: path.join(userDataDir, 'gone'), state: 1 })],
+    ['a record whose path is relative to a store install without the Extensions directory', async () => ({ path: 'mfjhbgfplnigmagldckm/1.0.0_0', state: 1 })],
+    ['a record whose unpacked directory exists but has no manifest.json', async userDataDir => {
+      const extensionDir = await fs.mkdtemp(path.join(userDataDir, 'mcp-extension-unpacked-'));
+      return { path: extensionDir, state: 1 };
+    }],
+    ['a record for a disabled extension', async userDataDir => {
+      const extensionDir = await fs.mkdtemp(path.join(userDataDir, 'mcp-extension-unpacked-'));
+      await fs.writeFile(path.join(extensionDir, 'manifest.json'), '{}');
+      return { path: extensionDir, state: 0 };
+    }],
+  ];
+  it.each(uninstallRecords)('does not launch a profile with only %s left from an uninstall', async (_label, makeRecord) => {
+    vi.mocked(spawn).mockClear();
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-extension-profile-'));
+    await fs.mkdir(path.join(userDataDir, 'Default'));
+    await fs.writeFile(path.join(userDataDir, 'Default', 'Preferences'), JSON.stringify({
+      extensions: { settings: { [EXTENSION_ID]: await makeRecord(userDataDir) } },
+    }));
+    const server = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome');
+    try {
+      const controller = new AbortController();
+      const connecting = relay.ensureExtensionConnectionForMCPContext(
+          { name: 'test-client', version: '1.0.0' },
+          controller.signal,
+          undefined,
+      );
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+      expect(vi.mocked(spawn).mock.calls[0][1].some(arg => /^--profile-directory=/.test(arg))).toBe(false);
+
+      controller.abort(new Error('done asserting'));
+      await expect(connecting).rejects.toThrow('done asserting');
+    } finally {
       relay.stop();
       await new Promise<void>(resolve => server.close(() => resolve()));
       await fs.rm(userDataDir, { recursive: true });

@@ -56,6 +56,7 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--output-dir <path>` | Directory for output files (reports, screenshots) |
 | `--config <path>` | Path to configuration file |
 | `--user-data-dir <path>` | Browser profile directory |
+| `--profile-dir-name <name>` | Chrome profile directory for extension mode (`--extension`/`--connect-tool` only), e.g. `Profile 1`; requires `--user-data-dir` |
 | `--isolated` | Keep browser profile in memory only |
 | `--storage-state <path>` | Storage state file to start the session from; applied in every mode except `--extension` (fresh contexts at creation, reused contexts via `setStorageState()`, which first clears their cookies and storage) |
 | `--executable-path <path>` | Custom browser executable |

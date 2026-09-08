@@ -93,6 +93,7 @@ export class CDPRelayServer {
   private _browserChannel: string;
   private _userDataDir?: string;
   private _executablePath?: string;
+  private _profileDirName?: string;
   private readonly _token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
   private _cdpPath: string;
   private readonly _cdpToken = crypto.randomUUID();
@@ -104,12 +105,13 @@ export class CDPRelayServer {
   private _handler!: ExtensionProtocolV2;
   private _extensionConnectionPromise!: ManualPromise<void>;
 
-  constructor(server: http.Server, browserChannel: string, userDataDir?: string, executablePath?: string) {
+  constructor(server: http.Server, browserChannel: string, userDataDir?: string, executablePath?: string, profileDirName?: string) {
     this._server = server;
     this._wsHost = httpAddressToString(server.address()).replace(/^http/, 'ws');
     this._browserChannel = browserChannel;
     this._userDataDir = userDataDir;
     this._executablePath = executablePath;
+    this._profileDirName = profileDirName;
 
     const uuid = crypto.randomUUID();
     this._cdpPath = `/cdp/${uuid}`;
@@ -222,7 +224,12 @@ export class CDPRelayServer {
     const args: string[] = [];
     if (this._userDataDir) {
       args.push(`--user-data-dir=${this._userDataDir}`);
-      const profileDirectory = await findPlaywrightExtensionProfile(this._userDataDir);
+      // An explicit profile wins over last-used auto-selection; with a custom
+      // executable the data dir may live on another filesystem (e.g. WSL2),
+      // so its contents cannot be checked from here.
+      const profileDirectory = this._profileDirName ?? await findPlaywrightExtensionProfile(this._userDataDir);
+      if (this._profileDirName && !this._executablePath && !await isExtensionInstalledInProfile(this._userDataDir, this._profileDirName))
+        throw new Error(`Playwright Extension is not installed in profile "${this._profileDirName}" of ${this._userDataDir}. Install it in that profile or pass the directory name of a profile that has it.`);
       if (profileDirectory)
         args.push(`--profile-directory=${profileDirectory}`);
     }
@@ -384,6 +391,50 @@ export class CDPRelayServer {
   }
 }
 
+async function isExtensionInstalledInProfile(userDataDir: string, profile: string): Promise<boolean> {
+  const profileDir = path.join(userDataDir, profile);
+  // Web store installs unpack into <profile>/Extensions/<id>; --load-extension
+  // only leaves a settings record in the preferences.
+  const packedDirectoryExists = await pathExists(path.join(profileDir, 'Extensions', protocol.EXTENSION_ID));
+  let installed = false;
+  // `extensions.settings` lives in Preferences or Secure Preferences depending on the platform.
+  for (const fileName of ['Preferences', 'Secure Preferences']) {
+    let prefs: { extensions?: { settings?: Record<string, unknown> } };
+    try {
+      prefs = JSON.parse(await fs.readFile(path.join(profileDir, fileName), 'utf8'));
+    } catch {
+      // Missing or unreadable preferences carry no extension record.
+      continue;
+    }
+    const record = prefs?.extensions?.settings?.[protocol.EXTENSION_ID];
+    if (typeof record !== 'object' || record === null)
+      continue;
+    // An explicit disabled/uninstalled state vetoes both install forms, even
+    // when the other preferences file contains an enabled record.
+    const state = 'state' in record ? record.state : undefined;
+    if (state !== undefined && state !== 1)
+      return false;
+    // Packed files may survive uninstall; only an enabled registration counts.
+    if (packedDirectoryExists && state === 1)
+      installed = true;
+    // Unpacked records can outlive their source directory. Store-relative
+    // paths are covered by the Extensions/<id> check above.
+    const recordPath = 'path' in record ? record.path : undefined;
+    if (typeof recordPath === 'string' && path.isAbsolute(recordPath) && await pathExists(path.join(recordPath, 'manifest.json')))
+      installed = true;
+  }
+  return installed;
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function findPlaywrightExtensionProfile(userDataDir: string): Promise<string | undefined> {
   let profiles: string[];
   try {
@@ -405,12 +456,8 @@ async function findPlaywrightExtensionProfile(userDataDir: string): Promise<stri
   }
 
   for (const profile of profiles) {
-    try {
-      await fs.access(path.join(userDataDir, profile, 'Extensions', protocol.EXTENSION_ID));
+    if (await isExtensionInstalledInProfile(userDataDir, profile))
       return profile;
-    } catch {
-      continue;
-    }
   }
 }
 
