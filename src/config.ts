@@ -350,7 +350,7 @@ function cliOptionsFromEnv(): CLIOptions {
   options.storageState = envToString(process.env.PLAYWRIGHT_MCP_STORAGE_STATE);
   options.userAgent = envToString(process.env.PLAYWRIGHT_MCP_USER_AGENT);
   options.userDataDir = envToString(process.env.PLAYWRIGHT_MCP_USER_DATA_DIR);
-  options.profileDirName = envToString(process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME);
+  options.profileDirName = envToString(process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME) || undefined;
   options.viewportSize = envToString(process.env.PLAYWRIGHT_MCP_VIEWPORT_SIZE);
   options.navigationTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT);
   options.defaultTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_DEFAULT_TIMEOUT);
@@ -540,5 +540,5 @@ function envToBoolean(value: string | undefined): boolean | undefined {
 }
 
 function envToString(value: string | undefined): string | undefined {
-  return value?.trim() || undefined;
+  return value ? value.trim() : undefined;
 }

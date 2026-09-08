@@ -395,46 +395,31 @@ async function isExtensionInstalledInProfile(userDataDir: string, profile: strin
   const profileDir = path.join(userDataDir, profile);
   // Web store installs unpack into <profile>/Extensions/<id>; --load-extension
   // only leaves a settings record in the preferences.
-  if (await pathExists(path.join(profileDir, 'Extensions', protocol.EXTENSION_ID)))
-    return true;
+  let installed = await pathExists(path.join(profileDir, 'Extensions', protocol.EXTENSION_ID));
   // `extensions.settings` lives in Preferences or Secure Preferences depending on the platform.
   for (const fileName of ['Preferences', 'Secure Preferences']) {
-    if (await hasExtensionSettingsRecord(path.join(profileDir, fileName)))
-      return true;
+    let prefs: { extensions?: { settings?: Record<string, unknown> } };
+    try {
+      prefs = JSON.parse(await fs.readFile(path.join(profileDir, fileName), 'utf8'));
+    } catch {
+      // Missing or unreadable preferences carry no extension record.
+      continue;
+    }
+    const record = prefs?.extensions?.settings?.[protocol.EXTENSION_ID];
+    if (typeof record !== 'object' || record === null)
+      continue;
+    // An explicit disabled/uninstalled state vetoes both install forms, even
+    // when the other preferences file contains an enabled record.
+    const state = 'state' in record ? record.state : undefined;
+    if (state !== undefined && state !== 1)
+      return false;
+    // Unpacked records can outlive their source directory. Store-relative
+    // paths are covered by the Extensions/<id> check above.
+    const recordPath = 'path' in record ? record.path : undefined;
+    if (typeof recordPath === 'string' && path.isAbsolute(recordPath) && await pathExists(path.join(recordPath, 'manifest.json')))
+      installed = true;
   }
-  return false;
-}
-
-async function hasExtensionSettingsRecord(prefsPath: string): Promise<boolean> {
-  let prefs: { extensions?: { settings?: Record<string, unknown> } };
-  try {
-    prefs = JSON.parse(await fs.readFile(prefsPath, 'utf8'));
-  } catch {
-    // A missing or unreadable preferences file carries no extension record,
-    // which is the answer the caller needs.
-    return false;
-  }
-  // Uninstalling leaves an orphaned empty settings record behind, so require a
-  // populated one; JSON values are untyped, so a null or non-object record
-  // must not reach Object.keys.
-  const record = prefs?.extensions?.settings?.[protocol.EXTENSION_ID];
-  if (typeof record !== 'object' || record === null || Object.keys(record).length === 0)
-    return false;
-  // Chrome writes the install location into the record: an absolute path for
-  // an unpacked extension, a path relative to Extensions/<id> for a store
-  // install. A record can outlive a deleted unpacked source directory, so
-  // require that directory to still exist; a relative path is only usable
-  // through the Extensions/<id> directory the caller already checked.
-  const recordPath = 'path' in record ? record.path : undefined;
-  if (typeof recordPath !== 'string' || !path.isAbsolute(recordPath) || !await pathExists(recordPath))
-    return false;
-  // The record carries the extension's enabled state (1 = enabled; 0 disabled,
-  // 2 uninstalled). Chromium loads the manifest from the unpacked directory,
-  // so a missing manifest.json is as dead as a deleted one.
-  const state = 'state' in record ? record.state : undefined;
-  if (state !== undefined && state !== 1)
-    return false;
-  return await pathExists(path.join(recordPath, 'manifest.json'));
+  return installed;
 }
 
 async function pathExists(p: string): Promise<boolean> {

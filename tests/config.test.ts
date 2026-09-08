@@ -120,6 +120,7 @@ describe('Config', () => {
   describe('security-sensitive string configuration', () => {
     const savedAuthToken = process.env.PLAYWRIGHT_MCP_AUTH_TOKEN;
     const savedUploadDirs = process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS;
+    const savedOutputDir = process.env.PLAYWRIGHT_MCP_OUTPUT_DIR;
 
     afterEach(() => {
       if (savedAuthToken === undefined)
@@ -130,6 +131,10 @@ describe('Config', () => {
         delete process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS;
       else
         process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS = savedUploadDirs;
+      if (savedOutputDir === undefined)
+        delete process.env.PLAYWRIGHT_MCP_OUTPUT_DIR;
+      else
+        process.env.PLAYWRIGHT_MCP_OUTPUT_DIR = savedOutputDir;
     });
 
     it('rejects blank auth tokens from config, CLI, and environment', async () => {
@@ -151,6 +156,11 @@ describe('Config', () => {
       process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS = '/safe; ;/also-safe';
       await expect(resolveCLIConfig({})).rejects.toThrow(/allowedUploadDirs.*blank/i);
       await expect(resolveConfig({ browser: { allowedUploadDirs: ['/safe', ' '] } })).rejects.toThrow(/allowedUploadDirs.*blank/i);
+    });
+
+    it('rejects a whitespace-only output directory from the environment', async () => {
+      process.env.PLAYWRIGHT_MCP_OUTPUT_DIR = '   ';
+      await expect(resolveCLIConfig({})).rejects.toThrow(/outputDir.*blank/i);
     });
 
     it.each(['null', '{}', '"/safe"', '1', 'false', '[1]'])('rejects malformed upload directories from JSON: %s', async value => {
@@ -269,9 +279,10 @@ describe('Config', () => {
       expect((await resolveCLIConfig({})).browser.profileDirName).toBeUndefined();
     });
 
-    it('treats a whitespace-only environment value as unset', async () => {
+    it('treats a whitespace-only environment value as unset and keeps the file fallback', async () => {
+      const configFile = await writeConfigFile({ browser: { profileDirName: 'Profile 1' } });
       process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = '   ';
-      expect((await resolveCLIConfig({})).browser.profileDirName).toBeUndefined();
+      expect((await resolveCLIConfig({ config: configFile })).browser.profileDirName).toBe('Profile 1');
     });
 
     it.each(['my-profile', 'Default/../../etc', 'Profile 1 ', ''])('rejects an invalid profile directory name from the CLI: %s', async profileDirName => {
