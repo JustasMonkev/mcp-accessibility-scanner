@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed for maintainer acceptance through this PR. Decision: defer implementation, not decline the feature permanently.
+Accepted. Decision: defer implementation, not decline the feature permanently.
 
 ## Context
 
