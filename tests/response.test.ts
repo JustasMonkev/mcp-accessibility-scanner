@@ -64,7 +64,7 @@ describe('Response', () => {
       currentTabOrDie: () => mockTab,
       tabs: () => [mockTab],
       config: {
-        imageResponses: 'include',
+        imageResponses: 'allow',
       },
     } as any;
   });
@@ -377,11 +377,13 @@ describe('Response', () => {
       expect(textContent.text).toContain('await page.click("button")');
     });
 
-    it('should include images when present', () => {
+    it.each(['allow', 'auto', undefined] as const)('should include text and images in mode %s', mode => {
+      mockContext.config.imageResponses = mode;
       const response = new Response(mockContext, 'test_tool', {});
       response.addImage({ contentType: 'image/png', data: Buffer.from('test') });
       const serialized = response.serialize();
       expect(serialized.content).toHaveLength(2);
+      expect(serialized.content[0].type).toBe('text');
       const imageContent = expectImageContent(serialized.content[1]);
       expect(imageContent.mimeType).toBe('image/png');
     });
@@ -392,6 +394,64 @@ describe('Response', () => {
       response.addImage({ contentType: 'image/png', data: Buffer.from('test') });
       const serialized = response.serialize();
       expect(serialized.content).toHaveLength(1);
+      expect(serialized.content[0].type).toBe('text');
+    });
+
+    it('returns all images without text in only mode', () => {
+      mockContext.config.imageResponses = 'only';
+      const response = new Response(mockContext, 'browser_take_screenshot', {});
+      response.addResult('Screenshot saved');
+      response.addCode('await page.screenshot()');
+      response.addImage({ contentType: 'image/png', data: Buffer.from('first') });
+      response.addImage({ contentType: 'image/webp', data: Buffer.from('second') });
+
+      expect(response.serialize().content).toEqual([
+        { type: 'image', mimeType: 'image/png', data: Buffer.from('first').toString('base64') },
+        { type: 'image', mimeType: 'image/webp', data: Buffer.from('second').toString('base64') },
+      ]);
+    });
+
+    it('keeps text when only mode has no images', () => {
+      mockContext.config.imageResponses = 'only';
+      const response = new Response(mockContext, 'browser_take_screenshot', { fullPage: true });
+      response.addResult('Full-page screenshot saved');
+
+      expect(response.serialize().content).toEqual([
+        { type: 'text', text: expect.stringContaining('Full-page screenshot saved') },
+      ]);
+    });
+
+    it('keeps errors and images in only mode', () => {
+      mockContext.config.imageResponses = 'only';
+      const response = new Response(mockContext, 'test_tool', {});
+      response.addImage({ contentType: 'image/png', data: Buffer.from('partial') });
+      response.addError('Capture failed');
+
+      expect(response.serialize()).toMatchObject({
+        isError: true,
+        content: [
+          { type: 'text', text: expect.stringContaining('Capture failed') },
+          { type: 'image', mimeType: 'image/png' },
+        ],
+      });
+    });
+
+    it('preserves structured findings and resource links in only mode', () => {
+      mockContext.config.imageResponses = 'only';
+      const response = new Response(mockContext, 'scan_page', {});
+      const findings = { violations: [{ id: 'image-alt', impact: 'critical' }] };
+      response.setStructuredContent(findings);
+      response.addResult('One accessibility violation');
+      response.addFileResourceLink('/tmp/report.json', { name: 'report', mimeType: 'application/json' });
+      response.addImage({ contentType: 'image/png', data: Buffer.from('annotated') });
+
+      expect(response.serialize()).toMatchObject({
+        structuredContent: findings,
+        content: [
+          { type: 'resource_link', uri: 'file:///tmp/report.json', name: 'report', mimeType: 'application/json' },
+          { type: 'image', mimeType: 'image/png' },
+        ],
+      });
     });
 
     it('should include error flag when error occurred', () => {

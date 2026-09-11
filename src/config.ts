@@ -47,7 +47,7 @@ export type CLIOptions = {
     host?: string;
     ignoreHttpsErrors?: boolean;
     isolated?: boolean;
-    imageResponses?: 'allow' | 'omit';
+    imageResponses?: Config['imageResponses'];
     mobile?: boolean;
     sandbox?: boolean;
     outputDir?: string;
@@ -337,8 +337,9 @@ function cliOptionsFromEnv(): CLIOptions {
   options.host = envToString(process.env.PLAYWRIGHT_MCP_HOST);
   options.ignoreHttpsErrors = envToBoolean(process.env.PLAYWRIGHT_MCP_IGNORE_HTTPS_ERRORS);
   options.isolated = envToBoolean(process.env.PLAYWRIGHT_MCP_ISOLATED);
-  if (process.env.PLAYWRIGHT_MCP_IMAGE_RESPONSES === 'omit')
-    options.imageResponses = 'omit';
+  const imageResponses = process.env.PLAYWRIGHT_MCP_IMAGE_RESPONSES;
+  if (imageResponses === 'allow' || imageResponses === 'omit' || imageResponses === 'auto' || imageResponses === 'only')
+    options.imageResponses = imageResponses;
   options.mobile = envToBoolean(process.env.PLAYWRIGHT_MCP_MOBILE);
   options.sandbox = envToBoolean(process.env.PLAYWRIGHT_MCP_SANDBOX);
   options.outputDir = envToString(process.env.PLAYWRIGHT_MCP_OUTPUT_DIR);

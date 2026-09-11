@@ -192,9 +192,11 @@ export type Config = {
   };
 
   /**
-   * Whether to send image responses to the client. Can be "allow", "omit", or "auto". Defaults to "auto", which sends images if the client can display them.
+   * Image response policy. Defaults to "allow"; "auto" is a legacy alias for "allow".
+   * "omit" excludes images. "only" omits text from successful responses containing images,
+   * but preserves errors, structured content and resource links. Responses without images keep text.
    */
-  imageResponses?: 'allow' | 'omit' | 'auto';
+  imageResponses?: 'allow' | 'omit' | 'auto' | 'only';
 
   snapshot?: {
     /**
