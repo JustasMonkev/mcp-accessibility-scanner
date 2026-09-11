@@ -77,6 +77,11 @@ describe('CLI command dispatch contract', () => {
       const help = runCLI('--help');
       expect(help).toContain('--profile-dir-name <name>');
     });
+
+    it('documents image-only responses and accepts the option before a subcommand', () => {
+      expect(runCLI('--help')).toContain('"only" omits text');
+      expect(runCLI('--image-responses only list-tools')).toContain('browser_take_screenshot');
+    });
   });
 
   describe('default command (no subcommand)', () => {

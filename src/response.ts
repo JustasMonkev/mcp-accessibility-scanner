@@ -230,7 +230,8 @@ ${this._code.join('\n')}
     }
 
     // Main response part
-    const content: CallToolResult['content'] = [
+    const imagesOnly = this._context.config.imageResponses === 'only' && this._images.length > 0 && !this._isError;
+    const content: CallToolResult['content'] = imagesOnly ? [] : [
       { type: 'text', text: response.join('\n') },
     ];
 

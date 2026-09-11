@@ -30,6 +30,31 @@ async function writeConfigFile(config: Config): Promise<string> {
 }
 
 describe('Config', () => {
+  describe('image responses', () => {
+    beforeEach(() => vi.stubEnv('PLAYWRIGHT_MCP_IMAGE_RESPONSES', ''));
+    afterEach(() => vi.unstubAllEnvs());
+
+    it.each(['allow', 'omit', 'auto', 'only'] as const)('resolves %s from config, environment and CLI', async mode => {
+      expect((await resolveConfig({ imageResponses: mode })).imageResponses).toBe(mode);
+      const configFile = await writeConfigFile({ imageResponses: mode });
+      expect((await resolveCLIConfig({ config: configFile })).imageResponses).toBe(mode);
+      vi.stubEnv('PLAYWRIGHT_MCP_IMAGE_RESPONSES', mode);
+      expect((await resolveCLIConfig({})).imageResponses).toBe(mode);
+      vi.stubEnv('PLAYWRIGHT_MCP_IMAGE_RESPONSES', '');
+      expect((await resolveCLIConfig({ imageResponses: mode })).imageResponses).toBe(mode);
+    });
+
+    it('applies file, environment and CLI precedence including allow overrides', async () => {
+      const configFile = await writeConfigFile({ imageResponses: 'only' });
+      vi.stubEnv('PLAYWRIGHT_MCP_IMAGE_RESPONSES', 'omit');
+      expect((await resolveCLIConfig({ config: configFile })).imageResponses).toBe('omit');
+      expect((await resolveCLIConfig({ config: configFile, imageResponses: 'only' })).imageResponses).toBe('only');
+      expect((await resolveCLIConfig({ config: configFile, imageResponses: 'allow' })).imageResponses).toBe('allow');
+      vi.stubEnv('PLAYWRIGHT_MCP_IMAGE_RESPONSES', 'allow');
+      expect((await resolveCLIConfig({ config: configFile })).imageResponses).toBe('allow');
+    });
+  });
+
   describe('resolveConfig', () => {
     it('should resolve default config when empty config provided', async () => {
       const config = await resolveConfig({});
