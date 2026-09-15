@@ -604,7 +604,7 @@ This tool requires `--caps pdf` in the CLI.
 Install the configured browser engine (use when browser executable is missing).
 - Parameters: none
 
-Disabled by default. Enable it at server startup with `--caps install`, `PLAYWRIGHT_MCP_CAPS=install`, or `"capabilities": ["install"]` in the config file. Without this opt-in, the tool is neither listed nor callable; existing browser installations can still be used.
+Disabled by default. Enable it at server startup with `--caps install`, `PLAYWRIGHT_MCP_CAPS=install`, or `"capabilities": ["install"]` in the config file. Explicit `core-install` settings remain supported as a deprecated alias; use `install` in new configurations. Without this opt-in, the tool is neither listed nor callable; existing browser installations can still be used.
 
 This tool invokes Playwright's installer, which downloads executable code. In [Playwright 1.63.0](https://github.com/microsoft/playwright/blob/v1.63.0/packages/playwright-core/src/server/registry/oopDownloadBrowserMain.ts), browser archives have no checksum or signature verification before extraction; the default download hosts use HTTPS. Only enable installation when you trust the download source and TLS configuration, including any custom `PLAYWRIGHT_DOWNLOAD_HOST`, browser-specific host overrides, or TLS-inspecting proxy. Do not disable TLS certificate validation.
 

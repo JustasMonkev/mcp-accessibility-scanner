@@ -44,7 +44,7 @@ describe('BrowserServerBackend.callTool', () => {
   });
 
   it.each<[ToolCapability[] | undefined]>([
-    [undefined], [[]], [['pdf']], [['core-install']],
+    [undefined], [[]], [['core']], [['pdf']],
   ])('does not expose or dispatch browser_install without install capability (%j)', async capabilities => {
     const config = await resolveConfig({ capabilities });
     const backend = new BrowserServerBackend(config, unusedFactory);
@@ -58,8 +58,8 @@ describe('BrowserServerBackend.callTool', () => {
         .rejects.toMatchObject({ code: ProtocolErrorCode.InvalidParams });
   });
 
-  it('exposes browser_install when the operator enables install capability', async () => {
-    const config = await resolveConfig({ capabilities: ['pdf', 'install'] });
+  it.each<ToolCapability>(['install', 'core-install'])('exposes browser_install when the operator enables %s', async capability => {
+    const config = await resolveConfig({ capabilities: ['pdf', capability] });
     const backend = new BrowserServerBackend(config, unusedFactory);
     const names = (await backend.listTools()).map(tool => tool.name);
 
