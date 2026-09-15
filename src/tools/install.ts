@@ -22,7 +22,7 @@ import { defineTool } from './tool.js';
 
 
 const install = defineTool({
-  capability: 'core-install',
+  capability: 'install',
   schema: {
     name: 'browser_install',
     title: 'Install the browser specified in the config',
