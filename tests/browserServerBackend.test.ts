@@ -23,6 +23,7 @@ import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { BrowserSessionRegistry } from '../src/browserSessions.js';
 import { resolveConfig } from '../src/config.js';
 import { allTools } from '../src/tools.js';
+import type { ToolCapability } from '../config.js';
 
 const unusedFactory = {
   createContext: async () => {
@@ -40,6 +41,31 @@ describe('BrowserServerBackend.callTool', () => {
     const backend = new BrowserServerBackend(config, unusedFactory);
     await expect(backend.callTool('does_not_exist', {}))
         .rejects.toMatchObject({ code: ProtocolErrorCode.InvalidParams });
+  });
+
+  it.each<[ToolCapability[] | undefined]>([
+    [undefined], [[]], [['core']], [['pdf']],
+  ])('does not expose or dispatch browser_install without install capability (%j)', async capabilities => {
+    const config = await resolveConfig({ capabilities });
+    const backend = new BrowserServerBackend(config, unusedFactory);
+    const names = (await backend.listTools()).map(tool => tool.name);
+
+    expect(names).not.toContain('browser_install');
+    expect(names).toContain('browser_navigate');
+    await expect(backend.callTool('browser_install', {}))
+        .rejects.toMatchObject({ code: ProtocolErrorCode.InvalidParams, message: expect.stringContaining('not found') });
+    await expect(backend.callTool('browser_install', { browserSessionId: 'another-session' }))
+        .rejects.toMatchObject({ code: ProtocolErrorCode.InvalidParams });
+  });
+
+  it.each<ToolCapability>(['install', 'core-install'])('exposes browser_install when the operator enables %s', async capability => {
+    const config = await resolveConfig({ capabilities: ['pdf', capability] });
+    const backend = new BrowserServerBackend(config, unusedFactory);
+    const names = (await backend.listTools()).map(tool => tool.name);
+
+    expect(names).toContain('browser_install');
+    expect(names).toContain('browser_pdf_save');
+    expect(names).toContain('browser_navigate');
   });
 
   it('reports invalid tool input as a readable execution error', async () => {

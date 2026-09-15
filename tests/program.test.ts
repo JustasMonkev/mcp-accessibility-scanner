@@ -28,6 +28,27 @@ beforeAll(() => {
   execFileSync(process.execPath, [path.join(rootDir, 'node_modules/typescript/bin/tsc'), '--project', path.join(rootDir, 'tsconfig.json')]);
 });
 
+describe('direct MCP harness install coverage', () => {
+  it.each([
+    { args: ['--only', 'browser_install'], summary: 'Skipped: 1' },
+    { args: ['--include-install', '--only', 'browser_session_close'], summary: 'Passed: 1' },
+  ])('matches exposed tools for $args', ({ args, summary }) => {
+    const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-install-harness-'));
+    try {
+      const output = execFileSync(process.execPath, [path.join(rootDir, '.codex/run-mcp-direct-harness.mjs'), ...args], {
+        cwd: rootDir,
+        env: { ...process.env, MCP_HARNESS_RESULTS_DIR: resultsDir },
+        encoding: 'utf-8',
+        timeout: 15_000,
+      });
+      expect(output).toContain(summary);
+      expect(output).toContain('Failed: 0');
+    } finally {
+      fs.rmSync(resultsDir, { recursive: true, force: true });
+    }
+  });
+});
+
 function runCLI(args: string): string {
   return execFileSync(process.execPath, [...cliArgs, ...args.split(' ').filter(Boolean)], {
     encoding: 'utf-8',
