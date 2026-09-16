@@ -221,7 +221,7 @@ export class BrowserServerBackend implements ServerBackend {
       if (name !== 'browser_close' && name !== 'browser_session_open' && name !== 'browser_session_close') {
         const idleNotice = await context.resumeAfterIdle();
         if (idleNotice)
-          response.addResult(idleNotice);
+          response.addNotice(idleNotice);
       }
       await tool.handle(context, parsedArguments, response);
       await response.finish();

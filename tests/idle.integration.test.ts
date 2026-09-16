@@ -24,14 +24,16 @@ import { contextFactory } from '../src/browserContextFactory.js';
 import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
 
-it('closes an idle owned context, reopens for the next tool, and reports navigation recovery once', async () => {
+it.each(['allow', 'only'] as const)('reopens an idle owned context and reports recovery once with image responses %s', async imageResponses => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-idle-owned-'));
   const browser = await chromium.launch();
   const contexts: BrowserContext[] = [];
   const closed = Promise.withResolvers<void>();
-  const config = await resolveConfig({ timeouts: { idle: 50, settle: 0 } });
+  const config = await resolveConfig({ outputDir: directory, imageResponses, timeouts: { idle: 50, settle: 0 } });
   const backend = new BrowserServerBackend(config, {
     createContext: async () => {
       const browserContext = await browser.newContext();
+      await browserContext.newPage();
       contexts.push(browserContext);
       browserContext.once('close', () => closed.resolve());
       return { browserContext, close: () => browserContext.close() };
@@ -43,10 +45,13 @@ it('closes an idle owned context, reopens for the next tool, and reports navigat
     expect(initial.isError).not.toBe(true);
     await closed.promise;
     expect(contexts).toHaveLength(1);
-    const resumed = await backend.callTool('browser_navigate', { url: 'about:blank' });
-    expect(resumed.isError).not.toBe(true);
+    const resumed = await backend.callTool('browser_take_screenshot', {});
+    expect(resumed.isError, JSON.stringify(resumed.content)).not.toBe(true);
     expect(contexts).toHaveLength(2);
     expect(resumed.content).toContainEqual(expect.objectContaining({ type: 'text', text: expect.stringContaining('Use browser_navigate') }));
+    expect(resumed.content.some(item => item.type === 'image')).toBe(true);
+    if (imageResponses === 'only')
+      expect(resumed.content).not.toContainEqual(expect.objectContaining({ type: 'text', text: expect.stringContaining('Took the') }));
     const next = await backend.callTool('browser_snapshot', {});
     expect(next.content).not.toContainEqual(expect.objectContaining({ type: 'text', text: expect.stringContaining('released after inactivity') }));
     await new Promise<void>(resolve => contexts[1].once('close', () => resolve()));
@@ -60,6 +65,7 @@ it('closes an idle owned context, reopens for the next tool, and reports navigat
   } finally {
     await Context.disposeAll();
     await browser.close();
+    await fs.rm(directory, { recursive: true, force: true });
   }
 });
 
