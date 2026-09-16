@@ -132,8 +132,10 @@ async function run(mode: string, args: string[] = [], cancel = false, extraEnv: 
   child.stdout.on('data', data => output += data.toString());
   child.stderr.on('data', data => output += data.toString());
   const cancelTimer = cancel ? setInterval(() => {
-    if (fs.existsSync(pidFile))
+    if (fs.existsSync(pidFile)) {
+      clearInterval(cancelTimer);
       child.kill('SIGINT');
+    }
   }, 100) : undefined;
   const deadline = setTimeout(() => child.kill('SIGKILL'), 10_000);
   try {
