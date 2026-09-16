@@ -48,7 +48,7 @@ describe('recorder compatibility with pinned Playwright (#218)', () => {
       await expect.poll(async () => {
         const entries = await Promise.all(logs.map(folder => fs.readFile(path.join(directory!, folder, 'session.md'), 'utf8')));
         return entries.every(log => log.includes('### Tool call: browser_close'));
-      }).toBe(true);
+      }, { timeout: 10_000 }).toBe(true);
       await fs.rm(directory, { recursive: true, force: true });
     }
     directory = undefined;
@@ -86,7 +86,14 @@ describe('recorder compatibility with pinned Playwright (#218)', () => {
     expect(duplicate.isError).toBe(true);
     expect(resultText(duplicate)).toContain('Recording is already in progress');
 
+    const folders = (await fs.readdir(directory)).filter(name => name.startsWith('session-'));
+    expect(folders).toHaveLength(2);
+    const logs = () => Promise.all(folders.map(folder => fs.readFile(path.join(directory!, folder, 'session.md'), 'utf8')));
     await page.getByRole('button').click();
+    // The owning connection's click completion is not a recorder-delivery barrier
+    // for the separate CDP connection. Observe both sinks before starting stop's
+    // bounded drain; a busy runner can deliver the event after that window.
+    await expect.poll(async () => (await logs()).filter(log => log.includes('### User action: click')).length, { timeout: 10_000 }).toBe(2);
     const firstRecording = resultText(await call(first, 'browser_stop_recording'));
     expect(firstRecording).toContain("getByRole('button', { name: 'User action' }).click()");
     const snapshot = resultText(await call(first, 'browser_snapshot'));
@@ -97,13 +104,10 @@ describe('recorder compatibility with pinned Playwright (#218)', () => {
     first.serverClosed();
     backends.splice(backends.indexOf(first), 1);
     expect(page.isClosed()).toBe(false);
-    const folders = (await fs.readdir(directory)).filter(name => name.startsWith('session-'));
-    expect(folders).toHaveLength(2);
-    const logs = () => Promise.all(folders.map(folder => fs.readFile(path.join(directory!, folder, 'session.md'), 'utf8')));
     // Playwright resolves fill before delivering its recorder event. Wait for receipt
     // in the real session log before asking stop to reject further unbuffered input.
     await page.getByRole('textbox', { name: 'Other' }).fill('After disconnect');
-    await expect.poll(async () => (await logs()).some(log => log.includes("fill('After disconnect')"))).toBe(true);
+    await expect.poll(async () => (await logs()).some(log => log.includes("fill('After disconnect')")), { timeout: 10_000 }).toBe(true);
     const secondRecording = resultText(await call(second, 'browser_stop_recording'));
     expect(secondRecording).toContain("getByRole('button', { name: 'User action' }).click()");
     expect(secondRecording).toContain("fill('After disconnect')");
@@ -112,7 +116,7 @@ describe('recorder compatibility with pinned Playwright (#218)', () => {
 
     await call(second, 'browser_start_recording');
     await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Restarted');
-    await expect.poll(async () => (await logs()).some(log => log.includes("fill('Restarted')"))).toBe(true);
+    await expect.poll(async () => (await logs()).some(log => log.includes("fill('Restarted')")), { timeout: 10_000 }).toBe(true);
     const restarted = resultText(await call(second, 'browser_stop_recording'));
     const restartedCode = restarted.split('~~~js')[1]?.split('~~~')[0];
     expect(restartedCode).toContain("fill('Restarted')");
@@ -153,7 +157,7 @@ describe('recorder compatibility with pinned Playwright (#218)', () => {
       const recordingContext = registry.resolve(browserSessionId);
       const beforeInput = recordingContext.recordingActivityAt()!;
       await page.getByRole('textbox').fill('Across requests');
-      await expect.poll(() => recordingContext.recordingActivityAt()).toBeGreaterThan(beforeInput);
+      await expect.poll(() => recordingContext.recordingActivityAt(), { timeout: 10_000 }).toBeGreaterThan(beforeInput);
       const nextRequest = await backend(config, factory, true);
       const recorded = resultText(await call(nextRequest, 'browser_stop_recording', args));
       expect(recorded).toContain("fill('Across requests')");
@@ -163,7 +167,7 @@ describe('recorder compatibility with pinned Playwright (#218)', () => {
       nextRequest.serverClosed();
       const beforeRestart = recordingContext.recordingActivityAt()!;
       await page.getByRole('textbox').fill('After standby');
-      await expect.poll(() => recordingContext.recordingActivityAt()).toBeGreaterThan(beforeRestart);
+      await expect.poll(() => recordingContext.recordingActivityAt(), { timeout: 10_000 }).toBeGreaterThan(beforeRestart);
       const lastRequest = await backend(config, factory, true);
       const restarted = resultText(await call(lastRequest, 'browser_stop_recording', args));
       expect(restarted).toContain("fill('After standby')");
