@@ -194,7 +194,7 @@ export type Config = {
   /**
    * Image response policy. Defaults to "allow"; "auto" is a legacy alias for "allow".
    * "omit" excludes images. "only" omits text from successful responses containing images,
-   * but preserves errors, structured content and resource links. Responses without images keep text.
+   * but preserves errors, browser lifecycle notices, structured content and resource links. Responses without images keep text.
    */
   imageResponses?: 'allow' | 'omit' | 'auto' | 'only';
 

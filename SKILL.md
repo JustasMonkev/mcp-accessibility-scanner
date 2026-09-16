@@ -83,7 +83,7 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--save-trace` | Save Playwright trace to output directory |
 | `--snapshot-boxes` | Include viewport-relative `[box=x,y,width,height]` metadata in snapshots |
 | `--no-sandbox` | Disable browser sandboxing |
-| `--image-responses <mode>` | `"allow"` (default), `"omit"`, or `"only"`. `only` removes text from successful MCP responses containing images while retaining errors, structured content and resource links; interactive mode rejects it because the REPL prints text only. `"auto"` aliases `"allow"`. |
+| `--image-responses <mode>` | `"allow"` (default), `"omit"`, or `"only"`. `only` removes text from successful MCP responses containing images while retaining errors, browser lifecycle notices, structured content and resource links; interactive mode rejects it because the REPL prints text only. `"auto"` aliases `"allow"`. |
 
 ## Accessibility Scanning Tools
 

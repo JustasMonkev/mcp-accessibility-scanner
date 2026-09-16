@@ -421,6 +421,20 @@ describe('Response', () => {
       ]);
     });
 
+    it.each(['allow', 'only', 'omit'] as const)('preserves browser lifecycle notices in %s mode', mode => {
+      mockContext.config.imageResponses = mode;
+      const response = new Response(mockContext, 'browser_take_screenshot', {});
+      response.addNotice('Browser reopened; previous element references are invalid.');
+      response.addResult('Screenshot saved');
+      response.addImage({ contentType: 'image/png', data: Buffer.from('capture') });
+      const content = response.serialize().content;
+      expect(content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('Browser reopened') });
+      expect(content.some(item => item.type === 'image')).toBe(mode !== 'omit');
+      if (mode === 'only')
+        expect(content[0]).toEqual({ type: 'text', text: 'Browser reopened; previous element references are invalid.' });
+      expect(response.result()).toContain('Browser reopened');
+    });
+
     it('keeps errors and images in only mode', () => {
       mockContext.config.imageResponses = 'only';
       const response = new Response(mockContext, 'test_tool', {});
