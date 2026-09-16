@@ -73,7 +73,7 @@
 		"knip": "^6.32.2",
 		"oxlint": "^1.78.0",
 		"typescript": "^7.0.2",
-		"vitest": "^4.1.10"
+		"vitest": "^5.0.1"
 	},
 	"keywords": [
 		"mcp",
