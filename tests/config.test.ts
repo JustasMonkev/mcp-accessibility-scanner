@@ -63,6 +63,7 @@ describe('Config', () => {
       expect(config.timeouts.navigationTimeout).toBe(60000);
       expect(config.timeouts.defaultTimeout).toBe(5000);
       expect(config.timeouts.settle).toBe(500);
+      expect(config.timeouts.idle).toBe(0);
       expect(config.saveTrace).toBe(false);
     });
 
@@ -246,6 +247,32 @@ describe('Config', () => {
       else
         process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE = previous;
     }
+  });
+
+  describe('idle timeout', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('merges config, environment, and CLI values and preserves explicit zero', async () => {
+      const config = await writeConfigFile({ timeouts: { idle: 1000 } });
+      vi.stubEnv('PLAYWRIGHT_MCP_TIMEOUT_IDLE', '');
+      expect((await resolveCLIConfig({ config })).timeouts.idle).toBe(1000);
+      vi.stubEnv('PLAYWRIGHT_MCP_TIMEOUT_IDLE', '  ');
+      expect((await resolveCLIConfig({ config })).timeouts.idle).toBe(1000);
+      vi.stubEnv('PLAYWRIGHT_MCP_TIMEOUT_IDLE', '2000');
+      expect((await resolveCLIConfig({ config })).timeouts.idle).toBe(2000);
+      expect((await resolveCLIConfig({ config, timeoutIdle: 0 })).timeouts.idle).toBe(0);
+      expect((await resolveConfig({ timeouts: { idle: 2147483647 } })).timeouts.idle).toBe(2147483647);
+    });
+
+    it.each([-1, 0.5, Infinity, NaN, 2147483648])('rejects invalid numeric idle timeout %s before browser setup', async idle => {
+      await expect(resolveConfig({ timeouts: { idle } })).rejects.toThrow('timeouts.idle must be an integer');
+      await expect(resolveCLIConfig({ timeoutIdle: idle })).rejects.toThrow('timeouts.idle must be an integer');
+    });
+
+    it.each(['-1', '1.5', 'NaN', 'Infinity', '123ms', '2147483648'])('rejects invalid environment idle timeout %s', async idle => {
+      vi.stubEnv('PLAYWRIGHT_MCP_TIMEOUT_IDLE', idle);
+      await expect(resolveCLIConfig({})).rejects.toThrow('timeouts.idle must be an integer');
+    });
   });
 
   describe('snapshot boxes', () => {

@@ -92,6 +92,7 @@ describe('CLI command dispatch contract', () => {
       expect(help).toContain('--mobile');
       expect(help).toContain('--snapshot-boxes');
       expect(help).toContain('--timeout-settle');
+      expect(help).toContain('--timeout-idle');
     });
 
     it('shows --profile-dir-name with its value placeholder', () => {

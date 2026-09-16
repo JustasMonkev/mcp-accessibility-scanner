@@ -65,6 +65,7 @@ export type CLIOptions = {
     navigationTimeout?: number;
     defaultTimeout?: number;
     settleTimeout?: number;
+    timeoutIdle?: number;
 };
 
 const defaultConfig: FullConfig = {
@@ -88,6 +89,7 @@ const defaultConfig: FullConfig = {
     navigationTimeout: 60000,
     defaultTimeout: 5000,
     settle: 500,
+    idle: 0,
   },
 };
 
@@ -103,7 +105,7 @@ export type FullConfig = Config & {
     network: NonNullable<Config['network']>,
     saveTrace: boolean;
     server: NonNullable<Config['server']>,
-    // mergeConfig() always materializes all three from defaultConfig, so a
+    // mergeConfig() always materializes all timeouts from defaultConfig, so a
     // resolved config never has a missing timeout to fall back on.
     timeouts: Required<NonNullable<Config['timeouts']>>,
 };
@@ -132,6 +134,8 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
 // omitted — the nullish semantics the fallback historically used.
 async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   validateAuthToken(config.server.authToken);
+  if (!Number.isInteger(config.timeouts.idle) || config.timeouts.idle < 0 || config.timeouts.idle > 2_147_483_647)
+    throw new Error('timeouts.idle must be an integer from 0 to 2147483647 milliseconds. Use 0 to disable idle shutdown.');
   const uploadDirs = config.browser.allowedUploadDirs;
   if (uploadDirs !== undefined) {
     if (!Array.isArray(uploadDirs))
@@ -309,6 +313,7 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
       navigationTimeout: cliOptions.navigationTimeout,
       defaultTimeout: cliOptions.defaultTimeout,
       settle: cliOptions.settleTimeout,
+      idle: cliOptions.timeoutIdle,
     }
   };
 }
@@ -356,6 +361,7 @@ function cliOptionsFromEnv(): CLIOptions {
   options.navigationTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT);
   options.defaultTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_DEFAULT_TIMEOUT);
   options.settleTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE);
+  options.timeoutIdle = envToNumber(process.env.PLAYWRIGHT_MCP_TIMEOUT_IDLE?.trim());
   return options;
 }
 
@@ -463,6 +469,7 @@ function mergeConfig(base: FullConfig, overrides: Config): FullConfig {
       navigationTimeout: overrides.timeouts?.navigationTimeout ?? base.timeouts.navigationTimeout,
       defaultTimeout: overrides.timeouts?.defaultTimeout ?? base.timeouts.defaultTimeout,
       settle: overrides.timeouts?.settle ?? base.timeouts.settle,
+      idle: overrides.timeouts?.idle !== undefined ? overrides.timeouts.idle : base.timeouts.idle,
     },
   } as FullConfig;
 }

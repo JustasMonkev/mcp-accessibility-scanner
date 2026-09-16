@@ -79,6 +79,7 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--port <port>` | Port for MCP Streamable HTTP transport |
 | `--navigation-timeout <ms>` | Page navigation timeout (default: 60000) |
 | `--default-timeout <ms>` | Default Playwright operation timeout (default: 5000) |
+| `--timeout-idle <ms>` | Release the default browser after inactivity; reopen on the next tool call (default: 0, disabled). Explicit browser sessions retain their separate TTL. |
 | `--save-session` | Save session to output directory |
 | `--save-trace` | Save Playwright trace to output directory |
 | `--snapshot-boxes` | Include viewport-relative `[box=x,y,width,height]` metadata in snapshots |

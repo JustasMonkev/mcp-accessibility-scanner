@@ -205,7 +205,8 @@ Create a `config.json` file with the following options:
   "timeouts": {
     "navigationTimeout": 60000,
     "defaultTimeout": 5000,
-    "settle": 500
+    "settle": 500,
+    "idle": 0
   },
   "network": {
     "allowedOrigins": ["example.com", "trusted-site.com"],
@@ -236,6 +237,7 @@ Create a `config.json` file with the following options:
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
 - `timeouts.settle`: How long to wait after every action before responding (default: `500`). An action that finishes quietly is first watched for up to 100ms (or the settle delay, whichever is shorter) so scheduled network work can still be awaited before the settle delay.
+- `timeouts.idle`: Release the default browser context after this many idle milliseconds (default: `0`, disabled). Accepts integers from `0` to `2147483647`.
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
 - `snapshot.boxes`: Include each element's viewport-relative bounding box as `[box=x,y,width,height]` in snapshots (default: `false`; CLI: `--snapshot-boxes`, env: `PLAYWRIGHT_MCP_SNAPSHOT_BOXES=1`)
@@ -259,6 +261,8 @@ The server does not trust `Forwarded` or `X-Forwarded-*` to bypass its checks. P
 Caller-supplied screenshot, PDF, scan-page-matrix, and audit report filenames use a no-clobber policy: an existing file causes the tool call to fail instead of being overwritten. Windows-reserved basenames and names ending in a dot or space are rejected on every platform so configured names behave consistently across hosts.
 
 Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies after every action so delayed DOM-only updates are included in the response; a short observation window also catches scheduled requests and waits for them before that delay.
+
+Use `--timeout-idle 300000`, `timeouts.idle`, or `PLAYWRIGHT_MCP_TIMEOUT_IDLE` to release the default browser after five idle minutes. Shared contexts stay open while any client is working; the idle window starts after the last tool call or download finishes. Explicit recordings prevent idle release until `browser_stop_recording` finishes; passive `--save-session` capture does not. Cleanup finalizes traces. The next browser tool call reopens the connection and includes a note to navigate again and refresh element references. Attached CDP, extension, and VS Code browsers are disconnected; their external pages remain open. Close and session-management tools do not relaunch an idle browser. Explicit `browser_session_open` handles keep their separate `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` behavior. Zero disables this feature; blank environment values leave the existing configuration unchanged.
 
 The VS Code `browser_connect` tool accepts only `playwright` or `playwright-core` libraries and loopback WebSocket URLs. Set `PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE=1` to allow remote endpoints, which must use `wss:`. URL userinfo credentials are rejected.
 

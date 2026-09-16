@@ -128,8 +128,10 @@ describe('closePage', () => {
 describe('Context', () => {
   let mockBrowserContextFactory: BrowserContextFactory;
   let mockBrowserContext: any;
+  let defaultConfig: Awaited<ReturnType<typeof resolveConfig>>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    defaultConfig = await resolveConfig({});
     mockBrowserContext = new EventEmitter();
     mockBrowserContext.newPage = vi.fn().mockResolvedValue({});
     mockBrowserContext.pages = vi.fn().mockReturnValue([]);
@@ -156,7 +158,7 @@ describe('Context', () => {
     it('should create context with options', () => {
       const context = new Context({
         tools: [],
-        config: {} as any,
+        config: defaultConfig,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -171,7 +173,7 @@ describe('Context', () => {
     it('should return empty array initially', () => {
       const context = new Context({
         tools: [],
-        config: {} as any,
+        config: defaultConfig,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -185,7 +187,7 @@ describe('Context', () => {
     it('should return undefined when no tabs exist', () => {
       const context = new Context({
         tools: [],
-        config: {} as any,
+        config: defaultConfig,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -199,7 +201,7 @@ describe('Context', () => {
     it('should throw error when no tabs exist', () => {
       const context = new Context({
         tools: [],
-        config: {} as any,
+        config: defaultConfig,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -223,7 +225,7 @@ describe('Context', () => {
       });
       const context = new Context({
         tools: [],
-        config: { saveTrace: true } as any,
+        config: { ...defaultConfig, saveTrace: true },
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -242,7 +244,7 @@ describe('Context', () => {
       });
       const context = new Context({
         tools: [],
-        config: { saveTrace: true } as any,
+        config: { ...defaultConfig, saveTrace: true },
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -257,14 +259,14 @@ describe('Context', () => {
     it('keeps a shared trace running until the final session closes', async () => {
       const first = new Context({
         tools: [],
-        config: { saveTrace: true } as any,
+        config: { ...defaultConfig, saveTrace: true },
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
       });
       const second = new Context({
         tools: [],
-        config: { saveTrace: true } as any,
+        config: { ...defaultConfig, saveTrace: true },
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -303,7 +305,7 @@ describe('Context', () => {
           .mockResolvedValueOnce({ browserContext: second, close: vi.fn().mockResolvedValue(undefined) });
       const makeContext = () => new Context({
         tools: [],
-        config: { saveTrace: true } as any,
+        config: { ...defaultConfig, saveTrace: true },
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -334,7 +336,7 @@ describe('Context', () => {
       });
       const context = new Context({
         tools: [],
-        config: { saveTrace: true } as any,
+        config: { ...defaultConfig, saveTrace: true },
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -360,7 +362,7 @@ describe('Context', () => {
       });
       const context = new Context({
         tools: [],
-        config: {} as any,
+        config: defaultConfig,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -394,7 +396,7 @@ describe('Context', () => {
         });
         const context = new Context({
           tools: [],
-          config: {} as any,
+          config: defaultConfig,
           browserContextFactory: mockBrowserContextFactory,
           sessionLog: undefined,
           clientInfo: {},
@@ -426,7 +428,7 @@ describe('Context', () => {
       });
       const context = new Context({
         tools: [],
-        config: {} as any,
+        config: defaultConfig,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -461,7 +463,7 @@ describe('Context', () => {
       });
       const context = new Context({
         tools: [],
-        config: {} as any,
+        config: defaultConfig,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -492,7 +494,7 @@ describe('Context', () => {
     it('logs a failed download save instead of leaving an unhandled rejection', async () => {
       const context = new Context({
         tools: [],
-        config: {} as any,
+        config: defaultConfig,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -1443,11 +1445,212 @@ describe('Context', () => {
     });
   });
 
+  describe('idle timeout', () => {
+    const close = vi.fn<() => Promise<void>>();
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      close.mockReset().mockResolvedValue(undefined);
+      vi.mocked(mockBrowserContextFactory.createContext).mockResolvedValue({ browserContext: mockBrowserContext, close });
+    });
+
+    afterEach(() => vi.useRealTimers());
+
+    const createContext = async (idle = 1000, browserSession = false) => new Context({
+      tools: [],
+      config: await resolveConfig({ timeouts: { idle } }),
+      browserContextFactory: mockBrowserContextFactory,
+      sessionLog: undefined,
+      clientInfo: {},
+      browserSession,
+    });
+
+    it.each([[0, false], [1000, true]])('leaves disabled defaults and explicit sessions open (idle=%s, session=%s)', async (idle, browserSession) => {
+      const context = await createContext(Number(idle), Boolean(browserSession));
+      await context.ensureTab();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(close).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('keeps shared clients alive through overlapping tools and waits one idle window after the final completion', async () => {
+      const first = await createContext();
+      const second = await createContext();
+      await first.ensureTab();
+      await second.ensureTab();
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(900);
+      const endFirst = second.beginToolCall('browser_click');
+      const endSecond = second.beginToolCall('browser_click');
+      await vi.advanceTimersByTimeAsync(10_000);
+      endSecond();
+      endSecond();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(close).not.toHaveBeenCalled();
+      endFirst();
+      await vi.advanceTimersByTimeAsync(999);
+      expect(close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(close).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(mockBrowserContext.listenerCount('page')).toBe(0);
+    });
+
+    it('holds idle cleanup until downloads finish and resets the idle window afterward', async () => {
+      const context = await createContext();
+      await context.ensureTab();
+      const download = Promise.withResolvers<void>();
+      context.trackPendingDownload(download.promise);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(close).not.toHaveBeenCalled();
+      download.resolve();
+      await vi.advanceTimersByTimeAsync(999);
+      expect(close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(close).toHaveBeenCalledOnce();
+    });
+
+    it('waits for idle cleanup before reopening and returns the navigation notice once', async () => {
+      const context = await createContext();
+      const cleanup = Promise.withResolvers<void>();
+      close.mockReturnValueOnce(cleanup.promise);
+      await context.ensureTab();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(close).toHaveBeenCalledOnce();
+      const endTool = context.beginToolCall('browser_snapshot');
+      const resume = context.resumeAfterIdle();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(mockBrowserContextFactory.createContext).toHaveBeenCalledOnce();
+      cleanup.resolve();
+      await expect(resume).resolves.toContain('Use browser_navigate');
+      expect(mockBrowserContextFactory.createContext).toHaveBeenCalledTimes(2);
+      await expect(context.resumeAfterIdle()).resolves.toBeUndefined();
+      endTool();
+      await context.dispose();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('does not release a shared context with a disabled sibling and rearms when that sibling leaves', async () => {
+      const first = await createContext();
+      const second = await createContext(0);
+      await first.ensureTab();
+      await second.ensureTab();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(close).not.toHaveBeenCalled();
+      await second.dispose();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(close).toHaveBeenCalledTimes(2);
+    });
+
+    it('waits for every shared client cleanup before resuming or attaching a new client', async () => {
+      const first = await createContext();
+      const second = await createContext();
+      const newcomer = await createContext();
+      await first.ensureTab();
+      await second.ensureTab();
+      const siblingCleanup = Promise.withResolvers<void>();
+      close.mockResolvedValueOnce(undefined).mockReturnValueOnce(siblingCleanup.promise);
+      await vi.advanceTimersByTimeAsync(1000);
+      const endFirst = first.beginToolCall('browser_snapshot');
+      const endNewcomer = newcomer.beginToolCall('browser_navigate');
+      const resumed = first.resumeAfterIdle();
+      const attached = newcomer.ensureTab();
+      await vi.advanceTimersByTimeAsync(0);
+      // The new acquisition releases its lease, then both callers wait for
+      // the sibling's cleanup instead of reviving the closing context.
+      expect(close).toHaveBeenCalledTimes(3);
+      expect(mockBrowserContextFactory.createContext).toHaveBeenCalledTimes(3);
+      expect(mockBrowserContext.listenerCount('page')).toBe(0);
+      siblingCleanup.resolve();
+      await Promise.all([resumed, attached]);
+      expect(mockBrowserContextFactory.createContext).toHaveBeenCalledTimes(5);
+      expect(mockBrowserContext.listenerCount('page')).toBe(2);
+      endFirst();
+      endNewcomer();
+    });
+
+    it('allows retry after a failed idle relaunch without leaking a timer', async () => {
+      const context = await createContext();
+      await context.ensureTab();
+      await vi.advanceTimersByTimeAsync(1000);
+      vi.mocked(mockBrowserContextFactory.createContext).mockRejectedValueOnce(new Error('launch failed'));
+      await expect(context.resumeAfterIdle()).rejects.toThrow('launch failed');
+      expect(vi.getTimerCount()).toBe(0);
+      await expect(context.resumeAfterIdle()).resolves.toContain('Use browser_navigate');
+      expect(mockBrowserContextFactory.createContext).toHaveBeenCalledTimes(3);
+    });
+
+    it('holds the shared group while a new client is still setting up its context', async () => {
+      const first = await createContext();
+      await first.ensureTab();
+      const sessionLog = Promise.withResolvers<undefined>();
+      const newcomer = new Context({
+        tools: [],
+        config: first.config,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: () => sessionLog.promise,
+        clientInfo: {},
+      });
+      const endTool = newcomer.beginToolCall('browser_navigate');
+      const setup = newcomer.ensureTab();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(close).not.toHaveBeenCalled();
+      sessionLog.resolve(undefined);
+      await setup;
+      endTool();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(close).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps explicit recordings alive and rearms after the recorder stops', async () => {
+      mockBrowserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+      const context = await createContext();
+      await context.startRecording();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(close).not.toHaveBeenCalled();
+      const stopping = context.stopRecording();
+      await vi.advanceTimersByTimeAsync(499);
+      expect(close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await stopping;
+      expect(mockBrowserContext._disableRecorder).toHaveBeenCalledOnce();
+      expect(context.recordingActivityAt()).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(999);
+      expect(close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(close).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('explicit close waits for idle cleanup and clears the relaunch notice', async () => {
+      const context = await createContext();
+      const cleanup = Promise.withResolvers<void>();
+      close.mockReturnValueOnce(cleanup.promise);
+      await context.ensureTab();
+      await vi.advanceTimersByTimeAsync(1000);
+      const explicitClose = context.closeBrowserContext();
+      cleanup.resolve();
+      await explicitClose;
+      await expect(context.resumeAfterIdle()).resolves.toBeUndefined();
+      expect(mockBrowserContextFactory.createContext).toHaveBeenCalledOnce();
+    });
+
+    it('finalizes the trace once before releasing shared clients', async () => {
+      const config = await resolveConfig({ timeouts: { idle: 1000 }, saveTrace: true });
+      const contexts = [0, 1].map(() => new Context({ tools: [], config, browserContextFactory: mockBrowserContextFactory, sessionLog: undefined, clientInfo: {} }));
+      for (const context of contexts)
+        await context.ensureTab();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockBrowserContext.tracing.stop).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe('isRunningTool', () => {
     it('should return false initially', () => {
       const context = new Context({
         tools: [],
-        config: {} as any,
+        config: defaultConfig,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -1459,7 +1662,7 @@ describe('Context', () => {
     it('should return true when tool is running', () => {
       const context = new Context({
         tools: [],
-        config: {} as any,
+        config: defaultConfig,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -1472,7 +1675,7 @@ describe('Context', () => {
     it('should return false after tool completes', () => {
       const context = new Context({
         tools: [],
-        config: {} as any,
+        config: defaultConfig,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},
@@ -1489,7 +1692,7 @@ describe('Context', () => {
       // session's browser mid-operation.
       const context = new Context({
         tools: [],
-        config: {} as any,
+        config: defaultConfig,
         browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined,
         clientInfo: {},

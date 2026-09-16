@@ -224,5 +224,11 @@ export type Config = {
      * How long to wait after each action for triggered work to settle before responding. Defaults to 500ms.
      */
     settle?: number;
+
+    /**
+     * Release the default browser context after this many idle milliseconds. Zero (the default) disables it.
+     * Explicit browser sessions retain their separate idle TTL.
+     */
+    idle?: number;
   };
 };

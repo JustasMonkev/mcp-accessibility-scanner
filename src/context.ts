@@ -104,6 +104,14 @@ const contextRegistry = new ContextRegistry();
 type TraceHub = { users: number, ready: Promise<void> };
 const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
 
+type IdleGroup = {
+  browserContext: playwright.BrowserContext;
+  contexts: Set<Context>;
+  timer?: ReturnType<typeof setTimeout>;
+  closing?: Promise<void>;
+};
+const idleGroups = new WeakMap<playwright.BrowserContext, IdleGroup>();
+
 async function acquireTrace(browserContext: playwright.BrowserContext): Promise<void> {
   let hub = traceHubs.get(browserContext);
   if (!hub) {
@@ -236,6 +244,9 @@ export class Context {
   private _closeAfterRecording = false;
   // Resolved from options.sessionLog at the first browser context launch.
   private _sessionLog: SessionLog | undefined;
+  private _idleGroup: IdleGroup | undefined;
+  private _lastActivityAt = Date.now();
+  private _idleClosePromise: Promise<void> | undefined;
 
   constructor(options: ContextOptions) {
     this.tools = options.tools;
@@ -333,6 +344,7 @@ export class Context {
       if (this._recordingStartFinished === startFinished)
         this._recordingStartFinished = undefined;
       finishStart!();
+      this._scheduleIdleTimeout();
     }
   }
 
@@ -350,6 +362,7 @@ export class Context {
     } catch (error) {
       if (this._recording === recording)
         this._recording = undefined;
+      this._scheduleIdleTimeout();
       this._closeBrowserContextAfterRecording();
       throw error;
     }
@@ -374,6 +387,8 @@ export class Context {
     } finally {
       this._recordingStops.delete(stopFinished);
       finishStop!();
+      this._lastActivityAt = Date.now();
+      this._scheduleIdleTimeout();
       this._closeBrowserContextAfterRecording();
     }
   }
@@ -447,6 +462,10 @@ export class Context {
   }
 
   async closeBrowserContext() {
+    if (this._idleClosePromise) {
+      await this._idleClosePromise;
+      this._idleClosePromise = undefined;
+    }
     if (!this._closeBrowserContextPromise)
       this._closeBrowserContextPromise = this._closeBrowserContextImpl().catch(logUnhandledError);
     await this._closeBrowserContextPromise;
@@ -480,7 +499,12 @@ export class Context {
   trackPendingDownload(promise: Promise<unknown>): void {
     const settled = promise.catch(logUnhandledError);
     this._pendingDownloads.add(settled);
-    void settled.then(() => this._pendingDownloads.delete(settled));
+    this._scheduleIdleTimeout();
+    void settled.then(() => {
+      this._pendingDownloads.delete(settled);
+      this._lastActivityAt = Date.now();
+      this._scheduleIdleTimeout();
+    });
   }
 
   /** True while a download save is still writing its file. */
@@ -526,6 +550,7 @@ export class Context {
    */
   beginToolCall(name: string): () => void {
     this._runningTools.push(name);
+    this._scheduleIdleTimeout();
     let released = false;
     return () => {
       if (released)
@@ -536,7 +561,47 @@ export class Context {
         this._runningTools.splice(index, 1);
       if (!recorderControlTools.has(name))
         this._lastToolCallEndedAt = Date.now();
+      this._lastActivityAt = Date.now();
+      this._scheduleIdleTimeout();
     };
+  }
+
+  async resumeAfterIdle(): Promise<string | undefined> {
+    if (!this._idleClosePromise)
+      return;
+    await this._idleClosePromise;
+    await this._ensureBrowserContext();
+    this._idleClosePromise = undefined;
+    return 'The browser connection was released after inactivity and has been reopened. Use browser_navigate to navigate again if needed; previous element references are no longer valid.';
+  }
+
+  private _scheduleIdleTimeout() {
+    const group = this._idleGroup;
+    if (!group)
+      return;
+    clearTimeout(group.timer);
+    group.timer = undefined;
+    if (group.closing || !group.contexts.size)
+      return;
+    let deadline = 0;
+    for (const context of group.contexts) {
+      if (!context.config.timeouts.idle || context.options.browserSession || context.isRunningTool() || context.hasPendingDownloads() || context._recording || context._recordingStartFinished || context._recordingStops.size)
+        return;
+      deadline = Math.max(deadline, context._lastActivityAt + context.config.timeouts.idle);
+    }
+    group.timer = setTimeout(() => {
+      group.timer = undefined;
+      const contexts = [...group.contexts];
+      // Invoke every close synchronously before another tool can acquire a
+      // shared context. Factory release hooks preserve external ownership.
+      group.closing = Promise.all(contexts.map(context => context.closeBrowserContext())).then(() => {
+        idleGroups.delete(group.browserContext);
+      });
+      for (const context of contexts)
+        context._idleClosePromise = group.closing;
+      void group.closing.catch(logUnhandledError);
+    }, Math.max(0, deadline - Date.now()));
+    group.timer.unref?.();
   }
 
   private async _closeBrowserContextImpl() {
@@ -608,6 +673,13 @@ export class Context {
   // listener would keep creating tabs inside a disposed Context, and the tab
   // wrappers' own page listeners would pile up with session churn.
   private _detachFromBrowserContext() {
+    if (this._idleGroup) {
+      this._idleGroup.contexts.delete(this);
+      this._scheduleIdleTimeout();
+      if (!this._idleGroup.contexts.size && !this._idleGroup.closing)
+        idleGroups.delete(this._idleGroup.browserContext);
+      this._idleGroup = undefined;
+    }
     this._removePageObserver?.();
     this._removePageObserver = undefined;
     this._removeRecorderContext?.();
@@ -638,6 +710,23 @@ export class Context {
     // The factory gets the most recently started call's name — with overlap
     // that is the call whose execution is creating the context right now.
     const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningTools[this._runningTools.length - 1], { browserSession: this.options.browserSession });
+    const closingGroup = idleGroups.get(result.browserContext)?.closing;
+    if (closingGroup) {
+      // A new client can acquire a shared factory lease during idle cleanup.
+      // Release it before waiting so the last old client can close the browser.
+      await result.close();
+      await closingGroup;
+      return this._setupBrowserContext();
+    }
+    let group = idleGroups.get(result.browserContext);
+    if (!group) {
+      group = { browserContext: result.browserContext, contexts: new Set() };
+      idleGroups.set(result.browserContext, group);
+    }
+    group.contexts.add(this);
+    this._idleGroup = group;
+    this._lastActivityAt = Date.now();
+    this._scheduleIdleTimeout();
     // The factory handed ownership over with close(); a setup failure past
     // this point would otherwise discard that callback with the browser still
     // running — and, for storage-state sessions, the disposable profile
