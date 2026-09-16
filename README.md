@@ -791,6 +791,48 @@ cd mcp-accessibility-scanner
 npm install
 ```
 
+### Playwright upgrade gate
+
+The September 16, 2026 review keeps `playwright` and `playwright-core` paired at
+**1.63.0**, the [latest stable release](https://github.com/microsoft/playwright/releases/tag/v1.63.0)
+on that date. Keep the local `InputRecorder` hub and the existing factory reference
+counts: multiple MCP clients share one client-side browser context, while the hub
+multiplexes session logs and explicit recordings and excludes sibling tool actions.
+A dependency bump alone must not change that ownership model.
+
+Before adopting a stable release containing [upstream #42627](https://github.com/microsoft/playwright/pull/42627),
+adapt the hub from `_enableRecorder` / `_disableRecorder` to
+`_startRecording({ language: 'javascript' }, sink)` / `_stopRecording()` and verify
+the per-client event contract against the installed runtime. Do not ship a
+prerelease bump or an untested method-name fallback. Migrating to the separate
+connections in [#42622](https://github.com/microsoft/playwright/pull/42622) is a
+separate ownership change requiring the same lifecycle checks.
+
+Install the pinned Chromium browser, then run the real recorder gate alongside
+its failure and concurrency tests:
+
+```bash
+npx playwright install chromium
+npx vitest run tests/recorder.integration.test.ts tests/context.test.ts tests/browserSessions.test.ts tests/browserContextFactory.test.ts tests/tools-recorder.test.ts tests/sessionLog.test.ts
+```
+
+The real-browser tests cover concurrent starts, duplicate-start rejection,
+shared CDP clients, sibling-action attribution, stop/disconnect/restart,
+`--save-session`, and recording across stateless explicit sessions. Existing unit
+tests also cover failed-start recovery and overlapping start/stop. The recorder
+must receive the final input event before stop; unbuffered input delivered after
+stop begins is excluded, while buffered clicks/navigation get a 500 ms drain.
+
+Also recheck the dependency fixes motivating the upgrade. On 1.63.0 Chromium,
+both full-page and oversized element screenshots changed `navigator.maxTouchPoints`
+from 1 to 0 and `(pointer: coarse)` from true to false; navigation restored the
+properties ([#42617](https://github.com/microsoft/playwright/pull/42617)).
+The fixed-header/smooth-scroll retry fixture clicked successfully but emitted 19
+scroll events rather than instant jumps ([#42626](https://github.com/microsoft/playwright/pull/42626)).
+A candidate upgrade must preserve touch properties after full-page and element
+screenshots and navigation, and complete retry scrolling without smooth animation.
+These are dependency limitations; the recorder gate alone does not verify them.
+
 ### MCP harnesses
 
 The npm wrappers build first, then the direct harness calls every exposed MCP
