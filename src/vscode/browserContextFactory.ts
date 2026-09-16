@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { applyStorageStateToReusedContext, assertStorageStateDoesNotResetUserProfile } from '../browserContextFactory.js';
+import { assertReusedContextStorageStateSupported, assertStorageStateDoesNotResetUserProfile } from '../browserContextFactory.js';
 import type { BrowserContextFactory, ClientInfo } from '../browserContextFactory.js';
 import type { FullConfig } from '../config.js';
 import type { BrowserContext } from 'playwright-core';
@@ -24,13 +24,12 @@ import { validateBrowserConnectConnectionString } from './validation.js';
 // the two never drift: the host checks the combination before tearing down
 // the working provider, and the factory keeps the same check as the last
 // line of defense.
-export const vscodeProfileConflictRemedy = 'Drop --user-data-dir (the state is applied inside the extension\'s own browser profile), or drop the storage state and sign in in that profile instead.';
+export const vscodeProfileConflictRemedy = 'Drop --storage-state and sign in in the profile, or use a fresh isolated browser outside the VS Code provider.';
 
 export class VSCodeBrowserContextFactory implements BrowserContextFactory {
   name = 'vscode';
   description = 'Connect to a browser running in the Playwright VS Code extension';
-  // A fresh context is created with the state; a reused extension context gets
-  // it applied via setStorageState(), like the other reused-context factories.
+  // Fresh contexts accept storage state; existing extension contexts reject it.
   readonly appliesStorageState = true;
   // Each createContext() reuses the extension browser's existing context when
   // one is present, so two sessions would end up in the same context (same
@@ -70,10 +69,8 @@ export class VSCodeBrowserContextFactory implements BrowserContextFactory {
     try {
       const existing = browser.contexts()[0];
       if (existing) {
-        // Without this, a configured storage state would be silently ignored on
-        // the reuse path while newContext() below applies it — authenticated
-        // scans would run anonymously depending on which branch was taken.
-        await applyStorageStateToReusedContext(this._config, existing);
+        // Importing into an existing context requires an unsafe rollback snapshot.
+        assertReusedContextStorageStateSupported(this._config);
         context = existing;
       } else {
         context = await browser.newContext(this._config.browser.contextOptions);

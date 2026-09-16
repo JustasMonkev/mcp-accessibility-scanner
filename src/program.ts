@@ -149,7 +149,7 @@ function configureBaseProgram() {
       .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')
       .option('--save-trace', 'Whether to save the Playwright Trace of the session into the output directory.')
       .option('--snapshot-boxes', 'include each element\'s bounding box as [box=x,y,width,height] in snapshots. Coordinates are viewport-relative, in CSS pixels.')
-      .option('--storage-state <path>', 'path to the storage state file to start the session from; applied in every mode except --extension (reused contexts receive it via setStorageState, which first clears their cookies and storage).')
+      .option('--storage-state <path>', 'path to the storage state file for a fresh context; existing CDP/VS Code contexts and --extension reject imports. Use --isolated with CDP.')
       .option('--user-agent <ua string>', 'specify user agent string')
       .option('--user-data-dir <path>', 'path to the user data directory. If not specified, a temporary directory will be created.')
       .option('--viewport-size <size>', 'specify browser viewport size in pixels, for example "1280, 720"')
