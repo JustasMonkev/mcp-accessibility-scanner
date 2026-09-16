@@ -277,6 +277,8 @@ program
     .action(async () => {
       const parentOptions = program.opts();
       const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(parentOptions, Boolean(parentOptions.extension));
+      if (config.imageResponses === 'only')
+        throw new Error('Interactive mode prints text only. Use --image-responses allow or omit instead of only.');
       const backend = new BrowserServerBackend(config, parentOptions.extension ? extensionContextFactory : browserContextFactory);
       const handleExit = setupExitWatchdog();
       await backend.initialize(

@@ -112,6 +112,22 @@ describe('CLI command dispatch contract', () => {
     });
   });
 
+  it.each(['cli', 'environment', 'config'])('rejects image-only interactive output from %s before starting the REPL', async source => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-image-only-'));
+    const configFile = path.join(configDir, 'config.json');
+    fs.writeFileSync(configFile, JSON.stringify({ imageResponses: 'only' }));
+    const args = source === 'cli' ? ['--image-responses', 'only'] : source === 'config' ? ['--config', configFile] : [];
+    try {
+      const { stdout, stderr } = await collectOutput([...args, 'interactive'], 3000,
+          { PLAYWRIGHT_MCP_IMAGE_RESPONSES: source === 'environment' ? 'only' : '' });
+      expect(stderr).toContain('Interactive mode prints text only');
+      expect(stderr).toContain('--image-responses allow or omit');
+      expect(stdout).not.toContain('Interactive mode. Type');
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
   it('prints usable auth setup without exposing the configured token', async () => {
     const secret = 'startup-secret-do-not-print';
     const { stderr } = await collectOutput(['--port', '0'], 3000, { PLAYWRIGHT_MCP_AUTH_TOKEN: secret });
