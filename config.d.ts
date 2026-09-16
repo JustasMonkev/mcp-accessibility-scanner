@@ -192,9 +192,11 @@ export type Config = {
   };
 
   /**
-   * Whether to send image responses to the client. Can be "allow", "omit", or "auto". Defaults to "auto", which sends images if the client can display them.
+   * Image response policy. Defaults to "allow"; "auto" is a legacy alias for "allow".
+   * "omit" excludes images. "only" omits text from successful responses containing images,
+   * but preserves errors, browser lifecycle notices, structured content and resource links. Responses without images keep text.
    */
-  imageResponses?: 'allow' | 'omit' | 'auto';
+  imageResponses?: 'allow' | 'omit' | 'auto' | 'only';
 
   snapshot?: {
     /**
@@ -222,5 +224,11 @@ export type Config = {
      * How long to wait after each action for triggered work to settle before responding. Defaults to 500ms.
      */
     settle?: number;
+
+    /**
+     * Release the default browser context after this many idle milliseconds. Zero (the default) disables it.
+     * Explicit browser sessions retain their separate idle TTL.
+     */
+    idle?: number;
   };
 };

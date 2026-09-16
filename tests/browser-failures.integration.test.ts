@@ -24,7 +24,7 @@ import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { contextFactory } from '../src/browserContextFactory.js';
 import { resolveConfig } from '../src/config.js';
 
-describe('pinned browser failure regressions (#226)', () => {
+describe('pinned browser failure regressions (#224, #226)', () => {
   let context: BrowserContext | undefined;
   let backend: BrowserServerBackend | undefined;
   let directory: string | undefined;
@@ -90,7 +90,7 @@ describe('pinned browser failure regressions (#226)', () => {
     expect(await page.locator('output').textContent()).toBe(clear ? 'empty' : 'first.txt');
   });
 
-  it('rejects a storage import before capture can execute a service worker, while allowing isolated import', async () => {
+  it('rejects storage imports before worker execution or IndexedDB Map/Set loss, while allowing isolated import', async () => {
     directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-storage-failure-'));
     const server = http.createServer((request, response) => {
       if (request.url === '/sw.js') {
@@ -118,6 +118,19 @@ describe('pinned browser failure regressions (#226)', () => {
       const page = context.pages()[0];
       await page.goto(origin);
       await page.evaluate(async () => {
+        await new Promise<void>((resolve, reject) => {
+          const request = indexedDB.open('collections', 1);
+          request.onupgradeneeded = () => request.result.createObjectStore('store');
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => {
+            const db = request.result;
+            const transaction = db.transaction('store', 'readwrite');
+            transaction.objectStore('store').put(new Map([['mk', 'mv']]), 'map');
+            transaction.objectStore('store').put(new Set([1, 2]), 'set');
+            transaction.oncomplete = () => { db.close(); resolve(); };
+            transaction.onerror = () => reject(transaction.error);
+          };
+        });
         localStorage.original = 'kept';
         const controlled = new Promise<void>(resolve => navigator.serviceWorker.addEventListener('controllerchange', () => resolve(), { once: true }));
         await navigator.serviceWorker.register('/sw.js');
@@ -125,7 +138,13 @@ describe('pinned browser failure regressions (#226)', () => {
       });
       await page.goto('about:blank');
       const port = (await fs.readFile(path.join(directory, 'DevToolsActivePort'), 'utf8')).split('\n')[0];
-      const storageState = { cookies: [], origins: [{ origin, localStorage: [{ name: 'imported', value: 'yes' }] }] };
+      const storageState = { cookies: [], origins: [{
+        origin,
+        localStorage: [{ name: 'imported', value: 'yes' }],
+        indexedDB: [{ name: 'collections', version: 1, stores: [{
+          name: 'store', autoIncrement: false, indexes: [], records: [{ key: 'session', value: { authenticated: true } }],
+        }] }],
+      }] };
       const browserOptions = { cdpEndpoint: `http://127.0.0.1:${port}`, contextOptions: { storageState } };
       const config = await resolveConfig({ browser: browserOptions });
       await expect(contextFactory(config).createContext({}, new AbortController().signal, undefined)).rejects.toThrow('Cannot apply --storage-state');
@@ -133,6 +152,22 @@ describe('pinned browser failure regressions (#226)', () => {
       expect(page.url()).toBe('about:blank');
       await page.goto(`${origin}/inspect`);
       expect(await page.evaluate(() => ({ ...localStorage }))).toEqual({ original: 'kept' });
+      expect(await page.evaluate(async () => {
+        const db = await new Promise<IDBDatabase>((resolve, reject) => {
+          const request = indexedDB.open('collections', 1);
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => resolve(request.result);
+        });
+        const transaction = db.transaction('store', 'readonly');
+        transaction.oncomplete = () => db.close();
+        const [map, set] = await Promise.all(['map', 'set'].map(key => new Promise<unknown>((resolve, reject) => {
+          const request = transaction.objectStore('store').get(key);
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => resolve(request.result);
+        })));
+        // Check inside the browser: evaluate() itself does not preserve Map/Set.
+        return { isMap: map instanceof Map, map: map instanceof Map ? [...map] : map, isSet: set instanceof Set, set: set instanceof Set ? [...set] : set };
+      })).toEqual({ isMap: true, map: [['mk', 'mv']], isSet: true, set: [1, 2] });
       // The existing profile's worker remains active and still serves navigations.
       await page.goto(origin);
       expect(await page.evaluate(() => localStorage.worker)).toBe('ran');
@@ -141,6 +176,18 @@ describe('pinned browser failure regressions (#226)', () => {
       const fresh = await isolated.browserContext.newPage();
       await fresh.goto(`${origin}/inspect`);
       expect(await fresh.evaluate(() => ({ ...localStorage }))).toEqual({ imported: 'yes' });
+      expect(await fresh.evaluate(() => new Promise<unknown>((resolve, reject) => {
+        const request = indexedDB.open('collections', 1);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+          const db = request.result;
+          const transaction = db.transaction('store', 'readonly');
+          transaction.oncomplete = () => db.close();
+          const record = transaction.objectStore('store').get('session');
+          record.onerror = () => reject(record.error);
+          record.onsuccess = () => resolve(record.result);
+        };
+      }))).toEqual({ authenticated: true });
     } finally {
       await isolated?.close();
       await context?.close();

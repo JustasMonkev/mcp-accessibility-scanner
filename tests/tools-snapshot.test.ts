@@ -591,6 +591,7 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('scan_page annotated 
           inTopLayer: layer.matches(':popover-open'),
           visible: style.display !== 'none' && style.visibility === 'visible' && style.opacity === '1',
           animations: document.getAnimations().map(animation => animation.playState),
+          pendingPauseAtMeasurement: document.querySelector('#one')?.hasAttribute('data-pending-pause'),
           target: document.querySelector('#one') && rect(document.querySelector('#one')!),
           boxes: children.filter((_, index) => index % 2 === 0).map((box, index) => ({
             label: children[index * 2 + 1].textContent,
@@ -669,13 +670,23 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('scan_page annotated 
 
   it('should freeze animations so a moving target keeps its marker', async () => {
     const { drawn, animationsAfter, results } = await annotate(
-        '<style>body{margin:0}@keyframes slide{from{left:0}to{left:700px}}#one{position:absolute;top:100px;width:80px;height:80px;animation:slide 1s linear infinite}</style><div id="one"></div>',
+        `<style>body{margin:0}@keyframes slide{from{left:0}to{left:700px}}#one{position:absolute;top:100px;width:80px;height:80px;animation:slide 1s linear infinite}</style><div id="one"></div>
+        <script>
+          const target = document.getElementById('one');
+          const getRect = target.getBoundingClientRect.bind(target);
+          target.getBoundingClientRect = () => {
+            if (target.getAnimations().some(animation => animation.playState === 'paused' && animation.pending))
+              target.setAttribute('data-pending-pause', 'true');
+            return getRect();
+          };
+        </script>`,
         [{ id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: ['#one'], html: '<div id="one">' }] }],
     );
 
     // Paused for the capture, so the target cannot slide out from under the
     // marker between measuring and screenshotting...
     expect(drawn.animations).toEqual(['paused']);
+    expect(drawn.pendingPauseAtMeasurement).toBe(false);
     expect(drawn.boxes[0].rect).toEqual(drawn.target);
     // ...and running again once the scan is over.
     expect(animationsAfter).toEqual(['running']);

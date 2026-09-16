@@ -138,7 +138,7 @@ function configureBaseProgram() {
       .option('--host <host>', 'host to bind server to. Default is localhost. Use 0.0.0.0 to bind to all interfaces.')
       .option('--ignore-https-errors', 'ignore https errors')
       .option('--isolated', 'keep the browser profile in memory, do not save it to disk.')
-      .option('--image-responses <mode>', 'whether to send image responses to the client. Can be "allow" or "omit", Defaults to "allow".')
+      .option('--image-responses <mode>', 'image response policy: "allow" (default), "omit", or "only". "only" omits text from successful responses with images; errors, browser lifecycle notices, structured content and resource links are preserved. "auto" is an alias for "allow".')
       .option('--mobile', 'emulate a generic mobile device (Pixel 10 for Chromium, iPhone 17 for WebKit). Cannot be combined with --device, CDP attach/launch modes, remote browser endpoints, or --extension.')
       .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
       .option('--output-dir <path>', 'path to the directory for output files.')
@@ -156,6 +156,7 @@ function configureBaseProgram() {
       .option('--navigation-timeout <ms>', 'maximum time in milliseconds for page navigation. Defaults to 60000ms (60 seconds).', parseInt)
       .option('--default-timeout <ms>', 'default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).', parseInt)
       .option('--timeout-settle <ms>', 'how long to wait after each action for triggered work to settle, in milliseconds. Defaults to 500ms.', parseInt)
+      .option('--timeout-idle <ms>', 'release the default browser context after inactivity, in milliseconds. Defaults to 0 (disabled).', value => value.trim() ? Number(value) : NaN)
       .addOption(new Option('--connect-tool', 'Allow to switch between different browser connection methods.').hideHelp())
       .addOption(new Option('--vscode', 'VS Code tools.').hideHelp());
 
@@ -277,6 +278,8 @@ program
     .action(async () => {
       const parentOptions = program.opts();
       const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(parentOptions, Boolean(parentOptions.extension));
+      if (config.imageResponses === 'only')
+        throw new Error('Interactive mode prints text only. Use --image-responses allow or omit instead of only.');
       const backend = new BrowserServerBackend(config, parentOptions.extension ? extensionContextFactory : browserContextFactory);
       const handleExit = setupExitWatchdog();
       await backend.initialize(

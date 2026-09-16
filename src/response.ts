@@ -38,6 +38,7 @@ const errorsDebug = debug('pw:mcp:errors');
 
 export class Response {
   private _result: string[] = [];
+  private _notices: string[] = [];
   private _code: string[] = [];
   private _images: { contentType: string, data: Buffer }[] = [];
   private _resourceLinks: ResourceLink[] = [];
@@ -73,6 +74,11 @@ export class Response {
 
   addResult(result: string) {
     this._result.push(result);
+  }
+
+  addNotice(notice: string) {
+    this._notices.push(notice);
+    this._result.push(notice);
   }
 
   addError(error: string) {
@@ -230,9 +236,9 @@ ${this._code.join('\n')}
     }
 
     // Main response part
-    const content: CallToolResult['content'] = [
-      { type: 'text', text: response.join('\n') },
-    ];
+    const imagesOnly = this._context.config.imageResponses === 'only' && this._images.length > 0 && !this._isError;
+    const text = imagesOnly ? this._notices.join('\n') : response.join('\n');
+    const content: CallToolResult['content'] = !imagesOnly || text ? [{ type: 'text', text }] : [];
 
     for (const link of this._resourceLinks)
       content.push(link);

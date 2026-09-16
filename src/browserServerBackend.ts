@@ -218,6 +218,11 @@ export class BrowserServerBackend implements ServerBackend {
     // browser_session_close) could dispose the browser under the slower call.
     const endToolCall = context.beginToolCall(name);
     try {
+      if (name !== 'browser_close' && name !== 'browser_session_open' && name !== 'browser_session_close') {
+        const idleNotice = await context.resumeAfterIdle();
+        if (idleNotice)
+          response.addNotice(idleNotice);
+      }
       await tool.handle(context, parsedArguments, response);
       await response.finish();
       if (name === 'browser_session_close') {

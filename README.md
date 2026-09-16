@@ -205,7 +205,8 @@ Create a `config.json` file with the following options:
   "timeouts": {
     "navigationTimeout": 60000,
     "defaultTimeout": 5000,
-    "settle": 500
+    "settle": 500,
+    "idle": 0
   },
   "network": {
     "allowedOrigins": ["example.com", "trusted-site.com"],
@@ -236,9 +237,11 @@ Create a `config.json` file with the following options:
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
 - `timeouts.settle`: How long to wait after every action before responding (default: `500`). An action that finishes quietly is first watched for up to 100ms (or the settle delay, whichever is shorter) so scheduled network work can still be awaited before the settle delay.
+- `timeouts.idle`: Release the default browser context after this many idle milliseconds (default: `0`, disabled). Accepts integers from `0` to `2147483647`.
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
 - `snapshot.boxes`: Include each element's viewport-relative bounding box as `[box=x,y,width,height]` in snapshots (default: `false`; CLI: `--snapshot-boxes`, env: `PLAYWRIGHT_MCP_SNAPSHOT_BOXES=1`)
+- `imageResponses`: `allow` (default) returns text and images; `omit` excludes images; `only` omits text from successful responses containing images. Errors, browser lifecycle notices, and responses without images (including full-page screenshots) keep their text. Structured results and resource links are always preserved. In `only` mode, screenshot save-path text, generated code and any accompanying text-only findings are omitted; use `allow` if you need them. Interactive mode rejects `only` because its REPL prints text only; use `allow` or `omit` there. `auto` remains a legacy alias for `allow`. CLI: `--image-responses only`; env: `PLAYWRIGHT_MCP_IMAGE_RESPONSES=only`. Precedence: CLI, then environment, then config file.
 - `server.authToken`: When set, Streamable HTTP requests (`--port`) require `Authorization: Bearer <token>` or return `401` (env: `PLAYWRIGHT_MCP_AUTH_TOKEN`). Blank or malformed tokens fail at startup. The scheme is case-insensitive; the token is exact. Bearer auth does not encrypt traffic: authenticated listeners must bind to loopback, such as `--host 127.0.0.1`; use a TLS reverse proxy for remote access. The printed client config includes a header placeholder to replace locally, without logging the secret. Unset keeps unauthenticated access.
 - `outputDir`: Directory for output files — reports, screenshots, traces, and session logs (CLI: `--output-dir`, env: `PLAYWRIGHT_MCP_OUTPUT_DIR`). Defaults to a fresh directory under the system temp folder, resolved once per server run so all of a run's artifacts land together. The output location is always server configuration; the deprecated MCP roots capability (client workspace folders) is no longer consulted.
 
@@ -258,6 +261,8 @@ The server does not trust `Forwarded` or `X-Forwarded-*` to bypass its checks. P
 Caller-supplied screenshot, PDF, scan-page-matrix, and audit report filenames use a no-clobber policy: an existing file causes the tool call to fail instead of being overwritten. Windows-reserved basenames and names ending in a dot or space are rejected on every platform so configured names behave consistently across hosts.
 
 Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies after every action so delayed DOM-only updates are included in the response; a short observation window also catches scheduled requests and waits for them before that delay.
+
+Use `--timeout-idle 300000`, `timeouts.idle`, or `PLAYWRIGHT_MCP_TIMEOUT_IDLE` to release the default browser after five idle minutes. Shared contexts stay open while any client is working; the idle window starts after the last tool call or download finishes. Explicit recordings prevent idle release until `browser_stop_recording` finishes; passive `--save-session` capture does not. Cleanup finalizes traces. The next browser tool call reopens the connection and includes a note to navigate again and refresh element references. Attached CDP, extension, and VS Code browsers are disconnected; their external pages remain open. Close and session-management tools do not relaunch an idle browser. Explicit `browser_session_open` handles keep their separate `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` behavior. Zero disables this feature; blank environment values leave the existing configuration unchanged.
 
 The VS Code `browser_connect` tool accepts only `playwright` or `playwright-core` libraries and loopback WebSocket URLs. Set `PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE=1` to allow remote endpoints, which must use `wss:`. URL userinfo credentials are rejected.
 
@@ -321,6 +326,8 @@ PLAYWRIGHT_MCP_ISOLATED=true PLAYWRIGHT_MCP_STORAGE_STATE=./auth.json npx mcp-ac
 >
 > **Playwright 1.63.0 safety restriction:** importing into an existing context is rejected before taking a rollback snapshot or resetting any storage. On this pin, snapshot capture can execute service-worker-served scripts for a previously visited origin whose tab is no longer open ([upstream fix](https://github.com/microsoft/playwright/pull/42664)). Use a fresh context, or omit `--storage-state` and sign in interactively. Service workers are not disabled. A future dependency upgrade must also pass the recorder/shared-client checks in [#218](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/218) and IndexedDB checks in [#224](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/224) before this restriction is reconsidered.
 >
+> **IndexedDB snapshot limitation:** on pinned Playwright 1.63.0 with Chromium 153.0.8010.12 and Firefox 155.0, `storageState({ indexedDB: true })` loses `Map` and `Set` contents. Both `newContext({ storageState })` and `setStorageState()` restore them as empty plain objects; ordinary JSON records survive. Fresh contexts protect existing browser data, but cannot recover values already lost during capture. The [upstream fix](https://github.com/microsoft/playwright/pull/42707) is merged but is not in this pin. Before allowing imports into existing contexts again, verify both restore paths preserve Map/Set types and entries on each supported engine, including after a failed import. The real-browser regression in `tests/browser-failures.integration.test.ts` checks that rejecting an import leaves the original Map/Set records intact and that isolated JSON IndexedDB imports still work.
+>
 > - **Fresh-context modes** (`--isolated`, the remote-endpoint mode, or either CDP mode combined with `--isolated`): the context is created with the storage state directly.
 > - **Default persistent-profile mode with `--storage-state`**: the session runs in a fresh, disposable profile — unique to that session and removed when it closes — built from the state, so the recorded state is provably the only session data (without `--storage-state` the regular persistent profile is used and survives restarts, as before). Any page the launch opened (for example from a URL in `browser.launchOptions.args`) is parked on a blank replacement before the state lands, then the replacement is navigated to the same URL, so a still-running anonymous page cannot overwrite the recorded identity and a scan never reads its DOM. This also means `--storage-state` cannot be combined with `--user-data-dir` (a user-supplied profile carries its own session and will not be wiped; the server refuses the combination).
 > - **CDP modes without `--isolated` and the VS Code provider**: `--storage-state` is rejected when the browser already has a context. Add `--isolated` in CDP mode to create a fresh context; otherwise omit the state and sign in interactively. If the browser exposes no context, the server creates one with the state. CDP sessions joining that same server-created context inherit its live state without resetting it.
@@ -364,7 +371,7 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 **Annotated screenshots:**
 When `annotateScreenshot` is `true`, each violating element is outlined and labelled with the rule ids it failed, a full-page PNG is written to the MCP output directory (`scan-page-annotated-{timestamp}-{token}.png`) and returned as a resource link, and the markers are then removed so the page is left exactly as it was. The markers are drawn in an out-of-flow overlay clipped to each element's own box, so they never reflow the page. The overlay uses a fresh id per scan, is placed in the browser's top layer so it stays visible over an open dialog, popover or fullscreen element, and compensates for a CSS `zoom` or a scaled ancestor so markers line up with what is rendered.
 An element that fails several rules gets one box listing every rule id, and elements inside open shadow roots are marked by walking the shadow path Axe reports.
-Running animations are paused before the elements are measured and resumed after the capture, so a moving target keeps its marker. The markers themselves live in a shadow root under an overlay whose own styles are `!important`, so page CSS cannot restyle or hide what the report counts, and each rule label sits outside the clipped box so it stays readable on an element smaller than its own label.
+Running animations are frozen at their current time before the elements are measured and resumed after the capture, so a moving target keeps its marker. The markers themselves live in a shadow root under an overlay whose own styles are `!important`, so page CSS cannot restyle or hide what the report counts, and each rule label sits outside the clipped box so it stays readable on an element smaller than its own label.
 At most 50 elements are annotated per scan. The result text always reports how many nodes were marked out of the total, plus how many were left out because they exceeded the limit, were hidden, zero-size or off-canvas (a full-page screenshot is clipped to the document box), or were inside an iframe (cross-frame selectors cannot be resolved from the top document).
 
 **Supported Violation Tags:**
@@ -787,6 +794,48 @@ git clone https://github.com/JustasMonkev/mcp-accessibility-scanner.git
 cd mcp-accessibility-scanner
 npm install
 ```
+
+### Playwright upgrade gate
+
+The September 16, 2026 review keeps `playwright` and `playwright-core` paired at
+**1.63.0**, the [latest stable release](https://github.com/microsoft/playwright/releases/tag/v1.63.0)
+on that date. Keep the local `InputRecorder` hub and the existing factory reference
+counts: multiple MCP clients share one client-side browser context, while the hub
+multiplexes session logs and explicit recordings and excludes sibling tool actions.
+A dependency bump alone must not change that ownership model.
+
+Before adopting a stable release containing [upstream #42627](https://github.com/microsoft/playwright/pull/42627),
+adapt the hub from `_enableRecorder` / `_disableRecorder` to
+`_startRecording({ language: 'javascript' }, sink)` / `_stopRecording()` and verify
+the per-client event contract against the installed runtime. Do not ship a
+prerelease bump or an untested method-name fallback. Migrating to the separate
+connections in [#42622](https://github.com/microsoft/playwright/pull/42622) is a
+separate ownership change requiring the same lifecycle checks.
+
+Install the pinned Chromium browser, then run the real recorder gate alongside
+its failure and concurrency tests:
+
+```bash
+npx playwright install chromium
+npx vitest run tests/recorder.integration.test.ts tests/context.test.ts tests/browserSessions.test.ts tests/browserContextFactory.test.ts tests/tools-recorder.test.ts tests/sessionLog.test.ts
+```
+
+The real-browser tests cover concurrent starts, duplicate-start rejection,
+shared CDP clients, sibling-action attribution, stop/disconnect/restart,
+`--save-session`, and recording across stateless explicit sessions. Existing unit
+tests also cover failed-start recovery and overlapping start/stop. The recorder
+must receive the final input event before stop; unbuffered input delivered after
+stop begins is excluded, while buffered clicks/navigation get a 500 ms drain.
+
+Also recheck the dependency fixes motivating the upgrade. On 1.63.0 Chromium,
+both full-page and oversized element screenshots changed `navigator.maxTouchPoints`
+from 1 to 0 and `(pointer: coarse)` from true to false; navigation restored the
+properties ([#42617](https://github.com/microsoft/playwright/pull/42617)).
+The fixed-header/smooth-scroll retry fixture clicked successfully but emitted 19
+scroll events rather than instant jumps ([#42626](https://github.com/microsoft/playwright/pull/42626)).
+A candidate upgrade must preserve touch properties after full-page and element
+screenshots and navigation, and complete retry scrolling without smooth animation.
+These are dependency limitations; the recorder gate alone does not verify them.
 
 ### MCP harnesses
 

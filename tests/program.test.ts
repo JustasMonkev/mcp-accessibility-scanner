@@ -92,11 +92,17 @@ describe('CLI command dispatch contract', () => {
       expect(help).toContain('--mobile');
       expect(help).toContain('--snapshot-boxes');
       expect(help).toContain('--timeout-settle');
+      expect(help).toContain('--timeout-idle');
     });
 
     it('shows --profile-dir-name with its value placeholder', () => {
       const help = runCLI('--help');
       expect(help).toContain('--profile-dir-name <name>');
+    });
+
+    it('documents image-only responses and accepts the option before a subcommand', () => {
+      expect(runCLI('--help')).toContain('"only" omits text');
+      expect(runCLI('--image-responses only list-tools')).toContain('browser_take_screenshot');
     });
   });
 
@@ -105,6 +111,22 @@ describe('CLI command dispatch contract', () => {
       const { stdout } = await collectOutput([], 2000);
       expect(stdout).not.toContain('Interactive mode');
     });
+  });
+
+  it.each(['cli', 'environment', 'config'])('rejects image-only interactive output from %s before starting the REPL', async source => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-image-only-'));
+    const configFile = path.join(configDir, 'config.json');
+    fs.writeFileSync(configFile, JSON.stringify({ imageResponses: 'only' }));
+    const args = source === 'cli' ? ['--image-responses', 'only'] : source === 'config' ? ['--config', configFile] : [];
+    try {
+      const { stdout, stderr } = await collectOutput([...args, 'interactive'], 3000,
+          { PLAYWRIGHT_MCP_IMAGE_RESPONSES: source === 'environment' ? 'only' : '' });
+      expect(stderr).toContain('Interactive mode prints text only');
+      expect(stderr).toContain('--image-responses allow or omit');
+      expect(stdout).not.toContain('Interactive mode. Type');
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
   });
 
   it('prints usable auth setup without exposing the configured token', async () => {
@@ -213,7 +235,9 @@ describe('CLI command dispatch contract', () => {
     // when its response closed); the registry must be process-scoped, exactly
     // like the direct startMCPServer path.
     async function startServer(args: string[]) {
-      const child = spawn(process.execPath, [...cliArgs, ...args, '--port', '0'], { stdio: 'pipe' });
+      // Match the HTTP harness's IPv4 loopback address: IPv6 localhost may
+      // miss an environment proxy's NO_PROXY matching in Node's fetch.
+      const child = spawn(process.execPath, [...cliArgs, ...args, '--host', '127.0.0.1', '--port', '0'], { stdio: 'pipe' });
       let stderr = '';
       const url = await new Promise<string>((resolve, reject) => {
         // The timeout must kill the child: the test's finally-cleanup only

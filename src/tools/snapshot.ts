@@ -228,8 +228,12 @@ async function drawAnnotations(page: playwright.Page, layerId: string, marks: An
     // drift between the measurement below and the screenshot and leave its
     // marker behind. The cleanup evaluate resumes exactly these.
     const paused = document.getAnimations().filter(animation => animation.playState === 'running');
-    for (const animation of paused)
+    for (const animation of paused) {
       animation.pause();
+      // Setting currentTime synchronously completes the pending pause task;
+      // pause() alone can advance one more frame after we measure the target.
+      animation.currentTime = animation.currentTime;
+    }
 
     const layer = document.createElement('div') as HTMLDivElement & { mcpPausedAnimations?: Animation[] };
     layer.id = layerId;
