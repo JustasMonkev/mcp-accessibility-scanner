@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import coreBundle from 'playwright-core/lib/coreBundle';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
+import { waitForCompletion } from './utils.js';
 
 import type { FullConfig } from '../config.js';
 
@@ -96,9 +97,11 @@ const uploadFile = defineTabTool({
 
     response.addCode(`await fileChooser.setFiles(${JSON.stringify(params.paths)})`);
 
-    tab.clearModalState(modalState);
-    await tab.waitForCompletion(async () => {
+    // Tab.waitForCompletion skips actions while a chooser is pending. Keep it
+    // pending through setFiles, but still observe the upload's page activity.
+    await waitForCompletion(tab, async () => {
       await modalState.fileChooser.setFiles(files);
+      tab.clearModalState(modalState);
     });
   },
   clearsModalState: 'fileChooser',

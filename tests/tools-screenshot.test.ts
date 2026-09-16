@@ -18,6 +18,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import screenshotTools from '../src/tools/screenshot.js';
 import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { outputFile, resolveConfig } from '../src/config.js';
 
 describe('Screenshot Tools', () => {
   const screenshotTool = screenshotTools.find(t => t.schema.name === 'browser_take_screenshot')!;
@@ -111,5 +115,50 @@ describe('Screenshot Tools', () => {
 
     const image = response.images().find(i => i.contentType === 'image/webp');
     expect(image).toBeDefined();
+  });
+
+  it.each(['css', 'device'])('rejects empty WebP captures at %s scale and removes failed files', async scale => {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-screenshot-'));
+    const config = await resolveConfig({ outputDir });
+    mockTab.context.outputFile = (name: string, exclusive: boolean) => outputFile(config, name, exclusive);
+    const emptyCapture = vi.fn(async (options: { path: string }) => {
+      await fs.writeFile(options.path, '');
+      return Buffer.alloc(0);
+    });
+    mockPage.screenshot = emptyCapture;
+    mockTab.refLocator = vi.fn().mockResolvedValue({ screenshot: emptyCapture, toString: () => "locator('div')" });
+    try {
+      for (const capture of [{}, { fullPage: true }, { element: 'Tall element', ref: 'e1' }]) {
+        for (const filename of [undefined, 'capture.webp']) {
+          response = new Response(mockContext, 'browser_take_screenshot', {});
+          const params = screenshotTool.schema.inputSchema.parse({ type: 'webp', scale, filename, ...capture });
+          await expect(screenshotTool.handle(mockContext, params, response)).rejects.toThrow('empty webp screenshot');
+          expect(response.result()).not.toContain('Took the');
+          expect(response.images()).toEqual([]);
+          expect(await fs.readdir(outputDir)).toHaveLength(1);
+          await response.cleanupFilesOnError();
+          expect(await fs.readdir(outputDir)).toEqual([]);
+        }
+      }
+    } finally {
+      await fs.rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('removes a partial auto-named screenshot when Playwright throws', async () => {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-screenshot-'));
+    const fileName = path.join(outputDir, 'partial.png');
+    mockTab.context.outputFile.mockResolvedValue(fileName);
+    mockPage.screenshot.mockImplementation(async () => {
+      await fs.writeFile(fileName, 'partial');
+      throw new Error('capture failed');
+    });
+    try {
+      await expect(screenshotTool.handle(mockContext, screenshotTool.schema.inputSchema.parse({}), response)).rejects.toThrow('capture failed');
+      await response.cleanupFilesOnError();
+      expect(await fs.readdir(outputDir)).toEqual([]);
+    } finally {
+      await fs.rm(outputDir, { recursive: true, force: true });
+    }
   });
 });

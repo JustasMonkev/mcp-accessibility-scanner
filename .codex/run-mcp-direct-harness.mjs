@@ -39,7 +39,7 @@ fs.writeFileSync(summaryPath, 'tool\tstatus\tdetail\tlog\n');
 
 const transport = new StdioClientTransport({
   command: process.execPath,
-  args: ['cli.js', '--headless', '--no-sandbox', '--isolated'],
+  args: ['cli.js', '--headless', '--no-sandbox', '--isolated', ...(options.includeInstall ? ['--caps', 'install'] : [])],
   cwd: projectRoot,
 });
 const client = new Client({ name: 'mcp-accessibility-direct-harness', version: '1.0.0' });
@@ -824,7 +824,7 @@ try {
   await client.connect(transport);
   const { tools } = await client.listTools();
   state.toolNames = tools.map(t => t.name);
-  await verifyCoverage(tests, state.toolNames);
+  await verifyCoverage(tests.filter(t => options.includeInstall || t.name !== 'browser_install'), state.toolNames);
   await runTests();
 } finally {
   await closeFixtureServer?.().catch(() => undefined);

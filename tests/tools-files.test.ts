@@ -17,23 +17,37 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import uploadFileTools, { prepareUploadFiles } from '../src/tools/files.js';
 import { resolveConfig } from '../src/config.js';
+import { Tab } from '../src/tab.js';
+import { Response } from '../src/response.js';
+import type { Context } from '../src/context.js';
+import type { Page } from 'playwright';
 
 const uploadFile = uploadFileTools.find(entry => entry.schema.name === 'browser_file_upload')!;
 
 async function createHarness(allowedUploadDirs?: string[], setFilesImpl: (files: unknown) => Promise<void> = async () => undefined) {
   const setFiles = vi.fn(setFilesImpl);
-  const modalState = { type: 'fileChooser', fileChooser: { setFiles } };
+  const modalState = { type: 'fileChooser' as const, description: 'File chooser', fileChooser: { setFiles } };
   const context = {
     currentTabOrDie: vi.fn(),
-    config: await resolveConfig({ browser: { allowedUploadDirs } }),
+    config: await resolveConfig({ browser: { allowedUploadDirs }, timeouts: { settle: 0 } }),
   };
+  const page = Object.assign(new EventEmitter(), {
+    isClosed: () => false,
+    setDefaultTimeout: vi.fn(),
+    setDefaultNavigationTimeout: vi.fn(),
+    waitForTimeout: vi.fn().mockResolvedValue(undefined),
+    _wrapApiCall: async (callback: () => Promise<void>) => callback(),
+  });
   const tab = {
+    page,
     modalStates: vi.fn(() => [modalState]),
     clearModalState: vi.fn(),
     waitForCompletion: vi.fn(async (action: () => Promise<void>) => action()),
+    waitForTimeout: page.waitForTimeout,
     context,
   };
   context.currentTabOrDie.mockReturnValue(tab);
@@ -41,8 +55,92 @@ async function createHarness(allowedUploadDirs?: string[], setFilesImpl: (files:
     setIncludeSnapshot: vi.fn(),
     addCode: vi.fn(),
   };
-  return { context, response, setFiles, tab };
+  return { context, response, setFiles, tab, modalState };
 }
+
+describe('browser_file_upload completion', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it.each([{ paths: ['/retry.txt'] }, { paths: [] }])('retains a failed chooser for retry or cancellation: $paths', async ({ paths }) => {
+    vi.useFakeTimers();
+    const { context, setFiles, tab: harness, modalState } = await createHarness();
+    // SAFETY: this context supplies config and currentTabOrDie used by the upload.
+    const toolContext = context as Context;
+    // SAFETY: the emitter supplies the Page methods exercised by Tab and upload settling.
+    const page = harness.page as Page;
+    const tab = new Tab(toolContext, page, () => {});
+    const response = new Response(toolContext, 'browser_file_upload', {});
+    context.currentTabOrDie.mockReturnValue(tab);
+    page.emit('filechooser', modalState.fileChooser);
+    const chooser = tab.modalStates()[0];
+    const listenersBefore = harness.page.eventNames().map(event => [event, harness.page.listenerCount(event)]);
+    setFiles.mockRejectedValueOnce(new Error('setFiles failed'));
+
+    await expect(uploadFile.handle(toolContext, { paths: ['/first.txt'] }, response)).rejects.toThrow('setFiles failed');
+    expect(tab.modalStates()).toEqual([chooser]);
+    expect(harness.page.eventNames().map(event => [event, harness.page.listenerCount(event)])).toEqual(listenersBefore);
+    expect(vi.getTimerCount()).toBe(0);
+
+    const retry = uploadFile.handle(toolContext, { paths }, response);
+    await vi.runAllTimersAsync();
+    await retry;
+    expect(setFiles).toHaveBeenCalledTimes(2);
+    expect(setFiles).toHaveBeenLastCalledWith(paths);
+    expect(tab.modalStates()).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    tab.dispose();
+  });
+
+  it('waits for upload requests and settle delay, without restoring a completed chooser on settle failure', async () => {
+    vi.useFakeTimers();
+    const { context, setFiles, tab } = await createHarness();
+    // SAFETY: the harness supplies the context and tab methods exercised by this tool.
+    const toolContext = context as Context;
+    const response = new Response(toolContext, 'browser_file_upload', {});
+    context.config.timeouts.settle = 250;
+    const request = {};
+    setFiles.mockImplementationOnce(async () => { tab.page.emit('request', request); });
+    tab.waitForTimeout.mockRejectedValueOnce(new Error('settle failed'));
+    const upload = uploadFile.handle(toolContext, { paths: ['/upload.txt'] }, response);
+    const failure = expect(upload).rejects.toThrow('settle failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tab.waitForTimeout).not.toHaveBeenCalled();
+    expect(tab.clearModalState).toHaveBeenCalledTimes(1);
+    tab.page.emit('requestfinished', request);
+    await failure;
+    expect(tab.waitForTimeout).toHaveBeenCalledWith(250);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(tab.page.listenerCount('request')).toBe(0);
+  });
+
+  it.each([false, true])('does not let a new chooser hide the upload outcome (failure: %s)', async fails => {
+    vi.useFakeTimers();
+    const { context, setFiles, tab: harness, modalState } = await createHarness();
+    // SAFETY: this context supplies the config and tab lookup used by the upload.
+    const toolContext = context as Context;
+    // SAFETY: the emitter supplies the Page methods used by Tab and upload settling.
+    const page = harness.page as Page;
+    const tab = new Tab(toolContext, page, () => {});
+    context.currentTabOrDie.mockReturnValue(tab);
+    page.emit('filechooser', modalState.fileChooser);
+    const original = tab.modalStates()[0];
+    const nextChooser = { setFiles: vi.fn() };
+    setFiles.mockImplementationOnce(async () => {
+      page.emit('filechooser', nextChooser);
+      if (fails)
+        throw new Error('upload rejected after next chooser');
+    });
+    const upload = uploadFile.handle(toolContext, { paths: ['/file.txt'] }, new Response(toolContext, 'browser_file_upload', {}));
+    const outcome = fails ? expect(upload).rejects.toThrow('upload rejected') : expect(upload).resolves.toBeUndefined();
+    await vi.runAllTimersAsync();
+    await outcome;
+    expect(tab.modalStates()).toHaveLength(fails ? 2 : 1);
+    expect(tab.modalStates().includes(original)).toBe(fails);
+    expect(tab.modalStates().at(-1)).toMatchObject({ fileChooser: nextChooser });
+    expect(vi.getTimerCount()).toBe(0);
+    tab.dispose();
+  });
+});
 
 describe('browser_file_upload allowedUploadDirs', () => {
   it('allows any path when no allowlist is configured', async () => {

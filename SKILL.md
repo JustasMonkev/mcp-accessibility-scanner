@@ -50,7 +50,7 @@ npx mcp-accessibility-scanner --headless --browser chrome
 |--------|-------------|
 | `--browser <browser>` | Browser to use: `chrome`, `firefox`, `webkit`, `msedge` |
 | `--headless` | Run browser in headless mode (headed by default) |
-| `--caps <caps>` | Comma-separated extra capabilities: `vision`, `pdf`, `verify`, `devtools` |
+| `--caps <caps>` | Comma-separated extra capabilities: `vision`, `pdf`, `verify`, `devtools`, `install` (allows browser downloads) |
 | `--viewport-size <size>` | Browser viewport, e.g. `"1280, 720"` |
 | `--device <device>` | Device emulation, e.g. `"iPhone 15"` |
 | `--output-dir <path>` | Directory for output files (reports, screenshots) |
@@ -58,7 +58,7 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--user-data-dir <path>` | Browser profile directory |
 | `--profile-dir-name <name>` | Chrome profile directory for extension mode (`--extension`/`--connect-tool` only), e.g. `Profile 1`; requires `--user-data-dir` |
 | `--isolated` | Keep browser profile in memory only |
-| `--storage-state <path>` | Storage state file to start the session from; applied in every mode except `--extension` (fresh contexts at creation, reused contexts via `setStorageState()`, which first clears their cookies and storage) |
+| `--storage-state <path>` | Storage state file for a fresh context; existing CDP/VS Code contexts and `--extension` reject imports. Use `--isolated` with CDP, or omit the state and sign in interactively. |
 | `--executable-path <path>` | Custom browser executable |
 | `--cdp-endpoint <endpoint>` | Connect to existing CDP endpoint |
 | `--cdp-header <header>` | CDP connect header, e.g. `"Authorization: Bearer <token>"`. Repeat the flag for multiple |
@@ -236,6 +236,8 @@ These tools are always available and work in the interactive REPL.
 | `browser_network_request` | Get credential-redacted headers and body metadata for one request: `{"index": 3}` |
 
 ### Optional Tools (require `--caps`)
+
+**`--caps install`:** `browser_install {}` - Install the configured browser. Disabled by default. If the browser is missing and installation is authorized, restart the REPL with `npx mcp-accessibility-scanner --caps install interactive`, preserving the existing browser options, then call `browser_install {}`. This downloads executable code through Playwright without independent archive checksum/signature verification; trust the download source and TLS configuration before enabling it. Alternatively, use a provisioned browser with `--executable-path`. Explicit `core-install` settings remain supported as a deprecated alias for `install`.
 
 **`--caps pdf`:** `browser_pdf_save` - Save page as PDF
 

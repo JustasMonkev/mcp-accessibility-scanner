@@ -231,7 +231,7 @@ Create a `config.json` file with the following options:
 - `browser.cdpTimeout`: Maximum time in milliseconds to wait when connecting to the CDP endpoint (default: `30000`)
 - `browser.cdpLaunch`: Launch a Chromium-family desktop app with CDP enabled, wait for the endpoint, and manage the child process lifecycle
 - CDP attach modes preserve the target browser's existing default-context settings instead of applying Playwright's defaults.
-- `browser.contextOptions.storageState`: Start each session from a recorded Playwright storage state; applied in every mode except `--extension` (fresh contexts receive it at creation, reused contexts via `setStorageState()`). Sessions that share one reused context (non-isolated CDP modes) get the state applied once per context — a session joining a live context inherits its current state, not a fresh copy of the file; see [Auditing pages behind a login](#auditing-pages-behind-a-login)
+- `browser.contextOptions.storageState`: Start a fresh context from a recorded Playwright storage state. Imports into existing CDP or VS Code contexts are rejected; use `--isolated` for CDP or sign in interactively. The default persistent mode uses a fresh disposable profile. See [Auditing pages behind a login](#auditing-pages-behind-a-login).
 - `browser.profileDirName`: Chrome profile directory name used in extension mode, for example `Default` or `Profile 1` (CLI: `--profile-dir-name`, env: `PLAYWRIGHT_MCP_PROFILE_DIR_NAME`). Requires `--user-data-dir` and extension mode (`--extension` or `--connect-tool`); defaults to the last-used profile that has the extension installed.
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
@@ -244,6 +244,8 @@ Create a `config.json` file with the following options:
 - `outputDir`: Directory for output files — reports, screenshots, traces, and session logs (CLI: `--output-dir`, env: `PLAYWRIGHT_MCP_OUTPUT_DIR`). Defaults to a fresh directory under the system temp folder, resolved once per server run so all of a run's artifacts land together. The output location is always server configuration; the deprecated MCP roots capability (client workspace folders) is no longer consulted.
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
+
+If CDP attachment times out after the WebSocket connects, an existing sleeping or unresponsive tab may be blocking Playwright's browser initialization ([upstream report](https://github.com/microsoft/playwright/issues/42730)). Use an explicit positive `--cdp-timeout` to bound the attempt. Inspect or wake the affected tabs yourself, or attach to a separate disposable browser. `noDefaults` and `--isolated` do not skip initialization of existing tabs; the server does not close your tabs or bypass Playwright's initialization to work around this.
 
 For remote HTTP access, configure the TLS reverse proxy explicitly. For example, with the MCP server bound using `--host 127.0.0.1 --port 8931` and `PLAYWRIGHT_MCP_AUTH_TOKEN` set:
 
@@ -318,10 +320,12 @@ PLAYWRIGHT_MCP_ISOLATED=true PLAYWRIGHT_MCP_STORAGE_STATE=./auth.json npx mcp-ac
 
 > **Every supported mode handles the state — by applying it or refusing it.**
 >
+> **Playwright 1.63.0 safety restriction:** importing into an existing context is rejected before taking a rollback snapshot or resetting any storage. On this pin, snapshot capture can execute service-worker-served scripts for a previously visited origin whose tab is no longer open ([upstream fix](https://github.com/microsoft/playwright/pull/42664)). Use a fresh context, or omit `--storage-state` and sign in interactively. Service workers are not disabled. A future dependency upgrade must also pass the recorder/shared-client checks in [#218](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/218) and IndexedDB checks in [#224](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/224) before this restriction is reconsidered.
+>
 > - **Fresh-context modes** (`--isolated`, the remote-endpoint mode, or either CDP mode combined with `--isolated`): the context is created with the storage state directly.
 > - **Default persistent-profile mode with `--storage-state`**: the session runs in a fresh, disposable profile — unique to that session and removed when it closes — built from the state, so the recorded state is provably the only session data (without `--storage-state` the regular persistent profile is used and survives restarts, as before). Any page the launch opened (for example from a URL in `browser.launchOptions.args`) is parked on a blank replacement before the state lands, then the replacement is navigated to the same URL, so a still-running anonymous page cannot overwrite the recorded identity and a scan never reads its DOM. This also means `--storage-state` cannot be combined with `--user-data-dir` (a user-supplied profile carries its own session and will not be wiped; the server refuses the combination).
-> - **CDP modes without `--isolated`**: the state is installed into the browser's existing context with Playwright's `setStorageState()`. Cookies are fully reset; origin storage (localStorage/IndexedDB) is reset for the origins recorded in the state *plus* any origins the Playwright connection has already seen — including pages open in the attached browser at connect time, whose storage can therefore be cleared even when the state omits them. Only origins from the profile's earlier history that this connection never saw survive untouched — cut in both directions, so treat an attached browser's storage as neither fully preserved nor fully reset, and add `--isolated` when you need a clean, fully-defined session. Pages already open in the attached browser are replaced with fresh tabs navigated to the same URLs so a scan never sees the previous identity's UI — and the old pages close *before* the state is installed, because a still-running page could otherwise persist the previous identity back into the freshly applied cookies or localStorage, which no later tab replacement could undo. A fresh tab also starts with empty per-tab `sessionStorage` (which sits outside Playwright storage states and would survive an in-place reload, where the old page's own scripts could even write the previous identity back between a clear and the reload), a replacement that fails to load is left blank or closed rather than left on a stale document, and these navigations run under a configured `--allowed-origins`/`--blocked-origins` policy just like every later navigation. The state is applied once per shared context: concurrent MCP sessions attached without `--isolated` share the browser's context, so a session joining while another is active inherits that context's live state (including anything the first session changed or cleared) rather than a fresh copy of the recorded file — add `--isolated` when every session must start from the recorded baseline.
-> - **`--extension`** (with or without `--isolated`) is the one exception: it works through the browser you are already running, where wiping cookies to install a recorded state is not an acceptable side effect, so the server refuses to start rather than doing that silently. There, sign in interactively instead — the persistent profile also keeps the session across restarts.
+> - **CDP modes without `--isolated` and the VS Code provider**: `--storage-state` is rejected when the browser already has a context. Add `--isolated` in CDP mode to create a fresh context; otherwise omit the state and sign in interactively. If the browser exposes no context, the server creates one with the state. CDP sessions joining that same server-created context inherit its live state without resetting it.
+> - **`--extension`** (with or without `--isolated`) refuses storage imports entirely: it works through the browser you are already running, where wiping cookies to install a recorded state is not an acceptable side effect, so the server refuses to start rather than doing that silently. There, sign in interactively instead — the persistent profile also keeps the session across restarts.
 
 ### Keep the crawl from destroying its own session
 
@@ -340,6 +344,8 @@ If a session cookie disappears anyway, `audit_site` says so instead of reporting
 The check compares which cookies the crawled URLs carry, not their values, so a rotating CSRF token never reads as a lost session. A cookie the browser deleted at its own stated expiry is ignored for the same reason — Cloudflare's `__cf_bm` lives 30 minutes and would otherwise warn on any longer crawl. Beyond that no attempt is made to tell an authentication cookie from any other: nothing in a cookie marks it as one, so any cookie the crawl started with and later lost is reported. Monitoring does not stop at the first loss — each cookie is reported once, at the URL where it vanished, so an analytics cookie expiring early cannot mask the session cookie being dropped later. URLs discovered mid-crawl join the cookie tracking before they are visited, so a session cookie scoped to a path below the start URL (say `/app`) is watched too.
 
 ## Available Tools
+
+Page-registered WebMCP tools are not currently exposed. See the [WebMCP adoption decision](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/decisions/001-webmcp-adoption.md) for the deferral and conditions for revisiting an opt-in capability.
 
 The MCP server provides comprehensive browser automation and accessibility scanning tools:
 
@@ -592,6 +598,7 @@ Evaluate a JavaScript expression on the page, or on a specific element when a `r
 Take a screenshot of the current page.
 - Parameters: `filename` (optional), `type` (`png`, `jpeg`, or `webp`), `scale` (`css` or `device`, default `css`), `fullPage` (optional), `element`/`ref` pair (for element screenshots)
 - `scale: device` captures a high-resolution screenshot using device pixels (accounts for the device pixel ratio); `scale: css` keeps the image sized in CSS pixels.
+- An empty capture is an error, and its output file is removed, including automatically named files. The requested format is never silently changed. If a WebP capture is empty, reduce its dimensions or explicitly request PNG/JPEG.
 
 #### `browser_pdf_save`
 Save page as PDF.
@@ -602,6 +609,12 @@ This tool requires `--caps pdf` in the CLI.
 #### `browser_install`
 Install the configured browser engine (use when browser executable is missing).
 - Parameters: none
+
+Disabled by default. Enable it at server startup with `--caps install`, `PLAYWRIGHT_MCP_CAPS=install`, or `"capabilities": ["install"]` in the config file. Explicit `core-install` settings remain supported as a deprecated alias; use `install` in new configurations. Without this opt-in, the tool is neither listed nor callable; existing browser installations can still be used.
+
+This tool invokes Playwright's installer, which downloads executable code. In [Playwright 1.63.0](https://github.com/microsoft/playwright/blob/v1.63.0/packages/playwright-core/src/server/registry/oopDownloadBrowserMain.ts), browser archives have no checksum or signature verification before extraction; the default download hosts use HTTPS. Only enable installation when you trust the download source and TLS configuration, including any custom `PLAYWRIGHT_DOWNLOAD_HOST`, browser-specific host overrides, or TLS-inspecting proxy. Do not disable TLS certificate validation.
+
+For deployments that require independently verified binaries, provision the browser through your trusted deployment process and use `--executable-path` or an existing browser connection. The capability opt-in limits MCP-triggered installation; it does not add archive verification or change manual, CI, or Docker build downloads.
 
 ### Browser Management
 
@@ -679,6 +692,7 @@ Handle browser dialogs (alerts, confirms, prompts).
 #### `browser_file_upload`
 Upload files to the page.
 - Parameters: `paths` (array of absolute file paths)
+- If `setFiles` fails, the chooser stays available for another upload attempt; `paths: []` clears the selection and completes the chooser. A successful upload clears only that chooser and waits for page activity and the configured settle delay.
 
 #### `browser_verify_element_visible`
 Verify an element by ARIA role/name.

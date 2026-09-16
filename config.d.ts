@@ -25,7 +25,7 @@ export type ToolCapability =
   | 'files'
   | 'install'
   | 'testing'
-  | 'core-install'
+  | 'core-install' // Deprecated alias for 'install'; requires explicit opt-in.
   | 'core-tabs'
   | 'devtools'
   | 'vision'

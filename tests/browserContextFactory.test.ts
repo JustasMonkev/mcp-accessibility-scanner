@@ -181,6 +181,32 @@ describe('browserContextFactory', () => {
     expect(browserContext.close).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { mode: 'attach', browser: { cdpEndpoint: 'http://127.0.0.1:9222' } },
+    { mode: 'launch', browser: { cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 500 } } },
+  ])('rejects storage imports into existing CDP $mode contexts before capture or mutation', async ({ browser: browserOptions }) => {
+    const page = createMockPage('https://app.example');
+    const browserContext = createMockBrowserContext();
+    browserContext.pages.mockReturnValue([page]);
+    const browser = createMockBrowser(browserContext);
+    connectOverCDP.mockResolvedValue(browser);
+    spawnMock.mockImplementation(createMockChildProcess);
+    // Cookie-only states are also unsafe: capture can visit previously seen origins.
+    for (const storageState of ['/missing/auth.json', { cookies: [], origins: [] }]) {
+      const config = await resolveConfig({ browser: { ...browserOptions, contextOptions: { storageState } } });
+      await expect(contextFactory(config).createContext({ name: 'vitest' }, new AbortController().signal, undefined))
+          .rejects.toThrow(/Cannot apply --storage-state.*existing browser context.*No storage snapshot or reset/);
+    }
+    expect(browserContext.storageState).not.toHaveBeenCalled();
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+    expect(browserContext.clearCookies).not.toHaveBeenCalled();
+    expect(browserContext.newPage).not.toHaveBeenCalled();
+    expect(browserContext.close).not.toHaveBeenCalled();
+    expect(page.close).not.toHaveBeenCalled();
+    expect(page.goto).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalledTimes(2);
+  });
+
   it('forwards configured CDP headers and timeout when attaching to an endpoint', async () => {
     const browserContext = createMockBrowserContext();
     const browser = createMockBrowser(browserContext);
@@ -968,456 +994,6 @@ describe('browserContextFactory', () => {
     expect(browserContext.close).toHaveBeenCalledTimes(1);
   });
 
-  it('applies the storage state to the reused context when attaching over CDP without isolation', async () => {
-    const browserContext = createMockBrowserContext();
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    expect(browser.newContext).not.toHaveBeenCalled();
-    expect(browserContext.setStorageState).toHaveBeenCalledWith(recordedState);
-    expect(result.browserContext).toBe(browserContext);
-  });
-
-  it('disconnects from the CDP browser when applying the storage state fails on attach', async () => {
-    const browserContext = createMockBrowserContext();
-    browserContext.setStorageState.mockRejectedValueOnce(new Error('Error setting storage state:\nnavigation failed'));
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow('navigation failed');
-    expect(browser.close).toHaveBeenCalledTimes(1);
-  });
-
-  it('rejects an unreadable storage state file before touching the browser', async () => {
-    // Discovered inside the apply, a bad file would land in the catch that
-    // answers every apply failure with a rollback — and the rollback's own
-    // setStorageState() clears the attached context's HTTP cache. A config
-    // error that changed nothing must not cost the running app its cache.
-    const browserContext = createMockBrowserContext();
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: '/tmp/definitely-missing-auth.json' },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow(/could not be read or parsed.*Nothing was changed/);
-    expect(browserContext.setStorageState).not.toHaveBeenCalled();
-    expect(browserContext.storageState).not.toHaveBeenCalled();
-    expect(browserContext.cookies).not.toHaveBeenCalled();
-    expect(browserContext.clearCookies).not.toHaveBeenCalled();
-    expect(browser.close).toHaveBeenCalledTimes(1);
-  });
-
-  it('rejects a malformed storage state file before touching the browser', async () => {
-    const stateFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-state-')), 'auth.json');
-    fs.writeFileSync(stateFile, 'not json {');
-    const browserContext = createMockBrowserContext();
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: stateFile },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow(/could not be read or parsed.*Nothing was changed/);
-    expect(browserContext.setStorageState).not.toHaveBeenCalled();
-    expect(browserContext.cookies).not.toHaveBeenCalled();
-  });
-
-  it('explains the Electron limitation when restoring origin storage needs a page the target cannot create', async () => {
-    // Playwright restores localStorage/IndexedDB by opening a temporary page;
-    // Electron CDP targets have no Target.createTarget, so that fails after the
-    // cookies were already applied. The raw protocol error says none of this.
-    const browserContext = createMockBrowserContext();
-    browserContext.setStorageState.mockRejectedValue(new Error('Error setting storage state:\nTarget.createTarget: Not supported'));
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow(/Drop the storage state and sign in inside the app instead/);
-    expect(browser.close).toHaveBeenCalledTimes(1);
-  });
-
-  it('rejects the storage state before mutating anything when the needed page cannot be created', async () => {
-    // setStorageState clears the HTTP cache before the page creation that fails
-    // on Electron, and a cache cannot be restored. With a loaded page in the
-    // attached browser (so a temporary page will be needed), the probe must
-    // fail the operation while nothing has been touched yet.
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockReturnValue([{ url: () => 'https://app.example/dashboard' }]);
-    browserContext.newPage.mockRejectedValue(new Error('Target.createTarget: Not supported'));
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow(/Nothing was changed/);
-    expect(browserContext.setStorageState).not.toHaveBeenCalled();
-    expect(browserContext.clearCookies).not.toHaveBeenCalled();
-    expect(browser.close).toHaveBeenCalledTimes(1);
-  });
-
-  it('closes already-open pages before installing the storage state, and navigates their replacements only after', async () => {
-    // A reused page still renders the previous identity's DOM, and its scripts
-    // keep running: a page that periodically persists authentication into
-    // cookies or localStorage would overwrite the freshly installed state if
-    // it were still alive during setStorageState() — and replacing its tab
-    // afterwards cannot undo writes already made into context-wide storage.
-    // The old documents therefore close (their replacements parked on blank)
-    // BEFORE the state lands; only the replacement navigations run after.
-    const pages = [
-      createMockPage('https://app.example/a'),
-      createMockPage('https://app.example/b'),
-    ];
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockReturnValue(pages);
-    const fresh = collectFreshPages(browserContext);
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    for (const page of pages) {
-      expect(page.close).toHaveBeenCalledTimes(1);
-      expect(page.reload).not.toHaveBeenCalled();
-      expect(page.close.mock.invocationCallOrder[0]).toBeLessThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
-    }
-    const replacements = fresh.filter(page => page.goto.mock.calls.length);
-    expect(replacements.flatMap(page => page.goto.mock.calls.map((call: any[]) => call[0])).sort()).toEqual(['https://app.example/a', 'https://app.example/b']);
-    for (const replacement of replacements)
-      expect(replacement.goto.mock.invocationCallOrder[0]).toBeGreaterThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
-  });
-
-  it('applies the validated parse of a storage-state file, not a re-read of the path', async () => {
-    // Handing the path to setStorageState() would make Playwright read the
-    // file a second time — a file replaced between the validating read and the
-    // apply would skip the cookie/origin validation and the page-creation
-    // probe, then fail after the unrestorable cache clear.
-    const state = { cookies: [{ name: 'app_session', value: 'recorded', domain: 'app.example', path: '/' }], origins: [] };
-    const stateFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-state-')), 'auth.json');
-    fs.writeFileSync(stateFile, JSON.stringify(state));
-    const browserContext = createMockBrowserContext();
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: stateFile },
-      },
-    });
-
-    const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    expect(browserContext.setStorageState).toHaveBeenCalledWith(state);
-    expect(browserContext.setStorageState).not.toHaveBeenCalledWith(stateFile);
-  });
-
-  it('resets a page that opens while the existing pages are being replaced', async () => {
-    // A still-old document can open a popup from a timer during the refresh
-    // window, and a same-origin popup clones its opener's previous-identity
-    // sessionStorage at creation — a single pages() snapshot would hand it to
-    // Context unreset.
-    const popup = createMockPage('https://app.example/popup');
-    const opener = createMockPage('https://app.example/a');
-    const pagesList: any[] = [opener];
-    opener.close.mockImplementation(async () => {
-      if (!pagesList.includes(popup))
-        pagesList.push(popup);
-    });
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockImplementation(() => [...pagesList]);
-    const fresh = collectFreshPages(browserContext);
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    expect(opener.close).toHaveBeenCalledTimes(1);
-    expect(popup.close).toHaveBeenCalledTimes(1);
-    expect(fresh.flatMap(page => page.goto.mock.calls.map((call: any[]) => call[0]))).toContain('https://app.example/popup');
-  });
-
-  it('resets a page the sweep only learns about from the page event', async () => {
-    // Playwright surfaces a new page in pages() asynchronously; a popup whose
-    // creation raced the sweep's last pages() call is only visible through the
-    // temporary 'page' listener — and the listener comes off before handoff.
-    const popup = createMockPage('https://app.example/popup');
-    const opener = createMockPage('https://app.example/a');
-    const listeners = new Map<string, (page: any) => void>();
-    const browserContext = createMockBrowserContext();
-    browserContext.on.mockImplementation((event: string, listener: (page: any) => void) => listeners.set(event, listener));
-    browserContext.pages.mockReturnValue([opener]);
-    opener.close.mockImplementation(async () => listeners.get('page')?.(popup));
-    const fresh = collectFreshPages(browserContext);
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    expect(popup.close).toHaveBeenCalledTimes(1);
-    expect(fresh.flatMap(page => page.goto.mock.calls.map((call: any[]) => call[0]))).toContain('https://app.example/popup');
-    expect(browserContext.off).toHaveBeenCalledWith('page', listeners.get('page'));
-  });
-
-  it('replaces a page arriving through both the page event and pages() exactly once', async () => {
-    // The same Page object can surface through the temporary listener and the
-    // next pages() call; two concurrent replacements would race each other's
-    // close and navigation and could blank or close a valid replacement.
-    const popup = createMockPage('https://app.example/popup');
-    const opener = createMockPage('https://app.example/a');
-    const pagesList: any[] = [opener];
-    const listeners = new Map<string, (page: any) => void>();
-    const browserContext = createMockBrowserContext();
-    browserContext.on.mockImplementation((event: string, listener: (page: any) => void) => listeners.set(event, listener));
-    browserContext.pages.mockImplementation(() => [...pagesList]);
-    opener.close.mockImplementation(async () => {
-      pagesList.push(popup);
-      listeners.get('page')?.(popup);
-    });
-    const fresh = collectFreshPages(browserContext);
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    expect(popup.close).toHaveBeenCalledTimes(1);
-    // One probe page, one replacement for the opener, one for the popup — a
-    // duplicate in the pending batch would create a fourth.
-    expect(browserContext.newPage).toHaveBeenCalledTimes(3);
-    expect(fresh.flatMap(page => page.goto.mock.calls.map((call: any[]) => call[0])).filter(url => url === 'https://app.example/popup')).toHaveLength(1);
-  });
-
-  it('mirrors the configured network policy around the replacement navigations', async () => {
-    // The replacement navigations run inside the factory, before Context
-    // installs the origin allowlist/blocklist — with the recorded credentials
-    // already applied, the first navigation must not be able to reach a
-    // blocked origin.
-    const pages = [createMockPage('https://app.example/a')];
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockReturnValue(pages);
-    const fresh = collectFreshPages(browserContext);
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-      network: { blockedOrigins: ['tracker.example'] },
-    });
-
-    const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    // Routes go in after the state is applied (so they cannot interfere with
-    // the temporary page Playwright drives) and before the replacement
-    // navigations — and they STAY: page scripts can queue requests that fire
-    // after the navigation settles, so removing the handlers before Context
-    // re-ensures the same policy would open a window to a blocked origin.
-    const replacement = fresh.find(page => page.goto.mock.calls.length)!;
-    expect(browserContext.route).toHaveBeenCalledWith('*://tracker.example/**', expect.any(Function));
-    expect(browserContext.route.mock.invocationCallOrder[0]).toBeGreaterThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
-    expect(browserContext.route.mock.invocationCallOrder[0]).toBeLessThan(replacement.goto.mock.invocationCallOrder[0]);
-    expect(browserContext.unroute).not.toHaveBeenCalled();
-    expect(browserContext.unrouteAll).not.toHaveBeenCalled();
-  });
-
-  it('leaves routing untouched around the replacements when no network policy is configured', async () => {
-    const pages = [createMockPage('https://app.example/a')];
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockReturnValue(pages);
-    const fresh = collectFreshPages(browserContext);
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    expect(pages[0].close).toHaveBeenCalledTimes(1);
-    expect(fresh.some(page => page.goto.mock.calls.length)).toBe(true);
-    expect(browserContext.route).not.toHaveBeenCalled();
-    expect(browserContext.unroute).not.toHaveBeenCalled();
-    expect(browserContext.unrouteAll).not.toHaveBeenCalled();
-  });
-
-  it('does not navigate rollback replacements when network policy setup fails', async () => {
-    const page = createMockPage('https://blocked.example/account');
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockReturnValue([page]);
-    browserContext.route.mockRejectedValue(new Error('Routing unsupported'));
-    const fresh = collectFreshPages(browserContext);
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-      network: { blockedOrigins: ['blocked.example'] },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow('Routing unsupported');
-    const replacement = fresh.at(-1);
-    expect(replacement.goto).not.toHaveBeenCalled();
-    expect(replacement.close).toHaveBeenCalledTimes(1);
-    expect(browserContext.setStorageState).toHaveBeenCalledTimes(2);
-  });
-
-  it('rejects the storage state when snapshotting retained origins needs a page the target cannot create', async () => {
-    // A connection can retain visited origins whose pages have since closed:
-    // pages() shows nothing, yet setStorageState() still unions those origins
-    // into its work and would clear the HTTP cache before failing to create
-    // its temporary page on Electron. The origin snapshot needs the same page
-    // and mutates nothing, so its failure must reject the operation while
-    // everything is intact.
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockReturnValue([]);
-    browserContext.storageState.mockRejectedValue(new Error('Target.createTarget: Not supported'));
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow(/origins this connection has already visited.*Nothing was changed/);
-    expect(browserContext.setStorageState).not.toHaveBeenCalled();
-    expect(browserContext.clearCookies).not.toHaveBeenCalled();
-    expect(browser.close).toHaveBeenCalledTimes(1);
-  });
-
-  it('closes the old document before its replacement navigates, and never scripts into it', async () => {
-    // An in-page sessionStorage clear leaves the old document's scripts
-    // running until the reload commits — a timer can write the previous
-    // identity back into that window, and sessionStorage survives the reload.
-    // Replacement closes the old document first, so nothing can be written
-    // back, and never needs to evaluate into its frames at all.
-    const frames = [{ evaluate: vi.fn().mockResolvedValue(undefined) }];
-    const pages = [createMockPage('https://app.example/a', { frames: vi.fn().mockReturnValue(frames) })];
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockReturnValue(pages);
-    const fresh = collectFreshPages(browserContext);
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    expect(frames[0].evaluate).not.toHaveBeenCalled();
-    expect(pages[0].reload).not.toHaveBeenCalled();
-    const replacement = fresh.find(page => page.goto.mock.calls.length)!;
-    expect(pages[0].close.mock.invocationCallOrder[0]).toBeLessThan(replacement.goto.mock.invocationCallOrder[0]);
-  });
-
   it('keeps the shared CDP connection open until the last session releases it', async () => {
     // Every session of a non-isolated CDP factory shares one connection; a
     // sibling closing must not tear down a live audit.
@@ -1461,161 +1037,6 @@ describe('browserContextFactory', () => {
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
         .rejects.toThrow('Target.createBrowserContext');
     expect(browser.close).not.toHaveBeenCalled();
-  });
-
-  // Playwright validates cookies only while installing them — after the
-  // attached context's HTTP cache and cookie jar are already cleared — and
-  // the cache cannot be restored by the rollback.
-  it.each([
-    { label: 'empty domain', cookie: { name: 'sid', value: 'x', domain: '', path: '/' }, problem: /url or a domain\/path pair/ },
-    { label: 'url with domain', cookie: { name: 'sid', value: 'x', url: 'https://app.example/', domain: 'app.example' }, problem: /either a url or a domain/ },
-    { label: 'url with path', cookie: { name: 'sid', value: 'x', url: 'https://app.example/', path: '/' }, problem: /either a url or a path/ },
-    { label: 'expires -2', cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', expires: -2 }, problem: /valid expires/ },
-    { label: 'expires past the ceiling', cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', expires: 253402300800 }, problem: /valid expires/ },
-    { label: 'bad sameSite', cookie: { name: 'sid', value: 'x', domain: 'app.example', path: '/', sameSite: 'Sideways' }, problem: /Strict\|Lax\|None/ },
-    { label: 'url about:blank', cookie: { name: 'sid', value: 'x', url: 'about:blank' }, problem: /cannot be about:blank/ },
-    { label: 'data: url', cookie: { name: 'sid', value: 'x', url: 'data:text/html,x' }, problem: /cannot be a data: URL/ },
-    { label: 'unparseable url', cookie: { name: 'sid', value: 'x', url: 'not a url' }, problem: /not a valid absolute URL/ },
-    { label: 'non-http url', cookie: { name: 'sid', value: 'x', url: 'ws://app.example/' }, problem: /must be an http\(s\) URL/ },
-  ])('rejects a storage state with a $label cookie before touching the browser', async ({ cookie, problem }) => {
-    const browserContext = createMockBrowserContext();
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: { cookies: [cookie], origins: [] } as any },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow(problem);
-    expect(browserContext.setStorageState).not.toHaveBeenCalled();
-    expect(browserContext.clearCookies).not.toHaveBeenCalled();
-  });
-
-  it('rejects a storage state whose origins entry is not an http(s) URL, before touching the browser', async () => {
-    // Restoring an origin's storage navigates Playwright's temporary page to
-    // it — a malformed origin fails that navigation after the cache clear.
-    const browserContext = createMockBrowserContext();
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: { cookies: [], origins: [{ origin: 'not a url', localStorage: [] }] } as any },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow(/origins entry .* is not an absolute http\(s\) URL/);
-    expect(browserContext.setStorageState).not.toHaveBeenCalled();
-    expect(browserContext.newPage).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    {
-      label: 'zero IndexedDB version',
-      database: { name: 'auth', version: 0, stores: [] },
-      problem: /positive integer version/,
-    },
-    {
-      label: 'auto-incrementing store with an array key path',
-      database: { name: 'auth', version: 1, stores: [{ name: 'tokens', autoIncrement: true, keyPathArray: ['tenant', 'id'], records: [], indexes: [] }] },
-      problem: /cannot combine autoIncrement with an empty or array key path/,
-    },
-    {
-      label: 'multi-entry index with an array key path',
-      database: { name: 'auth', version: 1, stores: [{ name: 'tokens', autoIncrement: false, records: [], indexes: [{ name: 'by_scope', keyPathArray: ['tenant', 'scope'], multiEntry: true, unique: false }] }] },
-      problem: /cannot combine multiEntry with an array key path/,
-    },
-    {
-      label: 'duplicate external IndexedDB record keys',
-      database: { name: 'auth', version: 1, stores: [{ name: 'tokens', autoIncrement: false, records: [{ key: 1, value: 'first' }, { key: 1, value: 'second' }], indexes: [] }] },
-      problem: /duplicate record key 1/,
-    },
-    {
-      label: 'malformed IndexedDB key path',
-      database: { name: 'auth', version: 1, stores: [{ name: 'tokens', autoIncrement: false, keyPath: 'a..b', records: [], indexes: [] }] },
-      problem: /invalid key path/,
-    },
-  ])('rejects a storage state with a $label before touching the browser', async ({ database, problem }) => {
-    const browserContext = createMockBrowserContext();
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: { cookies: [], origins: [{ origin: 'https://app.example', localStorage: [], indexedDB: [database] }] } as any },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow(problem);
-    expect(browserContext.setStorageState).not.toHaveBeenCalled();
-    expect(browserContext.storageState).not.toHaveBeenCalled();
-    expect(browserContext.cookies).not.toHaveBeenCalled();
-  });
-
-  it('closes a page outright when no replacement tab can be created', async () => {
-    // Electron targets cannot create pages; without a replacement, closing is
-    // the only way to keep the previous identity's DOM and sessionStorage out
-    // of the audit. (Reachable only with blank pages open — a loaded page
-    // makes the earlier newPage probe reject the whole apply first.)
-    const pages = [createMockPage('about:blank')];
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockReturnValue(pages);
-    browserContext.newPage.mockRejectedValue(new Error('Target.createTarget: Not supported'));
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    expect(pages[0].close).toHaveBeenCalledTimes(1);
-    expect(pages[0].reload).not.toHaveBeenCalled();
-    expect(pages[0].goto).not.toHaveBeenCalled();
-  });
-
-  it('rejects before applying the state when an old page cannot be closed', async () => {
-    const page = createMockPage('https://app.example/dashboard', {
-      close: vi.fn().mockRejectedValue(new Error('Target refused to close')),
-    });
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockReturnValue([page]);
-    const fresh = collectFreshPages(browserContext);
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow('Target refused to close');
-    expect(browserContext.setStorageState).not.toHaveBeenCalled();
-    expect(fresh.at(-1).close).toHaveBeenCalledTimes(1);
   });
 
   it('evicts a fallback context from the memo when it closes', async () => {
@@ -1715,8 +1136,9 @@ describe('browserContextFactory', () => {
     // see zero holders and close the shared connection out from under it.
     const browserContext = createMockBrowserContext();
     const browser = createMockBrowser(browserContext);
-    let releaseApply: () => void;
-    browserContext.setStorageState.mockImplementationOnce(() => new Promise<void>(resolve => { releaseApply = resolve; }));
+    browser.contexts.mockReturnValueOnce([]).mockReturnValue([browserContext]);
+    let releaseCreate: () => void;
+    browser.newContext.mockImplementationOnce(() => new Promise(resolve => { releaseCreate = () => resolve(browserContext); }));
     connectOverCDP.mockResolvedValue(browser);
 
     const config = await resolveConfig({
@@ -1727,18 +1149,16 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    // Session A blocks inside the storage-state apply.
+    // Session A is creating a fresh fallback context.
     const pendingA = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-    await vi.waitFor(() => expect(browserContext.setStorageState).toHaveBeenCalled());
+    await vi.waitFor(() => expect(browser.newContext).toHaveBeenCalled());
 
     // Session B fails context creation while A is still in flight.
-    browser.contexts.mockReturnValueOnce([]);
-    browser.newContext.mockRejectedValueOnce(new Error('Target.createBrowserContext: Not supported'));
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow('Target.createBrowserContext');
+        .rejects.toThrow('Cannot apply --storage-state');
     expect(browser.close).not.toHaveBeenCalled();
 
-    releaseApply!();
+    releaseCreate!();
     const resultA = await pendingA;
     await resultA.close();
     expect(browser.close).toHaveBeenCalledTimes(1);
@@ -1964,79 +1384,6 @@ describe('browserContextFactory', () => {
     expect(browser.close).toHaveBeenCalledTimes(1);
   });
 
-  it('blanks a replacement whose navigation fails, and closes it when even that fails', async () => {
-    // The origin may be blocked by the just-installed policy, or the load may
-    // simply fail. The fresh tab carries no old identity, so a blank
-    // replacement is safe to hand to Context; it is closed only when even
-    // blanking fails.
-    const pages = [
-      createMockPage('https://app.example/ok'),
-      createMockPage('https://blocked.example/a'),
-      createMockPage('https://dead.example/b'),
-    ];
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockReturnValue(pages);
-    const fresh: any[] = [];
-    browserContext.newPage.mockImplementation(async () => {
-      const page = createMockPage('about:blank');
-      // Call 0 is the probe; replacements follow in page order.
-      const index = fresh.length;
-      fresh.push(page);
-      if (index === 2)
-        page.goto.mockRejectedValueOnce(new Error('net::ERR_BLOCKED_BY_CLIENT')).mockResolvedValueOnce(undefined);
-      if (index === 3)
-        page.goto.mockRejectedValue(new Error('Target closed'));
-      return page;
-    });
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    // Every old page goes away; the replacement that navigated fine is left
-    // alone, the one whose navigation failed is blanked, and the one that
-    // could not even blank is closed, so no stale or broken page survives.
-    for (const page of pages)
-      expect(page.close).toHaveBeenCalledTimes(1);
-    expect(fresh[1].goto).toHaveBeenCalledWith('https://app.example/ok');
-    expect(fresh[1].close).not.toHaveBeenCalled();
-    expect(fresh[2].goto).toHaveBeenCalledWith('about:blank');
-    expect(fresh[2].close).not.toHaveBeenCalled();
-    expect(fresh[3].goto).toHaveBeenCalledWith('about:blank');
-    expect(fresh[3].close).toHaveBeenCalledTimes(1);
-  });
-
-  it('applies the storage state once per shared attached context, not once per session', async () => {
-    // One attached browser serves every session of a non-isolated CDP factory;
-    // a second session re-running the global setStorageState() would wipe the
-    // first session's live cookies and origin storage mid-audit.
-    const browserContext = createMockBrowserContext();
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    expect(first.browserContext).toBe(second.browserContext);
-    expect(browserContext.setStorageState).toHaveBeenCalledTimes(1);
-  });
-
   it('lets a later session join the context the fallback created, without resetting it', async () => {
     // The context created for a contextless target already carries the state;
     // a second session finds it as the browser's existing context and must
@@ -2083,173 +1430,6 @@ describe('browserContextFactory', () => {
 
     expect(browser.newContext).toHaveBeenCalledTimes(1);
     expect(first.browserContext).toBe(second.browserContext);
-  });
-
-  it('retries the shared-context apply for the next session when it failed', async () => {
-    // A failed apply must not poison the shared context forever — the memo is
-    // dropped so the next session gets a fresh attempt.
-    const browserContext = createMockBrowserContext();
-    browserContext.setStorageState
-        .mockRejectedValueOnce(new Error('Error setting storage state:\nnavigation failed'))
-        .mockResolvedValue(undefined);
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow('navigation failed');
-    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    // The retry must target the configured state again (the exact call count
-    // is the rollback's business, not this contract's).
-    expect(browserContext.setStorageState.mock.lastCall[0]).toEqual(recordedState);
-    expect(result.browserContext).toBe(browserContext);
-  });
-
-  it('rejects the storage state when the rollback snapshot fails for any other reason', async () => {
-    // Without the full snapshot, a partial forward apply could only be rolled
-    // back to cookies, leaving origin storage part old, part recorded — so a
-    // snapshot failure aborts before anything is mutated.
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockReturnValue([]);
-    browserContext.storageState.mockRejectedValue(new Error('Error serializing IndexedDB'));
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow(/rollback failed.*Nothing was changed/);
-    expect(browserContext.setStorageState).not.toHaveBeenCalled();
-    expect(browserContext.clearCookies).not.toHaveBeenCalled();
-  });
-
-  it('navigates the replacement tabs back to the original pages when the apply fails and the original state was rolled back', async () => {
-    // The old documents close before the apply (a live one could rewrite the
-    // freshly installed state), so a failed apply cannot hand them back — but
-    // with the original state rolled back, the blank replacement tabs are
-    // returned to the pages they replaced rather than left empty.
-    const pages = [createMockPage('https://app.example/a')];
-    const browserContext = createMockBrowserContext();
-    browserContext.pages.mockReturnValue(pages);
-    const fresh = collectFreshPages(browserContext);
-    // Probe page succeeds; the apply itself fails and the rollback runs.
-    browserContext.setStorageState
-        .mockRejectedValueOnce(new Error('Error setting storage state:\nnavigation failed'))
-        .mockResolvedValueOnce(undefined);
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow();
-    // Closed before the apply, like on the success path.
-    expect(pages[0].close).toHaveBeenCalledTimes(1);
-    expect(pages[0].close.mock.invocationCallOrder[0]).toBeLessThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
-    // The replacement tab returns to the original page, after the rollback
-    // (the second setStorageState call) restored the state it renders.
-    const replacement = fresh.find(page => page.goto.mock.calls.length)!;
-    expect(replacement.goto.mock.calls.map((call: any[]) => call[0])).toContain('https://app.example/a');
-    expect(replacement.goto.mock.invocationCallOrder[0]).toBeGreaterThan(browserContext.setStorageState.mock.invocationCallOrder[1]);
-  });
-
-  it('restores the full original storage state when a partial apply fails', async () => {
-    // A multi-origin apply can fail after earlier origins were already
-    // overwritten; the cookie jar alone is not enough to undo that. The
-    // pre-apply snapshot is replayed through setStorageState itself.
-    const originalState = { cookies: [{ name: 'app_session', value: 'original', domain: 'app.example', path: '/', expires: -1, httpOnly: true, secure: false, sameSite: 'Lax' }], origins: [{ origin: 'https://app.example', localStorage: [{ name: 'token', value: 'original' }] }] };
-    const browserContext = createMockBrowserContext();
-    browserContext.storageState.mockResolvedValue(originalState);
-    browserContext.setStorageState
-        .mockRejectedValueOnce(new Error('Error setting storage state:\nTarget.createTarget: Not supported'))
-        .mockResolvedValueOnce(undefined);
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow(/original storage state was restored/);
-    expect(browserContext.setStorageState).toHaveBeenNthCalledWith(2, originalState);
-    // The full-state rollback covered the cookies too.
-    expect(browserContext.clearCookies).not.toHaveBeenCalled();
-  });
-
-  it('rolls the attached cookie jar back when applying the storage state fails midway', async () => {
-    // setStorageState replaces the cookies before the origin-restore step that
-    // fails on Electron; without a rollback the running app keeps the recorded
-    // cookies even though the operation reported failure.
-    const originalCookies = [{ name: 'app_session', value: 'original', domain: 'app.example', path: '/', expires: -1, httpOnly: true, secure: false, sameSite: 'Lax' }];
-    const browserContext = createMockBrowserContext();
-    browserContext.cookies.mockResolvedValue(originalCookies);
-    browserContext.setStorageState.mockRejectedValue(new Error('Error setting storage state:\nTarget.createTarget: Not supported'));
-    const browser = createMockBrowser(browserContext);
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpEndpoint: 'http://127.0.0.1:9222',
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
-        .rejects.toThrow(/original cookies were restored/);
-    // Snapshot was taken before the apply, and put back afterwards.
-    expect(browserContext.cookies.mock.invocationCallOrder[0]).toBeLessThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
-    expect(browserContext.clearCookies).toHaveBeenCalledTimes(1);
-    expect(browserContext.addCookies).toHaveBeenCalledWith(originalCookies);
-  });
-
-  it('applies the storage state to the reused context when launching over CDP without isolation', async () => {
-    const browserContext = createMockBrowserContext();
-    const browser = createMockBrowser(browserContext);
-    spawnMock.mockReturnValue(createMockChildProcess());
-    connectOverCDP.mockResolvedValue(browser);
-
-    const config = await resolveConfig({
-      browser: {
-        cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 500 },
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = contextFactory(config);
-    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-
-    expect(browser.newContext).not.toHaveBeenCalled();
-    expect(browserContext.setStorageState).toHaveBeenCalledWith(recordedState);
-    expect(result.browserContext).toBe(browserContext);
   });
 
   it('creates a fresh context when the attached CDP browser exposes none', async () => {
@@ -2445,6 +1625,27 @@ describe('VSCodeBrowserContextFactory', () => {
     return { chromium: { connect: vi.fn().mockResolvedValue(browser) } } as any;
   }
 
+  it.each([false, true])('imports storage only when the VS Code provider creates a fresh context (existing: %s)', async existing => {
+    const browserContext = createMockBrowserContext();
+    const browser = createMockBrowser(browserContext);
+    browser.contexts.mockReturnValue(existing ? [browserContext] : []);
+    const config = await resolveConfig({ browser: { contextOptions: { storageState: { cookies: [], origins: [] } } } });
+    const factory = new VSCodeBrowserContextFactory(config, createVSCodePlaywright(browser), 'ws://127.0.0.1:1234/');
+    const result = factory.createContext({ name: 'vitest' }, new AbortController().signal);
+    if (existing) {
+      await expect(result).rejects.toThrow('Cannot apply --storage-state');
+      expect(browser.close).toHaveBeenCalledTimes(1);
+      expect(browser.newContext).not.toHaveBeenCalled();
+    } else {
+      expect((await result).browserContext).toBe(browserContext);
+      expect(browser.newContext).toHaveBeenCalledWith(config.browser.contextOptions);
+    }
+    expect(browserContext.storageState).not.toHaveBeenCalled();
+    expect(browserContext.setStorageState).not.toHaveBeenCalled();
+    expect(browserContext.newPage).not.toHaveBeenCalled();
+    expect(browserContext.close).not.toHaveBeenCalled();
+  });
+
   it('lets the VS Code endpoint choose the sandbox default but forwards explicit values', async () => {
     const browser = createMockBrowser(createMockBrowserContext());
     const vscodePlaywright = createVSCodePlaywright(browser);
@@ -2484,39 +1685,4 @@ describe('VSCodeBrowserContextFactory', () => {
     expect(browserContext.setStorageState).not.toHaveBeenCalled();
   });
 
-  it('applies the storage state to the context the extension already holds', async () => {
-    const browserContext = createMockBrowserContext();
-    const browser = createMockBrowser(browserContext);
-    const vscodePlaywright = createVSCodePlaywright(browser);
-    const config = await resolveConfig({
-      browser: {
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = new VSCodeBrowserContextFactory(config, vscodePlaywright, 'ws://127.0.0.1:1234/');
-    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
-
-    expect(browser.newContext).not.toHaveBeenCalled();
-    expect(browserContext.setStorageState).toHaveBeenCalledWith(recordedState);
-    expect(result.browserContext).toBe(browserContext);
-  });
-
-  it('closes the extension connection when applying the storage state fails', async () => {
-    const browserContext = createMockBrowserContext();
-    browserContext.setStorageState.mockRejectedValueOnce(new Error('Error setting storage state:\nnavigation failed'));
-    const browser = createMockBrowser(browserContext);
-    const vscodePlaywright = createVSCodePlaywright(browser);
-    const config = await resolveConfig({
-      browser: {
-        contextOptions: { storageState: writeStateFile() },
-      },
-    });
-
-    const factory = new VSCodeBrowserContextFactory(config, vscodePlaywright, 'ws://127.0.0.1:1234/');
-
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
-        .rejects.toThrow('navigation failed');
-    expect(browser.close).toHaveBeenCalledTimes(1);
-  });
 });
