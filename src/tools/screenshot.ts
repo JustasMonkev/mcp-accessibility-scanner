@@ -59,8 +59,7 @@ const screenshot = defineTabTool({
     // otherwise overwrite each other. User-specified filenames are reserved
     // exclusively so an existing artifact is never replaced.
     const fileName = await tab.context.outputFile(params.filename ?? `page-${safeIsoTimestampForFileName()}.${fileType}`, params.filename !== undefined);
-    if (params.filename !== undefined)
-      response.deleteFileOnError(fileName);
+    response.deleteFileOnError(fileName);
     const options: playwright.PageScreenshotOptions = {
       type: fileType,
       quality: fileType === 'png' ? undefined : 90,
@@ -82,6 +81,8 @@ const screenshot = defineTabTool({
       response.addCode(`await page.screenshot(${javascript.formatObject(options)});`);
 
     const buffer = locator ? await locator.screenshot(options) : await tab.page.screenshot(options);
+    if (!buffer.length)
+      throw new Error(`The browser returned an empty ${fileType} screenshot. Try a smaller capture or explicitly request png or jpeg instead.`);
     response.addResult(`Took the ${screenshotTarget} screenshot and saved it as ${fileName}`);
 
     // https://github.com/microsoft/playwright-mcp/issues/817
