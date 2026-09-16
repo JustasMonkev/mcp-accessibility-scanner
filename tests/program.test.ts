@@ -234,7 +234,9 @@ describe('CLI command dispatch contract', () => {
     // when its response closed); the registry must be process-scoped, exactly
     // like the direct startMCPServer path.
     async function startServer(args: string[]) {
-      const child = spawn(process.execPath, [...cliArgs, ...args, '--port', '0'], { stdio: 'pipe' });
+      // Match the HTTP harness's IPv4 loopback address: IPv6 localhost may
+      // miss an environment proxy's NO_PROXY matching in Node's fetch.
+      const child = spawn(process.execPath, [...cliArgs, ...args, '--host', '127.0.0.1', '--port', '0'], { stdio: 'pipe' });
       let stderr = '';
       const url = await new Promise<string>((resolve, reject) => {
         // The timeout must kill the child: the test's finally-cleanup only
