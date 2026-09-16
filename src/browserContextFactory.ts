@@ -31,17 +31,7 @@ import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
 
 import type { FullConfig } from './config.js';
 
-/**
- * Throws when a storage state is configured but `factory` will not apply it. A
- * factory that neither creates a fresh context with the state nor applies it to
- * the context it reuses would drop it without a word and audit the site as an
- * anonymous user, which looks exactly like a successful run. Every factory in
- * this file applies it one way or the other; the extension factory cannot — it
- * works through the user's own running browser, where clearing every origin's
- * cookies to install the recorded state is not an acceptable side effect.
- * Callers pass the remedy that fits the mode they selected — the factory that
- * creates the context is not always the one `contextFactory()` built.
- */
+/** Rejects factories that would silently ignore a configured storage state. */
 export function assertStorageStateSupported(config: FullConfig, factory: BrowserContextFactory, remedy: string): void {
   if (config.browser.contextOptions?.storageState && !factory.appliesStorageState)
     throw new Error(`Storage state cannot be applied in this mode. ${remedy}`);
@@ -62,148 +52,9 @@ export function assertStorageStateDoesNotResetUserProfile(config: FullConfig, re
 
 export function contextFactory(config: FullConfig): BrowserContextFactory {
   const factory = createContextFactory(config);
-  // Every built-in factory now applies a storage state; the guard stays so a
-  // future factory that forgets to declare support rejects the option instead
-  // of silently dropping it.
+  // Factories must apply the state to a fresh context or reject unsafe reuse.
   assertStorageStateSupported(config, factory, 'Drop the storage state and sign in interactively before auditing.');
   return factory;
-}
-
-// The rules addCookies enforces client-side (verified against Playwright
-// 1.61.1: empty or missing domain/path without a url, a url combined with a
-// domain or a path, about:blank/data:/unparseable urls, an expires other
-// than -1 or a positive number up to Playwright's ceiling, and sameSite
-// outside Strict/Lax/None are all rejected there — non-http(s) url schemes
-// and malformed origin strings fail browser-side during the apply). Failing
-// them here keeps the failure ahead of the cache clear; anything these
-// checks miss still fails inside setStorageState.
-const cookieUrlProblem = (url: unknown): string | null => {
-  if (typeof url !== 'string')
-    return 'is not a string';
-  if (url === 'about:blank')
-    return 'cannot be about:blank';
-  if (url.startsWith('data:'))
-    return 'cannot be a data: URL';
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
-      return `must be an http(s) URL, not ${parsed.protocol}`;
-  } catch {
-    return 'is not a valid absolute URL';
-  }
-  return null;
-};
-
-const isValidIndexedDBKey = (value: unknown): boolean =>
-  typeof value === 'string'
-  || (typeof value === 'number' && Number.isFinite(value))
-  || (value instanceof Date && Number.isFinite(value.getTime()))
-  || value instanceof ArrayBuffer
-  || ArrayBuffer.isView(value)
-  || (Array.isArray(value) && value.every(isValidIndexedDBKey));
-
-const indexedDBIdentifier = /^[$_\p{ID_Start}][$\u200C\u200D\p{ID_Continue}]*$/u;
-const isValidIndexedDBKeyPath = (value: unknown): boolean =>
-  typeof value === 'string' && (value === '' || value.split('.').every(part => indexedDBIdentifier.test(part)));
-const isValidIndexedDBKeyPathArray = (value: unknown): boolean =>
-  Array.isArray(value) && !!value.length && value.every(isValidIndexedDBKeyPath);
-
-function assertValidStorageState(state: { cookies?: unknown[], origins?: unknown[] }): void {
-  for (const value of state.cookies ?? []) {
-    const cookie = value as Record<string, unknown> | null;
-    const problem = !cookie || typeof cookie !== 'object'
-      ? 'a cookie entry is not an object'
-      : !cookie.url && (!cookie.domain || !cookie.path)
-        ? `cookie "${String(cookie.name ?? '')}" should have a url or a domain/path pair`
-        : cookie.url && cookie.domain
-          ? `cookie "${String(cookie.name ?? '')}" should have either a url or a domain, not both`
-          : cookie.url && cookie.path
-            ? `cookie "${String(cookie.name ?? '')}" should have either a url or a path, not both`
-            : cookie.url !== undefined && cookieUrlProblem(cookie.url)
-              ? `cookie "${String(cookie.name ?? '')}" has a url that ${cookieUrlProblem(cookie.url)}`
-              : cookie.expires !== undefined && (typeof cookie.expires !== 'number' || Number.isNaN(cookie.expires) || (cookie.expires !== -1 && (cookie.expires <= 0 || cookie.expires > 253402300799)))
-                ? `cookie "${String(cookie.name ?? '')}" should have a valid expires — only -1 or a positive unix timestamp in seconds up to 253402300799 (9999-12-31T23:59:59Z, Playwright's own ceiling) is allowed`
-                : cookie.sameSite !== undefined && !['Strict', 'Lax', 'None'].includes(cookie.sameSite as string)
-                  ? `cookie "${String(cookie.name ?? '')}" has sameSite "${String(cookie.sameSite)}", expected one of Strict|Lax|None`
-                  : null;
-    if (problem)
-      throw new Error(`Invalid storage state: ${problem}. Nothing was changed — the state is validated before the apply, because setStorageState() clears the attached context's HTTP cache and cookie jar before it validates, and the cache cannot be restored.`);
-  }
-  for (const value of state.origins ?? []) {
-    const entry = value as Record<string, unknown> | null;
-    // Restoring an origin's storage navigates Playwright's temporary page to
-    // it — a malformed or non-http(s) origin fails that navigation after the
-    // clear.
-    const problem = !entry || typeof entry !== 'object'
-      ? 'an origins entry is not an object'
-      : typeof entry.origin !== 'string' || cookieUrlProblem(entry.origin)
-        ? `origins entry "${String(entry?.origin ?? '')}" is not an absolute http(s) URL`
-        : null;
-    if (problem)
-      throw new Error(`Invalid storage state: ${problem}. Nothing was changed — the state is validated before the apply, because setStorageState() clears the attached context's HTTP cache and cookie jar before it validates, and the cache cannot be restored.`);
-
-    const databaseNames = new Set<string>();
-    for (const value of Array.isArray(entry?.indexedDB) ? entry.indexedDB : []) {
-      const database = value as Record<string, unknown>;
-      const stores = Array.isArray(database.stores) ? database.stores as Record<string, unknown>[] : [];
-      let indexedDBProblem = !Number.isSafeInteger(database.version) || (database.version as number) <= 0
-        ? `IndexedDB database "${String(database.name ?? '')}" should have a positive integer version`
-        : databaseNames.has(String(database.name))
-          ? `IndexedDB database name "${String(database.name)}" is duplicated`
-          : null;
-      databaseNames.add(String(database.name));
-      const storeNames = new Set<string>();
-      for (const store of stores) {
-        const storeName = String(store.name);
-        indexedDBProblem ??= storeNames.has(storeName)
-          ? `IndexedDB object store name "${storeName}" is duplicated in database "${String(database.name)}"`
-          : store.keyPath !== undefined && !isValidIndexedDBKeyPath(store.keyPath)
-            ? `IndexedDB object store "${storeName}" has an invalid key path`
-            : store.keyPathArray !== undefined && !isValidIndexedDBKeyPathArray(store.keyPathArray)
-              ? `IndexedDB object store "${storeName}" has an invalid array key path`
-              : store.autoIncrement && (store.keyPath === '' || Array.isArray(store.keyPathArray))
-            ? `IndexedDB object store "${storeName}" cannot combine autoIncrement with an empty or array key path`
-              : null;
-        storeNames.add(storeName);
-        const recordKeys = new Set<string>();
-        const hasInlineKey = store.keyPath !== undefined || store.keyPathArray !== undefined;
-        for (const value of Array.isArray(store.records) ? store.records : []) {
-          const record = value as Record<string, unknown>;
-          const hasExternalKey = (record.key !== undefined && record.key !== null)
-            || (record.keyEncoded !== undefined && record.keyEncoded !== null);
-          const key = record.key ?? record.keyEncoded;
-          const serializedKey = hasExternalKey ? JSON.stringify(key) ?? String(key) : '';
-          indexedDBProblem ??= record.key !== undefined && record.key !== null && !isValidIndexedDBKey(record.key)
-            ? `IndexedDB object store "${storeName}" has an invalid external record key`
-            : hasInlineKey && hasExternalKey
-            ? `IndexedDB object store "${storeName}" has an inline key path but record also supplies an external key`
-            : !hasInlineKey && !store.autoIncrement && !hasExternalKey
-              ? `IndexedDB object store "${storeName}" requires an external key for every record`
-              : hasExternalKey && recordKeys.has(serializedKey)
-                ? `IndexedDB object store "${storeName}" has duplicate record key ${serializedKey}`
-                : null;
-          if (hasExternalKey)
-            recordKeys.add(serializedKey);
-        }
-        const indexNames = new Set<string>();
-        for (const index of Array.isArray(store.indexes) ? store.indexes as Record<string, unknown>[] : []) {
-          const indexName = String(index.name);
-          indexedDBProblem ??= indexNames.has(indexName)
-            ? `IndexedDB index name "${indexName}" is duplicated in object store "${storeName}"`
-            : index.keyPath !== undefined && !isValidIndexedDBKeyPath(index.keyPath)
-              ? `IndexedDB index "${indexName}" has an invalid key path`
-              : index.keyPathArray !== undefined && !isValidIndexedDBKeyPathArray(index.keyPathArray)
-                ? `IndexedDB index "${indexName}" has an invalid array key path`
-                : index.multiEntry && Array.isArray(index.keyPathArray)
-              ? `IndexedDB index "${indexName}" cannot combine multiEntry with an array key path`
-                : null;
-          indexNames.add(indexName);
-        }
-      }
-      if (indexedDBProblem)
-        throw new Error(`Invalid storage state: ${indexedDBProblem}. Nothing was changed — the state is validated before the apply, because setStorageState() clears the attached context's HTTP cache and cookie jar before it validates, and the cache cannot be restored.`);
-    }
-  }
 }
 
 /**
@@ -296,147 +147,10 @@ async function navigateReplacementPages(replaced: { page: playwright.Page, url: 
   }));
 }
 
-/**
- * Lands the configured storage state in a context the browser already had.
- * `setStorageState()` clears the context's cookies, local storage and IndexedDB
- * and installs the recorded state — the documented semantics of the option the
- * caller asked for, applied to a context `newContext()` never sees: the CDP
- * modes without --isolated reuse the browser's existing context, and
- * launchPersistentContext() silently ignores a storageState option (verified
- * against Playwright 1.61.1).
- */
-export async function applyStorageStateToReusedContext(config: FullConfig, browserContext: playwright.BrowserContext): Promise<void> {
-  const storageState = config.browser.contextOptions?.storageState;
-  if (!storageState)
-    return;
-  const parsedState = await (async () => {
-    try {
-      return typeof storageState === 'string'
-        ? JSON.parse(await fs.promises.readFile(storageState, 'utf-8'))
-        : storageState;
-    } catch (error) {
-      // Letting setStorageState() discover the bad file would fail inside
-      // the apply block, whose catch answers every failure with a rollback —
-      // and the rollback's own setStorageState() clears the attached
-      // context's HTTP cache. A config error that changed nothing must not
-      // cost the running application its cache.
-      throw new Error(`The storage state file could not be read or parsed: ${error instanceof Error ? error.message : String(error)}. Nothing was changed.`);
-    }
-  })();
-  // Playwright validates cookies only while installing them — after the
-  // attached context's HTTP cache and cookie jar are already cleared — so a
-  // semantically invalid cookie (bad expires, missing domain/path) would
-  // fail the apply with the cache unrestorably gone. Checked up front, with
-  // the same rules addCookies enforces (verified against 1.61.1).
-  assertValidStorageState(parsedState);
-  // setStorageState needs a temporary page whenever the state carries origins
-  // or the context has visited any — and by the time that page creation fails
-  // on a target without Target.createTarget, the HTTP cache is already cleared
-  // and cannot be put back. Probe the page creation first, so such targets are
-  // rejected before anything is mutated. When neither signal indicates a page
-  // will be needed (cookie-only state, no pages open), the probe is skipped so
-  // that case keeps working on those targets.
-  const stateHasOrigins = (parsedState.origins?.length ?? 0) > 0;
-  const hasLoadedPages = browserContext.pages().some(page => page.url() && page.url() !== 'about:blank');
-  if (stateHasOrigins || hasLoadedPages) {
-    try {
-      const probe = await browserContext.newPage();
-      await probe.close();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes('Target.createTarget'))
-        throw new Error(`The attached browser cannot open the temporary page Playwright needs to apply the storage state's origin data (Electron targets do not support Target.createTarget). Nothing was changed. Drop the storage state and sign in inside the app instead. Original error: ${message}`);
-      throw error;
-    }
-  }
-  // setStorageState replaces the cookie jar and then rewrites origin storage
-  // one origin at a time, so a failure partway would otherwise leave the
-  // attached browser holding a mixture of old and recorded state while the
-  // operation reports failure. Both layers are snapshotted first: the cookie
-  // jar through pure protocol calls that work everywhere (kept as the
-  // fallback for a restore whose own origin phase fails), and origin storage
-  // through storageState() below.
-  const originalCookies = await browserContext.cookies();
-  // The snapshot doubles as a probe for origins this connection has already
-  // visited while its pages have since closed or gone blank: for those,
-  // storageState() opens the same temporary page the forward apply will need
-  // — the newPage probe above cannot see them — but unlike setStorageState()
-  // it mutates nothing, so a target that cannot create pages (Electron) is
-  // rejected here with everything intact, not after the forward apply has
-  // cleared the HTTP cache. Any other snapshot failure also aborts: without
-  // the full snapshot, a partial forward apply could only be rolled back to
-  // cookies, leaving the attached browser's origin storage part old, part
-  // recorded.
-  const originalState = await browserContext.storageState({ indexedDB: true }).catch((error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('Target.createTarget'))
-      throw new Error(`The attached browser cannot open the temporary page Playwright needs to reset origin storage for origins this connection has already visited (Electron targets do not support Target.createTarget). Nothing was changed. Drop the storage state and sign in inside the app instead. Original error: ${message}`);
-    throw new Error(`Snapshotting the context's current storage for rollback failed, so the storage state was not applied — a partial apply could not have been undone. Nothing was changed. Retry, or use --isolated for a fresh context. Original error: ${message}`);
-  });
-  // Pages that were already open still render the previous identity — and
-  // their scripts keep running: a page that periodically persists
-  // authentication into cookies or localStorage would overwrite the state
-  // being installed if it were still alive during setStorageState(), and
-  // replacing its tab afterwards cannot undo writes already made into
-  // context-wide storage. Every open page is therefore replaced with a blank
-  // fresh tab FIRST — the old document closes before the state lands, and
-  // only blank replacements (which run no scripts) survive the apply — and
-  // the replacements are navigated to the pages they replaced only once the
-  // recorded state is in place.
-  const replaced = await replaceOpenPagesWithBlankTabs(browserContext);
-  const policyRequired = !!(config.network?.allowedOrigins?.length || config.network?.blockedOrigins?.length);
-  let replacementNavigationSafe = !policyRequired;
-  try {
-    // The state validated above is the state applied: handing the path back
-    // to Playwright would re-read the file here, and a file replaced since
-    // that read would skip the cookie/origin validation and the page-creation
-    // probe only to fail after the cache clear those exist to prevent.
-    await browserContext.setStorageState(parsedState);
-    // The replacement navigations run inside the factory, before Context
-    // ensures the configured origin allowlist/blocklist — and the recorded
-    // credentials are already in place by now. The policy is installed here
-    // (permanently — page scripts can queue requests that fire after the
-    // navigation settles, so removing the handlers before Context re-ensures
-    // the same policy would open a window to a blocked origin;
-    // ensureNetworkPolicyRoutes installs once per context, so Context's later
-    // call is a no-op). Installed after setStorageState() so an abort-all
-    // route cannot interfere with the temporary page Playwright drives to
-    // restore origin storage.
-    await ensureNetworkPolicyRoutes(config, browserContext);
-    replacementNavigationSafe = true;
-    await navigateReplacementPages(replaced);
-  } catch (error) {
-    // Prefer the full-state rollback; fall back to cookies-only when its
-    // reapplication is itself impossible on this target.
-    const restoredFully = await browserContext.setStorageState(originalState).then(() => true, () => false);
-    const restoredCookies = restoredFully || await browserContext.clearCookies()
-        .then(() => originalCookies.length ? browserContext.addCookies(originalCookies) : undefined)
-        .then(() => true, () => false);
-    // The old pages were closed before the apply and cannot be handed back.
-    // Navigate their replacements only when no policy was required or its
-    // installation succeeded; otherwise restored credentials stay offline.
-    if (replacementNavigationSafe)
-      await navigateReplacementPages(replaced);
-    else
-      await Promise.all(replaced.map(({ page }) => page.close().catch(() => {})));
-    // Restoring origin storage (localStorage/IndexedDB) makes Playwright open a
-    // temporary page; a CDP target that cannot create one — Electron has no
-    // Target.createTarget — fails here. Cookie-only states need no page and
-    // still work on such targets, so name that remedy instead of surfacing the
-    // raw protocol error.
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('Target.createTarget')) {
-      const rollbackNote = restoredFully
-        ? 'The context\'s original storage state was restored.'
-        : restoredCookies
-          ? 'The context\'s original cookies were restored.'
-          : 'Restoring the context\'s original cookies also failed; its cookie jar may now hold the recorded state.';
-      throw new Error(`The attached browser cannot open the temporary page Playwright needs to reset origin storage (Electron targets do not support Target.createTarget). Drop the storage state and sign in inside the app instead — a cookies-only state helps only while the attached target has no pages open and the connection has visited no origin, because clearing storage for an already-visited origin needs the same temporary page. ${rollbackNote} Original error: ${message}`);
-    }
-    if (!restoredFully && restoredCookies)
-      throw new Error(`${message} The context's original cookies were restored, but origin storage may retain partially applied state.`);
-    throw error;
-  }
+/** Existing contexts can contain service workers and storage we cannot safely snapshot. */
+export function assertReusedContextStorageStateSupported(config: FullConfig): void {
+  if (config.browser.contextOptions?.storageState)
+    throw new Error('Cannot apply --storage-state to an existing browser context on Playwright 1.63.0: its rollback snapshot can run service-worker-served scripts and alter storage. Use a fresh context (for CDP, add --isolated), or omit --storage-state and sign in interactively. No storage snapshot or reset was attempted.');
 }
 
 function createContextFactory(config: FullConfig): BrowserContextFactory {
@@ -468,9 +182,8 @@ export type CreateContextOptions = {
 
 export interface BrowserContextFactory {
   /**
-   * True when createContext() lands config.browser.contextOptions.storageState in
-   * the returned context — either by creating a fresh context with it or by
-   * applying it to a reused context via setStorageState(). Omitted counts as
+   * True when createContext() honors config.browser.contextOptions.storageState
+   * or explicitly rejects contexts where it cannot safely do so. Omitted counts as
    * false, so a factory that forgets to declare it rejects a storage state rather
    * than dropping it silently.
    */
@@ -686,18 +399,11 @@ class IsolatedContextFactory extends BaseContextFactory {
 }
 
 class CdpContextFactory extends BaseContextFactory {
-  // The isolated path creates a fresh context with the state; the attach path
-  // applies it to the browser's existing context via setStorageState().
+  // Fresh contexts accept storage state; existing external contexts reject it.
   readonly appliesStorageState = true;
 
-  // One attached browser — and its default context — serves every session
-  // this factory creates. Re-running the global setStorageState() for a
-  // second session would wipe the first session's live cookies and origin
-  // storage mid-audit and reload its pages, so the state is applied once per
-  // context object: later sessions join the live shared state. Keyed weakly —
-  // a reconnect yields a fresh context object, so the slate resets with the
-  // connection — and a failed apply is forgotten so the next session retries.
-  private _storageStateApplied = new WeakMap<playwright.BrowserContext, Promise<void>>();
+  // Contexts created by this factory already received the configured state.
+  private _createdContexts = new WeakSet<playwright.BrowserContext>();
   // Serializes the no-context fallback the same way: two sessions arriving at
   // a contextless target must share one created context, not race two.
   private _fallbackContext = new WeakMap<playwright.Browser, Promise<playwright.BrowserContext>>();
@@ -803,15 +509,13 @@ class CdpContextFactory extends BaseContextFactory {
     const existing = browser.contexts()[0];
     // An attached browser can expose no context at all; a fresh one created
     // with the configured options (storage state included) beats handing an
-    // undefined context to the caller. The created context immediately seeds
-    // the applied-state memo — a later session will find it as the browser's
-    // existing context, and must join it rather than reset it — and the
-    // creation itself is memoized so concurrent arrivals share one context.
+    // undefined context to the caller. Track ownership so later sessions may
+    // join that context; memoize creation so concurrent arrivals share it.
     if (!existing) {
       let creating = this._fallbackContext.get(browser);
       if (!creating) {
         creating = browser.newContext(this.config.browser.contextOptions).then(created => {
-          this._storageStateApplied.set(created, Promise.resolve());
+          this._createdContexts.add(created);
           // Evict on close, or a context closed externally (while the
           // connection lives on) would keep being handed out of this memo to
           // every later session — contexts() no longer lists it, so only the
@@ -824,15 +528,8 @@ class CdpContextFactory extends BaseContextFactory {
       }
       return await creating;
     }
-    // The shared promise also serializes two sessions arriving at once: both
-    // await the same application instead of racing two global resets.
-    let applied = this._storageStateApplied.get(existing);
-    if (!applied) {
-      applied = applyStorageStateToReusedContext(this.config, existing);
-      this._storageStateApplied.set(existing, applied);
-      applied.catch(() => this._storageStateApplied.delete(existing));
-    }
-    await applied;
+    if (!this._createdContexts.has(existing))
+      assertReusedContextStorageStateSupported(this.config);
     return existing;
   }
 }
@@ -963,7 +660,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
       } else {
         const existing = browser.contexts()[0];
         if (existing) {
-          await applyStorageStateToReusedContext(this.config, existing);
+          assertReusedContextStorageStateSupported(this.config);
           browserContext = existing;
         } else {
           // See CdpContextFactory: a launched app can expose no context yet;
