@@ -310,7 +310,8 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
     saveTrace: cliOptions.saveTrace,
     snapshot: cliOptions.snapshotBoxes !== undefined ? { boxes: cliOptions.snapshotBoxes } : undefined,
     outputDir: cliOptions.outputDir,
-    filePaths: parseFilePaths(cliOptions.filePaths),
+    // SAFETY: resolveCLIConfig validates the merged value before returning it to consumers.
+    filePaths: cliOptions.filePaths as Config['filePaths'],
     imageResponses: cliOptions.imageResponses,
     timeouts: {
       navigationTimeout: cliOptions.navigationTimeout,

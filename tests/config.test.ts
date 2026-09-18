@@ -57,6 +57,11 @@ describe('Config', () => {
       expect((await resolveCLIConfig({ config, filePaths: other })).filePaths).toBe(other);
     });
 
+    it.each(['relative', 'absolute'] as const)('lets CLI %s override an invalid environment value', async filePaths => {
+      vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', 'invalid');
+      expect((await resolveCLIConfig({ filePaths })).filePaths).toBe(filePaths);
+    });
+
     it.each(['invalid', '', null, 0])('rejects invalid config value %j', async filePaths => {
       // SAFETY: deliberately pass invalid runtime input to test configuration validation.
       const config = { filePaths } as Config;
