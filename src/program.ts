@@ -142,6 +142,7 @@ function configureBaseProgram() {
       .option('--mobile', 'emulate a generic mobile device (Pixel 10 for Chromium, iPhone 17 for WebKit). Cannot be combined with --device, CDP attach/launch modes, remote browser endpoints, or --extension.')
       .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
       .option('--output-dir <path>', 'path to the directory for output files.')
+      .option('--file-paths <relative|absolute>', 'render output paths relative to the server working directory or as absolute paths; omitted preserves legacy rendering.')
       .option('--port <port>', 'port to listen on for MCP Streamable HTTP transport.')
       .option('--profile-dir-name <name>', 'name of the Chrome profile directory to connect to with --extension, for example "Profile 1". Requires --user-data-dir. Defaults to the last-used profile that has the extension installed.')
       .option('--proxy-bypass <bypass>', 'comma-separated domains to bypass proxy, for example ".com,chromium.org,.domain.com"')

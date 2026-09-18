@@ -51,6 +51,7 @@ export type CLIOptions = {
     mobile?: boolean;
     sandbox?: boolean;
     outputDir?: string;
+    filePaths?: string;
     port?: number;
     profileDirName?: string;
     proxyBypass?: string;
@@ -134,6 +135,7 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
 // omitted — the nullish semantics the fallback historically used.
 async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   validateAuthToken(config.server.authToken);
+  parseFilePaths(config.filePaths);
   if (!Number.isInteger(config.timeouts.idle) || config.timeouts.idle < 0 || config.timeouts.idle > 2_147_483_647)
     throw new Error('timeouts.idle must be an integer from 0 to 2147483647 milliseconds. Use 0 to disable idle shutdown.');
   const uploadDirs = config.browser.allowedUploadDirs;
@@ -308,6 +310,7 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
     saveTrace: cliOptions.saveTrace,
     snapshot: cliOptions.snapshotBoxes !== undefined ? { boxes: cliOptions.snapshotBoxes } : undefined,
     outputDir: cliOptions.outputDir,
+    filePaths: parseFilePaths(cliOptions.filePaths),
     imageResponses: cliOptions.imageResponses,
     timeouts: {
       navigationTimeout: cliOptions.navigationTimeout,
@@ -348,6 +351,7 @@ function cliOptionsFromEnv(): CLIOptions {
   options.mobile = envToBoolean(process.env.PLAYWRIGHT_MCP_MOBILE);
   options.sandbox = envToBoolean(process.env.PLAYWRIGHT_MCP_SANDBOX);
   options.outputDir = envToString(process.env.PLAYWRIGHT_MCP_OUTPUT_DIR);
+  options.filePaths = envToString(process.env.PLAYWRIGHT_MCP_FILE_PATHS);
   options.port = envToNumber(process.env.PLAYWRIGHT_MCP_PORT);
   options.proxyBypass = envToString(process.env.PLAYWRIGHT_MCP_PROXY_BYPASS);
   options.proxyServer = envToString(process.env.PLAYWRIGHT_MCP_PROXY_SERVER);
@@ -545,6 +549,12 @@ function envToBoolean(value: string | undefined): boolean | undefined {
   if (value === 'false' || value === '0')
     return false;
   return undefined;
+}
+
+function parseFilePaths(value: unknown): Config['filePaths'] {
+  if (value === undefined || value === 'relative' || value === 'absolute')
+    return value;
+  throw new Error('filePaths must be "relative" or "absolute".');
 }
 
 function envToString(value: string | undefined): string | undefined {

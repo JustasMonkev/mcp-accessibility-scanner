@@ -18,7 +18,7 @@ export async function writeJsonReport(
   await fs.promises.writeFile(path, JSON.stringify(report, null, 2), 'utf-8');
   const link = response.addFileResourceLink(path, { ...resource, mimeType: 'application/json' });
   return {
-    path,
+    path: response.formatFilePath(path),
     uri: link.uri,
     name: link.name,
     title: link.title ?? null,

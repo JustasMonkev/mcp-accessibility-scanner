@@ -464,6 +464,18 @@ describe('scan_page annotated screenshots', () => {
     expect(harness.results()).not.toContain('Not marked:');
   });
 
+  it.each(['relative', 'absolute'] as const)('renders annotated screenshot paths with policy %s', async filePaths => {
+    const harness = scanHarness({ markedNodes: 2 });
+    // SAFETY: scan_page only needs currentTabOrDie; path rendering only needs config.filePaths.
+    const context = { ...harness.context, config: { filePaths } } as Context;
+    const response = new Response(context, 'scan_page', {});
+    await scanPageTool.handle(context, scanParams(), response);
+    const expected = filePaths === 'relative' ? path.relative(process.cwd(), '/out/annotated.png') : '/out/annotated.png';
+    expect(response.result().split('\n')).toContain(`Annotated screenshot: ${expected}`);
+    expect(harness.screenshot).toHaveBeenCalledWith({ path: '/out/annotated.png', fullPage: true });
+    expect(response.resourceLinks()[0].uri).toBe('file:///out/annotated.png');
+  });
+
   it('should remove the markers even when the screenshot throws', async () => {
     const harness = scanHarness({ markedNodes: 2, screenshotError: new Error('screenshot boom') });
 
@@ -602,7 +614,7 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('scan_page annotated 
       });
       return screenshot(options);
     });
-    const response = { addResult: vi.fn(), addError: vi.fn(), addFileResourceLink: vi.fn() };
+    const response = { addResult: vi.fn(), addError: vi.fn(), formatFilePath: (file: string) => file, addFileResourceLink: vi.fn() };
     const tab = { page, context: { outputFile: async (name: string) => path.join(outputDir, name) } };
     const bodyBefore = await page.evaluate(() => document.body.innerHTML);
     await scanPageTool.handle({ currentTabOrDie: () => tab } as any, scanParams() as any, response as any);
@@ -780,6 +792,7 @@ function scanHarness(options: { violations?: any[], markedNodes?: number, screen
   const response = {
     addResult: vi.fn(),
     addError: vi.fn(),
+    formatFilePath: (file: string) => file,
     addFileResourceLink: vi.fn(),
   };
   const tab = {

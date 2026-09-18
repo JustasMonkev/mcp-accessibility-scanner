@@ -41,8 +41,9 @@ const pdf = defineTabTool({
     const fileName = await tab.context.outputFile(params.filename ?? `page-${safeIsoTimestampForFileName()}.pdf`, params.filename !== undefined);
     if (params.filename !== undefined)
       response.deleteFileOnError(fileName);
-    response.addCode(`await page.pdf(${javascript.formatObject({ path: fileName })});`);
-    response.addResult(`Saved page as ${fileName}`);
+    const displayPath = response.formatFilePath(fileName);
+    response.addCode(`await page.pdf(${javascript.formatObject({ path: displayPath })});`);
+    response.addResult(`Saved page as ${displayPath}`);
     await tab.page.pdf({ path: fileName });
   },
 });

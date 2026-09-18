@@ -15,6 +15,8 @@
  */
 
 import fs from 'fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import auditKeyboardTools from '../src/tools/auditKeyboard.js';
 import { Response } from '../src/response.js';
@@ -54,7 +56,7 @@ function createHarness(sequence: FocusPoint[], requestContext?: any) {
     },
     url: vi.fn(() => 'https://example.com/'),
     goBack: vi.fn(async () => undefined),
-    screenshot: vi.fn(async () => undefined),
+    screenshot: vi.fn(async (_options: { path: string; fullPage: boolean }) => undefined),
   };
 
   const outputFile = vi.fn(async (name: string) => `/tmp/${name}`);
@@ -122,13 +124,15 @@ describe('audit_keyboard tool', () => {
     expect(response.result()).toContain('JSON report: /tmp/my-keyboard-audit.json');
   });
 
-  it('includes issue screenshot paths and respects maxIssueScreenshots', async () => {
+  it.each([undefined, 'relative', 'absolute'] as const)('renders issue screenshots with policy %s and respects maxIssueScreenshots', async filePaths => {
     const { context, page, response } = createHarness([
       focusPoint({ role: 'document', tagName: 'BODY' }),
       focusPoint({ role: 'button', name: 'One', tagName: 'BUTTON', id: 'one', hasVisibleIndicator: false, boundingBox: null, inViewport: false }),
       focusPoint({ role: 'button', name: 'One', tagName: 'BUTTON', id: 'one', hasVisibleIndicator: false, boundingBox: null, inViewport: false }),
       focusPoint({ role: 'button', name: 'Two', tagName: 'BUTTON', id: 'two', hasVisibleIndicator: false, boundingBox: null, inViewport: false }),
     ]);
+
+    context.config.filePaths = filePaths;
 
     await tool.handle(context as any, {
       maxTabs: 2,
@@ -150,6 +154,13 @@ describe('audit_keyboard tool', () => {
 
     expect(page.screenshot).toHaveBeenCalledTimes(1);
     expect(response.result()).toContain('Issue screenshots:');
+    const storedPath = page.screenshot.mock.calls[0][0].path;
+    const displayPath = filePaths === 'relative' ? path.relative(process.cwd(), storedPath) : storedPath;
+    expect(response.result().split('\n')).toContain(`- ${displayPath}`);
+    expect(response.structuredContent()).toMatchObject({
+      screenshots: [{ path: displayPath, uri: pathToFileURL(storedPath).href }],
+    });
+    expect(JSON.parse(String(writeFileSpy.mock.calls[0][1])).screenshots).toEqual([storedPath]);
   });
 
   it('reports WCAG 2.2 target size and obscured focus findings without flagging compliant stops', async () => {

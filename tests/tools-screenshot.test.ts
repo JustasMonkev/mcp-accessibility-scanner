@@ -44,6 +44,7 @@ describe('Screenshot Tools', () => {
     };
 
     mockContext = {
+      config: {},
       currentTabOrDie: () => mockTab,
     } as any;
 
