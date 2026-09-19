@@ -212,7 +212,7 @@ async function annotateAndScreenshot(tab: Tab, violations: AxeViolation[], respo
   const invisibleNodes = queuedNodes - markedNodes;
   return [
     '',
-    `Annotated screenshot: ${fileName}`,
+    `Annotated screenshot: ${response.formatFilePath(fileName)}`,
     `Marked ${markedNodes} of ${totalNodes} violating nodes.`,
     ...(markedNodes < totalNodes ? [
       `Not marked: ${truncatedNodes} over the ${maxAnnotatedElements}-element annotation limit, ${invisibleNodes} hidden, zero-size or off-canvas, ${unreachableNodes} inside an iframe.`,

@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
-import type { Tab } from '../src/tab.js';
+import type { Tab, TabSnapshot } from '../src/tab.js';
 import type { ImageContent, ResourceLink, TextContent } from '@modelcontextprotocol/server';
 
 function expectTextContent(content: TextContent | ImageContent): TextContent {
@@ -67,6 +68,29 @@ describe('Response', () => {
         imageResponses: 'allow',
       },
     } as any;
+  });
+
+  it.each([undefined, 'relative', 'absolute'] as const)('renders completed downloads with policy %s without changing stored paths', async filePaths => {
+    mockContext.config.filePaths = filePaths;
+    const storedPaths = ['downloads/file #1.txt', path.resolve('downloads/file #2.txt')];
+    const downloads = storedPaths.map(outputFile => ({
+      outputFile, finished: true, download: { suggestedFilename: () => 'file.txt' },
+    }));
+    vi.mocked(mockTab.captureSnapshot).mockResolvedValue({
+      url: 'https://example.com', title: 'Example', ariaSnapshot: '',
+      modalStates: [], consoleMessages: [], downloads,
+      // SAFETY: rendering only reads suggestedFilename from the download objects.
+    } as TabSnapshot);
+    const response = new Response(mockContext, 'test', {});
+    response.setIncludeSnapshot();
+    await response.finish();
+    const text = expectTextContent(response.serialize().content[0]);
+    for (const stored of storedPaths) {
+      const rendered = filePaths === 'absolute' ? path.resolve(stored)
+        : filePaths === 'relative' ? path.relative(process.cwd(), stored) : stored;
+      expect(text.text.split('\n')).toContain(`- Downloaded file file.txt to ${rendered}`);
+    }
+    expect(downloads.map(entry => entry.outputFile)).toEqual(storedPaths);
   });
 
   describe('constructor', () => {

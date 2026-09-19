@@ -30,6 +30,52 @@ async function writeConfigFile(config: Config): Promise<string> {
 }
 
 describe('Config', () => {
+  describe('file paths', () => {
+    beforeEach(() => vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', ''));
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('preserves the legacy default', async () => {
+      expect((await resolveConfig({})).filePaths).toBeUndefined();
+      expect((await resolveCLIConfig({})).filePaths).toBeUndefined();
+    });
+
+    it.each(['relative', 'absolute'] as const)('resolves %s from every source', async filePaths => {
+      expect((await resolveConfig({ filePaths })).filePaths).toBe(filePaths);
+      const config = await writeConfigFile({ filePaths });
+      expect((await resolveCLIConfig({ config })).filePaths).toBe(filePaths);
+      vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', filePaths);
+      expect((await resolveCLIConfig({})).filePaths).toBe(filePaths);
+      vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', '');
+      expect((await resolveCLIConfig({ filePaths })).filePaths).toBe(filePaths);
+    });
+
+    it.each(['relative', 'absolute'] as const)('applies CLI > env > config precedence for %s', async mode => {
+      const other = mode === 'relative' ? 'absolute' : 'relative';
+      const config = await writeConfigFile({ filePaths: other });
+      vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', mode);
+      expect((await resolveCLIConfig({ config })).filePaths).toBe(mode);
+      expect((await resolveCLIConfig({ config, filePaths: other })).filePaths).toBe(other);
+    });
+
+    it.each(['relative', 'absolute'] as const)('lets CLI %s override an invalid environment value', async filePaths => {
+      vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', 'invalid');
+      expect((await resolveCLIConfig({ filePaths })).filePaths).toBe(filePaths);
+    });
+
+    it.each(['invalid', '', null, 0])('rejects invalid config value %j', async filePaths => {
+      // SAFETY: deliberately pass invalid runtime input to test configuration validation.
+      const config = { filePaths } as Config;
+      await expect(resolveConfig(config)).rejects.toThrow('filePaths');
+      await expect(resolveCLIConfig({ config: await writeConfigFile(config) })).rejects.toThrow('filePaths');
+    });
+
+    it('rejects invalid environment and CLI values', async () => {
+      await expect(resolveCLIConfig({ filePaths: 'invalid' })).rejects.toThrow('filePaths');
+      vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', 'invalid');
+      await expect(resolveCLIConfig({})).rejects.toThrow('filePaths');
+    });
+  });
+
   describe('image responses', () => {
     beforeEach(() => vi.stubEnv('PLAYWRIGHT_MCP_IMAGE_RESPONSES', ''));
     afterEach(() => vi.unstubAllEnvs());

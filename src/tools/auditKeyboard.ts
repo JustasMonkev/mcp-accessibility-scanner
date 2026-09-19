@@ -634,7 +634,7 @@ const auditKeyboard = defineTabTool({
         mimeType: 'image/png',
       });
       return {
-        path: screenshotPath,
+        path: response.formatFilePath(screenshotPath),
         uri: link.uri,
         name: link.name,
         title: link.title ?? null,
@@ -696,7 +696,7 @@ const auditKeyboard = defineTabTool({
       '',
       `Focus entirely obscured (WCAG 2.2 SC 2.4.11): ${result.focusObscuredIssues.length}`,
       ...(focusObscuredPreview.length ? focusObscuredPreview : ['- None']),
-      ...(result.screenshots.length ? ['', 'Issue screenshots:', ...result.screenshots.map(path => `- ${path}`)] : []),
+      ...(result.screenshots.length ? ['', 'Issue screenshots:', ...result.screenshots.map(path => `- ${response.formatFilePath(path)}`)] : []),
       '',
       `JSON report: ${reportResource.path}`,
     ].join('\n'));

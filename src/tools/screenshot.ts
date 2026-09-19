@@ -67,23 +67,25 @@ const screenshot = defineTabTool({
       path: fileName,
       ...(params.fullPage !== undefined && { fullPage: params.fullPage })
     };
+    const displayPath = response.formatFilePath(fileName);
+    const displayOptions = { ...options, path: displayPath };
     const isElementScreenshot = params.element && params.ref;
 
     const screenshotTarget = isElementScreenshot ? params.element : (params.fullPage ? 'full page' : 'viewport');
-    response.addCode(`// Screenshot ${screenshotTarget} and save it as ${fileName}`);
+    response.addCode(`// Screenshot ${screenshotTarget} and save it as ${displayPath}`);
 
     // Only get snapshot when element screenshot is needed
     const locator = params.ref ? await tab.refLocator({ element: params.element || '', ref: params.ref }) : null;
 
     if (locator)
-      response.addCode(`await page.${await generateLocator(locator)}.screenshot(${javascript.formatObject(options)});`);
+      response.addCode(`await page.${await generateLocator(locator)}.screenshot(${javascript.formatObject(displayOptions)});`);
     else
-      response.addCode(`await page.screenshot(${javascript.formatObject(options)});`);
+      response.addCode(`await page.screenshot(${javascript.formatObject(displayOptions)});`);
 
     const buffer = locator ? await locator.screenshot(options) : await tab.page.screenshot(options);
     if (!buffer.length)
       throw new Error(`The browser returned an empty ${fileType} screenshot. Try a smaller capture or explicitly request png or jpeg instead.`);
-    response.addResult(`Took the ${screenshotTarget} screenshot and saved it as ${fileName}`);
+    response.addResult(`Took the ${screenshotTarget} screenshot and saved it as ${displayPath}`);
 
     // https://github.com/microsoft/playwright-mcp/issues/817
     // Never return large images to LLM, saving them to the file system is enough.

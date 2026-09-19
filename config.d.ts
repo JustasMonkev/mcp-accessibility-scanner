@@ -179,6 +179,12 @@ export type Config = {
    */
   outputDir?: string;
 
+  /**
+   * Render output paths relative to the server working directory or as absolute paths.
+   * Omit to preserve legacy rendering. Does not change file locations or resource URIs.
+   */
+  filePaths?: 'relative' | 'absolute';
+
   network?: {
     /**
      * List of origins to allow the browser to request. Default is to allow all. Origins matching both `allowedOrigins` and `blockedOrigins` will be blocked.

@@ -15,7 +15,7 @@
  */
 
 import fs from 'node:fs';
-import { basename } from 'node:path';
+import { basename, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import debug from 'debug';
 
@@ -113,6 +113,14 @@ export class Response {
   addResourceLink(link: ResourceLink) {
     this._resourceLinks.push(link);
     return link;
+  }
+
+  formatFilePath(filePath: string): string {
+    if (this._context.config.filePaths === 'absolute')
+      return resolve(filePath);
+    if (this._context.config.filePaths === 'relative')
+      return relative(process.cwd(), filePath) || '.';
+    return filePath;
   }
 
   addFileResourceLink(filePath: string, options?: {
@@ -231,7 +239,7 @@ ${this._code.join('\n')}
       response.push(...renderModalStates(this._context, this._tabSnapshot.modalStates));
       response.push('');
     } else if (this._tabSnapshot) {
-      response.push(renderTabSnapshot(this._tabSnapshot, { compress: this._includeSnapshotCompress }));
+      response.push(renderTabSnapshot(this._tabSnapshot, file => this.formatFilePath(file), { compress: this._includeSnapshotCompress }));
       response.push('');
     }
 
@@ -257,7 +265,7 @@ ${this._code.join('\n')}
   }
 }
 
-function renderTabSnapshot(tabSnapshot: TabSnapshot, options: { compress?: boolean } = {}): string {
+function renderTabSnapshot(tabSnapshot: TabSnapshot, formatFilePath: (file: string) => string, options: { compress?: boolean } = {}): string {
   const lines: string[] = [];
   const ariaSnapshot = options.compress ? compressAriaSnapshot(tabSnapshot.ariaSnapshot).output : tabSnapshot.ariaSnapshot;
 
@@ -272,7 +280,7 @@ function renderTabSnapshot(tabSnapshot: TabSnapshot, options: { compress?: boole
     lines.push(`### Downloads`);
     for (const entry of tabSnapshot.downloads) {
       if (entry.finished)
-        lines.push(`- Downloaded file ${entry.download.suggestedFilename()} to ${entry.outputFile}`);
+        lines.push(`- Downloaded file ${entry.download.suggestedFilename()} to ${formatFilePath(entry.outputFile)}`);
       else
         lines.push(`- Downloading file ${entry.download.suggestedFilename()} ...`);
     }

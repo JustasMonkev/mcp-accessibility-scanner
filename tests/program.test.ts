@@ -71,6 +71,21 @@ function collectOutput(args: string[], timeoutMs = 3000, environment?: NodeJS.Pr
   });
 }
 
+describe('file path CLI option', () => {
+  it('advertises the accepted modes', () => {
+    expect(runCLI('--help')).toContain('--file-paths <relative|absolute>');
+  });
+
+  it.each(['relative', 'absolute'])('accepts %s at startup', async mode => {
+    const result = await collectOutput(['--file-paths', mode]);
+    expect(result.stderr).toBe('');
+  });
+
+  it('rejects an invalid mode before starting the server', () => {
+    expect(() => runCLI('--file-paths invalid')).toThrow(/filePaths must be/);
+  });
+});
+
 describe('CLI command dispatch contract', () => {
   describe('help text', () => {
     it('shows list-tools and interactive as available commands', () => {
