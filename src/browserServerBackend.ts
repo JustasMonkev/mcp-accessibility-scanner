@@ -25,6 +25,7 @@ import { SessionLog } from './sessionLog.js';
 import { filteredTools } from './tools.js';
 import { toMcpTool } from './mcp/tool.js';
 import { listWebMCPTools } from './webmcp.js';
+import type { WebMCPToolDefinition } from './webmcp.js';
 
 import type { Tool } from './tools/tool.js';
 import type { BrowserContextFactory } from './browserContextFactory.js';
@@ -210,7 +211,7 @@ export class BrowserServerBackend implements ServerBackend {
     const routedSessionId = this._routedSessionId(name, rawArguments);
     const context = routedSessionId !== undefined ? this._sessionRegistry!.resolve(routedSessionId) : this._context!;
     let parsedArguments: Record<string, any>;
-    let dynamicTool: Awaited<ReturnType<BrowserServerBackend['_currentWebMCPTools']>>[number] | undefined;
+    let dynamicTool: WebMCPToolDefinition | undefined;
     if (tool) {
       try {
         parsedArguments = tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, any>;
