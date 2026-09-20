@@ -24,6 +24,7 @@ import { Response } from './response.js';
 import { SessionLog } from './sessionLog.js';
 import { filteredTools } from './tools.js';
 import { toMcpTool } from './mcp/tool.js';
+import { listWebMCPTools } from './webmcp.js';
 
 import type { Tool } from './tools/tool.js';
 import type { BrowserContextFactory } from './browserContextFactory.js';
@@ -43,6 +44,8 @@ export class BrowserServerBackend implements ServerBackend {
   private _browserContextFactory: BrowserContextFactory;
   private _sharedSessionRegistry: BrowserSessionRegistry | undefined;
   private _ephemeralDefaultContext: boolean;
+  private _notifyToolListChanged: (() => Promise<void>) | undefined;
+  private _webmcpSignature = '';
 
   constructor(config: FullConfig, factory: BrowserContextFactory, sharedSessionRegistry?: BrowserSessionRegistry, options?: {
     /**
@@ -66,7 +69,8 @@ export class BrowserServerBackend implements ServerBackend {
     this._toolsByName = new Map(this._tools.map(tool => [tool.schema.name, tool]));
   }
 
-  async initialize(_context: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion): Promise<void> {
+  async initialize(serverContext: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion): Promise<void> {
+    this._notifyToolListChanged = serverContext.notifyToolListChanged;
     // A registry shared across the backends of one server factory (stateless
     // HTTP creates a fresh backend per request, and a handle minted in one
     // request must resolve in the next) outlives this backend; an owned one
@@ -168,26 +172,62 @@ export class BrowserServerBackend implements ServerBackend {
       }
       return mcpTool;
     });
-    return this._mcpTools;
+    const dynamic = await this._currentWebMCPTools(this._context!);
+    return [...this._mcpTools, ...dynamic.map(tool => {
+      const schema = structuredClone(tool.schema) as mcpServer.Tool;
+      const inputSchema = schema.inputSchema as { properties?: Record<string, unknown> };
+      inputSchema.properties = {
+        ...inputSchema.properties,
+        browserSessionId: {
+          type: 'string',
+          description: 'Browser session to run this tool in, as returned by browser_session_open. Omit to use the default session.',
+        },
+      };
+      return schema;
+    })];
+  }
+
+  private async _currentWebMCPTools(context: Context) {
+    const tab = context.currentTab();
+    if (!tab)
+      return [];
+    return await listWebMCPTools(tab);
+  }
+
+  private async _notifyIfWebMCPToolsChanged(context: Context) {
+    const tools = await this._currentWebMCPTools(context);
+    const signature = JSON.stringify(tools.map(tool => tool.schema));
+    if (signature === this._webmcpSignature)
+      return;
+    this._webmcpSignature = signature;
+    await this._notifyToolListChanged?.();
   }
 
   async callTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext) {
     const tool = this._toolsByName.get(name);
-    if (!tool)
-      throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Tool "${name}" not found`);
     // Resolved before the schema parse so an unknown handle surfaces as a
     // clear execution error, like other input validation failures below.
     const routedSessionId = this._routedSessionId(name, rawArguments);
     const context = routedSessionId !== undefined ? this._sessionRegistry!.resolve(routedSessionId) : this._context!;
     let parsedArguments: Record<string, any>;
-    try {
-      parsedArguments = tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, any>;
-    } catch (error) {
-      // Per the MCP spec, input validation failures are tool execution
-      // errors (isError results), not protocol errors.
-      if (error instanceof z.ZodError)
-        throw new Error(`Invalid input for tool "${name}":\n${z.prettifyError(error)}`);
-      throw error;
+    let dynamicTool: Awaited<ReturnType<BrowserServerBackend['_currentWebMCPTools']>>[number] | undefined;
+    if (tool) {
+      try {
+        parsedArguments = tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, any>;
+      } catch (error) {
+        // Per the MCP spec, input validation failures are tool execution
+        // errors (isError results), not protocol errors.
+        if (error instanceof z.ZodError)
+          throw new Error(`Invalid input for tool "${name}":\n${z.prettifyError(error)}`);
+        throw error;
+      }
+    } else {
+      dynamicTool = (await this._currentWebMCPTools(context)).find(candidate => candidate.schema.name === name);
+      if (!dynamicTool)
+        throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Tool "${name}" not found`);
+      parsedArguments = { ...(rawArguments || {}) };
+      delete parsedArguments.browserSessionId;
+      delete parsedArguments._meta;
     }
     // The wire-only browserSessionId never survives the parse above (the
     // tools' non-strict zod schemas strip it), which is right for the tool
@@ -223,7 +263,10 @@ export class BrowserServerBackend implements ServerBackend {
         if (idleNotice)
           response.addNotice(idleNotice);
       }
-      await tool.handle(context, parsedArguments, response);
+      if (tool)
+        await tool.handle(context, parsedArguments, response);
+      else
+        await dynamicTool!.handle(parsedArguments, response);
       await response.finish();
       if (name === 'browser_session_close') {
         // The close has already completed and the handle is gone, so a log
@@ -262,6 +305,7 @@ export class BrowserServerBackend implements ServerBackend {
       if (routedSessionId !== undefined)
         this._sessionRegistry?.touch(routedSessionId);
     }
+    await this._notifyIfWebMCPToolsChanged(context).catch(logUnhandledError);
     return response.serialize();
   }
 
