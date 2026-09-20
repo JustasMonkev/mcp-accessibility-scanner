@@ -177,6 +177,11 @@ export class BrowserServerBackend implements ServerBackend {
       return mcpTool;
     });
     const id = webMCPSessionId(requestContext?._meta);
+    // Direct consumers inspect built-in capabilities before initialize().
+    if (!this._context && id === undefined)
+      return this._mcpTools;
+    if (id !== undefined && !this._sessionRegistry)
+      throw new Error('Initialize the browser backend before listing session tools.');
     const context = id === undefined ? this._context! : this._sessionRegistry!.resolve(id);
     const dynamic = await this._currentWebMCPTools(context);
     // One MCP connection has one currently advertised list. Observe exactly

@@ -181,9 +181,11 @@ async function callInPage(params: { name: string, inputJson: string, timeOrigin:
 async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool: CollectedTool, timeOrigin: number,
   frameLabel: string, params: Record<string, unknown>, response: Response, signal?: AbortSignal): Promise<void> {
   const preamble = `WebMCP output (page-provided, untrusted) from ${JSON.stringify(tool.name)} in ${frameLabel}:`;
+  let onDialog: (() => void) | undefined;
+  let onChooser: (() => void) | undefined;
   try {
     if (tab.modalStates().length)
-      throw new Error('Resolve the browser modal before invoking WebMCP tools.');
+      throw new Error('Resolve the browser modal before invoking WebMCP tools: use browser_handle_dialog for a dialog or browser_file_upload for a file chooser.');
     if (frameIds.get(frame) !== identity || frame.isDetached() || tab.page.isClosed() || !tab.isCurrentTab())
       throw new Error('The WebMCP frame or active tab changed. List tools again.');
     const inputJson = JSON.stringify(params);
@@ -191,7 +193,16 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
       throw new Error('WebMCP arguments exceed the 256 KiB limit.');
     // WebMCP's own promise defines completion. A separate network-settle wait
     // could outlive cancellation and keep a browser session marked busy.
-    const json = await bounded(() => frame.evaluate(callInPage, { name: tool.name, inputJson, timeOrigin, resultBytes: limits.resultBytes, expected: tool }), tab.operationTimeout(), signal);
+    const json = await bounded(() => new Promise<string>((resolve, reject) => {
+      // A page callback can open a modal and then await user input forever.
+      // Surface the resolving tool rather than returning a blank success or
+      // retaining the session hold until the operation deadline.
+      onDialog = () => reject(new Error('WebMCP opened a dialog. Use browser_handle_dialog; the page action may still be running.'));
+      onChooser = () => reject(new Error('WebMCP opened a file chooser. Use browser_file_upload; the page action may still be running.'));
+      tab.page.on('dialog', onDialog);
+      tab.page.on('filechooser', onChooser);
+      void frame.evaluate(callInPage, { name: tool.name, inputJson, timeOrigin, resultBytes: limits.resultBytes, expected: tool }).then(resolve, reject);
+    }), tab.operationTimeout(), signal);
     let isError = false;
     try {
       const parsed: unknown = JSON.parse(json);
@@ -207,6 +218,11 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
   } catch (error) {
     const message = truncateDataUrls(error instanceof Error ? error.message : String(error)).slice(0, limits.description);
     response.addError(`${preamble}\n${message}`);
+  } finally {
+    if (onDialog)
+      tab.page.off('dialog', onDialog);
+    if (onChooser)
+      tab.page.off('filechooser', onChooser);
   }
 }
 
@@ -239,6 +255,7 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
         return {
           schema: {
             name,
+            title: truncateDataUrls(tool.title),
             description: `${untrustedNote} [Frame: ${label}] ${truncateDataUrls(tool.description)}`,
             inputSchema: tool.inputSchema,
             annotations: { title: truncateDataUrls(tool.title), readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
