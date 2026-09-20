@@ -93,7 +93,7 @@ For VS Code:
 code --add-mcp '{"name":"accessibility-scanner","command":"npx","args":["mcp-accessibility-scanner"]}'
 ```
 
-For VS Code Insiders:
+For Code Insiders:
 ```bash
 code-insiders --add-mcp '{"name":"accessibility-scanner","command":"npx","args":["mcp-accessibility-scanner"]}'
 ```
@@ -146,7 +146,7 @@ Packed extensions require an enabled record in the profile's preferences; a left
 
 ### Discovering available tools (`list-tools` subcommand)
 
-To print every tool name and its description:
+To print the built-in tool names and descriptions (page-registered WebMCP tools require a live MCP `tools/list` request):
 
 ```bash
 npx mcp-accessibility-scanner list-tools
@@ -232,7 +232,7 @@ Create a `config.json` file with the following options:
 - `browser.cdpTimeout`: Maximum time in milliseconds to wait when connecting to the CDP endpoint (default: `30000`)
 - `browser.cdpLaunch`: Launch a Chromium-family desktop app with CDP enabled, wait for the endpoint, and manage the child process lifecycle
 - CDP attach modes preserve the target browser's existing default-context settings instead of applying Playwright's defaults.
-- `browser.contextOptions.storageState`: Start a fresh context from a recorded Playwright storage state. Imports into existing CDP or VS Code contexts are rejected; use `--isolated` for CDP or sign in interactively. The default persistent mode uses a fresh disposable profile. See [Auditing pages behind a login](#auditing-pages-behind-a-login).
+- `browser.contextOptions.storageState`: Start a fresh context from a recorded Playwright storage state. Imports into existing CDP or VS Code contexts are rejected; use `--isolated` for CDP or sign in interactively. If the browser exposes no context, the server creates one with the state. CDP sessions joining that same server-created context inherit its live state without resetting it.
 - `browser.profileDirName`: Chrome profile directory name used in extension mode, for example `Default` or `Profile 1` (CLI: `--profile-dir-name`, env: `PLAYWRIGHT_MCP_PROFILE_DIR_NAME`). Requires `--user-data-dir` and extension mode (`--extension` or `--connect-tool`); defaults to the last-used profile that has the extension installed.
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
@@ -273,7 +273,7 @@ When the server runs with `--port`, it sends MCP heartbeat pings after a Streama
 
 #### Clients without the initialize handshake
 
-Clients on the MCP 2026-07-28 revision no longer send the `initialize` handshake. With `--port`, requests carrying the revision's per-request `_meta` envelope are served natively on the 2026-07-28 protocol: `server/discover` is answered (so clients negotiating with `versionNegotiation: 'auto'` or a `2026-07-28` pin connect directly), results carry `resultType` and the SEP-2549 cache fields — the tool list is advertised as cacheable for one hour with `cacheScope: "private"` — and the SEP-2243 standard headers (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) are validated against the request body. Older handshake-free clients (2025-era requests without the envelope) are served statelessly as before. In both cases requests receive no heartbeat pings, and in the modes where the server creates browser contexts itself each request runs against a fresh default browser session: with the default persistent profile the per-request default context runs in its own disposable profile (like an explicit browser session), so parallel handshake-free requests do not contend for the stable profile — and the stable profile's sign-in state is not visible to them — while `--isolated`, remote endpoints and isolated CDP modes mint a fresh context per request anyway. Modes that reuse one live browser context are the exception: `--extension` (and a `browser_connect` or VS Code session switched to a connected-browser provider) and CDP attach without `--isolated` serve every handshake-free request from the same shared context, so its tabs, cookies and storage persist across requests — the same sharing that makes these modes refuse `browser_session_open` (in `--vscode` serving the session tools are the exception: they are host-scoped and keep running against the default provider even while switched — see [Browser Session Tools](#browser-session-tools)). With a pinned `--cdp-launch-port`, only one launched application can be served at a time, so a second handshake-free request arriving while another request's browser context is still live is rejected with a clear error instead of silently attaching to the first request's application. With `--user-data-dir`, each handshake-free request launches a browser in the one configured profile: the profile's state persists across requests, and parallel requests contend for its browser lock and can fail with "Browser is already in use". Elsewhere, browser state that must persist across handshake-free requests belongs in an explicit browser session — a `browserSessionId` handle minted by `browser_session_open` in one request resolves in later ones (see [Browser Session Tools](#browser-session-tools)). Clients that do send `initialize` keep the classic `Mcp-Session-Id` session behavior unchanged. When several such stateful clients are connected at once in the default persistent-profile mode, the first client's default context holds the stable profile — concurrent clients' default contexts run in their own disposable profiles (without the stable profile's sign-in state) until it is freed, instead of failing with "Browser is already in use".
+Clients on the MCP 2026-07-28 revision no longer send the `initialize` handshake. With `--port`, requests carrying the revision's per-request `_meta` envelope are served natively on the 2026-07-28 protocol: `server/discover` is answered (so clients negotiating with `versionNegotiation: 'auto'` or a `2026-07-28` pin connect directly), results carry `resultType` and the SEP-2549 cache fields — dynamic browser tool lists use the conservative `ttlMs: 0` default instead of a one-hour cache — and the SEP-2243 standard headers (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) are validated against the request body. Older handshake-free clients (2025-era requests without the envelope) are served statelessly as before. In both cases requests receive no heartbeat pings, and in the modes where the server creates browser contexts itself each request runs against a fresh default browser session: with the default persistent profile the per-request default context runs in its own disposable profile (like an explicit browser session), so parallel handshake-free requests do not contend for the stable persistent one — and the stable profile's sign-in state is not visible to them — while `--isolated`, remote endpoints and isolated CDP modes mint a fresh context per request anyway. Modes that reuse one live browser context are the exception: `--extension` (and a `browser_connect` or VS Code session switched to a connected-browser provider) and CDP attach without `--isolated` serve every handshake-free request from the same shared context, so its tabs, cookies and storage persist across requests — the same sharing that makes these modes refuse `browser_session_open` (in `--vscode` serving the session tools are the exception: they are host-scoped and keep running against the default provider even while switched — see [Browser Session Tools](#browser-session-tools)). With a pinned `--cdp-launch-port`, only one launched application can be served at a time, so a second handshake-free request arriving while another request's browser context is still live is rejected with a clear error instead of silently attaching to the first request's application. With `--user-data-dir`, each handshake-free request launches a browser in the one configured profile: the profile's state persists across requests, and parallel requests contend for its browser lock and can fail with "Browser is already in use". Elsewhere, browser state that must persist across handshake-free requests belongs in an explicit browser session — a `browserSessionId` handle minted by `browser_session_open` in one request resolves in later ones (see [Browser Session Tools](#browser-session-tools)). Clients that do send `initialize` keep the classic `Mcp-Session-Id` session behavior unchanged. When several such stateful clients are connected at once in the default persistent-profile mode, the first client's default context holds the stable profile — concurrent clients' default contexts run in their own disposable profiles (without the stable profile's sign-in state) until it is freed, instead of failing with "Browser is already in use".
 
 ## Auditing pages behind a login
 
@@ -300,7 +300,7 @@ Record a session once with Playwright's codegen, then hand the file to the serve
 npx playwright@1.63.0 codegen --save-storage=auth.json https://example.com/login
 ```
 
-Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.
+Sign in in the opened browser, then close it — `auth.json` now holds the cookies and storage state.
 
 Pass it to the server with the CLI flag, the environment variable, or the config file:
 
@@ -352,7 +352,17 @@ The check compares which cookies the crawled URLs carry, not their values, so a 
 
 ## Available Tools
 
-Page-registered WebMCP tools are not currently exposed. See the [WebMCP adoption decision](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/decisions/001-webmcp-adoption.md) for the deferral and conditions for revisiting an opt-in capability.
+### Page-registered WebMCP tools
+
+When the current page exposes a supported WebMCP API, MCP `tools/list` includes its tools as `webmcp_<name>_<identity>` alongside built-in tools. Use the exact returned name: names are scoped to the browser session, frame/document and registration, and stale names are rejected rather than redirected to another action. No browser flags or polyfills are installed automatically.
+
+To discover or invoke tools in an explicit browser session, put its handle in **request metadata** (`params._meta.browserSessionId`) on both `tools/list` and `tools/call`. This is separate from `params.arguments`: page-defined `browserSessionId` and `_meta` arguments are preserved unchanged. Without routing metadata, discovery and invocation use the default session. Session handles are never enumerated by discovery.
+
+Names, descriptions, schemas, results and page errors are untrusted. Every page tool retains conservative action annotations even if the page claims it is read-only. Calls are bounded and cancellable, but a timed-out or cancelled page action may still be running; do not retry it blindly. Stateful connections receive deduplicated list-change notifications for their last listed scope; stateless clients should re-list rather than cache the result.
+
+See [WebMCP usage, limits and tests](docs/webmcp.md) for request examples, discovery limits and validation commands. An empty listing is not proof that the page has no tools: unsupported, invalid or timed-out registrations are omitted.
+
+### Built-in tools
 
 The MCP server provides comprehensive browser automation and accessibility scanning tools:
 
@@ -487,7 +497,7 @@ Audits what a screen reader actually announces, using the browser's own accessib
 
 **Checks (`checkNames`)**
 - `missing-accessible-name`: controls and images exposed with no accessible name (WCAG 4.1.2)
-- `uninformative-accessible-name`: names such as "click here", "read more", "image" that mean nothing out of context (WCAG 2.4.4)
+- `uninformative-accessible-name`: names such as "click here", "image" that mean nothing out of context (WCAG 2.4.4)
 - `filename-as-accessible-name`: image alt text that is a file name, e.g. `IMG_1234.jpg`, `DSC00123` (WCAG 1.1.1). Only images are checked: a link or button legitimately named after the file it downloads (`logo.png`) is not a defect.
 - `label-in-name-mismatch`: the accessible name does not contain the visible label, which breaks voice control (WCAG 2.5.3). The visible label of `<input type="submit|button|reset">` is read from its `value`, and a web component's label is read from its open shadow root.
 - `duplicate-accessible-name`: sibling links with the same name that lead to different URLs (WCAG 2.4.4)
@@ -512,7 +522,7 @@ Audits what a screen reader actually announces, using the browser's own accessib
 ```text
 1. Navigate to the target page and let it fully load
 2. Run audit_screen_reader (optionally raise maxElements for a large page)
-3. Fix the reported elements by ref, then re-run to confirm
+3. Review focus findings and open the generated JSON report path
 ```
 
 ### Navigation Tools
@@ -644,7 +654,7 @@ Manage browser tabs in one tool.
 
 ### Browser Session Tools
 
-Following the MCP 2026-07-28 stateless prescription, browser state can be named by an explicit server-minted handle instead of living implicitly in the connection. Every browser tool except the two session tools accepts an optional `browserSessionId` argument; when it is omitted, the tool runs in the default session and behaves exactly as before.
+Following the MCP 2026-07-28 stateless prescription, browser state can be named by an explicit server-minted handle instead of living implicitly in the connection. Every built-in browser tool except the two session tools accepts an optional `browserSessionId` argument; when it is omitted, the tool runs in the default session and behaves exactly as before. Dynamic `webmcp_*` tools instead use request metadata for routing, as described above, so page arguments are not overwritten.
 
 #### `browser_session_open`
 Opens a separate browser session — its own browser context with its own tabs, cookies and storage — and returns its opaque handle (`bs_...`) both in the result text and as `structuredContent.browserSessionId`. Pass that handle as the `browserSessionId` argument of other browser tools to run them in this session.

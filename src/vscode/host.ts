@@ -44,6 +44,7 @@ const contextSwitchOptions = z.object({
 
 /** @public */
 export class VSCodeProxyBackend implements ServerBackend {
+  readonly dynamicToolList = true;
   name = 'Playwright MCP Client Switcher';
   version = packageJSON.version;
 
@@ -64,6 +65,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   private _contextSwitchTool: Tool;
   private _clientVersion?: ClientVersion;
   private _backendContext: ServerBackendContext | undefined;
+  private _listedClient: Client | undefined;
 
   constructor(private readonly _config: FullConfig, private readonly _defaultTransportFactory: () => Promise<Transport>, private readonly _sharedSlot?: SharedClientSlot) {
     this._contextSwitchTool = this._defineContextSwitchTool();
@@ -89,8 +91,12 @@ export class VSCodeProxyBackend implements ServerBackend {
     await this._setCurrentClient(transport, false, true);
   }
 
-  async listTools(): Promise<Tool[]> {
-    const response = await this._currentClient!.listTools();
+  async listTools(requestContext?: Pick<mcpServer.CallToolRequestContext, '_meta'>): Promise<Tool[]> {
+    // Listing and invocation must resolve the same host-owned session even
+    // while the default browsing provider is switched to a VS Code child.
+    const client = await this._clientForTool('webmcp_', undefined, requestContext);
+    const response = await client.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined);
+    this._listedClient = client;
     return [
       ...response.tools,
       this._contextSwitchTool,
@@ -100,12 +106,12 @@ export class VSCodeProxyBackend implements ServerBackend {
   async callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
     if (name === this._contextSwitchTool.name)
       return this._callContextSwitchTool(args as any, requestContext);
-    const client = await this._clientForTool(name, args);
+    const client = await this._clientForTool(name, args, requestContext);
     return await client.callTool({
       name,
       arguments: args,
       _meta: requestContext?._meta,
-    });
+    }, requestContext ? { signal: requestContext.signal } : undefined);
   }
 
   /**
@@ -119,8 +125,12 @@ export class VSCodeProxyBackend implements ServerBackend {
    * any call carrying a browserSessionId — therefore always resolves against
    * a default-provider client; only session-less traffic follows the switch.
    */
-  private async _clientForTool(name: string, args: CallToolRequest['params']['arguments']): Promise<Client> {
-    const sessionTraffic = name === 'browser_session_open' || name === 'browser_session_close' || typeof args?.browserSessionId === 'string';
+  private async _clientForTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: Pick<mcpServer.CallToolRequestContext, '_meta'>): Promise<Client> {
+    // Dynamic tools own every argument field; only request metadata routes
+    // them. The destination backend validates the metadata handle.
+    const sessionTraffic = name.startsWith('webmcp_')
+      ? requestContext?._meta?.browserSessionId !== undefined
+      : name === 'browser_session_open' || name === 'browser_session_close' || typeof args?.browserSessionId === 'string';
     if (!sessionTraffic || this._currentClientIsDefault)
       return this._currentClient!;
     if (!this._sessionClient) {
@@ -138,6 +148,8 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   serverClosed?(): void {
+    this._backendContext = undefined;
+    this._listedClient = undefined;
     if (this._ownsCurrentClient)
       void this._currentClient?.close().catch(logUnhandledError);
     else if (this._currentClient)
@@ -287,6 +299,10 @@ export class VSCodeProxyBackend implements ServerBackend {
   private async _connectClient(transport: Transport): Promise<Client> {
     const client = new Client(this._clientVersion!);
     client.setRequestHandler('ping', () => ({}));
+    client.setNotificationHandler('notifications/tools/list_changed', async () => {
+      if (!this._sharedSlot && this._listedClient === client)
+        await this._backendContext?.notifyToolListChanged().catch(logUnhandledError);
+    });
 
     await client.connect(transport);
     return client;

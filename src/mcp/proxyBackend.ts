@@ -53,6 +53,7 @@ export type SharedProxySelection = {
 const errorsDebug = debug('pw:mcp:errors');
 
 export class ProxyBackend implements ServerBackend {
+  readonly dynamicToolList = true;
   private _mcpProviders: MCPProvider[];
   private _currentClient: Client | undefined;
   // False when _currentClient is adopted from the shared slot: response
@@ -86,8 +87,8 @@ export class ProxyBackend implements ServerBackend {
     await this._setCurrentClient(this._mcpProviders[0], false);
   }
 
-  async listTools(): Promise<Tool[]> {
-    const response = await this._currentClient!.listTools();
+  async listTools(requestContext?: Pick<CallToolRequestContext, '_meta'>): Promise<Tool[]> {
+    const response = await this._currentClient!.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined);
     if (this._mcpProviders.length === 1)
       return response.tools;
     return [
@@ -104,14 +105,18 @@ export class ProxyBackend implements ServerBackend {
       name,
       arguments: args,
       _meta: requestContext?._meta,
-    }, progressToken === undefined ? undefined : {
-      onprogress: params => {
-        void this._forwardProgressNotification(requestContext, progressToken, params);
-      },
-    });
+    }, requestContext ? {
+      signal: requestContext.signal,
+      ...(progressToken === undefined ? {} : {
+        onprogress: (params: { progress: number; total?: number; message?: string }) => {
+          void this._forwardProgressNotification(requestContext, progressToken, params);
+        },
+      }),
+    } : undefined);
   }
 
   serverClosed?(): void {
+    this._backendContext = undefined;
     if (this._ownsCurrentClient)
       void this._currentClient?.close().catch(errorsDebug);
     else if (this._currentClient)
@@ -227,6 +232,12 @@ export class ProxyBackend implements ServerBackend {
   private async _connectClient(factory: MCPProvider): Promise<Client> {
     const client = new Client({ name: 'Playwright MCP Proxy', version: '0.0.0' });
     client.setRequestHandler('ping', () => ({}));
+    client.setNotificationHandler('notifications/tools/list_changed', async () => {
+      // An owned connection has one upstream recipient. Shared stateless
+      // clients have no persistent recipient; callers re-list with zero TTL.
+      if (this._ownsCurrentClient && this._currentClient === client)
+        await this._backendContext?.notifyToolListChanged().catch(errorsDebug);
+    });
 
     const transport = await factory.connect();
     await client.connect(transport);
