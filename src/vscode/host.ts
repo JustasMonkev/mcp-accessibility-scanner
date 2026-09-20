@@ -107,11 +107,22 @@ export class VSCodeProxyBackend implements ServerBackend {
     if (name === this._contextSwitchTool.name)
       return this._callContextSwitchTool(args as any, requestContext);
     const client = await this._clientForTool(name, args, requestContext);
+    const progressToken = requestContext?._meta?.progressToken;
     return await client.callTool({
       name,
       arguments: args,
       _meta: requestContext?._meta,
-    }, requestContext ? { signal: requestContext.signal } : undefined);
+    }, requestContext ? {
+      signal: requestContext.signal,
+      ...(progressToken === undefined ? {} : {
+        onprogress: (params: { progress: number; total?: number; message?: string }) => {
+          void Promise.resolve().then(() => requestContext.sendNotification({
+            method: 'notifications/progress',
+            params: { progressToken, ...params },
+          })).catch(logUnhandledError);
+        },
+      }),
+    } : undefined);
   }
 
   /**
@@ -236,7 +247,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   // Stateless serving: publish the switch through the process-scoped slot so
   // later per-request backends adopt it. The slot closes the previously
   // shared client itself (exactly once, after the swap, once every adopting
-  // request has released it — the close terminates that client's spawned
+  // request has released its lease — the close terminates that client's spawned
   // child); only a client this request owned — its per-request default — is
   // closed here.
   private async _switchSharedClient(createTransport: (() => Promise<Transport>) | undefined): Promise<void> {

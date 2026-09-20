@@ -236,15 +236,21 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
     scopeIds.set(scope, scopeId);
   }
   const frames = tab.page.frames().slice(0, limits.frames);
+  // Allocate the global cap before browser serialization, not after every
+  // frame has already returned up to 128 schemas on each polling round.
+  const work = frames.map((frame, index) => ({
+    frame,
+    budget: { ...limits, tools: Math.floor(limits.tools / frames.length) + (index < limits.tools % frames.length ? 1 : 0) },
+  }));
   const deadline = Date.now() + discoveryTimeoutMs;
-  const collected = await withConcurrency(frames, async frame => {
+  const collected = await withConcurrency(work, async ({ frame, budget }) => {
     signal?.throwIfAborted();
     const remaining = deadline - Date.now();
     if (remaining <= 0)
       return [];
     const identity = frameIdentity(tab.page, frame);
     try {
-      const listing = await bounded(() => frame.evaluate(collectInPage, limits), remaining, signal);
+      const listing = await bounded(() => frame.evaluate(collectInPage, budget), remaining, signal);
       if (frameIds.get(frame) !== identity || frame.isDetached())
         return [];
       const label = truncateDataUrls(frame.url()).slice(0, 2048);

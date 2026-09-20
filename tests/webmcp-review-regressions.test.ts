@@ -16,6 +16,7 @@
 
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import vm from 'node:vm';
 import { describe, it } from 'vitest';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { listWebMCPTools } from '../src/webmcp.js';
@@ -72,6 +73,41 @@ describe('WebMCP follow-up review regressions', () => {
       assert.equal(h.results.length, 0);
       assert.match(h.errors.join(''), new RegExp(resolver));
       assert.equal(h.page.listenerCount(event), before);
+    });
+  }
+});
+
+
+describe('WebMCP aggregate discovery budget', () => {
+  for (const frameCount of [3, 32]) {
+    it(`caps registrations before transport across ${frameCount} populated frames`, async () => {
+      let transferred = 0;
+      const budgets: number[] = [];
+      const page = Object.assign(new EventEmitter(), { frames: () => frames, isClosed: () => false });
+      const frames = Array.from({ length: frameCount }, (_, index) => {
+        const sandbox = vm.createContext({
+          window: {}, navigator: {}, performance: { timeOrigin: index + 1 }, TextEncoder,
+          document: { modelContext: { getTools: async () => Array.from({ length: 128 }, (_, tool) => ({
+            name: `tool${tool}`, description: '', inputSchema: { type: 'object' },
+          })) } },
+        });
+        return {
+          url: () => 'https://example.test', isDetached: () => false,
+          evaluate: async (fn: Function, budget: { tools: number }) => {
+            budgets.push(budget.tools);
+            const result = await vm.runInContext(`(${fn.toString()})`, sandbox)(budget);
+            transferred += result.tools.length;
+            return JSON.parse(JSON.stringify(result));
+          },
+        };
+      });
+      // SAFETY: exercises the production in-page collector and concurrency path with serializing frame fixtures.
+      const tab = { page, context: {}, modalStates: () => [] } as unknown as Tab;
+      const tools = await listWebMCPTools(tab);
+      assert.equal(transferred, 128);
+      assert.equal(tools.length, 128);
+      assert.equal(budgets.reduce((sum, count) => sum + count, 0), 128);
+      assert.ok(Math.max(...budgets) - Math.min(...budgets) <= 1);
     });
   }
 });

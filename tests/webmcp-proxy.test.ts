@@ -91,3 +91,29 @@ describe('WebMCP VS Code host routing', () => {
     assert.deepEqual(calls, [{ destination: 'host', params: { name: 'webmcp_page_tool', arguments: { browserSessionId: 42 }, _meta: request._meta }, options: { signal } }]);
   });
 });
+
+
+describe('WebMCP VS Code progress forwarding', () => {
+  it('forwards progress for switched and host-routed calls without changing cancellation or page input', async () => {
+    for (const sessionId of [undefined, 'bs_host']) {
+      const { backend, calls } = vscodeHarness();
+      const notifications: unknown[] = [];
+      const signal = new AbortController().signal;
+      const request: CallToolRequestContext = {
+        signal, requestId: 1,
+        sendNotification: async value => { notifications.push(value); },
+        _meta: { ...(sessionId ? { browserSessionId: sessionId } : {}), progressToken: 0 },
+      };
+      const args = { browserSessionId: 'page-owned value', _meta: 'page-owned metadata' };
+      await backend.callTool('webmcp_page_tool', args, request);
+      assert.equal(calls[0].destination, sessionId ? 'host' : 'switched');
+      assert.deepEqual(calls[0].params, { name: 'webmcp_page_tool', arguments: args, _meta: request._meta });
+      // SAFETY: the injected client's options are the production callTool options captured by the fixture.
+      const options = calls[0].options as { signal: AbortSignal, onprogress: (value: { progress: number; total?: number; message?: string }) => void };
+      assert.equal(options.signal, signal);
+      options.onprogress({ progress: 2, total: 3, message: 'Preparing audit' });
+      await Promise.resolve();
+      assert.deepEqual(notifications, [{ method: 'notifications/progress', params: { progressToken: 0, progress: 2, total: 3, message: 'Preparing audit' } }]);
+    }
+  });
+});

@@ -236,7 +236,7 @@ Create a `config.json` file with the following options:
 - `browser.profileDirName`: Chrome profile directory name used in extension mode, for example `Default` or `Profile 1` (CLI: `--profile-dir-name`, env: `PLAYWRIGHT_MCP_PROFILE_DIR_NAME`). Requires `--user-data-dir` and extension mode (`--extension` or `--connect-tool`); defaults to the last-used profile that has the extension installed.
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
-- `timeouts.settle`: How long to wait after every action before responding (default: `500`). An action that finishes quietly is first watched for up to 100ms (or the settle delay, whichever is shorter) so scheduled network work can still be awaited before the settle delay.
+- `timeouts.settle`: How long to wait after every action for triggered work to settle before responding (default: `500`). An action that finishes quietly is first watched for up to 100ms (or the settle delay, whichever is shorter) so scheduled network work can still be awaited before the settle delay.
 - `timeouts.idle`: Release the default browser context after this many idle milliseconds (default: `0`, disabled). Accepts integers from `0` to `2147483647`.
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
@@ -522,7 +522,7 @@ Audits what a screen reader actually announces, using the browser's own accessib
 ```text
 1. Navigate to the target page and let it fully load
 2. Run audit_screen_reader (optionally raise maxElements for a large page)
-3. Review focus findings and open the generated JSON report path
+3. Review the accessibility findings and open the generated JSON report path
 ```
 
 ### Navigation Tools
