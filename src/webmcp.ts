@@ -122,12 +122,17 @@ async function collectInPage(budget: typeof limits & { documentKey: string, docu
   const registered = await modelContext.getTools();
   if (!Array.isArray(registered))
     return result;
-  const names = new Set<string>();
+  const counts = new Map<string, number>();
   for (const tool of registered) {
     if (!tool || typeof tool.name !== 'string' || !tool.name || tool.name.length > 256
-        || ('window' in tool && tool.window !== window) || names.has(tool.name))
+        || ('window' in tool && tool.window !== window))
       continue;
-    names.add(tool.name);
+    counts.set(tool.name, (counts.get(tool.name) ?? 0) + 1);
+  }
+  for (const tool of registered) {
+    if (!tool || typeof tool.name !== 'string' || counts.get(tool.name) !== 1
+        || ('window' in tool && tool.window !== window))
+      continue;
     let schema: unknown = tool.inputSchema;
     try {
       if (typeof schema === 'string') {
@@ -318,6 +323,7 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
         const digest = createHash('sha256').update(JSON.stringify([scopeId, listing.documentId, listing.timeOrigin, tool])).digest('hex').slice(0, 20);
         const base = tool.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 36) || 'tool';
         const name = `webmcp_${base}_${digest}`;
+        const invocationKey = JSON.stringify([scopeId, listing.documentId, listing.timeOrigin, tool.name]);
         return {
           schema: {
             name,
@@ -327,7 +333,7 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
             annotations: { title: truncateDataUrls(tool.title), readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
           },
           handle: (params: Record<string, unknown>, response: Response, callSignal?: AbortSignal) =>
-            invoke(tab, frame, identity, tool, listing.timeOrigin, name, label, params, response, callSignal),
+            invoke(tab, frame, identity, tool, listing.timeOrigin, invocationKey, label, params, response, callSignal),
         } satisfies WebMCPToolDefinition;
       });
     } catch {

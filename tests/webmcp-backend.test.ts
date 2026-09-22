@@ -77,6 +77,7 @@ function contextHarness(label: string) {
   return { context, tab, calls: () => calls, busy: () => busy, reads: () => reads, disposed: () => disposed,
     evaluations: () => evaluations, protocolErrorBytes: () => protocolErrorBytes, received: () => received,
     setRead: (value: typeof read) => { read = value; },
+    setTools: (value: typeof tools) => { tools = value; },
     removeTools: () => { tools = []; }, setExecute: (value: typeof execute) => { execute = value; },
   };
 }
@@ -237,6 +238,36 @@ describe('WebMCP backend scope and argument contracts', () => {
     const result = await h.backend.callTool(tool.name, input, request());
     assert.equal(result.isError, true);
     assert.ok(h.defaultContext.protocolErrorBytes() <= 2048);
+    h.backend.serverClosed();
+  });
+
+  it('omits every registration whose page name is ambiguous', async () => {
+    const h = backendHarness();
+    h.defaultContext.setTools([
+      { name: 'duplicate', description: 'first', inputSchema: { type: 'object', properties: {
+        browserSessionId: { type: 'number' }, _meta: { type: 'string' },
+      }, required: ['browserSessionId', '_meta'] } },
+      { name: 'duplicate', description: 'second', inputSchema: { type: 'object', properties: {
+        browserSessionId: { type: 'number' }, _meta: { type: 'string' },
+      }, required: ['browserSessionId', '_meta'] } },
+    ]);
+    assert.deepEqual(await h.backend.listTools(), []);
+    h.backend.serverClosed();
+  });
+
+  it('keeps invocation suppression stable across descriptor changes', async () => {
+    const h = backendHarness();
+    const [first] = await h.backend.listTools();
+    h.defaultContext.setExecute(() => new Promise(() => {}));
+    assert.match(text(await h.backend.callTool(first.name, input, request())), /timed out/);
+    h.defaultContext.setTools([{ name: 'echo', description: 'changed', inputSchema: { type: 'object', properties: {
+      browserSessionId: { type: 'number' }, _meta: { type: 'string' },
+    }, required: ['browserSessionId', '_meta'] } }]);
+    const [changed] = await h.backend.listTools();
+    assert.notEqual(changed.name, first.name);
+    const result = await h.backend.callTool(changed.name, input, request());
+    assert.match(text(result), /previous invocation.*still running/);
+    assert.equal(h.defaultContext.calls(), 1);
     h.backend.serverClosed();
   });
 
