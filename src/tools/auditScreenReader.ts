@@ -124,26 +124,26 @@ export function parseAriaSnapshot(snapshot: string): AriaTreeNode[] {
     // Playwright YAML-quotes the whole key when the accessible name contains
     // ": ", " #", braces or backticks, doubling any apostrophe inside it. Left
     // quoted, such a node is dropped and its children are mis-parented.
-    const quoted = /^(\s*)- '((?:[^']|'')*)'(.*)$/.exec(rawLine);
+    const quotedKey = /^(\s*)- '((?:[^']|'')*)'(.*)$/.exec(rawLine);
     // Separate the key from inline text before finding the final slash: the
     // value can contain slashes too. Keys containing ": " are YAML-quoted.
-    const line = quoted ? `${quoted[1]}- ${quoted[2].replace(/''/g, '\'')}` : rawLine.split(/:\s|:$/)[0];
+    const key = quotedKey ? `${quotedKey[1]}- ${quotedKey[2].replace(/''/g, '\'')}` : rawLine.split(/:\s|:$/)[0];
     // AI snapshots do not convert strings to regexes. On Playwright 1.63,
     // literal names starting and ending in / are emitted without quotes;
     // keep their delimiters and backslashes exactly as the page named them.
-    const match = /^(\s*)- ([a-zA-Z]+)(?:\s+(?:"((?:[^"\\]|\\.)*)"|(\/(?:.*\/)?)))?(.*)$/.exec(line);
+    const match = /^(\s*)- ([a-zA-Z]+)(?:\s+(?:"((?:[^"\\]|\\.)*)"|(\/(?:.*\/)?)))?(.*)$/.exec(key);
     if (!match)
       continue;
-    const depth = match[1].length;
-    const rest = match[5];
+    const [, indentation, role, quotedName, slashName, metadata] = match;
+    const depth = indentation.length;
     while (stack.length && stack[stack.length - 1].depth >= depth)
       stack.pop();
-    const levelMatch = /\[level=(\d+)\]/.exec(rest);
+    const levelMatch = /\[level=(\d+)\]/.exec(metadata);
     nodes.push({
-      role: match[2],
-      name: match[3] === undefined ? match[4] ?? null : match[3].replace(/\\(.)/g, '$1'),
+      role,
+      name: quotedName === undefined ? slashName ?? null : quotedName.replace(/\\(.)/g, '$1'),
       level: levelMatch ? Number(levelMatch[1]) : null,
-      ref: /\[ref=([^\]]+)\]/.exec(rest)?.[1] ?? null,
+      ref: /\[ref=([^\]]+)\]/.exec(metadata)?.[1] ?? null,
       depth,
       parent: stack.length ? stack[stack.length - 1].index : null,
     });
@@ -1184,3 +1184,4 @@ const auditScreenReader = defineTabTool({
 export default [
   auditScreenReader,
 ];
+

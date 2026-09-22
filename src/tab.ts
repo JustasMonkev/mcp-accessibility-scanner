@@ -195,9 +195,8 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       entry.finished = true;
     } catch (error) {
       const message = truncateDataUrls(formatPageStateError(error));
-      entry.error = truncateToUtf8Bytes(message, 2000);
-      if (entry.error !== message)
-        entry.error += '… [truncated]';
+      const bounded = truncateToUtf8Bytes(message, 2000);
+      entry.error = bounded === message ? bounded : `${bounded}… [truncated]`;
       throw error;
     }
   }
@@ -558,3 +557,4 @@ export function renderModalStates(context: Context, modalStates: ModalState[]): 
   }
   return result;
 }
+
