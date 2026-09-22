@@ -122,6 +122,43 @@ describe('WebMCP VS Code progress forwarding', () => {
 });
 
 describe('WebMCP VS Code notification races', () => {
+  it('waits for every overlapping listing on the same client before notifying', async () => {
+    let notifications = 0;
+    let innerContext!: ServerBackendContext;
+    let call = 0;
+    const started = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const finish = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const backend = new VSCodeProxyBackend(await resolveConfig({}), async () => wrapInProcess({
+      initialize: async context => { innerContext = context; },
+      listTools: async () => {
+        const index = call++;
+        started[index].resolve();
+        await finish[index].promise;
+        return [];
+      },
+      callTool: async () => ({ content: [] }),
+    }));
+    try {
+      await backend.initialize({ notifyToolListChanged: async () => { ++notifications; } }, { name: 'test', version: '1' });
+      const first = backend.listTools();
+      await started[0].promise;
+      const second = backend.listTools();
+      await started[1].promise;
+      await innerContext.notifyToolListChanged();
+      finish[0].resolve();
+      await first;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(notifications, 0);
+      finish[1].resolve();
+      await second;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(notifications, 1);
+    } finally {
+      finish.forEach(gate => gate.resolve());
+      backend.serverClosed();
+    }
+  });
+
   it('preserves notifications during the first and switched-client tool listing', async () => {
     let notifications = 0;
     const innerContexts: ServerBackendContext[] = [];

@@ -104,7 +104,7 @@ export class VSCodeProxyBackend implements ServerBackend {
       return [...response.tools, this._contextSwitchTool];
     } finally {
       this._pendingToolLists.delete(pending);
-      if (pending.changed)
+      if (pending.changed && ![...this._pendingToolLists].some(entry => entry.client === client))
         this._deferToolListChanged(client);
     }
   }
@@ -339,7 +339,7 @@ export class VSCodeProxyBackend implements ServerBackend {
     // The outer SDK must process the list response before a refresh arrives.
     this._toolListNotification = setImmediate(() => {
       this._toolListNotification = undefined;
-      if (!this._sharedSlot && this._listedClient === client)
+      if (!this._sharedSlot && this._listedClient === client && ![...this._pendingToolLists].some(entry => entry.client === client))
         void this._backendContext?.notifyToolListChanged().catch(logUnhandledError);
     });
   }
