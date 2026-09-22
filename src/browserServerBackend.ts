@@ -186,6 +186,8 @@ export class BrowserServerBackend implements ServerBackend {
     const endSessionHold = context.beginSessionHold();
     try {
       requestContext?.signal?.throwIfAborted();
+      if (context === this._context && this._browserContextFactory.sharedContext && !context.currentTab())
+        await context.ensureTab();
       const dynamic = await this._currentWebMCPTools(context, requestContext?.signal);
       requestContext?.signal?.throwIfAborted();
       // One MCP connection has one currently advertised list. Observe exactly

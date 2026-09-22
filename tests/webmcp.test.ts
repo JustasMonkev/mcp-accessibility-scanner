@@ -244,9 +244,10 @@ describe('WebMCP discovery and identity', () => {
       { ...registration('oversized'), inputSchema: { type: 'object', description: 'x'.repeat(17000) } },
       ...Array.from({ length: 150 }, (_, i) => registration(`tool${i}`, 'x'.repeat(3000))),
     ]);
+    h.frames[0].url = () => `https://example.test/${'long-path/'.repeat(300)}`;
     const tools = await listWebMCPTools(h.tab);
     assert.equal(tools.length, 128);
-    assert.ok(tools.every(t => !t.schema.name.includes('oversized') && t.schema.description!.length < 2600));
+    assert.ok(tools.every(t => !t.schema.name.includes('oversized') && t.schema.description!.length <= 2048));
   });
 
   it('omits malformed MCP schemas without poisoning valid tools', async () => {
@@ -297,6 +298,29 @@ describe('WebMCP execution boundaries', () => {
     const r = response();
     await tool.handle({}, r.value);
     assert.match(r.errors.join(''), /timed out.*may still be running/);
+  });
+
+  it('does not retry a timed-out invocation until its browser evaluation settles', async () => {
+    const h = harness([registration()]);
+    const first = Promise.withResolvers<unknown>();
+    h.setExecute(() => first.promise);
+    const [tool] = await listWebMCPTools(h.tab);
+    const timedOut = response();
+    await tool.handle({}, timedOut.value);
+    assert.match(timedOut.errors.join(''), /timed out/);
+    const [relisted] = await listWebMCPTools(h.tab);
+    assert.equal(relisted.schema.name, tool.schema.name);
+    const blocked = response();
+    await relisted.handle({}, blocked.value);
+    assert.match(blocked.errors.join(''), /previous invocation.*still running/);
+    assert.equal(h.calls(), 1);
+    first.resolve({ done: true });
+    await delay(0);
+    h.setExecute(() => ({ done: true }));
+    const retried = response();
+    await relisted.handle({}, retried.value);
+    assert.equal(retried.errors.length, 0);
+    assert.equal(h.calls(), 2);
   });
 
   it('does not execute an already-cancelled call', async () => {

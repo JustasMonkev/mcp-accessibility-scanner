@@ -31,6 +31,7 @@ const frameIds = new WeakMap<playwright.Frame, string>();
 const observedPages = new WeakSet<playwright.Page>();
 const documentKey = `__webmcp_${randomUUID()}`;
 const pendingDiscovery = new WeakMap<playwright.Frame, { promise: Promise<FrameListing>, expired: boolean }>();
+const pendingInvocations = new Map<string, Promise<string>>();
 
 type PageTool = { name: string, title?: string, description?: string, inputSchema?: unknown, window?: Window };
 type ModelContext = {
@@ -191,7 +192,7 @@ async function callInPage(params: { name: string, inputJson: string, timeOrigin:
 
 /** Calls one still-current registration without trusting page safety hints or waiting forever. */
 async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool: CollectedTool, timeOrigin: number,
-  frameLabel: string, params: Record<string, unknown>, response: Response, signal?: AbortSignal): Promise<void> {
+  invocationKey: string, frameLabel: string, params: Record<string, unknown>, response: Response, signal?: AbortSignal): Promise<void> {
   const preamble = `WebMCP output (page-provided, untrusted) from ${JSON.stringify(tool.name)} in ${frameLabel}:`;
   let onDialog: (() => void) | undefined;
   let onChooser: (() => void) | undefined;
@@ -206,6 +207,10 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
     // WebMCP's own promise defines completion. A separate network-settle wait
     // could outlive cancellation and keep a browser session marked busy.
     const json = await bounded(() => new Promise<string>((resolve, reject) => {
+      if (pendingInvocations.has(invocationKey)) {
+        reject(new Error('A previous invocation of this WebMCP tool is still running; do not retry it.'));
+        return;
+      }
       // A page callback can open a modal and then await user input forever.
       // Surface the resolving tool rather than returning a blank success or
       // retaining the session hold until the operation deadline.
@@ -213,7 +218,14 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
       onChooser = () => reject(new Error('WebMCP opened a file chooser. Use browser_file_upload; the page action may still be running.'));
       tab.page.on('dialog', onDialog);
       tab.page.on('filechooser', onChooser);
-      void frame.evaluate(callInPage, { name: tool.name, inputJson, timeOrigin, resultBytes: limits.resultBytes, expected: JSON.stringify(tool) }).then(resolve, reject);
+      const evaluation = frame.evaluate(callInPage, { name: tool.name, inputJson, timeOrigin, resultBytes: limits.resultBytes, expected: JSON.stringify(tool) });
+      pendingInvocations.set(invocationKey, evaluation);
+      const clear = () => {
+        if (pendingInvocations.get(invocationKey) === evaluation)
+          pendingInvocations.delete(invocationKey);
+      };
+      void evaluation.then(clear, clear);
+      void evaluation.then(resolve, reject);
     }), tab.operationTimeout(), signal);
     let isError = false;
     try {
@@ -294,12 +306,12 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
           schema: {
             name,
             title: truncateDataUrls(tool.title),
-            description: `${untrustedNote} [Frame: ${label}] ${truncateDataUrls(tool.description)}`,
+            description: `${untrustedNote} [Frame: ${label}] ${truncateDataUrls(tool.description)}`.slice(0, limits.description),
             inputSchema: tool.inputSchema,
             annotations: { title: truncateDataUrls(tool.title), readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
           },
           handle: (params: Record<string, unknown>, response: Response, callSignal?: AbortSignal) =>
-            invoke(tab, frame, identity, tool, listing.timeOrigin, label, params, response, callSignal),
+            invoke(tab, frame, identity, tool, listing.timeOrigin, name, label, params, response, callSignal),
         } satisfies WebMCPToolDefinition;
       });
     } catch {

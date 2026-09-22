@@ -103,6 +103,24 @@ function text(result: Awaited<ReturnType<BrowserServerBackend['callTool']>>) {
 }
 
 describe('WebMCP backend scope and argument contracts', () => {
+  it('attaches a shared default context before stateful listing', async () => {
+    const h = backendHarness(undefined, false);
+    let attached = false;
+    const ensureTab = vi.fn(async () => {
+      attached = true;
+      return h.defaultContext.tab;
+    });
+    Object.assign(h.defaultContext.context, {
+      currentTab: () => attached ? h.defaultContext.tab : undefined,
+      ensureTab,
+    });
+    Object.assign(h.backend, { _browserContextFactory: { sharedContext: true } });
+    const [tool] = await h.backend.listTools();
+    assert.match(tool.name, /^webmcp_/);
+    assert.equal(ensureTab.mock.calls.length, 1);
+    h.backend.serverClosed();
+  });
+
   it('lists only a selected known session and does not expose other bearer handles', async () => {
     const h = backendHarness();
     const a = contextHarness('session A');
