@@ -557,4 +557,3 @@ export function renderModalStates(context: Context, modalStates: ModalState[]): 
   }
   return result;
 }
-

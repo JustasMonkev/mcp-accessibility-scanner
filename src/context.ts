@@ -1081,4 +1081,3 @@ export class InputRecorder {
       this._context.sessionLog!.logUserAction(navigateAction, tab, `await page.goto('${signal.url}');`, false);
   }
 }
-

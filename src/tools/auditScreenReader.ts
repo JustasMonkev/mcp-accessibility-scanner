@@ -1184,4 +1184,3 @@ const auditScreenReader = defineTabTool({
 export default [
   auditScreenReader,
 ];
-
