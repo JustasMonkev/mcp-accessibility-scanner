@@ -33,10 +33,11 @@ const navigate = defineTool({
 
   handle: async (context, params, response) => {
     const tab = await context.ensureTab();
-    await tab.navigate(params.url);
+    await tab.navigate(params.url, { returnOnDialog: true });
 
     response.setIncludeSnapshot();
-    response.addCode(`await page.goto(${javascript.quote(params.url)});`);
+    if (!tab.modalStates().length)
+      response.addCode(`await page.goto(${javascript.quote(params.url)});`);
   },
 });
 

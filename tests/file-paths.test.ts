@@ -47,8 +47,8 @@ describe('output path rendering with real files', () => {
       });
       const page = await browser.newPage();
       const tab = { page, context: { outputFile: (name: string, exclusive: boolean) => outputFile(config, name, exclusive) }, modalStates: () => [] };
-      // SAFETY: these tools only access config and currentTabOrDie; the tab uses a real Playwright page.
-      const context = { config, currentTabOrDie: () => tab } as Context;
+      // SAFETY: these tools access config and currentTabOrDie; response serialization drains the empty download error queue.
+      const context = { config, currentTabOrDie: () => tab, takeDownloadErrors: () => [] } as Context;
       const reportPath = await outputFile(config, 'report #1.json');
       const display = (file: string) => filePaths === 'absolute' ? path.resolve(file)
         : filePaths === 'relative' ? path.relative(process.cwd(), path.resolve(file)) : file;

@@ -136,6 +136,17 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
 async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   validateAuthToken(config.server.authToken);
   parseFilePaths(config.filePaths);
+  const { contextOptions, launchOptions } = config.browser;
+  if (contextOptions.clientCertificates?.length) {
+    // Playwright 1.63's certificate interceptor only sees the context proxy.
+    // Preserve an explicit context override, otherwise carry the launch route
+    // into every fresh-context factory (including remote browser connections).
+    const proxy = contextOptions.proxy ?? launchOptions.proxy;
+    if (proxy?.bypass?.trim())
+      throw new Error('clientCertificates with proxy.bypass is unsupported on Playwright 1.63.0: the certificate interceptor ignores bypass rules. Use a separate browser configuration for these routes; no browser was started.');
+    if (proxy)
+      contextOptions.proxy = proxy;
+  }
   if (!Number.isInteger(config.timeouts.idle) || config.timeouts.idle < 0 || config.timeouts.idle > 2_147_483_647)
     throw new Error('timeouts.idle must be an integer from 0 to 2147483647 milliseconds. Use 0 to disable idle shutdown.');
   const uploadDirs = config.browser.allowedUploadDirs;

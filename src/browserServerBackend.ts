@@ -24,6 +24,7 @@ import { Response } from './response.js';
 import { SessionLog } from './sessionLog.js';
 import { filteredTools } from './tools.js';
 import { toMcpTool } from './mcp/tool.js';
+import { truncateDataUrls } from './utils/dataUrl.js';
 
 import type { Tool } from './tools/tool.js';
 import type { BrowserContextFactory } from './browserContextFactory.js';
@@ -226,6 +227,10 @@ export class BrowserServerBackend implements ServerBackend {
       await tool.handle(context, parsedArguments, response);
       await response.finish();
       if (name === 'browser_session_close') {
+        // This response belongs to the default context; saves drained while
+        // closing the removed session must not strand their errors there.
+        for (const error of closingSessionContext?.takeDownloadErrors() ?? [])
+          response.addError(truncateDataUrls(error));
         // The close has already completed and the handle is gone, so a log
         // failure must not turn the result into an isError — the caller's
         // retry would only meet "Unknown browserSessionId". Logged via debug

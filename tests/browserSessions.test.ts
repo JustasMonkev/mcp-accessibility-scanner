@@ -128,6 +128,25 @@ describe('browser sessions', () => {
     expect(createContext).toHaveBeenCalledTimes(3);
   });
 
+  it('reports a pending save failure while confirming the session was closed', async () => {
+    const { factory, created } = makeFactory();
+    const registry = new BrowserSessionRegistry();
+    const backend = new BrowserServerBackend(await resolveConfig({}), factory, registry);
+    await backend.initialize({ notifyToolListChanged: vi.fn().mockResolvedValue(undefined) }, { name: 'vitest', version: '1' });
+    const id = await openSession(backend);
+    await backend.callTool('browser_tabs', { action: 'list', browserSessionId: id });
+    const save = Promise.withResolvers<void>();
+    registry.resolve(id).trackPendingDownload(save.promise, 'report.txt');
+    const closing = backend.callTool('browser_session_close', { browserSessionId: id });
+    save.reject(new Error('download canceled while closing'));
+    const result = await closing;
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain(id);
+    expect(textOf(result)).toContain('Failed to save download "report.txt": download canceled while closing');
+    expect(created[0].close).toHaveBeenCalledOnce();
+    expect(() => registry.resolve(id)).toThrow('Unknown browserSessionId');
+  });
+
   it('marks registry contexts as browser sessions for the factory, default context unmarked', async () => {
     // The persistent factory keys disposable-profile allocation off this flag:
     // without it, two session handles under the default config collide on the

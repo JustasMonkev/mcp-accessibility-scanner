@@ -295,12 +295,123 @@ describe('Tab', () => {
   });
 
   describe('navigate', () => {
+    it('rejects an existing modal without clearing collected artifacts or navigating', async () => {
+      mockPage.goto = vi.fn();
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockPage.emit('pageerror', new Error('Previous page error'));
+      mockPage.emit('dialog', { type: () => 'alert', message: () => 'Already open' });
+
+      await expect(tab.navigate('https://example.com/other', { returnOnDialog: true })).rejects.toThrow('Cannot navigate while a modal state is present');
+      expect(mockPage.goto).not.toHaveBeenCalled();
+      expect(tab.consoleMessages()[0].text).toBe('Previous page error');
+      expect(tab.modalStates()).toHaveLength(1);
+    });
+
+    it.each(['alert', 'confirm', 'prompt'])('returns an unresolved load-time %s without handling it', async type => {
+      let finishNavigation!: () => void;
+      mockPage.goto = vi.fn().mockReturnValue(new Promise<void>(resolve => { finishNavigation = resolve; }));
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const dialog = { type: () => type, message: () => 'During load', accept: vi.fn(), dismiss: vi.fn() };
+      let returned = false;
+      const navigation = tab.navigate('https://example.com/dialog', { returnOnDialog: true }).then(() => { returned = true; });
+
+      try {
+        mockPage.emit('dialog', dialog);
+        await vi.waitFor(() => expect(returned).toBe(true));
+        expect(tab.modalStates()).toEqual([expect.objectContaining({ type: 'dialog', dialog })]);
+        expect(dialog.accept).not.toHaveBeenCalled();
+        expect(dialog.dismiss).not.toHaveBeenCalled();
+        expect(mockPage.listenerCount('download')).toBe(2);
+        expect(tab.listenerCount('modalState')).toBe(0);
+      } finally {
+        finishNavigation();
+        await navigation;
+      }
+      await vi.waitFor(() => expect(mockPage.listenerCount('download')).toBe(1));
+    });
+
+    it('also returns a dialog opened while waiting for the load event', async () => {
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      let finishLoad!: () => void;
+      mockPage.waitForLoadState = vi.fn(() => {
+        mockPage.emit('dialog', { type: () => 'alert', message: () => 'After DOMContentLoaded' });
+        return new Promise<void>(resolve => { finishLoad = resolve; });
+      });
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      let returned = false;
+      const navigation = tab.navigate('https://example.com/dialog', { returnOnDialog: true }).then(() => { returned = true; });
+
+      try {
+        await vi.waitFor(() => expect(returned).toBe(true));
+        expect(tab.modalStates()).toHaveLength(1);
+        expect(mockPage.listenerCount('download')).toBe(1);
+        expect(tab.listenerCount('modalState')).toBe(0);
+      } finally {
+        finishLoad();
+        await navigation;
+      }
+    });
+
+    it('observes a navigation rejection after returning a dialog', async () => {
+      let failNavigation!: (error: Error) => void;
+      mockPage.goto = vi.fn().mockReturnValue(new Promise((_, reject) => { failNavigation = reject; }));
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const navigation = tab.navigate('https://example.com/dialog', { returnOnDialog: true });
+      mockPage.emit('dialog', { type: () => 'alert', message: () => 'Still open' });
+
+      await navigation;
+      failNavigation(new Error('page.goto: Target page has been closed'));
+      await new Promise(resolve => setImmediate(resolve));
+      expect(tab.consoleMessages()[0].text).toContain('Navigation failed after dialog interruption: page.goto: Target page has been closed');
+      expect(tab.listenerCount('modalState')).toBe(0);
+      expect(mockPage.listenerCount('download')).toBe(1);
+    });
+
+    it('does not attribute a late navigation error to a newer document', async () => {
+      let failNavigation!: (error: Error) => void;
+      mockPage.goto = vi.fn().mockReturnValue(new Promise((_, reject) => { failNavigation = reject; }));
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const navigation = tab.navigate('https://example.com/dialog', { returnOnDialog: true });
+      mockPage.emit('dialog', { type: () => 'alert', message: () => 'Still open' });
+
+      await navigation;
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      failNavigation(new Error('old navigation aborted'));
+      await new Promise(resolve => setImmediate(resolve));
+      expect(tab.consoleMessages()).toEqual([]);
+      expect(mockPage.listenerCount('download')).toBe(1);
+    });
+
+    it('keeps download handling active after returning a dialog', async () => {
+      vi.useFakeTimers();
+      let failNavigation!: (error: Error) => void;
+      mockPage.goto = vi.fn().mockReturnValue(new Promise((_, reject) => { failNavigation = reject; }));
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const navigation = tab.navigate('https://example.com/dialog', { returnOnDialog: true });
+      mockPage.emit('dialog', { type: () => 'confirm', message: () => 'Download?' });
+      await navigation;
+      tab.clearModalState(tab.modalStates()[0]);
+
+      failNavigation(new Error('Download is starting'));
+      await vi.advanceTimersByTimeAsync(0);
+      const download = { suggestedFilename: () => 'report.txt', saveAs: vi.fn().mockResolvedValue(undefined) };
+      mockPage.emit('download', download);
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(download.saveAs).toHaveBeenCalledWith('/tmp/download');
+      expect(tab.consoleMessages()).toEqual([]);
+      expect(mockPage.listenerCount('download')).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
     it('does not wait for a download after an unrelated aborted navigation', async () => {
       mockPage.goto = vi.fn().mockRejectedValue(new Error('page.goto: net::ERR_ABORTED'));
       mockPage.waitForEvent = vi.fn().mockReturnValue(new Promise(() => {}));
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
-      await expect(tab.navigate('chrome://crash')).rejects.toThrow('net::ERR_ABORTED');
+      await expect(tab.navigate('chrome://crash', { returnOnDialog: true })).rejects.toThrow('net::ERR_ABORTED');
+      expect(tab.listenerCount('modalState')).toBe(0);
+      expect(mockPage.listenerCount('download')).toBe(1);
     });
 
     it('waits for an explicitly reported download', async () => {
@@ -314,7 +425,7 @@ describe('Tab', () => {
       });
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
-      await expect(tab.navigate('https://example.com/download')).resolves.toBeUndefined();
+      await expect(tab.navigate('https://example.com/download', { returnOnDialog: true })).resolves.toBeUndefined();
       expect(download.saveAs).toHaveBeenCalledWith('/tmp/download');
       expect(mockPage.listenerCount('download')).toBe(1);
     });
@@ -324,7 +435,7 @@ describe('Tab', () => {
       mockPage.goto = vi.fn().mockRejectedValue(new Error('Download is starting'));
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
-      const result = expect(tab.navigate('https://example.com/download')).rejects.toThrow('Download is starting');
+      const result = expect(tab.navigate('https://example.com/download', { returnOnDialog: true })).rejects.toThrow('Download is starting');
       await vi.advanceTimersByTimeAsync(6000);
       await result;
       expect(mockPage.listenerCount('download')).toBe(1);
@@ -343,6 +454,17 @@ describe('Tab', () => {
       // Echo the requested file name back as the full path, like the real
       // outputFile() does, so the assertions can see what would be written.
       (mockContext.outputFile as any).mockImplementation(async (name: string) => `/tmp/out/${name}`);
+    });
+
+    it('retains a failed save without advertising it as pending or completed', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const download = makeDownload('report.txt');
+      download.saveAs.mockRejectedValue(new Error('disk full'));
+      mockPage.emit('download', download);
+      const tracked = vi.mocked(mockContext.trackPendingDownload).mock.calls[0][0];
+      await expect(tracked).rejects.toThrow('disk full');
+      const snapshot = await tab.captureSnapshot();
+      expect(snapshot.downloads).toEqual([expect.objectContaining({ finished: false, error: 'disk full' })]);
     });
 
     it('saves two downloads suggesting the same name to distinct files, keeping the name recognizable', async () => {

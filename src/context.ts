@@ -22,6 +22,8 @@ import { createShortGuid } from './utils/guid.js';
 import { Tab } from './tab.js';
 import { outputFile } from './config.js';
 import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
+import { truncateDataUrls } from './utils/dataUrl.js';
+import { truncateToUtf8Bytes } from './utils/fileUtils.js';
 
 import type { FullConfig } from './config.js';
 import type { Tool } from './tools/tool.js';
@@ -234,6 +236,8 @@ export class Context {
   // missing or partial (the stateless HTTP path disposes the backend's
   // default context the moment the response closes).
   private _pendingDownloads = new Set<Promise<unknown>>();
+  private _downloadErrors: string[] = [];
+  private _omittedDownloadErrors = 0;
   private _abortController = new AbortController();
   private _removePageObserver: (() => void) | undefined;
   private _inputRecorder: InputRecorder | undefined;
@@ -493,11 +497,20 @@ export class Context {
    * registered saves before closing the browser context, and the session TTL
    * reaper holds off like it does for running tools — a download routinely
    * outlives the tool call that started it. The save's rejection is handled
-   * here (logged): an aborted download must not surface as an unhandled
-   * rejection.
+   * here: an aborted download must not surface as an unhandled rejection,
+   * and its error must survive the tab closing until a tool can report it.
    */
-  trackPendingDownload(promise: Promise<unknown>): void {
-    const settled = promise.catch(logUnhandledError);
+  trackPendingDownload(promise: Promise<unknown>, filename?: string): void {
+    const settled = promise.catch(error => {
+      if (this._downloadErrors.length < 20) {
+        const message = truncateDataUrls(`Failed to save download${filename ? ` "${filename}"` : ''}: ${error instanceof Error ? error.message : String(error)}`);
+        const bounded = truncateToUtf8Bytes(message, 2000);
+        this._downloadErrors.push(bounded === message ? message : `${bounded}… [truncated]`);
+      } else {
+        ++this._omittedDownloadErrors;
+      }
+      logUnhandledError(error);
+    });
     this._pendingDownloads.add(settled);
     this._scheduleIdleTimeout();
     void settled.then(() => {
@@ -510,6 +523,14 @@ export class Context {
   /** True while a download save is still writing its file. */
   hasPendingDownloads(): boolean {
     return this._pendingDownloads.size > 0;
+  }
+
+  takeDownloadErrors(): string[] {
+    const errors = this._downloadErrors.splice(0);
+    if (this._omittedDownloadErrors)
+      errors.push(`Omitted ${this._omittedDownloadErrors} additional download failure(s).`);
+    this._omittedDownloadErrors = 0;
+    return errors;
   }
 
   /**

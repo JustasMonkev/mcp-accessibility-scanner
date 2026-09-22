@@ -2,31 +2,59 @@ name: CI
 
 on:
   pull_request:
-    branches: ['feat/']
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        node-version: [24]
+    timeout-minutes: 20
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        shell: bash
+        env:
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
+          git checkout --detach "$CHECKOUT_SHA"
 
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'npm'
+      - name: Select installed supported Node.js
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { execFileSync } = require('node:child_process');
+          const supported = version => {
+            if (!/^\d+\.\d+\.\d+$/.test(version)) return false;
+            const [major, minor] = version.split('.').map(Number);
+            return (major === 24 && minor >= 15) || major >= 26;
+          };
+          const root = process.env.RUNNER_TOOL_CACHE && path.join(process.env.RUNNER_TOOL_CACHE, 'node');
+          const versions = root && fs.existsSync(root)
+            ? fs.readdirSync(root).filter(supported)
+              .sort((a, b) => b.localeCompare(a, undefined, { numeric: true })) : [];
+          const executable = versions.map(version => path.join(root, version, process.arch,
+            process.platform === 'win32' ? 'node.exe' : 'bin/node')).find(file => fs.existsSync(file)) || process.execPath;
+          const version = execFileSync(executable, ['--version'], { encoding: 'utf8' }).trim();
+          if (!supported(version.replace(/^v/, '')))
+            throw new Error(`Runner needs Node ^24.15.0 or >=26.0.0; found ${version}`);
+          fs.appendFileSync(process.env.GITHUB_PATH, path.dirname(executable) + '\n');
+          NODE
 
       - name: Install dependencies
-        run: npm ci
+        run: |
+          node --version
+          npm --version
+          npm ci
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium chrome
 
       - name: Run typecheck
         run: npx tsc --noEmit
@@ -39,3 +67,106 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Verify client-certificate proxy routing
+        run: node tests/client-certificate-proxy-probe.mjs
+
+  browser-regressions:
+    name: Browser regressions (${{ matrix.os }}, ${{ matrix.channel }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            channel: chromium
+          - os: windows-latest
+            channel: chromium
+          - os: windows-latest
+            channel: chrome
+          - os: windows-latest
+            channel: msedge
+    steps:
+      - name: Checkout code
+        shell: bash
+        env:
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
+          git checkout --detach "$CHECKOUT_SHA"
+
+      - name: Select installed supported Node.js
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { execFileSync } = require('node:child_process');
+          const supported = version => {
+            if (!/^\d+\.\d+\.\d+$/.test(version)) return false;
+            const [major, minor] = version.split('.').map(Number);
+            return (major === 24 && minor >= 15) || major >= 26;
+          };
+          const root = process.env.RUNNER_TOOL_CACHE && path.join(process.env.RUNNER_TOOL_CACHE, 'node');
+          const versions = root && fs.existsSync(root)
+            ? fs.readdirSync(root).filter(supported)
+              .sort((a, b) => b.localeCompare(a, undefined, { numeric: true })) : [];
+          const executable = versions.map(version => path.join(root, version, process.arch,
+            process.platform === 'win32' ? 'node.exe' : 'bin/node')).find(file => fs.existsSync(file)) || process.execPath;
+          const version = execFileSync(executable, ['--version'], { encoding: 'utf8' }).trim();
+          if (!supported(version.replace(/^v/, '')))
+            throw new Error(`Runner needs Node ^24.15.0 or >=26.0.0; found ${version}`);
+          fs.appendFileSync(process.env.GITHUB_PATH, path.dirname(executable) + '\n');
+          NODE
+
+      - run: npm ci
+      - run: npx playwright install --with-deps ${{ matrix.channel }}
+      - run: npx vitest run tests/history-downloads.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_CHANNEL: ${{ matrix.channel }}
+          DEBUG: pw:browser,pw:mcp:errors
+
+  webkit-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        shell: bash
+        env:
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
+          git checkout --detach "$CHECKOUT_SHA"
+
+      - name: Select installed supported Node.js
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { execFileSync } = require('node:child_process');
+          const supported = version => {
+            if (!/^\d+\.\d+\.\d+$/.test(version)) return false;
+            const [major, minor] = version.split('.').map(Number);
+            return (major === 24 && minor >= 15) || major >= 26;
+          };
+          const root = process.env.RUNNER_TOOL_CACHE && path.join(process.env.RUNNER_TOOL_CACHE, 'node');
+          const versions = root && fs.existsSync(root)
+            ? fs.readdirSync(root).filter(supported)
+              .sort((a, b) => b.localeCompare(a, undefined, { numeric: true })) : [];
+          const executable = versions.map(version => path.join(root, version, process.arch,
+            process.platform === 'win32' ? 'node.exe' : 'bin/node')).find(file => fs.existsSync(file)) || process.execPath;
+          const version = execFileSync(executable, ['--version'], { encoding: 'utf8' }).trim();
+          if (!supported(version.replace(/^v/, '')))
+            throw new Error(`Runner needs Node ^24.15.0 or >=26.0.0; found ${version}`);
+          fs.appendFileSync(process.env.GITHUB_PATH, path.dirname(executable) + '\n');
+          NODE
+
+      - run: npm ci
+      - run: npx playwright install --with-deps webkit
+      - run: node tests/webkit-network-probe.mjs
