@@ -83,7 +83,8 @@ afterEach(async () => {
   }));
   const closedBrowsers = await Promise.allSettled(browsers.splice(0).map(browser => browser.close()));
   const closedContexts = await Promise.allSettled(contexts.splice(0).map(context => context.close()));
-  await fs.rm(directory, { recursive: true, force: true });
+  // Windows can retain profile handles briefly after a native browser crash.
+  await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   const errors = [...closedClients, ...closedBrowsers, ...closedContexts].filter(result => result.status === 'rejected');
   if (errors.length)
     throw new AggregateError(errors.map(result => result.reason), 'Browser fixture cleanup failed');
