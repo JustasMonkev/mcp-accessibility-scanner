@@ -258,12 +258,25 @@ describe('WebMCP discovery and identity', () => {
       { type: 'object', properties: 'value' },
     ];
     const h = harness([
-      ...invalid.map((inputSchema, index) => ({ ...registration(`invalid${index}`), inputSchema })),
+      ...Array.from({ length: 128 }, (_, index) => ({ ...registration(`invalid${index}`), inputSchema: invalid[index % invalid.length] })),
       registration('valid'),
     ]);
     const tools = await listWebMCPTools(h.tab);
     assert.equal(tools.length, 1);
     assert.match(tools[0].schema.name, /^webmcp_valid_/);
+  });
+
+  it('omits schemas with page-controlled regular expressions', async () => {
+    const h = harness([
+      { ...registration('pattern'), inputSchema: { type: 'object', properties: { value: { type: 'string', pattern: '(a+)+$' } } } },
+      { ...registration('patternProperties'), inputSchema: { type: 'object', patternProperties: { '(a+)+$': {} } } },
+      { ...registration('patternRef'), inputSchema: { type: 'object', default: { type: 'string', pattern: '(a+)+$' }, properties: { value: { $ref: '#/default' } } } },
+      { ...registration('nestedPattern'), inputSchema: { type: 'object', $defs: { list: { type: 'array', items: { oneOf: [{ type: 'string', pattern: '(a+)+$' }] } } } } },
+      { ...registration('namedPattern'), inputSchema: { type: 'object', properties: { pattern: { type: 'string' }, patternProperties: { type: 'string' } } } },
+      registration('valid'),
+    ]);
+    const tools = await listWebMCPTools(h.tab);
+    assert.deepEqual(tools.map(tool => tool.schema.name.replace(/_[a-f0-9]{20}$/, '')).sort(), ['webmcp_namedPattern', 'webmcp_valid']);
   });
 
   it('truncates data URLs in descriptions and invocation results', async () => {
@@ -279,6 +292,17 @@ describe('WebMCP discovery and identity', () => {
 });
 
 describe('WebMCP execution boundaries', () => {
+  it('rechecks the selected tab after schema validation yields', async () => {
+    const h = harness([registration()]);
+    const [tool] = await listWebMCPTools(h.tab);
+    let checks = 0;
+    (h.tab as unknown as { isCurrentTab: () => boolean }).isCurrentTab = () => ++checks === 1;
+    const r = response();
+    await tool.handle({ value: 'ok' }, r.value);
+    assert.equal(h.calls(), 0);
+    assert.match(r.errors.join(''), /frame or active tab changed/);
+  });
+
   it('supports Firefox-style navigator.modelContext invocation', async () => {
     const h = harness([registration()]);
     const sandbox = h.frames[0].sandbox;

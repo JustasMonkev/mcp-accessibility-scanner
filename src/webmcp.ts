@@ -106,6 +106,29 @@ function frameIdentity(page: playwright.Page, frame: playwright.Frame): string {
 
 /** Runs in the page: validate and cap data before it crosses the browser connection. */
 async function collectInPage(budget: typeof limits & { documentKey: string, documentId: string }): Promise<FrameListing> {
+  const safeInputSchema = (schema: Record<string, unknown>): boolean => {
+    if (schema.required !== undefined && (!Array.isArray(schema.required) || !schema.required.every(value => typeof value === 'string')))
+      return false;
+    if (schema.properties !== undefined && (!schema.properties || typeof schema.properties !== 'object' || Array.isArray(schema.properties)))
+      return false;
+    const schemas = [schema];
+    while (schemas.length) {
+      const current = schemas.pop()!;
+      if (typeof current.pattern === 'string' || current.patternProperties !== undefined)
+        return false;
+      for (const [key, value] of Object.entries(current)) {
+        if (!value || typeof value !== 'object')
+          continue;
+        if (key === 'properties' || key === '$defs' || key === 'definitions' || key === 'dependentSchemas' || key === 'dependencies' || key === 'dependentRequired') {
+          if (!Array.isArray(value))
+            schemas.push(...Object.values(value).filter(item => !!item && typeof item === 'object') as Record<string, unknown>[]);
+        } else {
+          schemas.push(...(Array.isArray(value) ? value : [value]).filter(item => !!item && typeof item === 'object') as Record<string, unknown>[]);
+        }
+      }
+    }
+    return true;
+  };
   const modelContext = (document as Document & { modelContext?: ModelContext }).modelContext
     ?? (navigator as Navigator & { modelContext?: ModelContext }).modelContext;
   const result: FrameListing = { timeOrigin: performance.timeOrigin, documentId: '', tools: [] };
@@ -145,12 +168,15 @@ async function collectInPage(budget: typeof limits & { documentKey: string, docu
       const json = JSON.stringify(schema);
       if (new TextEncoder().encode(json).length > budget.schemaBytes)
         continue;
+      const parsed = JSON.parse(json) as Record<string, unknown>;
+      if (!safeInputSchema(parsed))
+        continue;
       result.tools.push({
         name: tool.name,
         title: typeof tool.title === 'string' ? tool.title.slice(0, 256) : tool.name,
         description: typeof tool.description === 'string' ? tool.description.slice(0, budget.description) : '',
         // SAFETY: JSON round-tripping removes browser object identity and the root type was checked above.
-        inputSchema: JSON.parse(json) as Tool['inputSchema'],
+        inputSchema: parsed as Tool['inputSchema'],
       });
     } catch {
       // A malformed or unserializable registration must not hide the others.
@@ -222,6 +248,8 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
     const validation = await fromJsonSchema<Record<string, unknown>>(tool.inputSchema as JsonSchemaType)['~standard'].validate(params);
     if (validation.issues)
       throw new Error(`Invalid WebMCP arguments: ${validation.issues.map(issue => issue.message).join('; ')}`);
+    if (frameIds.get(frame) !== identity || frame.isDetached() || tab.page.isClosed() || !tab.isCurrentTab())
+      throw new Error('The WebMCP frame or active tab changed. List tools again.');
     // WebMCP's own promise defines completion. A separate network-settle wait
     // could outlive cancellation and keep a browser session marked busy.
     const json = await bounded(() => new Promise<string>((resolve, reject) => {
