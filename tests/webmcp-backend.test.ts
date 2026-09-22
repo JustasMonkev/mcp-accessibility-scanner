@@ -33,6 +33,7 @@ function contextHarness(label: string) {
   let reads = 0;
   let disposed = false;
   let received: unknown;
+  let evaluations = 0;
   let protocolErrorBytes = 0;
   let read = async () => tools;
   let execute: (value: unknown) => unknown = value => value;
@@ -50,6 +51,7 @@ function contextHarness(label: string) {
   });
   const frame = { url: () => 'https://example.test', isDetached: () => false,
     evaluate: async (fn: Function, argument: unknown) => {
+      ++evaluations;
       try {
         return JSON.parse(JSON.stringify(await vm.runInContext(`(${fn.toString()})`, sandbox)(argument)));
       } catch (error) {
@@ -73,7 +75,7 @@ function contextHarness(label: string) {
     isCurrentTab: () => true, updateTitle: async () => undefined,
   };
   return { context, tab, calls: () => calls, busy: () => busy, reads: () => reads, disposed: () => disposed,
-    protocolErrorBytes: () => protocolErrorBytes, received: () => received,
+    evaluations: () => evaluations, protocolErrorBytes: () => protocolErrorBytes, received: () => received,
     setRead: (value: typeof read) => { read = value; },
     removeTools: () => { tools = []; }, setExecute: (value: typeof execute) => { execute = value; },
   };
@@ -219,10 +221,12 @@ describe('WebMCP backend scope and argument contracts', () => {
   it('rejects arguments that do not match the advertised schema before page invocation', async () => {
     const h = backendHarness();
     const [tool] = await h.backend.listTools();
+    const evaluations = h.defaultContext.evaluations();
     const result = await h.backend.callTool(tool.name, { browserSessionId: 'wrong', _meta: 'ok' }, request());
     assert.equal(result.isError, true);
     assert.match(text(result), /Invalid WebMCP arguments/);
     assert.equal(h.defaultContext.calls(), 0);
+    assert.equal(h.defaultContext.evaluations(), evaluations + 1, 'only re-discovery should evaluate in the page');
     h.backend.serverClosed();
   });
 
