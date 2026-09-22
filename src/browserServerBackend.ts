@@ -183,7 +183,7 @@ export class BrowserServerBackend implements ServerBackend {
     if (id !== undefined && !this._sessionRegistry)
       throw new Error('Initialize the browser backend before listing session tools.');
     const context = id === undefined ? this._context! : this._sessionRegistry!.resolve(id);
-    const endToolCall = context.beginToolCall('tools/list');
+    const endSessionHold = context.beginSessionHold();
     try {
       requestContext?.signal?.throwIfAborted();
       const dynamic = await this._currentWebMCPTools(context, requestContext?.signal);
@@ -199,7 +199,7 @@ export class BrowserServerBackend implements ServerBackend {
       }
       return [...this._mcpTools, ...dynamic.map(tool => tool.schema)];
     } finally {
-      endToolCall();
+      endSessionHold();
       if (id !== undefined)
         this._sessionRegistry?.touch(id);
     }

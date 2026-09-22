@@ -226,6 +226,7 @@ export class Context {
   // second still ran — letting the session TTL reaper (or a session close)
   // dispose the browser mid-operation.
   private _runningTools: string[] = [];
+  private _sessionHolds = 0;
   private _lastToolCallEndedAt = -Infinity;
   // In-flight download saves (Tab hands them over as they start). A download
   // outlives the tool call that triggered it — the response reports it as
@@ -479,9 +480,9 @@ export class Context {
     void this.closeBrowserContext();
   }
 
-  /** True while ANY tool call is running in this Context, overlap included. */
+  /** True while any tool call or lifetime hold is active, overlap included. */
   isRunningTool() {
-    return this._runningTools.length > 0;
+    return this._runningTools.length > 0 || this._sessionHolds > 0;
   }
 
   isRunningToolForRecording(buffered: boolean): boolean {
@@ -561,6 +562,21 @@ export class Context {
         this._runningTools.splice(index, 1);
       if (!recorderControlTools.has(name))
         this._lastToolCallEndedAt = Date.now();
+      this._lastActivityAt = Date.now();
+      this._scheduleIdleTimeout();
+    };
+  }
+
+  /** Holds session lifetime without suppressing manual input recording. */
+  beginSessionHold(): () => void {
+    this._sessionHolds++;
+    this._scheduleIdleTimeout();
+    let released = false;
+    return () => {
+      if (released)
+        return;
+      released = true;
+      this._sessionHolds--;
       this._lastActivityAt = Date.now();
       this._scheduleIdleTimeout();
     };

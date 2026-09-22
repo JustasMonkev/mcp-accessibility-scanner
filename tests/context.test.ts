@@ -1708,5 +1708,26 @@ describe('Context', () => {
       endSecond();
       expect(context.isRunningTool()).toBe(false);
     });
+
+    it('holds a session without suppressing input recording', () => {
+      const context = new Context({
+        tools: [],
+        config: defaultConfig,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      const endList = context.beginSessionHold();
+      const endOtherList = context.beginSessionHold();
+      expect(context.isRunningTool()).toBe(true);
+      expect(context.isRunningToolForRecording(true)).toBe(false);
+      endList();
+      endList();
+      expect(context.isRunningTool()).toBe(true);
+      endOtherList();
+      expect(context.isRunningTool()).toBe(false);
+      expect(context.isRunningToolForRecording(true)).toBe(false);
+    });
   });
 });
