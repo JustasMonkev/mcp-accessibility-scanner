@@ -272,7 +272,7 @@ describe('WebMCP discovery and identity', () => {
       { ...registration('patternProperties'), inputSchema: { type: 'object', patternProperties: { '(a+)+$': {} } } },
       { ...registration('patternRef'), inputSchema: { type: 'object', default: { type: 'string', pattern: '(a+)+$' }, properties: { value: { $ref: '#/default' } } } },
       { ...registration('nestedPattern'), inputSchema: { type: 'object', $defs: { list: { type: 'array', items: { oneOf: [{ type: 'string', pattern: '(a+)+$' }] } } } } },
-      { ...registration('namedPattern'), inputSchema: { type: 'object', properties: { pattern: { type: 'string' }, patternProperties: { type: 'string' } } } },
+      { ...registration('namedPattern'), inputSchema: { type: 'object', properties: { pattern: { type: 'string' }, patternProperties: { type: 'string' } }, default: { patternProperties: 'literal' } } },
       registration('valid'),
     ]);
     const tools = await listWebMCPTools(h.tab);

@@ -114,7 +114,7 @@ async function collectInPage(budget: typeof limits & { documentKey: string, docu
     const schemas = [schema];
     while (schemas.length) {
       const current = schemas.pop()!;
-      if (typeof current.pattern === 'string' || current.patternProperties !== undefined)
+      if (typeof current.pattern === 'string' || (!!current.patternProperties && typeof current.patternProperties === 'object' && !Array.isArray(current.patternProperties)))
         return false;
       for (const [key, value] of Object.entries(current)) {
         if (!value || typeof value !== 'object')
