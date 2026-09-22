@@ -41,7 +41,7 @@ export type TabSnapshot = {
   ariaSnapshot: string;
   modalStates: ModalState[];
   consoleMessages: ConsoleMessage[];
-  downloads: { download: playwright.Download, finished: boolean, outputFile: string }[];
+  downloads: { download: playwright.Download, finished: boolean, outputFile: string, error?: string }[];
 };
 
 class StaleAriaSnapshotError extends Error {}
@@ -56,7 +56,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _mainDocumentStatus: { status: number, statusText: string } | undefined;
   private _onPageClose: (tab: Tab) => void;
   private _modalStates: ModalState[] = [];
-  private _downloads: { download: playwright.Download, finished: boolean, outputFile: string }[] = [];
+  private _downloads: TabSnapshot['downloads'] = [];
   private _defaultTimeout: number;
   // The aria snapshot last handed to the caller; the refs in it are the refs the
   // next tool call will name. Cleared whenever the page it described is gone.
@@ -113,7 +113,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       // outlive the tab), and context disposal must wait for it instead of
       // closing the browser mid-stream. The context also owns the promise's
       // rejection handling.
-      this.context.trackPendingDownload(this._downloadStarted(download));
+      this.context.trackPendingDownload(this._downloadStarted(download), download.suggestedFilename());
     });
     page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? 30000);
     page.setDefaultTimeout(this._defaultTimeout);
@@ -184,14 +184,22 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       baseBudget = maxNameBytes - Buffer.byteLength(uniqueSuffix, 'utf8');
     }
     const uniqueName = `${truncateToUtf8Bytes(base, baseBudget)}${uniqueSuffix}${extension}`;
-    const entry = {
+    const entry: TabSnapshot['downloads'][number] = {
       download,
       finished: false,
       outputFile: await this.context.outputFile(uniqueName)
     };
     this._downloads.push(entry);
-    await download.saveAs(entry.outputFile);
-    entry.finished = true;
+    try {
+      await download.saveAs(entry.outputFile);
+      entry.finished = true;
+    } catch (error) {
+      const message = truncateDataUrls(formatPageStateError(error));
+      entry.error = truncateToUtf8Bytes(message, 2000);
+      if (entry.error !== message)
+        entry.error += '… [truncated]';
+      throw error;
+    }
   }
 
   private _clearCollectedArtifacts() {
@@ -260,9 +268,35 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     await callOnPageNoTrace(this.page, page => page.waitForLoadState(state, options).catch(logUnhandledError));
   }
 
-  async navigate(url: string) {
+  async navigate(url: string, options?: { returnOnDialog?: boolean }) {
+    if (options?.returnOnDialog && this.modalStates().length)
+      throw new Error(`Cannot navigate while a modal state is present.\n${this.modalStatesMarkdown().join('\n')}`);
     this._clearCollectedArtifacts();
+    // Crawlers need the document ready before evaluating it, and cannot hand
+    // an open dialog back to the user between their internal navigations.
+    if (!options?.returnOnDialog) {
+      await this._navigate(url);
+      return;
+    }
+    let navigation: Promise<void> | undefined;
+    // A dialog can block DOMContentLoaded or load until another tool handles
+    // it. Return its modal state immediately, leaving the dialog untouched.
+    const modalStates = await this._raceAgainstModalStates(() => {
+      navigation = this._navigate(url);
+      return navigation;
+    });
+    if (modalStates.length && navigation) {
+      const pageGeneration = this._pageGeneration;
+      void navigation.catch(error => {
+        // The tool already returned the dialog. Preserve a later failure for
+        // the next snapshot/console read, unless the user has moved on.
+        if (pageGeneration === this._pageGeneration)
+          this._handleConsoleMessage(pageErrorToConsoleMessage(new Error(`Navigation failed after dialog interruption: ${formatPageStateError(error)}`)));
+      });
+    }
+  }
 
+  private async _navigate(url: string) {
     const downloadEvent = new ManualPromise<playwright.Download>();
     const downloadListener = (download: playwright.Download) => downloadEvent.resolve(download);
     this.page.once('download', downloadListener);
@@ -401,13 +435,14 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     const listener = (modalState: ModalState) => promise.resolve([modalState]);
     this.once(TabEvents.modalState, listener);
 
-    return await Promise.race([
-      action().then(() => {
-        this.off(TabEvents.modalState, listener);
-        return [];
-      }),
-      promise,
-    ]);
+    try {
+      return await Promise.race([
+        action().then(() => []),
+        promise,
+      ]);
+    } finally {
+      this.off(TabEvents.modalState, listener);
+    }
   }
 
   async waitForCompletion(callback: () => Promise<void>) {

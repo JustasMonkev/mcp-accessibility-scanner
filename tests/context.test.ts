@@ -17,6 +17,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
+import { Response } from '../src/response.js';
 import type { BrowserContextFactory } from '../src/browserContextFactory.js';
 import { EventEmitter } from 'events';
 
@@ -503,7 +504,58 @@ describe('Context', () => {
       // The tracked rejection settles handled; the set drains.
       await new Promise(resolve => setImmediate(resolve));
       expect(context.hasPendingDownloads()).toBe(false);
+      expect(context.takeDownloadErrors()).toEqual(['Failed to save download: canceled']);
+      expect(context.takeDownloadErrors()).toEqual([]);
       await context.dispose();
+    });
+
+    it('reports a failed save on the next tool response even after its tab closes', async () => {
+      const context = new Context({
+        tools: [], config: defaultConfig, browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined, clientInfo: {},
+      });
+      await context.newTab();
+      const page = Object.assign(new EventEmitter(), {
+        setDefaultNavigationTimeout: vi.fn(), setDefaultTimeout: vi.fn(), url: () => 'https://fixture.local/',
+      });
+      mockBrowserContext.emit('page', page);
+      expect(context.tabs()).toHaveLength(1);
+      vi.spyOn(context, 'outputFile').mockResolvedValue('/tmp/not-created.txt');
+      const save = Promise.withResolvers<void>();
+      const download = { suggestedFilename: () => 'report.txt', saveAs: vi.fn(() => save.promise) };
+      page.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledOnce());
+      page.emit('close');
+      save.reject(new Error('Target page, context or browser has been closed'));
+      await vi.waitFor(() => expect(context.hasPendingDownloads()).toBe(false));
+      expect(context.currentTab()).toBeUndefined();
+
+      const response = new Response(context, 'browser_snapshot', {});
+      // Failed tool handlers skip finish(), just as currentTabOrDie does after
+      // a native browser disconnect. Serialization must still report the save.
+      expect(() => context.currentTabOrDie()).toThrow('No open pages');
+      response.addError('No open pages available');
+      const result = response.serialize();
+      expect(result.isError).toBe(true);
+      expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('Failed to save download "report.txt": Target page, context or browser has been closed') });
+      expect(result.content[0]).toMatchObject({ type: 'text', text: expect.not.stringContaining('/tmp/not-created.txt') });
+      expect(context.takeDownloadErrors()).toEqual([]);
+    });
+
+    it('bounds retained download failures and reports omitted errors once', async () => {
+      const context = new Context({
+        tools: [], config: defaultConfig, browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined, clientInfo: {},
+      });
+      for (let i = 0; i < 23; i++)
+        context.trackPendingDownload(Promise.reject(new Error('ė'.repeat(5000))), 'report.txt');
+      await vi.waitFor(() => expect(context.hasPendingDownloads()).toBe(false));
+      const errors = context.takeDownloadErrors();
+      expect(errors).toHaveLength(21);
+      expect(errors[0]).toContain('[truncated]');
+      expect(Buffer.byteLength(errors[0])).toBeLessThan(2048);
+      expect(errors[20]).toBe('Omitted 3 additional download failure(s).');
+      expect(context.takeDownloadErrors()).toEqual([]);
     });
   });
 

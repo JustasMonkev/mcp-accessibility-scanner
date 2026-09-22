@@ -87,6 +87,32 @@ describe('parseAriaSnapshot', () => {
     // A dropped container used to re-parent its children onto the grandparent.
     expect(nodes[5]).toMatchObject({ name: 'Open', ref: 'e6', parent: 4 });
   });
+
+  it('preserves literal slash names without consuming metadata or inline text', () => {
+    const nodes = parseAriaSnapshot([
+      '- generic [ref=e1]:',
+      '  - button / [ref=e2]: /',
+      '  - link /docs/ [ref=e3]:',
+      '    - /url: /docs/',
+      '  - heading /[ref=fake] [level=8]/ [level=2] [ref=e4]: /elsewhere/',
+      '  - button /\\d+ "quoted"/ [ref=e5]',
+      '  - \'button /Warning: it\'\'s {here}/ [ref=e6]\': /text/',
+      '  - button "/quoted/" [ref=e7]: /text/',
+      '  - button [ref=e8]: /text/',
+    ].join('\n'));
+
+    expect(nodes.slice(1).map(entry => [entry.name, entry.ref, entry.level, entry.parent])).toEqual([
+      ['/', 'e2', null, 0],
+      ['/docs/', 'e3', null, 0],
+      ['/[ref=fake] [level=8]/', 'e4', 2, 0],
+      ['/\\d+ "quoted"/', 'e5', null, 0],
+      ['/Warning: it\'s {here}/', 'e6', null, 0],
+      ['/quoted/', 'e7', null, 0],
+      [null, 'e8', null, 0],
+    ]);
+    // Names must survive even when the page refuses axe name measurement.
+    expect(analyze(nodes.map(entry => node(entry))).countByCheck['missing-accessible-name']).toBe(1);
+  });
 });
 
 describe('analyzeScreenReader accessible names', () => {
@@ -961,6 +987,35 @@ describe('collectElementFacts in a real page', () => {
     await page.close();
     return facts.map(fact => fact.visibleText);
   }
+
+  it('audits literal slash names from real AI snapshots without measured-name fallback', async () => {
+    const page = await browser!.newPage();
+    const names = ['/', '/docs/', '/123/', '/\\d+/', '/[ref=fake] [level=8]/', '/Warning: it\'s {here}/', '/Read more/', 'Ordinary 123', ''];
+    try {
+      await page.setContent('<main></main>');
+      await page.evaluate(labels => {
+        for (const label of labels) {
+          const button = document.createElement('button');
+          button.textContent = label;
+          document.querySelector('main')!.append(button);
+        }
+      }, names);
+      const snapshot = await page.ariaSnapshot({ mode: 'ai' });
+      const buttons = parseAriaSnapshot(snapshot).filter(entry => entry.role === 'button');
+
+      // AI mode keeps numeric names literal; regex conversion belongs to
+      // assertion generation, and /\\d+/ here is a page-supplied name.
+      expect(buttons.map(entry => entry.name)).toEqual(names.map(name => name || null));
+      expect(buttons.every(entry => /^e\d+$/.test(entry.ref ?? '') && entry.level === null)).toBe(true);
+      const findings = analyze(buttons.map(entry => node({ ...entry, parent: null }))).findings;
+      expect(findings.map(finding => [finding.check, finding.name])).toEqual([
+        ['uninformative-accessible-name', '/Read more/'],
+        ['missing-accessible-name', null],
+      ]);
+    } finally {
+      await page.close();
+    }
+  });
 
   it('measures the accessible name the snapshot leaves out, from the tree the page builds', async () => {
     const page = await browser!.newPage();

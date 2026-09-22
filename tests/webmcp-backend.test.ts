@@ -56,6 +56,7 @@ function contextHarness(label: string) {
     beginSessionHold: () => { ++busy; return () => --busy; },
     isRunningTool: () => busy > 0,
     recordingActivityAt: () => undefined, hasPendingDownloads: () => false,
+    takeDownloadErrors: () => [],
     resumeAfterIdle: async () => undefined, resolveSessionLog: async () => undefined,
     dispose: async () => { disposed = true; },
   };
