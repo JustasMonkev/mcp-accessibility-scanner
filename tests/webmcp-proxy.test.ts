@@ -217,3 +217,54 @@ describe('WebMCP proxy notification ordering', () => {
     }
   }
 });
+
+describe('WebMCP proxy list cancellation', () => {
+  for (const kind of ['direct', 'VS Code']) {
+    it(`${kind}: cancels downstream discovery and accepts the next request`, async () => {
+      const started = Promise.withResolvers<AbortSignal | undefined>();
+      const finished = Promise.withResolvers<void>();
+      let holdList = false;
+      let discoveryStopped = false;
+      const connect = async () => wrapInProcess({
+        listTools: async requestContext => {
+          if (holdList) {
+            const signal = requestContext?.signal;
+            const stop = () => finished.resolve();
+            started.resolve(signal);
+            signal?.addEventListener('abort', stop, { once: true });
+            await finished.promise;
+            signal?.removeEventListener('abort', stop);
+            discoveryStopped = true;
+          }
+          return [];
+        },
+        callTool: async () => ({ content: [] }),
+      });
+      const backend = kind === 'direct'
+        ? new ProxyBackend([{ name: 'default', description: 'Default', connect }])
+        : new VSCodeProxyBackend(await resolveConfig({}), connect);
+      const client = new Client({ name: 'list-cancellation-test', version: '1' });
+      client.setRequestHandler('ping', () => ({}));
+      const controller = new AbortController();
+      try {
+        await client.connect(await wrapInProcess(backend));
+        await client.listTools();
+        holdList = true;
+        const rejected = assert.rejects(client.listTools(undefined, { signal: controller.signal }), /cancelled discovery/);
+        const downstreamSignal = await started.promise;
+        controller.abort(new Error('cancelled discovery'));
+        await rejected;
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.ok(downstreamSignal, 'the server passes the request signal to discovery');
+        assert.equal(downstreamSignal.aborted, true, 'cancellation reaches the inner server across both MCP transports');
+        assert.equal(discoveryStopped, true, 'cancelled discovery has released its work');
+        holdList = false;
+        await client.listTools();
+      } finally {
+        controller.abort();
+        finished.resolve();
+        await client.close();
+      }
+    });
+  }
+});

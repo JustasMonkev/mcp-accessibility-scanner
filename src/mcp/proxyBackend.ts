@@ -89,12 +89,12 @@ export class ProxyBackend implements ServerBackend {
     await this._setCurrentClient(this._mcpProviders[0], false);
   }
 
-  async listTools(requestContext?: Pick<CallToolRequestContext, '_meta'>): Promise<Tool[]> {
+  async listTools(requestContext?: Partial<Pick<CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]> {
     const client = this._currentClient!;
     const pending = { client, changed: false };
     this._pendingToolLists.add(pending);
     try {
-      const response = await client.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined);
+      const response = await client.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined, { signal: requestContext?.signal });
       return this._mcpProviders.length === 1 ? response.tools : [...response.tools, this._contextSwitchTool];
     } finally {
       this._pendingToolLists.delete(pending);

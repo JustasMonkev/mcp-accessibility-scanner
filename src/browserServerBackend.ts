@@ -156,7 +156,7 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   /** Lists one explicitly selected scope without enumerating bearer session handles. */
-  async listTools(requestContext?: Pick<mcpServer.CallToolRequestContext, '_meta'>): Promise<mcpServer.Tool[]> {
+  async listTools(requestContext?: Partial<Pick<mcpServer.CallToolRequestContext, 'signal' | '_meta'>>): Promise<mcpServer.Tool[]> {
     this._mcpTools ??= this._tools.map(tool => {
       const mcpTool = toMcpTool(tool.schema);
       // Advertise the session-routing parameter resolved in callTool(). It is
@@ -183,17 +183,26 @@ export class BrowserServerBackend implements ServerBackend {
     if (id !== undefined && !this._sessionRegistry)
       throw new Error('Initialize the browser backend before listing session tools.');
     const context = id === undefined ? this._context! : this._sessionRegistry!.resolve(id);
-    const dynamic = await this._currentWebMCPTools(context);
-    // One MCP connection has one currently advertised list. Observe exactly
-    // the scope of the last completed list request, not unrelated tool calls.
-    this._webmcpObserver?.dispose();
-    if (!this._closed && !this._ephemeralDefaultContext) {
-      this._webmcpObserver = new WebMCPObserver(
-          signal => this._currentWebMCPTools(context, signal), dynamic,
-          () => this._notifyToolListChanged?.() ?? Promise.resolve(), logUnhandledError,
-      );
+    const endToolCall = context.beginToolCall('tools/list');
+    try {
+      requestContext?.signal?.throwIfAborted();
+      const dynamic = await this._currentWebMCPTools(context, requestContext?.signal);
+      requestContext?.signal?.throwIfAborted();
+      // One MCP connection has one currently advertised list. Observe exactly
+      // the scope of the last completed list request, not unrelated tool calls.
+      this._webmcpObserver?.dispose();
+      if (!this._closed && !this._ephemeralDefaultContext) {
+        this._webmcpObserver = new WebMCPObserver(
+            signal => this._currentWebMCPTools(context, signal), dynamic,
+            () => this._notifyToolListChanged?.() ?? Promise.resolve(), logUnhandledError,
+        );
+      }
+      return [...this._mcpTools, ...dynamic.map(tool => tool.schema)];
+    } finally {
+      endToolCall();
+      if (id !== undefined)
+        this._sessionRegistry?.touch(id);
     }
-    return [...this._mcpTools, ...dynamic.map(tool => tool.schema)];
   }
 
   /** Shares discovery, naming and static-name exclusion between listing and invocation. */

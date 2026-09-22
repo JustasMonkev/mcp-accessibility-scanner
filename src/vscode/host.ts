@@ -93,14 +93,14 @@ export class VSCodeProxyBackend implements ServerBackend {
     await this._setCurrentClient(transport, false, true);
   }
 
-  async listTools(requestContext?: Pick<mcpServer.CallToolRequestContext, '_meta'>): Promise<Tool[]> {
+  async listTools(requestContext?: Partial<Pick<mcpServer.CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]> {
     // Listing and invocation must resolve the same host-owned session even
     // while the default browsing provider is switched to a VS Code child.
     const client = await this._clientForTool('webmcp_', undefined, requestContext);
     const pending = { client, changed: false };
     this._pendingToolLists.add(pending);
     try {
-      const response = await client.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined);
+      const response = await client.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined, { signal: requestContext?.signal });
       this._listedClient = client;
       return [...response.tools, this._contextSwitchTool];
     } finally {

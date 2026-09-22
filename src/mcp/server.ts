@@ -47,7 +47,7 @@ export interface ServerBackend {
   /** Dynamic lists must not inherit a factory's static cache hint. */
   readonly dynamicToolList?: boolean;
   initialize?(context: ServerBackendContext, clientVersion: ClientVersion): Promise<void>;
-  listTools(requestContext?: Pick<CallToolRequestContext, '_meta'>): Promise<Tool[]>;
+  listTools(requestContext?: Partial<Pick<CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]>;
   callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: CallToolRequestContext): Promise<CallToolResult>;
   serverClosed?(): void;
 }
@@ -146,7 +146,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
   server.setRequestHandler('tools/list', async (_request, ctx) => {
     serverDebug('listTools');
     await ensureInitialized();
-    const tools = await backend.listTools({ _meta: ctx.mcpReq._meta });
+    const tools = await backend.listTools({ _meta: ctx.mcpReq._meta, signal: ctx.mcpReq.signal });
     return { tools };
   });
 

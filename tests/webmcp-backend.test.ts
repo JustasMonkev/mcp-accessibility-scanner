@@ -18,8 +18,10 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { setTimeout as delay } from 'node:timers/promises';
-import { describe, it } from 'vitest';
+import { describe, it, vi } from 'vitest';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
+import { BrowserSessionRegistry } from '../src/browserSessions.js';
+import type { Context } from '../src/context.js';
 import type { CallToolRequestContext } from '../src/mcp/server.js';
 
 function contextHarness(label: string) {
@@ -29,13 +31,15 @@ function contextHarness(label: string) {
   let busy = 0;
   let calls = 0;
   let reads = 0;
+  let disposed = false;
   let received: unknown;
+  let read = async () => tools;
   let execute: (value: unknown) => unknown = value => value;
   const page = Object.assign(new EventEmitter(), { frames: () => [frame], isClosed: () => false });
   const sandbox = vm.createContext({
     window: {}, navigator: {}, performance: { timeOrigin: 1 }, TextEncoder,
     document: { modelContext: {
-      getTools: async () => { ++reads; return tools; },
+      getTools: async () => { ++reads; return read(); },
       executeTool: async (_tool: unknown, input: string) => {
         ++calls;
         received = JSON.parse(input);
@@ -49,13 +53,16 @@ function contextHarness(label: string) {
   const context = {
     config: {}, currentTab: () => tab, tabs: () => [tab],
     beginToolCall: () => { ++busy; return () => --busy; },
+    isRunningTool: () => busy > 0,
+    recordingActivityAt: () => undefined, hasPendingDownloads: () => false,
     resumeAfterIdle: async () => undefined, resolveSessionLog: async () => undefined,
-    dispose: async () => undefined,
+    dispose: async () => { disposed = true; },
   };
   const tab = { context, page, modalStates: () => [], operationTimeout: () => 25,
     isCurrentTab: () => true, updateTitle: async () => undefined,
   };
-  return { context, tab, calls: () => calls, busy: () => busy, reads: () => reads, received: () => received,
+  return { context, tab, calls: () => calls, busy: () => busy, reads: () => reads, disposed: () => disposed, received: () => received,
+    setRead: (value: typeof read) => { read = value; },
     removeTools: () => { tools = []; }, setExecute: (value: typeof execute) => { execute = value; },
   };
 }
@@ -175,6 +182,79 @@ describe('WebMCP backend scope and argument contracts', () => {
     const result = await h.backend.callTool(tool.name, input, request());
     assert.equal(result.isError, true);
     assert.match(text(result), /timed out.*may still be running/);
+    assert.equal(h.defaultContext.busy(), 0);
+    h.backend.serverClosed();
+  });
+
+  it('holds an explicit session against close and TTL expiry during listing', async () => {
+    vi.useFakeTimers();
+    const h = backendHarness();
+    const a = contextHarness('session');
+    const registry = new BrowserSessionRegistry(10);
+    // SAFETY: the fixture implements the Context methods used by the real registry.
+    const id = registry.open(() => a.context as unknown as Context);
+    Object.assign(h.backend, { _sessionRegistry: registry, _sharedSessionRegistry: registry });
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    a.setRead(async () => { started.resolve(); await finish.promise; return []; });
+    const listing = h.backend.listTools(request(id));
+    try {
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(25);
+      assert.equal(a.disposed(), false);
+      assert.equal(registry.resolve(id), a.context);
+      await assert.rejects(registry.close(id), /still has a tool call running/);
+      finish.resolve();
+      assert.deepEqual(await listing, []);
+      assert.equal(a.busy(), 0);
+      await registry.close(id);
+      assert.equal(a.disposed(), true);
+    } finally {
+      finish.resolve();
+      await listing;
+      await registry.disposeAll();
+      h.backend.serverClosed();
+      vi.useRealTimers();
+    }
+  });
+
+  it('releases a listed session promptly when hung discovery is cancelled', async () => {
+    vi.useFakeTimers();
+    const h = backendHarness();
+    const a = contextHarness('session');
+    const registry = new BrowserSessionRegistry(0);
+    // SAFETY: the fixture implements the Context methods used by the real registry.
+    const id = registry.open(() => a.context as unknown as Context);
+    Object.assign(h.backend, { _sessionRegistry: registry, _sharedSessionRegistry: registry });
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    a.setRead(async () => { started.resolve(); await finish.promise; return []; });
+    const controller = new AbortController();
+    const listing = h.backend.listTools(request(id, controller.signal));
+    const rejection = assert.rejects(listing, /cancel listing/);
+    try {
+      await started.promise;
+      controller.abort(new Error('cancel listing'));
+      await vi.advanceTimersByTimeAsync(0);
+      assert.equal(a.busy(), 0);
+      await rejection;
+      await registry.close(id);
+      assert.equal(a.disposed(), true);
+    } finally {
+      finish.resolve();
+      await rejection;
+      await registry.disposeAll();
+      h.backend.serverClosed();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not discover tools for an already-cancelled list request', async () => {
+    const h = backendHarness();
+    const controller = new AbortController();
+    controller.abort(new Error('cancel listing'));
+    await assert.rejects(h.backend.listTools(request(undefined, controller.signal)), /cancel listing/);
+    assert.equal(h.defaultContext.reads(), 0);
     assert.equal(h.defaultContext.busy(), 0);
     h.backend.serverClosed();
   });
