@@ -79,6 +79,7 @@ describe('navigation interrupted by a load-time dialog', () => {
     const navigationResult = await navigation;
     expect(navigationResult.isError).not.toBe(true);
     expect(navigationResult.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining(`"${type}" dialog with message "During load"`) });
+    expect(navigationResult.content[0]).toMatchObject({ type: 'text', text: expect.not.stringContaining('await page.goto(') });
 
     const blocked = await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
     expect(blocked.isError).toBe(true);
@@ -93,6 +94,7 @@ describe('navigation interrupted by a load-time dialog', () => {
     const next = await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
     expect(next.isError).not.toBe(true);
     expect(next.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('button "Loaded"') });
+    expect(next.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('await page.goto(') });
   });
 
   it('reports a crawl navigation timeout without evaluating a dialog-blocked document', async () => {

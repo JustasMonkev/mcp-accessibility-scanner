@@ -251,7 +251,7 @@ CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`,
 
 If CDP attachment times out after the WebSocket connects, an existing sleeping or unresponsive tab may be blocking Playwright's browser initialization ([upstream report](https://github.com/microsoft/playwright/issues/42730)). Use an explicit positive `--cdp-timeout` to bound the attempt. Inspect or wake the affected tabs yourself, or attach to a separate disposable browser. `noDefaults` and `--isolated` do not skip initialization of existing tabs; the server does not close your tabs or bypass Playwright's initialization to work around this.
 
-Playwright 1.63 does not support back/forward-cache (BFCache) restoration: an attached browser with BFCache enabled can return unusable references and omit iframe contents after back navigation. This was reproduced with full Chromium, Chrome, and Edge. For a browser you launch yourself, include `--disable-back-forward-cache` before attaching, or use the server's normal browser launch mode, which retains Playwright's default flag. The server does not change an attached browser's flags or replace back navigation with a reload. See the [upstream maintainer's explanation](https://github.com/microsoft/playwright/issues/42777#issuecomment-5739095543), [Playwright's BFCache limitation](https://playwright.dev/docs/navigations#backforward-cache-bfcache), and the [verification and reproduction command](docs/issue-verification-2026-09.md#history-references-231).
+Playwright 1.63 does not support back/forward-cache (BFCache) restoration: an attached browser with BFCache enabled can return unusable references and omit iframe contents after back navigation. This was reproduced with full Chromium, Chrome, and Edge. For a browser you launch yourself, include `--disable-back-forward-cache` before attaching, or use the server's normal browser launch mode, which retains Playwright's default flag. The server does not change an attached browser's flags or replace back navigation with a reload. See the [upstream maintainer's explanation](https://github.com/microsoft/playwright/issues/42777#issuecomment-5739095543), [Playwright's BFCache limitation](https://playwright.dev/docs/navigations#backforward-cache-bfcache), and the [verification and reproduction command](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#history-references-231).
 
 For remote HTTP access, configure the TLS reverse proxy explicitly. For example, with the MCP server bound using `--host 127.0.0.1 --port 8931` and `PLAYWRIGHT_MCP_AUTH_TOKEN` set:
 
@@ -263,6 +263,8 @@ For remote HTTP access, configure the TLS reverse proxy explicitly. For example,
 The server does not trust `Forwarded` or `X-Forwarded-*` to bypass its checks. Preserving the public `Host` or HTTPS `Origin` upstream returns `403`, even with a valid bearer token.
 
 Caller-supplied screenshot, PDF, scan-page-matrix, and audit report filenames use a no-clobber policy: an existing file causes the tool call to fail instead of being overwritten. Windows-reserved basenames and names ending in a dot or space are rejected on every platform so configured names behave consistently across hosts.
+
+Failed download saves are reported as tool errors in the current or next response, including after the tab closes; failed entries do not advertise a saved file or an ongoing download. The server retains up to 20 bounded error messages between responses and reports any omitted count. Full Chromium-family browsers on Playwright 1.63.0 have [verified native crashes after persistent-profile relaunch](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#persistent-profile-downloads-230). Error reporting does not fix that native crash. The explicit `--isolated` control passed, but does not preserve a profile between launches; use recorded storage state when needed for authentication. Existing profiles and browser defaults are preserved.
 
 Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies after every action so delayed DOM-only updates are included in the response; a short observation window also catches scheduled requests and waits for them before that delay.
 
@@ -524,7 +526,7 @@ Audits what a screen reader actually announces, using the browser's own accessib
 Navigate to a URL.
 - Parameters: `url` (string)
 - Non-2xx main-document responses are shown as an `HTTP status` line in page state.
-- If a page opens a dialog while loading, navigation returns the pending dialog so you can resolve it with `browser_handle_dialog`. It does not dismiss the dialog automatically. A navigation attempt while a modal is already open fails with handling guidance. If the interrupted navigation later fails, the error appears in page console messages unless the document has changed.
+- If a page opens a dialog while loading, navigation returns the pending dialog so you can resolve it with `browser_handle_dialog`. It does not dismiss the dialog automatically, and the interrupted response omits the `page.goto` replay snippet. A navigation attempt while a modal is already open fails with handling guidance. If the interrupted navigation later fails, the error appears in page console messages unless the document has changed.
 
 #### `browser_navigate_back`
 Go back to the previous page.
@@ -666,6 +668,8 @@ Closes a session opened with `browser_session_open` and releases its browser res
 - Parameters: `browserSessionId` (the handle to close)
 
 Closing is refused with a tool error while a tool call is still running in that session — a close that disposed the browser mid-call would fail the running tool; wait for it to finish and retry.
+
+If a pending download fails while a session closes, the response includes the download error alongside the confirmation that the session was closed. That session handle has already been removed.
 
 Sessions that stay idle expire automatically after 30 minutes; the timer is refreshed on every use and while a tool is running in the session (overlapping calls each count, so the session survives until the last one finishes), so a long `audit_site` crawl is never expired mid-run. Set `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` to override the idle TTL in milliseconds (`0` or a negative value disables expiry). Passing an unknown or expired handle produces a tool error pointing back to `browser_session_open`; the error deliberately does not list other open sessions' handles, since handles are bearer tokens that route tool calls into their sessions. With `--save-session`, logged tool calls record the `browserSessionId` they were routed with, and recorded user actions from an explicit session carry the same `browserSessionId` in their logged args, so entries from different sessions stay distinguishable (default-session entries stay untagged).
 

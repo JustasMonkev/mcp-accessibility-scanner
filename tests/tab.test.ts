@@ -456,6 +456,17 @@ describe('Tab', () => {
       (mockContext.outputFile as any).mockImplementation(async (name: string) => `/tmp/out/${name}`);
     });
 
+    it('retains a failed save without advertising it as pending or completed', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const download = makeDownload('report.txt');
+      download.saveAs.mockRejectedValue(new Error('disk full'));
+      mockPage.emit('download', download);
+      const tracked = vi.mocked(mockContext.trackPendingDownload).mock.calls[0][0];
+      await expect(tracked).rejects.toThrow('disk full');
+      const snapshot = await tab.captureSnapshot();
+      expect(snapshot.downloads).toEqual([expect.objectContaining({ finished: false, error: 'disk full' })]);
+    });
+
     it('saves two downloads suggesting the same name to distinct files, keeping the name recognizable', async () => {
       // Sessions share one output directory; saving under the suggested name
       // alone let two concurrent "report.pdf" downloads overwrite each other.

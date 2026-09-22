@@ -41,7 +41,7 @@ export type TabSnapshot = {
   ariaSnapshot: string;
   modalStates: ModalState[];
   consoleMessages: ConsoleMessage[];
-  downloads: { download: playwright.Download, finished: boolean, outputFile: string }[];
+  downloads: { download: playwright.Download, finished: boolean, outputFile: string, error?: string }[];
 };
 
 class StaleAriaSnapshotError extends Error {}
@@ -56,7 +56,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _mainDocumentStatus: { status: number, statusText: string } | undefined;
   private _onPageClose: (tab: Tab) => void;
   private _modalStates: ModalState[] = [];
-  private _downloads: { download: playwright.Download, finished: boolean, outputFile: string }[] = [];
+  private _downloads: TabSnapshot['downloads'] = [];
   private _defaultTimeout: number;
   // The aria snapshot last handed to the caller; the refs in it are the refs the
   // next tool call will name. Cleared whenever the page it described is gone.
@@ -113,7 +113,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       // outlive the tab), and context disposal must wait for it instead of
       // closing the browser mid-stream. The context also owns the promise's
       // rejection handling.
-      this.context.trackPendingDownload(this._downloadStarted(download));
+      this.context.trackPendingDownload(this._downloadStarted(download), download.suggestedFilename());
     });
     page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? 30000);
     page.setDefaultTimeout(this._defaultTimeout);
@@ -184,14 +184,22 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       baseBudget = maxNameBytes - Buffer.byteLength(uniqueSuffix, 'utf8');
     }
     const uniqueName = `${truncateToUtf8Bytes(base, baseBudget)}${uniqueSuffix}${extension}`;
-    const entry = {
+    const entry: TabSnapshot['downloads'][number] = {
       download,
       finished: false,
       outputFile: await this.context.outputFile(uniqueName)
     };
     this._downloads.push(entry);
-    await download.saveAs(entry.outputFile);
-    entry.finished = true;
+    try {
+      await download.saveAs(entry.outputFile);
+      entry.finished = true;
+    } catch (error) {
+      const message = truncateDataUrls(formatPageStateError(error));
+      entry.error = truncateToUtf8Bytes(message, 2000);
+      if (entry.error !== message)
+        entry.error += '… [truncated]';
+      throw error;
+    }
   }
 
   private _clearCollectedArtifacts() {

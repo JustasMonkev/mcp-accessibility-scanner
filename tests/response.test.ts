@@ -64,6 +64,7 @@ describe('Response', () => {
       currentTab: () => mockTab,
       currentTabOrDie: () => mockTab,
       tabs: () => [mockTab],
+      takeDownloadErrors: vi.fn().mockReturnValue([]),
       config: {
         imageResponses: 'allow',
       },
@@ -91,6 +92,33 @@ describe('Response', () => {
       expect(text.text.split('\n')).toContain(`- Downloaded file file.txt to ${rendered}`);
     }
     expect(downloads.map(entry => entry.outputFile)).toEqual(storedPaths);
+  });
+
+  it('marks a download failure arriving after finish as an error during serialization', async () => {
+    const errors: string[] = [];
+    vi.mocked(mockContext.takeDownloadErrors).mockImplementation(() => errors.splice(0));
+    const response = new Response(mockContext, 'browser_click', {});
+    await response.finish();
+    errors.push('Failed to save download "report.txt": canceled');
+    const result = response.serialize();
+    expect(result.isError).toBe(true);
+    expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('Failed to save download "report.txt": canceled') });
+    expect(errors).toEqual([]);
+  });
+
+  it('renders failed download history without claiming a saved artifact or ongoing download', async () => {
+    mockTab.captureSnapshot = vi.fn().mockResolvedValue({
+      url: 'https://fixture.local/', title: '', ariaSnapshot: '', modalStates: [], consoleMessages: [],
+      downloads: [{ download: { suggestedFilename: () => 'report.txt' }, finished: false, outputFile: '/tmp/absent.txt', error: 'disk full' }],
+    });
+    const response = new Response(mockContext, 'browser_snapshot', {});
+    response.setIncludeSnapshot();
+    await response.finish();
+    const text = expectTextContent(response.serialize().content[0]).text;
+    expect(text).toContain('Failed to download report.txt: disk full');
+    expect(text).not.toContain('Downloading file');
+    expect(text).not.toContain('Downloaded file');
+    expect(text).not.toContain('/tmp/absent.txt');
   });
 
   describe('constructor', () => {

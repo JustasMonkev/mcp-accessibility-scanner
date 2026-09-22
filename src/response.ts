@@ -205,6 +205,14 @@ export class Response {
       Promise.allSettled(tabsToUpdate.map(tab => tab.updateTitle())),
     ]);
     this._tabSnapshot = snapshot;
+    this._addDownloadErrors();
+  }
+
+  private _addDownloadErrors() {
+    // Saves can fail after their page disappears or after the initiating tool
+    // returns. Report each failure once, without waiting on ongoing downloads.
+    for (const error of this._context.takeDownloadErrors())
+      this.addError(truncateDataUrls(error));
   }
 
   tabSnapshot(): TabSnapshot | undefined {
@@ -212,6 +220,9 @@ export class Response {
   }
 
   serialize(): Pick<CallToolResult, 'content' | 'structuredContent' | 'isError'> {
+    // Also covers failed handlers, which never reach finish(), and saves that
+    // reject during asynchronous session logging after the snapshot completes.
+    this._addDownloadErrors();
     const response: string[] = [];
 
     // Start with command result.
@@ -279,7 +290,9 @@ function renderTabSnapshot(tabSnapshot: TabSnapshot, formatFilePath: (file: stri
   if (tabSnapshot.downloads.length) {
     lines.push(`### Downloads`);
     for (const entry of tabSnapshot.downloads) {
-      if (entry.finished)
+      if (entry.error !== undefined)
+        lines.push(`- Failed to download ${entry.download.suggestedFilename()}: ${truncateDataUrls(entry.error)}`);
+      else if (entry.finished)
         lines.push(`- Downloaded file ${entry.download.suggestedFilename()} to ${formatFilePath(entry.outputFile)}`);
       else
         lines.push(`- Downloading file ${entry.download.suggestedFilename()} ...`);

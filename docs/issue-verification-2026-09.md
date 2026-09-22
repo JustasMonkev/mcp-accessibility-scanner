@@ -55,14 +55,49 @@ checks that storage is not reused. Only fixture-owned temporary profiles are
 removed. These tests use the MCP server in process; they do not test an external
 stdio server process's lifetime.
 
-Both Linux headless-shell cases passed on the versions above. Hosted run
-35691616856 then found no saved file after the second persistent-profile launch
-on Linux/Windows Chromium 153.0.8010.12 and Windows Chrome 153.0.8010.53. Both
-Edge 153.0.4234.48 cases passed, and isolated cases passed on every channel.
-The initial result alone does not establish a native crash or its cause; failure
-diagnostics now record download events, network status and browser survival.
-This investigation remains open. Do not treat the Linux headless-shell controls
-as evidence that the full-browser download failure is fixed.
+Both Linux headless-shell cases passed on the versions above. Hosted
+[diagnostic run 35692199642](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/35692199642)
+confirmed native browser crashes on the second persistent-profile launch:
+
+| Browser | Platform | Observed native exit |
+| --- | --- | --- |
+| Chromium 153.0.8010.12 | Linux | SIGSEGV (signal 11), native stack captured |
+| Chromium 153.0.8010.12 | Windows | Access violation, exit 3221225477 (0xC0000005) |
+| Chrome 153.0.8010.53 | Windows | Access violation, exit 3221225477 (0xC0000005) |
+| Edge 153.0.4234.48 | Windows | Access violation; this control passed the earlier run, so failure is intermittent |
+
+The fixture received HTTP 200 and a Playwright download event before browser
+disconnection; `saveAs()`/`path()` rejected with target-closed errors and no file
+was saved. First launches and isolated controls passed. This confirms a native
+failure in these conditions, without identifying its C++ root cause or claiming
+that another browser version is safe. [Issue #230](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/230)
+and the [upstream report](https://github.com/microsoft/playwright/issues/42831)
+remain relevant; no browser flags, profiles, browser defaults or dependency pins
+are changed to work around the crash.
+
+The local fix is failure reporting: previously the tool returned a successful
+response still saying “Downloading” after `saveAs()` had failed. Failed saves now
+produce a named tool error in the current or next response, even if the page has
+closed or the next tool itself fails because no page exists. Failed history
+entries show failure rather than an ongoing download or a saved artifact. Closing
+an explicit session reports any save failure alongside the completed session
+close. The context retains at most 20 bounded error messages between responses,
+with an explicit count of additional omitted failures.
+
+The regression still requires exact saved bytes and a live browser for every
+first launch, isolated context, headless-shell control and unlisted version. Only
+the exact platform/channel/version tuples above, paired with Playwright and
+playwright-core 1.63.0 on the second persistent launch, may instead verify the
+known native failure contract: download event and target-closed failure, closed
+page and disconnected browser, no artifact, a named `isError` response, and a
+successful MCP ping. Such an outcome logs `known-native-crash-reported`; it is
+**not a successful download or a fixed native crash**. Removing the retained-error
+drain makes the closed-tab reporting regression fail.
+
+`--isolated` is an explicit alternative whose two-launch controls passed; it
+does not preserve profile state between launches. Use recorded storage state if
+that mode needs an authenticated starting session. Do not reset a real profile
+or silently switch browsers to work around this failure.
 
 ## Running the focused checks
 
@@ -139,5 +174,5 @@ reset or dependency upgrade is included.
 
 `npm run lint`, `npm run build` and `npm run knip` pass. With the explicit
 `MCP_TEST_BROWSER_CHANNEL=chromium-headless-shell` control, the full Vitest suite
-passes **54 files / 1,246 tests, with no skips**. This environment selection is
+passes **54 files / 1,252 tests, with no skips**. This environment selection is
 confined to the history/download fixture; production browser defaults are intact.

@@ -16,12 +16,11 @@ jobs:
       - name: Checkout code
         shell: bash
         env:
-          CHECKOUT_REF: ${{ github.ref }}
           CHECKOUT_SHA: ${{ github.sha }}
         run: |
           git init .
           git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
-          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
           git checkout --detach "$CHECKOUT_SHA"
 
       - name: Select installed supported Node.js
@@ -38,7 +37,7 @@ jobs:
           };
           const root = process.env.RUNNER_TOOL_CACHE && path.join(process.env.RUNNER_TOOL_CACHE, 'node');
           const versions = root && fs.existsSync(root)
-            ? fs.readdirSync(root).filter(version => version.startsWith('24.') && supported(version))
+            ? fs.readdirSync(root).filter(supported)
               .sort((a, b) => b.localeCompare(a, undefined, { numeric: true })) : [];
           const executable = versions.map(version => path.join(root, version, process.arch,
             process.platform === 'win32' ? 'node.exe' : 'bin/node')).find(file => fs.existsSync(file)) || process.execPath;
@@ -92,12 +91,11 @@ jobs:
       - name: Checkout code
         shell: bash
         env:
-          CHECKOUT_REF: ${{ github.ref }}
           CHECKOUT_SHA: ${{ github.sha }}
         run: |
           git init .
           git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
-          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
           git checkout --detach "$CHECKOUT_SHA"
 
       - name: Select installed supported Node.js
@@ -114,7 +112,7 @@ jobs:
           };
           const root = process.env.RUNNER_TOOL_CACHE && path.join(process.env.RUNNER_TOOL_CACHE, 'node');
           const versions = root && fs.existsSync(root)
-            ? fs.readdirSync(root).filter(version => version.startsWith('24.') && supported(version))
+            ? fs.readdirSync(root).filter(supported)
               .sort((a, b) => b.localeCompare(a, undefined, { numeric: true })) : [];
           const executable = versions.map(version => path.join(root, version, process.arch,
             process.platform === 'win32' ? 'node.exe' : 'bin/node')).find(file => fs.existsSync(file)) || process.execPath;
@@ -138,12 +136,11 @@ jobs:
       - name: Checkout code
         shell: bash
         env:
-          CHECKOUT_REF: ${{ github.ref }}
           CHECKOUT_SHA: ${{ github.sha }}
         run: |
           git init .
           git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
-          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
           git checkout --detach "$CHECKOUT_SHA"
 
       - name: Select installed supported Node.js
@@ -160,7 +157,7 @@ jobs:
           };
           const root = process.env.RUNNER_TOOL_CACHE && path.join(process.env.RUNNER_TOOL_CACHE, 'node');
           const versions = root && fs.existsSync(root)
-            ? fs.readdirSync(root).filter(version => version.startsWith('24.') && supported(version))
+            ? fs.readdirSync(root).filter(supported)
               .sort((a, b) => b.localeCompare(a, undefined, { numeric: true })) : [];
           const executable = versions.map(version => path.join(root, version, process.arch,
             process.platform === 'win32' ? 'node.exe' : 'bin/node')).find(file => fs.existsSync(file)) || process.execPath;
