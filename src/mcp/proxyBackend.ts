@@ -167,7 +167,6 @@ export class ProxyBackend implements ServerBackend {
     const provider = providers.find(factory => factory.name === name);
     if (!provider)
       throw new Error('Unknown connection method: ' + name);
-    const previousTools = await this._getExposedTools(this._currentClient).catch(() => undefined);
     const previousOwned = this._ownsCurrentClient ? this._currentClient : undefined;
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
     const shared = await slot.replace(provider === providers[0] ? undefined : () => this._connectClient(provider));
@@ -187,7 +186,6 @@ export class ProxyBackend implements ServerBackend {
     if (previousShared)
       await slot.release(previousShared);
     await previousOwned?.close().catch(errorsDebug);
-    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(this._currentClient));
   }
 
   private async _forwardProgressNotification(
