@@ -129,6 +129,7 @@ jobs:
       - run: npx vitest run tests/history-downloads.integration.test.ts
         env:
           MCP_TEST_BROWSER_CHANNEL: ${{ matrix.channel }}
+          DEBUG: pw:browser,pw:mcp:errors
 
   webkit-regressions:
     runs-on: ubuntu-latest

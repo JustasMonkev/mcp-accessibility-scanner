@@ -28,6 +28,7 @@ import { resolveConfig, type FullConfig } from '../src/config.js';
 import { wrapInProcess } from '../src/mcp/server.js';
 
 const channel = process.env.MCP_TEST_BROWSER_CHANNEL || 'chromium';
+const enableBFCache = process.env.MCP_TEST_ENABLE_BFCACHE === '1';
 const downloadBytes = Buffer.from('Local download: verified after profile reuse.\n');
 const clients: Client[] = [];
 const contexts: BrowserContext[] = [];
@@ -57,7 +58,7 @@ beforeAll(async () => {
     throw new Error('Expected a TCP fixture server');
   origin = `http://127.0.0.1:${address.port}`;
   const require = createRequire(import.meta.url);
-  process.stdout.write(JSON.stringify({ platform: process.platform, channel, node: process.version,
+  process.stdout.write(JSON.stringify({ platform: process.platform, channel, enableBFCache, node: process.version,
     playwright: require('playwright/package.json').version,
     playwrightCore: require('playwright-core/package.json').version }) + '\n');
 });
@@ -113,8 +114,8 @@ it.each([
     const profile = path.join(directory, 'profile');
     const external = await chromium.launchPersistentContext(profile, {
       channel, headless: true, args: ['--remote-debugging-port=0'],
-      // External Chrome does not disable bfcache as Playwright's normal launch does.
-      ignoreDefaultArgs: ['--disable-back-forward-cache'],
+      // Opt in only to reproduce Playwright's documented unsupported BFCache mode.
+      ignoreDefaultArgs: enableBFCache ? ['--disable-back-forward-cache'] : [],
     });
     contexts.push(external);
     const port = (await fs.readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0].trim();
@@ -168,8 +169,11 @@ it.each([
     await expect.poll(() => page.url()).toBe(`${origin}/a`);
     await expect.poll(() => page.getByRole('textbox', { name: 'Saved note' }).inputValue()).toBe('Keep this form state');
     expect(await page.evaluate(() => history.length)).toBe(initialHistory + 1);
-    if (await page.locator('body').getAttribute('data-restored') === 'true')
+    const restored = await page.locator('body').getAttribute('data-restored') === 'true';
+    if (restored)
       bfcacheRestores++;
+    if (enableBFCache && mode === 'cdp')
+      process.stdout.write(JSON.stringify({ case: 'bfcache-probe', api, restored, frames: page.frames().map(frame => frame.url()) }) + '\n');
   }
   process.stdout.write(JSON.stringify({ case: 'history', mode, api, bfcacheRestores }) + '\n');
 }, 60_000);
@@ -199,12 +203,39 @@ it.each([false, true])('saves download bytes and keeps browser/MCP alive across 
     process.stdout.write(JSON.stringify({ case: 'download', isolated, launch, browser: context!.browser()!.version() }) + '\n');
     expect(await page.evaluate(() => localStorage.getItem('previousLaunch'))).toBe(!isolated && launch ? 'saved' : null);
     await page.evaluate(() => localStorage.setItem('previousLaunch', 'saved'));
+    const downloadEvents: { name: string, failure?: string | null, path?: string | null }[] = [];
+    const downloadRequests: { event: string, status?: number, error?: string }[] = [];
+    page.on('request', request => {
+      if (request.url() === `${origin}/download`)
+        downloadRequests.push({ event: 'request' });
+    });
+    page.on('response', response => {
+      if (response.url() === `${origin}/download`)
+        downloadRequests.push({ event: 'response', status: response.status() });
+    });
+    page.on('requestfailed', request => {
+      if (request.url() === `${origin}/download`)
+        downloadRequests.push({ event: 'requestfailed', error: request.failure()?.errorText });
+    });
+    page.on('download', download => {
+      const event: typeof downloadEvents[number] = { name: download.suggestedFilename() };
+      downloadEvents.push(event);
+      void download.failure().then(failure => { event.failure = failure; }, error => { event.failure = String(error); });
+      void download.path().then(downloadPath => { event.path = downloadPath; }, error => { event.path = String(error); });
+    });
     const snapshot = await call(client, 'browser_snapshot');
-    await call(client, 'browser_click', { element: 'Download file', ref: linkRef(snapshot, 'Download file') });
-    await expect.poll(async () => {
-      const files = await fs.readdir(outputDir);
-      return Promise.all(files.filter(file => file.endsWith('.txt')).map(file => fs.readFile(path.join(outputDir, file), 'utf8')));
-    }, { timeout: 10_000 }).toEqual([downloadBytes.toString()]);
+    const clickResult = await call(client, 'browser_click', { element: 'Download file', ref: linkRef(snapshot, 'Download file') });
+    try {
+      await expect.poll(async () => {
+        const files = await fs.readdir(outputDir);
+        return Promise.all(files.filter(file => file.endsWith('.txt')).map(file => fs.readFile(path.join(outputDir, file), 'utf8')));
+      }, { timeout: 10_000 }).toEqual([downloadBytes.toString()]);
+    } catch (error) {
+      process.stdout.write(JSON.stringify({ case: 'download-failure', isolated, launch, downloadEvents, downloadRequests,
+        pageClosed: page.isClosed(), browserConnected: context!.browser()!.isConnected(),
+        pages: context!.pages().map(candidate => candidate.url()), outputFiles: await fs.readdir(outputDir), clickResult }) + '\n');
+      throw error;
+    }
     expect(page.isClosed()).toBe(false);
     expect(context!.browser()!.isConnected()).toBe(true);
     expect(await call(client, 'browser_snapshot')).toContain('Download fixture');
