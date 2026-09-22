@@ -33,11 +33,12 @@ function contextHarness(label: string) {
   let reads = 0;
   let disposed = false;
   let received: unknown;
+  let protocolErrorBytes = 0;
   let read = async () => tools;
   let execute: (value: unknown) => unknown = value => value;
   const page = Object.assign(new EventEmitter(), { frames: () => [frame], isClosed: () => false });
   const sandbox = vm.createContext({
-    window: {}, navigator: {}, performance: { timeOrigin: 1 }, TextEncoder,
+    window: {}, navigator: {}, performance: { timeOrigin: 1 }, TextEncoder, TextDecoder,
     document: { modelContext: {
       getTools: async () => { ++reads; return read(); },
       executeTool: async (_tool: unknown, input: string) => {
@@ -48,7 +49,15 @@ function contextHarness(label: string) {
     } },
   });
   const frame = { url: () => 'https://example.test', isDetached: () => false,
-    evaluate: async (fn: Function, argument: unknown) => JSON.parse(JSON.stringify(await vm.runInContext(`(${fn.toString()})`, sandbox)(argument))),
+    evaluate: async (fn: Function, argument: unknown) => {
+      try {
+        return JSON.parse(JSON.stringify(await vm.runInContext(`(${fn.toString()})`, sandbox)(argument)));
+      } catch (error) {
+        const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : String(error);
+        protocolErrorBytes = Buffer.byteLength(message);
+        throw error;
+      }
+    },
   };
   const context = {
     config: {}, currentTab: () => tab, tabs: () => [tab],
@@ -63,7 +72,8 @@ function contextHarness(label: string) {
   const tab = { context, page, modalStates: () => [], operationTimeout: () => 25,
     isCurrentTab: () => true, updateTitle: async () => undefined,
   };
-  return { context, tab, calls: () => calls, busy: () => busy, reads: () => reads, disposed: () => disposed, received: () => received,
+  return { context, tab, calls: () => calls, busy: () => busy, reads: () => reads, disposed: () => disposed,
+    protocolErrorBytes: () => protocolErrorBytes, received: () => received,
     setRead: (value: typeof read) => { read = value; },
     removeTools: () => { tools = []; }, setExecute: (value: typeof execute) => { execute = value; },
   };
@@ -206,6 +216,26 @@ describe('WebMCP backend scope and argument contracts', () => {
     h.backend.serverClosed();
   });
 
+  it('rejects arguments that do not match the advertised schema before page invocation', async () => {
+    const h = backendHarness();
+    const [tool] = await h.backend.listTools();
+    const result = await h.backend.callTool(tool.name, { browserSessionId: 'wrong', _meta: 'ok' }, request());
+    assert.equal(result.isError, true);
+    assert.match(text(result), /Invalid WebMCP arguments/);
+    assert.equal(h.defaultContext.calls(), 0);
+    h.backend.serverClosed();
+  });
+
+  it('bounds page-thrown errors before they cross the browser protocol', async () => {
+    const h = backendHarness();
+    const [tool] = await h.backend.listTools();
+    h.defaultContext.setExecute(() => { throw new Error('€'.repeat(10_000)); });
+    const result = await h.backend.callTool(tool.name, input, request());
+    assert.equal(result.isError, true);
+    assert.ok(h.defaultContext.protocolErrorBytes() <= 2048);
+    h.backend.serverClosed();
+  });
+
   it('holds an explicit session against close and TTL expiry during listing', async () => {
     vi.useFakeTimers();
     const h = backendHarness();
@@ -275,6 +305,23 @@ describe('WebMCP backend scope and argument contracts', () => {
     controller.abort(new Error('cancel listing'));
     await assert.rejects(h.backend.listTools(request(undefined, controller.signal)), /cancel listing/);
     assert.equal(h.defaultContext.reads(), 0);
+    assert.equal(h.defaultContext.busy(), 0);
+    h.backend.serverClosed();
+  });
+
+  it('releases a shared-context listing when initial attachment is cancelled', async () => {
+    const h = backendHarness(undefined, false);
+    const started = Promise.withResolvers<void>();
+    Object.assign(h.defaultContext.context, {
+      currentTab: () => undefined,
+      ensureTab: async () => { started.resolve(); return new Promise(() => {}); },
+    });
+    Object.assign(h.backend, { _browserContextFactory: { sharedContext: true } });
+    const controller = new AbortController();
+    const listing = h.backend.listTools(request(undefined, controller.signal));
+    await started.promise;
+    controller.abort(new Error('cancel attachment'));
+    await assert.rejects(listing, /cancel attachment/);
     assert.equal(h.defaultContext.busy(), 0);
     h.backend.serverClosed();
   });

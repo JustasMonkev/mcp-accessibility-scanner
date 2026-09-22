@@ -17,8 +17,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { withConcurrency } from './tools/axe.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
-import { specTypeSchemas } from '@modelcontextprotocol/server';
-import type { Tool } from '@modelcontextprotocol/server';
+import { fromJsonSchema, specTypeSchemas } from '@modelcontextprotocol/server';
+import type { JsonSchemaType, Tool } from '@modelcontextprotocol/server';
 import type * as playwright from 'playwright';
 import type { Response } from './response.js';
 import type { Tab } from './tab.js';
@@ -158,7 +158,7 @@ async function collectInPage(budget: typeof limits & { documentKey: string, docu
 }
 
 /** Runs in the page; the document check prevents an evaluation queued across navigation from calling a replacement tool. */
-async function callInPage(params: { name: string, inputJson: string, timeOrigin: number, resultBytes: number, expected: string }): Promise<string> {
+async function callInPage(params: { name: string, inputJson: string, timeOrigin: number, resultBytes: number, errorBytes: number, expected: string }): Promise<string> {
   if (performance.timeOrigin !== params.timeOrigin)
     throw new Error('The WebMCP document changed. List tools again before calling.');
   const modelContext = (document as Document & { modelContext?: ModelContext }).modelContext
@@ -178,12 +178,21 @@ async function callInPage(params: { name: string, inputJson: string, timeOrigin:
   if (performance.timeOrigin !== params.timeOrigin || JSON.stringify(current) !== params.expected)
     throw new Error('The WebMCP registration changed. List tools again before calling.');
   let result: unknown;
-  if (modelContext.executeTool)
-    result = await modelContext.executeTool(tool, params.inputJson);
-  else if (modelContext.invokeTool)
-    result = JSON.stringify((await modelContext.invokeTool(params.name, JSON.parse(params.inputJson))) ?? null);
-  else
-    throw new Error('This browser does not support WebMCP tool invocation.');
+  try {
+    if (modelContext.executeTool)
+      result = await modelContext.executeTool(tool, params.inputJson);
+    else if (modelContext.invokeTool)
+      result = JSON.stringify((await modelContext.invokeTool(params.name, JSON.parse(params.inputJson))) ?? null);
+    else
+      throw new Error('This browser does not support WebMCP tool invocation.');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const bytes = new TextEncoder().encode(message);
+    let end = Math.min(bytes.length, params.errorBytes);
+    while (end < bytes.length && (bytes[end] & 0xc0) === 0x80)
+      --end;
+    throw new Error(bytes.length <= params.errorBytes ? message : new TextDecoder().decode(bytes.slice(0, end)));
+  }
   const json = typeof result === 'string' ? result : JSON.stringify(result ?? null);
   if (new TextEncoder().encode(json).length > params.resultBytes)
     throw new Error('WebMCP result exceeds the 256 KiB limit. The action may have completed; its result was not returned.');
@@ -204,6 +213,10 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
     const inputJson = JSON.stringify(params);
     if (Buffer.byteLength(inputJson) > limits.resultBytes)
       throw new Error('WebMCP arguments exceed the 256 KiB limit.');
+    // SAFETY: the SDK's Tool schema is the same JSON Schema contract with a looser serialized-value type.
+    const validation = await fromJsonSchema<Record<string, unknown>>(tool.inputSchema as JsonSchemaType)['~standard'].validate(params);
+    if (validation.issues)
+      throw new Error(`Invalid WebMCP arguments: ${validation.issues.map(issue => issue.message).join('; ')}`);
     // WebMCP's own promise defines completion. A separate network-settle wait
     // could outlive cancellation and keep a browser session marked busy.
     const json = await bounded(() => new Promise<string>((resolve, reject) => {
@@ -218,7 +231,10 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
       onChooser = () => reject(new Error('WebMCP opened a file chooser. Use browser_file_upload; the page action may still be running.'));
       tab.page.on('dialog', onDialog);
       tab.page.on('filechooser', onChooser);
-      const evaluation = frame.evaluate(callInPage, { name: tool.name, inputJson, timeOrigin, resultBytes: limits.resultBytes, expected: JSON.stringify(tool) });
+      const evaluation = frame.evaluate(callInPage, {
+        name: tool.name, inputJson, timeOrigin, resultBytes: limits.resultBytes,
+        errorBytes: limits.description, expected: JSON.stringify(tool),
+      });
       pendingInvocations.set(invocationKey, evaluation);
       const clear = () => {
         if (pendingInvocations.get(invocationKey) === evaluation)
