@@ -17,6 +17,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'vitest';
 import { chromium } from 'playwright';
+import { Client } from '@modelcontextprotocol/client';
+import { BrowserServerBackend } from '../src/browserServerBackend.js';
+import { resolveConfig } from '../src/config.js';
+import { wrapInProcess } from '../src/mcp/server.js';
 import { listWebMCPTools } from '../src/webmcp.js';
 import type { Tab } from '../src/tab.js';
 import type { Response } from '../src/response.js';
@@ -83,4 +87,58 @@ browserTests('WebMCP browser boundary', () => {
       await browser.close();
     }
   });
+});
+
+browserTests('Native WebMCP over MCP', () => {
+  it('lists and invokes registerTool registrations through the pinned browser and real MCP SDK', async () => {
+    const browser = await chromium.launch({ headless: true,
+      executablePath: process.env.WEBMCP_BROWSER_EXECUTABLE_PATH || undefined,
+      args: ['--enable-features=WebMCP', ...(process.env.WEBMCP_BROWSER_NO_SANDBOX === '1' ? ['--no-sandbox'] : [])],
+    });
+    const client = new Client({ name: 'native-webmcp-test', version: '1' });
+    try {
+      const browserContext = await browser.newContext();
+      await browserContext.route('http://localhost/**', route => route.fulfill({ contentType: 'text/html', body: '<h1>Native WebMCP</h1><iframe src="/frame"></iframe>' }));
+      // Prevent recursive frames while retaining same-origin native registration.
+      await browserContext.route('http://localhost/frame', route => route.fulfill({ contentType: 'text/html', body: '<h2>Frame</h2>' }));
+      const config = await resolveConfig({});
+      const backend = new BrowserServerBackend(config, {
+        createContext: async () => ({ browserContext, close: () => browserContext.close() }),
+      });
+      await client.connect(await wrapInProcess(backend));
+      const navigation = await client.callTool({ name: 'browser_navigate', arguments: { url: 'http://localhost/' } });
+      assert.notEqual(navigation.isError, true);
+      const page = browserContext.pages()[0];
+      for (const [index, frame] of page.frames().entries()) {
+        await frame.evaluate(index => {
+          type NativeContext = { registerTool: (tool: { name: string, description: string, inputSchema: { type: 'object', properties: Record<string, { type: 'number' | 'string' }>, required: string[] }, execute: (input: unknown) => Promise<unknown> }) => void };
+          // SAFETY: these are the native experimental members absent from TypeScript's DOM declarations.
+          const modelContext = (document as Document & { modelContext: NativeContext }).modelContext;
+          modelContext.registerTool({ name: 'native_echo', description: `native-frame-${index}`,
+            inputSchema: { type: 'object', properties: { browserSessionId: { type: 'number' }, _meta: { type: 'string' } }, required: ['browserSessionId', '_meta'] },
+            execute: async input => ({ content: [{ type: 'text', text: `frame=${index};${JSON.stringify(input)}` }] }),
+          });
+        }, index);
+      }
+      const tools = (await client.listTools()).tools.filter(tool => tool.name.startsWith('webmcp_'));
+      assert.equal(tools.length, 2);
+      const child = tools.find(tool => tool.description?.endsWith('native-frame-1'))!;
+      const result = await client.callTool({ name: child.name, arguments: { browserSessionId: 42, _meta: 'page input' } });
+      assert.notEqual(result.isError, true);
+      const text = JSON.stringify(result.content);
+      assert.ok(text.includes('page input'));
+      assert.ok(text.includes('frame=1;'));
+      assert.ok(text.includes('42'));
+      await page.goto('http://localhost/next');
+      const stale = await client.callTool({ name: child.name, arguments: { browserSessionId: 42, _meta: 'page input' } });
+      assert.equal(stale.isError, true);
+      assert.equal((await client.listTools()).tools.filter(tool => tool.name.startsWith('webmcp_')).length, 0);
+    } finally {
+      try {
+        await client.close();
+      } finally {
+        await browser.close();
+      }
+    }
+  }, 30000);
 });

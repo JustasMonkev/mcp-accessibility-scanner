@@ -17,6 +17,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { withConcurrency } from './tools/axe.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
+import { specTypeSchemas } from '@modelcontextprotocol/server';
 import type { Tool } from '@modelcontextprotocol/server';
 import type * as playwright from 'playwright';
 import type { Response } from './response.js';
@@ -145,7 +146,7 @@ async function collectInPage(budget: typeof limits): Promise<{ timeOrigin: numbe
 }
 
 /** Runs in the page; the document check prevents an evaluation queued across navigation from calling a replacement tool. */
-async function callInPage(params: { name: string, inputJson: string, timeOrigin: number, resultBytes: number, expected: CollectedTool }): Promise<string> {
+async function callInPage(params: { name: string, inputJson: string, timeOrigin: number, resultBytes: number, expected: string }): Promise<string> {
   if (performance.timeOrigin !== params.timeOrigin)
     throw new Error('The WebMCP document changed. List tools again before calling.');
   const modelContext = (document as Document & { modelContext?: ModelContext }).modelContext
@@ -162,7 +163,7 @@ async function callInPage(params: { name: string, inputJson: string, timeOrigin:
     schema = { type: 'object' };
   const current = { name: tool.name, title: typeof tool.title === 'string' ? tool.title.slice(0, 256) : tool.name,
     description: typeof tool.description === 'string' ? tool.description.slice(0, 2048) : '', inputSchema: schema };
-  if (performance.timeOrigin !== params.timeOrigin || JSON.stringify(current) !== JSON.stringify(params.expected))
+  if (performance.timeOrigin !== params.timeOrigin || JSON.stringify(current) !== params.expected)
     throw new Error('The WebMCP registration changed. List tools again before calling.');
   let result: unknown;
   if (modelContext.executeTool)
@@ -201,7 +202,7 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
       onChooser = () => reject(new Error('WebMCP opened a file chooser. Use browser_file_upload; the page action may still be running.'));
       tab.page.on('dialog', onDialog);
       tab.page.on('filechooser', onChooser);
-      void frame.evaluate(callInPage, { name: tool.name, inputJson, timeOrigin, resultBytes: limits.resultBytes, expected: tool }).then(resolve, reject);
+      void frame.evaluate(callInPage, { name: tool.name, inputJson, timeOrigin, resultBytes: limits.resultBytes, expected: JSON.stringify(tool) }).then(resolve, reject);
     }), tab.operationTimeout(), signal);
     let isError = false;
     try {
@@ -254,7 +255,7 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
       if (frameIds.get(frame) !== identity || frame.isDetached())
         return [];
       const label = truncateDataUrls(frame.url()).slice(0, 2048);
-      return listing.tools.map(tool => {
+      return listing.tools.filter(tool => !specTypeSchemas.Tool['~standard'].validate(tool).issues).map(tool => {
         const digest = createHash('sha256').update(JSON.stringify([scopeId, identity, tool])).digest('hex').slice(0, 20);
         const base = tool.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 36) || 'tool';
         const name = `webmcp_${base}_${digest}`;

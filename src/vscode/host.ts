@@ -66,6 +66,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   private _clientVersion?: ClientVersion;
   private _backendContext: ServerBackendContext | undefined;
   private _listedClient: Client | undefined;
+  private _pendingToolLists = new Set<{ client: Client, changed: boolean }>();
 
   constructor(private readonly _config: FullConfig, private readonly _defaultTransportFactory: () => Promise<Transport>, private readonly _sharedSlot?: SharedClientSlot) {
     this._contextSwitchTool = this._defineContextSwitchTool();
@@ -95,12 +96,17 @@ export class VSCodeProxyBackend implements ServerBackend {
     // Listing and invocation must resolve the same host-owned session even
     // while the default browsing provider is switched to a VS Code child.
     const client = await this._clientForTool('webmcp_', undefined, requestContext);
-    const response = await client.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined);
-    this._listedClient = client;
-    return [
-      ...response.tools,
-      this._contextSwitchTool,
-    ];
+    const pending = { client, changed: false };
+    this._pendingToolLists.add(pending);
+    try {
+      const response = await client.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined);
+      this._listedClient = client;
+      if (pending.changed && !this._sharedSlot)
+        await this._backendContext?.notifyToolListChanged().catch(logUnhandledError);
+      return [...response.tools, this._contextSwitchTool];
+    } finally {
+      this._pendingToolLists.delete(pending);
+    }
   }
 
   async callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
@@ -311,6 +317,10 @@ export class VSCodeProxyBackend implements ServerBackend {
     const client = new Client(this._clientVersion!);
     client.setRequestHandler('ping', () => ({}));
     client.setNotificationHandler('notifications/tools/list_changed', async () => {
+      for (const pending of this._pendingToolLists) {
+        if (pending.client === client)
+          pending.changed = true;
+      }
       if (!this._sharedSlot && this._listedClient === client)
         await this._backendContext?.notifyToolListChanged().catch(logUnhandledError);
     });

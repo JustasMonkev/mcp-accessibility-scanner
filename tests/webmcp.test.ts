@@ -228,6 +228,22 @@ describe('WebMCP discovery and identity', () => {
     assert.ok(tools.every(t => !t.schema.name.includes('oversized') && t.schema.description!.length < 2600));
   });
 
+  it('omits malformed MCP schemas without poisoning valid tools', async () => {
+    const invalid = [
+      { type: 'object', required: 'value' },
+      { type: 'object', required: [42] },
+      { type: 'object', properties: [] },
+      { type: 'object', properties: 'value' },
+    ];
+    const h = harness([
+      ...invalid.map((inputSchema, index) => ({ ...registration(`invalid${index}`), inputSchema })),
+      registration('valid'),
+    ]);
+    const tools = await listWebMCPTools(h.tab);
+    assert.equal(tools.length, 1);
+    assert.match(tools[0].schema.name, /^webmcp_valid_/);
+  });
+
   it('truncates data URLs in descriptions and invocation results', async () => {
     const h = harness([registration()]);
     const raw = `data:text/html;base64,${'A'.repeat(30000)}`;

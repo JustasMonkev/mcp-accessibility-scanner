@@ -2,11 +2,15 @@ name: CI
 
 on:
   pull_request:
-    branches: ['feat/']
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     strategy:
       matrix:
@@ -26,7 +30,7 @@ jobs:
         run: npm ci
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium chrome
 
       - name: Run typecheck
         run: npx tsc --noEmit
@@ -36,6 +40,11 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      - name: Run native WebMCP integration
+        run: npm test -- tests/webmcp-browser.test.ts
+        env:
+          WEBMCP_BROWSER_TEST: '1'
 
       - name: Build
         run: npm run build

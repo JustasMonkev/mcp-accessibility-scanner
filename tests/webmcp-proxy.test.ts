@@ -16,6 +16,9 @@
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'vitest';
+import { resolveConfig } from '../src/config.js';
+import { wrapInProcess } from '../src/mcp/server.js';
+import type { ServerBackendContext } from '../src/mcp/server.js';
 import { ProxyBackend } from '../src/mcp/proxyBackend.js';
 import { VSCodeProxyBackend } from '../src/vscode/host.js';
 import type { CallToolRequestContext } from '../src/mcp/server.js';
@@ -64,7 +67,7 @@ function vscodeHarness() {
   // SAFETY: list/call methods need only these injected current and host clients.
   const backend = Object.assign(Object.create(VSCodeProxyBackend.prototype), {
     _currentClient: client('switched'), _currentClientIsDefault: false,
-    _sessionClient: Promise.resolve(client('host')), _contextSwitchTool: { name: 'browser_connect' },
+    _sessionClient: Promise.resolve(client('host')), _pendingToolLists: new Set(), _contextSwitchTool: { name: 'browser_connect' },
   }) as VSCodeProxyBackend;
   return { backend, calls };
 }
@@ -92,7 +95,6 @@ describe('WebMCP VS Code host routing', () => {
   });
 });
 
-
 describe('WebMCP VS Code progress forwarding', () => {
   it('forwards progress for switched and host-routed calls without changing cancellation or page input', async () => {
     for (const sessionId of [undefined, 'bs_host']) {
@@ -114,6 +116,42 @@ describe('WebMCP VS Code progress forwarding', () => {
       options.onprogress({ progress: 2, total: 3, message: 'Preparing audit' });
       await Promise.resolve();
       assert.deepEqual(notifications, [{ method: 'notifications/progress', params: { progressToken: 0, progress: 2, total: 3, message: 'Preparing audit' } }]);
+    }
+  });
+});
+
+describe('WebMCP VS Code notification races', () => {
+  it('preserves notifications during the first and switched-client tool listing', async () => {
+    let notifications = 0;
+    const innerContexts: ServerBackendContext[] = [];
+    let duringList: (() => Promise<void>) | undefined;
+    const backend = new VSCodeProxyBackend(await resolveConfig({}), async () => wrapInProcess({
+      initialize: async context => { innerContexts.push(context); },
+      listTools: async () => {
+        await duringList?.();
+        return [];
+      },
+      callTool: async () => ({ content: [] }),
+    }));
+    try {
+      await backend.initialize({ notifyToolListChanged: async () => { ++notifications; } }, { name: 'test', version: '1' });
+      notifications = 0;
+      duringList = () => innerContexts[0].notifyToolListChanged();
+      await backend.listTools();
+      assert.ok(notifications > 0, 'the first listing must retain an in-flight notification');
+      // Select the host-owned session client, as happens after a provider switch.
+      Object.assign(backend, { _currentClientIsDefault: false });
+      notifications = 0;
+      duringList = () => innerContexts[1].notifyToolListChanged();
+      await backend.listTools({ _meta: { browserSessionId: 'bs_host' } });
+      assert.ok(notifications > 0, 'the newly selected client must retain an in-flight notification');
+      duringList = async () => { throw new Error('listing failed'); };
+      await assert.rejects(backend.listTools(), /listing failed/);
+      notifications = 0;
+      await innerContexts[1].notifyToolListChanged();
+      assert.equal(notifications, 1, 'failed listing must preserve the previous notification recipient');
+    } finally {
+      backend.serverClosed();
     }
   });
 });
