@@ -5,6 +5,7 @@
     "src/program.ts!",
     "src/vscode/main.ts!",
     "bench/*.mjs",
+    "tests/*-probe.mjs",
     "utils/copyright.js",
     ".codex/run-mcp-direct-harness.mjs",
     ".codex/run-mcp-tool-loop.mjs"

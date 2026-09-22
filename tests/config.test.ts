@@ -30,6 +30,57 @@ async function writeConfigFile(config: Config): Promise<string> {
 }
 
 describe('Config', () => {
+  describe('client certificate proxy routing', () => {
+    const clientCertificates = [{ origin: 'https://fixture.test', certPath: '/fixture.crt', keyPath: '/fixture.key' }];
+    const proxy = { server: 'http://proxy.test:3128', username: 'fixture', password: 'disposable' };
+    afterEach(() => vi.unstubAllEnvs());
+
+    it.each([false, true])('preserves the launch proxy with certificates (isolated: %s)', async isolated => {
+      const config = await resolveConfig({ browser: { isolated, launchOptions: { proxy }, contextOptions: { clientCertificates } } });
+      expect(config.browser.contextOptions.proxy).toEqual(proxy);
+      expect(config.browser.launchOptions.proxy).toEqual(proxy);
+    });
+
+    it('preserves a context proxy override, including an empty bypass overriding launch bypass', async () => {
+      const contextProxy = { server: 'http://context-proxy.test:3128', bypass: '' };
+      const config = await resolveConfig({ browser: {
+        launchOptions: { proxy: { ...proxy, bypass: 'private.test' } },
+        contextOptions: { clientCertificates, proxy: contextProxy },
+      } });
+      expect(config.browser.contextOptions.proxy).toEqual(contextProxy);
+    });
+
+    it.each(['launch', 'context'])('rejects an effective %s proxy bypass with certificates', async level => {
+      const options = { proxy: { ...proxy, bypass: 'private.test' } };
+      await expect(resolveConfig({ browser: {
+        launchOptions: level === 'launch' ? options : {},
+        contextOptions: { clientCertificates, ...(level === 'context' ? options : {}) },
+      } })).rejects.toThrow('clientCertificates with proxy.bypass is unsupported');
+    });
+
+    it('validates the merged CLI, environment and file proxy settings', async () => {
+      const config = await writeConfigFile({ browser: { contextOptions: { clientCertificates } } });
+      expect((await resolveCLIConfig({ config, proxyServer: proxy.server })).browser.contextOptions.proxy).toEqual({ server: proxy.server });
+      await expect(resolveCLIConfig({ config, proxyServer: proxy.server, proxyBypass: 'private.test' })).rejects.toThrow('proxy.bypass');
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', proxy.server);
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', 'private.test');
+      await expect(resolveCLIConfig({ config })).rejects.toThrow('proxy.bypass');
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', '');
+      expect((await resolveCLIConfig({ config })).browser.contextOptions.proxy).toEqual({ server: proxy.server });
+    });
+
+    it.each([undefined, []])('leaves proxy behavior unchanged without client certificates (%j)', async clientCertificates => {
+      const config = await resolveConfig({ browser: { launchOptions: { proxy: { ...proxy, bypass: 'private.test' } }, contextOptions: { clientCertificates } } });
+      expect(config.browser.contextOptions.proxy).toBeUndefined();
+      expect(config.browser.launchOptions.proxy?.bypass).toBe('private.test');
+    });
+
+    it('allows certificates without a configured proxy', async () => {
+      const config = await resolveConfig({ browser: { contextOptions: { clientCertificates } } });
+      expect(config.browser.contextOptions.proxy).toBeUndefined();
+    });
+  });
+
   describe('file paths', () => {
     beforeEach(() => vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', ''));
     afterEach(() => vi.unstubAllEnvs());

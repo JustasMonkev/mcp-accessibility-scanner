@@ -260,9 +260,35 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     await callOnPageNoTrace(this.page, page => page.waitForLoadState(state, options).catch(logUnhandledError));
   }
 
-  async navigate(url: string) {
+  async navigate(url: string, options?: { returnOnDialog?: boolean }) {
+    if (options?.returnOnDialog && this.modalStates().length)
+      throw new Error(`Cannot navigate while a modal state is present.\n${this.modalStatesMarkdown().join('\n')}`);
     this._clearCollectedArtifacts();
+    // Crawlers need the document ready before evaluating it, and cannot hand
+    // an open dialog back to the user between their internal navigations.
+    if (!options?.returnOnDialog) {
+      await this._navigate(url);
+      return;
+    }
+    let navigation: Promise<void> | undefined;
+    // A dialog can block DOMContentLoaded or load until another tool handles
+    // it. Return its modal state immediately, leaving the dialog untouched.
+    const modalStates = await this._raceAgainstModalStates(() => {
+      navigation = this._navigate(url);
+      return navigation;
+    });
+    if (modalStates.length && navigation) {
+      const pageGeneration = this._pageGeneration;
+      void navigation.catch(error => {
+        // The tool already returned the dialog. Preserve a later failure for
+        // the next snapshot/console read, unless the user has moved on.
+        if (pageGeneration === this._pageGeneration)
+          this._handleConsoleMessage(pageErrorToConsoleMessage(new Error(`Navigation failed after dialog interruption: ${formatPageStateError(error)}`)));
+      });
+    }
+  }
 
+  private async _navigate(url: string) {
     const downloadEvent = new ManualPromise<playwright.Download>();
     const downloadListener = (download: playwright.Download) => downloadEvent.resolve(download);
     this.page.once('download', downloadListener);
@@ -401,13 +427,14 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     const listener = (modalState: ModalState) => promise.resolve([modalState]);
     this.once(TabEvents.modalState, listener);
 
-    return await Promise.race([
-      action().then(() => {
-        this.off(TabEvents.modalState, listener);
-        return [];
-      }),
-      promise,
-    ]);
+    try {
+      return await Promise.race([
+        action().then(() => []),
+        promise,
+      ]);
+    } finally {
+      this.off(TabEvents.modalState, listener);
+    }
   }
 
   async waitForCompletion(callback: () => Promise<void>) {

@@ -2,11 +2,15 @@ name: CI
 
 on:
   pull_request:
-    branches: ['feat/']
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     strategy:
       matrix:
@@ -26,7 +30,7 @@ jobs:
         run: npm ci
 
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium chrome
 
       - name: Run typecheck
         run: npx tsc --noEmit
@@ -39,3 +43,47 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Verify client-certificate proxy routing
+        run: node tests/client-certificate-proxy-probe.mjs
+
+  browser-regressions:
+    name: Browser regressions (${{ matrix.os }}, ${{ matrix.channel }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            channel: chromium
+          - os: windows-latest
+            channel: chromium
+          - os: windows-latest
+            channel: chrome
+          - os: windows-latest
+            channel: msedge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps ${{ matrix.channel }}
+      - run: npx vitest run tests/history-downloads.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_CHANNEL: ${{ matrix.channel }}
+
+  webkit-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps webkit
+      - run: node tests/webkit-network-probe.mjs
