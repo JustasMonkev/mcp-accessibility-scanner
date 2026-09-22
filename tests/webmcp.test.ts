@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { setTimeout as delay } from 'node:timers/promises';
-import { describe, it } from 'vitest';
+import { describe, it, vi } from 'vitest';
 import { listWebMCPTools, webMCPSessionId, WebMCPObserver } from '../src/webmcp.js';
 import type { WebMCPToolDefinition } from '../src/webmcp.js';
 import type { Tab } from '../src/tab.js';
@@ -215,6 +215,27 @@ describe('WebMCP discovery and identity', () => {
     const tools = await listWebMCPTools(h.tab);
     assert.equal(tools.length, 32);
     assert.ok(h.maximumActive() <= 4);
+  });
+
+  it('does not accumulate pending evaluations across observer retries and recovers after settlement', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    let reads = 0;
+    let finishRead: (tools: ReturnType<typeof registration>[]) => void;
+    const registrations = new Promise<ReturnType<typeof registration>[]>(resolve => { finishRead = resolve; });
+    h.frames[0].sandbox.document.modelContext.getTools = () => { ++reads; return registrations; };
+    const observer = new WebMCPObserver(() => listWebMCPTools(h.tab), [], async () => {}, error => { throw error; });
+    try {
+      await vi.advanceTimersByTimeAsync(25000);
+      assert.equal(reads, 1, 'a timed-out protocol request must not be reissued every polling round');
+      finishRead!([registration()]);
+      await vi.advanceTimersByTimeAsync(1000);
+      assert.ok(reads > 1, 'discovery resumes once the old protocol request has settled');
+      assert.equal((await listWebMCPTools(h.tab)).length, 1);
+    } finally {
+      observer.dispose();
+      vi.useRealTimers();
+    }
   });
 
   it('bounds tool count, schemas and descriptions and skips malformed registrations', async () => {

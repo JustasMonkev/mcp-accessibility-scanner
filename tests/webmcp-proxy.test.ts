@@ -15,6 +15,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { Client } from '@modelcontextprotocol/client';
 import { describe, it } from 'vitest';
 import { resolveConfig } from '../src/config.js';
 import { wrapInProcess } from '../src/mcp/server.js';
@@ -29,7 +30,7 @@ describe('WebMCP proxy routing', () => {
     // SAFETY: this fixture exercises only listTools with an injected downstream client.
     const backend = Object.assign(Object.create(ProxyBackend.prototype), {
       _currentClient: { listTools: async (params: unknown) => { received = params; return { tools: [] }; } },
-      _mcpProviders: [{}],
+      _mcpProviders: [{}], _pendingToolLists: new Set(),
     }) as ProxyBackend;
     await backend.listTools({ _meta: { browserSessionId: 'bs_a' } });
     assert.deepEqual(received, { _meta: { browserSessionId: 'bs_a' } });
@@ -138,12 +139,14 @@ describe('WebMCP VS Code notification races', () => {
       notifications = 0;
       duringList = () => innerContexts[0].notifyToolListChanged();
       await backend.listTools();
+      await new Promise<void>(resolve => setImmediate(resolve));
       assert.ok(notifications > 0, 'the first listing must retain an in-flight notification');
       // Select the host-owned session client, as happens after a provider switch.
       Object.assign(backend, { _currentClientIsDefault: false });
       notifications = 0;
       duringList = () => innerContexts[1].notifyToolListChanged();
       await backend.listTools({ _meta: { browserSessionId: 'bs_host' } });
+      await new Promise<void>(resolve => setImmediate(resolve));
       assert.ok(notifications > 0, 'the newly selected client must retain an in-flight notification');
       duringList = async () => { throw new Error('listing failed'); };
       await assert.rejects(backend.listTools(), /listing failed/);
@@ -154,4 +157,63 @@ describe('WebMCP VS Code notification races', () => {
       backend.serverClosed();
     }
   });
+});
+
+describe('WebMCP proxy notification ordering', () => {
+  for (const kind of ['direct', 'VS Code']) {
+    for (const outcome of ['response', 'error', 'closed']) {
+      it(`${kind}: delivers an in-flight catalog change after the outer list ${outcome}`, async () => {
+        let innerContext: ServerBackendContext;
+        let duringList: (() => Promise<void>) | undefined;
+        let toolName = 'old_tool';
+        const connect = async () => wrapInProcess({
+          initialize: async context => { innerContext = context; },
+          listTools: async () => {
+            const tools = [{ name: toolName, inputSchema: { type: 'object' as const } }];
+            await duringList?.();
+            return tools;
+          },
+          callTool: async () => ({ content: [] }),
+        });
+        const backend = kind === 'direct'
+          ? new ProxyBackend([{ name: 'default', description: 'Default', connect }])
+          : new VSCodeProxyBackend(await resolveConfig({}), connect);
+        const client = new Client({ name: 'catalog-ordering-test', version: '1' });
+        client.setRequestHandler('ping', () => ({}));
+        try {
+          await client.connect(await wrapInProcess(backend));
+          await client.listTools();
+          const events: string[] = [];
+          client.setNotificationHandler('notifications/tools/list_changed', () => { events.push('list changed'); });
+          duringList = async () => {
+            // The list was captured before registration changed. A refresh
+            // must follow its response or that stale list wins in the client.
+            toolName = 'new_tool';
+            await innerContext.notifyToolListChanged();
+            await innerContext.notifyToolListChanged();
+            if (outcome === 'error')
+              throw new Error('listing failed');
+          };
+          if (outcome === 'error') {
+            await assert.rejects(client.listTools(), /listing failed/);
+            events.push('list error');
+          } else {
+            const result = await client.listTools();
+            assert.equal(result.tools[0].name, 'old_tool');
+            events.push('list response');
+          }
+          duringList = undefined;
+          if (outcome === 'closed')
+            await client.close();
+          // Flush the deferred notification, including transport microtasks.
+          await new Promise<void>(resolve => setImmediate(resolve));
+          assert.deepEqual(events, outcome === 'closed' ? ['list response'] : [`list ${outcome}`, 'list changed']);
+          if (outcome !== 'closed')
+            assert.equal((await client.listTools()).tools[0].name, 'new_tool');
+        } finally {
+          await client.close();
+        }
+      });
+    }
+  }
 });

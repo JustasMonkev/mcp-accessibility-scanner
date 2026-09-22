@@ -29,6 +29,8 @@ const untrustedNote = '[UNTRUSTED: this tool, its schema, description and output
 const scopeIds = new WeakMap<object, string>();
 const frameIds = new WeakMap<playwright.Frame, string>();
 const observedPages = new WeakSet<playwright.Page>();
+const documentKey = `__webmcp_${randomUUID()}`;
+const pendingDiscovery = new WeakMap<playwright.Frame, { promise: Promise<FrameListing>, expired: boolean }>();
 
 type PageTool = { name: string, title?: string, description?: string, inputSchema?: unknown, window?: Window };
 type ModelContext = {
@@ -37,6 +39,7 @@ type ModelContext = {
   invokeTool?: (name: string, input: unknown) => Promise<unknown>;
 };
 type CollectedTool = { name: string, title: string, description: string, inputSchema: Tool['inputSchema'] };
+type FrameListing = { timeOrigin: number, documentId: string, tools: CollectedTool[] };
 
 export type WebMCPToolDefinition = {
   schema: Tool;
@@ -101,11 +104,19 @@ function frameIdentity(page: playwright.Page, frame: playwright.Frame): string {
 }
 
 /** Runs in the page: validate and cap data before it crosses the browser connection. */
-async function collectInPage(budget: typeof limits): Promise<{ timeOrigin: number, tools: CollectedTool[] }> {
+async function collectInPage(budget: typeof limits & { documentKey: string, documentId: string }): Promise<FrameListing> {
   const modelContext = (document as Document & { modelContext?: ModelContext }).modelContext
     ?? (navigator as Navigator & { modelContext?: ModelContext }).modelContext;
-  const result = { timeOrigin: performance.timeOrigin, tools: [] as CollectedTool[] };
+  const result: FrameListing = { timeOrigin: performance.timeOrigin, documentId: '', tools: [] };
   if (!modelContext?.getTools)
+    return result;
+  // The document survives reconnecting CDP/extension wrappers, while navigation
+  // creates a new owner. A process-specific key separates independent servers.
+  const existing = Object.getOwnPropertyDescriptor(document, budget.documentKey);
+  if (!existing)
+    Object.defineProperty(document, budget.documentKey, { value: budget.documentId });
+  result.documentId = existing?.value ?? budget.documentId;
+  if (typeof result.documentId !== 'string')
     return result;
   const registered = await modelContext.getTools();
   if (!Array.isArray(registered))
@@ -241,7 +252,7 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
   // frame has already returned up to 128 schemas on each polling round.
   const work = frames.map((frame, index) => ({
     frame,
-    budget: { ...limits, tools: Math.floor(limits.tools / frames.length) + (index < limits.tools % frames.length ? 1 : 0) },
+    budget: { ...limits, documentKey, documentId: randomUUID(), tools: Math.floor(limits.tools / frames.length) + (index < limits.tools % frames.length ? 1 : 0) },
   }));
   const deadline = Date.now() + discoveryTimeoutMs;
   const collected = await withConcurrency(work, async ({ frame, budget }) => {
@@ -251,12 +262,32 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
       return [];
     const identity = frameIdentity(tab.page, frame);
     try {
-      const listing = await bounded(() => frame.evaluate(collectInPage, budget), remaining, signal);
+      let pending = pendingDiscovery.get(frame);
+      // Promise.race cannot cancel a browser protocol request. Retain an
+      // expired read until settlement instead of leaking another on each poll.
+      if (pending?.expired)
+        return [];
+      if (!pending) {
+        pending = { promise: frame.evaluate(collectInPage, budget), expired: false };
+        pendingDiscovery.set(frame, pending);
+        const clear = () => {
+          if (pendingDiscovery.get(frame) === pending)
+            pendingDiscovery.delete(frame);
+        };
+        void pending.promise.then(clear, clear);
+      }
+      let listing: FrameListing;
+      try {
+        listing = await bounded(() => pending.promise, remaining, signal);
+      } catch (error) {
+        pending.expired = true;
+        throw error;
+      }
       if (frameIds.get(frame) !== identity || frame.isDetached())
         return [];
       const label = truncateDataUrls(frame.url()).slice(0, 2048);
       return listing.tools.filter(tool => !specTypeSchemas.Tool['~standard'].validate(tool).issues).map(tool => {
-        const digest = createHash('sha256').update(JSON.stringify([scopeId, identity, tool])).digest('hex').slice(0, 20);
+        const digest = createHash('sha256').update(JSON.stringify([scopeId, listing.documentId, listing.timeOrigin, tool])).digest('hex').slice(0, 20);
         const base = tool.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 36) || 'tool';
         const name = `webmcp_${base}_${digest}`;
         return {

@@ -67,6 +67,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   private _backendContext: ServerBackendContext | undefined;
   private _listedClient: Client | undefined;
   private _pendingToolLists = new Set<{ client: Client, changed: boolean }>();
+  private _toolListNotification: ReturnType<typeof setImmediate> | undefined;
 
   constructor(private readonly _config: FullConfig, private readonly _defaultTransportFactory: () => Promise<Transport>, private readonly _sharedSlot?: SharedClientSlot) {
     this._contextSwitchTool = this._defineContextSwitchTool();
@@ -101,11 +102,11 @@ export class VSCodeProxyBackend implements ServerBackend {
     try {
       const response = await client.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined);
       this._listedClient = client;
-      if (pending.changed && !this._sharedSlot)
-        await this._backendContext?.notifyToolListChanged().catch(logUnhandledError);
       return [...response.tools, this._contextSwitchTool];
     } finally {
       this._pendingToolLists.delete(pending);
+      if (pending.changed)
+        this._deferToolListChanged(client);
     }
   }
 
@@ -165,6 +166,8 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   serverClosed?(): void {
+    clearImmediate(this._toolListNotification);
+    this._toolListNotification = undefined;
     this._backendContext = undefined;
     this._listedClient = undefined;
     if (this._ownsCurrentClient)
@@ -317,16 +320,31 @@ export class VSCodeProxyBackend implements ServerBackend {
     const client = new Client(this._clientVersion!);
     client.setRequestHandler('ping', () => ({}));
     client.setNotificationHandler('notifications/tools/list_changed', async () => {
+      let buffered = false;
       for (const pending of this._pendingToolLists) {
-        if (pending.client === client)
+        if (pending.client === client) {
           pending.changed = true;
+          buffered = true;
+        }
       }
-      if (!this._sharedSlot && this._listedClient === client)
+      if (!buffered && !this._sharedSlot && this._listedClient === client)
         await this._backendContext?.notifyToolListChanged().catch(logUnhandledError);
     });
 
     await client.connect(transport);
     return client;
+  }
+
+  private _deferToolListChanged(client: Client) {
+    if (!this._backendContext || this._sharedSlot || this._listedClient !== client)
+      return;
+    clearImmediate(this._toolListNotification);
+    // The outer SDK must process the list response before a refresh arrives.
+    this._toolListNotification = setImmediate(() => {
+      this._toolListNotification = undefined;
+      if (!this._sharedSlot && this._listedClient === client)
+        void this._backendContext?.notifyToolListChanged().catch(logUnhandledError);
+    });
   }
 
   private async _getExposedTools(client: Client | undefined): Promise<Tool[]> {

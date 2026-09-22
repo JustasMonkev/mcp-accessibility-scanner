@@ -198,8 +198,9 @@ export class BrowserServerBackend implements ServerBackend {
 
   /** Shares discovery, naming and static-name exclusion between listing and invocation. */
   private async _currentWebMCPTools(context: Context, signal?: AbortSignal): Promise<WebMCPToolDefinition[]> {
-    const tab = context.currentTab();
-    return tab ? await listWebMCPTools(tab, context, new Set(this._toolsByName.keys()), signal) : [];
+    const sharedDefault = this._ephemeralDefaultContext && context === this._context && this._browserContextFactory.sharedContext;
+    const tab = context.currentTab() ?? (sharedDefault ? await context.ensureTab() : undefined);
+    return tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
   }
 
   /** Routes page tools via request metadata; every field inside arguments belongs to the page. */

@@ -4,7 +4,7 @@ This integration follows [Playwright #42671](https://github.com/microsoft/playwr
 
 ## Discovery and scope
 
-After navigating to a page, request MCP `tools/list`. A supported `document.modelContext` or `navigator.modelContext` API contributes dynamic tools alongside the built-in tools. The server does not install a polyfill, enable browser flags, launch a browser solely to list tools, or upgrade Playwright.
+After navigating to a page, request MCP `tools/list`. A supported `document.modelContext` or `navigator.modelContext` API contributes dynamic tools alongside the built-in tools. The server does not install a polyfill, enable browser flags, launch a standalone browser solely to list tools, or upgrade Playwright. Stateless extension and non-isolated CDP requests reconnect to their configured shared browser when listing or calling page tools.
 
 Names have the shape `webmcp_<sanitized name>_<identity hash>` and are at most 64 characters. Use the returned name verbatim. The identity is stable across enumeration changes within one browser-session scope and live frame/document, but changes with navigation or registration metadata/schema changes. Identical names in different frames or sessions cannot be substituted for one another. A stale or wrong-scope name fails before invocation.
 
@@ -28,11 +28,11 @@ The default session is selected when routing metadata is absent. For an explicit
 }
 ```
 
-In that example, `42` and `"page-owned argument"` are passed unchanged to the page. They never select a server session. Discovery does not enumerate session handles, and an unknown handle does not fall back to the default session. Explicit-session identities survive new per-request backends while their shared registry context remains alive.
+In that example, `42` and `"page-owned argument"` are passed unchanged to the page. They never select a server session. Discovery does not enumerate session handles, and an unknown handle does not fall back to the default session. Explicit-session identities survive new per-request backends while their shared registry context remains alive. Stateless shared-browser defaults use a factory-scoped identity and a document-local marker, so reconnecting Playwright wrappers preserves names until the document or registration changes.
 
 ## Notifications and caching
 
-A stateful backend observes the scope of its last completed `tools/list` request. It checks again one second after a completed refresh and after tool calls, coalesces overlapping reads, and emits `notifications/tools/list_changed` only when the advertised descriptors change. This includes page registrations made between MCP calls. Notifications are hints to re-list, not tool definitions themselves.
+A stateful backend observes the scope of its last completed `tools/list` request. It checks again one second after a completed refresh and after tool calls, coalesces overlapping reads, and emits `notifications/tools/list_changed` only when the advertised descriptors change. This includes page registrations made between MCP calls. A frame evaluation that exceeds the discovery deadline is not reissued until the original protocol request settles, preventing hung pages from accumulating pending browser requests. Notifications are hints to re-list, not tool definitions themselves.
 
 A stateless response does not retain an observer. Shared stateless provider clients have no persistent notification recipient. Browser and proxy backends do not inherit a factory's old one-hour cache hint; clients should re-list using the conservative zero-TTL result. Both the direct and VS Code proxies forward listing metadata and cancellation. Explicit sessions remain host-routed after VS Code provider switches, while page arguments cannot change the destination. Owned stateful clients forward list-change notifications.
 

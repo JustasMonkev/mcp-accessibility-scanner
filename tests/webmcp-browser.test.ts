@@ -15,9 +15,12 @@
  */
 
 import assert from 'node:assert/strict';
+import net from 'node:net';
 import { describe, it } from 'vitest';
 import { chromium } from 'playwright';
 import { Client } from '@modelcontextprotocol/client';
+import { contextFactory } from '../src/browserContextFactory.js';
+import type { BrowserContextFactory } from '../src/browserContextFactory.js';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { resolveConfig } from '../src/config.js';
 import { wrapInProcess } from '../src/mcp/server.js';
@@ -136,6 +139,80 @@ browserTests('Native WebMCP over MCP', () => {
     } finally {
       try {
         await client.close();
+      } finally {
+        await browser.close();
+      }
+    }
+  }, 30000);
+});
+
+
+browserTests('Stateless shared-browser WebMCP', () => {
+  it('lists and calls through fresh CDP connections without remapping frame identities', async () => {
+    const reservation = net.createServer();
+    await new Promise<void>(resolve => reservation.listen(0, '127.0.0.1', resolve));
+    const address = reservation.address();
+    assert.ok(address && typeof address !== 'string');
+    const port = address.port;
+    await new Promise<void>((resolve, reject) => reservation.close(error => error ? reject(error) : resolve()));
+    const browser = await chromium.launch({ headless: true,
+      executablePath: process.env.WEBMCP_BROWSER_EXECUTABLE_PATH || undefined,
+      args: [`--remote-debugging-port=${port}`, '--enable-features=WebMCP', ...(process.env.WEBMCP_BROWSER_NO_SANDBOX === '1' ? ['--no-sandbox'] : [])],
+    });
+    const clients: Client[] = [];
+    try {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      await page.route('http://localhost/**', route => route.fulfill({ contentType: 'text/html', body: '<h1>Shared browser</h1>' }));
+      await page.goto('http://localhost/');
+      await page.evaluate(() => {
+        // SAFETY: registerTool is the native experimental browser API, absent from lib.dom.d.ts.
+        const modelContext = (document as Document & { modelContext: { registerTool: (tool: { name: string, description: string, execute: () => Promise<unknown> }) => void } }).modelContext;
+        modelContext.registerTool({ name: 'shared_echo', description: 'shared document', execute: async () => ({ content: [{ type: 'text', text: 'shared-result' }] }) });
+      });
+      const config = await resolveConfig({ browser: { cdpEndpoint: `http://127.0.0.1:${port}` } });
+      const originalFactory = contextFactory(config);
+      const attachedContexts: Awaited<ReturnType<BrowserContextFactory['createContext']>>['browserContext'][] = [];
+      const closed: Promise<void>[] = [];
+      const factory: BrowserContextFactory = {
+        sharedContext: originalFactory.sharedContext,
+        createContext: async (...args) => {
+          const result = await originalFactory.createContext(...args);
+          attachedContexts.push(result.browserContext);
+          let finishClose: () => void;
+          closed.push(new Promise<void>(resolve => { finishClose = resolve; }));
+          return { ...result, close: async () => {
+            try { await result.close(); } finally { finishClose!(); }
+          } };
+        },
+      };
+      const connect = async () => {
+        const client = new Client({ name: 'stateless-webmcp-test', version: '1' });
+        clients.push(client);
+        await client.connect(await wrapInProcess(new BrowserServerBackend(config, factory, undefined, { ephemeralDefaultContext: true })));
+        return client;
+      };
+      const first = await connect();
+      const [tool] = (await first.listTools()).tools.filter(tool => tool.name.startsWith('webmcp_'));
+      assert.ok(tool, 'tools/list attaches to the configured existing shared browser');
+      await first.close();
+      await closed[0];
+      const second = await connect();
+      const [again] = (await second.listTools()).tools.filter(tool => tool.name.startsWith('webmcp_'));
+      assert.equal(again.name, tool.name);
+      assert.notEqual(attachedContexts[1], attachedContexts[0], 'a fresh CDP wrapper must preserve the document identity');
+      await second.close();
+      await closed[1];
+      const third = await connect();
+      const result = await third.callTool({ name: tool.name, arguments: {} });
+      assert.notEqual(result.isError, true);
+      assert.notEqual(attachedContexts[2], attachedContexts[1]);
+      assert.match(JSON.stringify(result.content), /shared-result/);
+      await page.goto('http://localhost/replaced');
+      assert.equal((await third.callTool({ name: tool.name, arguments: {} })).isError, true);
+    } finally {
+      try {
+        await Promise.all(clients.map(client => client.close()));
       } finally {
         await browser.close();
       }

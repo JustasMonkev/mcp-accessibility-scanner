@@ -76,7 +76,7 @@ function backendHarness(shared?: Map<string, ReturnType<typeof contextHarness>['
   // SAFETY: this fixture bypasses browser launch and injects only the private
   // state used by the production backend's list/call/close methods.
   const backend = Object.assign(Object.create(BrowserServerBackend.prototype), {
-    _tools: [], _toolsByName: new Map(), _mcpTools: [], _config: {},
+    _tools: [], _toolsByName: new Map(), _mcpTools: [], _config: {}, _browserContextFactory: {},
     _context: defaultContext.context, _sessionRegistry: registry, _sharedSessionRegistry: registry,
     _ephemeralDefaultContext: stateless, _closed: false,
     _notifyToolListChanged: async () => { ++notifications; },

@@ -360,7 +360,7 @@ To discover or invoke tools in an explicit browser session, put its handle in **
 
 Names, descriptions, schemas, results and page errors are untrusted. Every page tool retains conservative action annotations even if the page claims it is read-only. Calls are bounded and cancellable, but a timed-out or cancelled page action may still be running; do not retry it blindly. Stateful connections receive deduplicated list-change notifications for their last listed scope; stateless clients should re-list rather than cache the result.
 
-See [WebMCP usage, limits and tests](docs/webmcp.md) for request examples, discovery limits and validation commands. Page descriptors must pass the MCP SDK’s tool-schema validation before publication. An empty listing is not proof that the page has no tools: unsupported, invalid or timed-out registrations are omitted.
+See [WebMCP usage, limits and tests](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/webmcp.md) for request examples, discovery limits and validation commands. Page descriptors must pass the MCP SDK’s tool-schema validation before publication. An empty listing is not proof that the page has no tools: unsupported, invalid or timed-out registrations are omitted.
 
 ### Built-in tools
 
