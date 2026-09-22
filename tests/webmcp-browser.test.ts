@@ -77,8 +77,9 @@ browserTests('WebMCP browser boundary', () => {
       const hung = tools.find(tool => tool.schema.description?.endsWith('hang-0'))!;
       await hung.handle({}, response);
       assert.match(errors.pop()!, /timed out.*may still be running/);
+      const cancellable = tools.find(tool => tool.schema.description?.endsWith('hang-1'))!;
       const controller = new AbortController();
-      const pending = hung.handle({}, response, controller.signal);
+      const pending = cancellable.handle({}, response, controller.signal);
       setTimeout(() => controller.abort(), 10);
       await pending;
       assert.match(errors.pop()!, /cancelled/);
