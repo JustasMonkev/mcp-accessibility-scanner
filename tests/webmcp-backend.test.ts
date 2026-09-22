@@ -247,11 +247,17 @@ describe('WebMCP backend scope and argument contracts', () => {
       { name: 'duplicate', description: 'first', inputSchema: { type: 'object', properties: {
         browserSessionId: { type: 'number' }, _meta: { type: 'string' },
       }, required: ['browserSessionId', '_meta'] } },
+      ...Array.from({ length: 128 }, (_, i) => ({ name: `unique-${i}`, description: '', inputSchema: {
+        type: 'object', properties: { browserSessionId: { type: 'number' }, _meta: { type: 'string' } },
+        required: ['browserSessionId', '_meta'],
+      } })),
       { name: 'duplicate', description: 'second', inputSchema: { type: 'object', properties: {
         browserSessionId: { type: 'number' }, _meta: { type: 'string' },
       }, required: ['browserSessionId', '_meta'] } },
     ]);
-    assert.deepEqual(await h.backend.listTools(), []);
+    const listed = await h.backend.listTools();
+    assert.equal(listed.length, 128);
+    assert.ok(listed.every(tool => !tool.name.includes('duplicate')));
     h.backend.serverClosed();
   });
 
