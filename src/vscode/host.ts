@@ -23,7 +23,6 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import * as mcpServer from '../mcp/server.js';
 import { SharedClientSlot } from '../mcp/sharedClientSlot.js';
-import { notifyToolListChanged } from '../mcp/toolListChanged.js';
 import { logUnhandledError } from '../utils/log.js';
 import { packageJSON } from '../utils/package.js';
 
@@ -260,7 +259,6 @@ export class VSCodeProxyBackend implements ServerBackend {
   // child); only a client this request owned — its per-request default — is
   // closed here.
   private async _switchSharedClient(createTransport: (() => Promise<Transport>) | undefined): Promise<void> {
-    const previousTools = await this._getExposedTools(this._currentClient).catch(() => undefined);
     const previousOwned = this._ownsCurrentClient ? this._currentClient : undefined;
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
     // The transport is created inside the serialized replace(), so a queued
@@ -284,7 +282,6 @@ export class VSCodeProxyBackend implements ServerBackend {
     if (previousShared)
       await this._sharedSlot!.release(previousShared);
     await previousOwned?.close().catch(logUnhandledError);
-    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(this._currentClient));
   }
 
   private _defineContextSwitchTool(): Tool {
@@ -304,7 +301,6 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   private async _setCurrentClient(transport: Transport, notifyOnChange: boolean, isDefault = false) {
-    const previousTools = notifyOnChange ? await this._getExposedTools(this._currentClient).catch(() => undefined) : undefined;
     await this._currentClient?.close();
     this._currentClient = undefined;
     this._currentClientIsDefault = false;
@@ -313,7 +309,8 @@ export class VSCodeProxyBackend implements ServerBackend {
     this._currentClient = client;
     this._ownsCurrentClient = true;
     this._currentClientIsDefault = isDefault;
-    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(client));
+    if (notifyOnChange)
+      await this._backendContext?.notifyToolListChanged();
   }
 
   private async _connectClient(transport: Transport): Promise<Client> {

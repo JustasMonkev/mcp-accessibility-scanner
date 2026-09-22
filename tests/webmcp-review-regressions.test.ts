@@ -17,14 +17,26 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
+import { Client } from '@modelcontextprotocol/client';
 import { describe, it } from 'vitest';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
+import { resolveConfig } from '../src/config.js';
+import { createConnection } from '../src/index.js';
+import { InProcessTransport } from '../src/mcp/inProcessTransport.js';
+import { wrapInProcess } from '../src/mcp/server.js';
+import { VSCodeBrowserContextFactory } from '../src/vscode/browserContextFactory.js';
 import { listWebMCPTools } from '../src/webmcp.js';
+import type { BrowserContext } from 'playwright';
 import type { Tab } from '../src/tab.js';
 import type { Response } from '../src/response.js';
 
 function modalHarness(event?: string) {
-  const page = Object.assign(new EventEmitter(), { frames: () => [frame], isClosed: () => false });
+  const page = Object.assign(new EventEmitter(), {
+    frames: () => [frame],
+    isClosed: () => false,
+    setDefaultNavigationTimeout: () => {},
+    setDefaultTimeout: () => {},
+  });
   const frame = {
     url: () => 'https://example.test', isDetached: () => false,
     evaluate: async (_fn: unknown, argument: unknown) => {
@@ -46,6 +58,54 @@ function modalHarness(event?: string) {
 }
 
 describe('WebMCP follow-up review regressions', () => {
+  it('attaches a custom shared context before its first tools/list', async () => {
+    const page = Object.assign(new EventEmitter(), {
+      frames: () => [],
+      isClosed: () => false,
+      setDefaultNavigationTimeout: () => {},
+      setDefaultTimeout: () => {},
+    });
+    let opened = 0;
+    const browserContext = Object.assign(new EventEmitter(), {
+      pages: () => [],
+      newPage: async () => {
+        ++opened;
+        browserContext.emit('page', page);
+        return page;
+      },
+      close: async () => {},
+    });
+    // SAFETY: this fixture implements only the BrowserContext surface reached by initial listing.
+    const server = await createConnection({}, async () => browserContext as unknown as BrowserContext);
+    const client = new Client({ name: 'custom-context-test', version: '1' });
+    try {
+      await client.connect(new InProcessTransport(server));
+      await client.listTools();
+      assert.equal(opened, 1);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('attaches the VS Code provider before its first tools/list', async () => {
+    const { page } = modalHarness();
+    const browserContext = Object.assign(new EventEmitter(), { pages: () => [page] });
+    const browser = { contexts: () => [browserContext], close: async () => {} };
+    const config = await resolveConfig({});
+    // SAFETY: these fixtures implement only the connected browser surfaces reached by initial listing.
+    const playwright = { chromium: { connect: async () => browser } } as unknown as typeof import('playwright');
+    const factory = new VSCodeBrowserContextFactory(config, playwright, 'ws://127.0.0.1:1234/');
+    const client = new Client({ name: 'vscode-context-test', version: '1' });
+    try {
+      await client.connect(await wrapInProcess(new BrowserServerBackend(config, factory)));
+      const tools = (await client.listTools()).tools.filter(tool => tool.name.startsWith('webmcp_'));
+      assert.equal(tools.length, 1);
+    } finally {
+      await client.close();
+    }
+  });
+
   it('preserves a nonempty built-in list before initialization', async () => {
     const staticTools = [{ name: 'browser_snapshot', inputSchema: { type: 'object' } }];
     // SAFETY: mirrors pre-initialize fields; no browser or registry exists yet.
