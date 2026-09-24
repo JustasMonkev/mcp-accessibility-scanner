@@ -52,6 +52,8 @@ type LogEntry = {
   toolCall?: {
     toolName: string;
     toolArgs: Record<string, any>;
+    /** Routing metadata, kept apart from arguments the tool itself owns. */
+    meta?: Record<string, unknown>;
     result: string;
     isError?: boolean;
   };
@@ -121,12 +123,18 @@ export class SessionLog {
     return new SessionLog(sessionFolder);
   }
 
-  logResponse(response: Response) {
+  /**
+   * `meta` records request metadata that routed the call. Page-registered
+   * WebMCP tools own every argument name, including `browserSessionId`, so
+   * their routing handle cannot be folded into the logged args.
+   */
+  logResponse(response: Response, meta?: Record<string, unknown>) {
     const entry: LogEntry = {
       timestamp: performance.now(),
       toolCall: {
         toolName: response.toolName,
         toolArgs: response.toolArgs,
+        meta,
         result: response.result(),
         isError: response.isError(),
       },
@@ -230,8 +238,10 @@ export class SessionLog {
     for (const entry of entries) {
       const ordinal = (++this._ordinal).toString().padStart(3, '0');
       if (entry.toolCall) {
+        lines.push(`### Tool call: ${entry.toolCall.toolName}`);
+        if (entry.toolCall.meta)
+          lines.push(`- Metadata`, '```json', JSON.stringify(entry.toolCall.meta, null, 2), '```');
         lines.push(
-            `### Tool call: ${entry.toolCall.toolName}`,
             `- Args`,
             '```json',
             JSON.stringify(entry.toolCall.toolArgs, null, 2),

@@ -22,6 +22,7 @@ import { describe, it, vi } from 'vitest';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { BrowserSessionRegistry } from '../src/browserSessions.js';
 import type { Context } from '../src/context.js';
+import type { Response } from '../src/response.js';
 import type { CallToolRequestContext } from '../src/mcp/server.js';
 
 function contextHarness(label: string) {
@@ -34,7 +35,7 @@ function contextHarness(label: string) {
   let disposed = false;
   let received: unknown;
   let evaluations = 0;
-  let protocolErrorBytes = 0;
+  let transferredBytes = 0;
   let read = async () => tools;
   let execute: (value: unknown) => unknown = value => value;
   const page = Object.assign(new EventEmitter(), { frames: () => [frame], isClosed: () => false });
@@ -53,10 +54,12 @@ function contextHarness(label: string) {
     evaluate: async (fn: Function, argument: unknown) => {
       ++evaluations;
       try {
-        return JSON.parse(JSON.stringify(await vm.runInContext(`(${fn.toString()})`, sandbox)(argument)));
+        const serialized = JSON.stringify(await vm.runInContext(`(${fn.toString()})`, sandbox)(argument));
+        transferredBytes = Buffer.byteLength(serialized);
+        return JSON.parse(serialized);
       } catch (error) {
         const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : String(error);
-        protocolErrorBytes = Buffer.byteLength(message);
+        transferredBytes = Buffer.byteLength(message);
         throw error;
       }
     },
@@ -75,7 +78,7 @@ function contextHarness(label: string) {
     isCurrentTab: () => true, updateTitle: async () => undefined,
   };
   return { context, tab, calls: () => calls, busy: () => busy, reads: () => reads, disposed: () => disposed,
-    evaluations: () => evaluations, protocolErrorBytes: () => protocolErrorBytes, received: () => received,
+    evaluations: () => evaluations, transferredBytes: () => transferredBytes, received: () => received,
     setRead: (value: typeof read) => { read = value; },
     setTools: (value: typeof tools) => { tools = value; },
     removeTools: () => { tools = []; }, setExecute: (value: typeof execute) => { execute = value; },
@@ -165,6 +168,22 @@ describe('WebMCP backend scope and argument contracts', () => {
     h.backend.serverClosed();
   });
 
+  it('logs the metadata route apart from page-owned arguments', async () => {
+    const h = backendHarness();
+    const a = contextHarness('session A');
+    const logged: { args: Record<string, unknown>, meta?: Record<string, unknown> }[] = [];
+    const sessionLog = { logResponse: (response: Response, meta?: Record<string, unknown>) => logged.push({ args: response.toolArgs, meta }) };
+    Object.assign(a.context, { resolveSessionLog: async () => sessionLog });
+    Object.assign(h.backend, { _sessionLog: Promise.resolve(sessionLog) });
+    h.sessions.set('bs_a', a.context);
+    const [routed] = await h.backend.listTools(request('bs_a'));
+    await h.backend.callTool(routed.name, input, request('bs_a'));
+    const [unrouted] = await h.backend.listTools();
+    await h.backend.callTool(unrouted.name, input, request());
+    assert.deepEqual(logged, [{ args: input, meta: { browserSessionId: 'bs_a' } }, { args: input, meta: undefined }]);
+    h.backend.serverClosed();
+  });
+
   it('does not interpret routing-looking fields in default page arguments', async () => {
     const h = backendHarness();
     const [tool] = await h.backend.listTools();
@@ -237,7 +256,9 @@ describe('WebMCP backend scope and argument contracts', () => {
     h.defaultContext.setExecute(() => { throw new Error('€'.repeat(10_000)); });
     const result = await h.backend.callTool(tool.name, input, request());
     assert.equal(result.isError, true);
-    assert.ok(h.defaultContext.protocolErrorBytes() <= 2048);
+    // The bounded message plus its status marker and JSON string quotes.
+    assert.ok(h.defaultContext.transferredBytes() <= 2048 + 3, `transferred ${h.defaultContext.transferredBytes()} bytes`);
+    assert.match(text(result), /€/);
     h.backend.serverClosed();
   });
 
@@ -353,9 +374,10 @@ describe('WebMCP backend scope and argument contracts', () => {
   it('releases a shared-context listing when initial attachment is cancelled', async () => {
     const h = backendHarness(undefined, false);
     const started = Promise.withResolvers<void>();
+    let attachSignal: AbortSignal | undefined;
     Object.assign(h.defaultContext.context, {
       currentTab: () => undefined,
-      ensureTab: async () => { started.resolve(); return new Promise(() => {}); },
+      ensureTab: async (signal?: AbortSignal) => { attachSignal = signal; started.resolve(); return new Promise(() => {}); },
     });
     Object.assign(h.backend, { _browserContextFactory: { sharedContext: true } });
     const controller = new AbortController();
@@ -364,6 +386,8 @@ describe('WebMCP backend scope and argument contracts', () => {
     controller.abort(new Error('cancel attachment'));
     await assert.rejects(listing, /cancel attachment/);
     assert.equal(h.defaultContext.busy(), 0);
+    // The attachment that outlives the released caller must not open a page for it.
+    assert.equal(attachSignal, controller.signal);
     h.backend.serverClosed();
   });
 

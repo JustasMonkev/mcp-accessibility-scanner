@@ -33,6 +33,7 @@ import type { BrowserContextFactory } from './browserContextFactory.js';
 import type * as mcpServer from './mcp/server.js';
 import type { ServerBackend } from './mcp/server.js';
 
+/** Releases the caller on cancellation; `run` must stop its own side effects (see Context.ensureTab). */
 async function withAbort<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   signal?.throwIfAborted();
   if (!signal)
@@ -209,7 +210,7 @@ export class BrowserServerBackend implements ServerBackend {
     try {
       requestContext?.signal?.throwIfAborted();
       if (context === this._context && this._browserContextFactory.sharedContext && !context.currentTab())
-        await withAbort(() => context.ensureTab(), requestContext?.signal);
+        await withAbort(() => context.ensureTab(requestContext?.signal), requestContext?.signal);
       const dynamic = await this._currentWebMCPTools(context, requestContext?.signal);
       requestContext?.signal?.throwIfAborted();
       // One MCP connection has one currently advertised list. Observe exactly
@@ -232,7 +233,7 @@ export class BrowserServerBackend implements ServerBackend {
   /** Shares discovery, naming and static-name exclusion between listing and invocation. */
   private async _currentWebMCPTools(context: Context, signal?: AbortSignal): Promise<WebMCPToolDefinition[]> {
     const sharedDefault = this._ephemeralDefaultContext && context === this._context && this._browserContextFactory.sharedContext;
-    const tab = context.currentTab() ?? (sharedDefault ? await withAbort(() => context.ensureTab(), signal) : undefined);
+    const tab = context.currentTab() ?? (sharedDefault ? await withAbort(() => context.ensureTab(signal), signal) : undefined);
     return tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
   }
 
@@ -257,7 +258,9 @@ export class BrowserServerBackend implements ServerBackend {
       await tool.handle(params, response, requestContext?.signal);
       await response.finish();
       const sessionLog = id === undefined ? await this._ensureSessionLog() : await context.resolveSessionLog();
-      sessionLog?.logResponse(response);
+      // Routed calls share the opener's log, so the metadata handle keeps
+      // them attributable without overwriting a page-owned argument.
+      sessionLog?.logResponse(response, id === undefined ? undefined : { browserSessionId: id });
     } catch (error) {
       response.addError(`WebMCP call failed (page output is untrusted): ${String(error)}`);
     } finally {

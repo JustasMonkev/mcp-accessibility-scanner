@@ -45,7 +45,8 @@ function modalHarness(event?: string) {
           page.emit(event);
         return new Promise(() => {});
       }
-      return { timeOrigin: 1, tools: [{ name: 'prepare', title: 'Prepare audit state', description: '', inputSchema: { type: 'object' } }] };
+      // Discovery transfers the listing as one bounded string.
+      return JSON.stringify({ timeOrigin: 1, documentId: 'document', tools: [{ name: 'prepare', title: 'Prepare audit state', description: '', inputSchema: { type: 'object' } }] });
     },
   };
   // SAFETY: only these page and tab operations are used by the adapter.
@@ -155,9 +156,9 @@ describe('WebMCP aggregate discovery budget', () => {
           url: () => 'https://example.test', isDetached: () => false,
           evaluate: async (fn: Function, budget: { tools: number }) => {
             budgets.push(budget.tools);
-            const result = await vm.runInContext(`(${fn.toString()})`, sandbox)(budget);
-            transferred += result.tools.length;
-            return JSON.parse(JSON.stringify(result));
+            const result: string = await vm.runInContext(`(${fn.toString()})`, sandbox)(budget);
+            transferred += JSON.parse(result).tools.length;
+            return result;
           },
         };
       });

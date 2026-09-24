@@ -1497,6 +1497,62 @@ describe('Context', () => {
     });
   });
 
+  describe('ensureTab after its owner gives up', () => {
+    const createContext = () => new Context({
+      tools: [],
+      config: defaultConfig,
+      browserContextFactory: mockBrowserContextFactory,
+      sessionLog: undefined,
+      clientInfo: {},
+    });
+
+    it('does not open a page for a caller cancelled during attachment', async () => {
+      const attached = Promise.withResolvers<{ browserContext: any, close: () => Promise<void> }>();
+      vi.mocked(mockBrowserContextFactory.createContext).mockReturnValue(attached.promise);
+      const context = createContext();
+      const controller = new AbortController();
+      const pending = context.ensureTab(controller.signal);
+      controller.abort(new Error('listing cancelled'));
+      attached.resolve({ browserContext: mockBrowserContext, close: vi.fn().mockResolvedValue(undefined) });
+      await expect(pending).rejects.toThrow('listing cancelled');
+      expect(mockBrowserContext.newPage).not.toHaveBeenCalled();
+    });
+
+    it('does not open a page once disposal began during attachment', async () => {
+      const attached = Promise.withResolvers<{ browserContext: any, close: () => Promise<void> }>();
+      const close = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockBrowserContextFactory.createContext).mockReturnValue(attached.promise);
+      const context = createContext();
+      const pending = context.ensureTab();
+      const disposed = context.dispose();
+      attached.resolve({ browserContext: mockBrowserContext, close });
+      await expect(pending).rejects.toThrow('closed while a tab was being opened');
+      await disposed;
+      expect(mockBrowserContext.newPage).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes a page that finishes opening after disposal began, before releasing the browser', async () => {
+      const opened = Promise.withResolvers<{ close: () => Promise<void> }>();
+      const close = vi.fn().mockResolvedValue(undefined);
+      mockBrowserContext.newPage = vi.fn(() => opened.promise);
+      vi.mocked(mockBrowserContextFactory.createContext).mockResolvedValue({ browserContext: mockBrowserContext, close });
+      const context = createContext();
+      const pending = context.ensureTab();
+      await vi.waitFor(() => expect(mockBrowserContext.newPage).toHaveBeenCalled());
+      const disposed = context.dispose();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(close).not.toHaveBeenCalled();
+      const page = { close: vi.fn().mockResolvedValue(undefined) };
+      opened.resolve(page);
+      await expect(pending).rejects.toThrow('closed while a tab was being opened');
+      await disposed;
+      expect(page.close).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(page.close.mock.invocationCallOrder[0]).toBeLessThan(close.mock.invocationCallOrder[0]);
+    });
+  });
+
   describe('idle timeout', () => {
     const close = vi.fn<() => Promise<void>>();
 

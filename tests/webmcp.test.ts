@@ -31,6 +31,7 @@ function harness(initial: Record<string, unknown>[] = [], frameCount = 1) {
   let active = 0;
   let maximumActive = 0;
   let evaluationDelay = 0;
+  let transferred = 0;
   let execute: (input: unknown) => unknown = input => ({ echoed: input });
   const page = Object.assign(new EventEmitter(), { frames: () => frames, isClosed: () => false });
   const frames = Array.from({ length: frameCount }, (_, index) => {
@@ -59,8 +60,17 @@ function harness(initial: Record<string, unknown>[] = [], frameCount = 1) {
           if (evaluationDelay)
             await delay(evaluationDelay);
           const evaluate = vm.runInContext(`(${fn.toString()})`, sandbox);
-          // Playwright returns serialized data, not objects with browser-realm prototypes.
-          return JSON.parse(JSON.stringify(await evaluate(arg)));
+          let serialized: string;
+          try {
+            // Playwright returns serialized data, not objects with browser-realm prototypes.
+            serialized = JSON.stringify(await evaluate(arg));
+          } catch (error) {
+            // A thrown page error crosses the protocol too.
+            transferred = Buffer.byteLength(String(error instanceof Error ? error.message : error));
+            throw error;
+          }
+          transferred = Buffer.byteLength(serialized);
+          return JSON.parse(serialized);
         } finally {
           --active;
         }
@@ -75,7 +85,7 @@ function harness(initial: Record<string, unknown>[] = [], frameCount = 1) {
     setRegistrations: (value: Record<string, unknown>[]) => { registrations = value; },
     setExecute: (value: (input: unknown) => unknown) => { execute = value; },
     setEvaluationDelay: (value: number) => { evaluationDelay = value; },
-    calls: () => calls, received: () => received, maximumActive: () => maximumActive,
+    calls: () => calls, received: () => received, maximumActive: () => maximumActive, transferred: () => transferred,
   };
 }
 
@@ -89,6 +99,10 @@ function response() {
 
 function registration(name = 'echo', description = name) {
   return { name, description, inputSchema: { type: 'object', properties: { value: { type: 'string' } } } };
+}
+
+function baseNames(tools: WebMCPToolDefinition[]) {
+  return tools.map(tool => tool.schema.name.replace(/_[a-f0-9]{20}$/, '')).sort();
 }
 
 async function until(check: () => boolean) {
@@ -279,6 +293,83 @@ describe('WebMCP discovery and identity', () => {
     assert.deepEqual(tools.map(tool => tool.schema.name.replace(/_[a-f0-9]{20}$/, '')).sort(), ['webmcp_namedPattern', 'webmcp_valid']);
   });
 
+  it('omits nested malformed schemas without consuming the tool budget', async () => {
+    const nested = (child: Record<string, unknown>) => ({ type: 'object', properties: { child } });
+    const invalid = [
+      nested({ type: 'object', required: 'x' }),
+      nested({ type: 'object', properties: [] }),
+      nested({ type: 7 }),
+      nested({ allOf: { type: 'string' } }),
+      nested({ type: 'array', items: [5] }),
+      nested({ $ref: '#/missing' }),
+      nested({ $ref: 'https://example.test/schema.json' }),
+      { type: 'object', additionalProperties: { type: 'object', dependentRequired: { a: 'b' } } },
+    ];
+    const h = harness([
+      ...Array.from({ length: 128 }, (_, index) => ({ ...registration(`invalid${index}`), inputSchema: invalid[index % invalid.length] })),
+      registration('valid'),
+    ]);
+    assert.deepEqual(baseNames(await listWebMCPTools(h.tab)), ['webmcp_valid']);
+  });
+
+  it('advertises only schemas that the call-time validator compiles', async () => {
+    const h = harness([
+      { ...registration('minLength'), inputSchema: { type: 'object', properties: { value: { type: 'string', minLength: 'x' } } } },
+      { ...registration('enum'), inputSchema: { type: 'object', properties: { value: { enum: 'x' } } } },
+      { ...registration('dialect'), inputSchema: { $schema: 'https://example.test/dialect', type: 'object' } },
+      { ...registration('nested'), inputSchema: { type: 'object', properties: { child: { type: 'object', properties: { value: { type: 'number' } }, required: ['value'] } } } },
+    ]);
+    const tools = await listWebMCPTools(h.tab);
+    assert.deepEqual(baseNames(tools), ['webmcp_nested']);
+    const r = response();
+    await tools[0].handle({ child: {} }, r.value);
+    assert.equal(h.calls(), 0);
+    assert.match(r.errors.join(''), /Invalid WebMCP arguments/);
+  });
+
+  it('checks regular expressions only where the schema defines subschemas', async () => {
+    const pattern = { type: 'string', pattern: '(a+)+$' };
+    const h = harness([
+      { ...registration('defaultData'), inputSchema: { type: 'object', properties: { options: { type: 'object', default: { pattern: 'literal' } } } } },
+      { ...registration('annotationData'), inputSchema: { type: 'object', examples: [{ pattern: 'x', patternProperties: {} }], properties: { value: { const: { pattern: 'y' } } } } },
+      { ...registration('localRef'), inputSchema: { type: 'object', $defs: { 'a/b': { type: 'string' } }, properties: { value: { $ref: '#/$defs/a~1b' } } } },
+      { ...registration('items'), inputSchema: { type: 'object', properties: { list: { type: 'array', items: pattern } } } },
+      { ...registration('propertyNames'), inputSchema: { type: 'object', propertyNames: pattern } },
+      { ...registration('conditional'), inputSchema: { type: 'object', if: { type: 'object' }, then: { properties: { value: pattern } } } },
+      { ...registration('dependentSchemas'), inputSchema: { type: 'object', dependentSchemas: { value: { properties: { other: pattern } } } } },
+      { ...registration('escapedRef'), inputSchema: { type: 'object', $defs: { 'a/b': pattern }, properties: { value: { $ref: '#/$defs/a~1b' } } } },
+      { ...registration('nestedId'), inputSchema: { type: 'object', properties: { value: { $id: 'https://example.test/value', type: 'string' } } } },
+    ]);
+    assert.deepEqual(baseNames(await listWebMCPTools(h.tab)), ['webmcp_annotationData', 'webmcp_defaultData', 'webmcp_localRef']);
+  });
+
+  it('repeats schema and size checks outside the page when page globals are replaced', async () => {
+    const h = harness([
+      { ...registration('hiddenPattern'), inputSchema: { type: 'object', properties: { value: { type: 'string', pattern: '(a+)+$' } } } },
+      // Fewer UTF-16 code units than the limit, but more UTF-8 bytes.
+      { ...registration('multibyte'), inputSchema: { type: 'object', description: '€'.repeat(6000) } },
+      registration('valid'),
+    ]);
+    vm.runInContext('Object.values = () => []; TextEncoder = class { encode() { return { length: 0 }; } };', h.frames[0].sandbox);
+    assert.deepEqual(baseNames(await listWebMCPTools(h.tab)), ['webmcp_valid']);
+    vm.runInContext(`JSON.stringify = () => ${JSON.stringify(JSON.stringify({ timeOrigin: 1, documentId: 'forged', tools: [
+      { name: 'forged', title: 'forged', description: '', inputSchema: { type: 'object', properties: { value: { type: 'string', pattern: '(a+)+$' } } } },
+    ] }))};`, h.frames[0].sandbox);
+    assert.deepEqual(await listWebMCPTools(h.tab), []);
+    vm.runInContext('JSON.stringify = () => "x".repeat(20000000);', h.frames[0].sandbox);
+    assert.deepEqual(await listWebMCPTools(h.tab), []);
+    assert.ok(h.transferred() < 16, `transferred ${h.transferred()} bytes`);
+  });
+
+  it('keeps discovery failures inside the page', async () => {
+    const h = harness();
+    h.frames[0].sandbox.document.modelContext.getTools = async () => {
+      throw new Error('x'.repeat(1_000_000));
+    };
+    assert.deepEqual(await listWebMCPTools(h.tab), []);
+    assert.ok(h.transferred() < 16, `transferred ${h.transferred()} bytes`);
+  });
+
   it('truncates data URLs in descriptions and invocation results', async () => {
     const h = harness([registration()]);
     const raw = `data:text/html;base64,${'A'.repeat(30000)}`;
@@ -395,6 +486,34 @@ describe('WebMCP execution boundaries', () => {
     await tool.handle({}, output.value);
     assert.match(output.errors.join(''), /result exceeds/);
     assert.ok(output.errors.join('').length < 3000);
+  });
+
+  it('bounds page errors and results by UTF-8 size with checks the page cannot replace', async () => {
+    const h = harness([registration()]);
+    const [tool] = await listWebMCPTools(h.tab);
+    vm.runInContext('TextEncoder = class { encode() { return { length: 0 }; } };', h.frames[0].sandbox);
+    h.setExecute(() => { throw new Error('€'.repeat(100_000)); });
+    const failed = response();
+    await tool.handle({}, failed.value);
+    assert.ok(h.transferred() <= 2048 + 8, `transferred ${h.transferred()} bytes`);
+    assert.match(failed.errors.join(''), /€/);
+    h.setExecute(() => {
+      // Replaced after the descriptor check, while the page action runs.
+      vm.runInContext('String.prototype.slice = function () { return this + this; };', h.frames[0].sandbox);
+      throw new Error('x'.repeat(100_000));
+    });
+    const tampered = response();
+    await tool.handle({}, tampered.value);
+    assert.ok(h.transferred() < 1024, `transferred ${h.transferred()} bytes`);
+    assert.match(tampered.errors.join(''), /could not be read/);
+    const fresh = harness([registration()]);
+    const [freshTool] = await listWebMCPTools(fresh.tab);
+    // Fewer UTF-16 code units than the limit, but more UTF-8 bytes.
+    fresh.setExecute(() => '€'.repeat(100_000));
+    const large = response();
+    await freshTool.handle({}, large.value);
+    assert.match(large.errors.join(''), /result exceeds/);
+    assert.ok(fresh.transferred() < 1024, `transferred ${fresh.transferred()} bytes`);
   });
 
   it('does not pretend a modal-blocked invocation succeeded', async () => {

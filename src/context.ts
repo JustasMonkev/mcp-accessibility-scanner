@@ -237,6 +237,10 @@ export class Context {
   // missing or partial (the stateless HTTP path disposes the backend's
   // default context the moment the response closes).
   private _pendingDownloads = new Set<Promise<unknown>>();
+  // Pages ensureTab() has requested but not yet adopted. Closing waits for
+  // them, so a page requested just before the close began is closed while
+  // the browser is still connected instead of outliving the Context.
+  private _openingPages = new Set<Promise<unknown>>();
   private _downloadErrors: string[] = [];
   private _omittedDownloadErrors = 0;
   private _abortController = new AbortController();
@@ -324,10 +328,34 @@ export class Context {
     return tab;
   }
 
-  async ensureTab(): Promise<Tab> {
-    const { browserContext } = await this._ensureBrowserContext();
-    if (!this._currentTab)
-      await browserContext.newPage();
+  /**
+   * Attaching can outlast both a cancelled caller and this Context (a
+   * stateless response disposes it as soon as the cancelled request is
+   * answered). The attachment itself follows this Context's own abort
+   * signal, which dispose() fires, and closing releases whatever it attached;
+   * the page opened afterwards is what `signal` and the close check guard, as
+   * a shared browser would otherwise keep it with no owner.
+   */
+  async ensureTab(signal?: AbortSignal): Promise<Tab> {
+    const attaching = this._ensureBrowserContext();
+    const { browserContext } = await attaching;
+    if (!this._currentTab) {
+      signal?.throwIfAborted();
+      if (this._browserContextPromise !== attaching)
+        throw new Error('The browser context closed while a tab was being opened.');
+      const opening = browserContext.newPage().then(async page => {
+        if (this._browserContextPromise === attaching)
+          return;
+        await page.close().catch(logUnhandledError);
+        throw new Error('The browser context closed while a tab was being opened.');
+      });
+      this._openingPages.add(opening);
+      try {
+        await opening;
+      } finally {
+        this._openingPages.delete(opening);
+      }
+    }
     return this._currentTab!;
   }
 
@@ -676,6 +704,7 @@ export class Context {
       if (this._recording)
         await this.stopRecording().catch(logUnhandledError);
       await Promise.all(this._recordingStops);
+      await Promise.allSettled(this._openingPages);
       this._detachFromBrowserContext();
       // close() is the factory's only cleanup hook — for storage-state
       // sessions it also removes the disposable profile — and this close
