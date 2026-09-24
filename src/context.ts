@@ -504,7 +504,9 @@ export class Context {
   trackPendingDownload(promise: Promise<unknown>, filename?: string): void {
     const settled = promise.catch(error => {
       if (this._downloadErrors.length < 20) {
-        const message = truncateDataUrls(`Failed to save download${filename ? ` "${filename}"` : ''}: ${error instanceof Error ? error.message : String(error)}`);
+        const label = filename ? ` "${filename}"` : '';
+        const cause = error instanceof Error ? error.message : String(error);
+        const message = truncateDataUrls(`Failed to save download${label}: ${cause}`);
         const bounded = truncateToUtf8Bytes(message, 2000);
         this._downloadErrors.push(bounded === message ? message : `${bounded}… [truncated]`);
       } else {
