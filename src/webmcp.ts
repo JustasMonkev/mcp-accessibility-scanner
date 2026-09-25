@@ -34,6 +34,9 @@ const scopeIds = new WeakMap<object, string>();
 const frameIds = new WeakMap<playwright.Frame, string>();
 const observedPages = new WeakSet<playwright.Page>();
 const documentKey = `__webmcp_${randomUUID()}`;
+// Document markers are minted with randomUUID(). The value comes back from
+// the page, which can forge it, and is copied into every tool's invocation key.
+const documentIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const pendingDiscovery = new WeakMap<playwright.Frame, { promise: Promise<string>, expired: boolean }>();
 const pendingInvocations = new Map<string, Promise<string>>();
 // Keyed by schema JSON, least recently used first.
@@ -309,7 +312,8 @@ function parseListing(raw: unknown, maxTools: number): FrameListing | undefined 
     return undefined;
   }
   const listing = value as Partial<FrameListing> | null;
-  if (!listing || typeof listing.timeOrigin !== 'number' || typeof listing.documentId !== 'string' || !listing.documentId || !Array.isArray(listing.tools))
+  if (!listing || typeof listing.timeOrigin !== 'number' || typeof listing.documentId !== 'string'
+      || !documentIdPattern.test(listing.documentId) || !Array.isArray(listing.tools))
     return undefined;
   const entries = listing.tools as Partial<CollectedTool>[];
   const counts = new Map<unknown, number>();
@@ -473,7 +477,9 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
     } catch {
       // Chromium may return plain text instead of JSON.
     }
-    const text = `${preamble}\n${json}`;
+    // Like every other browser-derived text, a result keeps data URLs short
+    // for the client's context and the --save-session log.
+    const text = `${preamble}\n${truncateDataUrls(json)}`;
     if (isError)
       response.addError(text);
     else

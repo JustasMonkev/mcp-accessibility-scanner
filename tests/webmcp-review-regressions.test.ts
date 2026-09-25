@@ -46,7 +46,7 @@ function modalHarness(event?: string) {
         return new Promise(() => {});
       }
       // Discovery transfers the listing as one bounded string.
-      return JSON.stringify({ timeOrigin: 1, documentId: 'document', tools: [{ name: 'prepare', title: 'Prepare audit state', description: '', inputSchema: { type: 'object' } }] });
+      return JSON.stringify({ timeOrigin: 1, documentId: '00000000-0000-4000-8000-000000000000', tools: [{ name: 'prepare', title: 'Prepare audit state', description: '', inputSchema: { type: 'object' } }] });
     },
   };
   // SAFETY: only these page and tab operations are used by the adapter.

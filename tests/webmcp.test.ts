@@ -361,6 +361,12 @@ describe('WebMCP discovery and identity', () => {
     assert.ok(h.transferred() < 16, `transferred ${h.transferred()} bytes`);
   });
 
+  it('rejects a forged document marker before copying it into per-tool keys', async () => {
+    const h = harness([registration('first'), registration('second')]);
+    vm.runInContext('Object.getOwnPropertyDescriptor = () => ({ value: "x".repeat(1000000) });', h.frames[0].sandbox);
+    assert.deepEqual(await listWebMCPTools(h.tab), []);
+  });
+
   it('keeps discovery failures inside the page', async () => {
     const h = harness();
     h.frames[0].sandbox.document.modelContext.getTools = async () => {
@@ -379,6 +385,16 @@ describe('WebMCP discovery and identity', () => {
     const r = response();
     await tool.handle({}, r.value);
     assert.ok(!r.results.join('').includes('A'.repeat(100)));
+    // The page action's own result, successful or structured as an error.
+    const image = `data:image/png;base64,${'B'.repeat(30000)}`;
+    for (const result of [{ image }, { isError: true, image }]) {
+      h.setExecute(() => result);
+      const page = response();
+      await tool.handle({}, page.value);
+      const text = [...page.results, ...page.errors].join('');
+      assert.match(text, /data:image\/png/);
+      assert.ok(!text.includes('B'.repeat(100)));
+    }
   });
 });
 
