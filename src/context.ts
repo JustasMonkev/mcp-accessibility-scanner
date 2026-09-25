@@ -241,6 +241,8 @@ export class Context {
   // them briefly, so a page requested just before the close began is closed
   // while the browser is still connected instead of outliving the Context.
   private _openingPages = new Set<Promise<unknown>>();
+  // The page request that ensureTab() callers share, with their signals.
+  private _openingTab: { attaching: Promise<unknown>, request: Promise<void>, waiting: (AbortSignal | undefined)[] } | undefined;
   private _downloadErrors: string[] = [];
   private _omittedDownloadErrors = 0;
   private _abortController = new AbortController();
@@ -334,7 +336,9 @@ export class Context {
    * answered). The attachment itself follows this Context's own abort
    * signal, which dispose() fires, and closing releases whatever it attached;
    * the page opened afterwards is what `signal` and the close check guard, as
-   * a shared browser would otherwise keep it with no owner.
+   * a shared browser would otherwise keep it with no owner. Callers arriving
+   * while that page is pending share it, and it is closed on arrival only
+   * when every one of them has been cancelled.
    */
   async ensureTab(signal?: AbortSignal): Promise<Tab> {
     const attaching = this._ensureBrowserContext();
@@ -343,17 +347,33 @@ export class Context {
       signal?.throwIfAborted();
       if (this._browserContextPromise !== attaching)
         throw new Error('The browser context closed while a tab was being opened.');
-      const opening = browserContext.newPage().then(async page => {
-        if (this._browserContextPromise === attaching)
-          return;
-        await page.close().catch(logUnhandledError);
-        throw new Error('The browser context closed while a tab was being opened.');
-      });
-      this._openingPages.add(opening);
+      let opening = this._openingTab;
+      if (opening?.attaching !== attaching) {
+        const waiting: (AbortSignal | undefined)[] = [];
+        const request = browserContext.newPage().then(async page => {
+          // Once settled, a later caller starts its own request.
+          if (this._openingTab?.waiting === waiting)
+            this._openingTab = undefined;
+          if (this._browserContextPromise === attaching && waiting.some(waiter => !waiter?.aborted))
+            return;
+          await page.close().catch(logUnhandledError);
+          if (this._browserContextPromise !== attaching)
+            throw new Error('The browser context closed while a tab was being opened.');
+          throw new Error('The tab request was cancelled.');
+        });
+        opening = this._openingTab = { attaching, request, waiting };
+        this._openingPages.add(request);
+      }
+      opening.waiting.push(signal);
       try {
-        await opening;
+        await opening.request;
+      } catch (error) {
+        signal?.throwIfAborted();
+        throw error;
       } finally {
-        this._openingPages.delete(opening);
+        this._openingPages.delete(opening.request);
+        if (this._openingTab === opening)
+          this._openingTab = undefined;
       }
     }
     return this._currentTab!;

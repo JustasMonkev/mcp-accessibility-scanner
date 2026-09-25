@@ -1552,6 +1552,43 @@ describe('Context', () => {
       expect(page.close.mock.invocationCallOrder[0]).toBeLessThan(close.mock.invocationCallOrder[0]);
     });
 
+    it('shares one page request and closes it when every waiting caller was cancelled', async () => {
+      const opened = Promise.withResolvers<{ close: () => Promise<void> }>();
+      mockBrowserContext.newPage = vi.fn(() => opened.promise);
+      vi.mocked(mockBrowserContextFactory.createContext).mockResolvedValue({ browserContext: mockBrowserContext, close: vi.fn().mockResolvedValue(undefined) });
+      const context = createContext();
+      const first = new AbortController();
+      const second = new AbortController();
+      const settled = Promise.allSettled([context.ensureTab(first.signal), context.ensureTab(second.signal)]);
+      await vi.waitFor(() => expect(mockBrowserContext.newPage).toHaveBeenCalled());
+      first.abort(new Error('first cancelled'));
+      second.abort(new Error('second cancelled'));
+      const page = { close: vi.fn().mockResolvedValue(undefined) };
+      opened.resolve(page);
+      const [a, b] = await settled;
+      expect(a.status === 'rejected' && a.reason.message).toBe('first cancelled');
+      expect(b.status === 'rejected' && b.reason.message).toBe('second cancelled');
+      expect(mockBrowserContext.newPage).toHaveBeenCalledTimes(1);
+      expect(page.close).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a shared page for a caller that is still waiting', async () => {
+      const opened = Promise.withResolvers<{ close: () => Promise<void> }>();
+      mockBrowserContext.newPage = vi.fn(() => opened.promise);
+      vi.mocked(mockBrowserContextFactory.createContext).mockResolvedValue({ browserContext: mockBrowserContext, close: vi.fn().mockResolvedValue(undefined) });
+      const context = createContext();
+      const cancelled = new AbortController();
+      const pending = Promise.allSettled([context.ensureTab(cancelled.signal), context.ensureTab()]);
+      await vi.waitFor(() => expect(mockBrowserContext.newPage).toHaveBeenCalled());
+      cancelled.abort(new Error('cancelled'));
+      const page = { close: vi.fn().mockResolvedValue(undefined) };
+      opened.resolve(page);
+      const [, waiting] = await pending;
+      expect(waiting.status).toBe('fulfilled');
+      expect(mockBrowserContext.newPage).toHaveBeenCalledTimes(1);
+      expect(page.close).not.toHaveBeenCalled();
+    });
+
     it('does not let a page request the browser never answers hold the close', async () => {
       vi.useFakeTimers();
       try {

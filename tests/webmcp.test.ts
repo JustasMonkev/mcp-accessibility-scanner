@@ -374,6 +374,29 @@ describe('WebMCP discovery and identity', () => {
     assert.equal(h.calls(), 1);
   });
 
+  it('omits registrations whose root schema declares another type and fills in an absent one', async () => {
+    const untypedSchema = { properties: { value: { type: 'number' } }, required: ['value'] };
+    const h = harness([
+      { ...registration('stringRoot'), inputSchema: { type: 'string' } },
+      { ...registration('arrayRoot'), inputSchema: [] },
+      { ...registration('numberRoot'), inputSchema: 5 },
+      { ...registration('stringifiedRoot'), inputSchema: JSON.stringify({ type: 'array' }) },
+      { name: 'absent', description: 'absent' },
+      { ...registration('untyped'), inputSchema: untypedSchema },
+    ]);
+    const tools = await listWebMCPTools(h.tab);
+    assert.deepEqual(baseNames(tools), ['webmcp_absent', 'webmcp_untyped']);
+    const untyped = tools.find(tool => tool.schema.name.startsWith('webmcp_untyped_'))!;
+    assert.deepEqual(untyped.schema.inputSchema, { ...untypedSchema, type: 'object' });
+    const invalid = response();
+    await untyped.handle({}, invalid.value);
+    assert.match(invalid.errors.join(''), /Invalid WebMCP arguments/);
+    const valid = response();
+    await untyped.handle({ value: 1 }, valid.value);
+    assert.equal(valid.errors.length, 0);
+    assert.equal(h.calls(), 1);
+  });
+
   it('omits only the registration whose accessors throw', async () => {
     const hostile = Object.defineProperty({ description: 'hostile', inputSchema: { type: 'object' } }, 'name', { get() { throw new Error('x'.repeat(1_000_000)); } });
     const hostileWindow = Object.defineProperty({ name: 'windowed', inputSchema: { type: 'object' } }, 'window', { get() { throw new Error('window'); } });
@@ -495,6 +518,50 @@ describe('WebMCP execution boundaries', () => {
     const retried = response();
     await relisted.handle({}, retried.value);
     assert.equal(retried.errors.length, 0);
+    assert.equal(h.calls(), 2);
+  });
+
+  it('blocks a still-running invocation for every client scope listing the document', async () => {
+    const h = harness([registration()]);
+    const first = Promise.withResolvers<unknown>();
+    h.setExecute(() => first.promise);
+    const [tool] = await listWebMCPTools(h.tab, {});
+    const timedOut = response();
+    await tool.handle({}, timedOut.value);
+    assert.match(timedOut.errors.join(''), /timed out/);
+    const [other] = await listWebMCPTools(h.tab, {});
+    assert.notEqual(other.schema.name, tool.schema.name);
+    const blocked = response();
+    await other.handle({}, blocked.value);
+    assert.match(blocked.errors.join(''), /previous invocation.*still running/);
+    assert.equal(h.calls(), 1);
+    first.resolve({ done: true });
+  });
+
+  it('interrupts argument validation that a page schema makes slow', async () => {
+    let nested: unknown[] = [];
+    for (let depth = 0; depth < 26; depth++)
+      nested = [nested];
+    const h = harness([
+      // Pairwise comparison of object items.
+      { ...registration('unique'), inputSchema: { type: 'object', properties: { value: { type: 'array', uniqueItems: true } } } },
+      // Two branches per level of argument nesting.
+      { ...registration('recursive'), inputSchema: { type: 'object', properties: { value: { $ref: '#/$defs/n' } },
+        $defs: { n: { allOf: [{ type: 'array', items: { $ref: '#/$defs/n' } }, { type: 'array', items: { $ref: '#/$defs/n' } }] } } } },
+    ]);
+    const tools = await listWebMCPTools(h.tab);
+    assert.deepEqual(baseNames(tools), ['webmcp_recursive', 'webmcp_unique']);
+    const inputs = [{ value: nested }, { value: Array.from({ length: 20000 }, (_, x) => ({ x })) }];
+    for (const [index, tool] of tools.entries()) {
+      const started = performance.now();
+      const r = response();
+      await tool.handle(inputs[index], r.value);
+      assert.ok(performance.now() - started < 2000, `validation took ${performance.now() - started}ms`);
+      assert.match(r.errors.join(''), /validation exceeded 500 ms/);
+      const valid = response();
+      await tool.handle({ value: [] }, valid.value);
+      assert.equal(valid.errors.length, 0);
+    }
     assert.equal(h.calls(), 2);
   });
 

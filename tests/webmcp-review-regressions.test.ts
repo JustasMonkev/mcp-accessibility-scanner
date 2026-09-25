@@ -15,6 +15,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { Client } from '@modelcontextprotocol/client';
@@ -37,6 +38,8 @@ function modalHarness(event?: string) {
     setDefaultNavigationTimeout: () => {},
     setDefaultTimeout: () => {},
   });
+  // Each fixture is its own document; a shared marker would share pending calls.
+  const documentId = randomUUID();
   const frame = {
     url: () => 'https://example.test', isDetached: () => false,
     evaluate: async (_fn: unknown, argument: unknown) => {
@@ -46,7 +49,7 @@ function modalHarness(event?: string) {
         return new Promise(() => {});
       }
       // Discovery transfers the listing as one bounded string.
-      return JSON.stringify({ timeOrigin: 1, documentId: '00000000-0000-4000-8000-000000000000', tools: [{ name: 'prepare', title: 'Prepare audit state', description: '', inputSchema: { type: 'object' } }] });
+      return JSON.stringify({ timeOrigin: 1, documentId, tools: [{ name: 'prepare', title: 'Prepare audit state', description: '', inputSchema: { type: 'object' } }] });
     },
   };
   // SAFETY: only these page and tab operations are used by the adapter.
