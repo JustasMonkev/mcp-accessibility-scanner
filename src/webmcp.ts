@@ -121,7 +121,7 @@ function frameIdentity(page: playwright.Page, frame: playwright.Frame): string {
  * never mistaken for a schema. Self-contained because the page runs the same
  * source as a pre-filter; Node repeats it on the transferred JSON.
  */
-function isSupportedInputSchema(root: unknown): boolean {
+function isSupportedInputSchema(root: unknown, visit?: (schema: Record<string, unknown>) => void): boolean {
   const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
   const isStrings = (value: unknown) => Array.isArray(value) && value.every(item => typeof item === 'string');
   if (!isObject(root))
@@ -135,6 +135,7 @@ function isSupportedInputSchema(root: unknown): boolean {
     if (!isObject(schema))
       return false;
     seen.add(schema);
+    visit?.(schema);
     // Patterns would become server-side regular expressions. A nested $id
     // moves the base that the local $ref resolution below assumes.
     if (schema.pattern !== undefined || schema.patternProperties !== undefined || schema.$dynamicRef !== undefined
@@ -175,16 +176,14 @@ function isSupportedInputSchema(root: unknown): boolean {
     const ref = schema.$ref;
     if (ref === undefined)
       continue;
-    if (typeof ref !== 'string' || (ref !== '#' && !ref.startsWith('#/')))
+    // Ajv percent-decodes the whole fragment before splitting it, so `%2F`
+    // selects a nested path rather than a key containing `/`. Encoded refs
+    // are rejected instead of mirroring that decoding here.
+    if (typeof ref !== 'string' || (ref !== '#' && !ref.startsWith('#/')) || ref.includes('%'))
       return false;
     let target: unknown = root;
     for (const token of ref === '#' ? [] : ref.slice(2).split('/')) {
-      let key: string;
-      try {
-        key = decodeURIComponent(token).replace(/~1/g, '/').replace(/~0/g, '~');
-      } catch {
-        return false;
-      }
+      const key = token.replace(/~1/g, '/').replace(/~0/g, '~');
       if (!target || typeof target !== 'object' || !Object.prototype.hasOwnProperty.call(target, key))
         return false;
       target = (target as Record<string, unknown>)[key];
@@ -209,8 +208,16 @@ function compiledSchema(schema: Tool['inputSchema'], key = JSON.stringify(schema
   }
   let compiled: StandardSchemaWithJSON<Record<string, unknown>, Record<string, unknown>> | undefined;
   try {
+    // ajv-formats checks formats such as `url` and `email` with regular
+    // expressions that backtrack on crafted arguments, synchronously and
+    // before any timeout applies. Formats stay advertised, and the page,
+    // which owns its input, remains responsible for enforcing them.
+    const validated = JSON.parse(key) as Record<string, unknown>;
+    isSupportedInputSchema(validated, node => {
+      delete node.format;
+    });
     // SAFETY: the SDK's Tool schema is the same JSON Schema contract with a looser serialized-value type.
-    compiled = fromJsonSchema<Record<string, unknown>>(schema as JsonSchemaType, new AjvJsonSchemaValidator());
+    compiled = fromJsonSchema<Record<string, unknown>>(validated as JsonSchemaType, new AjvJsonSchemaValidator());
   } catch {
     compiled = undefined;
   }
@@ -252,19 +259,26 @@ async function collectInPage(budget: DiscoveryBudget, isSupportedInputSchema: (s
     const registered = await modelContext.getTools();
     if (!Array.isArray(registered))
       return '';
+    // Registrations can carry accessors; one that throws omits only itself.
+    const candidates: { tool: PageTool, name: string }[] = [];
     const counts = new Map<string, number>();
-    for (const tool of registered) {
-      if (!tool || typeof tool.name !== 'string' || !tool.name || tool.name.length > 256
-          || ('window' in tool && tool.window !== window))
-        continue;
-      counts.set(tool.name, (counts.get(tool.name) ?? 0) + 1);
-    }
-    for (const tool of registered) {
-      if (!tool || typeof tool.name !== 'string' || counts.get(tool.name) !== 1
-          || ('window' in tool && tool.window !== window))
-        continue;
-      let schema: unknown = tool.inputSchema;
+    for (let index = 0; index < registered.length; index++) {
       try {
+        const tool = registered[index];
+        const name = tool?.name;
+        if (!tool || typeof name !== 'string' || !name || name.length > 256 || ('window' in tool && tool.window !== window))
+          continue;
+        candidates.push({ tool, name });
+        counts.set(name, (counts.get(name) ?? 0) + 1);
+      } catch {
+        continue;
+      }
+    }
+    for (const { tool, name } of candidates) {
+      if (counts.get(name) !== 1)
+        continue;
+      try {
+        let schema: unknown = tool.inputSchema;
         if (typeof schema === 'string') {
           if (schema.length > budget.schemaBytes)
             continue;
@@ -279,8 +293,8 @@ async function collectInPage(budget: DiscoveryBudget, isSupportedInputSchema: (s
         if (!isSupportedInputSchema(parsed))
           continue;
         result.tools.push({
-          name: tool.name,
-          title: typeof tool.title === 'string' ? tool.title.slice(0, 256) : tool.name,
+          name,
+          title: typeof tool.title === 'string' ? tool.title.slice(0, 256) : name,
           description: typeof tool.description === 'string' ? tool.description.slice(0, budget.description) : '',
           // SAFETY: JSON round-tripping removes browser object identity and the root type was checked above.
           inputSchema: parsed as Tool['inputSchema'],
@@ -386,7 +400,13 @@ async function callInPage(params: { name: string, inputJson: string, timeOrigin:
     if (!modelContext?.getTools)
       return 'EWebMCP is not available on this page.';
     const tools = await modelContext.getTools();
-    const matches = Array.isArray(tools) ? tools.filter(candidate => candidate?.name === params.name && (!('window' in candidate) || candidate.window === window)) : [];
+    const matches = Array.isArray(tools) ? tools.filter(candidate => {
+      try {
+        return candidate?.name === params.name && (!('window' in candidate) || candidate.window === window);
+      } catch {
+        return false;
+      }
+    }) : [];
     if (matches.length !== 1)
       return 'EThe WebMCP registration is no longer available or is ambiguous. List tools again.';
     const tool = matches[0];

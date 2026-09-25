@@ -343,6 +343,50 @@ describe('WebMCP discovery and identity', () => {
     assert.deepEqual(baseNames(await listWebMCPTools(h.tab)), ['webmcp_annotationData', 'webmcp_defaultData', 'webmcp_localRef']);
   });
 
+  it('resolves schema pointers the way the call-time validator does', async () => {
+    const pattern = { type: 'string', pattern: '(a+)+$' };
+    const h = harness([
+      // Ajv decodes %2F before splitting the pointer, reaching $defs.a.b instead of $defs['a%2Fb'].
+      { ...registration('encodedRef'), inputSchema: { type: 'object', $defs: { 'a%2Fb': { type: 'string' }, 'a': { b: pattern } }, properties: { value: { $ref: '#/$defs/a%2Fb' } } } },
+      { ...registration('encodedKey'), inputSchema: { type: 'object', $defs: { 'a%2Fb': { type: 'string' } }, properties: { value: { $ref: '#/$defs/a%252Fb' } } } },
+      registration('valid'),
+    ]);
+    assert.deepEqual(baseNames(await listWebMCPTools(h.tab)), ['webmcp_valid']);
+  });
+
+  it('advertises formats without evaluating them outside the page', async () => {
+    const schema = { type: 'object', properties: { value: { type: 'string', format: 'url' }, format: { type: 'string', enum: ['a'] } }, required: ['format'] };
+    const h = harness([{ ...registration('link'), inputSchema: schema }]);
+    const [tool] = await listWebMCPTools(h.tab);
+    assert.deepEqual(tool.schema.inputSchema, schema);
+    // Backtracks for seconds in ajv-formats' url expression, within the argument size limit.
+    const input = { value: `http://${'a:'.repeat(40000)}@!`, format: 'a' };
+    const started = performance.now();
+    const r = response();
+    await tool.handle(input, r.value);
+    assert.ok(performance.now() - started < 500, `validation took ${performance.now() - started}ms`);
+    assert.equal(r.errors.length, 0);
+    assert.deepEqual(h.received(), input);
+    // Only the format keyword is dropped: a property named `format` is still validated.
+    const invalid = response();
+    await tool.handle({ format: 'b' }, invalid.value);
+    assert.match(invalid.errors.join(''), /Invalid WebMCP arguments/);
+    assert.equal(h.calls(), 1);
+  });
+
+  it('omits only the registration whose accessors throw', async () => {
+    const hostile = Object.defineProperty({ description: 'hostile', inputSchema: { type: 'object' } }, 'name', { get() { throw new Error('x'.repeat(1_000_000)); } });
+    const hostileWindow = Object.defineProperty({ name: 'windowed', inputSchema: { type: 'object' } }, 'window', { get() { throw new Error('window'); } });
+    const h = harness([hostile, hostileWindow, registration('valid')]);
+    const [tool, ...rest] = await listWebMCPTools(h.tab);
+    assert.equal(rest.length, 0);
+    assert.deepEqual(baseNames([tool]), ['webmcp_valid']);
+    const r = response();
+    await tool.handle({ value: 'ok' }, r.value);
+    assert.equal(r.errors.length, 0);
+    assert.equal(h.calls(), 1);
+  });
+
   it('repeats schema and size checks outside the page when page globals are replaced', async () => {
     const h = harness([
       { ...registration('hiddenPattern'), inputSchema: { type: 'object', properties: { value: { type: 'string', pattern: '(a+)+$' } } } },

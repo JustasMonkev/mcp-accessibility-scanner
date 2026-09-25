@@ -238,8 +238,8 @@ export class Context {
   // default context the moment the response closes).
   private _pendingDownloads = new Set<Promise<unknown>>();
   // Pages ensureTab() has requested but not yet adopted. Closing waits for
-  // them, so a page requested just before the close began is closed while
-  // the browser is still connected instead of outliving the Context.
+  // them briefly, so a page requested just before the close began is closed
+  // while the browser is still connected instead of outliving the Context.
   private _openingPages = new Set<Promise<unknown>>();
   private _downloadErrors: string[] = [];
   private _omittedDownloadErrors = 0;
@@ -565,6 +565,29 @@ export class Context {
   }
 
   /**
+   * Gives a page request already in flight the chance to land while the
+   * browser is still connected, so ensureTab() can close it. Bounded: a
+   * newPage() the browser never answers must not hold the close, because
+   * closing the connection is what ends it.
+   */
+  private async _waitForOpeningPages(timeoutMs = 5_000): Promise<void> {
+    if (!this._openingPages.size)
+      return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled([...this._openingPages]),
+        new Promise<void>(resolve => {
+          timer = setTimeout(resolve, timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * Waits for in-flight download saves, bounded at 30s: the same order as the
    * default navigation timeout, so a download that network conditions allow
    * to finish gets to — while disposal (a stateless HTTP response closing,
@@ -704,7 +727,7 @@ export class Context {
       if (this._recording)
         await this.stopRecording().catch(logUnhandledError);
       await Promise.all(this._recordingStops);
-      await Promise.allSettled(this._openingPages);
+      await this._waitForOpeningPages();
       this._detachFromBrowserContext();
       // close() is the factory's only cleanup hook — for storage-state
       // sessions it also removes the disposable profile — and this close

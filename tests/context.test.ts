@@ -1551,6 +1551,30 @@ describe('Context', () => {
       expect(close).toHaveBeenCalledTimes(1);
       expect(page.close.mock.invocationCallOrder[0]).toBeLessThan(close.mock.invocationCallOrder[0]);
     });
+
+    it('does not let a page request the browser never answers hold the close', async () => {
+      vi.useFakeTimers();
+      try {
+        const opened = Promise.withResolvers<{ close: () => Promise<void> }>();
+        // Closing the connection is what fails an unanswered newPage().
+        const close = vi.fn(async () => opened.reject(new Error('Target closed')));
+        mockBrowserContext.newPage = vi.fn(() => opened.promise);
+        vi.mocked(mockBrowserContextFactory.createContext).mockResolvedValue({ browserContext: mockBrowserContext, close });
+        const context = createContext();
+        const pending = expect(context.ensureTab()).rejects.toThrow('Target closed');
+        await vi.advanceTimersByTimeAsync(0);
+        expect(mockBrowserContext.newPage).toHaveBeenCalled();
+        const disposed = context.dispose();
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(close).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(close).toHaveBeenCalledTimes(1);
+        await disposed;
+        await pending;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('idle timeout', () => {
