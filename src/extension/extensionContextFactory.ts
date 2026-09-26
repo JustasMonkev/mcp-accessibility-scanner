@@ -25,8 +25,11 @@ const debugLogger = debug('pw:mcp:relay');
 
 export class ExtensionContextFactory implements BrowserContextFactory {
   readonly sharedContext = true;
-  // Attaching waits until the user connects the extension.
-  readonly attachNeedsUser = true;
+  // Without a token, attaching waits until the user approves the connection;
+  // with one, the extension connects on its own within a bounded time.
+  get attachNeedsUser(): boolean {
+    return !process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
+  }
   // The relay attaches to the browser the user is already running and hands back
   // its existing context, so contextOptions — storage state included — never apply.
   readonly appliesStorageState = false;

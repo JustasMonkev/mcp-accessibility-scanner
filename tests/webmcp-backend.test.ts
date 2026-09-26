@@ -402,6 +402,29 @@ describe('WebMCP backend scope and argument contracts', () => {
     }
   });
 
+  it('attaches the extension for a listing when a token makes approval unnecessary', async () => {
+    const { ExtensionContextFactory } = await import('../src/extension/extensionContextFactory.js');
+    const factory = new ExtensionContextFactory('chrome', undefined, undefined, undefined);
+    vi.stubEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', '');
+    try {
+      assert.equal(factory.attachNeedsUser, true);
+      vi.stubEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', 'token');
+      assert.equal(factory.attachNeedsUser, false);
+      const h = backendHarness(undefined, true);
+      let attached = false;
+      Object.assign(h.defaultContext.context, {
+        currentTab: () => attached ? h.defaultContext.tab : undefined,
+        ensureTab: async () => { attached = true; return h.defaultContext.tab; },
+      });
+      Object.assign(h.backend, { _browserContextFactory: factory });
+      const [tool] = await h.backend.listTools(request());
+      assert.match(tool.name, /^webmcp_/);
+      h.backend.serverClosed();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('releases a shared-context listing when initial attachment is cancelled', async () => {
     const h = backendHarness(undefined, false);
     const started = Promise.withResolvers<void>();

@@ -184,8 +184,9 @@ export interface BrowserContextFactory {
   /** Attaches to one shared browser context across stateless requests. */
   readonly sharedContext?: boolean;
   /**
-   * Set when attaching waits for the user (the extension must be connected),
-   * so a tools/list, which clients send unprompted at startup, never attaches.
+   * Set when attaching waits for the user (the extension connection must be
+   * approved), so a tools/list, which clients send unprompted at startup,
+   * never attaches.
    */
   readonly attachNeedsUser?: boolean;
   /**

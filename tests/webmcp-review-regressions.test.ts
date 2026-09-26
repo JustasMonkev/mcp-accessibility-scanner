@@ -166,7 +166,7 @@ describe('WebMCP aggregate discovery budget', () => {
         };
       });
       // SAFETY: exercises the production in-page collector and concurrency path with serializing frame fixtures.
-      const tab = { page, context: {}, modalStates: () => [] } as unknown as Tab;
+      const tab = { page, context: {}, modalStates: () => [], isCurrentTab: () => true } as unknown as Tab;
       const tools = await listWebMCPTools(tab);
       assert.equal(transferred, 128);
       assert.equal(tools.length, 128);

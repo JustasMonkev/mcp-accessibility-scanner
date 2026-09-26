@@ -616,7 +616,9 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
         throw error;
       }
       const listing = await parseListing(raw, budget.tools, deadline, signal);
-      if (!listing || frameIds.get(frame) !== identity || frame.isDetached())
+      // Another request can select a different tab while discovery awaits;
+      // its tools would fail on the first call, so they are not published.
+      if (!listing || frameIds.get(frame) !== identity || frame.isDetached() || tab.page.isClosed() || !tab.isCurrentTab())
         return [];
       const label = truncateDataUrls(frame.url()).slice(0, 2048);
       return listing.tools.map(tool => {

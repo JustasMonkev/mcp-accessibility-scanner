@@ -398,6 +398,20 @@ describe('WebMCP discovery and identity', () => {
     assert.equal(h.calls(), 1);
   });
 
+  it('does not publish tools of a tab that stopped being current during discovery', async () => {
+    const h = harness([registration()]);
+    let current = true;
+    (h.tab as unknown as { isCurrentTab: () => boolean }).isCurrentTab = () => current;
+    h.frames[0].sandbox.document.modelContext.getTools = async () => {
+      current = false;
+      return [registration()];
+    };
+    assert.deepEqual(await listWebMCPTools(h.tab), []);
+    current = true;
+    h.frames[0].sandbox.document.modelContext.getTools = async () => [registration()];
+    assert.equal((await listWebMCPTools(h.tab)).length, 1);
+  });
+
   it('omits asynchronous schemas, whose validator would report success before failing', async () => {
     const h = harness([
       { ...registration('async'), inputSchema: { $async: true, type: 'object', properties: { value: { type: 'number' } } } },
