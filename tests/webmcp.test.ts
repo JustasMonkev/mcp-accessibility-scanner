@@ -15,6 +15,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -397,6 +398,33 @@ describe('WebMCP discovery and identity', () => {
     assert.equal(h.calls(), 1);
   });
 
+  it('omits asynchronous schemas, whose validator would report success before failing', async () => {
+    const h = harness([
+      { ...registration('async'), inputSchema: { $async: true, type: 'object', properties: { value: { type: 'number' } } } },
+      { ...registration('nestedAsync'), inputSchema: { type: 'object', properties: { value: { $async: true, type: 'number' } } } },
+      registration('valid'),
+    ]);
+    assert.deepEqual(baseNames(await listWebMCPTools(h.tab)), ['webmcp_valid']);
+  });
+
+  it('compiles schemas only within the discovery deadline', async () => {
+    const unique = randomUUID();
+    const h = harness(Array.from({ length: 3 }, (_, index) => ({
+      ...registration(`tool${index}`), inputSchema: { type: 'object', properties: { [`${unique}${index}`]: { type: 'string' } } },
+    })));
+    // The deadline is taken first and each frame checks it once; the fourth
+    // reading is the first compilation's, and the next one is past it.
+    let readings = 0;
+    const start = Date.now();
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => ++readings <= 3 ? start : start + 60_000);
+    try {
+      assert.equal((await listWebMCPTools(h.tab)).length, 1);
+    } finally {
+      now.mockRestore();
+    }
+    assert.equal((await listWebMCPTools(h.tab)).length, 3);
+  });
+
   it('omits only the registration whose accessors throw', async () => {
     const hostile = Object.defineProperty({ description: 'hostile', inputSchema: { type: 'object' } }, 'name', { get() { throw new Error('x'.repeat(1_000_000)); } });
     const hostileWindow = Object.defineProperty({ name: 'windowed', inputSchema: { type: 'object' } }, 'window', { get() { throw new Error('window'); } });
@@ -508,6 +536,37 @@ describe('WebMCP execution boundaries', () => {
     assert.match(timedOut.errors.join(''), /timed out/);
     const [relisted] = await listWebMCPTools(h.tab);
     assert.equal(relisted.schema.name, tool.schema.name);
+    const blocked = response();
+    await relisted.handle({}, blocked.value);
+    assert.match(blocked.errors.join(''), /previous invocation.*still running/);
+    assert.equal(h.calls(), 1);
+    first.resolve({ done: true });
+    await delay(0);
+    h.setExecute(() => ({ done: true }));
+    const retried = response();
+    await relisted.handle({}, retried.value);
+    assert.equal(retried.errors.length, 0);
+    assert.equal(h.calls(), 2);
+  });
+
+  it('keeps refusing a call whose browser connection dropped while the page action runs', async () => {
+    const h = harness([registration()]);
+    const first = Promise.withResolvers<unknown>();
+    h.setExecute(() => first.promise);
+    const [tool] = await listWebMCPTools(h.tab);
+    const frame = h.frames[0];
+    const evaluate = frame.evaluate;
+    // A closed connection rejects the evaluation; the page keeps running it.
+    frame.evaluate = async (fn, arg) => {
+      void evaluate(fn, arg).catch(() => {});
+      await delay(5);
+      throw new Error('Target page, context or browser has been closed');
+    };
+    const dropped = response();
+    await tool.handle({}, dropped.value);
+    assert.match(dropped.errors.join(''), /has been closed/);
+    frame.evaluate = evaluate;
+    const [relisted] = await listWebMCPTools(h.tab);
     const blocked = response();
     await relisted.handle({}, blocked.value);
     assert.match(blocked.errors.join(''), /previous invocation.*still running/);

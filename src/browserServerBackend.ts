@@ -209,9 +209,17 @@ export class BrowserServerBackend implements ServerBackend {
     const endSessionHold = context.beginSessionHold();
     try {
       requestContext?.signal?.throwIfAborted();
-      if (context === this._context && this._browserContextFactory.sharedContext && !context.currentTab())
-        await withAbort(() => context.ensureTab(requestContext?.signal), requestContext?.signal);
-      const dynamic = await this._currentWebMCPTools(context, requestContext?.signal);
+      // Page tools are best-effort: an unreachable browser must not hide the
+      // built-in tools, which never needed one to be listed.
+      let dynamic: WebMCPToolDefinition[] = [];
+      try {
+        if (context === this._context && this._browserContextFactory.sharedContext && !this._browserContextFactory.attachNeedsUser && !context.currentTab())
+          await withAbort(() => context.ensureTab(requestContext?.signal), requestContext?.signal);
+        dynamic = await this._currentWebMCPTools(context, requestContext?.signal, true);
+      } catch (error) {
+        requestContext?.signal?.throwIfAborted();
+        logUnhandledError(error);
+      }
       requestContext?.signal?.throwIfAborted();
       // One MCP connection has one currently advertised list. Observe exactly
       // the scope of the last completed list request, not unrelated tool calls.
@@ -231,9 +239,10 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   /** Shares discovery, naming and static-name exclusion between listing and invocation. */
-  private async _currentWebMCPTools(context: Context, signal?: AbortSignal): Promise<WebMCPToolDefinition[]> {
+  private async _currentWebMCPTools(context: Context, signal?: AbortSignal, listing = false): Promise<WebMCPToolDefinition[]> {
     const sharedDefault = this._ephemeralDefaultContext && context === this._context && this._browserContextFactory.sharedContext;
-    const tab = context.currentTab() ?? (sharedDefault ? await withAbort(() => context.ensureTab(signal), signal) : undefined);
+    const attach = sharedDefault && !(listing && this._browserContextFactory.attachNeedsUser);
+    const tab = context.currentTab() ?? (attach ? await withAbort(() => context.ensureTab(signal), signal) : undefined);
     return tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
   }
 

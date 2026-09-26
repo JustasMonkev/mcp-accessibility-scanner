@@ -371,6 +371,37 @@ describe('WebMCP backend scope and argument contracts', () => {
     h.backend.serverClosed();
   });
 
+  it('keeps built-in tools listable when attaching the shared browser fails', async () => {
+    for (const stateless of [false, true]) {
+      const h = backendHarness(undefined, stateless);
+      const builtIn = { name: 'browser_snapshot', inputSchema: { type: 'object' as const } };
+      Object.assign(h.defaultContext.context, {
+        currentTab: () => undefined,
+        ensureTab: async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:9222'); },
+      });
+      Object.assign(h.backend, { _mcpTools: [builtIn], _browserContextFactory: { sharedContext: true } });
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        assert.deepEqual(await h.backend.listTools(request()), [builtIn]);
+      } finally {
+        errors.mockRestore();
+      }
+      h.backend.serverClosed();
+    }
+  });
+
+  it('does not attach a browser that waits for the user just to list tools', async () => {
+    for (const stateless of [false, true]) {
+      const h = backendHarness(undefined, stateless);
+      const ensureTab = vi.fn(async () => new Promise<never>(() => {}));
+      Object.assign(h.defaultContext.context, { currentTab: () => undefined, ensureTab });
+      Object.assign(h.backend, { _browserContextFactory: { sharedContext: true, attachNeedsUser: true } });
+      assert.deepEqual(await h.backend.listTools(request()), []);
+      assert.equal(ensureTab.mock.calls.length, 0);
+      h.backend.serverClosed();
+    }
+  });
+
   it('releases a shared-context listing when initial attachment is cancelled', async () => {
     const h = backendHarness(undefined, false);
     const started = Promise.withResolvers<void>();

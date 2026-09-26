@@ -145,9 +145,10 @@ function isSupportedInputSchema(root: unknown, visit?: (schema: Record<string, u
     seen.add(schema);
     visit?.(schema);
     // Patterns would become server-side regular expressions. A nested $id
-    // moves the base that the local $ref resolution below assumes.
+    // moves the base that the local $ref resolution below assumes. $async
+    // compiles a validator whose Promise the SDK would read as success.
     if (schema.pattern !== undefined || schema.patternProperties !== undefined || schema.$dynamicRef !== undefined
-        || schema.$recursiveRef !== undefined || (schema !== root && schema.$id !== undefined))
+        || schema.$recursiveRef !== undefined || schema.$async !== undefined || (schema !== root && schema.$id !== undefined))
       return false;
     if ((schema.required !== undefined && !isStrings(schema.required))
         || (schema.type !== undefined && typeof schema.type !== 'string' && !isStrings(schema.type)))
@@ -330,7 +331,7 @@ async function collectInPage(budget: DiscoveryBudget, isSupportedInputSchema: (s
 const collectInPageScript = withPageHelper(collectInPage, isSupportedInputSchema);
 
 /** Validates a frame's transferred listing; nothing the page computed is trusted. */
-function parseListing(raw: unknown, maxTools: number): FrameListing | undefined {
+async function parseListing(raw: unknown, maxTools: number, deadline: number, signal?: AbortSignal): Promise<FrameListing | undefined> {
   if (typeof raw !== 'string' || !raw)
     return undefined;
   let value: unknown;
@@ -361,6 +362,15 @@ function parseListing(raw: unknown, maxTools: number): FrameListing | undefined 
     const json = JSON.stringify(schema);
     if (Buffer.byteLength(json) > limits.schemaBytes || !isSupportedInputSchema(schema))
       continue;
+    // Compiling a large schema takes tens of milliseconds of synchronous
+    // work. Yield between compilations so other sessions keep running, and
+    // omit what the discovery deadline leaves no time for.
+    if (!compiledSchemas.has(json)) {
+      await new Promise(resolve => setImmediate(resolve));
+      signal?.throwIfAborted();
+      if (Date.now() >= deadline)
+        break;
+    }
     // Key order matches callInPage's descriptor, which is compared as JSON.
     const collected: CollectedTool = { name: tool.name, title: tool.title, description: tool.description, inputSchema: schema };
     if (specTypeSchemas.Tool['~standard'].validate(collected).issues || !compiledSchema(schema, json))
@@ -376,7 +386,7 @@ function parseListing(raw: unknown, maxTools: number): FrameListing | undefined 
  * `R` plus the result or `E` plus the error, as one primitive string whose
  * size the page cannot misreport. Node checks the result size again.
  */
-async function callInPage(params: { name: string, inputJson: string, timeOrigin: number, resultBytes: number, errorBytes: number, expected: string }): Promise<string> {
+async function callInPage(params: { name: string, inputJson: string, timeOrigin: number, resultBytes: number, errorBytes: number, expected: string, runningKey: string }): Promise<string> {
   // Code units in the longest prefix that fits in `maxBytes` of UTF-8. Only
   // string indexing and comparison are used; the page cannot override them.
   const utf8Prefix = (text: string, maxBytes: number): number => {
@@ -433,13 +443,27 @@ async function callInPage(params: { name: string, inputJson: string, timeOrigin:
       description: typeof tool.description === 'string' ? tool.description.slice(0, 2048) : '', inputSchema: schema };
     if (performance.timeOrigin !== params.timeOrigin || JSON.stringify(current) !== params.expected)
       return 'EThe WebMCP registration changed. List tools again before calling.';
-    let result: unknown;
-    if (modelContext.executeTool)
-      result = await modelContext.executeTool(tool, params.inputJson);
-    else if (modelContext.invokeTool)
-      result = JSON.stringify((await modelContext.invokeTool(params.name, JSON.parse(params.inputJson))) ?? null);
-    else
+    if (!modelContext.executeTool && !modelContext.invokeTool)
       return 'EThis browser does not support WebMCP tool invocation.';
+    // Calls in flight are recorded in the document itself: a dropped browser
+    // connection rejects the server's evaluation while the action continues
+    // here, and the next connection must still not start it again.
+    let running = Object.getOwnPropertyDescriptor(document, params.runningKey)?.value as Set<string> | undefined;
+    if (!running) {
+      running = new Set<string>();
+      Object.defineProperty(document, params.runningKey, { value: running });
+    }
+    if (running.has(params.name))
+      return 'EA previous invocation of this WebMCP tool is still running; do not retry it.';
+    running.add(params.name);
+    let result: unknown;
+    try {
+      result = modelContext.executeTool
+        ? await modelContext.executeTool(tool, params.inputJson)
+        : JSON.stringify((await modelContext.invokeTool?.(params.name, JSON.parse(params.inputJson))) ?? null);
+    } finally {
+      running.delete(params.name);
+    }
     const json = typeof result === 'string' ? result : JSON.stringify(result ?? null);
     if (typeof json !== 'string')
       return 'EWebMCP returned a result that cannot be serialized as JSON.';
@@ -503,7 +527,7 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
       tab.page.on('filechooser', onChooser);
       const evaluation = frame.evaluate(callInPage, {
         name: tool.name, inputJson, timeOrigin, resultBytes: limits.resultBytes,
-        errorBytes: limits.description, expected: JSON.stringify(tool),
+        errorBytes: limits.description, expected: JSON.stringify(tool), runningKey: `${documentKey}:running`,
       });
       pendingInvocations.set(invocationKey, evaluation);
       const clear = () => {
@@ -591,7 +615,7 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
         pending.expired = true;
         throw error;
       }
-      const listing = parseListing(raw, budget.tools);
+      const listing = await parseListing(raw, budget.tools, deadline, signal);
       if (!listing || frameIds.get(frame) !== identity || frame.isDetached())
         return [];
       const label = truncateDataUrls(frame.url()).slice(0, 2048);

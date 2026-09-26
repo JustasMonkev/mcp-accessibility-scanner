@@ -184,6 +184,11 @@ export interface BrowserContextFactory {
   /** Attaches to one shared browser context across stateless requests. */
   readonly sharedContext?: boolean;
   /**
+   * Set when attaching waits for the user (the extension must be connected),
+   * so a tools/list, which clients send unprompted at startup, never attaches.
+   */
+  readonly attachNeedsUser?: boolean;
+  /**
    * True when createContext() honors config.browser.contextOptions.storageState
    * or explicitly rejects contexts where it cannot safely do so. Omitted counts as
    * false, so a factory that forgets to declare it rejects a storage state rather
