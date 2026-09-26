@@ -698,6 +698,7 @@ Returns credential-redacted request/response headers and body metadata for one r
 #### `browser_wait_for`
 Wait for text to appear/disappear or time to pass.
 - Parameters: `time` (optional), `text` (optional), `textGone` (optional)
+- `time` is in seconds and capped at 30. Generated code uses the capped delay; time-only results report seconds and disclose when the requested delay exceeded the cap.
 
 #### `browser_handle_dialog`
 Handle browser dialogs (alerts, confirms, prompts).
