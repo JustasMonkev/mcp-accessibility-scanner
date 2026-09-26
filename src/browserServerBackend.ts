@@ -24,6 +24,8 @@ import { Response } from './response.js';
 import { SessionLog } from './sessionLog.js';
 import { filteredTools } from './tools.js';
 import { toMcpTool } from './mcp/tool.js';
+import { listWebMCPTools, webMCPSessionId, WebMCPObserver } from './webmcp.js';
+import type { WebMCPToolDefinition } from './webmcp.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
 
 import type { Tool } from './tools/tool.js';
@@ -31,7 +33,30 @@ import type { BrowserContextFactory } from './browserContextFactory.js';
 import type * as mcpServer from './mcp/server.js';
 import type { ServerBackend } from './mcp/server.js';
 
+/** Releases the caller on cancellation; `run` must stop its own side effects (see Context.ensureTab). */
+async function withAbort<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  signal?.throwIfAborted();
+  if (!signal)
+    return run();
+  let onAbort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      run(),
+      new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted)
+          onAbort();
+      }),
+    ]);
+  } finally {
+    if (onAbort)
+      signal.removeEventListener('abort', onAbort);
+  }
+}
+
 export class BrowserServerBackend implements ServerBackend {
+  readonly dynamicToolList = true;
   private _tools: Tool[];
   private _toolsByName: Map<string, Tool>;
   // Converting the zod schemas to JSON schema costs a few milliseconds for the
@@ -44,6 +69,9 @@ export class BrowserServerBackend implements ServerBackend {
   private _browserContextFactory: BrowserContextFactory;
   private _sharedSessionRegistry: BrowserSessionRegistry | undefined;
   private _ephemeralDefaultContext: boolean;
+  private _notifyToolListChanged: (() => Promise<void>) | undefined;
+  private _webmcpObserver: WebMCPObserver | undefined;
+  private _closed = false;
 
   constructor(config: FullConfig, factory: BrowserContextFactory, sharedSessionRegistry?: BrowserSessionRegistry, options?: {
     /**
@@ -67,7 +95,8 @@ export class BrowserServerBackend implements ServerBackend {
     this._toolsByName = new Map(this._tools.map(tool => [tool.schema.name, tool]));
   }
 
-  async initialize(_context: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion): Promise<void> {
+  async initialize(serverContext: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion): Promise<void> {
+    this._notifyToolListChanged = serverContext.notifyToolListChanged;
     // A registry shared across the backends of one server factory (stateless
     // HTTP creates a fresh backend per request, and a handle minted in one
     // request must resolve in the next) outlives this backend; an owned one
@@ -149,7 +178,8 @@ export class BrowserServerBackend implements ServerBackend {
     return this._sessionLog;
   }
 
-  async listTools(): Promise<mcpServer.Tool[]> {
+  /** Lists one explicitly selected scope without enumerating bearer session handles. */
+  async listTools(requestContext?: Partial<Pick<mcpServer.CallToolRequestContext, 'signal' | '_meta'>>): Promise<mcpServer.Tool[]> {
     this._mcpTools ??= this._tools.map(tool => {
       const mcpTool = toMcpTool(tool.schema);
       // Advertise the session-routing parameter resolved in callTool(). It is
@@ -169,13 +199,92 @@ export class BrowserServerBackend implements ServerBackend {
       }
       return mcpTool;
     });
-    return this._mcpTools;
+    const id = webMCPSessionId(requestContext?._meta);
+    // Direct consumers inspect built-in capabilities before initialize().
+    if (!this._context && id === undefined)
+      return this._mcpTools;
+    if (id !== undefined && !this._sessionRegistry)
+      throw new Error('Initialize the browser backend before listing session tools.');
+    const context = id === undefined ? this._context! : this._sessionRegistry!.resolve(id);
+    const endSessionHold = context.beginSessionHold();
+    try {
+      requestContext?.signal?.throwIfAborted();
+      // Page tools are best-effort: an unreachable browser must not hide the
+      // built-in tools, which never needed one to be listed.
+      let dynamic: WebMCPToolDefinition[] = [];
+      try {
+        if (context === this._context && this._browserContextFactory.sharedContext && !this._browserContextFactory.attachNeedsUser && !context.currentTab())
+          await withAbort(() => context.ensureTab(requestContext?.signal), requestContext?.signal);
+        dynamic = await this._currentWebMCPTools(context, requestContext?.signal, true);
+      } catch (error) {
+        requestContext?.signal?.throwIfAborted();
+        logUnhandledError(error);
+      }
+      requestContext?.signal?.throwIfAborted();
+      // One MCP connection has one currently advertised list. Observe exactly
+      // the scope of the last completed list request, not unrelated tool calls.
+      this._webmcpObserver?.dispose();
+      if (!this._closed && !this._ephemeralDefaultContext) {
+        this._webmcpObserver = new WebMCPObserver(
+            signal => this._currentWebMCPTools(context, signal), dynamic,
+            () => this._notifyToolListChanged?.() ?? Promise.resolve(), logUnhandledError,
+        );
+      }
+      return [...this._mcpTools, ...dynamic.map(tool => tool.schema)];
+    } finally {
+      endSessionHold();
+      if (id !== undefined)
+        this._sessionRegistry?.touch(id);
+    }
+  }
+
+  /** Shares discovery, naming and static-name exclusion between listing and invocation. */
+  private async _currentWebMCPTools(context: Context, signal?: AbortSignal, listing = false): Promise<WebMCPToolDefinition[]> {
+    const sharedDefault = this._ephemeralDefaultContext && context === this._context && this._browserContextFactory.sharedContext;
+    const attach = sharedDefault && !(listing && this._browserContextFactory.attachNeedsUser);
+    const tab = context.currentTab() ?? (attach ? await withAbort(() => context.ensureTab(signal), signal) : undefined);
+    return tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
+  }
+
+  /** Routes page tools via request metadata; every field inside arguments belongs to the page. */
+  private async _callWebMCP(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext) {
+    if (!name.startsWith('webmcp_'))
+      throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Tool "${name}" not found`);
+    const id = webMCPSessionId(requestContext?._meta);
+    const context = id === undefined ? this._context! : this._sessionRegistry!.resolve(id);
+    const params = { ...(rawArguments ?? {}) };
+    const response = new Response(context, name, params, requestContext);
+    // Hold the session during discovery too, which can await a slow frame.
+    const endToolCall = context.beginToolCall(name);
+    try {
+      requestContext?.signal.throwIfAborted();
+      const idleNotice = await context.resumeAfterIdle();
+      if (idleNotice)
+        response.addNotice(idleNotice);
+      const tool = (await this._currentWebMCPTools(context, requestContext?.signal)).find(candidate => candidate.schema.name === name);
+      if (!tool)
+        throw new Error('WebMCP tool is stale or unavailable in this scope. List tools again with the same request metadata.');
+      await tool.handle(params, response, requestContext?.signal);
+      await response.finish();
+      const sessionLog = id === undefined ? await this._ensureSessionLog() : await context.resolveSessionLog();
+      // Routed calls share the opener's log, so the metadata handle keeps
+      // them attributable without overwriting a page-owned argument.
+      sessionLog?.logResponse(response, id === undefined ? undefined : { browserSessionId: id });
+    } catch (error) {
+      response.addError(`WebMCP call failed (page output is untrusted): ${String(error)}`);
+    } finally {
+      endToolCall();
+      if (id !== undefined)
+        this._sessionRegistry?.touch(id);
+      void this._webmcpObserver?.refresh();
+    }
+    return response.serialize();
   }
 
   async callTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext) {
     const tool = this._toolsByName.get(name);
     if (!tool)
-      throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Tool "${name}" not found`);
+      return this._callWebMCP(name, rawArguments, requestContext);
     // Resolved before the schema parse so an unknown handle surfaces as a
     // clear execution error, like other input validation failures below.
     const routedSessionId = this._routedSessionId(name, rawArguments);
@@ -267,6 +376,7 @@ export class BrowserServerBackend implements ServerBackend {
       if (routedSessionId !== undefined)
         this._sessionRegistry?.touch(routedSessionId);
     }
+    void this._webmcpObserver?.refresh();
     return response.serialize();
   }
 
@@ -291,6 +401,9 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   serverClosed() {
+    this._closed = true;
+    this._webmcpObserver?.dispose();
+    this._webmcpObserver = undefined;
     // A shared registry outlives any one backend — over stateless HTTP the
     // per-request server closes after every response, and disposing the
     // registry with it would kill the very sessions the handles exist for.

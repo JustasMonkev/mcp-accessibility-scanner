@@ -149,6 +149,47 @@ describe('session log folders', () => {
     }
   });
 
+  it('records routing metadata apart from tool-owned arguments', async () => {
+    // A page-registered WebMCP tool may define its own browserSessionId
+    // argument, so the metadata route cannot be merged into the logged args.
+    vi.useFakeTimers();
+    try {
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const log = new SessionLog('/unused', storage);
+      const response = (toolArgs: Record<string, unknown>) => ({
+        context: { options: {} },
+        toolName: 'webmcp_echo',
+        toolArgs,
+        result: () => 'ok',
+        isError: () => false,
+        code: () => '',
+        tabSnapshot: () => undefined,
+      }) as any;
+      log.logResponse(response({ browserSessionId: 42 }), { browserSessionId: 'bs_route' });
+      log.logResponse(response({ value: 'default' }));
+      await vi.advanceTimersByTimeAsync(1000);
+      await (log as any)._sessionFileQueue;
+
+      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
+      expect(appended).toContain([
+        '### Tool call: webmcp_echo',
+        '- Metadata',
+        '```json',
+        JSON.stringify({ browserSessionId: 'bs_route' }, null, 2),
+        '```',
+        '- Args',
+        '```json',
+        JSON.stringify({ browserSessionId: 42 }, null, 2),
+      ].join('\n'));
+      expect(appended.match(/- Metadata/g)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps a return navigation after intervening log entries', async () => {
     vi.useFakeTimers();
     try {

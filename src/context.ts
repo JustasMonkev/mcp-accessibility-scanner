@@ -228,6 +228,7 @@ export class Context {
   // second still ran — letting the session TTL reaper (or a session close)
   // dispose the browser mid-operation.
   private _runningTools: string[] = [];
+  private _sessionHolds = 0;
   private _lastToolCallEndedAt = -Infinity;
   // In-flight download saves (Tab hands them over as they start). A download
   // outlives the tool call that triggered it — the response reports it as
@@ -236,6 +237,12 @@ export class Context {
   // missing or partial (the stateless HTTP path disposes the backend's
   // default context the moment the response closes).
   private _pendingDownloads = new Set<Promise<unknown>>();
+  // Pages ensureTab() has requested but not yet adopted. Closing waits for
+  // them briefly, so a page requested just before the close began is closed
+  // while the browser is still connected instead of outliving the Context.
+  private _openingPages = new Set<Promise<unknown>>();
+  // The page request that ensureTab() callers share, with their signals.
+  private _openingTab: { attaching: Promise<unknown>, request: Promise<void>, waiting: (AbortSignal | undefined)[] } | undefined;
   private _downloadErrors: string[] = [];
   private _omittedDownloadErrors = 0;
   private _abortController = new AbortController();
@@ -323,10 +330,52 @@ export class Context {
     return tab;
   }
 
-  async ensureTab(): Promise<Tab> {
-    const { browserContext } = await this._ensureBrowserContext();
-    if (!this._currentTab)
-      await browserContext.newPage();
+  /**
+   * Attaching can outlast both a cancelled caller and this Context (a
+   * stateless response disposes it as soon as the cancelled request is
+   * answered). The attachment itself follows this Context's own abort
+   * signal, which dispose() fires, and closing releases whatever it attached;
+   * the page opened afterwards is what `signal` and the close check guard, as
+   * a shared browser would otherwise keep it with no owner. Callers arriving
+   * while that page is pending share it, and it is closed on arrival only
+   * when every one of them has been cancelled.
+   */
+  async ensureTab(signal?: AbortSignal): Promise<Tab> {
+    const attaching = this._ensureBrowserContext();
+    const { browserContext } = await attaching;
+    if (!this._currentTab) {
+      signal?.throwIfAborted();
+      if (this._browserContextPromise !== attaching)
+        throw new Error('The browser context closed while a tab was being opened.');
+      let opening = this._openingTab;
+      if (opening?.attaching !== attaching) {
+        const waiting: (AbortSignal | undefined)[] = [];
+        const request = browserContext.newPage().then(async page => {
+          // Once settled, a later caller starts its own request.
+          if (this._openingTab?.waiting === waiting)
+            this._openingTab = undefined;
+          if (this._browserContextPromise === attaching && waiting.some(waiter => !waiter?.aborted))
+            return;
+          await page.close().catch(logUnhandledError);
+          if (this._browserContextPromise !== attaching)
+            throw new Error('The browser context closed while a tab was being opened.');
+          throw new Error('The tab request was cancelled.');
+        });
+        opening = this._openingTab = { attaching, request, waiting };
+        this._openingPages.add(request);
+      }
+      opening.waiting.push(signal);
+      try {
+        await opening.request;
+      } catch (error) {
+        signal?.throwIfAborted();
+        throw error;
+      } finally {
+        this._openingPages.delete(opening.request);
+        if (this._openingTab === opening)
+          this._openingTab = undefined;
+      }
+    }
     return this._currentTab!;
   }
 
@@ -483,9 +532,9 @@ export class Context {
     void this.closeBrowserContext();
   }
 
-  /** True while ANY tool call is running in this Context, overlap included. */
+  /** True while any tool call or lifetime hold is active, overlap included. */
   isRunningTool() {
-    return this._runningTools.length > 0;
+    return this._runningTools.length > 0 || this._sessionHolds > 0;
   }
 
   isRunningToolForRecording(buffered: boolean): boolean {
@@ -533,6 +582,29 @@ export class Context {
       errors.push(`Omitted ${this._omittedDownloadErrors} additional download failure(s).`);
     this._omittedDownloadErrors = 0;
     return errors;
+  }
+
+  /**
+   * Gives a page request already in flight the chance to land while the
+   * browser is still connected, so ensureTab() can close it. Bounded: a
+   * newPage() the browser never answers must not hold the close, because
+   * closing the connection is what ends it.
+   */
+  private async _waitForOpeningPages(timeoutMs = 5_000): Promise<void> {
+    if (!this._openingPages.size)
+      return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled([...this._openingPages]),
+        new Promise<void>(resolve => {
+          timer = setTimeout(resolve, timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -584,6 +656,21 @@ export class Context {
         this._runningTools.splice(index, 1);
       if (!recorderControlTools.has(name))
         this._lastToolCallEndedAt = Date.now();
+      this._lastActivityAt = Date.now();
+      this._scheduleIdleTimeout();
+    };
+  }
+
+  /** Holds session lifetime without suppressing manual input recording. */
+  beginSessionHold(): () => void {
+    this._sessionHolds++;
+    this._scheduleIdleTimeout();
+    let released = false;
+    return () => {
+      if (released)
+        return;
+      released = true;
+      this._sessionHolds--;
       this._lastActivityAt = Date.now();
       this._scheduleIdleTimeout();
     };
@@ -660,6 +747,7 @@ export class Context {
       if (this._recording)
         await this.stopRecording().catch(logUnhandledError);
       await Promise.all(this._recordingStops);
+      await this._waitForOpeningPages();
       this._detachFromBrowserContext();
       // close() is the factory's only cleanup hook — for storage-state
       // sessions it also removes the disposable profile — and this close

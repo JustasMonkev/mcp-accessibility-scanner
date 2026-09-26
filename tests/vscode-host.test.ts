@@ -50,8 +50,9 @@ describe('VSCodeProxyBackend', () => {
     const backend = new VSCodeProxyBackend({} as any, vi.fn(async () => ({ id: 'default-transport' } as any)));
 
     const close = vi.fn(async () => undefined);
+    const currentListTools = vi.fn(async () => ({ tools: [{ name: 'scan_page' }] }));
     (backend as any)._currentClient = {
-      listTools: vi.fn(async () => ({ tools: [{ name: 'scan_page' }] })),
+      listTools: currentListTools,
       close,
     };
     (backend as any)._backendContext = {
@@ -60,13 +61,15 @@ describe('VSCodeProxyBackend', () => {
     (backend as any)._clientVersion = { name: 'vitest', version: '1.0.0' };
 
     vi.spyOn(Client.prototype, 'connect').mockResolvedValue(undefined);
-    vi.spyOn(Client.prototype, 'listTools').mockResolvedValue({
+    const nextListTools = vi.spyOn(Client.prototype, 'listTools').mockResolvedValue({
       tools: [{ name: 'audit_site' }] as any[],
     } as any);
 
     await (backend as any)._setCurrentClient({ id: 'alternate-transport' } as any, true);
 
     expect(close).toHaveBeenCalledTimes(1);
+    expect(currentListTools).not.toHaveBeenCalled();
+    expect(nextListTools).not.toHaveBeenCalled();
     expect((backend as any)._backendContext.notifyToolListChanged).toHaveBeenCalledTimes(1);
   });
 
@@ -276,6 +279,22 @@ describe('VSCodeProxyBackend', () => {
       await request4.initialize(backendContext as any, clientVersion);
       await request4.callTool('tool_default', {});
       expect(defaults.at(-1)!.calls).toContain('tool_default');
+    });
+
+    it('does not probe a shared provider while publishing its switch', async () => {
+      const { slot, backendContext, clientVersion, makeRequestBackend } = await makeSharedSetup();
+      const child = makeInnerBackend('tool_child');
+      child.listTools = vi.fn(async () => { throw new Error('browser endpoint is not live yet'); });
+      const request = makeRequestBackend();
+      await request.initialize(backendContext as any, clientVersion);
+      vi.spyOn(request as any, '_createSwitchTransport').mockImplementation(() => wrapInProcess(child as any));
+
+      const switched = await request.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:9/never-connected', lib: 'playwright' });
+
+      expect(switched.isError).not.toBe(true);
+      expect(child.listTools).not.toHaveBeenCalled();
+      request.serverClosed?.();
+      await slot.dispose();
     });
   });
 });

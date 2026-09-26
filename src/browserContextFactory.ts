@@ -181,6 +181,14 @@ export type CreateContextOptions = {
 };
 
 export interface BrowserContextFactory {
+  /** Attaches to one shared browser context across stateless requests. */
+  readonly sharedContext?: boolean;
+  /**
+   * Set when attaching waits for the user (the extension connection must be
+   * approved), so a tools/list, which clients send unprompted at startup,
+   * never attaches.
+   */
+  readonly attachNeedsUser?: boolean;
   /**
    * True when createContext() honors config.browser.contextOptions.storageState
    * or explicitly rejects contexts where it cannot safely do so. Omitted counts as
@@ -399,6 +407,10 @@ class IsolatedContextFactory extends BaseContextFactory {
 }
 
 class CdpContextFactory extends BaseContextFactory {
+  get sharedContext(): boolean {
+    return !this.config.browser.isolated;
+  }
+
   // Fresh contexts accept storage state; existing external contexts reject it.
   readonly appliesStorageState = true;
 
