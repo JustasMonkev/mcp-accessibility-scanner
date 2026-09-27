@@ -500,6 +500,10 @@ class CdpContextFactory extends BaseContextFactory {
       headers: cdpConnectHeaders(clientInfo, this.config.browser),
       timeout: this.config.browser.cdpTimeout,
       noDefaults: true,
+    }).catch(error => {
+      if (isCdpAttachTimeout(error))
+        error.message += `\n${cdpAttachTimeoutHint}`;
+      throw error;
     });
   }
 
@@ -754,7 +758,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
         testDebug(`connect over CDP failed for ${endpoint}: ${String(error)}`);
         if (Date.now() >= deadline) {
           childProcess.kill('SIGTERM');
-          throw new Error(`Timed out waiting for CDP endpoint ${endpoint}.`);
+          throw new Error(`Timed out waiting for CDP endpoint ${endpoint}.${isCdpAttachTimeout(error) ? ` ${cdpAttachTimeoutHint}` : ''}`);
         }
         await new Promise(resolve => setTimeout(resolve, 50));
       }
@@ -1084,6 +1088,19 @@ function cdpConnectHeaders(clientInfo: ClientInfo, browserConfig: FullConfig['br
     headers['User-Agent'] = userAgent;
   Object.assign(headers, browserConfig.cdpHeaders);
   return Object.keys(headers).length ? headers : undefined;
+}
+
+const cdpAttachTimeoutHint = 'The CDP WebSocket connected, but Playwright did not finish attaching before the timeout. An existing tab can block the attach: on Playwright 1.63.0 a tab without a renderer (crashed, or discarded by Memory Saver) never answers, and a sleeping or unresponsive tab can stall it. Reload or close that tab in the browser yourself, or attach to a separate browser, then retry; a longer --cdp-timeout helps only when the attach is merely slow.';
+
+/**
+ * Playwright 1.63.0 initializes every existing tab while attaching over CDP,
+ * and a tab without a renderer never answers, so `connectOverCDP` runs into
+ * its timeout after the WebSocket connected (microsoft/playwright#42936). The
+ * call log's `<ws connected>` entry tells that apart from an endpoint that
+ * never answered, which must not be blamed on a tab.
+ */
+function isCdpAttachTimeout(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'TimeoutError' && error.message.includes('<ws connected>');
 }
 
 /**

@@ -176,3 +176,93 @@ reset or dependency upgrade is included.
 `MCP_TEST_BROWSER_CHANNEL=chromium-headless-shell` control, the full Vitest suite
 passes **54 files / 1,252 tests, with no skips**. This environment selection is
 confined to the history/download fixture; production browser defaults are intact.
+
+## CDP attach and numpad keys (#244)
+
+**Upstream status on 2026-09-27.** npm `latest` is still Playwright 1.63.0, and
+`next` is `1.64.0-alpha-2026-09-27`. The alpha's `playwright-core` bundle was
+inspected without being installed. It contains
+[#42913](https://github.com/microsoft/playwright/pull/42913) (`isKeypad` on
+Chromium key events). It does not contain
+[#42936](https://github.com/microsoft/playwright/pull/42936) (no
+`Inspector.enable` during page initialization) or
+[#42927](https://github.com/microsoft/playwright/pull/42927) (`NumpadDecimal`
+still has key `"\0"`). Both PRs are still open upstream. The paired
+`playwright`/`playwright-core` pins stay at 1.63.0: there is no alpha
+dependency and no vendored browser internals.
+
+**CDP attach with a tab without a renderer.** A disposable browser, launched
+with `--remote-debugging-port`, gets one healthy tab and one tab crashed through
+`chrome://crash`. Then the attach is retried. This container cannot install
+Playwright's bundled browser. Local runs therefore used the preinstalled
+Chromium 141.0.7390.37 (full and headless shell) with the paired 1.63.0
+dependencies; CI covers the bundled build. Observed behavior:
+
+| Attach | Result on 1.63.0 |
+| --- | --- |
+| `connectOverCDP`, `timeout: 3000` | `TimeoutError` after ~3s; the call log reaches `<ws connected>` |
+| `connectOverCDP`, `timeout: 0` | Still pending after an 8s guard (unbounded hang) |
+| Endpoint that accepts TCP but never answers | `TimeoutError` without `<ws connected>` |
+| Refused endpoint | Immediate `ECONNREFUSED` |
+
+The user's tabs were unchanged after every failed attempt: the same URLs and
+titles appeared in `/json/list`. A Memory Saver discard was not reproduced
+locally, because it needs a headed browser with internal debug pages. The
+upstream PR's tests show that discarded tabs go through the same
+renderer-less path.
+
+The server cannot make such a tab attach without reloading or closing it,
+which it must not do. Neither `noDefaults` nor `--isolated` skips the
+initialization. Instead, the failure is now bounded and explained:
+
+- `--cdp-endpoint` rethrows Playwright's timeout error, call log included. When
+  the call log shows `<ws connected>`, it appends a note naming the crashed or
+  discarded tab and the remedy.
+- `--cdp-launch` previously said only `Timed out waiting for CDP endpoint …`,
+  although the endpoint had answered. It now appends the same note when the
+  last attempt timed out after the WebSocket connected.
+- Unreachable endpoints keep their unchanged errors; they are not blamed on a
+  tab.
+
+`tests/cdp-attach.integration.test.ts` covers the direct Playwright attach
+and both MCP paths. The endpoint test uses `cdpTimeout: 2000`. The launch test
+uses `startupTimeoutMs: 3000` and `cdpTimeout: 1000`, where the "launched
+application" forwards to the prepared browser. On 1.63.0 each MCP attach must
+fail with the note well inside the configured budgets: ~2.3s and ~3.6s locally,
+against a 15s bound far below Playwright's 30s default. The launched
+application must be stopped, and the browser's tab list must be unchanged.
+Removing the note makes both MCP tests fail. On any other Playwright version,
+all three tests require the fixed contract: the attach succeeds, the healthy
+tab is listed, and the crashed tab is omitted but not closed. An upgrade
+therefore has to prove #42936. The note's wording names 1.63.0; revise it
+together with the upgrade.
+
+**Numpad keys through `browser_press_key`.** The test in
+`tests/numpad-keys.integration.test.ts` presses each key through the MCP tool
+into a focused textarea. It records `key`, `code`, `location` and `keyCode`
+for `keydown`/`keyup`, plus the typed value. The expected model is
+Playwright's US layout: NumLock-off keys, Shift yields the digit or decimal
+point, and every event is at `DOM_KEY_LOCATION_NUMPAD` (3).
+
+| Press | Chromium 141.0.7390.37, Playwright 1.63.0 |
+| --- | --- |
+| `NumpadSubtract` | key `-`, keyCode 109; location 3 on keydown, **1 on keyup**; types `-` |
+| `NumpadDecimal` | key **`"\u0000"`** (expected `Delete`), keyCode 46; keyup location **1** |
+| `Shift+Numpad1` | key `1` but keyCode **35 (End)**; keyup location **1**; **types nothing** |
+| `Shift+NumpadDecimal` | key `.` but keyCode **46 (Delete)**; keyup location **1**; **types nothing** |
+
+These match the upstream diagnoses. The keyup location is #42913, and
+`NumpadDecimal` plus the shifted digits are #42927. The server forwards keys
+unchanged; remapping them locally would diverge from Playwright's layout and
+from the other engines. The test pins exactly these deviations for
+`1.63.0/chromium`, and any other version must deliver the modeled events. The
+`keyboard-controls` CI job runs the same test on Firefox and WebKit. Their
+events are recorded in the job log before they gate.
+
+Focused checks:
+
+```sh
+npx vitest run tests/cdp-attach.integration.test.ts tests/numpad-keys.integration.test.ts
+MCP_TEST_BROWSER_NAME=firefox npx vitest run tests/numpad-keys.integration.test.ts
+MCP_TEST_BROWSER_NAME=webkit npx vitest run tests/numpad-keys.integration.test.ts
+```
