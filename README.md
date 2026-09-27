@@ -78,6 +78,8 @@ The Compose configuration publishes the unauthenticated MCP HTTP transport on `1
 docker build -t mcp-accessibility-scanner .
 ```
 
+Images built from this Dockerfile include `tini` as an init process; Docker's `--init` flag is optional.
+
 #### Docker smoke test
 
 ```bash
@@ -562,8 +564,9 @@ AI snapshots mark a visually present subtree excluded from accessibility queries
 
 #### `browser_find`
 Search the current page accessibility snapshot without returning the full snapshot.
-- Parameters: `text` (case-insensitive substring) or `regex` (regular expression, supports `/pattern/flags`)
+- Parameters: `text` (case-insensitive substring) or `regex` (regular expression, supports `/pattern/flags`), `maxResults` (optional positive integer; defaults to all matches)
 - Returns matching snapshot lines with surrounding context, shown under their path from the root of the tree; `...` marks truncated off-path context.
+- `maxResults` selects the first matching lines before building context windows and preserves their ancestor paths. Context may include additional matching lines. When truncated, the header reports the total match count and `(showing first Y)`.
 
 #### `browser_click`
 Perform click on a web page element.
@@ -708,6 +711,7 @@ Returns credential-redacted request/response headers and body metadata for one r
 #### `browser_wait_for`
 Wait for text to appear/disappear or time to pass.
 - Parameters: `time` (optional), `text` (optional), `textGone` (optional)
+- `time` is in seconds and capped at 30. Generated code uses the capped delay; time-only results report seconds and disclose when the requested delay exceeded the cap.
 
 #### `browser_handle_dialog`
 Handle browser dialogs (alerts, confirms, prompts).
