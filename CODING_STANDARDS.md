@@ -16,7 +16,9 @@ Judge compatibility by observable behavior: defaults, explicit values, runtime u
 
 Place validation before the first side effect it can prevent. Restoring viewport or media settings does not undo navigation, lost form input, or application mutations. Distinguish invalid requests from failures encountered while executing a valid request.
 
-**Review evidence:** an invalid-input test demonstrates both the error and the absence of the relevant side effect. See checklist section 2.
+Public input schemas must encode runtime constraints they can represent, such as integer-only values and minimum bounds; descriptions and handler checks alone do not constrain the published contract. When every call reaches the handler through schema validation, do not duplicate those checks in the handler.
+
+**Review evidence:** test schema validation and the published schema's constraints, not just handler behavior. An invalid-input test demonstrates both the error and the absence of the relevant side effect. See checklist section 2.
 
 ## 3. Report what was actually evaluated
 

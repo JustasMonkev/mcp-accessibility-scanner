@@ -65,6 +65,7 @@ const snapshotSchema = z.object({
 const findSchema = z.object({
   text: z.string().optional().describe('Plain text to search for in the page snapshot (case-insensitive substring match). Provide either text or regex, not both.'),
   regex: z.string().optional().refine(value => !value || isValidRegex(value), { message: 'Invalid regular expression' }).describe('Regular expression to search for in the page snapshot. Matching is case-sensitive by default; wrap the pattern in slashes to add flags, e.g. "/error/i" for case-insensitive. Provide either text or regex, not both.'),
+  maxResults: z.number().int().min(1).optional().describe('Maximum number of matching lines to return. Must be a positive integer. Defaults to returning all matches.'),
 }).superRefine((params, context) => {
   if (!params.text && !params.regex)
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Provide either "text" or "regex" to search for.' });
@@ -382,8 +383,13 @@ const find = defineTabTool({
       return;
     }
 
+    const totalMatches = matchedLines.length;
+    const matchesToRender = params.maxResults !== undefined && params.maxResults < totalMatches
+      ? matchedLines.slice(0, params.maxResults)
+      : matchedLines;
+
     const windows: { start: number, end: number }[] = [];
-    for (const line of matchedLines) {
+    for (const line of matchesToRender) {
       const start = Math.max(0, line - 3);
       const end = Math.min(lines.length - 1, line + 3);
       const last = windows[windows.length - 1];
@@ -395,7 +401,7 @@ const find = defineTabTool({
 
     const parents = parentIndices(lines, indents);
     const path = new Set<number>();
-    for (const match of matchedLines)
+    for (const match of matchesToRender)
       addPath(path, parents, match);
 
     const snippets = windows.map(window => {
@@ -412,8 +418,11 @@ const find = defineTabTool({
       }
       return truncateDataUrls(out.join('\n'));
     });
-    const matchWord = matchedLines.length === 1 ? 'match' : 'matches';
-    response.addResult(`Found ${matchedLines.length} ${matchWord} for ${query}:\n\n${snippets.join('\n\n----\n\n')}`);
+    const matchWord = totalMatches === 1 ? 'match' : 'matches';
+    const header = matchesToRender.length < totalMatches
+      ? `Found ${totalMatches} ${matchWord} for ${query} (showing first ${matchesToRender.length}):`
+      : `Found ${totalMatches} ${matchWord} for ${query}:`;
+    response.addResult(`${header}\n\n${snippets.join('\n\n----\n\n')}`);
   },
 });
 
