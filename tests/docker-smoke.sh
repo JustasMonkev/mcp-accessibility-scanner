@@ -48,7 +48,9 @@ for _ in $(seq 1 20); do
 done
 
 if [[ "${ready}" != "1" ]]; then
-  echo "[docker-smoke] MCP endpoint did not become ready on localhost:${PORT}"
+  echo "[docker-smoke] MCP endpoint did not become ready on localhost:${PORT} (HTTP ${http_code})"
+  cat /tmp/mcp-docker-smoke-response.txt || true
+  curl --noproxy '*' -i -X POST "http://127.0.0.1:${PORT}/mcp" -H 'content-type: application/json' -d '{}' || true
   docker logs "${CONTAINER_NAME}" || true
   exit 1
 fi
