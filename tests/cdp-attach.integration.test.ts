@@ -169,6 +169,9 @@ describe('CDP attach with a tab without a renderer (#244)', () => {
       expect(result.isError, text).toBe(true);
       expect(text).toContain(`Timed out waiting for CDP endpoint http://127.0.0.1:${launchPort}.`);
       expect(text).toContain('Playwright did not finish attaching before the timeout');
+      // Attempts that ran their full --cdp-timeout point at it; with 0 only
+      // the startup budget ended them.
+      expect(text).toContain(cdpTimeout ? 'a longer --cdp-timeout helps' : 'a longer --cdp-launch-startup-timeout (3000ms) helps');
       expect(elapsed).toBeLessThan(attachBound);
       // The launched app is the server's own to stop; the browser behind it
       // keeps every tab.

@@ -227,6 +227,11 @@ initialization. Instead, the failure is now bounded and explained:
   `--cdp-launch-startup-timeout` by a longer `--cdp-timeout`, or hang forever
   with `--cdp-timeout 0`. Each attempt is now capped at the remaining startup
   budget, and at `--cdp-timeout` when that is positive.
+- The note names the limit worth raising for an attach that is merely slow:
+  `--cdp-timeout` when an attempt ran for its full length, and otherwise
+  `--cdp-launch-startup-timeout`. That covers a healthy application whose
+  attach is cut short near the end of its startup budget, where a longer
+  `--cdp-timeout` cannot help.
 - Unreachable endpoints keep their unchanged errors; they are not blamed on a
   tab.
 
@@ -238,8 +243,8 @@ attach must fail with the note well inside the configured budgets: ~2.2s and
 ~3.3s locally, against a 15s bound far below Playwright's 30s default. The
 `cdpTimeout: 0` launch hung before the cap. The launched
 application must be stopped, and the browser's tab list must be unchanged.
-Removing the note makes both MCP tests fail. On any other Playwright version,
-all three tests require the fixed contract: the attach succeeds, the healthy
+Removing the note makes all three MCP tests fail. On any other Playwright
+version, all four tests require the fixed contract: the attach succeeds, the healthy
 tab is listed, and the crashed tab is omitted but not closed. An upgrade
 therefore has to prove #42936. The note's wording names 1.63.0; revise it
 together with the upgrade.

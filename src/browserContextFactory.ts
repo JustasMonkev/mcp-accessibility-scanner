@@ -502,7 +502,7 @@ class CdpContextFactory extends BaseContextFactory {
       noDefaults: true,
     }).catch(error => {
       if (isCdpAttachTimeout(error))
-        error.message += `\n${cdpAttachTimeoutHint}`;
+        error.message += `\n${cdpAttachTimeoutHint('--cdp-timeout')}`;
       throw error;
     });
   }
@@ -749,27 +749,34 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     const headers = cdpConnectHeaders(clientInfo, this.config.browser);
     // Playwright's own connect default, which --cdp-timeout overrides.
     const cdpTimeout = this.config.browser.cdpTimeout ?? 30000;
-    let attachTimedOut = false;
+    // Which limit ended attaches that timed out after the WebSocket
+    // connected: remembered across attempts, as the last one may be cut short
+    // by the deadline before its WebSocket connects.
+    let attachTimedOutAt: 'cdp' | 'startup' | undefined;
     for (;;) {
       // Every attempt also ends at the startup deadline: an attach that hangs
       // on a tab without a renderer must not outlast the launch budget, even
       // when --cdp-timeout is longer or 0 (disabled). Never 0 here, which
       // would disable Playwright's timeout instead.
       const remaining = Math.max(1, deadline - Date.now());
+      const cappedByStartup = !(cdpTimeout > 0) || remaining < cdpTimeout;
       try {
         return await playwright.chromium.connectOverCDP(endpoint, {
           headers,
-          timeout: cdpTimeout > 0 ? Math.min(cdpTimeout, remaining) : remaining,
+          timeout: cappedByStartup ? remaining : cdpTimeout,
           noDefaults: true,
         });
       } catch (error) {
         testDebug(`connect over CDP failed for ${endpoint}: ${String(error)}`);
-        // Remembered across attempts: the last one may be cut short by the
-        // deadline before its WebSocket connects.
-        attachTimedOut ||= isCdpAttachTimeout(error);
+        // An attempt that ran its full --cdp-timeout shows that raising it
+        // could help; one cut short by the startup deadline only that the
+        // launch budget ran out, even for a healthy but slow application.
+        if (isCdpAttachTimeout(error) && attachTimedOutAt !== 'cdp')
+          attachTimedOutAt = cappedByStartup ? 'startup' : 'cdp';
         if (Date.now() >= deadline) {
           childProcess.kill('SIGTERM');
-          throw new Error(`Timed out waiting for CDP endpoint ${endpoint}.${attachTimedOut ? ` ${cdpAttachTimeoutHint}` : ''}`);
+          const limit = attachTimedOutAt === 'cdp' ? '--cdp-timeout' : `--cdp-launch-startup-timeout (${startupTimeoutMs}ms)`;
+          throw new Error(`Timed out waiting for CDP endpoint ${endpoint}.${attachTimedOutAt ? ` ${cdpAttachTimeoutHint(limit)}` : ''}`);
         }
         await new Promise(resolve => setTimeout(resolve, 50));
       }
@@ -1101,7 +1108,10 @@ function cdpConnectHeaders(clientInfo: ClientInfo, browserConfig: FullConfig['br
   return Object.keys(headers).length ? headers : undefined;
 }
 
-const cdpAttachTimeoutHint = 'The CDP WebSocket connected, but Playwright did not finish attaching before the timeout. An existing tab can block the attach: on Playwright 1.63.0 a tab without a renderer (crashed, or discarded by Memory Saver) never answers, and a sleeping or unresponsive tab can stall it. Reload or close that tab in the browser yourself, or attach to a separate browser, then retry; a longer --cdp-timeout helps only when the attach is merely slow.';
+/** `limit` names the timeout that ended the attach, the one worth raising when it is merely slow. */
+function cdpAttachTimeoutHint(limit: string): string {
+  return `The CDP WebSocket connected, but Playwright did not finish attaching before the timeout. An existing tab can block the attach: on Playwright 1.63.0 a tab without a renderer (crashed, or discarded by Memory Saver) never answers, and a sleeping or unresponsive tab can stall it. Reload or close that tab in the browser yourself, or attach to a separate browser, then retry; a longer ${limit} helps only when the attach is merely slow.`;
+}
 
 /**
  * Playwright 1.63.0 initializes every existing tab while attaching over CDP,

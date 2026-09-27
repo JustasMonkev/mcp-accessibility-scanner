@@ -396,6 +396,26 @@ describe('browserContextFactory', () => {
       expect(error.message.includes(attachHint)).toBe(explained);
       expect(childProcess.kill).toHaveBeenCalledWith('SIGTERM');
     });
+
+    // Raising --cdp-timeout cannot help an attempt the startup deadline cut
+    // short, as for a healthy but slow application near its budget.
+    it.each([
+      ['--cdp-launch-startup-timeout when the startup deadline cut the attach short', undefined, 'a longer --cdp-launch-startup-timeout (10ms) helps'],
+      ['--cdp-launch-startup-timeout when --cdp-timeout is 0', 0, 'a longer --cdp-launch-startup-timeout (10ms) helps'],
+      ['--cdp-timeout when an attach ran its full --cdp-timeout', 1, 'a longer --cdp-timeout helps'],
+    ])('names %s', async (_label, cdpTimeout, remedy) => {
+      spawnMock.mockReturnValue(createMockChildProcess());
+      connectOverCDP.mockRejectedValue(timeoutError(connected));
+      const factory = contextFactory(await resolveConfig({ browser: { cdpTimeout, cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 10 } } }));
+      const error = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined).catch(error => error);
+      expect(error.message).toContain(remedy);
+    });
+
+    it('names --cdp-timeout on the endpoint path', async () => {
+      connectOverCDP.mockRejectedValue(timeoutError(connected));
+      const factory = contextFactory(await resolveConfig({ browser: { cdpEndpoint: 'http://127.0.0.1:9222', cdpTimeout: 1000 } }));
+      await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow('a longer --cdp-timeout helps');
+    });
   });
 
   it('never hands two concurrent --cdp-launch sessions the same endpoint', async () => {
