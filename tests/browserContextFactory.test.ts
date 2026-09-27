@@ -248,7 +248,7 @@ describe('browserContextFactory', () => {
         cdpLaunch: {
           command: 'open',
           port: 9222,
-          startupTimeoutMs: 500,
+          startupTimeoutMs: 10000,
         },
       },
     });
@@ -306,6 +306,7 @@ describe('browserContextFactory', () => {
       headers: {
         'User-Agent': 'vitest/1.0.0',
       },
+      timeout: expect.any(Number),
       noDefaults: true,
     });
 
@@ -334,6 +335,67 @@ describe('browserContextFactory', () => {
 
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow('Timed out waiting for CDP endpoint http://127.0.0.1:9222.');
     expect(childProcess.kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  describe('CDP attach timeouts (#244)', () => {
+    const attachHint = 'Playwright did not finish attaching before the timeout';
+
+    it.each([
+      ['a shorter --cdp-timeout', 100, 10000, (timeout: number) => expect(timeout).toBe(100)],
+      ['the default --cdp-timeout', undefined, 60000, (timeout: number) => expect(timeout).toBe(30000)],
+      ['a longer --cdp-timeout', 30000, 500, (timeout: number) => expect(timeout).toBeLessThanOrEqual(500)],
+      ['--cdp-timeout 0', 0, 500, (timeout: number) => expect(timeout).toBeLessThanOrEqual(500)],
+    ])('bounds each launch attach attempt by %s and the startup budget', async (_label, cdpTimeout, startupTimeoutMs, check) => {
+      spawnMock.mockReturnValue(createMockChildProcess());
+      connectOverCDP.mockResolvedValue(createMockBrowser(createMockBrowserContext()));
+      const factory = contextFactory(await resolveConfig({ browser: { cdpTimeout, cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs } } }));
+      await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+      const timeout = connectOverCDP.mock.calls[0][1].timeout;
+      expect(timeout).toBeGreaterThan(0);
+      check(timeout);
+    });
+
+    function timeoutError(callLog: string[]) {
+      const error = new Error(['browserType.connectOverCDP: Timeout 1000ms exceeded.', 'Call log:', ...callLog.map(line => `  - ${line}`)].join('\n'));
+      error.name = 'TimeoutError';
+      return error;
+    }
+    const connected = ['<ws preparing> retrieving websocket url from http://127.0.0.1:9222', '<ws connecting> ws://127.0.0.1:9222/devtools/browser/x', '<ws connected> ws://127.0.0.1:9222/devtools/browser/x'];
+
+    it.each([
+      ['explains', connected, true],
+      ['does not blame a tab for', connected.slice(0, 1), false],
+    ])('%s an endpoint attach timeout', async (_label, callLog, explained) => {
+      connectOverCDP.mockRejectedValue(timeoutError(callLog));
+      const factory = contextFactory(await resolveConfig({ browser: { cdpEndpoint: 'http://127.0.0.1:9222', cdpTimeout: 1000 } }));
+      const error = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined).catch(error => error);
+      expect(error.name).toBe('TimeoutError');
+      expect(error.message).toContain('Timeout 1000ms exceeded.');
+      expect(error.message.includes(attachHint)).toBe(explained);
+    });
+
+    it('leaves other endpoint errors unchanged', async () => {
+      connectOverCDP.mockRejectedValue(new Error('browserType.connectOverCDP: connect ECONNREFUSED 127.0.0.1:9222'));
+      const factory = contextFactory(await resolveConfig({ browser: { cdpEndpoint: 'http://127.0.0.1:9222' } }));
+      await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow(/^browserType\.connectOverCDP: connect ECONNREFUSED 127\.0\.0\.1:9222$/);
+    });
+
+    it.each([
+      ['explains a launched app whose attach timed out after the WebSocket connected', timeoutError(connected), true],
+      ['does not blame a tab when the launched app never answered', timeoutError(connected.slice(0, 1)), false],
+      ['explains a launched app whose attach timed out before a last attempt cut short by the deadline', [timeoutError(connected), timeoutError(connected.slice(0, 1))], true],
+      ['does not blame a tab when the launched app refused connections', new Error('connect ECONNREFUSED'), false],
+    ])('%s', async (_label, errors, explained) => {
+      const childProcess = createMockChildProcess();
+      spawnMock.mockReturnValue(childProcess);
+      const [firstError, lastError] = Array.isArray(errors) ? errors : [errors, errors];
+      connectOverCDP.mockRejectedValueOnce(firstError).mockRejectedValue(lastError);
+      const factory = contextFactory(await resolveConfig({ browser: { cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 10 } } }));
+      const error = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined).catch(error => error);
+      expect(error.message.startsWith('Timed out waiting for CDP endpoint http://127.0.0.1:9222.')).toBe(true);
+      expect(error.message.includes(attachHint)).toBe(explained);
+      expect(childProcess.kill).toHaveBeenCalledWith('SIGTERM');
+    });
   });
 
   it('never hands two concurrent --cdp-launch sessions the same endpoint', async () => {

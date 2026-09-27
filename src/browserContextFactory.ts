@@ -500,6 +500,10 @@ class CdpContextFactory extends BaseContextFactory {
       headers: cdpConnectHeaders(clientInfo, this.config.browser),
       timeout: this.config.browser.cdpTimeout,
       noDefaults: true,
+    }).catch(error => {
+      if (isCdpAttachTimeout(error))
+        error.message += `\n${cdpAttachTimeoutHint}`;
+      throw error;
     });
   }
 
@@ -742,19 +746,30 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
 
   private async _waitForBrowser(endpoint: string, clientInfo: ClientInfo, childProcess: ReturnType<typeof spawn>, startupTimeoutMs: number): Promise<playwright.Browser> {
     const deadline = Date.now() + startupTimeoutMs;
-    const connectOptions: playwright.ConnectOverCDPOptions = {
-      headers: cdpConnectHeaders(clientInfo, this.config.browser),
-      timeout: this.config.browser.cdpTimeout,
-      noDefaults: true,
-    };
+    const headers = cdpConnectHeaders(clientInfo, this.config.browser);
+    // Playwright's own connect default, which --cdp-timeout overrides.
+    const cdpTimeout = this.config.browser.cdpTimeout ?? 30000;
+    let attachTimedOut = false;
     for (;;) {
+      // Every attempt also ends at the startup deadline: an attach that hangs
+      // on a tab without a renderer must not outlast the launch budget, even
+      // when --cdp-timeout is longer or 0 (disabled). Never 0 here, which
+      // would disable Playwright's timeout instead.
+      const remaining = Math.max(1, deadline - Date.now());
       try {
-        return await playwright.chromium.connectOverCDP(endpoint, connectOptions);
+        return await playwright.chromium.connectOverCDP(endpoint, {
+          headers,
+          timeout: cdpTimeout > 0 ? Math.min(cdpTimeout, remaining) : remaining,
+          noDefaults: true,
+        });
       } catch (error) {
         testDebug(`connect over CDP failed for ${endpoint}: ${String(error)}`);
+        // Remembered across attempts: the last one may be cut short by the
+        // deadline before its WebSocket connects.
+        attachTimedOut ||= isCdpAttachTimeout(error);
         if (Date.now() >= deadline) {
           childProcess.kill('SIGTERM');
-          throw new Error(`Timed out waiting for CDP endpoint ${endpoint}.`);
+          throw new Error(`Timed out waiting for CDP endpoint ${endpoint}.${attachTimedOut ? ` ${cdpAttachTimeoutHint}` : ''}`);
         }
         await new Promise(resolve => setTimeout(resolve, 50));
       }
@@ -1084,6 +1099,19 @@ function cdpConnectHeaders(clientInfo: ClientInfo, browserConfig: FullConfig['br
     headers['User-Agent'] = userAgent;
   Object.assign(headers, browserConfig.cdpHeaders);
   return Object.keys(headers).length ? headers : undefined;
+}
+
+const cdpAttachTimeoutHint = 'The CDP WebSocket connected, but Playwright did not finish attaching before the timeout. An existing tab can block the attach: on Playwright 1.63.0 a tab without a renderer (crashed, or discarded by Memory Saver) never answers, and a sleeping or unresponsive tab can stall it. Reload or close that tab in the browser yourself, or attach to a separate browser, then retry; a longer --cdp-timeout helps only when the attach is merely slow.';
+
+/**
+ * Playwright 1.63.0 initializes every existing tab while attaching over CDP,
+ * and a tab without a renderer never answers, so `connectOverCDP` runs into
+ * its timeout after the WebSocket connected (microsoft/playwright#42936). The
+ * call log's `<ws connected>` entry tells that apart from an endpoint that
+ * never answered, which must not be blamed on a tab.
+ */
+function isCdpAttachTimeout(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'TimeoutError' && error.message.includes('<ws connected>');
 }
 
 /**
