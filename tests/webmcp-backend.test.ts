@@ -445,6 +445,25 @@ describe('WebMCP backend scope and argument contracts', () => {
     h.backend.serverClosed();
   });
 
+  it('skips the post-call page read once a page tool call is cancelled', async () => {
+    const h = backendHarness(undefined, false);
+    const updateTitle = vi.fn(() => new Promise<void>(() => {}));
+    Object.assign(h.defaultContext.tab, { updateTitle, operationTimeout: () => 60_000 });
+    const started = Promise.withResolvers<void>();
+    h.defaultContext.setExecute(() => { started.resolve(); return new Promise(() => {}); });
+    const [tool] = await h.backend.listTools();
+    const controller = new AbortController();
+    const call = h.backend.callTool(tool.name, input, request(undefined, controller.signal));
+    await started.promise;
+    controller.abort(new Error('client cancelled'));
+    const result = await call;
+    assert.equal(result.isError, true);
+    assert.match(text(result), /cancelled/);
+    assert.equal(updateTitle.mock.calls.length, 0);
+    assert.equal(h.defaultContext.busy(), 0);
+    h.backend.serverClosed();
+  });
+
   it('honors cancellation before discovering or executing a page tool', async () => {
     const h = backendHarness();
     const [tool] = await h.backend.listTools();

@@ -265,7 +265,10 @@ export class BrowserServerBackend implements ServerBackend {
       if (!tool)
         throw new Error('WebMCP tool is stale or unavailable in this scope. List tools again with the same request metadata.');
       await tool.handle(params, response, requestContext?.signal);
-      await response.finish();
+      // finish() reads the page title with no cancellation of its own; a
+      // cancelled call must release its session instead of waiting on it.
+      if (!requestContext?.signal.aborted)
+        await response.finish();
       const sessionLog = id === undefined ? await this._ensureSessionLog() : await context.resolveSessionLog();
       // Routed calls share the opener's log, so the metadata handle keeps
       // them attributable without overwriting a page-owned argument.

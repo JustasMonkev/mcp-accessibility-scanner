@@ -18,7 +18,6 @@ import debug from 'debug';
 import { z } from 'zod';
 
 import { Client } from '@modelcontextprotocol/client';
-import { notifyToolListChanged } from './toolListChanged.js';
 
 import type { CallToolRequestContext, ServerBackend, ClientVersion, ServerBackendContext, Tool, CallToolResult, CallToolRequest } from './server.js';
 import type { SharedClientSlot } from './sharedClientSlot.js';
@@ -225,14 +224,17 @@ export class ProxyBackend implements ServerBackend {
   }
 
   private async _setCurrentClient(factory: MCPProvider, notifyOnChange: boolean) {
-    const previousTools = notifyOnChange ? await this._getExposedTools(this._currentClient).catch(() => undefined) : undefined;
     await this._currentClient?.close();
     this._currentClient = undefined;
 
     const client = await this._connectClient(factory);
     this._currentClient = client;
     this._ownsCurrentClient = true;
-    await notifyToolListChanged(this._backendContext, previousTools, await this._getExposedTools(client));
+    // Page tools depend on the connected browser, so a switch is announced
+    // outright. Listing either provider's tools to compare them would run
+    // page discovery, and possibly attach a browser, that no client asked for.
+    if (notifyOnChange)
+      await this._backendContext?.notifyToolListChanged().catch(errorsDebug);
   }
 
   private async _connectClient(factory: MCPProvider): Promise<Client> {
@@ -267,16 +269,5 @@ export class ProxyBackend implements ServerBackend {
       if (this._ownsCurrentClient && this._currentClient === client)
         void this._backendContext?.notifyToolListChanged().catch(errorsDebug);
     });
-  }
-
-  private async _getExposedTools(client: Client | undefined): Promise<Tool[]> {
-    if (!client)
-      return [];
-
-    const { tools } = await client.listTools();
-    const toolDescriptors = [...tools];
-    if (this._mcpProviders.length > 1)
-      toolDescriptors.push(this._contextSwitchTool);
-    return toolDescriptors;
   }
 }

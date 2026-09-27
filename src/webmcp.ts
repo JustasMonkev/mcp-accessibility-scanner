@@ -45,7 +45,7 @@ const documentKey = `__webmcp_${randomUUID()}`;
 // Document markers are minted with randomUUID(). The value comes back from
 // the page, which can forge it, and is copied into every tool's invocation key.
 const documentIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const pendingDiscovery = new WeakMap<playwright.Frame, { promise: Promise<string>, expired: boolean }>();
+const pendingDiscovery = new WeakMap<playwright.Frame, Promise<string>>();
 const pendingInvocations = new Map<string, Promise<string>>();
 // Keyed by schema JSON, least recently used first.
 const compiledSchemas = new Map<string, StandardSchemaWithJSON<Record<string, unknown>, Record<string, unknown>> | undefined>();
@@ -594,27 +594,21 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
       return [];
     const identity = frameIdentity(tab.page, frame);
     try {
+      // Promise.race cannot cancel a browser protocol request. A read still
+      // in flight after its caller gave up is shared by later callers, each
+      // under its own deadline, instead of starting another on every poll.
       let pending = pendingDiscovery.get(frame);
-      // Promise.race cannot cancel a browser protocol request. Retain an
-      // expired read until settlement instead of leaking another on each poll.
-      if (pending?.expired)
-        return [];
       if (!pending) {
-        pending = { promise: frame.evaluate(collectInPageScript, budget), expired: false };
-        pendingDiscovery.set(frame, pending);
+        const read = frame.evaluate(collectInPageScript, budget);
+        pending = read;
+        pendingDiscovery.set(frame, read);
         const clear = () => {
-          if (pendingDiscovery.get(frame) === pending)
+          if (pendingDiscovery.get(frame) === read)
             pendingDiscovery.delete(frame);
         };
-        void pending.promise.then(clear, clear);
+        void read.then(clear, clear);
       }
-      let raw: string;
-      try {
-        raw = await bounded(() => pending.promise, remaining, signal);
-      } catch (error) {
-        pending.expired = true;
-        throw error;
-      }
+      const raw = await bounded(() => pending, remaining, signal);
       const listing = await parseListing(raw, budget.tools, deadline, signal);
       // Another request can select a different tab while discovery awaits;
       // its tools would fail on the first call, so they are not published.

@@ -253,6 +253,28 @@ describe('WebMCP discovery and identity', () => {
     }
   });
 
+  it('lets a later listing wait on a discovery read its predecessor gave up on', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      let reads = 0;
+      h.frames[0].sandbox.document.modelContext.getTools = () => {
+        ++reads;
+        return new Promise(resolve => setTimeout(() => resolve([registration()]), 6000));
+      };
+      const first = listWebMCPTools(h.tab);
+      await vi.advanceTimersByTimeAsync(5000);
+      assert.deepEqual(await first, []);
+      // The read answers one second into this listing's own deadline.
+      const second = listWebMCPTools(h.tab);
+      await vi.advanceTimersByTimeAsync(1000);
+      assert.equal((await second).length, 1);
+      assert.equal(reads, 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('bounds tool count, schemas and descriptions and skips malformed registrations', async () => {
     const h = harness([
       { name: null },
