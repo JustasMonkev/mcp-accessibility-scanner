@@ -28,11 +28,11 @@ import { contextFactory } from '../src/browserContextFactory.js';
 import { resolveCLIConfig } from '../src/config.js';
 import { wrapInProcess } from '../src/mcp/server.js';
 
-const requestedBrowser = process.env.MCP_TEST_BROWSER;
+const requestedBrowser = process.env.MCP_TEST_BROWSER_NAME;
 const browser = requestedBrowser || 'chromium';
 // An unrecognized --browser value silently falls back to Chrome.
 if (!['chromium', 'firefox', 'webkit'].includes(browser))
-  throw new Error(`MCP_TEST_BROWSER must be chromium, firefox or webkit; got ${JSON.stringify(browser)}`);
+  throw new Error(`MCP_TEST_BROWSER_NAME must be chromium, firefox or webkit; got ${JSON.stringify(browser)}`);
 // The default run skips without the bundled Chromium, like the other
 // real-browser tests; an explicitly requested engine must not skip silently.
 const canRun = !!requestedBrowser || existsSync(chromium.executablePath());

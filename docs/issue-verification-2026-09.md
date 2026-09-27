@@ -324,16 +324,17 @@ verification was added:
 | WebKit 26.6 | Button exposed with a reference, found and verified (`known-webkit-nested-details-leak`) | Discoverable |
 
 Locally, the pinned dependencies with Chromium 141.0.7390.37 also passed; this
-container cannot download the pinned browser builds. `MCP_TEST_BROWSER` selects
-`chromium` (default), `firefox` or `webkit`. The default Chromium case skips
-when the bundled Chromium is not installed, like the other real-browser tests;
-an explicitly selected engine never skips. `npm test` runs the Chromium case in
-CI. The `webkit-regressions` job runs WebKit and a Firefox control:
+container cannot download the pinned browser builds. `MCP_TEST_BROWSER_NAME`
+selects `chromium` (default), `firefox` or `webkit`, as for the numpad test. The
+default Chromium case skips when the bundled Chromium is not installed, like
+the other real-browser tests; an explicitly selected engine never skips.
+`npm test` runs the Chromium case in CI. The `webkit-regressions` job runs
+WebKit and a Firefox control:
 
 ```sh
 npx playwright install --with-deps webkit firefox
-MCP_TEST_BROWSER=webkit npx vitest run tests/details-visibility.integration.test.ts
-MCP_TEST_BROWSER=firefox npx vitest run tests/details-visibility.integration.test.ts
+MCP_TEST_BROWSER_NAME=webkit npx vitest run tests/details-visibility.integration.test.ts
+MCP_TEST_BROWSER_NAME=firefox npx vitest run tests/details-visibility.integration.test.ts
 ```
 
 The fixture uses light DOM only. It does not show whether Axe or the custom
