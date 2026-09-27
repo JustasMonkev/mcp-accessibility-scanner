@@ -174,30 +174,21 @@ describe('Snapshot Tools', () => {
       '    - link "Target Three"',
     ];
 
-    it('should expose an optional numeric limit without changing the default', () => {
+    it('should expose an optional positive integer limit without changing the default', () => {
       // SAFETY: toMcpTool emits a JSON schema; this test reads only its properties and required fields.
       const schema = toMcpTool(findTool.schema).inputSchema as JSONSchema7;
-      expect(schema.properties?.maxResults).toMatchObject({ type: 'number' });
+      expect(schema.properties?.maxResults).toMatchObject({ type: 'integer', minimum: 1 });
       expect(schema.required ?? []).not.toContain('maxResults');
       expect(findTool.schema.inputSchema.parse({ text: 'Target' })).toEqual({ text: 'Target' });
-      expect(findTool.schema.inputSchema.parse({ text: 'Target', maxResults: 2 })).toEqual({ text: 'Target', maxResults: 2 });
+      expect(findTool.schema.inputSchema.parse({ text: 'Target', maxResults: 1 })).toEqual({ text: 'Target', maxResults: 1 });
     });
 
     it.each(['1', null, true, {}, []])('should reject a nonnumeric maxResults %j', maxResults => {
       expect(() => findTool.schema.inputSchema.parse({ text: 'Target', maxResults })).toThrow();
     });
 
-    it.each([0, -1, 1.5])('should reject maxResults %s before reading the snapshot', async maxResults => {
-      const context = findContext(lines.join('\n'));
-      const tab = context.currentTabOrDie();
-      const response = findResponse();
-
-      // SAFETY: These mocks provide the tab, modal state, snapshot, and response methods used by browser_find.
-      await findTool.handle(context as any, { text: 'Target', maxResults }, response as any);
-
-      expect(response.addError).toHaveBeenCalledExactlyOnceWith('"maxResults" must be a positive integer.');
-      expect(response.addResult).not.toHaveBeenCalled();
-      expect(tab.page.ariaSnapshot).not.toHaveBeenCalled();
+    it.each([0, -1, 1.5])('should reject maxResults %s at the input schema', maxResults => {
+      expect(() => findTool.schema.inputSchema.parse({ text: 'Target', maxResults })).toThrow();
     });
 
     it.each([

@@ -75,6 +75,17 @@ describe('BrowserServerBackend.callTool', () => {
         .rejects.toThrow(/Invalid input for tool "browser_navigate"/);
   });
 
+  it.each([0, -1, 1.5])('rejects browser_find maxResults %s before invoking the handler', async maxResults => {
+    const config = await resolveConfig({});
+    const backend = new BrowserServerBackend(config, unusedFactory);
+    const tool = allTools.find(candidate => candidate.schema.name === 'browser_find')!;
+    const handle = vi.spyOn(tool, 'handle');
+
+    await expect(backend.callTool('browser_find', { text: 'Target', maxResults }))
+        .rejects.toThrow(/Invalid input for tool "browser_find"/);
+    expect(handle).not.toHaveBeenCalled();
+  });
+
   it('removes reserved output files when a tool fails', async () => {
     const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-reservation-'));
     const tool = allTools.find(candidate => candidate.schema.name === 'browser_default_timeout')!;

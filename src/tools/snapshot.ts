@@ -65,7 +65,7 @@ const snapshotSchema = z.object({
 const findSchema = z.object({
   text: z.string().optional().describe('Plain text to search for in the page snapshot (case-insensitive substring match). Provide either text or regex, not both.'),
   regex: z.string().optional().refine(value => !value || isValidRegex(value), { message: 'Invalid regular expression' }).describe('Regular expression to search for in the page snapshot. Matching is case-sensitive by default; wrap the pattern in slashes to add flags, e.g. "/error/i" for case-insensitive. Provide either text or regex, not both.'),
-  maxResults: z.number().optional().describe('Maximum number of matching lines to return. Must be a positive integer. Defaults to returning all matches.'),
+  maxResults: z.number().int().min(1).optional().describe('Maximum number of matching lines to return. Must be a positive integer. Defaults to returning all matches.'),
 }).superRefine((params, context) => {
   if (!params.text && !params.regex)
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Provide either "text" or "regex" to search for.' });
@@ -355,10 +355,6 @@ const find = defineTabTool({
     }
     if (params.text && params.regex) {
       response.addError('Provide only one of "text" or "regex", not both.');
-      return;
-    }
-    if (params.maxResults !== undefined && (!Number.isInteger(params.maxResults) || params.maxResults <= 0)) {
-      response.addError('"maxResults" must be a positive integer.');
       return;
     }
 
