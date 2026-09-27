@@ -78,6 +78,8 @@ The Compose configuration publishes the unauthenticated MCP HTTP transport on `1
 docker build -t mcp-accessibility-scanner .
 ```
 
+Images built from this Dockerfile include `tini` as an init process; Docker's `--init` flag is optional.
+
 #### Docker smoke test
 
 ```bash

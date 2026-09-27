@@ -36,6 +36,7 @@ COPY --from=build /app/LICENSE ./LICENSE
 COPY --from=build /app/NOTICE.md ./NOTICE.md
 
 RUN node ./node_modules/playwright-core/cli.js install --with-deps chromium \
+  && apt-get install -y --no-install-recommends tini \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --system mcp \
   && useradd --system --gid mcp --create-home --shell /usr/sbin/nologin mcp \
@@ -49,4 +50,4 @@ EXPOSE 8931
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "const http = require('http'); const req = http.request({hostname:'localhost',port:8931,path:'/mcp',method:'POST',headers:{'content-type':'application/json'}}, res => process.exit(res.statusCode === 406 ? 0 : 1)); req.on('error', () => process.exit(1)); req.end('{}');"
 
-ENTRYPOINT ["node", "cli.js", "--no-sandbox"]
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "node", "cli.js", "--no-sandbox"]

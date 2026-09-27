@@ -71,6 +71,22 @@ jobs:
       - name: Verify client-certificate proxy routing
         run: node tests/client-certificate-proxy-probe.mjs
 
+  docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        shell: bash
+        env:
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
+          git checkout --detach "$CHECKOUT_SHA"
+      - name: Test Docker image
+        run: npm run test:docker
+
   browser-regressions:
     name: Browser regressions (${{ matrix.os }}, ${{ matrix.channel }})
     runs-on: ${{ matrix.os }}
