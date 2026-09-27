@@ -154,6 +154,132 @@ describe('Snapshot Tools', () => {
     expect(response.addResult).not.toHaveBeenCalledWith(expect.stringContaining('----'));
   });
 
+  describe('browser_find maxResults', () => {
+    const lines = [
+      '- main:',
+      '  - region "First":',
+      '    - navigation:',
+      '      - link "Home"',
+      '      - link "About"',
+      '      - link "Contact"',
+      '      - link "Help"',
+      '      - link "Target One"',
+      '      - link "Target Two"',
+      '      - link "News"',
+      '      - link "Careers"',
+      '      - link "Products"',
+      '      - link "Services"',
+      '      - link "Support"',
+      '  - region "Last":',
+      '    - link "Target Three"',
+    ];
+
+    it('should expose an optional numeric limit without changing the default', () => {
+      // SAFETY: toMcpTool emits a JSON schema; this test reads only its properties and required fields.
+      const schema = toMcpTool(findTool.schema).inputSchema as JSONSchema7;
+      expect(schema.properties?.maxResults).toMatchObject({ type: 'number' });
+      expect(schema.required ?? []).not.toContain('maxResults');
+      expect(findTool.schema.inputSchema.parse({ text: 'Target' })).toEqual({ text: 'Target' });
+      expect(findTool.schema.inputSchema.parse({ text: 'Target', maxResults: 2 })).toEqual({ text: 'Target', maxResults: 2 });
+    });
+
+    it.each(['1', null, true, {}, []])('should reject a nonnumeric maxResults %j', maxResults => {
+      expect(() => findTool.schema.inputSchema.parse({ text: 'Target', maxResults })).toThrow();
+    });
+
+    it.each([0, -1, 1.5])('should reject maxResults %s before reading the snapshot', async maxResults => {
+      const context = findContext(lines.join('\n'));
+      const tab = context.currentTabOrDie();
+      const response = findResponse();
+
+      // SAFETY: These mocks provide the tab, modal state, snapshot, and response methods used by browser_find.
+      await findTool.handle(context as any, { text: 'Target', maxResults }, response as any);
+
+      expect(response.addError).toHaveBeenCalledExactlyOnceWith('"maxResults" must be a positive integer.');
+      expect(response.addResult).not.toHaveBeenCalled();
+      expect(tab.page.ariaSnapshot).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { params: { text: 'target', maxResults: 1 }, query: '"target"' },
+      { params: { regex: '/target/i', maxResults: 1 }, query: '/target/i' },
+    ])('should cap matching lines and preserve ancestors for $query', async ({ params, query }) => {
+      const response = findResponse();
+
+      // SAFETY: These mocks provide the tab, modal state, snapshot, and response methods used by browser_find.
+      await findTool.handle(findContext(lines.join('\n')) as any, params, response as any);
+
+      expect(response.addResult).toHaveBeenCalledExactlyOnceWith([
+        `Found 3 matches for ${query} (showing first 1):`,
+        '',
+        ...lines.slice(0, 3),
+        ...lines.slice(4, 11),
+      ].join('\n'));
+      expect(response.addError).not.toHaveBeenCalled();
+    });
+
+    it('should count matching lines rather than merged context windows', async () => {
+      const response = findResponse();
+
+      // SAFETY: These mocks provide the tab, modal state, snapshot, and response methods used by browser_find.
+      await findTool.handle(findContext(lines.join('\n')) as any, { text: 'Target', maxResults: 2 }, response as any);
+
+      expect(response.addResult).toHaveBeenCalledExactlyOnceWith([
+        'Found 3 matches for "Target" (showing first 2):',
+        '',
+        ...lines.slice(0, 3),
+        ...lines.slice(4, 12),
+      ].join('\n'));
+    });
+
+    it('should retain separated windows only for the selected matches', async () => {
+      const snapshotLines = Array.from({ length: 17 }, (_, index) =>
+        `- button "${index % 8 === 0 ? 'Target' : 'Other'} ${index}"`);
+      const response = findResponse();
+
+      // SAFETY: These mocks provide the tab, modal state, snapshot, and response methods used by browser_find.
+      await findTool.handle(findContext(snapshotLines.join('\n')) as any, { text: 'Target', maxResults: 2 }, response as any);
+
+      expect(response.addResult).toHaveBeenCalledExactlyOnceWith([
+        'Found 3 matches for "Target" (showing first 2):',
+        '',
+        ...snapshotLines.slice(0, 4),
+        '',
+        '----',
+        '',
+        ...snapshotLines.slice(5, 12),
+      ].join('\n'));
+    });
+
+    it.each([undefined, 3, 4])('should preserve all matches with maxResults %s', async maxResults => {
+      const response = findResponse();
+
+      // SAFETY: These mocks provide the tab, modal state, snapshot, and response methods used by browser_find.
+      await findTool.handle(findContext(lines.join('\n')) as any, { text: 'Target', maxResults }, response as any);
+
+      expect(response.addResult).toHaveBeenCalledExactlyOnceWith([
+        'Found 3 matches for "Target":',
+        '',
+        ...lines.slice(0, 3),
+        ...lines.slice(4),
+      ].join('\n'));
+    });
+
+    it('should keep singular and zero-match messages unchanged with a limit', async () => {
+      const context = findContext('- button "Submit"');
+      const matched = findResponse();
+      const unmatched = findResponse();
+
+      // SAFETY: These mocks provide the tab, modal state, snapshot, and response methods used by browser_find.
+      await findTool.handle(context as any, { text: 'Submit', maxResults: 1 }, matched as any);
+      // SAFETY: The same context mock and unmatched response provide all methods used by browser_find.
+      await findTool.handle(context as any, { text: 'Cancel', maxResults: 1 }, unmatched as any);
+
+      expect(matched.addResult).toHaveBeenCalledExactlyOnceWith('Found 1 match for "Submit":\n\n- button "Submit"');
+      expect(unmatched.addResult).toHaveBeenCalledExactlyOnceWith('No matches found for "Cancel".');
+    });
+  });
+
   it('should show browser_find matches under their path from the root', async () => {
     const context = findContext([
       '- main [ref=e1]:',

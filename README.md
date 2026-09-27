@@ -552,8 +552,9 @@ AI snapshots mark a visually present subtree excluded from accessibility queries
 
 #### `browser_find`
 Search the current page accessibility snapshot without returning the full snapshot.
-- Parameters: `text` (case-insensitive substring) or `regex` (regular expression, supports `/pattern/flags`)
+- Parameters: `text` (case-insensitive substring) or `regex` (regular expression, supports `/pattern/flags`), `maxResults` (optional positive integer; defaults to all matches)
 - Returns matching snapshot lines with surrounding context, shown under their path from the root of the tree; `...` marks truncated off-path context.
+- `maxResults` selects the first matching lines before building context windows and preserves their ancestor paths. Context may include additional matching lines. When truncated, the header reports the total match count and `(showing first Y)`.
 
 #### `browser_click`
 Perform click on a web page element.
