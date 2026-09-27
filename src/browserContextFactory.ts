@@ -746,19 +746,30 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
 
   private async _waitForBrowser(endpoint: string, clientInfo: ClientInfo, childProcess: ReturnType<typeof spawn>, startupTimeoutMs: number): Promise<playwright.Browser> {
     const deadline = Date.now() + startupTimeoutMs;
-    const connectOptions: playwright.ConnectOverCDPOptions = {
-      headers: cdpConnectHeaders(clientInfo, this.config.browser),
-      timeout: this.config.browser.cdpTimeout,
-      noDefaults: true,
-    };
+    const headers = cdpConnectHeaders(clientInfo, this.config.browser);
+    // Playwright's own connect default, which --cdp-timeout overrides.
+    const cdpTimeout = this.config.browser.cdpTimeout ?? 30000;
+    let attachTimedOut = false;
     for (;;) {
+      // Every attempt also ends at the startup deadline: an attach that hangs
+      // on a tab without a renderer must not outlast the launch budget, even
+      // when --cdp-timeout is longer or 0 (disabled). Never 0 here, which
+      // would disable Playwright's timeout instead.
+      const remaining = Math.max(1, deadline - Date.now());
       try {
-        return await playwright.chromium.connectOverCDP(endpoint, connectOptions);
+        return await playwright.chromium.connectOverCDP(endpoint, {
+          headers,
+          timeout: cdpTimeout > 0 ? Math.min(cdpTimeout, remaining) : remaining,
+          noDefaults: true,
+        });
       } catch (error) {
         testDebug(`connect over CDP failed for ${endpoint}: ${String(error)}`);
+        // Remembered across attempts: the last one may be cut short by the
+        // deadline before its WebSocket connects.
+        attachTimedOut ||= isCdpAttachTimeout(error);
         if (Date.now() >= deadline) {
           childProcess.kill('SIGTERM');
-          throw new Error(`Timed out waiting for CDP endpoint ${endpoint}.${isCdpAttachTimeout(error) ? ` ${cdpAttachTimeoutHint}` : ''}`);
+          throw new Error(`Timed out waiting for CDP endpoint ${endpoint}.${attachTimedOut ? ` ${cdpAttachTimeoutHint}` : ''}`);
         }
         await new Promise(resolve => setTimeout(resolve, 50));
       }

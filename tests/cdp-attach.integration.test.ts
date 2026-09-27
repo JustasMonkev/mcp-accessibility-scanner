@@ -142,7 +142,9 @@ describe('CDP attach with a tab without a renderer (#244)', () => {
     expect(await listTabs(endpoint)).toEqual(tabs);
   });
 
-  it('bounds and explains a blocked --cdp-launch attach, then stops only the launched app', async () => {
+  // A --cdp-timeout above the startup budget, or 0 (disabled), must not let a
+  // hung attach outlast --cdp-launch-startup-timeout.
+  it.each([1000, 0])('bounds and explains a blocked --cdp-launch attach (cdpTimeout %i), then stops only the launched app', async cdpTimeout => {
     const { endpoint, port, tabs } = await launchWithCrashedTab();
     // The "launched application" forwards its CDP port to the prepared
     // browser, so the tab has crashed before the launch path's first attach.
@@ -158,7 +160,7 @@ describe('CDP attach with a tab without a renderer (#244)', () => {
     const config = await resolveConfig({
       browser: {
         cdpLaunch: { command: process.execPath, args: ['-e', forwarder, '{port}', String(port)], port: launchPort, startupTimeoutMs: 3000 },
-        cdpTimeout: 1000,
+        cdpTimeout,
       },
       timeouts: { settle: 50 },
     });

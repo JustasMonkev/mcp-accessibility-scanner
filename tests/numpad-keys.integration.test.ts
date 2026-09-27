@@ -36,9 +36,10 @@ const presses = [
   { press: 'Shift+NumpadDecimal', key: '.', code: 'NumpadDecimal', typed: '.' },
 ];
 
-// Deviations recorded on the paired pins (microsoft/playwright#42913, merged
-// after 1.63.0, and #42927, unmerged when recorded). A Playwright version or
-// browser without an entry must deliver every key as modeled above.
+// Deviations recorded on the paired pins with Chromium 153.0.8010.12, Firefox
+// 155.0 and WebKit 26.6 (microsoft/playwright#42913, merged after 1.63.0, and
+// #42927, unmerged when recorded). A Playwright version or browser without an
+// entry must deliver every key as modeled above.
 const knownDeviations: Record<string, string[]> = {
   '1.63.0/chromium': [
     'NumpadSubtract keyup location is not numpad',
@@ -49,6 +50,14 @@ const knownDeviations: Record<string, string[]> = {
     'Shift+Numpad1 typed ""',
     'Shift+NumpadDecimal keyup location is not numpad',
     'Shift+NumpadDecimal typed ""',
+  ],
+  '1.63.0/firefox': [
+    'NumpadDecimal keydown key "\\u0000"',
+    'NumpadDecimal keyup key "\\u0000"',
+  ],
+  '1.63.0/webkit': [
+    'NumpadDecimal keydown key "\\u0000"',
+    'NumpadDecimal keyup key "\\u0000"',
   ],
 };
 
@@ -114,8 +123,5 @@ it(`records numpad key events delivered by browser_press_key (${browserName}, #2
   }
   const pin = `${playwrightCoreVersion}/${browserName}`;
   process.stdout.write(JSON.stringify({ pin, browserVersion: browser.version(), platform: process.platform, found, observed }) + '\n');
-  // Firefox and WebKit controls are recorded in CI before they gate.
-  if (browserName !== 'chromium' && !(pin in knownDeviations))
-    return;
   expect(found).toEqual(knownDeviations[pin] ?? []);
 });

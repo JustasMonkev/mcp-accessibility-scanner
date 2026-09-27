@@ -196,7 +196,8 @@ with `--remote-debugging-port`, gets one healthy tab and one tab crashed through
 `chrome://crash`. Then the attach is retried. This container cannot install
 Playwright's bundled browser. Local runs therefore used the preinstalled
 Chromium 141.0.7390.37 (full and headless shell) with the paired 1.63.0
-dependencies; CI covers the bundled build. Observed behavior:
+dependencies. In CI, the regression tests below showed the same hang on the
+bundled Chromium 153.0.8010.12 headless shell. Observed behavior:
 
 | Attach | Result on 1.63.0 |
 | --- | --- |
@@ -219,17 +220,23 @@ initialization. Instead, the failure is now bounded and explained:
   the call log shows `<ws connected>`, it appends a note naming the crashed or
   discarded tab and the remedy.
 - `--cdp-launch` previously said only `Timed out waiting for CDP endpoint …`,
-  although the endpoint had answered. It now appends the same note when the
-  last attempt timed out after the WebSocket connected.
+  although the endpoint had answered. It now appends the same note when an
+  attempt timed out after the WebSocket connected.
+- `--cdp-launch` also awaited each attach attempt in full before checking its
+  startup deadline. A hung attach could therefore outlast
+  `--cdp-launch-startup-timeout` by a longer `--cdp-timeout`, or hang forever
+  with `--cdp-timeout 0`. Each attempt is now capped at the remaining startup
+  budget, and at `--cdp-timeout` when that is positive.
 - Unreachable endpoints keep their unchanged errors; they are not blamed on a
   tab.
 
 `tests/cdp-attach.integration.test.ts` covers the direct Playwright attach
-and both MCP paths. The endpoint test uses `cdpTimeout: 2000`. The launch test
-uses `startupTimeoutMs: 3000` and `cdpTimeout: 1000`, where the "launched
-application" forwards to the prepared browser. On 1.63.0 each MCP attach must
-fail with the note well inside the configured budgets: ~2.3s and ~3.6s locally,
-against a 15s bound far below Playwright's 30s default. The launched
+and both MCP paths. The endpoint test uses `cdpTimeout: 2000`. The launch
+tests use `startupTimeoutMs: 3000` with `cdpTimeout` 1000 and 0, where the
+"launched application" forwards to the prepared browser. On 1.63.0 each MCP
+attach must fail with the note well inside the configured budgets: ~2.2s and
+~3.3s locally, against a 15s bound far below Playwright's 30s default. The
+`cdpTimeout: 0` launch hung before the cap. The launched
 application must be stopped, and the browser's tab list must be unchanged.
 Removing the note makes both MCP tests fail. On any other Playwright version,
 all three tests require the fixed contract: the attach succeeds, the healthy
@@ -244,20 +251,29 @@ for `keydown`/`keyup`, plus the typed value. The expected model is
 Playwright's US layout: NumLock-off keys, Shift yields the digit or decimal
 point, and every event is at `DOM_KEY_LOCATION_NUMPAD` (3).
 
-| Press | Chromium 141.0.7390.37, Playwright 1.63.0 |
-| --- | --- |
-| `NumpadSubtract` | key `-`, keyCode 109; location 3 on keydown, **1 on keyup**; types `-` |
-| `NumpadDecimal` | key **`"\u0000"`** (expected `Delete`), keyCode 46; keyup location **1** |
-| `Shift+Numpad1` | key `1` but keyCode **35 (End)**; keyup location **1**; **types nothing** |
-| `Shift+NumpadDecimal` | key `.` but keyCode **46 (Delete)**; keyup location **1**; **types nothing** |
+Recorded with Playwright 1.63.0. Chromium 153.0.8010.12 (the bundled build, CI)
+and Chromium 141.0.7390.37 (local) produced identical events. Firefox 155.0 and
+WebKit 26.6 ran on Linux in the `keyboard-controls` CI job. Values are
+`key`, `keyCode`, `location` for keydown → keyup, then the typed value:
 
-These match the upstream diagnoses. The keyup location is #42913, and
-`NumpadDecimal` plus the shifted digits are #42927. The server forwards keys
-unchanged; remapping them locally would diverge from Playwright's layout and
-from the other engines. The test pins exactly these deviations for
-`1.63.0/chromium`, and any other version must deliver the modeled events. The
-`keyboard-controls` CI job runs the same test on Firefox and WebKit. Their
-events are recorded in the job log before they gate.
+| Press | Chromium 153 / 141 | Firefox 155.0 | WebKit 26.6 |
+| --- | --- | --- | --- |
+| `NumpadSubtract` | `-`, 109, 3 → **1**; types `-` | `-`, 109, 3 → 3; types `-` | `-`, 109, 3 → 3; types `-` |
+| `NumpadDecimal` | **`"\u0000"`**, 46, 3 → **1**; types nothing | **`"\u0000"`**, 46, 3 → 3; types nothing | **`"\u0000"`**, 46, 3 → 3; types nothing |
+| `Shift+Numpad1` | `1`, **35 (End)**, 3 → **1**; **types nothing** | `1`, 35, 3 → 3; types `1` | `1`, 97, 3 → 3; types `1` |
+| `Shift+NumpadDecimal` | `.`, **46 (Delete)**, 3 → **1**; **types nothing** | `.`, 46, 3 → 3; types `.` | `.`, 110, 3 → 3; types `.` |
+
+Bold marks a deviation from the modeled events, which expect key `Delete` for
+`NumpadDecimal` and location 3 on every event. Firefox's `keyCode` for shifted
+digits is also the unshifted value, but it still types the digit. On Linux,
+WebKit typed nothing for `NumpadDecimal`: no U+0000 was inserted.
+
+These results match the upstream diagnoses. The Chromium keyup location is
+#42913. `NumpadDecimal` in every engine, and the Chromium shifted digits, are
+#42927. The server forwards keys unchanged; remapping them locally would diverge
+from Playwright's layout. The test pins exactly these deviations per
+`1.63.0/<engine>`. Any other Playwright version, or an engine without an entry,
+must deliver the modeled events.
 
 Focused checks:
 
