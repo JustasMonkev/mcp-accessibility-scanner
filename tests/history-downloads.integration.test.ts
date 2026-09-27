@@ -31,13 +31,16 @@ const channel = process.env.MCP_TEST_BROWSER_CHANNEL || 'chromium';
 const enableBFCache = process.env.MCP_TEST_ENABLE_BFCACHE === '1';
 const require = createRequire(import.meta.url);
 const versions = { playwright: require('playwright/package.json').version, playwrightCore: require('playwright-core/package.json').version };
-// Exact native crash controls captured in CI run 35692199642. New versions
-// must prove saved bytes; they do not inherit an assumed browser limitation.
+// Exact native crash controls captured in CI runs 35692199642 and 36224901523
+// and on local macOS. New versions must prove saved bytes; they do not inherit
+// an assumed browser limitation.
 const observedNativeCrashes = new Set([
+  'darwin/chromium/153.0.8010.12',
   'linux/chromium/153.0.8010.12',
   'win32/chromium/153.0.8010.12',
   'win32/chrome/153.0.8010.53',
   'win32/msedge/153.0.4234.48',
+  'win32/msedge/154.0.4258.37',
 ]);
 const downloadBytes = Buffer.from('Local download: verified after profile reuse.\n');
 const clients: Client[] = [];
