@@ -40,7 +40,7 @@ docker run -d --name "${CONTAINER_NAME}" -p "${PORT}:8931" "${IMAGE_TAG}" --host
 ready=0
 for _ in $(seq 1 20); do
   http_code="$(curl -sS -o /tmp/mcp-docker-smoke-response.txt -w '%{http_code}' -X POST "http://127.0.0.1:${PORT}/mcp" -H 'content-type: application/json' -d '{}' 2>/dev/null || true)"
-  if [[ "${http_code}" == "406" ]]; then
+  if [[ "${http_code}" == "400" ]] && grep -Fq 'Bad Request: the request body is not a valid JSON-RPC message' /tmp/mcp-docker-smoke-response.txt; then
     ready=1
     break
   fi
@@ -50,7 +50,6 @@ done
 if [[ "${ready}" != "1" ]]; then
   echo "[docker-smoke] MCP endpoint did not become ready on localhost:${PORT} (HTTP ${http_code})"
   cat /tmp/mcp-docker-smoke-response.txt || true
-  curl --noproxy '*' -i -X POST "http://127.0.0.1:${PORT}/mcp" -H 'content-type: application/json' -d '{}' || true
   docker logs "${CONTAINER_NAME}" || true
   exit 1
 fi
