@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
@@ -21,15 +22,20 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { afterAll, afterEach, beforeAll, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/client';
+import { chromium } from 'playwright';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { contextFactory } from '../src/browserContextFactory.js';
 import { resolveCLIConfig } from '../src/config.js';
 import { wrapInProcess } from '../src/mcp/server.js';
 
-const browser = process.env.MCP_TEST_BROWSER || 'chromium';
+const requestedBrowser = process.env.MCP_TEST_BROWSER;
+const browser = requestedBrowser || 'chromium';
 // An unrecognized --browser value silently falls back to Chrome.
 if (!['chromium', 'firefox', 'webkit'].includes(browser))
   throw new Error(`MCP_TEST_BROWSER must be chromium, firefox or webkit; got ${JSON.stringify(browser)}`);
+// The default run skips without the bundled Chromium, like the other
+// real-browser tests; an explicitly requested engine must not skip silently.
+const canRun = !!requestedBrowser || existsSync(chromium.executablePath());
 const require = createRequire(import.meta.url);
 const versions = { playwright: require('playwright/package.json').version, playwrightCore: require('playwright-core/package.json').version };
 // Playwright 1.63.0's injected WebKit visibility fallback checks only the
@@ -93,9 +99,14 @@ async function expectDiscoverable(snapshot: string) {
   expect(snapshot).toMatch(/button "Hidden action" \[ref=/);
   expect(await ok('browser_find', { text: 'Hidden action' })).toMatch(/button "Hidden action" \[ref=/);
   expect(await ok('browser_verify_element_visible', { role: 'button', accessibleName: 'Hidden action' })).toContain('Done');
+  expect(await ok('browser_verify_text_visible', { text: 'Hidden action' })).toContain('Done');
 }
 
-it(`hides an open details nested in a closed details from snapshots, find and verify (${browser}) #246`, async () => {
+const title = knownWebKitLeak
+  ? 'reproduces the known WebKit leak of an open details nested in a closed details'
+  : 'hides an open details nested in a closed details from snapshots, find and verify';
+
+it.skipIf(!canRun)(`${title} (${browser}) #246`, async () => {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-details-visibility-'));
   const config = await resolveCLIConfig({ browser, caps: ['verify'], headless: true, isolated: true, outputDir: directory });
   client = new Client({ name: 'details-visibility-test', version: '1' });
@@ -115,6 +126,9 @@ it(`hides an open details nested in a closed details from snapshots, find and ve
     const verify = await call('browser_verify_element_visible', { role: 'button', accessibleName: 'Hidden action' });
     expect(verify.isError, verify.text).toBe(true);
     expect(verify.text).toContain('Element with role "button" and accessible name "Hidden action" not found');
+    const verifyText = await call('browser_verify_text_visible', { text: 'Hidden action' });
+    expect(verifyText.isError, verifyText.text).toBe(true);
+    expect(verifyText.text).toContain('Text not found');
   }
 
   const opened = await ok('browser_click', { element: 'Outer section', ref: outerRef });

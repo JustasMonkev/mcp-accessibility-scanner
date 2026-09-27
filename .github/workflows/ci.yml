@@ -186,9 +186,12 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps webkit firefox
       - run: node tests/webkit-network-probe.mjs
-      - run: npx vitest run tests/details-visibility.integration.test.ts
+      # Independent checks: a probe or WebKit failure must not hide the others.
+      - if: ${{ !cancelled() }}
+        run: npx vitest run tests/details-visibility.integration.test.ts
         env:
           MCP_TEST_BROWSER: webkit
-      - run: npx vitest run tests/details-visibility.integration.test.ts
+      - if: ${{ !cancelled() }}
+        run: npx vitest run tests/details-visibility.integration.test.ts
         env:
           MCP_TEST_BROWSER: firefox

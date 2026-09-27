@@ -191,26 +191,38 @@ stable release; only `1.64.0-alpha` builds follow it.
 `tests/details-visibility.integration.test.ts` resolves the server's own
 `--browser <engine> --isolated --headless --caps verify` configuration and
 drives it over MCP with the upstream fixture. With the outer details closed it
-checks the `browser_navigate` snapshot, `browser_find` and
-`browser_verify_element_visible`. It then opens the outer details by clicking
-its summary with `browser_click`, and requires the inner summary and button to
-be discoverable through all three.
+checks the `browser_navigate` snapshot, `browser_find`,
+`browser_verify_element_visible` and `browser_verify_text_visible`. It then
+opens the outer details by clicking its summary with `browser_click`, and
+requires the inner summary and button to be discoverable through all four.
 
 Every engine and version must hide the nested contents while the outer details
 is closed, except WebKit with exactly `playwright` and `playwright-core` 1.63.0.
 That pin must instead reproduce the known defect: the closed-state snapshot,
-find result and verification all expose the hidden button, and the run logs
-`known-webkit-nested-details-leak`. This is **a reproduced upstream defect, not
-a fix**. Any dependency change makes the WebKit check demand the correct
-behavior, so an upgrade fails unless the new release contains the fix. Once a
-stable release does, upgrade `playwright` and `playwright-core` together and
-install its browsers. No snapshot filtering, dependency patch or alpha pin is
-included.
+find result and both verifications all expose the hidden button, and the run
+logs `known-webkit-nested-details-leak`. This is **a reproduced upstream defect,
+not a fix**. Changing either package's version makes the WebKit check demand
+the correct behavior, so an upgrade fails unless the new release contains the
+fix. Once a stable release does, upgrade `playwright` and `playwright-core`
+together and install its browsers. No snapshot filtering, dependency patch or
+alpha pin is included.
 
-Locally, the pinned dependencies with Chromium 141.0.7390.37 passed; this
+Hosted [run 36325621479](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/36325621479)
+on Linux, Node 24.21.0 and the paired 1.63.0 dependencies, before the text
+verification was added:
+
+| Browser | Outer details closed | After opening |
+| --- | --- | --- |
+| Chromium 153.0.8010.12 | Hidden from snapshot, find and verification | Discoverable |
+| Firefox 155.0 | Hidden from snapshot, find and verification | Discoverable |
+| WebKit 26.6 | Button exposed with a reference, found and verified (`known-webkit-nested-details-leak`) | Discoverable |
+
+Locally, the pinned dependencies with Chromium 141.0.7390.37 also passed; this
 container cannot download the pinned browser builds. `MCP_TEST_BROWSER` selects
-`chromium` (default), `firefox` or `webkit`. `npm test` runs the Chromium case
-in CI. The `webkit-regressions` job runs WebKit and a Firefox control:
+`chromium` (default), `firefox` or `webkit`. The default Chromium case skips
+when the bundled Chromium is not installed, like the other real-browser tests;
+an explicitly selected engine never skips. `npm test` runs the Chromium case in
+CI. The `webkit-regressions` job runs WebKit and a Firefox control:
 
 ```sh
 npx playwright install --with-deps webkit firefox
