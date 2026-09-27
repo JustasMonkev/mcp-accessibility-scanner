@@ -176,3 +176,47 @@ reset or dependency upgrade is included.
 `MCP_TEST_BROWSER_CHANNEL=chromium-headless-shell` control, the full Vitest suite
 passes **54 files / 1,252 tests, with no skips**. This environment selection is
 confined to the history/download fixture; production browser defaults are intact.
+
+## WebKit nested details visibility (#246)
+
+Playwright's injected visibility check uses `Element.checkVisibility()` except
+in WebKit, where a manual fallback inspects only the nearest `details` or
+`summary`. The shipped `playwright-core` 1.63.0 bundle contains that fallback,
+so an open `<details>` nested inside a closed one, and everything in it, counts
+as visible to AI snapshots and `getByRole`. The upstream fix,
+[microsoft/playwright#42951](https://github.com/microsoft/playwright/pull/42951),
+checks every ancestor instead. It is unmerged, and 1.63.0 is still the latest
+stable release; only `1.64.0-alpha` builds follow it.
+
+`tests/details-visibility.integration.test.ts` resolves the server's own
+`--browser <engine> --isolated --headless --caps verify` configuration and
+drives it over MCP with the upstream fixture. With the outer details closed it
+checks the `browser_navigate` snapshot, `browser_find` and
+`browser_verify_element_visible`. It then opens the outer details by clicking
+its summary with `browser_click`, and requires the inner summary and button to
+be discoverable through all three.
+
+Every engine and version must hide the nested contents while the outer details
+is closed, except WebKit with exactly `playwright` and `playwright-core` 1.63.0.
+That pin must instead reproduce the known defect: the closed-state snapshot,
+find result and verification all expose the hidden button, and the run logs
+`known-webkit-nested-details-leak`. This is **a reproduced upstream defect, not
+a fix**. Any dependency change makes the WebKit check demand the correct
+behavior, so an upgrade fails unless the new release contains the fix. Once a
+stable release does, upgrade `playwright` and `playwright-core` together and
+install its browsers. No snapshot filtering, dependency patch or alpha pin is
+included.
+
+Locally, the pinned dependencies with Chromium 141.0.7390.37 passed; this
+container cannot download the pinned browser builds. `MCP_TEST_BROWSER` selects
+`chromium` (default), `firefox` or `webkit`. `npm test` runs the Chromium case
+in CI. The `webkit-regressions` job runs WebKit and a Firefox control:
+
+```sh
+npx playwright install --with-deps webkit firefox
+MCP_TEST_BROWSER=webkit npx vitest run tests/details-visibility.integration.test.ts
+MCP_TEST_BROWSER=firefox npx vitest run tests/details-visibility.integration.test.ts
+```
+
+The fixture uses light DOM only. It does not show whether Axe or the custom
+audit tools share the defect.
