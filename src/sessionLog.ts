@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -74,6 +75,16 @@ type LogEntry = {
   code: string;
   tabSnapshot?: TabSnapshot;
 };
+
+// Session handles are bearer tokens: whoever holds a live one can route tool
+// calls into that session. session.md keeps entries attributable with a
+// stable label instead, wherever a handle appears (routing, arguments,
+// results such as browser_session_open's).
+const sessionHandlePattern = /\bbs_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+
+function redactSessionHandles(text: string): string {
+  return text.replace(sessionHandlePattern, handle => `bs_redacted_${createHash('sha256').update(handle).digest('hex').slice(0, 8)}`);
+}
 
 function renderUserAction(action: actions.Action, browserSessionId: string | undefined, code: string): string[] {
   const actionData: Record<string, unknown> = { ...action };
@@ -171,8 +182,8 @@ export class SessionLog {
           .catch(logUnhandledError)
           .then(async () => {
             const content = await this._storage.readFile(this._file);
-            const oldBlock = renderUserAction(previousAction, flushed.browserSessionId, previousCode).join('\n');
-            const newBlock = renderUserAction(flushed.action, flushed.browserSessionId, flushed.code).join('\n');
+            const oldBlock = redactSessionHandles(renderUserAction(previousAction, flushed.browserSessionId, previousCode).join('\n'));
+            const newBlock = redactSessionHandles(renderUserAction(flushed.action, flushed.browserSessionId, flushed.code).join('\n'));
             const markerIndex = content.indexOf(flushed.marker);
             if (markerIndex === -1)
               return;
@@ -194,11 +205,11 @@ export class SessionLog {
       userAction: action,
       source,
       tab,
-      // Session contexts' recorded actions carry the handle in session.md,
-      // mirroring how routed tool calls log a browserSessionId in their
-      // args — otherwise concurrent sessions' user actions would be
-      // indistinguishable in the shared log. Default-context actions stay
-      // untagged, exactly as before.
+      // Session contexts' recorded actions carry their session in session.md
+      // (as a redacted label), mirroring how routed tool calls log a
+      // browserSessionId in their args — otherwise concurrent sessions' user
+      // actions would be indistinguishable in the shared log. Default-context
+      // actions stay untagged, exactly as before.
       browserSessionId: source.options.browserSessionId,
       code,
       tabSnapshot: {
@@ -282,7 +293,7 @@ export class SessionLog {
 
     this._sessionFileQueue = this._sessionFileQueue
         .catch(logUnhandledError)
-        .then(() => this._storage.appendFile(this._file, lines.join('\n')))
+        .then(() => this._storage.appendFile(this._file, redactSessionHandles(lines.join('\n'))))
         .catch(logUnhandledError);
   }
 }
