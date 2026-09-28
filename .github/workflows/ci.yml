@@ -184,8 +184,17 @@ jobs:
           NODE
 
       - run: npm ci
-      - run: npx playwright install --with-deps webkit
+      - run: npx playwright install --with-deps webkit firefox
       - run: node tests/webkit-network-probe.mjs
+      # Independent checks: a probe or WebKit failure must not hide the others.
+      - if: ${{ !cancelled() }}
+        run: npx vitest run tests/details-visibility.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_NAME: webkit
+      - if: ${{ !cancelled() }}
+        run: npx vitest run tests/details-visibility.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_NAME: firefox
 
   keyboard-controls:
     name: Keyboard controls (${{ matrix.browser }})

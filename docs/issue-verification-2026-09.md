@@ -282,3 +282,60 @@ npx vitest run tests/cdp-attach.integration.test.ts tests/numpad-keys.integratio
 MCP_TEST_BROWSER_NAME=firefox npx vitest run tests/numpad-keys.integration.test.ts
 MCP_TEST_BROWSER_NAME=webkit npx vitest run tests/numpad-keys.integration.test.ts
 ```
+
+## WebKit nested details visibility (#246)
+
+Playwright's injected visibility check uses `Element.checkVisibility()` except
+in WebKit, where a manual fallback inspects only the nearest `details` or
+`summary`. The shipped `playwright-core` 1.63.0 bundle contains that fallback,
+so an open `<details>` nested inside a closed one, and everything in it, counts
+as visible to AI snapshots and `getByRole`. The upstream fix,
+[microsoft/playwright#42951](https://github.com/microsoft/playwright/pull/42951),
+checks every ancestor instead. It is unmerged, and 1.63.0 is still the latest
+stable release; only `1.64.0-alpha` builds follow it.
+
+`tests/details-visibility.integration.test.ts` resolves the server's own
+`--browser <engine> --isolated --headless --caps verify` configuration and
+drives it over MCP with the upstream fixture. With the outer details closed it
+checks the `browser_navigate` snapshot, `browser_find`,
+`browser_verify_element_visible` and `browser_verify_text_visible`. It then
+opens the outer details by clicking its summary with `browser_click`, and
+requires the inner summary and button to be discoverable through all four.
+
+Every engine and version must hide the nested contents while the outer details
+is closed, except WebKit with exactly `playwright` and `playwright-core` 1.63.0.
+That pin must instead reproduce the known defect: the closed-state snapshot,
+find result and both verifications all expose the hidden button, and the run
+logs `known-webkit-nested-details-leak`. This is **a reproduced upstream defect,
+not a fix**. Changing either package's version makes the WebKit check demand
+the correct behavior, so an upgrade fails unless the new release contains the
+fix. Once a stable release does, upgrade `playwright` and `playwright-core`
+together and install its browsers. No snapshot filtering, dependency patch or
+alpha pin is included.
+
+Hosted [run 36325621479](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/36325621479)
+on Linux, Node 24.21.0 and the paired 1.63.0 dependencies, before the text
+verification was added:
+
+| Browser | Outer details closed | After opening |
+| --- | --- | --- |
+| Chromium 153.0.8010.12 | Hidden from snapshot, find and verification | Discoverable |
+| Firefox 155.0 | Hidden from snapshot, find and verification | Discoverable |
+| WebKit 26.6 | Button exposed with a reference, found and verified (`known-webkit-nested-details-leak`) | Discoverable |
+
+Locally, the pinned dependencies with Chromium 141.0.7390.37 also passed; this
+container cannot download the pinned browser builds. `MCP_TEST_BROWSER_NAME`
+selects `chromium` (default), `firefox` or `webkit`, as for the numpad test. The
+default Chromium case skips when the bundled Chromium is not installed, like
+the other real-browser tests; an explicitly selected engine never skips.
+`npm test` runs the Chromium case in CI. The `webkit-regressions` job runs
+WebKit and a Firefox control:
+
+```sh
+npx playwright install --with-deps webkit firefox
+MCP_TEST_BROWSER_NAME=webkit npx vitest run tests/details-visibility.integration.test.ts
+MCP_TEST_BROWSER_NAME=firefox npx vitest run tests/details-visibility.integration.test.ts
+```
+
+The fixture uses light DOM only. It does not show whether Axe or the custom
+audit tools share the defect.
