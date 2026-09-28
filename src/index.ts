@@ -37,6 +37,7 @@ export async function createConnection(userConfig: Config = {}, contextGetter?: 
 class SimpleBrowserContextFactory implements BrowserContextFactory {
   name = 'custom';
   description = 'Connect to a browser using a custom context getter';
+  readonly sharedContext = true;
   // The getter is caller-supplied and typically hands back one long-lived
   // context; nothing guarantees a separate context per call, so explicit
   // browser sessions cannot promise separation here.

@@ -65,6 +65,11 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Run native WebMCP integration
+        run: npm test -- tests/webmcp-browser.test.ts
+        env:
+          WEBMCP_BROWSER_TEST: '1'
+
       - name: Build
         run: npm run build
 

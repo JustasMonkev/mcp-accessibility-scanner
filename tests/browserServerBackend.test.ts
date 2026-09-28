@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -169,7 +170,9 @@ describe('BrowserServerBackend.callTool', () => {
       expect(sessionFolders).toHaveLength(1);
       const sessionMd = fs.readFileSync(path.join(outputDir, sessionFolders[0], 'session.md'), 'utf-8');
       expect(sessionMd).toContain('browser_default_timeout');
-      expect(sessionMd).toContain(browserSessionId);
+      // Attributed to the session by label; the live bearer handle is never written.
+      expect(sessionMd).toContain(`bs_redacted_${createHash('sha256').update(browserSessionId).digest('hex').slice(0, 8)}`);
+      expect(sessionMd).not.toContain(browserSessionId);
     } finally {
       fs.rmSync(outputDir, { recursive: true, force: true });
     }

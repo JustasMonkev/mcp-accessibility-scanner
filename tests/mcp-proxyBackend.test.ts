@@ -88,55 +88,43 @@ describe('ProxyBackend', () => {
     ] as any);
 
     const close = vi.fn(async () => undefined);
-    (backend as any)._currentClient = {
-      listTools: vi.fn(async () => ({ tools: [{ name: 'scan_page' }] })),
-      close,
-    };
+    const previousListTools = vi.fn(async () => ({ tools: [{ name: 'scan_page' }] }));
+    (backend as any)._currentClient = { listTools: previousListTools, close };
     (backend as any)._backendContext = {
       notifyToolListChanged: vi.fn(async () => undefined),
     };
 
     vi.spyOn(Client.prototype, 'connect').mockResolvedValue(undefined);
-    vi.spyOn(Client.prototype, 'listTools').mockResolvedValue({
-      tools: [{ name: 'audit_site' }] as any[],
+    const nextListTools = vi.spyOn(Client.prototype, 'listTools').mockResolvedValue({
+      tools: [{ name: 'scan_page' }] as any[],
     } as any);
 
     await (backend as any)._setCurrentClient((backend as any)._mcpProviders[1], true);
 
     expect(close).toHaveBeenCalledTimes(1);
+    // Announced even with matching built-in names: page tools depend on the
+    // browser, and listing either provider would run page discovery.
     expect((backend as any)._backendContext.notifyToolListChanged).toHaveBeenCalledTimes(1);
+    expect(previousListTools).not.toHaveBeenCalled();
+    expect(nextListTools).not.toHaveBeenCalled();
   });
 
-  it('skips tool list change notifications when the exposed tools stay the same', async () => {
+  it('neither lists tools nor notifies while connecting the first provider', async () => {
     const backend = new ProxyBackend([
       {
         name: 'default',
         description: 'Default provider',
         connect: vi.fn(async () => ({ id: 'default-transport' })),
       },
-      {
-        name: 'alternate',
-        description: 'Alternate provider',
-        connect: vi.fn(async () => ({ id: 'alternate-transport' })),
-      },
     ] as any);
-
-    (backend as any)._currentClient = {
-      listTools: vi.fn(async () => ({ tools: [{ name: 'scan_page' }] })),
-      close: vi.fn(async () => undefined),
-    };
-    (backend as any)._backendContext = {
-      notifyToolListChanged: vi.fn(async () => undefined),
-    };
-
+    const context = { notifyToolListChanged: vi.fn(async () => undefined) };
     vi.spyOn(Client.prototype, 'connect').mockResolvedValue(undefined);
-    vi.spyOn(Client.prototype, 'listTools').mockResolvedValue({
-      tools: [{ name: 'scan_page' }] as any[],
-    } as any);
+    const listTools = vi.spyOn(Client.prototype, 'listTools');
 
-    await (backend as any)._setCurrentClient((backend as any)._mcpProviders[1], true);
+    await backend.initialize(context as any, { name: 'vitest', version: '1' });
 
-    expect((backend as any)._backendContext.notifyToolListChanged).not.toHaveBeenCalled();
+    expect(listTools).not.toHaveBeenCalled();
+    expect(context.notifyToolListChanged).not.toHaveBeenCalled();
   });
 
   it('keeps the current provider connected when a switch fails validation', async () => {

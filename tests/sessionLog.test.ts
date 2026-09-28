@@ -14,12 +14,16 @@
  * limitations under the License.
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveConfig } from '../src/config.js';
 import { SessionLog } from '../src/sessionLog.js';
+
+const handle = (n: number) => `bs_${n.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`;
+const label = (value: string) => `bs_redacted_${createHash('sha256').update(value).digest('hex').slice(0, 8)}`;
 
 describe('session log folders', () => {
   afterEach(() => {
@@ -61,7 +65,7 @@ describe('session log folders', () => {
         appendFile: vi.fn().mockResolvedValue(undefined),
       };
       const log = new SessionLog('/unused', storage);
-      const sessionContext = { options: { browserSessionId: 'bs_0a1b2c3d' } } as any;
+      const sessionContext = { options: { browserSessionId: handle(1) } } as any;
       const defaultContext = { options: {} } as any;
       const sessionTab = { context: sessionContext, page: { url: () => 'https://session.example/' } } as any;
       const defaultTab = { context: defaultContext, page: { url: () => 'https://default.example/' } } as any;
@@ -80,7 +84,8 @@ describe('session log folders', () => {
       expect(blocks).toHaveLength(3);
       const [, sessionBlock, defaultBlock] = blocks;
       expect(sessionBlock).toContain('"text": "session-2"');
-      expect(sessionBlock).toContain('"browserSessionId": "bs_0a1b2c3d"');
+      expect(sessionBlock).toContain(`"browserSessionId": "${label(handle(1))}"`);
+      expect(appended).not.toContain(handle(1));
       expect(appended).not.toContain('session-1');
       // The default context's entry is intact and stays untagged, as before.
       expect(defaultBlock).toContain('"text": "default-1"');
@@ -144,6 +149,89 @@ describe('session log folders', () => {
       expect(content).toContain("await page.fill('#name', 'Hi');");
       expect(content).not.toContain('"text": "H"');
       expect(content).not.toContain("await page.fill('#name', 'H');");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never writes a live session handle, keeping sessions distinguishable by label', async () => {
+    vi.useFakeTimers();
+    try {
+      let content = '';
+      const storage = {
+        readFile: vi.fn(async () => content),
+        writeFile: vi.fn(async (filePath: string, value: string) => {
+          if (filePath.endsWith('session.md'))
+            content = value;
+        }),
+        appendFile: vi.fn(async (_filePath: string, value: string) => { content += value; }),
+      };
+      const log = new SessionLog('/unused', storage);
+      // browser_session_open returns the new handle in its result text.
+      log.logResponse({
+        context: { options: {} }, toolName: 'browser_session_open', toolArgs: {},
+        result: () => `Opened browser session ${handle(3)}.`, isError: () => false, code: () => '', tabSnapshot: () => undefined,
+      } as any);
+      log.logResponse({
+        context: { options: {} }, toolName: 'browser_tabs', toolArgs: { action: 'list', browserSessionId: handle(4) },
+        result: () => 'ok', isError: () => false, code: () => '', tabSnapshot: () => undefined,
+      } as any);
+      const tab = { context: { options: { browserSessionId: handle(3) } }, page: { url: () => 'https://example.com/' } } as any;
+      log.logUserAction({ name: 'fill', text: 'H' } as any, tab, "await page.fill('#name', 'H');", false);
+      await vi.advanceTimersByTimeAsync(1000);
+      // An update after the flush rewrites the block already on disk.
+      log.logUserAction({ name: 'fill', text: 'Hi' } as any, tab, "await page.fill('#name', 'Hi');", true);
+      await (log as any)._sessionFileQueue;
+
+      expect(content).not.toContain(handle(3));
+      expect(content).not.toContain(handle(4));
+      expect(content).toContain(`Opened browser session ${label(handle(3))}.`);
+      expect(content).toContain(`"browserSessionId": "${label(handle(4))}"`);
+      expect(content).toContain(`"browserSessionId": "${label(handle(3))}"`);
+      expect(content).toContain('"text": "Hi"');
+      expect(content).not.toContain('"text": "H"');
+      expect(label(handle(3))).not.toBe(label(handle(4)));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('records routing metadata apart from tool-owned arguments', async () => {
+    // A page-registered WebMCP tool may define its own browserSessionId
+    // argument, so the metadata route cannot be merged into the logged args.
+    vi.useFakeTimers();
+    try {
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const log = new SessionLog('/unused', storage);
+      const response = (toolArgs: Record<string, unknown>) => ({
+        context: { options: {} },
+        toolName: 'webmcp_echo',
+        toolArgs,
+        result: () => 'ok',
+        isError: () => false,
+        code: () => '',
+        tabSnapshot: () => undefined,
+      }) as any;
+      log.logResponse(response({ browserSessionId: 42 }), { browserSessionId: handle(2) });
+      log.logResponse(response({ value: 'default' }));
+      await vi.advanceTimersByTimeAsync(1000);
+      await (log as any)._sessionFileQueue;
+
+      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
+      expect(appended).toContain([
+        '### Tool call: webmcp_echo',
+        '- Metadata',
+        '```json',
+        JSON.stringify({ browserSessionId: label(handle(2)) }, null, 2),
+        '```',
+        '- Args',
+        '```json',
+        JSON.stringify({ browserSessionId: 42 }, null, 2),
+      ].join('\n'));
+      expect(appended.match(/- Metadata/g)).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }

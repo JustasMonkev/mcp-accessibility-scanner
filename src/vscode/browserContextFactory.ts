@@ -29,6 +29,7 @@ export const vscodeProfileConflictRemedy = 'Drop --storage-state and sign in in 
 export class VSCodeBrowserContextFactory implements BrowserContextFactory {
   name = 'vscode';
   description = 'Connect to a browser running in the Playwright VS Code extension';
+  readonly sharedContext = true;
   // Fresh contexts accept storage state; existing extension contexts reject it.
   readonly appliesStorageState = true;
   // Each createContext() reuses the extension browser's existing context when
