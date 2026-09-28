@@ -884,11 +884,11 @@ commands](docs/browser-upgrade-validation-251.md) before upgrading.
 - **Firefox on macOS:** `browser_press_key` with `Alt+a` inserted `a`; Chromium
   and WebKit controls did not. The Firefox r1553 roll addressing Option-key and
   frame-focus behavior is merged but unreleased. Keys remain passed through.
-- **WebKit on macOS 14:** upstream reports page creation failing with
-  `Unknown setting: PushAPIEnabled` in its pinned r2251 bundle. This OS was not
-  available for local validation. Do not treat the passing macOS 26/r2359
-  control as macOS 14 coverage; use a separately validated browser/OS combination
-  if affected, rather than blindly downgrading Playwright.
+- **WebKit on macOS 14:** page creation fails with
+  `Unknown setting: PushAPIEnabled` in the frozen r2251 bundle, reproduced on a
+  hosted macOS 14.8.9 arm64 runner. The macOS 26/r2359 control passed. Use a
+  separately validated browser/OS combination if affected, rather than blindly
+  downgrading Playwright.
 
 The WebKit provisional-load event-order race and Linux Firefox crash-window
 retention report remain distinct upgrade checks. Ordinary navigation/error

@@ -34,7 +34,7 @@ profiles are never navigated, reloaded, patched, or killed.
 | [CDP main-frame corruption #42955](https://github.com/microsoft/playwright/issues/42955) | **Reproduced** through endpoint and launch factories. `page.url()` and raw CDP still identify the top document; Playwright evaluation reaches `about:srcdoc`, `window.top !== window`, the top locator matches zero elements, and the scoped Axe scan rejects the missing top selector. A fresh context created after attachment evaluates, locates and scans the top document correctly. | Timing changes the signature: evaluation can reach the top before the later locator/scan is redirected. Upstream also reports destroyed execution contexts. |
 | [Screenshot font changes #42962](https://github.com/microsoft/playwright/issues/42962) | **Reproduced** via `browser_take_screenshot`. Viewport capture preserves actual fonts and geometry. Headless-shell full-page capture changes all five generic families; Chrome changes monospace only, with unchanged measured geometry. Navigation restores the original metrics. | Other platforms/font installations need their own measurements. Chrome is not a universal unaffected control. |
 | [WebKit lost navigation abort #42957](https://github.com/microsoft/playwright/issues/42957) | Launch, page creation, COOP+COEP navigation, intercepted abort, a 3-second stalled navigation, and subsequent navigation pass through MCP. An additional 350 fresh-page COOP+COEP navigations completed without failure (93.6 seconds). The abort is delivered without a timeout; the deliberately stalled request reports the configured timeout. | **The exact provisional-load-before-document-request ordering was not reproduced.** A route abort is a control, not a replay of that engine race. A containing stable release still needs the reported order (including a document request that never arrives) plus these controls. |
-| [WebKit macOS 14 #42964](https://github.com/microsoft/playwright/issues/42964) | Installed `browsers.json` confirms r2251 overrides for `mac14` and `mac14-arm64`; this host uses r2359 and passes page setup/navigation. | **macOS 14 is unavailable locally.** The `PushAPIEnabled` failure remains an upstream report, not a locally reproduced result. No downgrade has been verified or recommended. |
+| [WebKit macOS 14 #42964](https://github.com/microsoft/playwright/issues/42964) | Installed `browsers.json` confirms r2251 overrides for `mac14` and `mac14-arm64`; this host uses r2359 and passes page setup/navigation. | **Reproduced on hosted macOS 14.8.9 arm64/r2251** (see below); not a local macOS 26 result. Page-dependent controls cannot run on the affected bundle. No downgrade has been verified or recommended. |
 | [Firefox retained crash windows #42956](https://github.com/microsoft/playwright/issues/42956) | An explicitly opted-in Linux fixture compares 10 normal and 10 crash/context-close cycles after warm-up, reports parent RSS, checks subsequent browser usability, and crashes the sole page of a fresh persistent profile before opening three new pages. | RSS is diagnostic, not a count of retained native windows. A future fix needs native-window/memory-report evidence as well; a closed Playwright context alone cannot prove cleanup. See hosted results below. |
 | [Firefox Option-key/frame-focus roll #42958](https://github.com/microsoft/playwright/pull/42958) | **Option insertion reproduced:** MCP `Alt+a` sends keydown/keyup and an input event inserting `a` in Firefox; Chromium/Chrome/WebKit insert nothing. All tested engines report `[true,false,false]`, `[true,true,false]`, `[true,true,true]` for top/child/nested focus respectively. | No frame-focus failure reproduced in these controls. r1553 itself is not adopted or claimed tested. Recheck focused and unfocused controls on a containing stable release. |
 
@@ -90,11 +90,34 @@ explicit execution on non-Linux hosts. CI opts in in its Firefox job.
 
 ## Hosted platform results
 
-Pending the PR's disposable CI runs: Ubuntu Firefox/WebKit and macOS 14 WebKit.
+[Initial hosted run](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/36449725328):
+Ubuntu 24.04 x64 / Firefox 155.0 completed the normal/crash comparison and
+persistent-profile recovery. Parent RSS grew **21.18 MiB** over ten normal cycles
+and **181.80 MiB** over ten crash cycles after two warm-up cycles. This supports
+the retention report, but is not a native-window count. Firefox's Linux Option
+and nested-focus controls passed without text insertion.
+
+macOS 14.8.9 arm64 installed frozen WebKit **r2251** and produced the expected
+`Unknown setting: PushAPIEnabled` rejection; the initial test budget expired at
+30 seconds. The fixture now gives that identical error assertion a 60-second test
+budget. Ubuntu WebKit r2359 also completed **350** fresh-page COOP+COEP
+navigations in **141.1 seconds**, plus abort, timeout and recovery controls,
+without reproducing the reported ordering failure.
 The macOS 14 job asserts the exact known page-setup failure on 1.63.0; subsequent
 page-dependent controls are explicitly skipped there. Other versions must create
 a page and pass the navigation/keyboard controls. Local macOS 26 results must not
 be substituted for macOS 14, Linux crash retention or Linux font measurements.
+
+## Repository checks
+
+Local `npm test`: **1,407 passed, 5 skipped** (platform/opt-in cases).
+`npm run test:coverage` passed: statements 78.91%, branches 68.47%, functions
+84.23%, lines 79.18%. `npm run lint`, `npm run build`, `npm run knip`, strict
+TypeScript checks of the three new test files, `git diff --check`, and
+lazy-clean's slop-check all passed. `npm run test:mcp`: **33 passed**, installation
+intentionally skipped. The initial hosted run also passed Docker smoke, Linux
+Chromium history/downloads, Linux WebKit regressions, and Windows Chrome/Edge
+history/downloads. See PR checks for the latest complete run.
 
 ## Stable upgrade gate
 

@@ -218,4 +218,4 @@ it.skipIf(!mac14WebKit)('characterizes actual macOS 14 WebKit page setup (#42964
     await page.goto('data:text/html,<h1>WebKit page created</h1>');
     expect(await page.locator('h1').textContent()).toBe('WebKit page created');
   }
-});
+}, 60000);
