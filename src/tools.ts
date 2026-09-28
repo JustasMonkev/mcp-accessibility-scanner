@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import { isToolBlocked } from './mcp/toolPolicy.js';
+import type { ToolPolicy } from './mcp/toolPolicy.js';
 import common from './tools/common.js';
 import console from './tools/console.js';
 import dialogs from './tools/dialogs.js';
@@ -68,10 +70,31 @@ export const allTools: Tool<any>[] = [
   ...auditScreenReader,
 ];
 
+export function validateToolPolicy(config: ToolPolicy): void {
+  // browser_connect belongs to the proxies, not the browser tool registry.
+  const knownNames = new Set([...allTools.map(tool => tool.schema.name), 'browser_connect']);
+  for (const option of ['allowedTools', 'blockedTools'] as const) {
+    const names = config[option];
+    if (names === undefined)
+      continue;
+    if (!Array.isArray(names) || names.some(name => typeof name !== 'string' || !name.trim()))
+      throw new Error(`${option} must be an array of non-blank exact tool names. Use [] to clear the list.`);
+    for (const name of names) {
+      // Page-owned registrations cannot be discovered at startup. Accept only
+      // the complete generated name; scope/staleness are still checked on call.
+      if (!knownNames.has(name) && !/^webmcp_[a-zA-Z0-9_-]{1,36}_[a-f0-9]{20}$/.test(name))
+        throw new Error(`Unknown tool in ${option}: ${name}`);
+    }
+  }
+}
+
 export function filteredTools(config: FullConfig) {
-  return allTools.filter(tool => tool.capability.startsWith('core')
+  validateToolPolicy(config);
+  return allTools.filter(tool => !isToolBlocked(config, tool.schema.name) && (
+    tool.capability.startsWith('core')
     || config.capabilities?.includes(tool.capability)
-    || (tool.capability === 'install' && config.capabilities?.includes('core-install')));
+    || config.allowedTools?.includes(tool.schema.name)
+    || (tool.capability === 'install' && config.capabilities?.includes('core-install'))));
 }
 
 export const serverInstructions = [

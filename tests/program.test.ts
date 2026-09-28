@@ -71,6 +71,31 @@ function collectOutput(args: string[], timeoutMs = 3000, environment?: NodeJS.Pr
   });
 }
 
+describe('tool policy CLI options', () => {
+  it('advertises both flags and applies additive allow / block precedence', () => {
+    expect(runCLI('--help')).toContain('--allowed-tools <tools>');
+    expect(runCLI('--help')).toContain('--blocked-tools <tools>');
+    const output = runCLI('--allowed-tools browser_pdf_save,browser_install --blocked-tools browser_navigate,browser_install list-tools');
+    expect(output).toMatch(/^browser_pdf_save  /m);
+    expect(output).toMatch(/^browser_snapshot  /m);
+    expect(output).not.toMatch(/^browser_navigate  /m);
+    expect(output).not.toMatch(/^browser_install  /m);
+  });
+
+  it('clears an environment list with an explicitly empty CLI value', () => {
+    const output = execFileSync(process.execPath, [...cliArgs, '--blocked-tools=', 'list-tools'], {
+      encoding: 'utf-8', env: { ...process.env, PLAYWRIGHT_MCP_BLOCKED_TOOLS: 'browser_navigate' }, timeout: 15_000,
+    });
+    expect(output).toMatch(/^browser_navigate  /m);
+  });
+
+  it.each([{ mode: [] }, { mode: ['--connect-tool'] }, { mode: ['--extension'] }, { mode: ['--vscode'] }])('rejects unknown names before starting $mode', async ({ mode }) => {
+    const result = await collectOutput([...mode, '--port', '0', '--blocked-tools', 'browser_nav']);
+    expect(result.stderr).toContain('Unknown tool in blockedTools: browser_nav');
+    expect(result.stderr).not.toContain('Listening on');
+  });
+});
+
 describe('file path CLI option', () => {
   it('advertises the accepted modes', () => {
     expect(runCLI('--help')).toContain('--file-paths <relative|absolute>');
@@ -300,6 +325,37 @@ describe('CLI command dispatch contract', () => {
       expect(message?.result).toBeDefined();
       return message.result;
     }
+
+    it.each([{ mode: [] }, { mode: ['--connect-tool'] }, { mode: ['--extension'] }, { mode: ['--vscode'] }])('enforces tool policy on separate handshake-free requests in $mode', async ({ mode }) => {
+      const { child, url } = await startServer([...mode, '--allowed-tools', 'browser_pdf_save', '--blocked-tools', 'browser_connect,browser_navigate,browser_session_open']);
+      const rpc = async (id: number, method: string, params: object) => {
+        const response = await fetch(`${url}/mcp`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'accept': 'application/json, text/event-stream' },
+          body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+        });
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        const messages = response.headers.get('content-type')?.includes('application/json')
+          ? [JSON.parse(body)]
+          : body.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)));
+        return messages.find(message => message.id === id);
+      };
+      try {
+        const listed = await rpc(1, 'tools/list', {});
+        expect(listed.error).toBeUndefined();
+        const names = listed.result.tools.map((tool: { name: string }) => tool.name);
+        expect(names).toContain('browser_pdf_save');
+        expect(names).toContain('browser_snapshot');
+        for (const [index, name] of ['browser_connect', 'browser_navigate', 'browser_session_open'].entries()) {
+          expect(names).not.toContain(name);
+          const called = await rpc(index + 2, 'tools/call', { name, arguments: { browserSessionId: 'unknown' } });
+          expect(called.error).toMatchObject({ code: -32602, message: expect.stringContaining('not found') });
+        }
+      } finally {
+        child.kill('SIGTERM');
+      }
+    });
 
     // A browser_connect switch must survive the response that carried it:
     // handshake-free POSTs are each served by a throwaway proxy backend, so

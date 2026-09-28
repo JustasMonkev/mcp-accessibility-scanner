@@ -23,6 +23,7 @@ import { packageJSON } from './utils/package.js';
 import { Context } from './context.js';
 import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported, contextFactory, PersistentContextFactory, persistentProfileConflictRemedy } from './browserContextFactory.js';
 import { ProxyBackend } from './mcp/proxyBackend.js';
+import { toolNameList } from './mcp/toolPolicy.js';
 import { SharedClientSlot } from './mcp/sharedClientSlot.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
 import { BrowserSessionRegistry } from './browserSessions.js';
@@ -121,6 +122,8 @@ function configureBaseProgram() {
       .option('--blocked-origins <origins>', 'semicolon-separated list of origins to block the browser from requesting. Blocklist is evaluated before allowlist. If used without the allowlist, requests not matching the blocklist are still allowed.', semicolonSeparatedList)
       .option('--block-service-workers', 'block service workers')
       .option('--browser <browser>', 'browser or chrome channel to use, possible values: chrome, firefox, webkit, msedge.')
+      .option('--allowed-tools <tools>', 'comma-separated exact tool names to enable in addition to core and capability tools (not a whitelist).', toolNameList)
+      .option('--blocked-tools <tools>', 'comma-separated exact tool names to hide and reject; takes precedence over --allowed-tools.', toolNameList)
       .option('--caps <caps>', 'comma-separated list of additional capabilities to enable, possible values: vision, pdf, verify, devtools, install (allows browser downloads).', commaSeparatedList)
       .option('--cdp-launch-command <command>', 'launch a desktop app command and connect to its CDP endpoint.')
       .option('--cdp-launch-args <args>', 'comma-separated arguments passed to the CDP launch command.', commaSeparatedList)
@@ -250,8 +253,8 @@ configureBaseProgram()
           name: 'Playwright w/ switch',
           nameInConfig: 'playwright-switch',
           version: packageJSON.version,
-          create: () => new ProxyBackend(makeProviders(false)),
-          createStateless: () => new ProxyBackend(makeProviders(true), sharedSelection),
+          create: () => new ProxyBackend(makeProviders(false), undefined, config),
+          createStateless: () => new ProxyBackend(makeProviders(true), sharedSelection, config),
         };
         await mcpServer.start(factory, config.server);
         return;

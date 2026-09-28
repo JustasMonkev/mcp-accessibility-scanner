@@ -24,6 +24,7 @@ import { Response } from './response.js';
 import { SessionLog } from './sessionLog.js';
 import { filteredTools } from './tools.js';
 import { toMcpTool } from './mcp/tool.js';
+import { assertToolNotBlocked, isToolBlocked } from './mcp/toolPolicy.js';
 import { listWebMCPTools, webMCPSessionId, WebMCPObserver } from './webmcp.js';
 import type { WebMCPToolDefinition } from './webmcp.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
@@ -243,7 +244,8 @@ export class BrowserServerBackend implements ServerBackend {
     const sharedDefault = this._ephemeralDefaultContext && context === this._context && this._browserContextFactory.sharedContext;
     const attach = sharedDefault && !(listing && this._browserContextFactory.attachNeedsUser);
     const tab = context.currentTab() ?? (attach ? await withAbort(() => context.ensureTab(signal), signal) : undefined);
-    return tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
+    const tools = tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
+    return tools.filter(tool => !isToolBlocked(this._config, tool.schema.name));
   }
 
   /** Routes page tools via request metadata; every field inside arguments belongs to the page. */
@@ -285,6 +287,7 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   async callTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext) {
+    assertToolNotBlocked(this._config, name);
     const tool = this._toolsByName.get(name);
     if (!tool)
       return this._callWebMCP(name, rawArguments, requestContext);

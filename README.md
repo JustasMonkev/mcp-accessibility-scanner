@@ -186,6 +186,27 @@ You can pass a configuration file to customize Playwright behavior:
 }
 ```
 
+#### Exact-name tool selection
+
+```bash
+npx mcp-accessibility-scanner --allowed-tools browser_pdf_save --blocked-tools browser_evaluate,browser_file_upload
+```
+
+| CLI | Environment | JSON config |
+| --- | --- | --- |
+| `--allowed-tools` | `PLAYWRIGHT_MCP_ALLOWED_TOOLS` | `allowedTools` |
+| `--blocked-tools` | `PLAYWRIGHT_MCP_BLOCKED_TOOLS` | `blockedTools` |
+
+CLI/environment values are comma-separated exact, case-sensitive names; JSON values are arrays of strings. `allowedTools` **adds** named tools to core and enabled capabilities; it is **not a restrictive whitelist**. For example, allowing `browser_pdf_save` does not disable navigation or accessibility audits, and allowing `browser_install` explicitly enables browser downloads without `--caps install`. Omitted lists preserve existing exposure defaults.
+
+`blockedTools` wins over core tools, capabilities and `allowedTools`. Blocked tools are absent from `tools/list` and rejected on `tools/call`, even without prior listing and even when a request names a browser session. The policy applies to standalone, CDP, extension, provider-switching and VS Code backends, over stdio and HTTP. `browser_session_open`, `browser_session_close`, accessibility tools and the proxy-owned `browser_connect` are not exempt. Allowing a tool does not bypass a provider's limitations or enable a connection mode; `browser_connect` still requires a mode that supplies it.
+
+Precedence is **CLI > environment > config file**, independently for each list. A higher-precedence list replaces the lower one; lists are not merged. `[]` in JSON, `--blocked-tools=`, or an empty environment value explicitly clears that list (likewise for `allowedTools`). Empty lists add/block nothing; duplicates are harmless. Blank entries inside nonempty lists, non-array JSON values, unknown built-in names and wildcards fail at startup.
+
+Page-provided WebMCP tools remain discoverable by default. Lists can contain the **full generated name** from `tools/list`, including its identity suffix. Such names are syntax-checked at startup; existence, scope and staleness can only be checked when called. Blocking an exact name hides and rejects that registration, including after dynamic list changes. Allowing a page name neither registers it nor restricts other page tools. A navigation or changed registration can produce a new name, so an exact-name block is not a persistent ban on an application's action.
+
+This controls dispatch by tool name, not equivalent actions through other tools: for example, blocking `browser_click` does not prevent a page click through `browser_evaluate`. See the [adoption decision](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/decisions/002-tool-filtering.md).
+
 #### Configuration Options
 
 Create a `config.json` file with the following options:
@@ -633,13 +654,13 @@ Take a screenshot of the current page.
 Save page as PDF.
 - Parameters: `filename` (optional, defaults to `page-{timestamp}-{token}.pdf`)
 
-This tool requires `--caps pdf` in the CLI.
+Enable this tool with `--caps pdf` or `--allowed-tools browser_pdf_save`.
 
 #### `browser_install`
 Install the configured browser engine (use when browser executable is missing).
 - Parameters: none
 
-Disabled by default. Enable it at server startup with `--caps install`, `PLAYWRIGHT_MCP_CAPS=install`, or `"capabilities": ["install"]` in the config file. Explicit `core-install` settings remain supported as a deprecated alias; use `install` in new configurations. Without this opt-in, the tool is neither listed nor callable; existing browser installations can still be used.
+Disabled by default. Enable it at server startup with `--caps install`, `PLAYWRIGHT_MCP_CAPS=install`, or `"capabilities": ["install"]` in the config file. Exact-name opt-in via `--allowed-tools browser_install` or `allowedTools` is also supported. Explicit `core-install` settings remain supported as a deprecated alias; use `install` in new configurations. Without this opt-in, the tool is neither listed nor callable; existing browser installations can still be used.
 
 This tool invokes Playwright's installer, which downloads executable code. In [Playwright 1.63.0](https://github.com/microsoft/playwright/blob/v1.63.0/packages/playwright-core/src/server/registry/oopDownloadBrowserMain.ts), browser archives have no checksum or signature verification before extraction; the default download hosts use HTTPS. Only enable installation when you trust the download source and TLS configuration, including any custom `PLAYWRIGHT_DOWNLOAD_HOST`, browser-specific host overrides, or TLS-inspecting proxy. Do not disable TLS certificate validation.
 
@@ -742,11 +763,11 @@ Verify list items at a snapshot reference.
 Verify an element value or checked state.
 - Parameters: `type`, `element`, `ref`, `value`
 
-These verification tools require `--caps verify`:
+Enable these verification tools with `--caps verify`, or select individual names with `--allowed-tools`:
 
 ### Vision Mode Tools (Coordinate-based Interaction)
 
-These tools require `--caps vision`:
+Enable these tools with `--caps vision`, or select individual names with `--allowed-tools`:
 
 #### `browser_mouse_move_xy`
 Move mouse to specific coordinates.
