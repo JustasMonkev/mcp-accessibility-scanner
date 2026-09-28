@@ -257,7 +257,6 @@ jobs:
         run: npx vitest run tests/browser-upgrade-controls.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
-          DEBUG: ${{ matrix.browser == 'webkit' && 'pw:protocol' || '' }}
 
       - if: ${{ !cancelled() && matrix.browser == 'firefox' }}
         name: Probe crashes only in this disposable runner's Firefox

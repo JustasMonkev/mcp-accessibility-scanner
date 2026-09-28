@@ -161,10 +161,12 @@ it.skipIf(knownPageSetupFailure)('records Option-key text insertion and focused/
 
 it.skipIf(knownPageSetupFailure)('delivers navigation errors, bounds stalled loads, and remains usable (#42957, #42964 controls)', async () => {
   const { page, backend } = await setup();
+  const served = new Set<string>();
   const server = http.createServer((request, response) => {
     if (request.url === '/stall')
       return;
     response.writeHead(200, { 'content-type': 'text/html', 'cross-origin-opener-policy': 'same-origin', 'cross-origin-embedder-policy': 'require-corp' });
+    response.once('finish', () => served.add(request.url!));
     response.end('<h1>Navigation recovered</h1>');
   });
   try {
@@ -193,16 +195,38 @@ it.skipIf(knownPageSetupFailure)('delivers navigation errors, bounds stalled loa
     }
     if (browserName === 'webkit') {
       const started = Date.now();
+      let lostAborts = 0;
+      let deliveredAborts = 0;
       for (let round = 0; round < 350; round++) {
         const fresh = await page.context().newPage();
+        const target = `/ok?round=${round}`;
         try {
-          await fresh.goto(`${origin}/ok`, { waitUntil: 'domcontentloaded', timeout: 3000 });
+          try {
+            await fresh.goto(origin + target, { waitUntil: 'domcontentloaded', timeout: 3000 });
+          } catch (error) {
+            // #42957's abort-before-request order was protocol-confirmed on
+            // pinned Linux WebKit. Only its served-but-uncommitted signature
+            // may time out; a containing fix must deliver cancellation promptly.
+            const knownTimeout = pinned && process.platform === 'linux' && error instanceof playwright.errors.TimeoutError;
+            const deliveredAbort = error instanceof Error && error.message.startsWith('page.goto: Load request cancelled');
+            if (!knownTimeout && !deliveredAbort)
+              throw error;
+            expect(served.has(target)).toBe(true);
+            expect(fresh.url()).toBe('about:blank');
+            if (knownTimeout)
+              lostAborts++;
+            else
+              deliveredAborts++;
+            process.stdout.write(JSON.stringify({ round, navigation: knownTimeout ? 'known-lost-abort-timeout' : 'delivered-abort', error: String(error) }) + '\n');
+            // Recovery is strict and uses the same affected page, not a new one.
+            await fresh.goto(`${origin}/ok?recovery=${round}`, { waitUntil: 'domcontentloaded', timeout: 3000 });
+          }
           expect(await fresh.locator('h1').textContent()).toBe('Navigation recovered');
         } finally {
           await fresh.close();
         }
       }
-      process.stdout.write(JSON.stringify({ webkitFreshNavigations: 350, elapsed: Date.now() - started }) + '\n');
+      process.stdout.write(JSON.stringify({ webkitFreshNavigations: 350, successfulFirstNavigations: 350 - lostAborts - deliveredAborts, lostAborts, deliveredAborts, elapsed: Date.now() - started }) + '\n');
     }
   } finally {
     server.closeAllConnections();

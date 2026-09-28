@@ -890,10 +890,12 @@ commands](docs/browser-upgrade-validation-251.md) before upgrading.
   separately validated browser/OS combination if affected, rather than blindly
   downgrading Playwright.
 
-The WebKit provisional-load event-order race and Linux Firefox crash-window
-retention report remain distinct upgrade checks. Ordinary navigation/error
-controls do not prove the former fixed, and context closure alone does not prove
-native Firefox windows were freed. No engine patches, alpha upgrades, or browser
+The WebKit provisional-load event-order race was also reproduced on Linux: a
+cancelled navigation waited for its configured timeout instead of reporting the
+abort promptly. Keep a finite navigation timeout; it bounds the wait but does
+not fix the missed error. Linux Firefox crash cycles showed increased parent
+RSS, but context closure alone does not prove native windows were freed. These
+remain separate upgrade checks. No engine patches, alpha upgrades, or browser
 default changes are applied.
 
 ### MCP harnesses

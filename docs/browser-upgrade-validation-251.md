@@ -33,7 +33,7 @@ profiles are never navigated, reloaded, patched, or killed.
 | --- | --- | --- |
 | [CDP main-frame corruption #42955](https://github.com/microsoft/playwright/issues/42955) | **Reproduced** through endpoint and launch factories. `page.url()` and raw CDP still identify the top document; Playwright evaluation reaches `about:srcdoc`, `window.top !== window`, the top locator matches zero elements, and the scoped Axe scan rejects the missing top selector. A fresh context created after attachment evaluates, locates and scans the top document correctly. | Timing changes the signature: evaluation can reach the top before the later locator/scan is redirected. Upstream also reports destroyed execution contexts. |
 | [Screenshot font changes #42962](https://github.com/microsoft/playwright/issues/42962) | **Reproduced** via `browser_take_screenshot`. Viewport capture preserves actual fonts and geometry. Headless-shell full-page capture changes all five generic families; Chrome changes monospace only, with unchanged measured geometry. Navigation restores the original metrics. | Other platforms/font installations need their own measurements. Chrome is not a universal unaffected control. |
-| [WebKit lost navigation abort #42957](https://github.com/microsoft/playwright/issues/42957) | Launch, page creation, COOP+COEP navigation, intercepted abort, a 3-second stalled navigation, and subsequent navigation pass through MCP. An additional 350 fresh-page COOP+COEP navigations completed without failure (93.6 seconds). The abort is delivered without a timeout; the deliberately stalled request reports the configured timeout. | **The exact provisional-load-before-document-request ordering was not reproduced.** A route abort is a control, not a replay of that engine race. A containing stable release still needs the reported order (including a document request that never arrives) plus these controls. |
+| [WebKit lost navigation abort #42957](https://github.com/microsoft/playwright/issues/42957) | **Reproduced on hosted Linux/r2359**, with protocol evidence: `provisionalLoadFailed` precedes the document request for the same loader, then `goto` times out. Local macOS completed 350 fresh-page COOP+COEP navigations (93.6 seconds). MCP normal navigation, intercepted abort, bounded stall and recovery controls pass. | The race is intermittent; passing stress is not proof of a fix. The pin permits only a served-but-uncommitted timeout signature on Linux and requires same-page recovery. Future versions must succeed or deliver cancellation instead of losing it. The no-document-request variant still needs validation. |
 | [WebKit macOS 14 #42964](https://github.com/microsoft/playwright/issues/42964) | Installed `browsers.json` confirms r2251 overrides for `mac14` and `mac14-arm64`; this host uses r2359 and passes page setup/navigation. | **Reproduced on hosted macOS 14.8.9 arm64/r2251** (see below); not a local macOS 26 result. Page-dependent controls cannot run on the affected bundle. No downgrade has been verified or recommended. |
 | [Firefox retained crash windows #42956](https://github.com/microsoft/playwright/issues/42956) | An explicitly opted-in Linux fixture compares 10 normal and 10 crash/context-close cycles after warm-up, reports parent RSS, checks subsequent browser usability, and crashes the sole page of a fresh persistent profile before opening three new pages. | RSS is diagnostic, not a count of retained native windows. A future fix needs native-window/memory-report evidence as well; a closed Playwright context alone cannot prove cleanup. See hosted results below. |
 | [Firefox Option-key/frame-focus roll #42958](https://github.com/microsoft/playwright/pull/42958) | **Option insertion reproduced:** MCP `Alt+a` sends keydown/keyup and an input event inserting `a` in Firefox; Chromium/Chrome/WebKit insert nothing. All tested engines report `[true,false,false]`, `[true,true,false]`, `[true,true,true]` for top/child/nested focus respectively. | No frame-focus failure reproduced in these controls. r1553 itself is not adopted or claimed tested. Recheck focused and unfocused controls on a containing stable release. |
@@ -84,6 +84,13 @@ pin, not arbitrary errors; fresh-context controls always require correct scans.
 A passing characterization run means the observations match the known limitation,
 **not** that the dependency is fixed.
 
+WebKit stress reports successful first attempts separately from delivered aborts
+and known lost-abort timeouts. Any handled abort must leave the page usable on
+the next navigation. Timeouts are permitted only on the paired Linux 1.63.0 pin,
+after the fixture served the unique request but the page remained `about:blank`;
+other failures are not accepted. This is the observed failure signature, not a
+replacement for the protocol evidence below.
+
 Only on a **disposable Linux runner**, with the pinned Firefox installed:
 
 ```bash
@@ -110,13 +117,35 @@ macOS 14.8.9 arm64 installed frozen WebKit **r2251** and produced the expected
 the test budget from 30 to 60 seconds showed that page creation remained pending,
 not merely slow. The fixture now bounds its owned browser at five seconds,
 closes it if creation stalls, and asserts the original protocol error after
-cleanup; a new paired version must create a usable page without that closure. Ubuntu WebKit r2359 also completed **350** fresh-page COOP+COEP
-navigations in **141.1 seconds**, plus abort, timeout and recovery controls,
-without reproducing the reported ordering failure.
+cleanup; a new paired version must create a usable page without that closure.
+Ubuntu WebKit r2359 initially completed **350** fresh-page COOP+COEP navigations
+in **141.1 seconds**, but later runs reproduced the intermittent lost abort.
 The macOS 14 job asserts the exact known page-setup failure on 1.63.0; subsequent
 page-dependent controls are explicitly skipped there. Other versions must create
 a page and pass the navigation/keyboard controls. Local macOS 26 results must not
 be substituted for macOS 14, Linux crash retention or Linux font measurements.
+
+### WebKit event-order reproduction
+
+The [instrumented Linux job](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/36451930051/job/109028564797)
+failed on fresh navigation **292**, after 291 successful attempts. Its
+`DEBUG=pw:protocol` trace records page proxy `4681`, loader `4690`, original
+target `page-4682`, and provisional target `page-4693` in this received order:
+
+```text
+16:36:54.677  SEND Playwright.navigate
+16:36:54.683  RECV Target.targetCreated (page-4693, isProvisional: true)
+16:36:54.684  RECV Playwright.provisionalLoadFailed (loader 4690, "Load request cancelled")
+16:36:54.684  RECV Target.targetDestroyed (page-4693, crashed: false)
+16:36:54.684  RECV Network.requestWillBeSent (page-4682, loader 4690, type: Document)
+16:36:57.679  goto times out at 3000 ms; fixture closes the page
+```
+
+No document commit followed. This confirms the upstream ordering, rather than
+inferring it from a slow CI timeout. The normal navigation, explicit abort,
+deliberate stall and recovery controls had already passed in that job. Routine
+CI does not retain the verbose protocol logging; use `DEBUG=pw:protocol` with
+the WebKit rerun command above when investigating the order again.
 
 ## Repository checks
 
@@ -136,8 +165,9 @@ history/downloads. See PR checks for the latest complete run.
 2. Rerun the real CDP endpoint/launch and fresh-context controls, font/geometry
    comparisons, and keyboard/focus controls. New versions cannot inherit the
    1.63.0 allowances.
-3. Reproduce #42957's exact event ordering and test prompt rejection, normal
-   navigation, bounded stalls, and subsequent usability.
+3. Replay #42957's confirmed event ordering against the candidate and test prompt
+   rejection, normal navigation, bounded stalls, and subsequent usability. Also
+   cover the upstream variant where the document request never arrives.
 4. Run actual macOS 14 page setup/navigation against its selected bundle or keep
    an explicit platform limitation; macOS 26 is not a substitute.
 5. Compare Linux crash/non-crash cycles, inspect native retained windows, and
