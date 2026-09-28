@@ -60,6 +60,12 @@ signature. The first Linux run caught profile cleanup racing surviving Chromium
 children; the fixture now sends `Browser.close` to its owned browser before
 removing the profile, with bounded filesystem retries.
 
+These font observations describe the measured machines, not every installation
+of the same OS. On 1.63.0, full-page font/layout changes are diagnostic because
+installed fonts and browser builds vary; viewport stability and restoration on
+reload remain strict. A new paired version must preserve all sampled metrics
+across both screenshot modes on the machine running the check.
+
 ## Rerun
 
 ```bash

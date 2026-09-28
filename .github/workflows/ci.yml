@@ -212,6 +212,7 @@ jobs:
           - { os: ubuntu-latest, browser: firefox }
           - { os: ubuntu-latest, browser: webkit }
           - { os: macos-14, browser: webkit }
+          - { os: macos-14, browser: firefox }
     steps:
       - name: Checkout code
         shell: bash
@@ -249,7 +250,7 @@ jobs:
 
       - run: npm ci
       - run: npx playwright install --with-deps ${{ matrix.browser }}
-      - if: ${{ matrix.os != 'macos-14' }}
+      - if: ${{ !(matrix.os == 'macos-14' && matrix.browser == 'webkit') }}
         run: npx vitest run tests/numpad-keys.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
@@ -258,7 +259,7 @@ jobs:
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
 
-      - if: ${{ !cancelled() && matrix.browser == 'firefox' }}
+      - if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' && matrix.browser == 'firefox' }}
         name: Probe crashes only in this disposable runner's Firefox
         run: npx vitest run tests/firefox-crash.integration.test.ts
         env:
