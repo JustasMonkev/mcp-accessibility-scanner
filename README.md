@@ -863,6 +863,39 @@ A candidate upgrade must preserve touch properties after full-page and element
 screenshots and navigation, and complete retry scrolling without smooth animation.
 These are dependency limitations; the recorder gate alone does not verify them.
 
+### Newly reported browser limitations (#251)
+
+The September 28, 2026 validation retains the paired Playwright **1.63.0** pins;
+no containing stable release is available. See the [platform results and rerun
+commands](docs/browser-upgrade-validation-251.md) before upgrading.
+
+- **Preloaded CDP pages:** nested cross-site/sandboxed frames can redirect
+  evaluation, locators and scans into an iframe even while `page.url()` shows the
+  top URL. Both `--cdp-endpoint` and `--cdp-launch` reproduced this. Prefer a fresh
+  isolated context when losing the existing tab state is acceptable; do not trust
+  a top-level URL alone as proof of the scan target. This is separate from the
+  crashed-tab attach timeout in #244.
+- **Full-page screenshots on macOS:** bundled Chromium headless shell changed
+  actual fonts and layout after capture. Chrome changed the monospace font but
+  retained the measured geometry. Viewport screenshots did not change either.
+  Keyboard-audit issue screenshots also use full-page capture; capture after
+  layout-sensitive checks, or disable those screenshots with
+  `screenshotOnIssue: false`. The server does not reset fonts or reload pages.
+- **Firefox on macOS:** `browser_press_key` with `Alt+a` inserted `a`; Chromium
+  and WebKit controls did not. The Firefox r1553 roll addressing Option-key and
+  frame-focus behavior is merged but unreleased. Keys remain passed through.
+- **WebKit on macOS 14:** upstream reports page creation failing with
+  `Unknown setting: PushAPIEnabled` in its pinned r2251 bundle. This OS was not
+  available for local validation. Do not treat the passing macOS 26/r2359
+  control as macOS 14 coverage; use a separately validated browser/OS combination
+  if affected, rather than blindly downgrading Playwright.
+
+The WebKit provisional-load event-order race and Linux Firefox crash-window
+retention report remain distinct upgrade checks. Ordinary navigation/error
+controls do not prove the former fixed, and context closure alone does not prove
+native Firefox windows were freed. No engine patches, alpha upgrades, or browser
+default changes are applied.
+
 ### MCP harnesses
 
 The npm wrappers build first, then the direct harness calls every exposed MCP
