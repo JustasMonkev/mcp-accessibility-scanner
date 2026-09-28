@@ -179,17 +179,33 @@ confined to the history/download fixture; production browser defaults are intact
 
 ## CDP attach and numpad keys (#244)
 
-**Upstream status on 2026-09-27.** npm `latest` is still Playwright 1.63.0, and
-`next` is `1.64.0-alpha-2026-09-27`. The alpha's `playwright-core` bundle was
-inspected without being installed. It contains
+**Upstream status on 2026-09-28.** npm `latest` is still Playwright 1.63.0, and
+`next` is `1.64.0-alpha-2026-09-28`. The alpha's `playwright-core` bundle was
+inspected and exercised from a scratch directory, never as a dependency of this
+repository. It contains
 [#42913](https://github.com/microsoft/playwright/pull/42913) (`isKeypad` on
 Chromium key events). It does not contain
 [#42936](https://github.com/microsoft/playwright/pull/42936) (no
 `Inspector.enable` during page initialization) or
 [#42927](https://github.com/microsoft/playwright/pull/42927) (`NumpadDecimal`
-still has key `"\0"`). Both PRs are still open upstream. The paired
-`playwright`/`playwright-core` pins stay at 1.63.0: there is no alpha
-dependency and no vendored browser internals.
+still has key `"\0"`). Both PRs were still open upstream on 2026-09-27. The
+alpha behaves accordingly on the preinstalled Chromium 141.0.7390.37, using the
+same crashed-tab and numpad probes as the tests below:
+
+| Probe | `1.64.0-alpha-2026-09-28` |
+| --- | --- |
+| `connectOverCDP`, `timeout: 3000`, one healthy and one crashed tab | Still `TimeoutError` after ~3s, with `<ws connected>` in the call log |
+| `NumpadSubtract` keyup location | 3 (fixed by #42913) |
+| `NumpadDecimal` key | Still `"\u0000"`; types nothing |
+| `Shift+Numpad1`, `Shift+NumpadDecimal` | Still keyCode 35 / 46 and typed nothing |
+
+So neither the attach hang nor the shifted numpad keys are fixed on any
+published build. The paired `playwright`/`playwright-core` pins stay at 1.63.0:
+there is no alpha dependency and no vendored browser internals. Once a stable
+release includes these fixes, bump both pins together and update the
+`knownAttachHang` gate in `tests/cdp-attach.integration.test.ts` and the
+`knownDeviations` table in `tests/numpad-keys.integration.test.ts`; the tests
+already require the fixed behavior on any other version.
 
 **CDP attach with a tab without a renderer.** A disposable browser, launched
 with `--remote-debugging-port`, gets one healthy tab and one tab crashed through
