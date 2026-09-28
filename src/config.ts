@@ -138,12 +138,13 @@ async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   parseFilePaths(config.filePaths);
   const { contextOptions, launchOptions } = config.browser;
   if (contextOptions.clientCertificates?.length) {
-    // Playwright 1.63's certificate interceptor only sees the context proxy.
+    // Playwright 1.63's certificate interceptor only sees the context proxy
+    // (the 1.64 alpha also falls back to the launch proxy).
     // Preserve an explicit context override, otherwise carry the launch route
     // into every fresh-context factory (including remote browser connections).
     const proxy = contextOptions.proxy ?? launchOptions.proxy;
     if (proxy?.bypass?.trim())
-      throw new Error('clientCertificates with proxy.bypass is unsupported on Playwright 1.63.0: the certificate interceptor ignores bypass rules. Use a separate browser configuration for these routes; no browser was started.');
+      throw new Error('clientCertificates with proxy.bypass is unsupported: the certificate interceptor ignored bypass rules through Playwright 1.63.0, and this server has not validated them on the pinned 1.64.0-alpha-2026-09-28 for every browser and launch mode. Use a separate browser configuration for these routes; no browser was started.');
     if (proxy)
       contextOptions.proxy = proxy;
   }

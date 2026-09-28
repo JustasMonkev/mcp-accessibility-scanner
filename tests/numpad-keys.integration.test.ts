@@ -36,10 +36,13 @@ const presses = [
   { press: 'Shift+NumpadDecimal', key: '.', code: 'NumpadDecimal', typed: '.' },
 ];
 
-// Deviations recorded on the paired pins with Chromium 153.0.8010.12, Firefox
-// 155.0 and WebKit 26.6 (microsoft/playwright#42913, merged after 1.63.0, and
-// #42927, unmerged when recorded). A Playwright version or browser without an
-// entry must deliver every key as modeled above.
+// Deviations recorded on the paired pins: 1.63.0 with Chromium 153.0.8010.12,
+// Firefox 155.0 and WebKit 26.6; 1.64.0-alpha-2026-09-28 with Chromium
+// 155.0.8059.12, Firefox 156.0 and WebKit 26.6. The alpha carries
+// microsoft/playwright#42913 (Chromium keyup location) but not #42927
+// (NumpadDecimal key, Chromium shifted numpad keys), unmerged when recorded. A
+// Playwright version or browser without an entry must deliver every key as
+// modeled above.
 const knownDeviations: Record<string, string[]> = {
   '1.63.0/chromium': [
     'NumpadSubtract keyup location is not numpad',
@@ -56,6 +59,20 @@ const knownDeviations: Record<string, string[]> = {
     'NumpadDecimal keyup key "\\u0000"',
   ],
   '1.63.0/webkit': [
+    'NumpadDecimal keydown key "\\u0000"',
+    'NumpadDecimal keyup key "\\u0000"',
+  ],
+  '1.64.0-alpha-2026-09-28/chromium': [
+    'NumpadDecimal keydown key "\\u0000"',
+    'NumpadDecimal keyup key "\\u0000"',
+    'Shift+Numpad1 typed ""',
+    'Shift+NumpadDecimal typed ""',
+  ],
+  '1.64.0-alpha-2026-09-28/firefox': [
+    'NumpadDecimal keydown key "\\u0000"',
+    'NumpadDecimal keyup key "\\u0000"',
+  ],
+  '1.64.0-alpha-2026-09-28/webkit': [
     'NumpadDecimal keydown key "\\u0000"',
     'NumpadDecimal keyup key "\\u0000"',
   ],

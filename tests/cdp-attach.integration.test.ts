@@ -25,11 +25,11 @@ import { resolveConfig, type FullConfig } from '../src/config.js';
 
 const require = createRequire(import.meta.url);
 const playwrightCoreVersion: string = require('playwright-core/package.json').version;
-// Playwright 1.63.0 never finishes attaching while an existing tab has no
-// renderer (microsoft/playwright#42936, unreleased when this was recorded).
-// Any other version must attach and omit that tab: an upgrade does not
-// inherit the known hang, it has to prove the fix.
-const knownAttachHang = playwrightCoreVersion === '1.63.0';
+// Playwright 1.63.0 and the 1.64.0-alpha-2026-09-28 build never finish
+// attaching while an existing tab has no renderer (microsoft/playwright#42936,
+// unreleased when this was recorded). Any other version must attach and omit
+// that tab: an upgrade does not inherit the known hang, it has to prove the fix.
+const knownAttachHang = ['1.63.0', '1.64.0-alpha-2026-09-28'].includes(playwrightCoreVersion);
 // Far below Playwright's 30s default, so an ignored configured timeout fails.
 const attachBound = 15000;
 

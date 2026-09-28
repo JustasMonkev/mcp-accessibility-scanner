@@ -200,12 +200,13 @@ same crashed-tab and numpad probes as the tests below:
 | `Shift+Numpad1`, `Shift+NumpadDecimal` | Still keyCode 35 / 46 and typed nothing |
 
 So neither the attach hang nor the shifted numpad keys are fixed on any
-published build. The paired `playwright`/`playwright-core` pins stay at 1.63.0:
-there is no alpha dependency and no vendored browser internals. Once a stable
-release includes these fixes, bump both pins together and update the
-`knownAttachHang` gate in `tests/cdp-attach.integration.test.ts` and the
-`knownDeviations` table in `tests/numpad-keys.integration.test.ts`; the tests
-already require the fixed behavior on any other version.
+published build. The pins were later moved to this alpha on request (see
+[the bump](#playwright-1640-alpha-2026-09-28-bump) below); no browser internals
+are vendored. Once a stable release includes these fixes, bump both pins
+together and update the `knownAttachHang` gate in
+`tests/cdp-attach.integration.test.ts` and the `knownDeviations` table in
+`tests/numpad-keys.integration.test.ts`; the tests already require the fixed
+behavior on any other version.
 
 **CDP attach with a tab without a renderer.** A disposable browser, launched
 with `--remote-debugging-port`, gets one healthy tab and one tab crashed through
@@ -257,7 +258,7 @@ application must be stopped, and the browser's tab list must be unchanged.
 Removing the note makes both MCP tests fail. On any other Playwright version,
 all three tests require the fixed contract: the attach succeeds, the healthy
 tab is listed, and the crashed tab is omitted but not closed. An upgrade
-therefore has to prove #42936. The note's wording names 1.63.0; revise it
+therefore has to prove #42936. The note's wording names 1.63.0 and 1.64.0-alpha-2026-09-28; revise it
 together with the upgrade.
 
 **Numpad keys through `browser_press_key`.** The test in
@@ -319,8 +320,9 @@ opens the outer details by clicking its summary with `browser_click`, and
 requires the inner summary and button to be discoverable through all four.
 
 Every engine and version must hide the nested contents while the outer details
-is closed, except WebKit with exactly `playwright` and `playwright-core` 1.63.0.
-That pin must instead reproduce the known defect: the closed-state snapshot,
+is closed, except WebKit with `playwright` and `playwright-core` both at 1.63.0
+or both at 1.64.0-alpha-2026-09-28 (which still has the defect, checked on
+WebKit 26.6). Those pins must instead reproduce the known defect: the closed-state snapshot,
 find result and both verifications all expose the hidden button, and the run
 logs `known-webkit-nested-details-leak`. This is **a reproduced upstream defect,
 not a fix**. Changing either package's version makes the WebKit check demand
@@ -355,3 +357,49 @@ MCP_TEST_BROWSER_NAME=firefox npx vitest run tests/details-visibility.integratio
 
 The fixture uses light DOM only. It does not show whether Axe or the custom
 audit tools share the defect.
+
+## Playwright 1.64.0-alpha-2026-09-28 bump
+
+Stable 1.64.0 does not exist yet: npm `latest` was 1.63.0 on 2026-09-28, and
+1.64 ships only as nightly alphas. `playwright` and `playwright-core` were
+moved together to the exact build `1.64.0-alpha-2026-09-28` on request,
+overriding the earlier no-prerelease rule. `package-lock.json` changes only the
+two Playwright entries; a regenerated lockfile from npm 10 dropped the native
+optional dependencies' `libc` fields and was discarded.
+
+**Required code change.** The alpha replaced the recorder API
+([#42627](https://github.com/microsoft/playwright/pull/42627)):
+`_enableRecorder(params, sink)` / `_disableRecorder()` became
+`_startRecording({ language }, sink)` / `_stopRecording()`. The old methods no
+longer exist, so `tests/recorder.integration.test.ts` failed with
+`_enableRecorder is not a function`. `_startRecording` also rejects a second
+start while a recording runs, after replacing the sink. The `InputRecorder`
+hub in `src/context.ts` therefore starts only from standby; arming an armed hub
+is a no-op, which matches the old behavior because re-enabling an unchanged
+recorder mode did nothing. `tests/context.test.ts` asserts a single start for
+two sessions on one context and fails without the guard. The real-browser
+recorder tests pass on the alpha.
+
+**Pinned browsers.** The alpha expects Chromium 155.0.8059.12, Firefox 156.0
+and WebKit 26.6. On Linux with Node 22.22.2 (CI needs Node 24), all three
+engines ran locally.
+
+| Check on the alpha | Result |
+| --- | --- |
+| Crashed-tab CDP attach (#244, `tests/cdp-attach.integration.test.ts`) | Still hangs; gate `knownAttachHang` now lists both pins. 4 tests pass with Chromium 155 |
+| Numpad keys (`tests/numpad-keys.integration.test.ts`) | Chromium: `NumpadDecimal` key, shifted `Numpad1`/`NumpadDecimal` type nothing. Firefox and WebKit: `NumpadDecimal` key only. `keyup` location fixed everywhere |
+| WebKit nested `<details>` (#246) | Still leaks; gate lists both pins |
+| Client certificates with `proxy.bypass` | A manual Chromium probe went direct on the alpha; on 1.63.0 the same probe sent the request through the proxy. The server's rejection is unchanged, and `tests/client-certificate-proxy-probe.mjs` passes |
+| IndexedDB `Map`/`Set` through `storageState` | Preserved in Chromium 155 and Firefox 156 via `newContext({ storageState })` and `setStorageState()` (#42707) |
+| Touch properties after screenshots and navigation | Preserved (1.63.0 control: reset) (#42617) |
+| Smooth-scroll retries | Bundle adds `behavior: "instant"` (#42626); the 19-event fixture was not reproduced |
+| Existing-context storage import | Bundle bypasses service workers for the snapshot page (#42664); the server's rejection stays until verified end to end |
+| BFCache reproduction (`MCP_TEST_ENABLE_BFCACHE=1 ... -t 'back navigation'`) | Still fails in the two CDP cases, as documented |
+| Linux Chromium 155 persistent-profile download relaunch | Passed with saved bytes; other platforms are covered by CI only |
+| `tests/webkit-network-probe.mjs`, `tests/client-certificate-proxy-probe.mjs` | Both exit 0 |
+| `npm run lint`, `npm run build`, `npm run knip` | Pass |
+| `npm test` (Chromium 155) | 1,393 passed, 3 skipped, 9 failed. All 9 are `tests/extension-protocol.test.ts` cases that need an installed Google Chrome (`"chrome" executable not found`); the same 9 fail on the 1.63.0 pins in this container |
+
+Lifting the client-certificate bypass and existing-context storage-state
+restrictions is a follow-up: both need per-engine and per-launch-mode
+verification, and neither is part of the bump.

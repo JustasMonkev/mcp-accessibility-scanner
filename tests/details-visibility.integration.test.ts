@@ -38,11 +38,14 @@ if (!['chromium', 'firefox', 'webkit'].includes(browser))
 const canRun = !!requestedBrowser || existsSync(chromium.executablePath());
 const require = createRequire(import.meta.url);
 const versions = { playwright: require('playwright/package.json').version, playwrightCore: require('playwright-core/package.json').version };
-// Playwright 1.63.0's injected WebKit visibility fallback checks only the
-// nearest details/summary, so an open details nested in a closed one exposes
-// its contents (microsoft/playwright#42951, #246). Only this exact pin may
-// verify that known defect; any other version must hide the nested contents.
-const knownWebKitLeak = browser === 'webkit' && versions.playwright === '1.63.0' && versions.playwrightCore === '1.63.0';
+// The injected WebKit visibility fallback of Playwright 1.63.0 and of the
+// 1.64.0-alpha-2026-09-28 build checks only the nearest details/summary, so an
+// open details nested in a closed one exposes its contents
+// (microsoft/playwright#42951, #246). Only these exact pins may verify that
+// known defect; any other version must hide the nested contents.
+const knownLeakPins = ['1.63.0', '1.64.0-alpha-2026-09-28'];
+const knownWebKitLeak = browser === 'webkit'
+  && knownLeakPins.includes(versions.playwright) && knownLeakPins.includes(versions.playwrightCore);
 const fixture = `<title>Nested details</title>
 <details>
   <summary>Outer section</summary>

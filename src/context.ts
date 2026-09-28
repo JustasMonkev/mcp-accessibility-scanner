@@ -869,18 +869,19 @@ export class Context {
   }
 }
 
-// Playwright's _enableRecorder supports a single event sink per browser
-// context, and a shared (non-isolated CDP) context can serve several sessions
-// at once — a second _enableRecorder call would silently replace the first
-// session's callbacks, and a departing session would leave the sink pointing
-// at its disposed Context. One hub therefore owns a dispatching sink per
-// context. Session logs and on-demand recordings register and deregister with
-// it. The hub carries the enablement promise: a session
-// joining while (or after) another session's _enableRecorder call is in
-// flight must not report recording as ready before it is, and a failed
-// enablement evicts the hub so the next session retries instead of silently
-// recording nothing. When the last consumer leaves, the recorder returns to
-// standby; the same hub arms it again for the next recording.
+// Playwright's _startRecording supports a single event sink per browser
+// context and rejects a second start while one is running, and a shared
+// (non-isolated CDP) context can serve several sessions at once — each session
+// installing its own sink would replace the previous one, and a departing
+// session would leave the sink pointing at its disposed Context. One hub
+// therefore owns a dispatching sink per context. Session logs and on-demand
+// recordings register and deregister with it. The hub carries the enablement
+// promise: a session joining while (or after) another session's
+// _startRecording call is in flight must not report recording as ready before
+// it is, and a failed enablement evicts the hub so the next session retries
+// instead of silently recording nothing. When the last consumer leaves, the
+// recorder returns to standby; the same hub arms it again for the next
+// recording.
 type RecordedAction = { page: playwright.Page, code: string, sequence?: number };
 type RecordingTarget = {
   actions: RecordedAction[];
@@ -1042,12 +1043,7 @@ export class InputRecorder {
         }
       }
     };
-    const params = {
-        mode: 'recording',
-        recorderMode: 'api',
-        omitCallTracking: true,
-        language: 'javascript',
-    };
+    const params = { language: 'javascript' };
     const sink = {
         actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
           const sequence = ++actionSequence;
@@ -1102,8 +1098,12 @@ export class InputRecorder {
           );
         },
     };
+    // _startRecording throws while a recording is running, and it replaces the
+    // sink before it does, so an armed hub must not start again.
     const arm = async () => {
-      await (browserContext as any)._enableRecorder(params, sink);
+      if (armed)
+        return;
+      await (browserContext as any)._startRecording(params, sink);
       armed = true;
     };
     const created: RecorderHub = {
@@ -1121,7 +1121,7 @@ export class InputRecorder {
         if (created.starting || recorders.size || recordings.size)
           return;
         try {
-          await (browserContext as any)._disableRecorder();
+          await (browserContext as any)._stopRecording();
         } finally {
           armed = false;
         }
