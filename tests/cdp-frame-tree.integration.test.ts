@@ -141,16 +141,31 @@ it.each(['endpoint', 'launch'] as const)('characterizes the top document when at
     }
   } finally {
     try {
-      await attached?.close();
+      try {
+        // A CDP disconnect does not stop this test-owned browser. Ask it to exit
+        // before deleting its profile so child processes cannot keep writing it.
+        const browser = attached?.browserContext.browser();
+        if (browser?.isConnected()) {
+          const cdp = await browser.newBrowserCDPSession();
+          await cdp.send('Browser.close');
+        }
+      } finally {
+        await attached?.close();
+      }
     } finally {
       if (child && child.exitCode === null && child.signalCode === null) {
-        const exited = once(child, 'exit');
-        child.kill('SIGKILL');
-        await exited;
+        const ownedChild = child;
+        const exited = once(ownedChild, 'exit');
+        const deadline = setTimeout(() => ownedChild.kill('SIGKILL'), 5000);
+        try {
+          await exited;
+        } finally {
+          clearTimeout(deadline);
+        }
       }
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));
-      await fs.rm(directory, { recursive: true, force: true });
+      await fs.rm(directory, { recursive: true, force: true, maxRetries: 5 });
     }
   }
 });

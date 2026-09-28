@@ -52,6 +52,14 @@ capture. Viewport capture leaves the entire sampled metrics object unchanged.
 | cursive | Apple-Chancery → TimesNewRomanPS-BoldMT | 2378.46875 → 2000.46875 |
 | fantasy | Papyrus → Impact | 2337.46875 → 2042.46875 |
 
+On hosted Ubuntu 24.04 x64, only headless-shell **monospace** changed:
+`DejaVuSansMono-Bold` → `LiberationMono-Bold`, last paragraph Y **1960.46875 →
+1959.46875 px**. Viewport captures and the other four families stayed unchanged.
+Both Linux CDP factory paths also reproduced the wrong-document/empty-locator
+signature. The first Linux run caught profile cleanup racing surviving Chromium
+children; the fixture now sends `Browser.close` to its owned browser before
+removing the profile, with bounded filesystem retries.
+
 ## Rerun
 
 ```bash
@@ -98,9 +106,11 @@ the retention report, but is not a native-window count. Firefox's Linux Option
 and nested-focus controls passed without text insertion.
 
 macOS 14.8.9 arm64 installed frozen WebKit **r2251** and produced the expected
-`Unknown setting: PushAPIEnabled` rejection; the initial test budget expired at
-30 seconds. The fixture now gives that identical error assertion a 60-second test
-budget. Ubuntu WebKit r2359 also completed **350** fresh-page COOP+COEP
+`Unknown setting: PushAPIEnabled` error after the browser was closed. Increasing
+the test budget from 30 to 60 seconds showed that page creation remained pending,
+not merely slow. The fixture now bounds its owned browser at five seconds,
+closes it if creation stalls, and asserts the original protocol error after
+cleanup; a new paired version must create a usable page without that closure. Ubuntu WebKit r2359 also completed **350** fresh-page COOP+COEP
 navigations in **141.1 seconds**, plus abort, timeout and recovery controls,
 without reproducing the reported ordering failure.
 The macOS 14 job asserts the exact known page-setup failure on 1.63.0; subsequent

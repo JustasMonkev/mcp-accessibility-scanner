@@ -110,9 +110,12 @@ it.skipIf(browserName !== 'chromium')('measures actual fonts and layout across M
     await page.reload();
     expect(await fontMetrics(page)).toEqual(before);
   }
-  const knownChanges = pinned && process.platform === 'darwin'
-    ? !channel ? ['sans-serif', 'serif', 'monospace', 'cursive', 'fantasy'] : channel === 'chrome' ? ['monospace'] : []
-    : [];
+  const knownFontChanges: Record<string, string[]> = {
+    'darwin/bundled': ['sans-serif', 'serif', 'monospace', 'cursive', 'fantasy'],
+    'darwin/chrome': ['monospace'],
+    'linux/bundled': ['monospace'],
+  };
+  const knownChanges = pinned ? knownFontChanges[`${process.platform}/${channel || 'bundled'}`] ?? [] : [];
   expect(changed).toEqual(knownChanges);
 });
 
@@ -210,12 +213,31 @@ it.skipIf(knownPageSetupFailure)('delivers navigation errors, bounds stalled loa
 it.skipIf(!mac14WebKit)('characterizes actual macOS 14 WebKit page setup (#42964)', async () => {
   browser = await browserType.launch();
   const context = await browser.newContext();
-  if (pinned) {
-    await expect(context.newPage()).rejects.toThrow('Unknown setting: PushAPIEnabled');
-    process.stdout.write(JSON.stringify({ mac14WebKit: 'known-PushAPIEnabled-setup-failure', browserVersion: browser.version(), ...versions }) + '\n');
-  } else {
-    const page = await context.newPage();
-    await page.goto('data:text/html,<h1>WebKit page created</h1>');
-    expect(await page.locator('h1').textContent()).toBe('WebKit page created');
+  const creating = context.newPage().then(page => ({ page }), (error: unknown) => ({ error }));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // On r2251, the failed initialization can leave newPage pending until the
+    // browser closes. Bound our own disposable browser, not the user's session.
+    const first = await Promise.race([
+      creating,
+      new Promise<'stalled'>(resolve => { timer = setTimeout(() => resolve('stalled'), 5000); }),
+    ]);
+    if (first === 'stalled')
+      await browser.close();
+    const result = await creating;
+    if (pinned) {
+      if (!('error' in result) || !(result.error instanceof Error))
+        throw new Error('Expected the pinned WebKit page-setup error');
+      expect(result.error.message).toContain('Unknown setting: PushAPIEnabled');
+      process.stdout.write(JSON.stringify({ mac14WebKit: 'known-PushAPIEnabled-setup-failure', stalled: first === 'stalled', error: result.error.message, ...versions }) + '\n');
+    } else {
+      expect(first).not.toBe('stalled');
+      if (!('page' in result))
+        throw result.error;
+      await result.page.goto('data:text/html,<h1>WebKit page created</h1>');
+      expect(await result.page.locator('h1').textContent()).toBe('WebKit page created');
+    }
+  } finally {
+    clearTimeout(timer);
   }
 }, 60000);
