@@ -44,10 +44,21 @@ async function processTree(root: number): Promise<number[]> {
   return descendants;
 }
 
+async function readProcessFile(pid: number, name: 'comm' | 'cmdline') {
+  try {
+    return await fs.readFile(`/proc/${pid}/${name}`, 'utf8');
+  } catch (error) {
+    // A process from the descendant snapshot may exit before inspection.
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
+      return undefined;
+    throw error;
+  }
+}
+
 async function crashPage(page: Page, root: number) {
   const targets: number[] = [];
   for (const pid of await processTree(root)) {
-    const name = (await fs.readFile(`/proc/${pid}/comm`, 'utf8')).trim();
+    const name = (await readProcessFile(pid, 'comm'))?.trim();
     if (name === 'Web Content' || name === 'Isolated Web Co')
       targets.push(pid);
   }
@@ -55,10 +66,20 @@ async function crashPage(page: Page, root: number) {
   const crashed = page.waitForEvent('crash', { timeout: 10000 });
   // Attach the rejection handler before sending signals, including on failure.
   const result = crashed.then(() => undefined, (error: Error) => error);
+  let signalled = 0;
   for (const pid of targets) {
-    expect(await processTree(root)).toContain(pid);
-    process.kill(pid, 'SIGKILL');
+    if (!(await processTree(root)).includes(pid))
+      continue;
+    try {
+      process.kill(pid, 'SIGKILL');
+      signalled++;
+    } catch (error) {
+      // The child can exit between the ancestry recheck and the signal.
+      if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH'))
+        throw error;
+    }
   }
+  expect(signalled).toBeGreaterThan(0);
   expect(await result).toBeUndefined();
 }
 
@@ -108,8 +129,8 @@ it.skipIf(!enabled)('records Firefox crash-cycle retention and persistent-browse
     try {
       const roots: number[] = [];
       for (const pid of await processTree(process.pid)) {
-        const args = (await fs.readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0');
-        if (args.includes(directory))
+        const args = (await readProcessFile(pid, 'cmdline'))?.split('\0');
+        if (args?.includes(directory))
           roots.push(pid);
       }
       expect(roots).toHaveLength(1);
