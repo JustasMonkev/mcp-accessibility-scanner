@@ -520,6 +520,49 @@ describe('audit_site tool', () => {
     expect(report.crawlTabRestarts).toEqual([{ url: 'https://example.com/next' }]);
   });
 
+  it('does not take a hash change on a same-URL reload for the new document committing', async () => {
+    // /first redirects to /canonical, so the queued /canonical reloads the URL already open.
+    const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+      'https://example.com/': ['https://example.com/first', 'https://example.com/canonical'],
+      'https://example.com/canonical': [],
+    }, { redirectMap: { 'https://example.com/first': 'https://example.com/canonical' } });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // The /canonical reload's response arrives, the old /canonical document changes
+    // its hash, and then it alerts before the new document commits.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/canonical')
+        return navigateImpl(url);
+      emitPageEvent('response', navigationResponse('https://example.com/canonical'));
+      setCurrentUrl('https://example.com/canonical#top');
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Session ending"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/canonical');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/first', 'scanned'],
+      ['https://example.com/canonical', 'scanned'],
+    ]);
+  });
+
   it('warns about pages whose frames the scan could not reach', async () => {
     // A page scanned with a frame missing reports fewer violations, so a reader
     // counting them has to know which pages those numbers are incomplete for.
