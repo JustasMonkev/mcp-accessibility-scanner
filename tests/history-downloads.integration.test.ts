@@ -43,6 +43,15 @@ const observedNativeCrashes = new Set([
   'win32/msedge/154.0.4258.37',
 ]);
 const downloadBytes = Buffer.from('Local download: verified after profile reuse.\n');
+// Distinct bytes per launch prove that each saved file came from its own download.
+const idleDownloads = [
+  { name: 'first.txt', bytes: Buffer.from('Idle release download 1: saved before the browser is released.\n') },
+  { name: 'second.txt', bytes: Buffer.from('Idle release download 2: saved after the profile is relaunched.\n') },
+];
+// Served in two parts so a test decides when the download may complete.
+const slowDownloadBytes = Buffer.from(`Slow download: ${'x'.repeat(4096)}\n`);
+const slowDownloadFirstPart = 1024;
+let slowDownload: { response: http.ServerResponse, finish: () => void } | undefined;
 const clients: Client[] = [];
 const contexts: BrowserContext[] = [];
 const browsers: Browser[] = [];
@@ -54,12 +63,34 @@ const server = http.createServer((request, response) => {
     response.end(downloadBytes);
     return;
   }
+  const idleDownload = /^\/idle-download-(\d)$/.exec(request.url || '');
+  if (idleDownload && idleDownloads[Number(idleDownload[1])]) {
+    const { name, bytes } = idleDownloads[Number(idleDownload[1])];
+    response.writeHead(200, { 'content-type': 'text/plain', 'content-disposition': `attachment; filename="${name}"` });
+    response.end(bytes);
+    return;
+  }
+  if (request.url === '/slow-download') {
+    // The advertised length exceeds what is sent until finish() runs, so the
+    // browser holds a started but incomplete download.
+    response.writeHead(200, { 'content-type': 'text/plain', 'content-disposition': 'attachment; filename="slow.txt"', 'content-length': slowDownloadBytes.length });
+    response.write(slowDownloadBytes.subarray(0, slowDownloadFirstPart));
+    const held = { response, finish: () => response.end(slowDownloadBytes.subarray(slowDownloadFirstPart)) };
+    slowDownload = held;
+    response.on('close', () => {
+      if (slowDownload === held)
+        slowDownload = undefined;
+    });
+    return;
+  }
   response.writeHead(200, { 'content-type': 'text/html' });
   const pages: Record<string, string> = {
     '/a': '<title>Page A</title><input aria-label="Saved note"><a href="/b">Open B</a><iframe title="Child" src="/frame"></iframe><script>addEventListener("pageshow", e => document.body.dataset.restored = String(e.persisted))</script>',
     '/frame': '<a href="/b" target="_top">Frame open B</a>',
     '/b': '<title>Page B</title><h1>Page B</h1><a href="#plain">Plain ref control</a>',
     '/downloads': '<title>Download fixture</title><a href="/download">Download file</a>',
+    '/idle-downloads': '<title>Idle download fixture</title><a href="/idle-download-0">Download first</a> <a href="/idle-download-1">Download second</a>',
+    '/slow-downloads': '<title>Slow download fixture</title><a href="/slow-download">Download slow file</a>',
   };
   response.end(pages[request.url || ''] || '<title>Fixture</title>');
 });
@@ -77,6 +108,9 @@ beforeAll(async () => {
 beforeEach(async () => { directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-history-downloads-')); });
 
 afterEach(async () => {
+  // A held response would otherwise keep its connection (and afterAll) open.
+  slowDownload?.response.destroy();
+  slowDownload = undefined;
   const closedClients = await Promise.allSettled(clients.splice(0).map(async client => {
     try {
       await client.callTool({ name: 'browser_close', arguments: {} });
@@ -93,7 +127,16 @@ afterEach(async () => {
     throw new AggregateError(errors.map(result => result.reason), 'Browser fixture cleanup failed');
 });
 
-afterAll(async () => { await new Promise<void>(resolve => server.close(() => resolve())); });
+afterAll(async () => {
+  // Browsers can leave keep-alive or held connections behind; close() alone waits for them.
+  server.closeAllConnections();
+  await new Promise<void>(resolve => server.close(() => resolve()));
+});
+
+function isObservedNativeCrashTuple(browser: Browser) {
+  return versions.playwright === '1.63.0' && versions.playwrightCore === '1.63.0'
+    && observedNativeCrashes.has(`${process.platform}/${channel}/${browser.version()}`);
+}
 
 async function connect(config: FullConfig, factory = contextFactory(config)) {
   const client = new Client({ name: 'history-downloads-test', version: '1' });
@@ -213,9 +256,7 @@ it.each([false, true])('saves bytes or reports a known native relaunch crash wit
     await call(client, 'browser_navigate', { url: `${origin}/downloads` });
     const page = context!.pages()[0];
     const browser = context!.browser()!;
-    const knownNativeCrash = !isolated && launch === 1
-      && versions.playwright === '1.63.0' && versions.playwrightCore === '1.63.0'
-      && observedNativeCrashes.has(`${process.platform}/${channel}/${browser.version()}`);
+    const knownNativeCrash = !isolated && launch === 1 && isObservedNativeCrashTuple(browser);
     process.stdout.write(JSON.stringify({ case: 'download', isolated, launch, browser: browser.version() }) + '\n');
     expect(await page.evaluate(() => localStorage.getItem('previousLaunch'))).toBe(!isolated && launch ? 'saved' : null);
     await page.evaluate(() => localStorage.setItem('previousLaunch', 'saved'));
@@ -299,3 +340,218 @@ it.each([false, true])('saves bytes or reports a known native relaunch crash wit
     clients.splice(clients.indexOf(client), 1);
   }
 }, 60_000);
+
+function persistentConfig(profile: string, outputDir: string, idle?: number) {
+  return resolveConfig({
+    browser: { userDataDir: profile, launchOptions: {
+      channel, headless: true,
+      chromiumSandbox: channel === 'chromium-headless-shell' && process.platform === 'linux' ? false : undefined,
+    } },
+    outputDir, timeouts: { settle: 0, idle },
+  });
+}
+
+// Records every browser context the MCP layer launches, so a test can tell a
+// relaunch from a survivor of the previous browser.
+function trackedFactory(config: FullConfig) {
+  const factory = contextFactory(config);
+  const launched: BrowserContext[] = [];
+  return {
+    launched,
+    factory: {
+      createContext: async (...args: Parameters<BrowserContextFactory['createContext']>) => {
+        const result = await factory.createContext(...args);
+        launched.push(result.browserContext);
+        return result;
+      },
+    } satisfies BrowserContextFactory,
+  };
+}
+
+function textOf(result: Awaited<ReturnType<Client['callTool']>>) {
+  return result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+}
+
+async function savedFiles(outputDir: string) {
+  const files = (await fs.readdir(outputDir)).filter(file => file.endsWith('.txt')).sort();
+  return Promise.all(files.map(async file => ({ file, bytes: await fs.readFile(path.join(outputDir, file)) })));
+}
+
+// The save rejection can trail the disconnect, so keep asking until a response
+// carries the named failure. Bounded by the poll timeout, never by a hung call.
+async function nextDownloadFailure(client: Client, filename: string, timeout = 10_000) {
+  let result: Awaited<ReturnType<Client['callTool']>> | undefined;
+  let text = '';
+  await expect.poll(async () => {
+    result = await client.callTool({ name: 'browser_snapshot', arguments: {} });
+    text = textOf(result);
+    return text.includes(`Failed to save download "${filename}":`);
+  }, { timeout }).toBe(true);
+  return { result: result!, text };
+}
+
+function watchUnhandledRejections() {
+  const reasons: unknown[] = [];
+  const listener = (reason: unknown) => reasons.push(reason);
+  process.on('unhandledRejection', listener);
+  return async () => {
+    // Node reports an unhandled rejection after the microtask queue drains.
+    await new Promise(resolve => setTimeout(resolve, 100));
+    process.off('unhandledRejection', listener);
+    return reasons;
+  };
+}
+
+async function startSlowDownload(client: Client) {
+  await call(client, 'browser_navigate', { url: `${origin}/slow-downloads` });
+  const snapshot = await call(client, 'browser_snapshot');
+  await call(client, 'browser_click', { element: 'Download slow file', ref: linkRef(snapshot, 'Download slow file') });
+  await expect.poll(() => slowDownload !== undefined, { timeout: 10_000 }).toBe(true);
+  // The click can return before the download event reaches the tab.
+  await expect.poll(async () => (await call(client, 'browser_snapshot')).includes('Downloading file slow.txt'), { timeout: 10_000 }).toBe(true);
+}
+
+it.each(['context', 'browser'] as const)('reports a named error when the %s is closed while a download is mid-save #230', async closing => {
+  const stopWatching = watchUnhandledRejections();
+  const outputDir = path.join(directory, 'downloads');
+  const config = await persistentConfig(path.join(directory, 'profile'), outputDir);
+  const { factory, launched } = trackedFactory(config);
+  const client = await connect(config, factory);
+  await startSlowDownload(client);
+  const first = launched[0];
+  const browser = first.browser()!;
+  process.stdout.write(JSON.stringify({ case: 'interrupted-download', closing, browser: browser.version() }) + '\n');
+  // Started but incomplete: nothing may be claimed or written yet.
+  expect(await fs.readdir(outputDir)).toEqual([]);
+  if (closing === 'context')
+    await first.close();
+  else
+    await browser.close();
+  expect(browser.isConnected()).toBe(false);
+
+  const { result, text } = await nextDownloadFailure(client, 'slow.txt');
+  expect(result.isError, text).toBe(true);
+  // Chromium reports the interrupted save as "canceled"; other builds name the closed target.
+  expect(text).toMatch(/Failed to save download "slow\.txt": .*(cancel|closed)/i);
+  expect(text).not.toContain('Downloaded file slow.txt');
+  expect(await fs.readdir(outputDir)).toEqual([]);
+  // Reported once: the failure is consumed, not repeated on every later response.
+  expect(textOf(await client.callTool({ name: 'browser_snapshot', arguments: {} }))).not.toContain('Failed to save download');
+  await client.ping();
+  // A relaunch of the reused profile can hit the observed native crash; only
+  // other tuples are required to prove the server recovers with a new browser.
+  if (!isObservedNativeCrashTuple(browser)) {
+    await call(client, 'browser_navigate', { url: `${origin}/slow-downloads` });
+    expect(launched.length).toBeGreaterThan(1);
+    expect(launched.at(-1)).not.toBe(first);
+    expect(launched.at(-1)!.browser()!.isConnected()).toBe(true);
+    expect(await call(client, 'browser_snapshot')).toContain('Slow download fixture');
+  }
+  await client.ping();
+  expect(await stopWatching()).toEqual([]);
+}, 60_000);
+
+it('relaunches the same persistent profile after the idle release and saves exact bytes both times #230', async () => {
+  const stopWatching = watchUnhandledRejections();
+  const profile = path.join(directory, 'profile');
+  const outputDir = path.join(directory, 'downloads');
+  const config = await persistentConfig(profile, outputDir, 1000);
+  const { factory, launched } = trackedFactory(config);
+  const client = await connect(config, factory);
+
+  await call(client, 'browser_navigate', { url: `${origin}/idle-downloads` });
+  const first = launched[0];
+  await first.pages()[0].evaluate(() => localStorage.setItem('previousLaunch', 'saved'));
+  let released = false;
+  first.once('close', () => { released = true; });
+  const snapshot = await call(client, 'browser_snapshot');
+  await call(client, 'browser_click', { element: 'Download first', ref: linkRef(snapshot, 'Download first') });
+  await expect.poll(() => savedFiles(outputDir), { timeout: 10_000 }).toEqual([{ file: expect.stringMatching(/^first-.*\.txt$/), bytes: idleDownloads[0].bytes }]);
+  await expect.poll(async () => (await call(client, 'browser_snapshot')).includes('Downloaded file first.txt'), { timeout: 10_000 }).toBe(true);
+
+  // No tool runs and no save is pending: only the idle timer can release the
+  // browser, and the client stays connected throughout.
+  expect(released).toBe(false);
+  await expect.poll(() => released, { timeout: 15_000 }).toBe(true);
+  expect(first.browser()!.isConnected()).toBe(false);
+  expect(launched).toHaveLength(1);
+
+  const resumed = await call(client, 'browser_navigate', { url: `${origin}/idle-downloads` });
+  expect(resumed).toContain('released after inactivity');
+  // A new browser, not the released one, on the same profile.
+  expect(launched).toHaveLength(2);
+  const second = launched[1];
+  expect(second).not.toBe(first);
+  expect(second.browser()).not.toBe(first.browser());
+  expect(second.browser()!.isConnected()).toBe(true);
+  expect(await fs.readdir(profile)).toContain('Default');
+  expect(await second.pages()[0].evaluate(() => localStorage.getItem('previousLaunch'))).toBe('saved');
+
+  const secondBrowser = second.browser()!;
+  const knownNativeCrash = isObservedNativeCrashTuple(secondBrowser);
+  process.stdout.write(JSON.stringify({ case: 'idle-relaunch', browser: secondBrowser.version(), knownNativeCrash }) + '\n');
+  const relaunchedSnapshot = await call(client, 'browser_snapshot');
+  const clicked = await client.callTool({ name: 'browser_click', arguments: { element: 'Download second', ref: linkRef(relaunchedSnapshot, 'Download second') } });
+  const page = second.pages()[0];
+  const bothSaved = [
+    { file: expect.stringMatching(/^first-.*\.txt$/), bytes: idleDownloads[0].bytes },
+    { file: expect.stringMatching(/^second-.*\.txt$/), bytes: idleDownloads[1].bytes },
+  ];
+  await expect.poll(async () => {
+    const files = await savedFiles(outputDir);
+    return files.length === 2 && files[1].bytes.equals(idleDownloads[1].bytes)
+      || knownNativeCrash && page.isClosed() && !secondBrowser.isConnected();
+  }, { timeout: 10_000 }).toBe(true);
+  if (page.isClosed() && !secondBrowser.isConnected()) {
+    // Only the observed native relaunch crash may end here; it must still be
+    // reported by name, with no second artifact and a live MCP connection.
+    expect(knownNativeCrash).toBe(true);
+    const { result, text } = clicked.isError && textOf(clicked).includes('Failed to save download "second.txt":')
+      ? { result: clicked, text: textOf(clicked) }
+      : await nextDownloadFailure(client, 'second.txt');
+    expect(result.isError, text).toBe(true);
+    expect(text).not.toContain('Downloaded file second.txt');
+    expect(await savedFiles(outputDir)).toEqual(bothSaved.slice(0, 1));
+    process.stdout.write(JSON.stringify({ case: 'known-native-crash-reported', platform: process.platform, channel,
+      browser: secondBrowser.version(), ...versions, idleRelaunch: true }) + '\n');
+  } else {
+    expect(clicked.isError, textOf(clicked)).not.toBe(true);
+    expect(await savedFiles(outputDir)).toEqual(bothSaved);
+    expect(secondBrowser.isConnected()).toBe(true);
+    expect(await call(client, 'browser_snapshot')).toContain('Downloaded file second.txt');
+  }
+  await client.ping();
+  expect(await stopWatching()).toEqual([]);
+}, 90_000);
+
+it('holds the idle release while a download is still streaming, then releases and relaunches #230', async () => {
+  const stopWatching = watchUnhandledRejections();
+  const profile = path.join(directory, 'profile');
+  const outputDir = path.join(directory, 'downloads');
+  const config = await persistentConfig(profile, outputDir, 500);
+  const { factory, launched } = trackedFactory(config);
+  const client = await connect(config, factory);
+  await startSlowDownload(client);
+  const first = launched[0];
+  await first.pages()[0].evaluate(() => localStorage.setItem('previousLaunch', 'saved'));
+  let released = false;
+  first.once('close', () => { released = true; });
+  // Several idle windows pass with the save incomplete: the browser must not be
+  // released underneath it, and must stay usable.
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  expect(released).toBe(false);
+  expect(first.browser()!.isConnected()).toBe(true);
+  expect(await call(client, 'browser_snapshot')).toContain('Slow download fixture');
+  slowDownload!.finish();
+  await expect.poll(() => savedFiles(outputDir), { timeout: 10_000 }).toEqual([{ file: expect.stringMatching(/^slow-.*\.txt$/), bytes: slowDownloadBytes }]);
+  // Only once the save settled does the idle release proceed.
+  await expect.poll(() => released, { timeout: 15_000 }).toBe(true);
+  const resumed = await call(client, 'browser_navigate', { url: `${origin}/slow-downloads` });
+  expect(resumed).toContain('released after inactivity');
+  expect(launched).toHaveLength(2);
+  expect(launched[1]).not.toBe(first);
+  expect(await launched[1].pages()[0].evaluate(() => localStorage.getItem('previousLaunch'))).toBe('saved');
+  expect(await call(client, 'browser_snapshot')).toContain('Slow download fixture');
+  await client.ping();
+  expect(await stopWatching()).toEqual([]);
+}, 90_000);

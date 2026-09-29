@@ -94,6 +94,27 @@ successful MCP ping. Such an outcome logs `known-native-crash-reported`; it is
 **not a successful download or a fixed native crash**. Removing the retained-error
 drain makes the closed-tab reporting regression fail.
 
+Further persistent-profile cases in the same file use a fixture route that sends
+part of an attachment and holds the rest until the test releases it. (1) Closing
+the context, or the browser, mid-save yields a named `Failed to save download
+"slow.txt": ...` `isError` response (Chromium 141 words the cause as `canceled`),
+reported once, with no artifact written or claimed, no unhandled rejection, a
+working MCP ping and, outside the observed-crash tuples above, a new browser on
+the next tool. (2) With `timeouts.idle` set, a saved download, an idle release of
+the default browser and a reopen notice on the next tool, the relaunched browser
+is a new context on the same profile (the local storage written before the
+release survives) and its own download saves exact bytes; the observed-crash
+tuples may instead take the named-failure contract for that second download. (3) A
+download still streaming holds the idle release: the browser stays connected past
+several idle windows, the release happens only after the bytes are saved, and the
+relaunch reuses the profile. Removing the pending-download check from the idle
+scheduler fails (3); dropping the retained download errors from responses, or
+rethrowing the tracked save rejection, fails (1). On Linux Chromium 141.0.7390.37
+(Playwright 1.63.0, both `chromium` and `chromium-headless-shell`) all three
+pass, and no server defect was found in these paths. The file also now calls
+`closeAllConnections()` before closing its fixture server so held connections
+cannot hang the run.
+
 `--isolated` is an explicit alternative whose two-launch controls passed; it
 does not preserve profile state between launches. Use recorded storage state if
 that mode needs an authenticated starting session. Do not reset a real profile
