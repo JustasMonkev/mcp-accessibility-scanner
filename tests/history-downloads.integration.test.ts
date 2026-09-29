@@ -42,6 +42,7 @@ const observedNativeCrashes = new Set([
   'win32/msedge/153.0.4234.48',
   'win32/msedge/154.0.4258.37',
 ]);
+const restoreProbe = '<script>addEventListener("pageshow", e => document.body.dataset.restored = String(e.persisted))</script>';
 const downloadBytes = Buffer.from('Local download: verified after profile reuse.\n');
 // Distinct bytes per launch prove that each saved file came from its own download.
 const idleDownloads = [
@@ -85,7 +86,8 @@ const server = http.createServer((request, response) => {
   }
   response.writeHead(200, { 'content-type': 'text/html' });
   const pages: Record<string, string> = {
-    '/a': '<title>Page A</title><input aria-label="Saved note"><a href="/b">Open B</a><iframe title="Child" src="/frame"></iframe><script>addEventListener("pageshow", e => document.body.dataset.restored = String(e.persisted))</script>',
+    '/a': '<title>Page A</title><input aria-label="Saved note"><a href="/b">Open B</a><iframe title="Child" src="/frame"></iframe>' + restoreProbe,
+    '/plain': '<title>Plain A</title><input aria-label="Saved note"><a href="/b">Open B</a>' + restoreProbe,
     '/frame': '<a href="/b" target="_top">Frame open B</a>',
     '/b': '<title>Page B</title><h1>Page B</h1><a href="#plain">Plain ref control</a>',
     '/downloads': '<title>Download fixture</title><a href="/download">Download file</a>',
@@ -160,9 +162,7 @@ function linkRef(snapshot: string, name: string) {
   return ref!;
 }
 
-it.each([
-  ['cdp', 'direct'], ['cdp', 'mcp'], ['launched', 'direct'], ['launched', 'mcp'],
-] as const)('keeps returned main/frame refs usable after repeated back navigation (%s, %s) #231', async (mode, api) => {
+async function openHistoryBrowser(mode: 'cdp' | 'launched') {
   let context: BrowserContext;
   let factory: BrowserContextFactory;
   if (mode === 'cdp') {
@@ -186,6 +186,13 @@ it.each([
     await context.newPage();
     factory = { createContext: async () => ({ browserContext: context, close: () => context.close() }) };
   }
+  return { context, factory };
+}
+
+it.each([
+  ['cdp', 'direct'], ['cdp', 'mcp'], ['launched', 'direct'], ['launched', 'mcp'],
+] as const)('keeps returned main/frame refs usable after repeated back navigation (%s, %s) #231', async (mode, api) => {
+  const { context, factory } = await openHistoryBrowser(mode);
   process.stdout.write(JSON.stringify({ case: 'history', mode, api, browser: context.browser()!.version() }) + '\n');
   const page = context.pages()[0];
   const client = api === 'mcp' ? await connect(await resolveConfig({ outputDir: directory, timeouts: { settle: 0 } }), factory) : undefined;
@@ -231,6 +238,96 @@ it.each([
       process.stdout.write(JSON.stringify({ case: 'bfcache-probe', api, restored, frames: page.frames().map(frame => frame.url()) }) + '\n');
   }
   process.stdout.write(JSON.stringify({ case: 'history', mode, api, bfcacheRestores }) + '\n');
+}, 60_000);
+
+// The case above snapshots afresh after every back step. An agent instead
+// clicks the refs the back step itself returned (the `browser_navigate_back`
+// response snapshot; for the direct API, `page.ariaSnapshot()` taken right after
+// `goBack`) or a repeated snapshot of the same restored page. Nothing here
+// navigates afresh, reloads or otherwise recovers: history length and form state
+// must show the page really came back from history. Playwright frame-qualifies
+// refs as `f<seq>e<n>` after the first cross-document navigation and advances
+// `<seq>` on every traversal, so the plain page exercises main-frame refs alone.
+it.each(
+    (['cdp', 'launched'] as const).flatMap(mode => (['direct', 'mcp'] as const).flatMap(api =>
+      (['plain', 'iframe'] as const).map(variant => [mode, api, variant] as const))),
+)('clicks refs from back responses and repeated snapshots of the restored page (%s, %s, %s page) #231', async (mode, api, variant) => {
+  const { context, factory } = await openHistoryBrowser(mode);
+  process.stdout.write(JSON.stringify({ case: 'history-response-refs', mode, api, variant, browser: context.browser()!.version() }) + '\n');
+  const page = context.pages()[0];
+  const client = api === 'mcp' ? await connect(await resolveConfig({ outputDir: directory, timeouts: { settle: 0 } }), factory) : undefined;
+  const pathname = variant === 'plain' ? '/plain' : '/a';
+  const bfcacheOptIn = enableBFCache && mode === 'cdp';
+  const note = page.getByRole('textbox', { name: 'Saved note' });
+  const snapshot = async () => client ? await call(client, 'browser_snapshot') : await page.ariaSnapshot({ mode: 'ai' });
+  // The iframe of a restored document can attach after the back step returns,
+  // so a repeated snapshot waits for the link it is going to click.
+  const repeatedSnapshot = async (name: string) => {
+    let text = '';
+    await expect.poll(async () => {
+      text = await snapshot();
+      return text.includes(`link "${name}"`);
+    }).toBe(true);
+    return text;
+  };
+  const historyLength = () => page.evaluate(() => history.length);
+  const restored = () => page.locator('body').getAttribute('data-restored');
+
+  for (const target of ['/b', pathname]) {
+    if (client)
+      await call(client, 'browser_navigate', { url: origin + target });
+    else
+      await page.goto(origin + target);
+  }
+  await note.fill('Keep this form state');
+  const initialHistory = await historyLength();
+  // `initial` is a snapshot of the page before the first back step, `back` the
+  // snapshot that the previous back step returned, `repeat` another snapshot of
+  // the restored page taken after it. The frame link can miss the back snapshot
+  // when the iframe attaches late; it then falls back to `repeat`.
+  const cycles = variant === 'plain'
+    ? [['Open B', 'initial'], ['Open B', 'back'], ['Open B', 'repeat'], ['Open B', 'back'], ['Open B', 'repeat']] as const
+    : [['Open B', 'initial'], ['Frame open B', 'back'], ['Open B', 'back'], ['Frame open B', 'repeat'], ['Open B', 'repeat']] as const;
+  let backSnapshot = '';
+  let bfcacheRestores = 0;
+  const used: { name: string, source: string, ref: string }[] = [];
+  for (const [name, wanted] of cycles) {
+    const backHasLink = backSnapshot.includes(`link "${name}"`);
+    const source = wanted === 'back' && name === 'Frame open B' && !backHasLink ? 'repeat' : wanted;
+    const text = source === 'back' ? backSnapshot : await repeatedSnapshot(name);
+    const ref = linkRef(text, name);
+    expect(ref).toMatch(/^f\d+e\d+$/);
+    if (source === 'repeat' && backHasLink)
+      expect(ref, 'a repeated snapshot of the restored page must keep its refs').toBe(linkRef(backSnapshot, name));
+    used.push({ name, source, ref });
+    if (client)
+      await call(client, 'browser_click', { element: name, ref });
+    else
+      await page.locator(`aria-ref=${ref}`).click();
+    await expect.poll(() => page.url()).toBe(`${origin}/b`);
+    if (client) {
+      backSnapshot = await call(client, 'browser_navigate_back');
+    } else {
+      await page.goBack({ waitUntil: 'commit' });
+      backSnapshot = await page.ariaSnapshot({ mode: 'ai' });
+    }
+    if (client)
+      expect(backSnapshot).toContain(`Page URL: ${origin}${pathname}`);
+    await expect.poll(() => page.url()).toBe(origin + pathname);
+    await expect.poll(() => note.inputValue()).toBe('Keep this form state');
+    expect(await historyLength(), 'going back must traverse history, not add a navigation').toBe(initialHistory + 1);
+    if (bfcacheOptIn) {
+      if (await restored() === 'true')
+        bfcacheRestores++;
+    } else {
+      // Playwright's launch flags disable BFCache, so `true` here would mean a
+      // cached document came back and the case no longer describes what it claims.
+      await expect.poll(restored).toBe('false');
+    }
+    if (variant === 'iframe' && !bfcacheOptIn)
+      await expect.poll(() => page.frames().map(frame => new URL(frame.url()).pathname)).toEqual(['/a', '/frame']);
+  }
+  process.stdout.write(JSON.stringify({ case: 'history-response-refs', mode, api, variant, cycles: used, bfcacheRestores }) + '\n');
 }, 60_000);
 
 it.each([false, true])('saves bytes or reports a known native relaunch crash without losing MCP (isolated: %s) #230', async isolated => {

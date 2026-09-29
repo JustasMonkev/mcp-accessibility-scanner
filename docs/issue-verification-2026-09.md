@@ -45,6 +45,24 @@ The opt-in probe logs `pageshow.persisted` and the observed Playwright frame lis
 after each back operation. Headless-shell passes with no observed restores do not
 establish BFCache support.
 
+A second set of eight cases (CDP and launched, direct and MCP, a plain page and the
+iframe page) follows what an agent does after going back: it clicks the refs that
+the back step itself returned (the `browser_navigate_back` response snapshot, or
+`page.ariaSnapshot({ mode: 'ai' })` taken right after `goBack` for the direct API)
+or a repeated snapshot of the same restored page, never a fresh navigation. Each
+runs five back cycles, checks that the main-frame refs are frame-qualified
+(`f<seq>e<n>`, with a new `<seq>` on every traversal, for example `f3e3`, `f5e3`,
+`f7e3`), that a repeated snapshot keeps the refs of the back response, and that
+history length, the form value, `pageshow.persisted === false` and (iframe page) the
+frame list show a real history traversal. No goto, reload or other recovery is
+used. On Linux, Node 22.22.2, Playwright 1.63.0 and Chromium 141.0.7390.37 (the full
+executable and the headless shell) all eight passed, twelve consecutive runs
+included; the frame link was present in the back response every time. With
+`MCP_TEST_ENABLE_BFCACHE=1` the four launched cases still pass, while the four
+CDP cases fail as the unsupported mode predicts, including on the plain page: the
+restored document reports the old ref `f1e3` and the click is rejected with
+`Invalid frame in aria-ref selector`.
+
 ## Persistent-profile downloads (#230)
 
 The same test file launches two separate browser instances against one newly
