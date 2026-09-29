@@ -60,7 +60,8 @@ describe('navigation interrupted by a load-time dialog', () => {
           const script = type === 'late'
             ? '<script>addEventListener("load", () => alert("After load"));</script>'
             : type === 'outgoing'
-              ? '<script>fetch("/hold").then(() => alert("From the previous page"));</script>'
+              // Drops the session cookie just before its dialog, as a sign-out timer would.
+              ? '<script>fetch("/hold").then(() => { document.cookie = "sid=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT"; alert("From the previous page"); });</script>'
               : ['alert', 'confirm', 'prompt'].includes(type)
                 ? `<script>window.dialogResult = ${type}('During load');</script>`
                 : '';
@@ -274,6 +275,7 @@ describe('navigation interrupted by a load-time dialog', () => {
     config.outputDir = outputDir;
     await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
     const urls = ['outgoing', 'delayed', 'second'].map(name => `http://fixture.local/${name}`);
+    await browserContext.addCookies([{ name: 'sid', value: 'signed-in', url: 'http://fixture.local/' }]);
     const audit = backend.callTool('audit_site', {
       startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0,
     });
@@ -289,9 +291,10 @@ describe('navigation interrupted by a load-time dialog', () => {
       expect(report.pages.map((page: { url: string, status: string }) => [page.url, page.status])).toEqual([
         [urls[0], 'scanned'], [urls[1], 'scanned'], [urls[2], 'scanned'],
       ]);
+      // The cookie went while the outgoing page was still the one running.
+      expect(report.sessionLosses).toEqual([{ url: urls[0], cookies: ['sid'] }]);
       expect(browserContext.pages()).toHaveLength(1);
     } finally {
-      // Settles a hung audit so a regression fails here instead of leaking the crawl.
       await browserContext.close();
       await audit;
       await rm(outputDir, { recursive: true, force: true });

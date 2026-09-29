@@ -483,14 +483,20 @@ function dialogFailure(description: string): Error {
 function watchForDialog(tab: Tab) {
   let listener: ((state: { type: string, description: string }) => void) | undefined;
   let fired = false;
-  // The document URL when the dialog opened: until a navigation commits, page.url()
-  // is still the outgoing document's, so this tells which page raised it.
-  let firedAtUrl: string | undefined;
+  // A document runs no script before it commits, so a dialog that opens before the
+  // main frame commits a navigation comes from the outgoing document. Counted by
+  // commit rather than compared by URL: a reload of the same URL commits too.
+  let committed = false;
+  let raisedByOutgoingDocument = false;
+  const onFrameNavigated = (frame: import('playwright').Frame) => {
+    if (frame === tab.page.mainFrame())
+      committed = true;
+  };
+  tab.page.on('framenavigated', onFrameNavigated);
   const failed = new Promise<never>((_, reject) => {
     const present = openDialog(tab);
     if (present) {
       fired = true;
-      firedAtUrl = tab.page.url();
       reject(dialogFailure(present.description));
       return;
     }
@@ -498,7 +504,7 @@ function watchForDialog(tab: Tab) {
       if (state.type !== 'dialog')
         return;
       fired = true;
-      firedAtUrl = tab.page.url();
+      raisedByOutgoingDocument = !committed;
       reject(dialogFailure(state.description));
     };
     tab.on(TabEvents.modalState, listener);
@@ -509,9 +515,10 @@ function watchForDialog(tab: Tab) {
     guard: <T>(work: Promise<T>): Promise<T> => Promise.race([work, failed]),
     /** A dialog opened: work on the tab may have been abandoned mid-call. */
     fired: () => fired,
-    /** True when the dialog came from the document `url`, not the one being loaded. */
-    firedOn: (url: string) => fired && firedAtUrl === url,
+    /** True when the dialog came from the document being navigated away from. */
+    raisedByOutgoingDocument: () => raisedByOutgoingDocument,
     stop: () => {
+      tab.page.off('framenavigated', onFrameNavigated);
       if (listener)
         tab.off(TabEvents.modalState, listener);
     },
@@ -745,9 +752,10 @@ const auditSite = defineTabTool({
           }
         } catch (error) {
           // A timer on the previous page can raise its dialog while this URL is
-          // still loading. That is not this page's dialog, so it is audited again,
+          // still loading, even a reload of the same URL. That is not this page's
+          // dialog, so it is audited again,
           // once, in the fresh tab the abandoned one is replaced with.
-          if (!item.retriedAfterOutgoingDialog && urlBeforeNavigation !== item.url && dialogWatch.firedOn(urlBeforeNavigation)) {
+          if (!item.retriedAfterOutgoingDialog && dialogWatch.raisedByOutgoingDocument()) {
             retryItem = true;
           } else {
             erroredPages++;
@@ -764,7 +772,9 @@ const auditSite = defineTabTool({
           // baseline, so each later disappearance is still caught and attributed
           // to its own URL instead of being masked by an earlier, unrelated one.
           if (baselineCookies.size) {
-            const loss = await findCookieLoss(crawlTab.page, cookieScopeUrls, baselineCookies, item.url, urlBeforeNavigation);
+            // A retried page never loaded: the outgoing page that raised the dialog
+            // is the one that ran in the meantime, so a loss is laid at its door.
+            const loss = await findCookieLoss(crawlTab.page, cookieScopeUrls, baselineCookies, retryItem ? urlBeforeNavigation : item.url, urlBeforeNavigation);
             if (loss) {
               sessionLosses.push({ url: loss.url, cookies: loss.cookies });
               // Removed from the jar snapshot too, or a later-discovered URL

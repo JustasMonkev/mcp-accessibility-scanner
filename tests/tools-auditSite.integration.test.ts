@@ -64,6 +64,9 @@ describe('audit_site integration', () => {
         title: `Title for ${currentUrl}`,
         links: selector ? linkMap[currentUrl] ?? [] : [],
       })),
+      mainFrame: vi.fn(() => ({})),
+      on: vi.fn(),
+      off: vi.fn(),
     };
 
     const crawlTab: any = {

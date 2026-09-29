@@ -74,7 +74,16 @@ function createHarness(
             || pathname.startsWith(cookie.path.endsWith('/') ? cookie.path : `${cookie.path}/`);
         })));
 
+  // A committed navigation reports framenavigated on the main frame, as a real page does.
+  const mainFrame = {};
+  const frameNavigatedListeners = new Set<(frame: unknown) => void>();
   const crawlPage = {
+    mainFrame: vi.fn(() => mainFrame),
+    on: vi.fn((event: string, listener: (frame: unknown) => void) => {
+      if (event === 'framenavigated')
+        frameNavigatedListeners.add(listener);
+    }),
+    off: vi.fn((_event: string, listener: (frame: unknown) => void) => frameNavigatedListeners.delete(listener)),
     context: vi.fn(() => ({ cookies: cookiesMock })),
     url: vi.fn(() => currentUrl),
     title: vi.fn(async () => `Title for ${currentUrl}`),
@@ -100,6 +109,8 @@ function createHarness(
         throw new Error(`net::ERR_ABORTED navigating to ${url}`);
       }
       currentUrl = redirectMap[url] ?? url;
+      for (const listener of frameNavigatedListeners)
+        listener(mainFrame);
       // The response landed and the page committed, but the load never finished,
       // which is how a hanging logout endpoint behaves.
       if (options?.navigationFailsFor?.(currentUrl))
@@ -281,6 +292,46 @@ describe('audit_site tool', () => {
       ['https://example.com/after', 'scanned'],
     ]);
     expect(report.pages[1].error).toContain('The page opened a dialog that the crawl does not answer');
+    expect(tabs).toHaveLength(1);
+  });
+
+  it('audits a same-URL reload again when the outgoing document raised its dialog before the commit', async () => {
+    // /first redirects to /canonical, so the queued /canonical reloads the URL already open.
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/first', 'https://example.com/canonical'],
+      'https://example.com/canonical': [],
+    }, { redirectMap: { 'https://example.com/first': 'https://example.com/canonical' } });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // The /canonical document left open by /first alerts before the reload commits.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/canonical')
+        return navigateImpl(url);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Session ending"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/canonical');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/first', 'scanned'],
+      ['https://example.com/canonical', 'scanned'],
+    ]);
     expect(tabs).toHaveLength(1);
   });
 
