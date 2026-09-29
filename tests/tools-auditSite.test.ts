@@ -247,14 +247,15 @@ describe('audit_site tool', () => {
       'https://example.com/after': [],
     });
     vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
-    // /dialog raises a dialog mid-navigation that someone else dismisses at once,
-    // so no dialog is open by the next page; the abandoned navigation never settles.
+    // /dialog commits, then raises its own dialog mid-load that someone else dismisses
+    // at once, so no dialog is open by the next page; the abandoned load never settles.
     const listeners: ((state: { type: string, description: string }) => void)[] = [];
     crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
     const navigateImpl = crawlTab.navigate.getMockImplementation()!;
     crawlTab.navigate.mockImplementation(async (url: string) => {
+      await navigateImpl(url);
       if (!url.endsWith('/dialog'))
-        return navigateImpl(url);
+        return;
       for (const listener of listeners)
         listener({ type: 'dialog', description: '["confirm" dialog with message "Leave?"]' });
       return new Promise(() => {});

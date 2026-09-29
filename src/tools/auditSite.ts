@@ -28,6 +28,8 @@ type CrawlItem = {
   cookieUrl: string;
   depth: number;
   discoveredFrom: string | null;
+  // Set when a dialog from the previous page cut this item's navigation short.
+  retriedAfterOutgoingDialog?: boolean;
 };
 
 type PageScanStatus = 'scanned' | 'error';
@@ -481,10 +483,14 @@ function dialogFailure(description: string): Error {
 function watchForDialog(tab: Tab) {
   let listener: ((state: { type: string, description: string }) => void) | undefined;
   let fired = false;
+  // The document URL when the dialog opened: until a navigation commits, page.url()
+  // is still the outgoing document's, so this tells which page raised it.
+  let firedAtUrl: string | undefined;
   const failed = new Promise<never>((_, reject) => {
     const present = openDialog(tab);
     if (present) {
       fired = true;
+      firedAtUrl = tab.page.url();
       reject(dialogFailure(present.description));
       return;
     }
@@ -492,6 +498,7 @@ function watchForDialog(tab: Tab) {
       if (state.type !== 'dialog')
         return;
       fired = true;
+      firedAtUrl = tab.page.url();
       reject(dialogFailure(state.description));
     };
     tab.on(TabEvents.modalState, listener);
@@ -502,6 +509,8 @@ function watchForDialog(tab: Tab) {
     guard: <T>(work: Promise<T>): Promise<T> => Promise.race([work, failed]),
     /** A dialog opened: work on the tab may have been abandoned mid-call. */
     fired: () => fired,
+    /** True when the dialog came from the document `url`, not the one being loaded. */
+    firedOn: (url: string) => fired && firedAtUrl === url,
     stop: () => {
       if (listener)
         tab.off(TabEvents.modalState, listener);
@@ -701,6 +710,7 @@ const auditSite = defineTabTool({
 
         const urlBeforeNavigation = crawlTab.page.url();
         const dialogWatch = watchForDialog(crawlTab);
+        let retryItem = false;
         try {
           await dialogWatch.guard(crawlTab.navigate(item.url));
           await dialogWatch.guard(crawlTab.waitForTimeout(params.waitAfterNavigationMs));
@@ -734,9 +744,16 @@ const auditSite = defineTabTool({
             aggregateIntoSummary(summaryByIncomplete, incomplete.deduped, item.url);
           }
         } catch (error) {
-          erroredPages++;
-          pageReport.status = 'error';
-          pageReport.error = error instanceof Error ? error.message : String(error);
+          // A timer on the previous page can raise its dialog while this URL is
+          // still loading. That is not this page's dialog, so it is audited again,
+          // once, in the fresh tab the abandoned one is replaced with.
+          if (!item.retriedAfterOutgoingDialog && urlBeforeNavigation !== item.url && dialogWatch.firedOn(urlBeforeNavigation)) {
+            retryItem = true;
+          } else {
+            erroredPages++;
+            pageReport.status = 'error';
+            pageReport.error = error instanceof Error ? error.message : String(error);
+          }
         } finally {
           dialogWatch.stop();
           crawlTabAbandoned = dialogWatch.fired();
@@ -759,15 +776,23 @@ const auditSite = defineTabTool({
               }
             }
           }
-          processedPages++;
-          const message = pageReport.status === 'scanned'
-            ? `Scanned page ${processedPages}/${params.maxPages}: ${item.url}`
-            : `Failed page ${processedPages}/${params.maxPages}: ${item.url}`;
-          await response.reportProgress({
-            progress: processedPages,
-            total: params.maxPages,
-            message,
-          });
+          if (retryItem) {
+            // Not counted or reported: the page runs again next, in a fresh tab.
+            pages.splice(pages.indexOf(pageReport), 1);
+            visited.delete(item.url);
+            queue.unshift({ ...item, retriedAfterOutgoingDialog: true });
+            queued.add(item.url);
+          } else {
+            processedPages++;
+            const message = pageReport.status === 'scanned'
+              ? `Scanned page ${processedPages}/${params.maxPages}: ${item.url}`
+              : `Failed page ${processedPages}/${params.maxPages}: ${item.url}`;
+            await response.reportProgress({
+              progress: processedPages,
+              total: params.maxPages,
+              message,
+            });
+          }
         }
       }
     } finally {

@@ -18,7 +18,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { chromium, type Browser, type BrowserContext } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Route } from 'playwright';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { resolveConfig } from '../src/config.js';
 
@@ -40,15 +40,30 @@ describe('navigation interrupted by a load-time dialog', () => {
     backend = new BrowserServerBackend(config, {
       createContext: async () => {
         browserContext = await browser.newContext();
-        await browserContext.route('http://fixture.local/**', route => {
+        let heldRequest: Route | undefined;
+        await browserContext.route('http://fixture.local/**', async route => {
           const type = new URL(route.request().url()).pathname.slice(1);
+          // 'outgoing' keeps a request open and alerts once it is answered, which
+          // happens only when 'delayed' is requested: its dialog opens while the
+          // crawl is already navigating away, before 'delayed' commits.
+          if (type === 'hold') {
+            heldRequest = route;
+            return;
+          }
+          if (type === 'delayed') {
+            await heldRequest?.fulfill({ body: '' });
+            heldRequest = undefined;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
           // 'late' opens its dialog once the document is parsed and interactive, so
           // the navigation itself succeeds and only the work after it is frozen.
           const script = type === 'late'
             ? '<script>addEventListener("load", () => alert("After load"));</script>'
-            : ['alert', 'confirm', 'prompt'].includes(type)
-              ? `<script>window.dialogResult = ${type}('During load');</script>`
-              : '';
+            : type === 'outgoing'
+              ? '<script>fetch("/hold").then(() => alert("From the previous page"));</script>'
+              : ['alert', 'confirm', 'prompt'].includes(type)
+                ? `<script>window.dialogResult = ${type}('During load');</script>`
+                : '';
           return route.fulfill({
             contentType: 'text/html',
             body: `<!doctype html><html lang="en"><head><title>Load dialog</title></head><body>${script}<button>Loaded</button></body></html>`,
@@ -245,6 +260,35 @@ describe('navigation interrupted by a load-time dialog', () => {
         [urls[0], 'scanned'], [urls[1], 'error'], [urls[2], 'scanned'],
       ]);
       expect(report.pages[1].error).toContain('"alert" dialog with message "After load"');
+      expect(browserContext.pages()).toHaveLength(1);
+    } finally {
+      // Settles a hung audit so a regression fails here instead of leaking the crawl.
+      await browserContext.close();
+      await audit;
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('audits a page again when the previous page raised its dialog during the navigation to it', async () => {
+    const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
+    config.outputDir = outputDir;
+    await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
+    const urls = ['outgoing', 'delayed', 'second'].map(name => `http://fixture.local/${name}`);
+    const audit = backend.callTool('audit_site', {
+      startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0,
+    });
+    let auditReturned = false;
+    void audit.then(() => { auditReturned = true; });
+    try {
+      await vi.waitFor(() => expect(auditReturned).toBe(true), { timeout: 10000 });
+      const result = await audit;
+      // Without the retry, 'delayed' is reported as failed for the previous page's dialog.
+      expect(result.structuredContent).toMatchObject({ totals: { scannedPages: 3, erroredPages: 0 } });
+      const files = await readdir(outputDir);
+      const report = JSON.parse(await readFile(path.join(outputDir, files[0]), 'utf8'));
+      expect(report.pages.map((page: { url: string, status: string }) => [page.url, page.status])).toEqual([
+        [urls[0], 'scanned'], [urls[1], 'scanned'], [urls[2], 'scanned'],
+      ]);
       expect(browserContext.pages()).toHaveLength(1);
     } finally {
       // Settles a hung audit so a regression fails here instead of leaking the crawl.
