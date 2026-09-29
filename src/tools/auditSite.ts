@@ -480,7 +480,7 @@ function dialogFailure(description: string): Error {
  * stays pending until the tab is closed, which rejects it; the race has already
  * taken a handler on it, so that rejection is not reported again.
  */
-function watchForDialog(tab: Tab) {
+function watchForDialog(tab: Tab, requestedUrl: string) {
   let listener: ((state: { type: string, description: string }) => void) | undefined;
   let fired = false;
   // A document runs no script before it commits, so a dialog that opens before the
@@ -488,13 +488,23 @@ function watchForDialog(tab: Tab) {
   // commit rather than compared by URL: a reload of the same URL commits too. A new
   // document commits only after its navigation response, and to that response's URL;
   // framenavigated alone also fires for a same-document change (pushState, a hash)
-  // the outgoing page makes, before or after that response.
+  // the outgoing page makes, before or after that response. Only the navigation the
+  // crawl asked for counts, redirects included, not one the outgoing page started.
   let respondedUrl: string | undefined;
   let committed = false;
   let raisedByOutgoingDocument = false;
   const withoutFragment = (url: string) => url.split('#')[0];
+  const requested = withoutFragment(new URL(requestedUrl).href);
+  const isRequestedNavigation = (request: import('playwright').Request) => {
+    for (let hop: import('playwright').Request | null = request; hop; hop = hop.redirectedFrom()) {
+      if (withoutFragment(hop.url()) === requested)
+        return true;
+    }
+    return false;
+  };
   const onResponse = (response: import('playwright').Response) => {
-    if (response.request().isNavigationRequest() && response.frame() === tab.page.mainFrame() && (response.status() < 300 || response.status() >= 400))
+    const request = response.request();
+    if (request.isNavigationRequest() && response.frame() === tab.page.mainFrame() && (response.status() < 300 || response.status() >= 400) && isRequestedNavigation(request))
       respondedUrl = withoutFragment(response.url());
   };
   const onFrameNavigated = (frame: import('playwright').Frame) => {
@@ -663,6 +673,8 @@ const auditSite = defineTabTool({
             .map(cookie => `${cookie.name}\n${cookie.domain}\n${cookie.path}`));
     const baselineCookies = await readCrawlCookies(crawlTab.page, cookieScopeUrls);
     const sessionLosses: { url: string, cookies: string[] }[] = [];
+    // The first URL audited in each replacement crawl tab.
+    const crawlTabRestarts: { url: string }[] = [];
     let processedPages = 0;
     try {
       while (queue.length && pages.length < params.maxPages) {
@@ -719,6 +731,9 @@ const auditSite = defineTabTool({
           const frozenTab = crawlTab;
           retiredTabs.push(frozenTab);
           crawlTab = await context.newTab();
+          // A new tab starts without the old one's sessionStorage, so pages from here
+          // on may run in a different session; the report says where that began.
+          crawlTabRestarts.push({ url: item.url });
           // Best effort: closing a frozen page can time out, and that must not end
           // the crawl it was retired to rescue. The final sweep tries it again.
           const frozenIndex = context.tabs().indexOf(frozenTab);
@@ -727,7 +742,7 @@ const auditSite = defineTabTool({
         }
 
         const urlBeforeNavigation = crawlTab.page.url();
-        const dialogWatch = watchForDialog(crawlTab);
+        const dialogWatch = watchForDialog(crawlTab, item.url);
         let retryItem = false;
         try {
           await dialogWatch.guard(crawlTab.navigate(item.url));
@@ -878,6 +893,7 @@ const auditSite = defineTabTool({
       pages,
       summary,
       sessionLosses,
+      crawlTabRestarts,
     };
 
     const reportResource = await writeJsonReport(response, reportPath, report, {
@@ -898,6 +914,7 @@ const auditSite = defineTabTool({
       },
       totals: summary.totals,
       sessionLosses,
+      crawlTabRestarts,
       pagesWithUnscannedFrames: pagesWithUnscannedFrames.map(page => ({
         url: page.url,
         unscannedFrames: page.unscannedFrames,
@@ -938,10 +955,16 @@ const auditSite = defineTabTool({
       'If one of these was a session cookie, pages scanned after the URL that dropped it were audited as a signed-out user. Add that URL to excludePathPatterns, sign in again, and re-run.',
       '',
     ] : [];
+    const restartWarning = crawlTabRestarts.length ? [
+      ...crawlTabRestarts.map(restart => `WARNING: a dialog froze the crawl tab, so the crawl continued in a fresh tab from ${restart.url}.`),
+      'Per-tab state such as sessionStorage from earlier pages was not carried over; if the site keeps its session there, pages from that URL on may have been audited in a different session.',
+      '',
+    ] : [];
     response.addCode('// Crawled pages in a temporary tab and aggregated Axe violations.');
     response.addResult([
       ...frameWarning,
       ...sessionWarning,
+      ...restartWarning,
       `Scanned pages: ${summary.totals.scannedPages}`,
       `Errored pages: ${summary.totals.erroredPages}`,
       `Skipped URLs: ${summary.totals.skippedUrls}`,

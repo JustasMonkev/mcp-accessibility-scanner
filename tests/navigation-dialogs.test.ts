@@ -225,6 +225,10 @@ describe('navigation interrupted by a load-time dialog', () => {
       expect(report.pages.map((page: { url: string, status: string }) => [page.url, page.status])).toEqual([
         [urls[0], 'error'], [urls[1], 'scanned'], [urls[2], 'error'], [urls[3], 'error'], [urls[4], 'scanned'],
       ]);
+      // Each page after a dialog ran in a fresh tab, without the old tab's sessionStorage, and the report says so.
+      expect(report.crawlTabRestarts).toEqual([{ url: urls[1] }, { url: urls[3] }, { url: urls[4] }]);
+      expect(result.structuredContent).toMatchObject({ crawlTabRestarts: report.crawlTabRestarts });
+      expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining(`the crawl continued in a fresh tab from ${urls[1]}`) });
       // Only the pages that opened a dialog carry a note about it, and it names their own dialog.
       expect(report.pages[0].error).toContain('"alert" dialog with message "During load"');
       expect(report.pages[2].error).toContain('"confirm" dialog with message "During load"');
