@@ -486,18 +486,20 @@ function watchForDialog(tab: Tab) {
   // A document runs no script before it commits, so a dialog that opens before the
   // main frame commits a navigation comes from the outgoing document. Counted by
   // commit rather than compared by URL: a reload of the same URL commits too. A new
-  // document commits only after its navigation response; framenavigated alone also
-  // fires for a same-document change (pushState, a hash) the outgoing page makes.
-  let navigated = false;
-  let navigationResponded = false;
+  // document commits only after its navigation response, and to that response's URL;
+  // framenavigated alone also fires for a same-document change (pushState, a hash)
+  // the outgoing page makes, before or after that response.
+  let respondedUrl: string | undefined;
+  let committed = false;
   let raisedByOutgoingDocument = false;
-  const onFrameNavigated = (frame: import('playwright').Frame) => {
-    if (frame === tab.page.mainFrame())
-      navigated = true;
-  };
+  const withoutFragment = (url: string) => url.split('#')[0];
   const onResponse = (response: import('playwright').Response) => {
     if (response.request().isNavigationRequest() && response.frame() === tab.page.mainFrame() && (response.status() < 300 || response.status() >= 400))
-      navigationResponded = true;
+      respondedUrl = withoutFragment(response.url());
+  };
+  const onFrameNavigated = (frame: import('playwright').Frame) => {
+    if (frame === tab.page.mainFrame() && respondedUrl !== undefined && withoutFragment(frame.url()) === respondedUrl)
+      committed = true;
   };
   tab.page.on('framenavigated', onFrameNavigated);
   tab.page.on('response', onResponse);
@@ -512,7 +514,7 @@ function watchForDialog(tab: Tab) {
       if (state.type !== 'dialog')
         return;
       fired = true;
-      raisedByOutgoingDocument = !(navigated && navigationResponded);
+      raisedByOutgoingDocument = !committed;
       reject(dialogFailure(state.description));
     };
     tab.on(TabEvents.modalState, listener);

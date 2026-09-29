@@ -75,15 +75,16 @@ function createHarness(
         })));
 
   // A committed navigation reports its main-frame navigation response and then
-  // framenavigated on the main frame, as a real page does.
-  const mainFrame = {};
+  // framenavigated on the main frame at that response's URL, as a real page does.
+  const mainFrame = { url: () => currentUrl };
   const pageListeners = new Map<string, Set<(arg: unknown) => void>>();
   const emitPageEvent = (event: string, arg: unknown) => {
     for (const listener of pageListeners.get(event) ?? [])
       listener(arg);
   };
+  const navigationResponse = (url: string) => ({ request: () => ({ isNavigationRequest: () => true }), frame: () => mainFrame, status: () => 200, url: () => url });
   const commitNavigation = () => {
-    emitPageEvent('response', { request: () => ({ isNavigationRequest: () => true }), frame: () => mainFrame, status: () => 200 });
+    emitPageEvent('response', navigationResponse(currentUrl));
     emitPageEvent('framenavigated', mainFrame);
   };
   const crawlPage = {
@@ -189,6 +190,7 @@ function createHarness(
     cookiesMock,
     emitPageEvent,
     mainFrame,
+    navigationResponse,
   };
 }
 
@@ -358,6 +360,47 @@ describe('audit_site tool', () => {
     crawlTab.navigate.mockImplementation(async (url: string) => {
       if (url !== 'https://example.com/next')
         return navigateImpl(url);
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Saved"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/next');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/next', 'scanned'],
+    ]);
+  });
+
+  it('does not pair the next page\'s response with a same-document navigation by the outgoing page', async () => {
+    const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse } = createHarness({
+      'https://example.com/': ['https://example.com/next'],
+      'https://example.com/next': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // While /next loads: the outgoing page pushes a history entry, /next's response
+    // arrives, then the outgoing page alerts before /next commits.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/next')
+        return navigateImpl(url);
+      emitPageEvent('framenavigated', mainFrame);
+      emitPageEvent('response', navigationResponse('https://example.com/next'));
       emitPageEvent('framenavigated', mainFrame);
       for (const listener of listeners)
         listener({ type: 'dialog', description: '["alert" dialog with message "Saved"]' });
