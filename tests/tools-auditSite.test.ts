@@ -240,6 +240,49 @@ describe('audit_site tool', () => {
     expect(context.selectTab).toHaveBeenCalledWith(0);
   });
 
+  it('retires a crawl tab whose dialog was answered elsewhere before the next page', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/dialog', 'https://example.com/after'],
+      'https://example.com/dialog': [],
+      'https://example.com/after': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    // /dialog raises a dialog mid-navigation that someone else dismisses at once,
+    // so no dialog is open by the next page; the abandoned navigation never settles.
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (!url.endsWith('/dialog'))
+        return navigateImpl(url);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["confirm" dialog with message "Leave?"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(crawlTab.navigate).not.toHaveBeenCalledWith('https://example.com/after');
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/after');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/dialog', 'error'],
+      ['https://example.com/after', 'scanned'],
+    ]);
+    expect(report.pages[1].error).toContain('The page opened a dialog that the crawl does not answer');
+    expect(tabs).toHaveLength(1);
+  });
+
   it('warns about pages whose frames the scan could not reach', async () => {
     // A page scanned with a frame missing reports fewer violations, so a reader
     // counting them has to know which pages those numbers are incomplete for.

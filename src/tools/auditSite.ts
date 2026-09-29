@@ -480,15 +480,19 @@ function dialogFailure(description: string): Error {
  */
 function watchForDialog(tab: Tab) {
   let listener: ((state: { type: string, description: string }) => void) | undefined;
+  let fired = false;
   const failed = new Promise<never>((_, reject) => {
     const present = openDialog(tab);
     if (present) {
+      fired = true;
       reject(dialogFailure(present.description));
       return;
     }
     listener = state => {
-      if (state.type === 'dialog')
-        reject(dialogFailure(state.description));
+      if (state.type !== 'dialog')
+        return;
+      fired = true;
+      reject(dialogFailure(state.description));
     };
     tab.on(TabEvents.modalState, listener);
   });
@@ -496,6 +500,8 @@ function watchForDialog(tab: Tab) {
   failed.catch(() => {});
   return {
     guard: <T>(work: Promise<T>): Promise<T> => Promise.race([work, failed]),
+    /** A dialog opened: work on the tab may have been abandoned mid-call. */
+    fired: () => fired,
     stop: () => {
       if (listener)
         tab.off(TabEvents.modalState, listener);
@@ -615,6 +621,7 @@ const auditSite = defineTabTool({
     // Crawl tabs given up on because a dialog froze them; each is closed, and the
     // sweep below covers one whose close failed.
     const retiredTabs: Tab[] = [];
+    let crawlTabAbandoned = false;
     // Cookies the crawl URLs carry before the crawl are the session the caller
     // signed in with. If one disappears mid-crawl every later page is audited as a
     // signed-out user, which still looks like a clean run, so record where it happened.
@@ -677,8 +684,11 @@ const auditSite = defineTabTool({
 
         // A dialog the previous page left open freezes this tab for every later URL.
         // It goes, dialog and all, and the crawl continues in a new tab; the tab the
-        // tool was called from is never touched.
-        if (openDialog(crawlTab)) {
+        // tool was called from is never touched. A tab whose dialog was answered
+        // elsewhere (a headed or shared CDP browser) goes too: the navigation or scan
+        // abandoned for that dialog may resume and race the next page.
+        if (crawlTabAbandoned || openDialog(crawlTab)) {
+          crawlTabAbandoned = false;
           const frozenTab = crawlTab;
           retiredTabs.push(frozenTab);
           crawlTab = await context.newTab();
@@ -729,6 +739,7 @@ const auditSite = defineTabTool({
           pageReport.error = error instanceof Error ? error.message : String(error);
         } finally {
           dialogWatch.stop();
+          crawlTabAbandoned = dialogWatch.fired();
           // Checked after failed navigations too: a logout URL that clears the cookie
           // and then times out still ended the session, and skipping it pins the
           // warning on the next page that happens to load — an innocent route.
