@@ -563,6 +563,50 @@ describe('audit_site tool', () => {
     ]);
   });
 
+  it('counts a commit whose redirect Location added a fragment as the new document', async () => {
+    const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+      'https://example.com/': ['https://example.com/old', 'https://example.com/next'],
+      'https://example.com/next': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // /old redirects to /landing#section: the response URL has no fragment, the
+    // committed frame URL does. That document then raises its own dialog.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/old')
+        return navigateImpl(url);
+      emitPageEvent('response', navigationResponse('https://example.com/landing', 'https://example.com/old'));
+      setCurrentUrl('https://example.com/landing#section');
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Landing"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    // Its own dialog: reported on /old, not retried; the crawl moves on to /next.
+    expect(replacement.navigate).not.toHaveBeenCalledWith('https://example.com/old');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/old', 'error'],
+      ['https://example.com/next', 'scanned'],
+    ]);
+    expect(report.pages[1].error).toContain('"alert" dialog with message "Landing"');
+  });
+
   it('warns about pages whose frames the scan could not reach', async () => {
     // A page scanned with a frame missing reports fewer violations, so a reader
     // counting them has to know which pages those numbers are incomplete for.

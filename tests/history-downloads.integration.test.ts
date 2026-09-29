@@ -625,12 +625,15 @@ it('relaunches the same persistent profile after the idle release and saves exac
     { file: expect.stringMatching(/^first-.*\.txt$/), bytes: idleDownloads[0].bytes },
     { file: expect.stringMatching(/^second-.*\.txt$/), bytes: idleDownloads[1].bytes },
   ];
+  let secondSaved = false;
   await expect.poll(async () => {
     const files = await savedFiles(outputDir);
-    return files.length === 2 && files[1].bytes.equals(idleDownloads[1].bytes)
-      || knownNativeCrash && page.isClosed() && !secondBrowser.isConnected();
+    secondSaved = files.length === 2 && files[1].bytes.equals(idleDownloads[1].bytes);
+    return secondSaved || knownNativeCrash && page.isClosed() && !secondBrowser.isConnected();
   }, { timeout: 10_000 }).toBe(true);
-  if (page.isClosed() && !secondBrowser.isConnected()) {
+  // Chosen by what was saved, not by the connection: the observed crash can
+  // also land after second.txt is fully written (handled in the else branch).
+  if (!secondSaved) {
     // Only the observed native relaunch crash may end here; it must still be
     // reported by name, with no second artifact and a live MCP connection.
     expect(knownNativeCrash).toBe(true);

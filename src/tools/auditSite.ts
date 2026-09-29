@@ -507,12 +507,15 @@ function watchForDialog(tab: Tab, requestedUrl: string) {
     if (request.isNavigationRequest() && response.frame() === tab.page.mainFrame() && isRequestedNavigation(request))
       navigationResponse = response;
   };
+  const isCommitUrl = (frameUrl: string, response: import('playwright').Response) =>
+    frameUrl === response.url() || !!response.request().redirectedFrom() && withoutFragment(frameUrl) === response.url();
   const onFrameNavigated = (frame: import('playwright').Frame) => {
     // A terminal 3xx can commit a document too. Check the actual redirect chain
     // here, once any successor request exists, rather than excluding its status.
     // Crawl URLs carry no fragment, so a new document commits exactly at the
     // response URL; a hash change by an outgoing page already at that URL adds one.
-    if (frame === tab.page.mainFrame() && navigationResponse && !navigationResponse.request().redirectedTo() && frame.url() === navigationResponse.url())
+    // Only a redirect's Location can add a fragment to the committed URL itself.
+    if (frame === tab.page.mainFrame() && navigationResponse && !navigationResponse.request().redirectedTo() && isCommitUrl(frame.url(), navigationResponse))
       committed = true;
   };
   tab.page.on('framenavigated', onFrameNavigated);
