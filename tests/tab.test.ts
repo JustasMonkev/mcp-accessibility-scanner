@@ -59,6 +59,7 @@ describe('Tab', () => {
       outputFile: vi.fn().mockResolvedValue('/tmp/download'),
       trackPendingDownload: vi.fn(),
       tools: [],
+      modalStateTools: [],
     } as any;
 
     onPageClose = vi.fn();
@@ -1164,8 +1165,11 @@ describe.skipIf(!hasBundledChromium)('Playwright AI snapshot compatibility', () 
 });
 
 describe('renderModalStates', () => {
+  const dialogHandler = { schema: { name: 'browser_handle_dialog' }, clearsModalState: 'dialog' };
+  const modalStates = [{ type: 'dialog' as const, description: 'Test dialog', dialog: {} as any }];
+
   it('should render empty modal states', () => {
-    const mockContext = { tools: [] } as any;
+    const mockContext = { modalStateTools: [], config: {} } as any;
     const result = renderModalStates(mockContext, []);
     const text = result.join('\n');
     expect(text).toContain('### Modal state');
@@ -1173,22 +1177,28 @@ describe('renderModalStates', () => {
   });
 
   it('should render dialog modal state', () => {
-    const mockContext = {
-      tools: [{
-        schema: { name: 'browser_handle_dialog' },
-        clearsModalState: 'dialog',
-      }],
-    } as any;
-
-    const modalStates = [{
-      type: 'dialog' as const,
-      description: 'Test dialog',
-      dialog: {} as any,
-    }];
+    const mockContext = { modalStateTools: [dialogHandler], config: {} } as any;
 
     const result = renderModalStates(mockContext, modalStates);
     const text = result.join('\n');
     expect(text).toContain('Test dialog');
-    expect(text).toContain('browser_handle_dialog');
+    expect(text).toContain('can be handled by the "browser_handle_dialog" tool');
+  });
+
+  it('should say so when the handler for a modal state is blocked', () => {
+    // The handler is hidden from Context.tools but its metadata is kept, so the
+    // guidance names it instead of rendering the "undefined" tool.
+    const mockContext = { tools: [], modalStateTools: [dialogHandler], config: { blockedTools: ['browser_handle_dialog'] } } as any;
+
+    const text = renderModalStates(mockContext, modalStates).join('\n');
+    expect(text).toContain('[Test dialog]: would be handled by the "browser_handle_dialog" tool, but this server blocks it (blockedTools)');
+    expect(text).not.toContain('undefined');
+    expect(text).not.toContain('can be handled by');
+  });
+
+  it('should not report an unrelated blocked tool as the handler', () => {
+    const mockContext = { modalStateTools: [dialogHandler], config: { blockedTools: ['browser_file_upload'] } } as any;
+
+    expect(renderModalStates(mockContext, modalStates).join('\n')).toContain('can be handled by the "browser_handle_dialog" tool');
   });
 });

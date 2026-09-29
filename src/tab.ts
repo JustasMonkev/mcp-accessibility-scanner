@@ -19,6 +19,7 @@ import type * as playwright from 'playwright';
 import { callOnPageNoTrace, waitForCompletion } from './tools/utils.js';
 import { logUnhandledError } from './utils/log.js';
 import { ManualPromise } from './mcp/manualPromise.js';
+import { isToolBlocked } from './mcp/toolPolicy.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
 import { safeIsoTimestampForFileName, truncateToUtf8Bytes } from './utils/fileUtils.js';
 import type { ModalState } from './tools/tool.js';
@@ -552,8 +553,12 @@ export function renderModalStates(context: Context, modalStates: ModalState[]): 
   if (modalStates.length === 0)
     result.push('- There is no modal state present');
   for (const state of modalStates) {
-    const tool = context.tools.find(tool => tool.clearsModalState === state.type);
-    result.push(`- [${truncateDataUrls(state.description)}]: can be handled by the "${tool?.schema.name}" tool`);
+    const tool = context.modalStateTools.find(tool => tool.clearsModalState === state.type);
+    const description = truncateDataUrls(state.description);
+    if (tool && isToolBlocked(context.config, tool.schema.name))
+      result.push(`- [${description}]: would be handled by the "${tool.schema.name}" tool, but this server blocks it (blockedTools)`);
+    else
+      result.push(`- [${description}]: can be handled by the "${tool?.schema.name}" tool`);
   }
   return result;
 }
