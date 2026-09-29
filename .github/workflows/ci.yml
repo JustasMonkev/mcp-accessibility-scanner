@@ -213,6 +213,7 @@ jobs:
           - { os: ubuntu-latest, browser: webkit }
           - { os: macos-14, browser: webkit }
           - { os: macos-14, browser: firefox }
+          - { os: macos-14, browser: chromium }
     steps:
       - name: Checkout code
         shell: bash
@@ -250,7 +251,7 @@ jobs:
 
       - run: npm ci
       - run: npx playwright install --with-deps ${{ matrix.browser }}
-      - if: ${{ !(matrix.os == 'macos-14' && matrix.browser == 'webkit') }}
+      - if: ${{ matrix.browser != 'chromium' && !(matrix.os == 'macos-14' && matrix.browser == 'webkit') }}
         run: npx vitest run tests/numpad-keys.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}

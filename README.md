@@ -878,9 +878,11 @@ commands](docs/browser-upgrade-validation-251.md) before upgrading.
 - **Full-page screenshots on macOS:** bundled Chromium headless shell changed
   actual fonts and layout after capture. Chrome changed the monospace font but
   retained the measured geometry. Viewport screenshots did not change either.
-  Keyboard-audit issue screenshots also use full-page capture; capture after
+  Keyboard-audit issue screenshots and `scan_page` with
+  `annotateScreenshot: true` also use full-page capture; run them after
   layout-sensitive checks, or disable those screenshots with
-  `screenshotOnIssue: false`. The server does not reset fonts or reload pages.
+  `screenshotOnIssue: false` and `annotateScreenshot: false`. The server does
+  not reset fonts or reload pages.
 - **Firefox on macOS:** `browser_press_key` with `Alt+a` inserted `a`; Chromium
   and WebKit controls did not. The Firefox r1553 roll addressing Option-key and
   frame-focus behavior is merged but unreleased. Keys remain passed through.

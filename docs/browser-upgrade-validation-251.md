@@ -128,8 +128,11 @@ Ubuntu WebKit r2359 initially completed **350** fresh-page COOP+COEP navigations
 in **141.1 seconds**, but later runs reproduced the intermittent lost abort.
 The macOS 14 job asserts the exact known page-setup failure on 1.63.0; subsequent
 page-dependent controls are explicitly skipped there. Other versions must create
-a page and pass the navigation/keyboard controls. Local macOS 26 results must not
-be substituted for macOS 14, Linux crash retention or Linux font measurements.
+a page and pass the navigation/keyboard controls. A macOS 14 Chromium job runs
+the full-page screenshot font/geometry measurement on the platform where the
+defect was reported; on 1.63.0 it is diagnostic, and a new paired version must
+preserve every sampled metric. Local macOS 26 results must not be substituted
+for macOS 14, Linux crash retention or Linux font measurements.
 
 ### WebKit event-order reproduction
 

@@ -93,7 +93,10 @@ it.each(['endpoint', 'launch'] as const)('characterizes the top document when at
       : { cdpLaunch: { command: process.execPath, args: ['-e', forwarder, '{port}'], startupTimeoutMs: 10000 }, cdpTimeout: 5000 },
     });
     attached = await contextFactory(config).createContext({}, new AbortController().signal, undefined);
-    const page = attached.browserContext.pages()[0];
+    const context = attached.browserContext;
+    // Target attachment is racy: the preloaded page may register after attach.
+    await expect.poll(() => context.pages().length, { timeout: 5000 }).toBeGreaterThan(0);
+    const page = context.pages()[0];
     expect(page.url()).toBe(`${origin}/`);
     const cdp = await attached.browserContext.newCDPSession(page);
     try {

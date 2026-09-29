@@ -28,7 +28,16 @@ if (enabled && process.platform !== 'linux')
 
 async function processTree(root: number): Promise<number[]> {
   const descendants: number[] = [];
-  for (const thread of await fs.readdir(`/proc/${root}/task`)) {
+  let threads: string[];
+  try {
+    threads = await fs.readdir(`/proc/${root}/task`);
+  } catch (error) {
+    // A child listed by its parent may exit before its own threads are read.
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
+      return descendants;
+    throw error;
+  }
+  for (const thread of threads) {
     try {
       const children = await fs.readFile(`/proc/${root}/task/${thread}/children`, 'utf8');
       for (const entry of children.trim().split(/\s+/).filter(Boolean)) {
