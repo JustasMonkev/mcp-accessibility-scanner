@@ -83,7 +83,7 @@ function createHarness(
       listener(arg);
   };
   // `requestedUrl` is where the chain started when the final URL was reached by redirect.
-  const navigationRequest = (url: string, redirectedFrom: unknown = null) => ({ isNavigationRequest: () => true, url: () => url, redirectedFrom: () => redirectedFrom });
+  const navigationRequest = (url: string, redirectedFrom: unknown = null) => ({ isNavigationRequest: () => true, url: () => url, redirectedFrom: () => redirectedFrom, redirectedTo: () => null });
   const navigationResponse = (url: string, requestedUrl = url) => ({
     request: () => navigationRequest(url, requestedUrl === url ? null : navigationRequest(requestedUrl)),
     frame: () => mainFrame, status: () => 200, url: () => url,
@@ -429,6 +429,52 @@ describe('audit_site tool', () => {
     expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
       ['https://example.com/', 'scanned'],
       ['https://example.com/next', 'scanned'],
+    ]);
+  });
+
+  it('does not count a followed redirect as a commit when the outgoing page changes to its URL', async () => {
+    const nextUrl = 'https://example.com/next';
+    const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+      'https://example.com/': [nextUrl],
+      [nextUrl]: [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== nextUrl)
+        return navigateImpl(url);
+      const redirect = navigationResponse(nextUrl);
+      emitPageEvent('response', {
+        ...redirect,
+        status: () => 302,
+        request: () => ({ ...redirect.request(), redirectedTo: () => ({ url: () => 'https://example.com/final' }) }),
+      });
+      // The outgoing document's pushState matches the intermediate response URL,
+      // but the redirect's successor has not responded or committed yet.
+      setCurrentUrl(nextUrl);
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Outgoing"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith(nextUrl);
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'], [nextUrl, 'scanned'],
     ]);
   });
 

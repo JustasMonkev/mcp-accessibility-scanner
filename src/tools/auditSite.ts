@@ -490,7 +490,7 @@ function watchForDialog(tab: Tab, requestedUrl: string) {
   // framenavigated alone also fires for a same-document change (pushState, a hash)
   // the outgoing page makes, before or after that response. Only the navigation the
   // crawl asked for counts, redirects included, not one the outgoing page started.
-  let respondedUrl: string | undefined;
+  let navigationResponse: import('playwright').Response | undefined;
   let committed = false;
   let raisedByOutgoingDocument = false;
   const withoutFragment = (url: string) => url.split('#')[0];
@@ -504,11 +504,13 @@ function watchForDialog(tab: Tab, requestedUrl: string) {
   };
   const onResponse = (response: import('playwright').Response) => {
     const request = response.request();
-    if (request.isNavigationRequest() && response.frame() === tab.page.mainFrame() && (response.status() < 300 || response.status() >= 400) && isRequestedNavigation(request))
-      respondedUrl = withoutFragment(response.url());
+    if (request.isNavigationRequest() && response.frame() === tab.page.mainFrame() && isRequestedNavigation(request))
+      navigationResponse = response;
   };
   const onFrameNavigated = (frame: import('playwright').Frame) => {
-    if (frame === tab.page.mainFrame() && respondedUrl !== undefined && withoutFragment(frame.url()) === respondedUrl)
+    // A terminal 3xx can commit a document too. Check the actual redirect chain
+    // here, once any successor request exists, rather than excluding its status.
+    if (frame === tab.page.mainFrame() && navigationResponse && !navigationResponse.request().redirectedTo() && withoutFragment(frame.url()) === withoutFragment(navigationResponse.url()))
       committed = true;
   };
   tab.page.on('framenavigated', onFrameNavigated);

@@ -202,6 +202,41 @@ describe('navigation interrupted by a load-time dialog', () => {
     }
   });
 
+  it.each([300, 302])('reports a one-shot load dialog on a terminal HTTP %i page without retrying it', async status => {
+    const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
+    config.outputDir = outputDir;
+    try {
+      await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
+      let requests = 0;
+      await browserContext.route('http://fixture.local/terminal', route => route.fulfill({
+        status,
+        contentType: 'text/html',
+        // No Location: the browser commits this response instead of following a redirect.
+        // On an incorrect retry the dialog is gone, making the audit look successful.
+        body: `<!doctype html><html lang="en"><head><title>Terminal response</title></head><body>${++requests === 1 ? '<script>alert("Terminal response");</script>' : ''}<button>Loaded</button></body></html>`,
+      }));
+      const urls = ['first', 'terminal', 'second'].map(name => `http://fixture.local/${name}`);
+      const result = await backend.callTool('audit_site', {
+        startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0,
+      });
+
+      expect(requests).toBe(1);
+      expect(result.structuredContent).toMatchObject({ totals: { scannedPages: 2, erroredPages: 1 } });
+      const files = await readdir(outputDir);
+      expect(files).toHaveLength(1);
+      const report = JSON.parse(await readFile(path.join(outputDir, files[0]), 'utf8'));
+      expect(report.pages.map((page: { url: string, status: string }) => [page.url, page.status])).toEqual([
+        [urls[0], 'scanned'], [urls[1], 'error'], [urls[2], 'scanned'],
+      ]);
+      expect(report.pages[1].error).toContain('"alert" dialog with message "Terminal response"');
+      expect(report.crawlTabRestarts).toEqual([{ url: urls[2] }]);
+      expect(browserContext.pages()).toHaveLength(1);
+      expect(browserContext.pages()[0].url()).toBe('http://fixture.local/after');
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it('does not let a dialog a crawled page opens fail the pages after it', async () => {
     const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
     config.outputDir = outputDir;

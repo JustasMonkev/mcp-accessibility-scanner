@@ -186,8 +186,8 @@ raised from a `load` listener or a timer stalled the crawl for good, because the
 now gives up on a page the moment its dialog opens, reports it with the dialog named, and
 continues in a fresh tab after closing the frozen one; the same run scans every other page
 in about 1 s. A dialog that the previous page raises while the crawl is already
-navigating away (a timer, before the next page commits) is recognised by the URL
-still being the outgoing page's; the next page is then audited once more in the fresh
+navigating away (a timer, before the next page commits) is recognised because the
+requested navigation has not committed a document; the next page is then audited once more in the fresh
 tab instead of being reported as failed. The tab the tool was called from is never touched. Regression tests in
 `tests/navigation-dialogs.test.ts` fail without the change. The crawl navigation timeout
 still applies to pages that stall without a dialog. Separately, a navigation timeout that
