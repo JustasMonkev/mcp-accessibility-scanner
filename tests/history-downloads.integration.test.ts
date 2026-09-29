@@ -585,11 +585,13 @@ it('relaunches the same persistent profile after the idle release and saves exac
   expect(await second.pages()[0].evaluate(() => localStorage.getItem('previousLaunch'))).toBe('saved');
 
   const secondBrowser = second.browser()!;
+  // Taken before the click: the known native crash closes the context's pages,
+  // after which pages() is empty.
+  const page = second.pages()[0];
   const knownNativeCrash = isObservedNativeCrashTuple(secondBrowser);
   process.stdout.write(JSON.stringify({ case: 'idle-relaunch', browser: secondBrowser.version(), knownNativeCrash }) + '\n');
   const relaunchedSnapshot = await call(client, 'browser_snapshot');
   const clicked = await client.callTool({ name: 'browser_click', arguments: { element: 'Download second', ref: linkRef(relaunchedSnapshot, 'Download second') } });
-  const page = second.pages()[0];
   const bothSaved = [
     { file: expect.stringMatching(/^first-.*\.txt$/), bytes: idleDownloads[0].bytes },
     { file: expect.stringMatching(/^second-.*\.txt$/), bytes: idleDownloads[1].bytes },
