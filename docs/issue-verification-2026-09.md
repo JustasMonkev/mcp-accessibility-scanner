@@ -84,6 +84,7 @@ confirmed native browser crashes on the second persistent-profile launch:
 | Chrome 153.0.8010.53 | Windows | Access violation, exit 3221225477 (0xC0000005) |
 | Edge 153.0.4234.48 | Windows | Access violation; this control passed the earlier run, so failure is intermittent |
 | Chrome 154.0.8037.58 | Windows | Access violation, exit 3221225477 (0xC0000005), in [run 36594165313](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/36594165313) after the hosted runner's Chrome updated; the same save failed with target-closed and was reported by name |
+| Chrome 154.0.8037.93 | Windows | Access violation, exit 3221225477 (0xC0000005), in [run 36616936708](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/36616936708) after a further runner Chrome update; target-closed save reported by name |
 
 The fixture received HTTP 200 and a Playwright download event before browser
 disconnection; `saveAs()`/`path()` rejected with target-closed errors and no file
@@ -110,7 +111,10 @@ playwright-core 1.63.0 on the second persistent launch, may instead verify the
 known native failure contract: download event and target-closed failure, closed
 page and disconnected browser, no artifact, a named `isError` response, and a
 successful MCP ping. Such an outcome logs `known-native-crash-reported`; it is
-**not a successful download or a fixed native crash**. Removing the retained-error
+**not a successful download or a fixed native crash**. On those tuples the crash can
+also land just after the save finished (Chrome 154.0.8037.58 exited with
+0x80000003 once the file was written); the exact bytes must then be on disk and MCP
+must still answer, logged as `known-native-crash-after-save`. Removing the retained-error
 drain makes the closed-tab reporting regression fail.
 
 Further persistent-profile cases in the same file use a fixture route that sends
