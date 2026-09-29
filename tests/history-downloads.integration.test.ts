@@ -163,6 +163,18 @@ function linkRef(snapshot: string, name: string) {
   return ref!;
 }
 
+// On Windows the browser can still hold DevToolsActivePort open while writing it
+// (EBUSY), or not have written the port yet, so read until a port is there.
+async function readDevToolsPort(profile: string) {
+  let port = '';
+  await expect.poll(async () => {
+    port = await fs.readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')
+        .then(text => text.split('\n')[0].trim(), () => '');
+    return /^\d+$/.test(port);
+  }, { timeout: 10_000 }).toBe(true);
+  return port;
+}
+
 async function openHistoryBrowser(mode: 'cdp' | 'launched') {
   let context: BrowserContext;
   let factory: BrowserContextFactory;
@@ -174,7 +186,7 @@ async function openHistoryBrowser(mode: 'cdp' | 'launched') {
       ignoreDefaultArgs: enableBFCache ? ['--disable-back-forward-cache'] : [],
     });
     contexts.push(external);
-    const port = (await fs.readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0].trim();
+    const port = await readDevToolsPort(profile);
     const endpoint = `http://127.0.0.1:${port}`;
     const browser = await chromium.connectOverCDP(endpoint);
     browsers.push(browser);
@@ -306,6 +318,9 @@ it.each(
     else
       await page.locator(`aria-ref=${ref}`).click();
     await expect.poll(() => page.url()).toBe(`${origin}/b`);
+    // A back step taken while B is still loading can be dropped by the browser;
+    // browser_click already waits for this, a direct click does not.
+    await page.waitForLoadState();
     if (client) {
       backSnapshot = await call(client, 'browser_navigate_back');
     } else {
