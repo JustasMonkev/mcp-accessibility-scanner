@@ -438,7 +438,9 @@ it.each([false, true])('saves bytes or reports a known native relaunch crash wit
       } else {
         expect(savedContents).toEqual([downloadBytes.toString()]);
         expect(clicked.isError, clickResult).not.toBe(true);
-        const afterSave = await call(client, 'browser_snapshot');
+        // Read raw: after the known crash the snapshot itself can be an error result.
+        const afterSaveResult = await client.callTool({ name: 'browser_snapshot', arguments: {} });
+        const afterSave = textOf(afterSaveResult);
         if (knownNativeCrash && !browser.isConnected()) {
           // The observed native crash can also land just after the save finished:
           // the exact bytes are on disk and MCP must still answer.
@@ -446,6 +448,7 @@ it.each([false, true])('saves bytes or reports a known native relaunch crash wit
           process.stdout.write(JSON.stringify({ case: 'known-native-crash-after-save', platform: process.platform, channel,
             browser: browser.version(), ...versions, isolated, launch }) + '\n');
         } else {
+          expect(afterSaveResult.isError, afterSave).not.toBe(true);
           expect(page.isClosed()).toBe(false);
           expect(browser.isConnected()).toBe(true);
           expect(afterSave).toContain('Download fixture');
@@ -642,9 +645,11 @@ it('relaunches the same persistent profile after the idle release and saves exac
   } else {
     expect(clicked.isError, textOf(clicked)).not.toBe(true);
     expect(await savedFiles(outputDir)).toEqual(bothSaved);
-    const afterSave = await call(client, 'browser_snapshot');
+    const afterSaveResult = await client.callTool({ name: 'browser_snapshot', arguments: {} });
+    const afterSave = textOf(afterSaveResult);
     // As in the case above, the observed crash may land just after the save.
     if (!knownNativeCrash || secondBrowser.isConnected()) {
+      expect(afterSaveResult.isError, afterSave).not.toBe(true);
       expect(secondBrowser.isConnected()).toBe(true);
       expect(afterSave).toContain('Downloaded file second.txt');
     }
