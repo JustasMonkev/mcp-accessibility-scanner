@@ -28,6 +28,8 @@ import { allTools, filteredTools, serverInstructions } from '../src/tools.js';
 import { VSCodeProxyBackend } from '../src/vscode/host.js';
 
 const pageTool = 'webmcp_prepare_0123456789abcdef0123';
+// A built-in that the proxy tests treat as the tool a downstream provider lists.
+const hiddenTool = 'browser_take_screenshot';
 const names = (tools: { name: string }[]) => tools.map(tool => tool.name);
 const unusedFactory = { createContext: vi.fn(async () => { throw new Error('unexpected browser launch'); }) };
 
@@ -71,7 +73,16 @@ describe('exact-name tool policy', () => {
   it.each(['allowedTools', 'blockedTools'] as const)('validates %s before startup', async option => {
     for (const value of [null, 'browser_navigate', [4], [''], [' '], ['browser_nav'], ['browser_*'], ['webmcp_prepare']])
       await expect(resolveConfig({ [option]: value } as any)).rejects.toThrow(new RegExp(`${option}|Unknown tool`));
-    await expect(resolveConfig({ [option]: ['browser_connect', pageTool] })).resolves.toHaveProperty(option, ['browser_connect', pageTool]);
+    await expect(resolveConfig({ [option]: ['browser_connect', 'browser_navigate'] })).resolves.toHaveProperty(option, ['browser_connect', 'browser_navigate']);
+  });
+
+  it.each(['allowedTools', 'blockedTools'] as const)('rejects generated WebMCP names in %s instead of silently ignoring them', async option => {
+    // These names embed a per-run scope, document and registration identity, so
+    // one copied from tools/list can never match after a restart.
+    await expect(resolveConfig({ [option]: [pageTool] })).rejects.toThrow(`Unknown tool in ${option}: ${pageTool}. Page-registered WebMCP tool names are generated for each server run and registration`);
+    await expect(resolveConfig({ [option]: ['browser_navigate', pageTool] })).rejects.toThrow(/cannot be configured ahead of time/);
+    expect(() => filteredTools({ [option]: [pageTool] } as any)).toThrow(/Unknown tool/);
+    expect(() => new BrowserServerBackend({ [option]: [pageTool] } as any, unusedFactory)).toThrow(/Unknown tool/);
   });
 });
 
@@ -147,7 +158,7 @@ describe('server instructions follow the tool policy', () => {
 for (const mode of ['browser', 'extension', 'direct proxy', 'VS Code proxy'] as const) {
   describe(`${mode} policy at the MCP boundary`, () => {
     it('hides blocked tools and rejects calls with or without a prior tools/list', async () => {
-      const config = await resolveConfig({ blockedTools: ['browser_navigate', 'browser_session_open', 'browser_connect', pageTool] });
+      const config = await resolveConfig({ blockedTools: ['browser_navigate', 'browser_session_open', 'browser_connect', hiddenTool] });
       const dispatch = vi.fn(async () => ({ content: [] }));
       const connect = async () => wrapInProcess({
         listTools: async () => [...config.blockedTools!, 'browser_snapshot'].map(name => ({ name, inputSchema: { type: 'object' as const } })),
@@ -183,9 +194,9 @@ for (const mode of ['browser', 'extension', 'direct proxy', 'VS Code proxy'] as 
 
 for (const kind of ['direct', 'VS Code']) {
   it(`${kind} proxy keeps filtering provider changes and dynamic list notifications`, async () => {
-    const config = await resolveConfig({ blockedTools: [pageTool, 'browser_navigate'] });
+    const config = await resolveConfig({ blockedTools: [hiddenTool, 'browser_navigate'] });
     let context: ServerBackendContext;
-    let catalog = [pageTool, 'browser_navigate', 'browser_snapshot'];
+    let catalog = [hiddenTool, 'browser_navigate', 'browser_snapshot'];
     const connect = async () => wrapInProcess({
       initialize: async value => { context = value; },
       listTools: async () => catalog.map(name => ({ name, inputSchema: { type: 'object' as const } })),
@@ -201,14 +212,14 @@ for (const kind of ['direct', 'VS Code']) {
       expect(names((await client.listTools()).tools)).toEqual(['browser_snapshot', 'browser_connect']);
       const changed = Promise.withResolvers<void>();
       client.setNotificationHandler('notifications/tools/list_changed', () => changed.resolve());
-      catalog = [pageTool, 'browser_navigate', 'browser_tabs'];
+      catalog = [hiddenTool, 'browser_navigate', 'browser_tabs'];
       await context!.notifyToolListChanged();
       await changed.promise;
       expect(names((await client.listTools()).tools)).toEqual(['browser_tabs', 'browser_connect']);
       const result = await client.callTool({ name: 'browser_connect', arguments: kind === 'direct' ? { name: 'extension' } : {} });
       expect(result.isError).not.toBe(true);
       expect(names((await client.listTools()).tools)).toEqual(['browser_tabs', 'browser_connect']);
-      await expect(client.callTool({ name: pageTool, arguments: {} })).rejects.toMatchObject({ code: ProtocolErrorCode.InvalidParams });
+      await expect(client.callTool({ name: hiddenTool, arguments: {} })).rejects.toMatchObject({ code: ProtocolErrorCode.InvalidParams });
     } finally {
       await client.close();
     }

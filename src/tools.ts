@@ -80,10 +80,15 @@ export function validateToolPolicy(config: ToolPolicy): void {
     if (!Array.isArray(names) || names.some(name => typeof name !== 'string' || !name.trim()))
       throw new Error(`${option} must be an array of non-blank exact tool names. Use [] to clear the list.`);
     for (const name of names) {
-      // Page-owned registrations cannot be discovered at startup. Accept only
-      // the complete generated name; scope/staleness are still checked on call.
-      if (!knownNames.has(name) && !/^webmcp_[a-zA-Z0-9_-]{1,36}_[a-f0-9]{20}$/.test(name))
-        throw new Error(`Unknown tool in ${option}: ${name}`);
+      if (knownNames.has(name))
+        continue;
+      // Generated page-tool names hash a per-process scope id, a per-document
+      // id and the document's timeOrigin (see listWebMCPTools), so a name
+      // copied from tools/list can never match once the server restarts.
+      // Accepting it would leave the page tool silently exposed.
+      throw new Error(name.startsWith('webmcp_')
+        ? `Unknown tool in ${option}: ${name}. Page-registered WebMCP tool names are generated for each server run and registration, so they cannot be configured ahead of time.`
+        : `Unknown tool in ${option}: ${name}`);
     }
   }
 }

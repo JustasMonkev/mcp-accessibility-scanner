@@ -120,44 +120,6 @@ function text(result: Awaited<ReturnType<BrowserServerBackend['callTool']>>) {
 }
 
 describe('WebMCP backend scope and argument contracts', () => {
-  it('blocks exact dynamic names before session lookup and follows changing registrations', async () => {
-    const h = backendHarness();
-    const [original] = await h.backend.listTools();
-    Object.assign(h.backend, { _config: { allowedTools: [original.name], blockedTools: [original.name] } });
-    assert.deepEqual(await h.backend.listTools(), []);
-    const reads = h.defaultContext.reads();
-    await assert.rejects(h.backend.callTool(original.name, input, request('nonexistent')), /not found/);
-    await assert.rejects(h.backend.callTool(original.name, input, request()), /not found/);
-    assert.equal(h.defaultContext.reads(), reads);
-    assert.equal(h.defaultContext.calls(), 0);
-    h.defaultContext.setTools([{ name: 'replacement', description: 'new registration', inputSchema: { type: 'object' } }]);
-    const [replacement] = await h.backend.listTools();
-    assert.notEqual(replacement.name, original.name);
-    const result = await h.backend.callTool(replacement.name, {}, request());
-    assert.ok(!result.isError);
-    assert.equal(h.defaultContext.calls(), 1);
-    h.backend.serverClosed();
-  });
-
-  it('observes changes to the filtered dynamic catalog', async () => {
-    const h = backendHarness(undefined, false);
-    try {
-      const [original] = await h.backend.listTools();
-      Object.assign(h.backend, { _config: { blockedTools: [original.name] } });
-      assert.deepEqual(await h.backend.listTools(), []);
-      h.defaultContext.removeTools();
-      // Refresh the actual observer without wall-clock sleeps.
-      await (h.backend as any)._webmcpObserver.refresh();
-      assert.equal(h.notifications(), 0);
-      h.defaultContext.setTools([{ name: 'new', description: 'new', inputSchema: { type: 'object' } }]);
-      await (h.backend as any)._webmcpObserver.refresh();
-      assert.equal(h.notifications(), 1);
-      assert.equal((await h.backend.listTools()).length, 1);
-    } finally {
-      h.backend.serverClosed();
-    }
-  });
-
   it('attaches a shared default context before stateful listing', async () => {
     const h = backendHarness(undefined, false);
     let attached = false;
