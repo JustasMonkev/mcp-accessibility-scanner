@@ -19,10 +19,12 @@ import { ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { describe, expect, it, vi } from 'vitest';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { resolveConfig } from '../src/config.js';
+import { createConnection } from '../src/index.js';
+import { InProcessTransport } from '../src/mcp/inProcessTransport.js';
 import { ProxyBackend } from '../src/mcp/proxyBackend.js';
 import { wrapInProcess } from '../src/mcp/server.js';
 import type { ServerBackendContext } from '../src/mcp/server.js';
-import { allTools, filteredTools } from '../src/tools.js';
+import { allTools, filteredTools, serverInstructions } from '../src/tools.js';
 import { VSCodeProxyBackend } from '../src/vscode/host.js';
 
 const pageTool = 'webmcp_prepare_0123456789abcdef0123';
@@ -70,6 +72,75 @@ describe('exact-name tool policy', () => {
     for (const value of [null, 'browser_navigate', [4], [''], [' '], ['browser_nav'], ['browser_*'], ['webmcp_prepare']])
       await expect(resolveConfig({ [option]: value } as any)).rejects.toThrow(new RegExp(`${option}|Unknown tool`));
     await expect(resolveConfig({ [option]: ['browser_connect', pageTool] })).resolves.toHaveProperty(option, ['browser_connect', pageTool]);
+  });
+});
+
+describe('server instructions follow the tool policy', () => {
+  const intro = 'This server runs automated web accessibility audits (axe-core / WCAG) and drives a real browser via Playwright.';
+  const advertised = (text: string) => [...text.matchAll(/`([a-z_]+)`/g)].map(match => match[1]);
+
+  it('is unchanged when nothing is blocked', () => {
+    expect(serverInstructions({})).toBe(intro + ' Use `browser_navigate` to load a page first. Then use `audit_site` to crawl and scan multiple pages of a site, '
+      + '`scan_page_matrix` to scan the current page across viewports and WCAG tag sets, `audit_keyboard` to check keyboard navigation, focus visibility and skip links, '
+      + 'and `audit_screen_reader` to check accessible name quality and reading order. Results are returned as markdown with axe-core rule ids, impact levels, '
+      + 'failure summaries and remediation links. Regular browser interaction tools (click, type, snapshot, screenshot, tabs) are also available for navigating to '
+      + 'the state you want to audit. To work with several separate browsers at once, `browser_session_open` returns a browserSessionId that the non-session browser '
+      + 'tools accept as an optional argument; omit it to use the default session, and close extra sessions with `browser_session_close` when done. Modes that share '
+      + 'one live browser context (non-isolated CDP attach, extension) reject browser_session_open instead of handing out a session that is not separate.');
+    expect(serverInstructions({ blockedTools: [] })).toBe(serverInstructions({}));
+  });
+
+  it.each(['browser_navigate', 'audit_site', 'scan_page_matrix', 'audit_keyboard', 'audit_screen_reader', 'browser_session_open', 'browser_session_close'])(
+      'never names %s once it is blocked', async name => {
+        const config = await resolveConfig({ blockedTools: [name] });
+        const text = serverInstructions(config);
+        expect(text).not.toContain(name);
+        // Whatever is still recommended must be listed and callable.
+        const exposed = new Set(filteredTools(config).map(tool => tool.schema.name));
+        for (const recommended of advertised(text))
+          expect(exposed.has(recommended)).toBe(true);
+      });
+
+  it.each([
+    ['click', 'browser_click', '(type, snapshot, screenshot, tabs)'],
+    ['tabs', 'browser_tabs', '(click, type, snapshot, screenshot)'],
+  ])('drops the %s interaction hint when %s is blocked', (_label, name, remaining) => {
+    expect(serverInstructions({ blockedTools: [name] })).toContain(`Regular browser interaction tools ${remaining} are also available`);
+  });
+
+  it('keeps the sentences grammatical for partial catalogs', () => {
+    const skipNavigate = serverInstructions({ blockedTools: ['browser_navigate', 'audit_keyboard', 'audit_screen_reader'] });
+    expect(skipNavigate).toContain('Use `audit_site` to crawl and scan multiple pages of a site and `scan_page_matrix` to scan the current page across viewports and WCAG tag sets.');
+    expect(skipNavigate).not.toContain('Then use');
+    expect(serverInstructions({ blockedTools: ['audit_site', 'scan_page_matrix', 'audit_keyboard'] }))
+        .toContain('Then use `audit_screen_reader` to check accessible name quality and reading order.');
+    const noClose = serverInstructions({ blockedTools: ['browser_session_close'] });
+    expect(noClose).toContain('omit it to use the default session. Modes that share');
+    expect(noClose).not.toContain('close extra sessions');
+    const noAudits = serverInstructions({ blockedTools: ['audit_site', 'scan_page_matrix', 'audit_keyboard', 'audit_screen_reader'] });
+    expect(noAudits).toContain('Use `browser_navigate` to load a page first. Regular browser interaction tools');
+    expect(noAudits).not.toContain('Results are returned as markdown');
+  });
+
+  it('collapses to the introduction when every advertised tool is blocked', () => {
+    const blockedTools = [...advertised(serverInstructions({})), 'browser_click', 'browser_type', 'browser_snapshot', 'browser_take_screenshot', 'browser_tabs'];
+    expect(serverInstructions({ blockedTools })).toBe(intro);
+  });
+
+  it('is what createConnection publishes at initialization', async () => {
+    const server = await createConnection({ blockedTools: ['browser_navigate', 'audit_site', 'browser_session_open'] });
+    const client = new Client({ name: 'instructions-test', version: '1' });
+    client.setRequestHandler('ping', () => ({}));
+    try {
+      await client.connect(new InProcessTransport(server));
+      const text = client.getInstructions()!;
+      expect(text).toBe(serverInstructions({ blockedTools: ['browser_navigate', 'audit_site', 'browser_session_open'] }));
+      for (const name of ['browser_navigate', 'audit_site', 'browser_session_open'])
+        expect(text).not.toContain(name);
+      expect(text).toContain('`scan_page_matrix`');
+    } finally {
+      await client.close();
+    }
   });
 });
 

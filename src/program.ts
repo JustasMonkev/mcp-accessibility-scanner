@@ -89,7 +89,7 @@ async function startMCPServer(config: FullConfig, browserContextFactory: Browser
     title: 'Accessibility Scanner',
     nameInConfig: 'playwright',
     version: packageJSON.version,
-    instructions: serverInstructions,
+    instructions: serverInstructions(config),
     // The tool list is fixed per process (filteredTools(config) never changes
     // at runtime), so 2026-07-28 clients may cache it for an hour. Scope is
     // `private`: the list depends on this server's local configuration
@@ -192,7 +192,7 @@ configureBaseProgram()
           title: 'Accessibility Scanner (browser extension)',
           nameInConfig: 'playwright-extension',
           version: packageJSON.version,
-          instructions: serverInstructions,
+          instructions: serverInstructions(config),
           // Static per process, same rationale as in startMCPServer above.
           toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
           create: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry),

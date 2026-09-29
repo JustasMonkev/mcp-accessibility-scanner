@@ -97,16 +97,42 @@ export function filteredTools(config: FullConfig) {
     || (tool.capability === 'install' && config.capabilities?.includes('core-install'))));
 }
 
-export const serverInstructions = [
-  'This server runs automated web accessibility audits (axe-core / WCAG) and drives a real browser via Playwright.',
-  'Use `browser_navigate` to load a page first. Then use `audit_site` to crawl and scan multiple pages of a site,',
-  '`scan_page_matrix` to scan the current page across viewports and WCAG tag sets, `audit_keyboard` to check',
-  'keyboard navigation, focus visibility and skip links, and `audit_screen_reader` to check accessible name quality',
-  'and reading order. Results are returned as markdown with axe-core rule ids,',
-  'impact levels, failure summaries and remediation links. Regular browser interaction tools (click, type, snapshot,',
-  'screenshot, tabs) are also available for navigating to the state you want to audit.',
-  'To work with several separate browsers at once, `browser_session_open` returns a browserSessionId that the',
-  'non-session browser tools accept as an optional argument; omit it to use the default session, and close extra',
-  'sessions with `browser_session_close` when done. Modes that share one live browser context (non-isolated CDP',
-  'attach, extension) reject browser_session_open instead of handing out a session that is not separate.',
-].join(' ');
+const auditGuidance: [tool: string, purpose: string][] = [
+  ['audit_site', 'to crawl and scan multiple pages of a site'],
+  ['scan_page_matrix', 'to scan the current page across viewports and WCAG tag sets'],
+  ['audit_keyboard', 'to check keyboard navigation, focus visibility and skip links'],
+  ['audit_screen_reader', 'to check accessible name quality and reading order'],
+];
+
+const interactionTools: [label: string, tool: string][] = [
+  ['click', 'browser_click'],
+  ['type', 'browser_type'],
+  ['snapshot', 'browser_snapshot'],
+  ['screenshot', 'browser_take_screenshot'],
+  ['tabs', 'browser_tabs'],
+];
+
+const joinList = (items: string[]) => items.length < 3 ? items.join(' and ') : `${items.slice(0, -1).join(', ')}, and ${items.at(-1)}`;
+
+/** Names only tools the policy leaves callable, so clients are never pointed at a guaranteed InvalidParams. */
+export function serverInstructions(policy: ToolPolicy): string {
+  const usable = (name: string) => !isToolBlocked(policy, name);
+  const canNavigate = usable('browser_navigate');
+  const audits = auditGuidance.filter(([tool]) => usable(tool)).map(([tool, purpose]) => `\`${tool}\` ${purpose}`);
+  const interaction = interactionTools.filter(([, tool]) => usable(tool)).map(([label]) => label);
+  const parts = ['This server runs automated web accessibility audits (axe-core / WCAG) and drives a real browser via Playwright.'];
+  if (canNavigate)
+    parts.push('Use `browser_navigate` to load a page first.');
+  if (audits.length) {
+    parts.push(`${canNavigate ? 'Then use' : 'Use'} ${joinList(audits)}.`);
+    parts.push('Results are returned as markdown with axe-core rule ids, impact levels, failure summaries and remediation links.');
+  }
+  if (interaction.length)
+    parts.push(`Regular browser interaction tools (${interaction.join(', ')}) are also available for navigating to the state you want to audit.`);
+  if (usable('browser_session_open')) {
+    parts.push('To work with several separate browsers at once, `browser_session_open` returns a browserSessionId that the non-session browser tools accept as an optional argument; omit it to use the default session'
+      + (usable('browser_session_close') ? ', and close extra sessions with `browser_session_close` when done.' : '.'));
+    parts.push('Modes that share one live browser context (non-isolated CDP attach, extension) reject browser_session_open instead of handing out a session that is not separate.');
+  }
+  return parts.join(' ');
+}
