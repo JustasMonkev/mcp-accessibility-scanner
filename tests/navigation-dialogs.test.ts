@@ -62,9 +62,12 @@ describe('navigation interrupted by a load-time dialog', () => {
             : type === 'outgoing'
               // Drops the session cookie just before its dialog, as a sign-out timer would.
               ? '<script>fetch("/hold").then(() => { document.cookie = "sid=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT"; alert("From the previous page"); });</script>'
-              : ['alert', 'confirm', 'prompt'].includes(type)
-                ? `<script>window.dialogResult = ${type}('During load');</script>`
-                : '';
+              : type === 'outgoing-pushstate'
+                // A same-document navigation first, which Playwright also reports as framenavigated.
+                ? '<script>fetch("/hold").then(() => { history.pushState(null, "", location.pathname + "#moved"); alert("From the previous page"); });</script>'
+                : ['alert', 'confirm', 'prompt'].includes(type)
+                  ? `<script>window.dialogResult = ${type}('During load');</script>`
+                  : '';
           return route.fulfill({
             contentType: 'text/html',
             body: `<!doctype html><html lang="en"><head><title>Load dialog</title></head><body>${script}<button>Loaded</button></body></html>`,
@@ -264,6 +267,29 @@ describe('navigation interrupted by a load-time dialog', () => {
       expect(browserContext.pages()).toHaveLength(1);
     } finally {
       // Settles a hung audit so a regression fails here instead of leaking the crawl.
+      await browserContext.close();
+      await audit;
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not take a same-document navigation by the previous page for the next page committing', async () => {
+    const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
+    config.outputDir = outputDir;
+    await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
+    const urls = ['outgoing-pushstate', 'delayed', 'second'].map(name => `http://fixture.local/${name}`);
+    const audit = backend.callTool('audit_site', {
+      startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0,
+    });
+    let auditReturned = false;
+    void audit.then(() => { auditReturned = true; });
+    try {
+      await vi.waitFor(() => expect(auditReturned).toBe(true), { timeout: 10000 });
+      const result = await audit;
+      // Without telling the two apart, the pushState counts as 'delayed' committing and it fails.
+      expect(result.structuredContent).toMatchObject({ totals: { scannedPages: 3, erroredPages: 0 } });
+      expect(browserContext.pages()).toHaveLength(1);
+    } finally {
       await browserContext.close();
       await audit;
       await rm(outputDir, { recursive: true, force: true });

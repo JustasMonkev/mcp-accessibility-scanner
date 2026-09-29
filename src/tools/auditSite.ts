@@ -485,14 +485,22 @@ function watchForDialog(tab: Tab) {
   let fired = false;
   // A document runs no script before it commits, so a dialog that opens before the
   // main frame commits a navigation comes from the outgoing document. Counted by
-  // commit rather than compared by URL: a reload of the same URL commits too.
-  let committed = false;
+  // commit rather than compared by URL: a reload of the same URL commits too. A new
+  // document commits only after its navigation response; framenavigated alone also
+  // fires for a same-document change (pushState, a hash) the outgoing page makes.
+  let navigated = false;
+  let navigationResponded = false;
   let raisedByOutgoingDocument = false;
   const onFrameNavigated = (frame: import('playwright').Frame) => {
     if (frame === tab.page.mainFrame())
-      committed = true;
+      navigated = true;
+  };
+  const onResponse = (response: import('playwright').Response) => {
+    if (response.request().isNavigationRequest() && response.frame() === tab.page.mainFrame() && (response.status() < 300 || response.status() >= 400))
+      navigationResponded = true;
   };
   tab.page.on('framenavigated', onFrameNavigated);
+  tab.page.on('response', onResponse);
   const failed = new Promise<never>((_, reject) => {
     const present = openDialog(tab);
     if (present) {
@@ -504,7 +512,7 @@ function watchForDialog(tab: Tab) {
       if (state.type !== 'dialog')
         return;
       fired = true;
-      raisedByOutgoingDocument = !committed;
+      raisedByOutgoingDocument = !(navigated && navigationResponded);
       reject(dialogFailure(state.description));
     };
     tab.on(TabEvents.modalState, listener);
@@ -519,6 +527,7 @@ function watchForDialog(tab: Tab) {
     raisedByOutgoingDocument: () => raisedByOutgoingDocument,
     stop: () => {
       tab.page.off('framenavigated', onFrameNavigated);
+      tab.page.off('response', onResponse);
       if (listener)
         tab.off(TabEvents.modalState, listener);
     },

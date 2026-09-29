@@ -74,16 +74,24 @@ function createHarness(
             || pathname.startsWith(cookie.path.endsWith('/') ? cookie.path : `${cookie.path}/`);
         })));
 
-  // A committed navigation reports framenavigated on the main frame, as a real page does.
+  // A committed navigation reports its main-frame navigation response and then
+  // framenavigated on the main frame, as a real page does.
   const mainFrame = {};
-  const frameNavigatedListeners = new Set<(frame: unknown) => void>();
+  const pageListeners = new Map<string, Set<(arg: unknown) => void>>();
+  const emitPageEvent = (event: string, arg: unknown) => {
+    for (const listener of pageListeners.get(event) ?? [])
+      listener(arg);
+  };
+  const commitNavigation = () => {
+    emitPageEvent('response', { request: () => ({ isNavigationRequest: () => true }), frame: () => mainFrame, status: () => 200 });
+    emitPageEvent('framenavigated', mainFrame);
+  };
   const crawlPage = {
     mainFrame: vi.fn(() => mainFrame),
-    on: vi.fn((event: string, listener: (frame: unknown) => void) => {
-      if (event === 'framenavigated')
-        frameNavigatedListeners.add(listener);
+    on: vi.fn((event: string, listener: (arg: unknown) => void) => {
+      pageListeners.set(event, (pageListeners.get(event) ?? new Set()).add(listener));
     }),
-    off: vi.fn((_event: string, listener: (frame: unknown) => void) => frameNavigatedListeners.delete(listener)),
+    off: vi.fn((event: string, listener: (arg: unknown) => void) => pageListeners.get(event)?.delete(listener)),
     context: vi.fn(() => ({ cookies: cookiesMock })),
     url: vi.fn(() => currentUrl),
     title: vi.fn(async () => `Title for ${currentUrl}`),
@@ -109,8 +117,7 @@ function createHarness(
         throw new Error(`net::ERR_ABORTED navigating to ${url}`);
       }
       currentUrl = redirectMap[url] ?? url;
-      for (const listener of frameNavigatedListeners)
-        listener(mainFrame);
+      commitNavigation();
       // The response landed and the page committed, but the load never finished,
       // which is how a hanging logout endpoint behaves.
       if (options?.navigationFailsFor?.(currentUrl))
@@ -180,6 +187,8 @@ function createHarness(
     crawlTab,
     fetchMock,
     cookiesMock,
+    emitPageEvent,
+    mainFrame,
   };
 }
 
@@ -333,6 +342,45 @@ describe('audit_site tool', () => {
       ['https://example.com/canonical', 'scanned'],
     ]);
     expect(tabs).toHaveLength(1);
+  });
+
+  it('does not count a same-document navigation by the outgoing page as the next page committing', async () => {
+    const { context, response, crawlTab, emitPageEvent, mainFrame } = createHarness({
+      'https://example.com/': ['https://example.com/next'],
+      'https://example.com/next': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // While /next is loading, the outgoing page pushes a history entry (framenavigated
+    // without a navigation response) and then alerts.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/next')
+        return navigateImpl(url);
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Saved"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/next');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/next', 'scanned'],
+    ]);
   });
 
   it('warns about pages whose frames the scan could not reach', async () => {
