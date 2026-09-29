@@ -7,6 +7,7 @@ import { writeJsonReport } from './report.js';
 import { TabEvents, type Tab } from '../tab.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
+import { logUnhandledError } from '../utils/log.js';
 import {
   assertRuleOptionsValid,
   axeRuleSchemaShape,
@@ -681,9 +682,11 @@ const auditSite = defineTabTool({
           const frozenTab = crawlTab;
           retiredTabs.push(frozenTab);
           crawlTab = await context.newTab();
+          // Best effort: closing a frozen page can time out, and that must not end
+          // the crawl it was retired to rescue. The final sweep tries it again.
           const frozenIndex = context.tabs().indexOf(frozenTab);
           if (frozenIndex !== -1)
-            await context.closeTab(frozenIndex);
+            await context.closeTab(frozenIndex).catch(logUnhandledError);
         }
 
         const urlBeforeNavigation = crawlTab.page.url();
@@ -757,14 +760,17 @@ const auditSite = defineTabTool({
         }
       }
     } finally {
+      // Each step is best effort, so one tab that will not close neither leaves
+      // the others open nor keeps the caller's tab unselected, and cleanup never
+      // discards the report built below. A tab left open still shows under Open tabs.
       for (const crawlOwnedTab of [crawlTab, ...retiredTabs]) {
         const crawlTabIndex = context.tabs().indexOf(crawlOwnedTab);
         if (crawlTabIndex !== -1)
-          await context.closeTab(crawlTabIndex);
+          await context.closeTab(crawlTabIndex).catch(logUnhandledError);
       }
       const originalTabIndex = context.tabs().indexOf(originalTab);
       if (originalTabIndex !== -1)
-        await context.selectTab(originalTabIndex);
+        await context.selectTab(originalTabIndex).catch(logUnhandledError);
     }
 
     const summaryViolations = toSortedSummaryViolations(summaryByViolation);

@@ -192,6 +192,54 @@ describe('audit_site tool', () => {
     expect(context.newTab).not.toHaveBeenCalled();
   });
 
+  it('keeps crawling and restores the caller tab when a dialog-frozen crawl tab refuses to close', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/dialog', 'https://example.com/after'],
+      'https://example.com/dialog': [],
+      'https://example.com/after': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    // /dialog leaves a dialog open on the first crawl tab, which then cannot be closed.
+    let frozen = false;
+    crawlTab.modalStates.mockImplementation(() => frozen ? [{ type: 'dialog', description: '["alert" dialog with message "Hi"]' }] : []);
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      await navigateImpl(url);
+      if (url.endsWith('/dialog'))
+        frozen = true;
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl) };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+    context.closeTab.mockImplementation(async (index: number) => {
+      if (tabs[index] === crawlTab)
+        throw new Error('page.close: Timeout 5000ms exceeded');
+      tabs.splice(index, 1);
+      return '';
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/after');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/dialog', 'scanned'],
+      ['https://example.com/after', 'scanned'],
+    ]);
+    // Retired, then retried by the final sweep; the replacement still closes and
+    // the caller's tab is selected again.
+    expect(context.closeTab).toHaveBeenCalledTimes(3);
+    expect(tabs).toEqual([expect.anything(), crawlTab]);
+    expect(context.selectTab).toHaveBeenCalledWith(0);
+  });
+
   it('warns about pages whose frames the scan could not reach', async () => {
     // A page scanned with a frame missing reports fewer violations, so a reader
     // counting them has to know which pages those numbers are incomplete for.
