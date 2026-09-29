@@ -202,13 +202,18 @@ jobs:
           MCP_TEST_BROWSER_NAME: firefox
 
   keyboard-controls:
-    name: Keyboard controls (${{ matrix.browser }})
-    runs-on: ubuntu-latest
+    name: Browser controls (${{ matrix.os }}, ${{ matrix.browser }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        browser: [firefox, webkit]
+        include:
+          - { os: ubuntu-latest, browser: firefox }
+          - { os: ubuntu-latest, browser: webkit }
+          - { os: macos-14, browser: webkit }
+          - { os: macos-14, browser: firefox }
+          - { os: macos-14, browser: chromium }
     steps:
       - name: Checkout code
         shell: bash
@@ -246,6 +251,17 @@ jobs:
 
       - run: npm ci
       - run: npx playwright install --with-deps ${{ matrix.browser }}
-      - run: npx vitest run tests/numpad-keys.integration.test.ts
+      - if: ${{ matrix.browser != 'chromium' && !(matrix.os == 'macos-14' && matrix.browser == 'webkit') }}
+        run: npx vitest run tests/numpad-keys.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
+      - if: ${{ !cancelled() }}
+        run: npx vitest run tests/browser-upgrade-controls.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
+
+      - if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' && matrix.browser == 'firefox' }}
+        name: Probe crashes only in this disposable runner's Firefox
+        run: npx vitest run tests/firefox-crash.integration.test.ts
+        env:
+          MCP_TEST_FIREFOX_CRASH: '1'
