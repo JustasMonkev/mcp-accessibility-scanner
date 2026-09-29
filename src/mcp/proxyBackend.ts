@@ -19,6 +19,8 @@ import { z } from 'zod';
 
 import { Client } from '@modelcontextprotocol/client';
 
+import { assertToolNotBlocked, isToolBlocked } from './toolPolicy.js';
+import type { ToolPolicy } from './toolPolicy.js';
 import type { CallToolRequestContext, ServerBackend, ClientVersion, ServerBackendContext, Tool, CallToolResult, CallToolRequest } from './server.js';
 import type { SharedClientSlot } from './sharedClientSlot.js';
 import type { Transport } from '@modelcontextprotocol/client';
@@ -65,7 +67,7 @@ export class ProxyBackend implements ServerBackend {
   private _pendingToolLists = new Set<{ client: Client, changed: boolean }>();
   private _toolListNotification: ReturnType<typeof setImmediate> | undefined;
 
-  constructor(mcpProviders: MCPProvider[], sharedSelection?: SharedProxySelection) {
+  constructor(mcpProviders: MCPProvider[], sharedSelection?: SharedProxySelection, private readonly _toolPolicy: ToolPolicy = {}) {
     this._mcpProviders = mcpProviders;
     this._sharedSelection = sharedSelection;
     this._contextSwitchTool = this._defineContextSwitchTool();
@@ -94,7 +96,8 @@ export class ProxyBackend implements ServerBackend {
     this._pendingToolLists.add(pending);
     try {
       const response = await client.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined, { signal: requestContext?.signal });
-      return this._mcpProviders.length === 1 ? response.tools : [...response.tools, this._contextSwitchTool];
+      const tools = this._mcpProviders.length === 1 ? response.tools : [...response.tools, this._contextSwitchTool];
+      return tools.filter(tool => !isToolBlocked(this._toolPolicy, tool.name));
     } finally {
       this._pendingToolLists.delete(pending);
       if (pending.changed)
@@ -103,6 +106,7 @@ export class ProxyBackend implements ServerBackend {
   }
 
   async callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: CallToolRequestContext): Promise<CallToolResult> {
+    assertToolNotBlocked(this._toolPolicy, name);
     if (name === this._contextSwitchTool.name)
       return this._callContextSwitchTool(args);
     const progressToken = requestContext?._meta?.progressToken;

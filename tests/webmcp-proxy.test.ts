@@ -29,7 +29,7 @@ describe('WebMCP proxy routing', () => {
     let received: unknown;
     // SAFETY: this fixture exercises only listTools with an injected downstream client.
     const backend = Object.assign(Object.create(ProxyBackend.prototype), {
-      _currentClient: { listTools: async (params: unknown) => { received = params; return { tools: [] }; } },
+      _toolPolicy: {}, _currentClient: { listTools: async (params: unknown) => { received = params; return { tools: [] }; } },
       _mcpProviders: [{}], _pendingToolLists: new Set(),
     }) as ProxyBackend;
     await backend.listTools({ _meta: { browserSessionId: 'bs_a' } });
@@ -43,7 +43,7 @@ describe('WebMCP proxy routing', () => {
     // SAFETY: callTool only uses the injected downstream client and switch-tool name.
     const backend = Object.assign(Object.create(ProxyBackend.prototype), {
       _contextSwitchTool: { name: 'browser_connect' },
-      _currentClient: { callTool: async (p: unknown, o: typeof options) => { params = p; options = o; return { content: [] }; } },
+      _toolPolicy: {}, _currentClient: { callTool: async (p: unknown, o: typeof options) => { params = p; options = o; return { content: [] }; } },
     }) as ProxyBackend;
     const controller = new AbortController();
     const request: CallToolRequestContext = { signal: controller.signal, requestId: 1,
@@ -67,7 +67,7 @@ function vscodeHarness() {
   });
   // SAFETY: list/call methods need only these injected current and host clients.
   const backend = Object.assign(Object.create(VSCodeProxyBackend.prototype), {
-    _currentClient: client('switched'), _currentClientIsDefault: false,
+    _config: {}, _currentClient: client('switched'), _currentClientIsDefault: false,
     _sessionClient: Promise.resolve(client('host')), _pendingToolLists: new Set(), _contextSwitchTool: { name: 'browser_connect' },
   }) as VSCodeProxyBackend;
   return { backend, calls };

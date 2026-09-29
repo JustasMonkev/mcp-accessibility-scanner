@@ -19,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { BrowserContextOptions, LaunchOptions } from 'playwright';
 import { devices } from 'playwright';
+import { toolNameList } from './mcp/toolPolicy.js';
 import { safeIsoTimestampForFileName, sanitizeForFilePath } from './utils/fileUtils.js';
 
 import type { Config, ToolCapability } from '../config.js';
@@ -31,6 +32,8 @@ export type CLIOptions = {
     blockServiceWorkers?: boolean;
     browser?: string;
     caps?: string[];
+    allowedTools?: string[];
+    blockedTools?: string[];
     cdpLaunchArgs?: string[];
     cdpLaunchCommand?: string;
     cdpLaunchCwd?: string;
@@ -134,6 +137,10 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
 // env, CLI, programmatic Config) is covered. Only undefined/null count as
 // omitted — the nullish semantics the fallback historically used.
 async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
+  if (config.allowedTools !== undefined || config.blockedTools !== undefined) {
+    const { validateToolPolicy } = await import('./tools.js');
+    validateToolPolicy(config);
+  }
   validateAuthToken(config.server.authToken);
   parseFilePaths(config.filePaths);
   const { contextOptions, launchOptions } = config.browser;
@@ -313,6 +320,8 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
       authToken: cliOptions.authToken,
     },
     capabilities: cliOptions.caps as ToolCapability[],
+    allowedTools: cliOptions.allowedTools,
+    blockedTools: cliOptions.blockedTools,
     network: {
       allowedOrigins: cliOptions.allowedOrigins,
       blockedOrigins: cliOptions.blockedOrigins,
@@ -342,6 +351,8 @@ function cliOptionsFromEnv(): CLIOptions {
   options.blockServiceWorkers = envToBoolean(process.env.PLAYWRIGHT_MCP_BLOCK_SERVICE_WORKERS);
   options.browser = envToString(process.env.PLAYWRIGHT_MCP_BROWSER);
   options.caps = commaSeparatedList(process.env.PLAYWRIGHT_MCP_CAPS);
+  options.allowedTools = toolNameList(process.env.PLAYWRIGHT_MCP_ALLOWED_TOOLS);
+  options.blockedTools = toolNameList(process.env.PLAYWRIGHT_MCP_BLOCKED_TOOLS);
   options.cdpLaunchArgs = commaSeparatedList(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_ARGS);
   options.cdpLaunchCommand = envToString(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND);
   options.cdpLaunchCwd = envToString(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_CWD);

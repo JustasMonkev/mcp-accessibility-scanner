@@ -176,6 +176,11 @@ async function releaseTrace(browserContext: playwright.BrowserContext): Promise<
 
 type ContextOptions = {
   tools: Tool[];
+  /**
+   * Tools that clear a modal state, including ones hidden by `blockedTools`,
+   * so a blocked tab can still name the handler it needs. Defaults to `tools`.
+   */
+  modalStateTools?: Tool[];
   config: FullConfig;
   browserContextFactory: BrowserContextFactory;
   /**
@@ -214,6 +219,7 @@ type ContextOptions = {
 
 export class Context {
   readonly tools: Tool[];
+  readonly modalStateTools: Tool[];
   readonly config: FullConfig;
   readonly options: ContextOptions;
   private _browserContextPromise: Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void>, closeStarting?: () => void }> | undefined;
@@ -261,6 +267,7 @@ export class Context {
 
   constructor(options: ContextOptions) {
     this.tools = options.tools;
+    this.modalStateTools = options.modalStateTools ?? options.tools;
     this.config = options.config;
     this.options = options;
     this._browserContextFactory = options.browserContextFactory;

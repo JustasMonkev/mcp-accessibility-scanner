@@ -30,6 +30,34 @@ async function writeConfigFile(config: Config): Promise<string> {
 }
 
 describe('Config', () => {
+  describe('tool policy precedence', () => {
+    beforeEach(() => {
+      vi.stubEnv('PLAYWRIGHT_MCP_ALLOWED_TOOLS', undefined);
+      vi.stubEnv('PLAYWRIGHT_MCP_BLOCKED_TOOLS', undefined);
+    });
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('replaces each array in file < environment < CLI order, including explicit empty lists', async () => {
+      const config = await writeConfigFile({ allowedTools: ['browser_pdf_save'], blockedTools: ['browser_navigate'] });
+      expect(await resolveCLIConfig({ config })).toMatchObject({ allowedTools: ['browser_pdf_save'], blockedTools: ['browser_navigate'] });
+      vi.stubEnv('PLAYWRIGHT_MCP_ALLOWED_TOOLS', 'browser_install, browser_mouse_move_xy');
+      vi.stubEnv('PLAYWRIGHT_MCP_BLOCKED_TOOLS', 'browser_evaluate');
+      expect(await resolveCLIConfig({ config })).toMatchObject({ allowedTools: ['browser_install', 'browser_mouse_move_xy'], blockedTools: ['browser_evaluate'] });
+      expect(await resolveCLIConfig({ config, allowedTools: ['browser_pdf_save'], blockedTools: [] })).toMatchObject({ allowedTools: ['browser_pdf_save'], blockedTools: [] });
+      vi.stubEnv('PLAYWRIGHT_MCP_ALLOWED_TOOLS', '');
+      vi.stubEnv('PLAYWRIGHT_MCP_BLOCKED_TOOLS', ' ');
+      expect(await resolveCLIConfig({ config })).toMatchObject({ allowedTools: [], blockedTools: [] });
+    });
+
+    it('rejects malformed lists from environment and JSON, but validates only the winning source', async () => {
+      const config = await writeConfigFile({ blockedTools: ['unknown_tool'] });
+      await expect(resolveCLIConfig({ config })).rejects.toThrow('Unknown tool');
+      vi.stubEnv('PLAYWRIGHT_MCP_BLOCKED_TOOLS', 'browser_navigate,');
+      await expect(resolveCLIConfig({ config })).rejects.toThrow('non-blank');
+      expect(await resolveCLIConfig({ config, blockedTools: [] })).toMatchObject({ blockedTools: [] });
+    });
+  });
+
   describe('client certificate proxy routing', () => {
     const clientCertificates = [{ origin: 'https://fixture.test', certPath: '/fixture.crt', keyPath: '/fixture.key' }];
     const proxy = { server: 'http://proxy.test:3128', username: 'fixture', password: 'disposable' };

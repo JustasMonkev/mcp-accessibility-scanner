@@ -649,7 +649,7 @@ describe('Response', () => {
     it('should truncate data URL payloads in modal snapshot output', async () => {
       const payload = Buffer.from('<p>hello</p>').toString('base64');
       const dataUrl = `data:text/html;base64,${payload}`;
-      mockContext.tools = [{
+      mockContext.modalStateTools = [{
         schema: { name: 'browser_handle_dialog' },
         clearsModalState: 'dialog',
       }] as any;

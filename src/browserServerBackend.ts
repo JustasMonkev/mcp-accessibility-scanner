@@ -22,8 +22,9 @@ import { Context } from './context.js';
 import { logUnhandledError } from './utils/log.js';
 import { Response } from './response.js';
 import { SessionLog } from './sessionLog.js';
-import { filteredTools } from './tools.js';
+import { allTools, filteredTools } from './tools.js';
 import { toMcpTool } from './mcp/tool.js';
+import { assertToolNotBlocked } from './mcp/toolPolicy.js';
 import { listWebMCPTools, webMCPSessionId, WebMCPObserver } from './webmcp.js';
 import type { WebMCPToolDefinition } from './webmcp.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
@@ -115,6 +116,9 @@ export class BrowserServerBackend implements ServerBackend {
     // other clients open.
     const createContext = (browserSession?: boolean, browserSessionId?: string): Context => new Context({
       tools: this._tools,
+      // A blocked handler is hidden and rejected, but a modal it would clear
+      // can still appear; its name is needed to explain why the tab is stuck.
+      modalStateTools: allTools.filter(tool => tool.clearsModalState),
       config: this._config,
       browserContextFactory: this._browserContextFactory,
       sessionLog: () => this._ensureSessionLog(),
@@ -285,6 +289,7 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   async callTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext) {
+    assertToolNotBlocked(this._config, name);
     const tool = this._toolsByName.get(name);
     if (!tool)
       return this._callWebMCP(name, rawArguments, requestContext);

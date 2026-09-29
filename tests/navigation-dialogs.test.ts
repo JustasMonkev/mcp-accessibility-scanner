@@ -97,6 +97,40 @@ describe('navigation interrupted by a load-time dialog', () => {
     expect(next.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('await page.goto(') });
   });
 
+  it('names the blocked handler when a dialog appears and browser_handle_dialog is blocked', async () => {
+    const blockedConfig = await resolveConfig({
+      browser: { browserName: 'chromium', isolated: true },
+      timeouts: { navigationTimeout: 15000, defaultTimeout: 5000, settle: 0 },
+      blockedTools: ['browser_handle_dialog'],
+    });
+    let blockedContext: BrowserContext | undefined;
+    const blockedBackend = new BrowserServerBackend(blockedConfig, {
+      createContext: async () => {
+        blockedContext = await browser.newContext();
+        await blockedContext.route('http://fixture.local/**', route => route.fulfill({
+          contentType: 'text/html',
+          body: '<!doctype html><html lang="en"><head><title>Load dialog</title></head><body><script>alert("During load");</script></body></html>',
+        }));
+        return { browserContext: blockedContext, close: () => blockedContext!.close() };
+      },
+    });
+    await blockedBackend.initialize({ notifyToolListChanged: vi.fn().mockResolvedValue(undefined) }, { name: 'vitest', version: 'blocked-dialog' });
+    try {
+      const guidance = 'would be handled by the "browser_handle_dialog" tool, but this server blocks it (blockedTools)';
+      const navigation = await blockedBackend.callTool('browser_navigate', { url: 'http://fixture.local/alert' });
+      expect(navigation.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining(guidance) });
+      expect(navigation.content[0]).toMatchObject({ type: 'text', text: expect.not.stringContaining('undefined') });
+      // Ordinary tools stay refused while the modal is open and repeat the same explanation.
+      const refused = await blockedBackend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
+      expect(refused.isError).toBe(true);
+      expect(refused.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining(guidance) });
+      await expect(blockedBackend.callTool('browser_handle_dialog', { accept: true })).rejects.toThrow(/not found/);
+    } finally {
+      blockedBackend.serverClosed();
+      await blockedContext?.close();
+    }
+  });
+
   it('reports a crawl navigation timeout without evaluating a dialog-blocked document', async () => {
     const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
     config.outputDir = outputDir;

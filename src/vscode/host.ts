@@ -23,6 +23,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import * as mcpServer from '../mcp/server.js';
 import { SharedClientSlot } from '../mcp/sharedClientSlot.js';
+import { assertToolNotBlocked, isToolBlocked } from '../mcp/toolPolicy.js';
 import { logUnhandledError } from '../utils/log.js';
 import { packageJSON } from '../utils/package.js';
 
@@ -101,7 +102,7 @@ export class VSCodeProxyBackend implements ServerBackend {
     try {
       const response = await client.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined, { signal: requestContext?.signal });
       this._listedClient = client;
-      return [...response.tools, this._contextSwitchTool];
+      return [...response.tools, this._contextSwitchTool].filter(tool => !isToolBlocked(this._config, tool.name));
     } finally {
       this._pendingToolLists.delete(pending);
       if (pending.changed && ![...this._pendingToolLists].some(entry => entry.client === client))
@@ -110,6 +111,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   async callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
+    assertToolNotBlocked(this._config, name);
     if (name === this._contextSwitchTool.name)
       return this._callContextSwitchTool(args as any, requestContext);
     const client = await this._clientForTool(name, args, requestContext);
@@ -349,10 +351,7 @@ export class VSCodeProxyBackend implements ServerBackend {
       return [];
 
     const { tools } = await client.listTools();
-    return [
-      ...tools,
-      this._contextSwitchTool,
-    ];
+    return [...tools, this._contextSwitchTool].filter(tool => !isToolBlocked(this._config, tool.name));
   }
 }
 
