@@ -463,6 +463,7 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 - Supports `links`, `nav`, `sitemap`, and `provided` URL strategies
 - Sitemap URLs and every redirect must pass the server network policy and crawl scope. Fetches run on the MCP host, use HTTP(S) without browser cookies or auth headers, and have a 15-second total timeout, 20-redirect cap, and 10 MiB response limit. Browser proxy settings, `browser.remoteEndpoint`, `browser.cdpEndpoint` (including loopback endpoints, which may tunnel to remote browsers), and switched `browser_connect` providers are rejected for this strategy; use `provided` URLs in these modes. Sitemap TLS certificates must be valid even when browser HTTPS errors are ignored.
 - Always writes a JSON report (default filename: `audit-site-{timestamp}-{token}.json`)
+- A page that opens an `alert`, `confirm` or `prompt` while it is being audited is reported as an errored page as soon as the dialog opens, with the dialog named in its `error`. The crawl never answers a dialog: it closes that page's tab and continues with the next URL in a fresh one, so one such page does not fail or hang the pages after it. The tab the tool was called from is not touched.
 - Warns and records `sessionLosses` if the crawl loses cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
 
 **Example flow:**

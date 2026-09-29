@@ -124,7 +124,7 @@ The paired 1.63.0 dependencies reproduce both local defects. Navigation previous
 waited for DOMContentLoaded behind an alert, confirm or prompt. The MCP navigation
 tool now returns the pending dialog, leaves it untouched, and permits the dialog
 handling tool to finish the action. Crawlers still wait for document readiness
-and retain their navigation timeout. An already-open modal rejects a new
+and retain their navigation timeout, except when a dialog opens (see below). An already-open modal rejects a new
 navigation before clearing collected state. Regression tests cover subsequent
 navigation, downloads, late failures and listener cleanup. Removing the modal
 race makes the real alert regression fail.
@@ -135,6 +135,21 @@ backslashes, quotes and YAML-quoted keys, without consuming reference metadata o
 inline text. Real Chromium snapshots and a parser mutation verify the behavior.
 All 86 nearby screen-reader tests and 161 navigation/crawler tests passed on the
 pinned dependencies and Chromium headless shell 153.0.8010.12.
+
+A later re-check of `audit_site` over a local site (Chromium headless shell, navigation
+timeout 3 s) found the crawl's single tab was the weak point. A page raising `alert()`
+while it was parsed, from a `DOMContentLoaded` listener, or as a `confirm`/`prompt` left
+that dialog open in the crawl tab, so every later, healthy page timed out on `page.goto`
+and was reported as failed (4 pages took 9.3 s and only the first was scanned). A dialog
+raised from a `load` listener or a timer stalled the crawl for good, because the page's
+`evaluate` never returns while a dialog is open. The crawl still answers no dialog, but it
+now gives up on a page the moment its dialog opens, reports it with the dialog named, and
+continues in a fresh tab after closing the frozen one; the same run scans every other page
+in about 1 s. The tab the tool was called from is never touched. Regression tests in
+`tests/navigation-dialogs.test.ts` fail without the change. The crawl navigation timeout
+still applies to pages that stall without a dialog. Separately, a navigation timeout that
+expired behind an unanswered dialog was delivered by `browser_console_messages` with a
+stack frame into this server's own files; it is now the message alone.
 
 ## Client certificates and proxy routing (#235)
 

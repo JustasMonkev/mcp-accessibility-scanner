@@ -4,6 +4,8 @@ import type { FullConfig } from '../config.js';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { writeJsonReport } from './report.js';
+import { TabEvents, type Tab } from '../tab.js';
+import { truncateDataUrls } from '../utils/dataUrl.js';
 import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 import {
   assertRuleOptionsValid,
@@ -452,6 +454,54 @@ function summarizeTopPages(sortedScannedPages: PageReport[], count: number): str
       .map(page => `- ${page.url}: ${page.summary?.totalRules ?? 0} violations, ${page.summary?.totalNodes ?? 0} nodes`);
 }
 
+/**
+ * The crawl answers no dialog: it is not the crawl's to dismiss, and accepting an
+ * alert or confirm would change what the page under audit does. A dialog freezes
+ * its tab, though: navigation waits out the whole navigation timeout and a
+ * `page.evaluate` never returns, so a page that opens one while it loads would
+ * otherwise fail every later URL, or hang the crawl for good. The page is given up
+ * on as soon as its dialog opens, and the crawl carries on in a fresh tab.
+ */
+function openDialog(tab: Tab) {
+  return tab.modalStates().find(state => state.type === 'dialog');
+}
+
+function dialogFailure(description: string): Error {
+  const named = truncateDataUrls(description);
+  const shown = named.length > 200 ? `${named.slice(0, 200)}…` : named;
+  return new Error(`The page opened a dialog that the crawl does not answer, so it was not audited: ${shown}`);
+}
+
+/**
+ * Fails `guard`ed work the moment a dialog opens on the tab. The abandoned call
+ * stays pending until the tab is closed, which rejects it; the race has already
+ * taken a handler on it, so that rejection is not reported again.
+ */
+function watchForDialog(tab: Tab) {
+  let listener: ((state: { type: string, description: string }) => void) | undefined;
+  const failed = new Promise<never>((_, reject) => {
+    const present = openDialog(tab);
+    if (present) {
+      reject(dialogFailure(present.description));
+      return;
+    }
+    listener = state => {
+      if (state.type === 'dialog')
+        reject(dialogFailure(state.description));
+    };
+    tab.on(TabEvents.modalState, listener);
+  });
+  // A dialog can open while nothing is being guarded; the next guard still sees it.
+  failed.catch(() => {});
+  return {
+    guard: <T>(work: Promise<T>): Promise<T> => Promise.race([work, failed]),
+    stop: () => {
+      if (listener)
+        tab.off(TabEvents.modalState, listener);
+    },
+  };
+}
+
 const auditSite = defineTabTool({
   capability: 'core',
   schema: {
@@ -560,7 +610,10 @@ const auditSite = defineTabTool({
       message: `Initialized site audit with ${queue.length} queued URL(s).`,
     });
 
-    const crawlTab = await context.newTab();
+    let crawlTab = await context.newTab();
+    // Crawl tabs given up on because a dialog froze them; each is closed, and the
+    // sweep below covers one whose close failed.
+    const retiredTabs: Tab[] = [];
     // Cookies the crawl URLs carry before the crawl are the session the caller
     // signed in with. If one disappears mid-crawl every later page is audited as a
     // signed-out user, which still looks like a clean run, so record where it happened.
@@ -621,10 +674,23 @@ const auditSite = defineTabTool({
           }
         }
 
+        // A dialog the previous page left open freezes this tab for every later URL.
+        // It goes, dialog and all, and the crawl continues in a new tab; the tab the
+        // tool was called from is never touched.
+        if (openDialog(crawlTab)) {
+          const frozenTab = crawlTab;
+          retiredTabs.push(frozenTab);
+          crawlTab = await context.newTab();
+          const frozenIndex = context.tabs().indexOf(frozenTab);
+          if (frozenIndex !== -1)
+            await context.closeTab(frozenIndex);
+        }
+
         const urlBeforeNavigation = crawlTab.page.url();
+        const dialogWatch = watchForDialog(crawlTab);
         try {
-          await crawlTab.navigate(item.url);
-          await crawlTab.waitForTimeout(params.waitAfterNavigationMs);
+          await dialogWatch.guard(crawlTab.navigate(item.url));
+          await dialogWatch.guard(crawlTab.waitForTimeout(params.waitAfterNavigationMs));
 
           // Discover before scanning. A scoped scan throws when an
           // includeSelectors entry is absent from this page, and that must not
@@ -635,12 +701,12 @@ const auditSite = defineTabTool({
           else if (params.strategy === 'nav' && item.depth === 0)
             linkSelector = navLinksSelector;
 
-          const { title, links } = await readPage(crawlTab.page, linkSelector);
+          const { title, links } = await dialogWatch.guard(readPage(crawlTab.page, linkSelector));
           pageReport.title = title;
           for (const link of links)
             enqueueUrl(link, item.depth + 1, item.url);
 
-          const axeResult = await runAxeScan(crawlTab.page, axeScanOptions(params));
+          const axeResult = await dialogWatch.guard(runAxeScan(crawlTab.page, axeScanOptions(params)));
           const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
 
           pageReport.status = 'scanned';
@@ -659,6 +725,7 @@ const auditSite = defineTabTool({
           pageReport.status = 'error';
           pageReport.error = error instanceof Error ? error.message : String(error);
         } finally {
+          dialogWatch.stop();
           // Checked after failed navigations too: a logout URL that clears the cookie
           // and then times out still ended the session, and skipping it pins the
           // warning on the next page that happens to load — an innocent route.
@@ -690,9 +757,11 @@ const auditSite = defineTabTool({
         }
       }
     } finally {
-      const crawlTabIndex = context.tabs().indexOf(crawlTab);
-      if (crawlTabIndex !== -1)
-        await context.closeTab(crawlTabIndex);
+      for (const crawlOwnedTab of [crawlTab, ...retiredTabs]) {
+        const crawlTabIndex = context.tabs().indexOf(crawlOwnedTab);
+        if (crawlTabIndex !== -1)
+          await context.closeTab(crawlTabIndex);
+      }
       const originalTabIndex = context.tabs().indexOf(originalTab);
       if (originalTabIndex !== -1)
         await context.selectTab(originalTabIndex);

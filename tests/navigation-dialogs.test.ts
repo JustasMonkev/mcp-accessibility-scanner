@@ -42,9 +42,13 @@ describe('navigation interrupted by a load-time dialog', () => {
         browserContext = await browser.newContext();
         await browserContext.route('http://fixture.local/**', route => {
           const type = new URL(route.request().url()).pathname.slice(1);
-          const script = ['alert', 'confirm', 'prompt'].includes(type)
-            ? `<script>window.dialogResult = ${type}('During load');</script>`
-            : '';
+          // 'late' opens its dialog once the document is parsed and interactive, so
+          // the navigation itself succeeds and only the work after it is frozen.
+          const script = type === 'late'
+            ? '<script>addEventListener("load", () => alert("After load"));</script>'
+            : ['alert', 'confirm', 'prompt'].includes(type)
+              ? `<script>window.dialogResult = ${type}('During load');</script>`
+              : '';
           return route.fulfill({
             contentType: 'text/html',
             body: `<!doctype html><html lang="en"><head><title>Load dialog</title></head><body>${script}<button>Loaded</button></body></html>`,
@@ -131,10 +135,25 @@ describe('navigation interrupted by a load-time dialog', () => {
     }
   });
 
-  it('reports a crawl navigation timeout without evaluating a dialog-blocked document', async () => {
+  it('delivers a navigation timeout that lands while the dialog is open, without server stack frames', async () => {
+    config.timeouts.navigationTimeout = 500;
+    const navigation = await backend.callTool('browser_navigate', { url: 'http://fixture.local/alert' });
+    expect(navigation.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('"alert" dialog with message "During load"') });
+    // The goto timeout expires while nobody has answered the dialog.
+    await new Promise(resolve => setTimeout(resolve, 900));
+
+    const handled = await backend.callTool('browser_handle_dialog', { accept: true });
+    expect(handled.isError).not.toBe(true);
+    expect(handled.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('Navigation failed after dialog interruption: page.goto: Timeout 500ms exceeded') });
+    const messages = await backend.callTool('browser_console_messages', {});
+    const text = (messages.content[0] as { text: string }).text;
+    expect(text).toContain('Error: Navigation failed after dialog interruption: page.goto: Timeout 500ms exceeded');
+    expect(text).not.toMatch(/\n\s+at /);
+  });
+
+  it('reports a dialog-blocked crawl page as soon as its dialog opens, without evaluating the document', async () => {
     const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
     config.outputDir = outputDir;
-    config.timeouts.navigationTimeout = 500;
     await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
     const audit = backend.callTool('audit_site', {
       startUrl: 'http://fixture.local/alert',
@@ -146,14 +165,89 @@ describe('navigation interrupted by a load-time dialog', () => {
     let auditReturned = false;
     void audit.then(() => { auditReturned = true; });
     try {
+      // Far below the 15-second navigation timeout the page would otherwise wait out.
       await vi.waitFor(() => expect(auditReturned).toBe(true), { timeout: 5000 });
       const result = await audit;
       expect(result.structuredContent).toMatchObject({ totals: { scannedPages: 0, erroredPages: 1 } });
       const files = await readdir(outputDir);
       expect(files).toHaveLength(1);
       const report = JSON.parse(await readFile(path.join(outputDir, files[0]), 'utf8'));
-      expect(report.pages[0]).toMatchObject({ status: 'error', error: expect.stringContaining('Timeout 500ms exceeded') });
+      expect(report.pages[0]).toMatchObject({
+        status: 'error',
+        error: expect.stringContaining('The page opened a dialog that the crawl does not answer, so it was not audited: "alert" dialog with message "During load"'),
+      });
     } finally {
+      await browserContext.close();
+      await audit;
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let a dialog a crawled page opens fail the pages after it', async () => {
+    const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
+    config.outputDir = outputDir;
+    // Short enough that an unfixed crawl finishes and fails on its results, not on the clock.
+    config.timeouts.navigationTimeout = 1000;
+    await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
+    const urls = ['alert', 'first', 'confirm', 'prompt', 'second'].map(name => `http://fixture.local/${name}`);
+    const audit = backend.callTool('audit_site', {
+      startUrl: urls[0], strategy: 'provided', urls, maxPages: 5, waitAfterNavigationMs: 0,
+    });
+    let auditReturned = false;
+    void audit.then(() => { auditReturned = true; });
+    try {
+      // Without the fix every page after the first dialog waits out the navigation timeout and fails.
+      await vi.waitFor(() => expect(auditReturned).toBe(true), { timeout: 15000 });
+      const result = await audit;
+      expect(result.structuredContent).toMatchObject({ totals: { scannedPages: 2, erroredPages: 3 } });
+      const files = await readdir(outputDir);
+      expect(files).toHaveLength(1);
+      const report = JSON.parse(await readFile(path.join(outputDir, files[0]), 'utf8'));
+      expect(report.pages.map((page: { url: string, status: string }) => [page.url, page.status])).toEqual([
+        [urls[0], 'error'], [urls[1], 'scanned'], [urls[2], 'error'], [urls[3], 'error'], [urls[4], 'scanned'],
+      ]);
+      // Only the pages that opened a dialog carry a note about it, and it names their own dialog.
+      expect(report.pages[0].error).toContain('"alert" dialog with message "During load"');
+      expect(report.pages[2].error).toContain('"confirm" dialog with message "During load"');
+      expect(report.pages[3].error).toContain('"prompt" dialog with message "During load"');
+      expect(report.pages[1].error).toBeNull();
+      expect(report.pages[4].error).toBeNull();
+      // Every crawl tab, including the ones a dialog froze, is gone; the tab the tool was called from is untouched.
+      expect(browserContext.pages()).toHaveLength(1);
+      const snapshot = await backend.callTool('browser_snapshot', {});
+      expect(snapshot.isError).not.toBe(true);
+      expect(snapshot.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('http://fixture.local/after') });
+    } finally {
+      await browserContext.close();
+      await audit;
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not hang the crawl on a dialog that opens after the navigation succeeded', async () => {
+    const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
+    config.outputDir = outputDir;
+    await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
+    const urls = ['first', 'late', 'second'].map(name => `http://fixture.local/${name}`);
+    const audit = backend.callTool('audit_site', {
+      startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0,
+    });
+    let auditReturned = false;
+    void audit.then(() => { auditReturned = true; });
+    try {
+      // Without the fix the page's evaluate never returns: the audit waits forever.
+      await vi.waitFor(() => expect(auditReturned).toBe(true), { timeout: 8000 });
+      const result = await audit;
+      expect(result.structuredContent).toMatchObject({ totals: { scannedPages: 2, erroredPages: 1 } });
+      const files = await readdir(outputDir);
+      const report = JSON.parse(await readFile(path.join(outputDir, files[0]), 'utf8'));
+      expect(report.pages.map((page: { url: string, status: string }) => [page.url, page.status])).toEqual([
+        [urls[0], 'scanned'], [urls[1], 'error'], [urls[2], 'scanned'],
+      ]);
+      expect(report.pages[1].error).toContain('"alert" dialog with message "After load"');
+      expect(browserContext.pages()).toHaveLength(1);
+    } finally {
+      // Settles a hung audit so a regression fails here instead of leaking the crawl.
       await browserContext.close();
       await audit;
       await rm(outputDir, { recursive: true, force: true });

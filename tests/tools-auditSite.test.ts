@@ -106,6 +106,10 @@ function createHarness(
         throw new Error(`Timeout 60000ms exceeded navigating to ${url}`);
     }),
     waitForTimeout: vi.fn(async () => undefined),
+    // No dialog ever opens on these tabs; the crawl only watches for one.
+    modalStates: vi.fn(() => []),
+    on: vi.fn(),
+    off: vi.fn(),
   };
 
   const defaultFetch = async (input: string | URL) => {
