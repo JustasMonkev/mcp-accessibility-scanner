@@ -83,6 +83,7 @@ confirmed native browser crashes on the second persistent-profile launch:
 | Chromium 153.0.8010.12 | Windows | Access violation, exit 3221225477 (0xC0000005) |
 | Chrome 153.0.8010.53 | Windows | Access violation, exit 3221225477 (0xC0000005) |
 | Edge 153.0.4234.48 | Windows | Access violation; this control passed the earlier run, so failure is intermittent |
+| Chrome 154.0.8037.58 | Windows | Access violation, exit 3221225477 (0xC0000005), in [run 36594165313](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/36594165313) after the hosted runner's Chrome updated; the same save failed with target-closed and was reported by name |
 
 The fixture received HTTP 200 and a Playwright download event before browser
 disconnection; `saveAs()`/`path()` rejected with target-closed errors and no file

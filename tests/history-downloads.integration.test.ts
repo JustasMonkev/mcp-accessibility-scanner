@@ -39,6 +39,7 @@ const observedNativeCrashes = new Set([
   'linux/chromium/153.0.8010.12',
   'win32/chromium/153.0.8010.12',
   'win32/chrome/153.0.8010.53',
+  'win32/chrome/154.0.8037.58',
   'win32/msedge/153.0.4234.48',
   'win32/msedge/154.0.4258.37',
 ]);
