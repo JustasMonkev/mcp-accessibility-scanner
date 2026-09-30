@@ -1936,11 +1936,22 @@ describe('audit_site tool', () => {
 
   // An aborted navigation never leaves the previous page, so the URL asked for is the
   // only thing identifying the response that cleared the cookie.
-  it('blames the requested URL when the navigation that lost the session never committed', async () => {
-    const { context, response } = createHarness({}, {
+  it.each(['previous', 'chrome-error://chromewebdata/', 'about:neterror?e=connectionFailure'])('blames the requested URL when a failed navigation leaves %s', async errorUrl => {
+    const { context, response, crawlTab, setCurrentUrl } = createHarness({}, {
       navigationAbortsFor: url => url.endsWith('/failing-logout'),
       cookiesForUrl: () => [{ name: 'sid' }],
     });
+    if (errorUrl !== 'previous') {
+      const navigate = crawlTab.navigate.getMockImplementation();
+      crawlTab.navigate.mockImplementation(async (url: string) => {
+        try {
+          await navigate(url);
+        } catch (error) {
+          setCurrentUrl(errorUrl);
+          throw error;
+        }
+      });
+    }
     vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
       return createAxeResult(page.url(), []);
     });

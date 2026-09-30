@@ -287,9 +287,11 @@ async function findCookieLoss(
   // The page reached after redirects is the one that dropped the cookie, and the one
   // worth excluding; the queued URL may only have pointed at it. A navigation that
   // never committed leaves the tab on the previous page, which is innocent — there
-  // the URL asked for is the one whose response dropped the cookie.
+  // the URL asked for is the one whose response dropped the cookie. Browser error
+  // documents are not crawl destinations either: Chrome/Firefox may commit one
+  // after a failed navigation, but the response came from the requested URL.
   const reachedUrl = page.url();
-  const url = !reachedUrl || reachedUrl === urlBeforeNavigation ? requestedUrl : reachedUrl;
+  const url = !/^https?:\/\//i.test(reachedUrl) || reachedUrl === urlBeforeNavigation ? requestedUrl : reachedUrl;
   return {
     url,
     cookies: [...new Set(missing.map(([, cookie]) => cookie.name))],

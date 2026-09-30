@@ -579,10 +579,13 @@ const tests = [
     });
     if (failed.structuredContent?.sessionLosses?.[0]?.url !== `${state.fixtureOrigin}/session/revoke`)
       throw new Error(`Expected a session loss at /session/revoke, got ${JSON.stringify(failed.structuredContent?.sessionLosses)}`);
-    // Only /secure loads: /session/revoke throws, and Chromium's error page for it
-    // interrupts /secure-2. Nothing after /secure is scanned, so a check that only
-    // ran on successful navigations would have reported no session loss at all.
-    assertText(failed, /Scanned pages: 1/);
+    // Chromium can either interrupt /secure-2 with the prior error-page commit
+    // or load it successfully. In both cases the failed revoke must be an error,
+    // and its cookie loss must have been attributed before the next navigation.
+    const failedReport = JSON.parse(fs.readFileSync(failed.structuredContent.report.path, 'utf8'));
+    if (failedReport.pages.find(page => page.url === `${state.fixtureOrigin}/session/revoke`)?.status !== 'error'
+        || failedReport.pages.find(page => page.url === `${state.fixtureOrigin}/secure`)?.status !== 'scanned')
+      throw new Error(`Expected a scanned secure page and an errored revoke page, got ${JSON.stringify(failedReport.pages)}`);
 
     // Rule ids are run-wide input, so a bad one must be rejected before the
     // crawl starts. Otherwise every supplied URL is visited, errored, and
@@ -803,7 +806,8 @@ const tests = [
   test('browser_install', async () => {
     if (!options.includeInstall)
       throw new SkipError('browser_install skipped by default; rerun with --include-install');
-    await callTool('browser_install', {});
+    const result = await callTool('browser_install', {});
+    assertText(result, /Browser .+ installed successfully/);
   }),
 
   test('browser_close', async () => {

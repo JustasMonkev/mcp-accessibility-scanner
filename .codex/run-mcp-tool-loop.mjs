@@ -25,7 +25,7 @@ import { pipeline } from 'node:stream/promises';
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDir, '..');
 const serverName = 'mcp-accessibility-scanner';
-const model = 'gpt-5.6-luna';
+const model = 'gpt-6-luna';
 const reasoningEffort = 'xhigh';
 const options = parseArgs(process.argv.slice(2));
 
@@ -100,6 +100,7 @@ Harness result contract (takes precedence over the requested display format): pe
       finalPath,
       resultsDir,
       uploadPath,
+      includeInstall: entry.tool === 'browser_install',
     });
     const result = summarize(execution, entry.tool, logPath, finalPath);
     const detail = result.evidence.replace(/\s+/g, ' ').slice(0, 300);
@@ -294,6 +295,7 @@ async function runCodex(command, prompt, paths) {
     '--headless',
     '--no-sandbox',
     '--isolated',
+    ...(paths.includeInstall ? ['--caps', 'install'] : []),
     '--output-dir',
     paths.resultsDir,
     '--allowed-upload-dirs',
@@ -489,7 +491,7 @@ function readJsonLines(filePath) {
 function printUsage() {
   console.log(`Usage: node .codex/run-mcp-tool-loop.mjs [options]
 
-Runs one Codex gpt-5.6-luna exec per mcp-accessibility-scanner prompt with
+Runs one Codex ${model} exec per mcp-accessibility-scanner prompt with
 xhigh reasoning, a repo-scoped MCP server, structured evidence, and bounded
 cleanup. Results are written to test-results/mcp-tool-loop-results/.
 

@@ -19,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { allTools } from '../src/tools.js';
 
 const runner = path.resolve('.codex/run-mcp-tool-loop.mjs');
 let fixtureDir: string;
@@ -46,9 +47,13 @@ if (args[0] === 'login' && args[1] === 'status') {
   else
     console.log('--ignore-user-config --ephemeral --json --model --sandbox --output-schema --output-last-message');
 } else {
-  if (args[args.indexOf('--model') + 1] !== 'gpt-5.6-luna' ||
+  if (args[args.indexOf('--model') + 1] !== 'gpt-6-luna' ||
       args[args.indexOf('--sandbox') + 1] !== 'read-only' ||
       !args.includes('model_reasoning_effort="xhigh"')) process.exit(9);
+  const mcpPrefix = 'mcp_servers.mcp-accessibility-scanner.args=';
+  const mcpArgs = JSON.parse(args.find(arg => arg.startsWith(mcpPrefix)).slice(mcpPrefix.length));
+  const installEnabled = mcpArgs[mcpArgs.indexOf('--caps') + 1] === 'install';
+  if (installEnabled !== (mode === 'install')) process.exit(9);
   const final = args[args.indexOf('--output-last-message') + 1];
   const prompt = args.at(-1);
   const emit = event => console.log(JSON.stringify(event));
@@ -60,14 +65,14 @@ if (args[0] === 'login' && args[1] === 'status') {
     console.error('test log');
     setInterval(() => {}, 1000);
   } else {
-    const targetTool = mode === 'fixture-audit' ? 'audit_site' : 'browser_navigate';
+    const targetTool = mode === 'fixture-audit' ? 'audit_site' : mode === 'install' ? 'browser_install' : 'browser_navigate';
     const finish = () => {
       if (mode === 'startup-warning') emit({type:'item.completed',item:{type:'error',message:'Ignoring malformed agent role definition: local role'}});
       emit({type:'turn.started'});
       if (mode === 'reconnecting') emit({type:'error',message:'Reconnecting... 1/5'});
       if (mode !== 'no-call') {
         emit(call('target', 'browser_navigate'));
-        if (targetTool === 'audit_site') emit(call('audit', 'audit_site'));
+        if (targetTool !== 'browser_navigate') emit(call('target-extra', targetTool));
       }
       if (mode === 'other-failure') emit(call('verify', 'browser_evaluate', 'failed'));
       if (mode === 'incomplete') emit({type:'item.started',item:{id:'unfinished',type:'mcp_tool_call',server:'mcp-accessibility-scanner',tool:'browser_evaluate',status:'in_progress'}});
@@ -155,8 +160,22 @@ async function run(mode: string, args: string[] = [], cancel = false, extraEnv: 
 
 // The fake executable uses a POSIX shebang and signal handling, not a Windows launcher.
 describe.skipIf(process.platform === 'win32')('Luna harness CLI', () => {
+  it('covers every core tool and the optional install tool exactly once', () => {
+    const prompts = fs.readFileSync(path.resolve('.codex/mcp-tool-prompts.tsv'), 'utf8')
+        .split(/\r?\n/).filter(line => line.trim() && !line.startsWith('#'));
+    const names = prompts.map(line => line.split('\t')[0]);
+    const expected = allTools.filter(tool => tool.capability.startsWith('core') || tool.capability === 'install')
+        .map(tool => tool.schema.name);
+    expect(names.toSorted()).toEqual(expected.toSorted());
+  });
   it.each(['success', 'startup-warning', 'reconnecting'])('accepts a real successful tool trace: %s', async mode => {
     const result = await run(mode);
+    expect(result.output).toContain('Passed: 1');
+    expect(result.code).toBe(0);
+  });
+
+  it('enables the install capability only for the install prompt', async () => {
+    const result = await run('install', ['--only', 'browser_install']);
     expect(result.output).toContain('Passed: 1');
     expect(result.code).toBe(0);
   });
