@@ -65,6 +65,7 @@ describe('audit_site integration', () => {
         links: selector ? linkMap[currentUrl] ?? [] : [],
       })),
       mainFrame: vi.fn(() => ({})),
+      addInitScript: vi.fn(async () => ({ dispose: vi.fn(async () => {}) })),
       on: vi.fn(),
       off: vi.fn(),
     };

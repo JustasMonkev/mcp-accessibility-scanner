@@ -1,5 +1,6 @@
 import RE2 from 're2';
 import coreBundle from 'playwright-core/lib/coreBundle';
+import type { Page, Request, Response } from 'playwright';
 import type { FullConfig } from '../config.js';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
@@ -245,7 +246,7 @@ function normalizeUrl(rawUrl: string, baseUrl: URL, ignoredParams: Set<string>):
  * Values are deliberately not compared: a rotating CSRF token is not a lost session.
  * Ceiling: a session cookie scoped to a path below the crawl URLs is not tracked.
  */
-async function readCrawlCookies(page: import('playwright').Page, urls: string[]): Promise<Map<string, { name: string, expires: number }>> {
+async function readCrawlCookies(page: Page, urls: string[]): Promise<Map<string, { name: string, expires: number }>> {
   const cookies = await page.context().cookies(urls);
   return new Map(cookies.map(cookie => [`${cookie.name}\n${cookie.domain}\n${cookie.path}`, { name: cookie.name, expires: cookie.expires }]));
 }
@@ -269,7 +270,7 @@ async function readCrawlCookies(page: import('playwright').Page, urls: string[])
  * crawl must not mask the real session cookie being dropped ten pages later.
  */
 async function findCookieLoss(
-  page: import('playwright').Page,
+  page: Page,
   urls: string[],
   baseline: Map<string, { name: string, expires: number }>,
   requestedUrl: string,
@@ -302,7 +303,7 @@ async function findCookieLoss(
  * `linkSelector` is empty when this page contributes no links (depth exhausted,
  * or a strategy that only reads the entry page).
  */
-async function readPage(page: import('playwright').Page, linkSelector: string): Promise<{ title: string, links: string[] }> {
+async function readPage(page: Page, linkSelector: string): Promise<{ title: string, links: string[] }> {
   return await page.evaluate(selector => ({
     title: document.title,
     links: selector
@@ -483,47 +484,33 @@ function dialogFailure(description: string): Error {
 function watchForDialog(tab: Tab, requestedUrl: string) {
   let listener: ((state: { type: string, description: string }) => void) | undefined;
   let fired = false;
-  // A document runs no script before it commits, so a dialog that opens before the
-  // main frame commits a navigation comes from the outgoing document. Counted by
-  // commit rather than compared by URL: a reload of the same URL commits too. A new
-  // document commits only after its navigation response, and to that response's URL;
-  // framenavigated alone also fires for a same-document change (pushState, a hash)
-  // the outgoing page makes, before or after that response. Only the navigation the
-  // crawl asked for counts, redirects included, not one the outgoing page started.
-  let navigationResponse: import('playwright').Response | undefined;
+  // Init scripts run only in newly created documents, before their page scripts.
+  // Unlike framenavigated this distinguishes a reload from pushState/replaceState
+  // even when both use the identical URL. Match the requested response as well,
+  // so an intervening navigation the outgoing document started does not count.
+  let navigationResponse: Response | undefined;
   let committed = false;
   let raisedByOutgoingDocument = false;
   const withoutFragment = (url: string) => url.split('#')[0];
   const requested = withoutFragment(new URL(requestedUrl).href);
-  const isRequestedNavigation = (request: import('playwright').Request) => {
-    for (let hop: import('playwright').Request | null = request; hop; hop = hop.redirectedFrom()) {
+  const isRequestedNavigation = (request: Request) => {
+    for (let hop: Request | null = request; hop; hop = hop.redirectedFrom()) {
       if (withoutFragment(hop.url()) === requested)
         return true;
     }
     return false;
   };
-  const onResponse = (response: import('playwright').Response) => {
+  const onResponse = (response: Response) => {
     const request = response.request();
     if (request.isNavigationRequest() && response.frame() === tab.page.mainFrame() && isRequestedNavigation(request))
       navigationResponse = response;
   };
-  const isCommitUrl = (frameUrl: string, response: import('playwright').Response) =>
-    frameUrl === response.url() || !!response.request().redirectedFrom() && withoutFragment(frameUrl) === response.url();
-  const onFrameNavigated = (frame: import('playwright').Frame) => {
-    // A terminal 3xx can commit a document too. Check the actual redirect chain
-    // here, once any successor request exists, rather than excluding its status.
-    // Crawl URLs carry no fragment, so a new document commits exactly at the
-    // response URL; a hash change by an outgoing page already at that URL adds one.
-    // Only a redirect's Location can add a fragment to the committed URL itself.
-    if (frame === tab.page.mainFrame() && navigationResponse && !navigationResponse.request().redirectedTo() && isCommitUrl(frame.url(), navigationResponse))
-      committed = true;
-  };
-  tab.page.on('framenavigated', onFrameNavigated);
   tab.page.on('response', onResponse);
   const failed = new Promise<never>((_, reject) => {
     const present = openDialog(tab);
     if (present) {
       fired = true;
+      raisedByOutgoingDocument = true;
       reject(dialogFailure(present.description));
       return;
     }
@@ -537,15 +524,37 @@ function watchForDialog(tab: Tab, requestedUrl: string) {
     tab.on(TabEvents.modalState, listener);
   });
   // A dialog can open while nothing is being guarded; the next guard still sees it.
-  failed.catch(() => {});
+  failed.catch(() => {
+    // A dialog between guards is consumed by the next guard or tab retirement.
+  });
+  const initScript = tab.page.addInitScript(({ onNewDocument }) => {
+    if (window === window.top) {
+      void onNewDocument(location.href).catch(() => {
+        // The crawl may retire the tab before this notification finishes.
+      });
+    }
+  }, {
+    onNewDocument: async (url: string) => {
+      // Terminal 3xx responses can create documents; actual redirects do not.
+      if (navigationResponse && !navigationResponse.request().redirectedTo() && withoutFragment(url) === withoutFragment(navigationResponse.url()))
+        committed = true;
+    },
+  }, { exposeFunctions: true });
   return {
+    ready: () => Promise.race([initScript, failed]),
     guard: <T>(work: Promise<T>): Promise<T> => Promise.race([work, failed]),
     /** A dialog opened: work on the tab may have been abandoned mid-call. */
     fired: () => fired,
     /** True when the dialog came from the document being navigated away from. */
     raisedByOutgoingDocument: () => raisedByOutgoingDocument,
-    stop: () => {
-      tab.page.off('framenavigated', onFrameNavigated);
+    stop: async () => {
+      // Script removal can wait behind a dialog too. Keep watching during
+      // cleanup; if a dialog wins, retiring the tab finishes script cleanup.
+      if (!fired) {
+        await Promise.race([initScript.then(script => script.dispose()).catch(logUnhandledError), failed]).catch(() => {
+          // A dialog during removal retires the tab and its init script together.
+        });
+      }
       tab.page.off('response', onResponse);
       if (listener)
         tab.off(TabEvents.modalState, listener);
@@ -752,6 +761,7 @@ const auditSite = defineTabTool({
         const dialogWatch = watchForDialog(crawlTab, item.url);
         let retryItem = false;
         try {
+          await dialogWatch.ready();
           await dialogWatch.guard(crawlTab.navigate(item.url));
           await dialogWatch.guard(crawlTab.waitForTimeout(params.waitAfterNavigationMs));
 
@@ -796,7 +806,7 @@ const auditSite = defineTabTool({
             pageReport.error = error instanceof Error ? error.message : String(error);
           }
         } finally {
-          dialogWatch.stop();
+          await dialogWatch.stop();
           crawlTabAbandoned = dialogWatch.fired();
           // Checked after failed navigations too: a logout URL that clears the cookie
           // and then times out still ended the session, and skipping it pins the

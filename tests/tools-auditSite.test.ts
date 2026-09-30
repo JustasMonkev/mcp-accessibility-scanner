@@ -74,9 +74,14 @@ function createHarness(
             || pathname.startsWith(cookie.path.endsWith('/') ? cookie.path : `${cookie.path}/`);
         })));
 
-  // A committed navigation reports its main-frame navigation response and then
-  // framenavigated on the main frame at that response's URL, as a real page does.
+  // A committed navigation reports its response, navigates the main frame and
+  // runs init scripts in the newly created document, as a real page does.
   const mainFrame = { url: () => currentUrl };
+  const documentListeners = new Set<(url: string) => Promise<void>>();
+  const emitNewDocument = () => {
+    for (const listener of documentListeners)
+      void listener(currentUrl);
+  };
   const pageListeners = new Map<string, Set<(arg: unknown) => void>>();
   const emitPageEvent = (event: string, arg: unknown) => {
     for (const listener of pageListeners.get(event) ?? [])
@@ -91,9 +96,14 @@ function createHarness(
   const commitNavigation = (requestedUrl: string) => {
     emitPageEvent('response', navigationResponse(currentUrl, requestedUrl));
     emitPageEvent('framenavigated', mainFrame);
+    emitNewDocument();
   };
   const crawlPage = {
     mainFrame: vi.fn(() => mainFrame),
+    addInitScript: vi.fn(async (_script: unknown, { onNewDocument }: { onNewDocument: (url: string) => Promise<void> }) => {
+      documentListeners.add(onNewDocument);
+      return { dispose: vi.fn(async () => { documentListeners.delete(onNewDocument); }) };
+    }),
     on: vi.fn((event: string, listener: (arg: unknown) => void) => {
       pageListeners.set(event, (pageListeners.get(event) ?? new Set()).add(listener));
     }),
@@ -194,6 +204,7 @@ function createHarness(
     fetchMock,
     cookiesMock,
     emitPageEvent,
+    emitNewDocument,
     mainFrame,
     navigationResponse,
     setCurrentUrl: (url: string) => { currentUrl = url; },
@@ -309,6 +320,46 @@ describe('audit_site tool', () => {
       ['https://example.com/after', 'scanned'],
     ]);
     expect(report.pages[1].error).toContain('The page opened a dialog that the crawl does not answer');
+    expect(tabs).toHaveLength(1);
+  });
+
+  it.each(['setup', 'cleanup'])('retires the tab if a late dialog blocks init-script %s', async phase => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/after'],
+      'https://example.com/after': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: (state: { type: string, description: string }) => void) => listeners.push(listener));
+    const blockWithDialog = async () => {
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Late dialog"]' });
+      return new Promise<never>(() => {});
+    };
+    const install = crawlTab.page.addInitScript.getMockImplementation()!;
+    crawlTab.page.addInitScript.mockImplementationOnce(async (scriptBody: unknown, bindings: { onNewDocument: (url: string) => Promise<void> }) => {
+      if (phase === 'setup')
+        return blockWithDialog();
+      const script = await install(scriptBody, bindings);
+      script.dispose.mockImplementation(blockWithDialog);
+      return script;
+    });
+    const replacement = { ...crawlTab, navigate: vi.fn(crawlTab.navigate.getMockImplementation()!), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/after');
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { status: string }) => page.status)).toEqual(['scanned', 'scanned']);
+    expect(report.crawlTabRestarts).toEqual([{ url: phase === 'setup' ? 'https://example.com/' : 'https://example.com/after' }]);
     expect(tabs).toHaveLength(1);
   });
 
@@ -479,7 +530,7 @@ describe('audit_site tool', () => {
   });
 
   it('does not take a navigation the outgoing page started itself for the requested page committing', async () => {
-    const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+    const { context, response, crawlTab, emitPageEvent, emitNewDocument, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
       'https://example.com/': ['https://example.com/next'],
       'https://example.com/next': [],
     });
@@ -495,6 +546,7 @@ describe('audit_site tool', () => {
       emitPageEvent('response', navigationResponse('https://example.com/elsewhere'));
       setCurrentUrl('https://example.com/elsewhere');
       emitPageEvent('framenavigated', mainFrame);
+      emitNewDocument();
       for (const listener of listeners)
         listener({ type: 'dialog', description: '["alert" dialog with message "Elsewhere"]' });
       return new Promise(() => {});
@@ -520,7 +572,7 @@ describe('audit_site tool', () => {
     expect(report.crawlTabRestarts).toEqual([{ url: 'https://example.com/next' }]);
   });
 
-  it('does not take a hash change on a same-URL reload for the new document committing', async () => {
+  it.each(['hash change', 'exact-URL history update'])('does not treat %s on a same-URL reload as a new document committing', async update => {
     // /first redirects to /canonical, so the queued /canonical reloads the URL already open.
     const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
       'https://example.com/': ['https://example.com/first', 'https://example.com/canonical'],
@@ -530,13 +582,13 @@ describe('audit_site tool', () => {
     const listeners: ((state: { type: string, description: string }) => void)[] = [];
     crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
     const navigateImpl = crawlTab.navigate.getMockImplementation()!;
-    // The /canonical reload's response arrives, the old /canonical document changes
-    // its hash, and then it alerts before the new document commits.
+    // The /canonical reload's response arrives, then the old document updates
+    // history (possibly keeping the identical URL) and alerts before the commit.
     crawlTab.navigate.mockImplementation(async (url: string) => {
       if (url !== 'https://example.com/canonical')
         return navigateImpl(url);
       emitPageEvent('response', navigationResponse('https://example.com/canonical'));
-      setCurrentUrl('https://example.com/canonical#top');
+      setCurrentUrl(`https://example.com/canonical${update === 'hash change' ? '#top' : ''}`);
       emitPageEvent('framenavigated', mainFrame);
       for (const listener of listeners)
         listener({ type: 'dialog', description: '["alert" dialog with message "Session ending"]' });
@@ -564,7 +616,7 @@ describe('audit_site tool', () => {
   });
 
   it('counts a commit whose redirect Location added a fragment as the new document', async () => {
-    const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+    const { context, response, crawlTab, emitPageEvent, emitNewDocument, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
       'https://example.com/': ['https://example.com/old', 'https://example.com/next'],
       'https://example.com/next': [],
     });
@@ -580,6 +632,7 @@ describe('audit_site tool', () => {
       emitPageEvent('response', navigationResponse('https://example.com/landing', 'https://example.com/old'));
       setCurrentUrl('https://example.com/landing#section');
       emitPageEvent('framenavigated', mainFrame);
+      emitNewDocument();
       for (const listener of listeners)
         listener({ type: 'dialog', description: '["alert" dialog with message "Landing"]' });
       return new Promise(() => {});

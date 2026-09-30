@@ -191,7 +191,10 @@ now gives up on a page the moment its dialog opens, reports it with the dialog n
 continues in a fresh tab after closing the frozen one; the same run scans every other page
 in about 1 s. A dialog that the previous page raises while the crawl is already
 navigating away (a timer, before the next page commits) is recognised because the
-requested navigation has not committed a document; the next page is then audited once more in the fresh
+requested navigation has not created a new document. A main-frame init-script callback
+distinguishes new documents from same-document history updates (including exact-URL
+pushState/replaceState) using the public Playwright API across browser engines; the
+next page is then audited once more in the fresh
 tab instead of being reported as failed. The tab the tool was called from is never touched. Regression tests in
 `tests/navigation-dialogs.test.ts` fail without the change. The crawl navigation timeout
 still applies to pages that stall without a dialog. Separately, a navigation timeout that
