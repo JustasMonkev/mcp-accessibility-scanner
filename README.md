@@ -464,7 +464,7 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 - Sitemap URLs and every redirect must pass the server network policy and crawl scope. Fetches run on the MCP host, use HTTP(S) without browser cookies or auth headers, and have a 15-second total timeout, 20-redirect cap, and 10 MiB response limit. Browser proxy settings, `browser.remoteEndpoint`, `browser.cdpEndpoint` (including loopback endpoints, which may tunnel to remote browsers), and switched `browser_connect` providers are rejected for this strategy; use `provided` URLs in these modes. Sitemap TLS certificates must be valid even when browser HTTPS errors are ignored.
 - Always writes a JSON report (default filename: `audit-site-{timestamp}-{token}.json`)
 - A page that opens an `alert`, `confirm` or `prompt` while it is being audited is reported as an errored page as soon as the dialog opens, with the dialog named in its `error`. This includes terminal HTTP 3xx pages (for example, `300` or `302` without a `Location`) that commit a document instead of redirecting. The crawl never answers a dialog: it closes that page's tab and continues with the next URL in a fresh one, so one such page does not fail or hang the pages after it. A dialog the previous page raises while the crawl is already navigating away is not blamed on the next page, which is audited again in the fresh tab. Same-document history updates, even ones that keep the exact URL unchanged, do not count as the next page loading. A fresh tab starts without the old tab's `sessionStorage`, so the result then starts with a `WARNING: … continued in a fresh tab from <url>` line and both the JSON report and the structured content carry a `crawlTabRestarts` list; if the site keeps its session in `sessionStorage`, pages from that URL on may have been audited in a different session. The tab the tool was called from is not touched.
-- Warns and records `sessionLosses` if the crawl loses cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login)
+- Warns and records `sessionLosses` if the crawl loses cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login). If navigation fails on a browser-internal error page, the warning names the requested URL instead.
 
 **Example flow:**
 ```text
@@ -660,6 +660,7 @@ Enable this tool with `--caps pdf` or `--allowed-tools browser_pdf_save`.
 #### `browser_install`
 Install the configured browser engine (use when browser executable is missing).
 - Parameters: none
+- A completed install reports `Browser <channel> installed successfully.` even when no tabs are open.
 
 Disabled by default. Enable it at server startup with `--caps install`, `PLAYWRIGHT_MCP_CAPS=install`, or `"capabilities": ["install"]` in the config file. Exact-name opt-in via `--allowed-tools browser_install` or `allowedTools` is also supported. Explicit `core-install` settings remain supported as a deprecated alias; use `install` in new configurations. Without this opt-in, the tool is neither listed nor callable; existing browser installations can still be used.
 
@@ -932,7 +933,7 @@ npm run test:mcp
 npm run test:mcp:install
 ```
 
-The Luna wrapper runs each prompt through Codex `gpt-5.6-luna` with xhigh
+The Luna wrapper runs each prompt through Codex `gpt-6-luna` with xhigh
 reasoning. It uses a repo-scoped scanner MCP server, read-only Codex sandbox,
 structured PASS/FAIL evidence, and a per-prompt timeout:
 
@@ -941,6 +942,11 @@ npm run test:mcp:luna
 npm run test:mcp:luna -- --only browser_snapshot
 npm run test:mcp:luna -- --skip-optional --limit 1
 ```
+
+The prompt suite covers all 34 core/install tools, including session management,
+media emulation, network request details, drop actions, and screen-reader audits.
+The optional `browser_install` prompt is included by default and enables the
+server's `install` capability for that prompt only; use `--skip-optional` to omit it.
 
 Results are written under `test-results/mcp-direct-harness-results/` or
 `test-results/mcp-tool-loop-results/`. Set `MCP_HARNESS_RESULTS_DIR` to use another output root.

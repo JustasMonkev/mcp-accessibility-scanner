@@ -49,6 +49,7 @@ const install = defineTool({
           reject(new Error(`Failed to install browser: ${output.join('')}`));
       });
     });
+    response.addResult(`Browser ${channel} installed successfully.`);
     response.setIncludeTabs();
   },
 });
