@@ -74,7 +74,40 @@ function createHarness(
             || pathname.startsWith(cookie.path.endsWith('/') ? cookie.path : `${cookie.path}/`);
         })));
 
+  // A committed navigation reports its response, navigates the main frame and
+  // runs init scripts in the newly created document, as a real page does.
+  const mainFrame = { url: () => currentUrl };
+  const documentListeners = new Set<(url: string) => Promise<void>>();
+  const emitNewDocument = () => {
+    for (const listener of documentListeners)
+      void listener(currentUrl);
+  };
+  const pageListeners = new Map<string, Set<(arg: unknown) => void>>();
+  const emitPageEvent = (event: string, arg: unknown) => {
+    for (const listener of pageListeners.get(event) ?? [])
+      listener(arg);
+  };
+  // `requestedUrl` is where the chain started when the final URL was reached by redirect.
+  const navigationRequest = (url: string, redirectedFrom: unknown = null) => ({ isNavigationRequest: () => true, url: () => url, redirectedFrom: () => redirectedFrom, redirectedTo: () => null });
+  const navigationResponse = (url: string, requestedUrl = url) => ({
+    request: () => navigationRequest(url, requestedUrl === url ? null : navigationRequest(requestedUrl)),
+    frame: () => mainFrame, status: () => 200, url: () => url,
+  });
+  const commitNavigation = (requestedUrl: string) => {
+    emitPageEvent('response', navigationResponse(currentUrl, requestedUrl));
+    emitPageEvent('framenavigated', mainFrame);
+    emitNewDocument();
+  };
   const crawlPage = {
+    mainFrame: vi.fn(() => mainFrame),
+    addInitScript: vi.fn(async (_script: unknown, { onNewDocument }: { onNewDocument: (url: string) => Promise<void> }) => {
+      documentListeners.add(onNewDocument);
+      return { dispose: vi.fn(async () => { documentListeners.delete(onNewDocument); }) };
+    }),
+    on: vi.fn((event: string, listener: (arg: unknown) => void) => {
+      pageListeners.set(event, (pageListeners.get(event) ?? new Set()).add(listener));
+    }),
+    off: vi.fn((event: string, listener: (arg: unknown) => void) => pageListeners.get(event)?.delete(listener)),
     context: vi.fn(() => ({ cookies: cookiesMock })),
     url: vi.fn(() => currentUrl),
     title: vi.fn(async () => `Title for ${currentUrl}`),
@@ -100,12 +133,17 @@ function createHarness(
         throw new Error(`net::ERR_ABORTED navigating to ${url}`);
       }
       currentUrl = redirectMap[url] ?? url;
+      commitNavigation(url);
       // The response landed and the page committed, but the load never finished,
       // which is how a hanging logout endpoint behaves.
       if (options?.navigationFailsFor?.(currentUrl))
         throw new Error(`Timeout 60000ms exceeded navigating to ${url}`);
     }),
     waitForTimeout: vi.fn(async () => undefined),
+    // No dialog ever opens on these tabs; the crawl only watches for one.
+    modalStates: vi.fn(() => []),
+    on: vi.fn(),
+    off: vi.fn(),
   };
 
   const defaultFetch = async (input: string | URL) => {
@@ -165,6 +203,11 @@ function createHarness(
     crawlTab,
     fetchMock,
     cookiesMock,
+    emitPageEvent,
+    emitNewDocument,
+    mainFrame,
+    navigationResponse,
+    setCurrentUrl: (url: string) => { currentUrl = url; },
   };
 }
 
@@ -186,6 +229,435 @@ describe('audit_site tool', () => {
         .rejects.toThrow('Output file already exists');
 
     expect(context.newTab).not.toHaveBeenCalled();
+  });
+
+  it('keeps crawling and restores the caller tab when a dialog-frozen crawl tab refuses to close', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/dialog', 'https://example.com/after'],
+      'https://example.com/dialog': [],
+      'https://example.com/after': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    // /dialog leaves a dialog open on the first crawl tab, which then cannot be closed.
+    let frozen = false;
+    crawlTab.modalStates.mockImplementation(() => frozen ? [{ type: 'dialog', description: '["alert" dialog with message "Hi"]' }] : []);
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      await navigateImpl(url);
+      if (url.endsWith('/dialog'))
+        frozen = true;
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl) };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+    context.closeTab.mockImplementation(async (index: number) => {
+      if (tabs[index] === crawlTab)
+        throw new Error('page.close: Timeout 5000ms exceeded');
+      tabs.splice(index, 1);
+      return '';
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/after');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/dialog', 'scanned'],
+      ['https://example.com/after', 'scanned'],
+    ]);
+    // Retired, then retried by the final sweep; the replacement still closes and
+    // the caller's tab is selected again.
+    expect(context.closeTab).toHaveBeenCalledTimes(3);
+    expect(tabs).toEqual([expect.anything(), crawlTab]);
+    expect(context.selectTab).toHaveBeenCalledWith(0);
+  });
+
+  it('retires a crawl tab whose dialog was answered elsewhere before the next page', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/dialog', 'https://example.com/after'],
+      'https://example.com/dialog': [],
+      'https://example.com/after': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    // /dialog commits, then raises its own dialog mid-load that someone else dismisses
+    // at once, so no dialog is open by the next page; the abandoned load never settles.
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      await navigateImpl(url);
+      if (!url.endsWith('/dialog'))
+        return;
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["confirm" dialog with message "Leave?"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(crawlTab.navigate).not.toHaveBeenCalledWith('https://example.com/after');
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/after');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/dialog', 'error'],
+      ['https://example.com/after', 'scanned'],
+    ]);
+    expect(report.pages[1].error).toContain('The page opened a dialog that the crawl does not answer');
+    expect(tabs).toHaveLength(1);
+  });
+
+  it.each(['setup', 'cleanup'])('retires the tab if a late dialog blocks init-script %s', async phase => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/after'],
+      'https://example.com/after': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: (state: { type: string, description: string }) => void) => listeners.push(listener));
+    const blockWithDialog = async () => {
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Late dialog"]' });
+      return new Promise<never>(() => {});
+    };
+    const install = crawlTab.page.addInitScript.getMockImplementation()!;
+    crawlTab.page.addInitScript.mockImplementationOnce(async (scriptBody: unknown, bindings: { onNewDocument: (url: string) => Promise<void> }) => {
+      if (phase === 'setup')
+        return blockWithDialog();
+      const script = await install(scriptBody, bindings);
+      script.dispose.mockImplementation(blockWithDialog);
+      return script;
+    });
+    const replacement = { ...crawlTab, navigate: vi.fn(crawlTab.navigate.getMockImplementation()!), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/after');
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { status: string }) => page.status)).toEqual(['scanned', 'scanned']);
+    expect(report.crawlTabRestarts).toEqual([{ url: phase === 'setup' ? 'https://example.com/' : 'https://example.com/after' }]);
+    expect(tabs).toHaveLength(1);
+  });
+
+  it('audits a same-URL reload again when the outgoing document raised its dialog before the commit', async () => {
+    // /first redirects to /canonical, so the queued /canonical reloads the URL already open.
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/first', 'https://example.com/canonical'],
+      'https://example.com/canonical': [],
+    }, { redirectMap: { 'https://example.com/first': 'https://example.com/canonical' } });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // The /canonical document left open by /first alerts before the reload commits.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/canonical')
+        return navigateImpl(url);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Session ending"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/canonical');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/first', 'scanned'],
+      ['https://example.com/canonical', 'scanned'],
+    ]);
+    expect(tabs).toHaveLength(1);
+  });
+
+  it('does not count a same-document navigation by the outgoing page as the next page committing', async () => {
+    const { context, response, crawlTab, emitPageEvent, mainFrame } = createHarness({
+      'https://example.com/': ['https://example.com/next'],
+      'https://example.com/next': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // While /next is loading, the outgoing page pushes a history entry (framenavigated
+    // without a navigation response) and then alerts.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/next')
+        return navigateImpl(url);
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Saved"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/next');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/next', 'scanned'],
+    ]);
+  });
+
+  it('does not pair the next page\'s response with a same-document navigation by the outgoing page', async () => {
+    const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse } = createHarness({
+      'https://example.com/': ['https://example.com/next'],
+      'https://example.com/next': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // While /next loads: the outgoing page pushes a history entry, /next's response
+    // arrives, then the outgoing page alerts before /next commits.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/next')
+        return navigateImpl(url);
+      emitPageEvent('framenavigated', mainFrame);
+      emitPageEvent('response', navigationResponse('https://example.com/next'));
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Saved"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/next');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/next', 'scanned'],
+    ]);
+  });
+
+  it('does not count a followed redirect as a commit when the outgoing page changes to its URL', async () => {
+    const nextUrl = 'https://example.com/next';
+    const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+      'https://example.com/': [nextUrl],
+      [nextUrl]: [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== nextUrl)
+        return navigateImpl(url);
+      const redirect = navigationResponse(nextUrl);
+      emitPageEvent('response', {
+        ...redirect,
+        status: () => 302,
+        request: () => ({ ...redirect.request(), redirectedTo: () => ({ url: () => 'https://example.com/final' }) }),
+      });
+      // The outgoing document's pushState matches the intermediate response URL,
+      // but the redirect's successor has not responded or committed yet.
+      setCurrentUrl(nextUrl);
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Outgoing"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith(nextUrl);
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'], [nextUrl, 'scanned'],
+    ]);
+  });
+
+  it('does not take a navigation the outgoing page started itself for the requested page committing', async () => {
+    const { context, response, crawlTab, emitPageEvent, emitNewDocument, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+      'https://example.com/': ['https://example.com/next'],
+      'https://example.com/next': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // While /next loads, a navigation the outgoing page started to /elsewhere commits
+    // first, and that document alerts before /next commits.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/next')
+        return navigateImpl(url);
+      emitPageEvent('response', navigationResponse('https://example.com/elsewhere'));
+      setCurrentUrl('https://example.com/elsewhere');
+      emitPageEvent('framenavigated', mainFrame);
+      emitNewDocument();
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Elsewhere"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/next');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/next', 'scanned'],
+    ]);
+    expect(report.crawlTabRestarts).toEqual([{ url: 'https://example.com/next' }]);
+  });
+
+  it.each(['hash change', 'exact-URL history update'])('does not treat %s on a same-URL reload as a new document committing', async update => {
+    // /first redirects to /canonical, so the queued /canonical reloads the URL already open.
+    const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+      'https://example.com/': ['https://example.com/first', 'https://example.com/canonical'],
+      'https://example.com/canonical': [],
+    }, { redirectMap: { 'https://example.com/first': 'https://example.com/canonical' } });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // The /canonical reload's response arrives, then the old document updates
+    // history (possibly keeping the identical URL) and alerts before the commit.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/canonical')
+        return navigateImpl(url);
+      emitPageEvent('response', navigationResponse('https://example.com/canonical'));
+      setCurrentUrl(`https://example.com/canonical${update === 'hash change' ? '#top' : ''}`);
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Session ending"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/canonical');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/first', 'scanned'],
+      ['https://example.com/canonical', 'scanned'],
+    ]);
+  });
+
+  it('counts a commit whose redirect Location added a fragment as the new document', async () => {
+    const { context, response, crawlTab, emitPageEvent, emitNewDocument, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+      'https://example.com/': ['https://example.com/old', 'https://example.com/next'],
+      'https://example.com/next': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // /old redirects to /landing#section: the response URL has no fragment, the
+    // committed frame URL does. That document then raises its own dialog.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/old')
+        return navigateImpl(url);
+      emitPageEvent('response', navigationResponse('https://example.com/landing', 'https://example.com/old'));
+      setCurrentUrl('https://example.com/landing#section');
+      emitPageEvent('framenavigated', mainFrame);
+      emitNewDocument();
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Landing"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    // Its own dialog: reported on /old, not retried; the crawl moves on to /next.
+    expect(replacement.navigate).not.toHaveBeenCalledWith('https://example.com/old');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/old', 'error'],
+      ['https://example.com/next', 'scanned'],
+    ]);
+    expect(report.pages[1].error).toContain('"alert" dialog with message "Landing"');
   });
 
   it('warns about pages whose frames the scan could not reach', async () => {

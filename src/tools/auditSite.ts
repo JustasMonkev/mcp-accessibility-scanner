@@ -1,10 +1,14 @@
 import RE2 from 're2';
 import coreBundle from 'playwright-core/lib/coreBundle';
+import type { Page, Request, Response } from 'playwright';
 import type { FullConfig } from '../config.js';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { writeJsonReport } from './report.js';
+import { TabEvents, type Tab } from '../tab.js';
+import { truncateDataUrls } from '../utils/dataUrl.js';
 import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
+import { logUnhandledError } from '../utils/log.js';
 import {
   assertRuleOptionsValid,
   axeRuleSchemaShape,
@@ -25,6 +29,8 @@ type CrawlItem = {
   cookieUrl: string;
   depth: number;
   discoveredFrom: string | null;
+  // Set when a dialog from the previous page cut this item's navigation short.
+  retriedAfterOutgoingDialog?: boolean;
 };
 
 type PageScanStatus = 'scanned' | 'error';
@@ -240,7 +246,7 @@ function normalizeUrl(rawUrl: string, baseUrl: URL, ignoredParams: Set<string>):
  * Values are deliberately not compared: a rotating CSRF token is not a lost session.
  * Ceiling: a session cookie scoped to a path below the crawl URLs is not tracked.
  */
-async function readCrawlCookies(page: import('playwright').Page, urls: string[]): Promise<Map<string, { name: string, expires: number }>> {
+async function readCrawlCookies(page: Page, urls: string[]): Promise<Map<string, { name: string, expires: number }>> {
   const cookies = await page.context().cookies(urls);
   return new Map(cookies.map(cookie => [`${cookie.name}\n${cookie.domain}\n${cookie.path}`, { name: cookie.name, expires: cookie.expires }]));
 }
@@ -264,7 +270,7 @@ async function readCrawlCookies(page: import('playwright').Page, urls: string[])
  * crawl must not mask the real session cookie being dropped ten pages later.
  */
 async function findCookieLoss(
-  page: import('playwright').Page,
+  page: Page,
   urls: string[],
   baseline: Map<string, { name: string, expires: number }>,
   requestedUrl: string,
@@ -297,7 +303,7 @@ async function findCookieLoss(
  * `linkSelector` is empty when this page contributes no links (depth exhausted,
  * or a strategy that only reads the entry page).
  */
-async function readPage(page: import('playwright').Page, linkSelector: string): Promise<{ title: string, links: string[] }> {
+async function readPage(page: Page, linkSelector: string): Promise<{ title: string, links: string[] }> {
   return await page.evaluate(selector => ({
     title: document.title,
     links: selector
@@ -452,6 +458,110 @@ function summarizeTopPages(sortedScannedPages: PageReport[], count: number): str
       .map(page => `- ${page.url}: ${page.summary?.totalRules ?? 0} violations, ${page.summary?.totalNodes ?? 0} nodes`);
 }
 
+/**
+ * The crawl answers no dialog: it is not the crawl's to dismiss, and accepting an
+ * alert or confirm would change what the page under audit does. A dialog freezes
+ * its tab, though: navigation waits out the whole navigation timeout and a
+ * `page.evaluate` never returns, so a page that opens one while it loads would
+ * otherwise fail every later URL, or hang the crawl for good. The page is given up
+ * on as soon as its dialog opens, and the crawl carries on in a fresh tab.
+ */
+function openDialog(tab: Tab) {
+  return tab.modalStates().find(state => state.type === 'dialog');
+}
+
+function dialogFailure(description: string): Error {
+  const named = truncateDataUrls(description);
+  const shown = named.length > 200 ? `${named.slice(0, 200)}…` : named;
+  return new Error(`The page opened a dialog that the crawl does not answer, so it was not audited: ${shown}`);
+}
+
+/**
+ * Fails `guard`ed work the moment a dialog opens on the tab. The abandoned call
+ * stays pending until the tab is closed, which rejects it; the race has already
+ * taken a handler on it, so that rejection is not reported again.
+ */
+function watchForDialog(tab: Tab, requestedUrl: string) {
+  let listener: ((state: { type: string, description: string }) => void) | undefined;
+  let fired = false;
+  // Init scripts run only in newly created documents, before their page scripts.
+  // Unlike framenavigated this distinguishes a reload from pushState/replaceState
+  // even when both use the identical URL. Match the requested response as well,
+  // so an intervening navigation the outgoing document started does not count.
+  let navigationResponse: Response | undefined;
+  let committed = false;
+  let raisedByOutgoingDocument = false;
+  const withoutFragment = (url: string) => url.split('#')[0];
+  const requested = withoutFragment(new URL(requestedUrl).href);
+  const isRequestedNavigation = (request: Request) => {
+    for (let hop: Request | null = request; hop; hop = hop.redirectedFrom()) {
+      if (withoutFragment(hop.url()) === requested)
+        return true;
+    }
+    return false;
+  };
+  const onResponse = (response: Response) => {
+    const request = response.request();
+    if (request.isNavigationRequest() && response.frame() === tab.page.mainFrame() && isRequestedNavigation(request))
+      navigationResponse = response;
+  };
+  tab.page.on('response', onResponse);
+  const failed = new Promise<never>((_, reject) => {
+    const present = openDialog(tab);
+    if (present) {
+      fired = true;
+      raisedByOutgoingDocument = true;
+      reject(dialogFailure(present.description));
+      return;
+    }
+    listener = state => {
+      if (state.type !== 'dialog')
+        return;
+      fired = true;
+      raisedByOutgoingDocument = !committed;
+      reject(dialogFailure(state.description));
+    };
+    tab.on(TabEvents.modalState, listener);
+  });
+  // A dialog can open while nothing is being guarded; the next guard still sees it.
+  failed.catch(() => {
+    // A dialog between guards is consumed by the next guard or tab retirement.
+  });
+  const initScript = tab.page.addInitScript(({ onNewDocument }) => {
+    if (window === window.top) {
+      void onNewDocument(location.href).catch(() => {
+        // The crawl may retire the tab before this notification finishes.
+      });
+    }
+  }, {
+    onNewDocument: async (url: string) => {
+      // Terminal 3xx responses can create documents; actual redirects do not.
+      if (navigationResponse && !navigationResponse.request().redirectedTo() && withoutFragment(url) === withoutFragment(navigationResponse.url()))
+        committed = true;
+    },
+  }, { exposeFunctions: true });
+  return {
+    ready: () => Promise.race([initScript, failed]),
+    guard: <T>(work: Promise<T>): Promise<T> => Promise.race([work, failed]),
+    /** A dialog opened: work on the tab may have been abandoned mid-call. */
+    fired: () => fired,
+    /** True when the dialog came from the document being navigated away from. */
+    raisedByOutgoingDocument: () => raisedByOutgoingDocument,
+    stop: async () => {
+      // Script removal can wait behind a dialog too. Keep watching during
+      // cleanup; if a dialog wins, retiring the tab finishes script cleanup.
+      if (!fired) {
+        await Promise.race([initScript.then(script => script.dispose()).catch(logUnhandledError), failed]).catch(() => {
+          // A dialog during removal retires the tab and its init script together.
+        });
+      }
+      tab.page.off('response', onResponse);
+      if (listener)
+        tab.off(TabEvents.modalState, listener);
+    },
+  };
+}
+
 const auditSite = defineTabTool({
   capability: 'core',
   schema: {
@@ -560,7 +670,11 @@ const auditSite = defineTabTool({
       message: `Initialized site audit with ${queue.length} queued URL(s).`,
     });
 
-    const crawlTab = await context.newTab();
+    let crawlTab = await context.newTab();
+    // Crawl tabs given up on because a dialog froze them; each is closed, and the
+    // sweep below covers one whose close failed.
+    const retiredTabs: Tab[] = [];
+    let crawlTabAbandoned = false;
     // Cookies the crawl URLs carry before the crawl are the session the caller
     // signed in with. If one disappears mid-crawl every later page is audited as a
     // signed-out user, which still looks like a clean run, so record where it happened.
@@ -575,6 +689,8 @@ const auditSite = defineTabTool({
             .map(cookie => `${cookie.name}\n${cookie.domain}\n${cookie.path}`));
     const baselineCookies = await readCrawlCookies(crawlTab.page, cookieScopeUrls);
     const sessionLosses: { url: string, cookies: string[] }[] = [];
+    // The first URL audited in each replacement crawl tab.
+    const crawlTabRestarts: { url: string }[] = [];
     let processedPages = 0;
     try {
       while (queue.length && pages.length < params.maxPages) {
@@ -621,10 +737,33 @@ const auditSite = defineTabTool({
           }
         }
 
+        // A dialog the previous page left open freezes this tab for every later URL.
+        // It goes, dialog and all, and the crawl continues in a new tab; the tab the
+        // tool was called from is never touched. A tab whose dialog was answered
+        // elsewhere (a headed or shared CDP browser) goes too: the navigation or scan
+        // abandoned for that dialog may resume and race the next page.
+        if (crawlTabAbandoned || openDialog(crawlTab)) {
+          crawlTabAbandoned = false;
+          const frozenTab = crawlTab;
+          retiredTabs.push(frozenTab);
+          crawlTab = await context.newTab();
+          // A new tab starts without the old one's sessionStorage, so pages from here
+          // on may run in a different session; the report says where that began.
+          crawlTabRestarts.push({ url: item.url });
+          // Best effort: closing a frozen page can time out, and that must not end
+          // the crawl it was retired to rescue. The final sweep tries it again.
+          const frozenIndex = context.tabs().indexOf(frozenTab);
+          if (frozenIndex !== -1)
+            await context.closeTab(frozenIndex).catch(logUnhandledError);
+        }
+
         const urlBeforeNavigation = crawlTab.page.url();
+        const dialogWatch = watchForDialog(crawlTab, item.url);
+        let retryItem = false;
         try {
-          await crawlTab.navigate(item.url);
-          await crawlTab.waitForTimeout(params.waitAfterNavigationMs);
+          await dialogWatch.ready();
+          await dialogWatch.guard(crawlTab.navigate(item.url));
+          await dialogWatch.guard(crawlTab.waitForTimeout(params.waitAfterNavigationMs));
 
           // Discover before scanning. A scoped scan throws when an
           // includeSelectors entry is absent from this page, and that must not
@@ -635,12 +774,12 @@ const auditSite = defineTabTool({
           else if (params.strategy === 'nav' && item.depth === 0)
             linkSelector = navLinksSelector;
 
-          const { title, links } = await readPage(crawlTab.page, linkSelector);
+          const { title, links } = await dialogWatch.guard(readPage(crawlTab.page, linkSelector));
           pageReport.title = title;
           for (const link of links)
             enqueueUrl(link, item.depth + 1, item.url);
 
-          const axeResult = await runAxeScan(crawlTab.page, axeScanOptions(params));
+          const axeResult = await dialogWatch.guard(runAxeScan(crawlTab.page, axeScanOptions(params)));
           const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
 
           pageReport.status = 'scanned';
@@ -655,10 +794,20 @@ const auditSite = defineTabTool({
             aggregateIntoSummary(summaryByIncomplete, incomplete.deduped, item.url);
           }
         } catch (error) {
-          erroredPages++;
-          pageReport.status = 'error';
-          pageReport.error = error instanceof Error ? error.message : String(error);
+          // A timer on the previous page can raise its dialog while this URL is
+          // still loading, even a reload of the same URL. That is not this page's
+          // dialog, so it is audited again,
+          // once, in the fresh tab the abandoned one is replaced with.
+          if (!item.retriedAfterOutgoingDialog && dialogWatch.raisedByOutgoingDocument()) {
+            retryItem = true;
+          } else {
+            erroredPages++;
+            pageReport.status = 'error';
+            pageReport.error = error instanceof Error ? error.message : String(error);
+          }
         } finally {
+          await dialogWatch.stop();
+          crawlTabAbandoned = dialogWatch.fired();
           // Checked after failed navigations too: a logout URL that clears the cookie
           // and then times out still ended the session, and skipping it pins the
           // warning on the next page that happens to load — an innocent route.
@@ -666,7 +815,9 @@ const auditSite = defineTabTool({
           // baseline, so each later disappearance is still caught and attributed
           // to its own URL instead of being masked by an earlier, unrelated one.
           if (baselineCookies.size) {
-            const loss = await findCookieLoss(crawlTab.page, cookieScopeUrls, baselineCookies, item.url, urlBeforeNavigation);
+            // A retried page never loaded: the outgoing page that raised the dialog
+            // is the one that ran in the meantime, so a loss is laid at its door.
+            const loss = await findCookieLoss(crawlTab.page, cookieScopeUrls, baselineCookies, retryItem ? urlBeforeNavigation : item.url, urlBeforeNavigation);
             if (loss) {
               sessionLosses.push({ url: loss.url, cookies: loss.cookies });
               // Removed from the jar snapshot too, or a later-discovered URL
@@ -678,24 +829,37 @@ const auditSite = defineTabTool({
               }
             }
           }
-          processedPages++;
-          const message = pageReport.status === 'scanned'
-            ? `Scanned page ${processedPages}/${params.maxPages}: ${item.url}`
-            : `Failed page ${processedPages}/${params.maxPages}: ${item.url}`;
-          await response.reportProgress({
-            progress: processedPages,
-            total: params.maxPages,
-            message,
-          });
+          if (retryItem) {
+            // Not counted or reported: the page runs again next, in a fresh tab.
+            pages.splice(pages.indexOf(pageReport), 1);
+            visited.delete(item.url);
+            queue.unshift({ ...item, retriedAfterOutgoingDialog: true });
+            queued.add(item.url);
+          } else {
+            processedPages++;
+            const message = pageReport.status === 'scanned'
+              ? `Scanned page ${processedPages}/${params.maxPages}: ${item.url}`
+              : `Failed page ${processedPages}/${params.maxPages}: ${item.url}`;
+            await response.reportProgress({
+              progress: processedPages,
+              total: params.maxPages,
+              message,
+            });
+          }
         }
       }
     } finally {
-      const crawlTabIndex = context.tabs().indexOf(crawlTab);
-      if (crawlTabIndex !== -1)
-        await context.closeTab(crawlTabIndex);
+      // Each step is best effort, so one tab that will not close neither leaves
+      // the others open nor keeps the caller's tab unselected, and cleanup never
+      // discards the report built below. A tab left open still shows under Open tabs.
+      for (const crawlOwnedTab of [crawlTab, ...retiredTabs]) {
+        const crawlTabIndex = context.tabs().indexOf(crawlOwnedTab);
+        if (crawlTabIndex !== -1)
+          await context.closeTab(crawlTabIndex).catch(logUnhandledError);
+      }
       const originalTabIndex = context.tabs().indexOf(originalTab);
       if (originalTabIndex !== -1)
-        await context.selectTab(originalTabIndex);
+        await context.selectTab(originalTabIndex).catch(logUnhandledError);
     }
 
     const summaryViolations = toSortedSummaryViolations(summaryByViolation);
@@ -746,6 +910,7 @@ const auditSite = defineTabTool({
       pages,
       summary,
       sessionLosses,
+      crawlTabRestarts,
     };
 
     const reportResource = await writeJsonReport(response, reportPath, report, {
@@ -766,6 +931,7 @@ const auditSite = defineTabTool({
       },
       totals: summary.totals,
       sessionLosses,
+      crawlTabRestarts,
       pagesWithUnscannedFrames: pagesWithUnscannedFrames.map(page => ({
         url: page.url,
         unscannedFrames: page.unscannedFrames,
@@ -806,10 +972,16 @@ const auditSite = defineTabTool({
       'If one of these was a session cookie, pages scanned after the URL that dropped it were audited as a signed-out user. Add that URL to excludePathPatterns, sign in again, and re-run.',
       '',
     ] : [];
+    const restartWarning = crawlTabRestarts.length ? [
+      ...crawlTabRestarts.map(restart => `WARNING: a dialog froze the crawl tab, so the crawl continued in a fresh tab from ${restart.url}.`),
+      'Per-tab state such as sessionStorage from earlier pages was not carried over; if the site keeps its session there, pages from that URL on may have been audited in a different session.',
+      '',
+    ] : [];
     response.addCode('// Crawled pages in a temporary tab and aggregated Axe violations.');
     response.addResult([
       ...frameWarning,
       ...sessionWarning,
+      ...restartWarning,
       `Scanned pages: ${summary.totals.scannedPages}`,
       `Errored pages: ${summary.totals.erroredPages}`,
       `Skipped URLs: ${summary.totals.skippedUrls}`,

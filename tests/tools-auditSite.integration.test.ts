@@ -64,6 +64,10 @@ describe('audit_site integration', () => {
         title: `Title for ${currentUrl}`,
         links: selector ? linkMap[currentUrl] ?? [] : [],
       })),
+      mainFrame: vi.fn(() => ({})),
+      addInitScript: vi.fn(async () => ({ dispose: vi.fn(async () => {}) })),
+      on: vi.fn(),
+      off: vi.fn(),
     };
 
     const crawlTab: any = {
@@ -72,6 +76,10 @@ describe('audit_site integration', () => {
         currentUrl = url;
       }),
       waitForTimeout: vi.fn(async () => undefined),
+      // No dialog ever opens on these tabs; the crawl only watches for one.
+      modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
     };
 
     const originalTab: any = {

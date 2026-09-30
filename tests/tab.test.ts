@@ -365,6 +365,8 @@ describe('Tab', () => {
       failNavigation(new Error('page.goto: Target page has been closed'));
       await new Promise(resolve => setImmediate(resolve));
       expect(tab.consoleMessages()[0].text).toContain('Navigation failed after dialog interruption: page.goto: Target page has been closed');
+      // browser_console_messages prints toString(): no stack into this server's own files.
+      expect(tab.consoleMessages()[0].toString()).toBe(`Error: ${tab.consoleMessages()[0].text}`);
       expect(tab.listenerCount('modalState')).toBe(0);
       expect(mockPage.listenerCount('download')).toBe(1);
     });

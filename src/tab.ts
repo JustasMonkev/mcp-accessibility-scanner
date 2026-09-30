@@ -291,7 +291,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
         // The tool already returned the dialog. Preserve a later failure for
         // the next snapshot/console read, unless the user has moved on.
         if (pageGeneration === this._pageGeneration)
-          this._handleConsoleMessage(pageErrorToConsoleMessage(new Error(`Navigation failed after dialog interruption: ${formatPageStateError(error)}`)));
+          this._handleConsoleMessage(navigationFailureToConsoleMessage(error));
       });
     }
   }
@@ -540,6 +540,13 @@ function pageErrorToConsoleMessage(errorOrValue: Error | any): ConsoleMessage {
     text: String(errorOrValue),
     toString: () => String(errorOrValue),
   };
+}
+
+// The console tool prints a page error's stack, and a synthetic Error created here
+// would only point into this server's own files. Rendered like an Error, minus the frames.
+function navigationFailureToConsoleMessage(error: unknown): ConsoleMessage {
+  const text = `Navigation failed after dialog interruption: ${formatPageStateError(error)}`;
+  return { type: undefined, text, toString: () => `Error: ${text}` };
 }
 
 function formatPageStateError(error: unknown): string {

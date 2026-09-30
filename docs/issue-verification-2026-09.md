@@ -45,6 +45,24 @@ The opt-in probe logs `pageshow.persisted` and the observed Playwright frame lis
 after each back operation. Headless-shell passes with no observed restores do not
 establish BFCache support.
 
+A second set of eight cases (CDP and launched, direct and MCP, a plain page and the
+iframe page) follows what an agent does after going back: it clicks the refs that
+the back step itself returned (the `browser_navigate_back` response snapshot, or
+`page.ariaSnapshot({ mode: 'ai' })` taken right after `goBack` for the direct API)
+or a repeated snapshot of the same restored page, never a fresh navigation. Each
+runs five back cycles, checks that the main-frame refs are frame-qualified
+(`f<seq>e<n>`, with a new `<seq>` on every traversal, for example `f3e3`, `f5e3`,
+`f7e3`), that a repeated snapshot keeps the refs of the back response, and that
+history length, the form value, `pageshow.persisted === false` and (iframe page) the
+frame list show a real history traversal. No goto, reload or other recovery is
+used. On Linux, Node 22.22.2, Playwright 1.63.0 and Chromium 141.0.7390.37 (the full
+executable and the headless shell) all eight passed, twelve consecutive runs
+included; the frame link was present in the back response every time. With
+`MCP_TEST_ENABLE_BFCACHE=1` the four launched cases still pass, while the four
+CDP cases fail as the unsupported mode predicts, including on the plain page: the
+restored document reports the old ref `f1e3` and the click is rejected with
+`Invalid frame in aria-ref selector`.
+
 ## Persistent-profile downloads (#230)
 
 The same test file launches two separate browser instances against one newly
@@ -65,6 +83,8 @@ confirmed native browser crashes on the second persistent-profile launch:
 | Chromium 153.0.8010.12 | Windows | Access violation, exit 3221225477 (0xC0000005) |
 | Chrome 153.0.8010.53 | Windows | Access violation, exit 3221225477 (0xC0000005) |
 | Edge 153.0.4234.48 | Windows | Access violation; this control passed the earlier run, so failure is intermittent |
+| Chrome 154.0.8037.58 | Windows | Access violation, exit 3221225477 (0xC0000005), in [run 36594165313](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/36594165313) after the hosted runner's Chrome updated; the same save failed with target-closed and was reported by name |
+| Chrome 154.0.8037.93 | Windows | Access violation, exit 3221225477 (0xC0000005), in [run 36616936708](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/36616936708) after a further runner Chrome update; target-closed save reported by name |
 
 The fixture received HTTP 200 and a Playwright download event before browser
 disconnection; `saveAs()`/`path()` rejected with target-closed errors and no file
@@ -91,8 +111,32 @@ playwright-core 1.63.0 on the second persistent launch, may instead verify the
 known native failure contract: download event and target-closed failure, closed
 page and disconnected browser, no artifact, a named `isError` response, and a
 successful MCP ping. Such an outcome logs `known-native-crash-reported`; it is
-**not a successful download or a fixed native crash**. Removing the retained-error
+**not a successful download or a fixed native crash**. On those tuples the crash can
+also land just after the save finished (Chrome 154.0.8037.58 exited with
+0x80000003 once the file was written); the exact bytes must then be on disk and MCP
+must still answer, logged as `known-native-crash-after-save`. Removing the retained-error
 drain makes the closed-tab reporting regression fail.
+
+Further persistent-profile cases in the same file use a fixture route that sends
+part of an attachment and holds the rest until the test releases it. (1) Closing
+the context, or the browser, mid-save yields a named `Failed to save download
+"slow.txt": ...` `isError` response (Chromium 141 words the cause as `canceled`),
+reported once, with no artifact written or claimed, no unhandled rejection, a
+working MCP ping and, outside the observed-crash tuples above, a new browser on
+the next tool. (2) With `timeouts.idle` set, a saved download, an idle release of
+the default browser and a reopen notice on the next tool, the relaunched browser
+is a new context on the same profile (the local storage written before the
+release survives) and its own download saves exact bytes; the observed-crash
+tuples may instead take the named-failure contract for that second download. (3) A
+download still streaming holds the idle release: the browser stays connected past
+several idle windows, the release happens only after the bytes are saved, and the
+relaunch reuses the profile. Removing the pending-download check from the idle
+scheduler fails (3); dropping the retained download errors from responses, or
+rethrowing the tracked save rejection, fails (1). On Linux Chromium 141.0.7390.37
+(Playwright 1.63.0, both `chromium` and `chromium-headless-shell`) all three
+pass, and no server defect was found in these paths. The file also now calls
+`closeAllConnections()` before closing its fixture server so held connections
+cannot hang the run.
 
 `--isolated` is an explicit alternative whose two-launch controls passed; it
 does not preserve profile state between launches. Use recorded storage state if
@@ -124,7 +168,7 @@ The paired 1.63.0 dependencies reproduce both local defects. Navigation previous
 waited for DOMContentLoaded behind an alert, confirm or prompt. The MCP navigation
 tool now returns the pending dialog, leaves it untouched, and permits the dialog
 handling tool to finish the action. Crawlers still wait for document readiness
-and retain their navigation timeout. An already-open modal rejects a new
+and retain their navigation timeout, except when a dialog opens (see below). An already-open modal rejects a new
 navigation before clearing collected state. Regression tests cover subsequent
 navigation, downloads, late failures and listener cleanup. Removing the modal
 race makes the real alert regression fail.
@@ -135,6 +179,27 @@ backslashes, quotes and YAML-quoted keys, without consuming reference metadata o
 inline text. Real Chromium snapshots and a parser mutation verify the behavior.
 All 86 nearby screen-reader tests and 161 navigation/crawler tests passed on the
 pinned dependencies and Chromium headless shell 153.0.8010.12.
+
+A later re-check of `audit_site` over a local site (Chromium headless shell, navigation
+timeout 3 s) found the crawl's single tab was the weak point. A page raising `alert()`
+while it was parsed, from a `DOMContentLoaded` listener, or as a `confirm`/`prompt` left
+that dialog open in the crawl tab, so every later, healthy page timed out on `page.goto`
+and was reported as failed (4 pages took 9.3 s and only the first was scanned). A dialog
+raised from a `load` listener or a timer stalled the crawl for good, because the page's
+`evaluate` never returns while a dialog is open. The crawl still answers no dialog, but it
+now gives up on a page the moment its dialog opens, reports it with the dialog named, and
+continues in a fresh tab after closing the frozen one; the same run scans every other page
+in about 1 s. A dialog that the previous page raises while the crawl is already
+navigating away (a timer, before the next page commits) is recognised because the
+requested navigation has not created a new document. A main-frame init-script callback
+distinguishes new documents from same-document history updates (including exact-URL
+pushState/replaceState) using the public Playwright API across browser engines; the
+next page is then audited once more in the fresh
+tab instead of being reported as failed. The tab the tool was called from is never touched. Regression tests in
+`tests/navigation-dialogs.test.ts` fail without the change. The crawl navigation timeout
+still applies to pages that stall without a dialog. Separately, a navigation timeout that
+expired behind an unanswered dialog was delivered by `browser_console_messages` with a
+stack frame into this server's own files; it is now the message alone.
 
 ## Client certificates and proxy routing (#235)
 
