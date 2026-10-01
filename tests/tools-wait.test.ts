@@ -50,17 +50,35 @@ describe('browser_wait_for', () => {
       : `Waited for ${actual} seconds (requested ${requested}, maximum is 30)`);
   });
 
-  it.each([undefined, 0, 70])('preserves text waits with time %s', async time => {
+  it.each([undefined, 0, 70])('races text and textGone, using time %s as their timeout', async time => {
     const { context, response, waitFor } = setup();
     const pending = waitTools[0].handle(context, { time, text: 'Ready', textGone: 'Loading' }, response);
     await vi.runAllTimersAsync();
     await pending;
-    expect(waitFor.mock.calls).toEqual([[{ state: 'hidden' }], [{ state: 'visible' }]]);
+    // A clamped time becomes the waitFor timeout; a missing/zero time leaves the default.
+    const visible = time ? { state: 'visible', timeout: 30000 } : { state: 'visible' };
+    const hidden = time ? { state: 'hidden', timeout: 30000 } : { state: 'hidden' };
+    expect(waitFor.mock.calls).toEqual([[visible], [hidden]]);
+    // Both stubs resolve immediately, so the appearance wait (first in the race) wins.
     expect(response.result()).toBe('Waited for Ready');
-    if (time)
-      expect(response.code()).toContain('setTimeout(f, 30 * 1000)');
-    else
-      expect(response.code()).not.toContain('setTimeout');
+    expect(response.code()).toBe(`await page.getByText("Ready").first().waitFor({ state: 'visible' });`);
+    expect(response.code()).not.toContain('setTimeout');
+  });
+
+  it('waits for text to appear', async () => {
+    const { context, response, waitFor } = setup();
+    await waitTools[0].handle(context, { text: 'Ready' }, response);
+    expect(waitFor.mock.calls).toEqual([[{ state: 'visible' }]]);
+    expect(response.result()).toBe('Waited for Ready');
+    expect(response.code()).toBe(`await page.getByText("Ready").first().waitFor({ state: 'visible' });`);
+  });
+
+  it('waits for text to disappear', async () => {
+    const { context, response, waitFor } = setup();
+    await waitTools[0].handle(context, { textGone: 'Loading' }, response);
+    expect(waitFor.mock.calls).toEqual([[{ state: 'hidden' }]]);
+    expect(response.result()).toBe('Waited for Loading');
+    expect(response.code()).toBe(`await page.getByText("Loading").first().waitFor({ state: 'hidden' });`);
   });
 
   it.each([{}, { time: 0 }])('preserves missing-condition errors for %j', async params => {
