@@ -45,8 +45,9 @@ const wait = defineTool({
       const timeoutOptions = time ? { timeout: time * 1000 } : {};
       const waitForText = async (text: string, state: 'visible' | 'hidden') => {
         await tab.page.getByText(text).first().waitFor({ state, ...timeoutOptions });
+        const waitForOptions = time ? `{ state: '${state}', timeout: ${time * 1000} }` : `{ state: '${state}' }`;
         return {
-          code: `await page.getByText(${JSON.stringify(text)}).first().waitFor({ state: '${state}' });`,
+          code: `await page.getByText(${JSON.stringify(text)}).first().waitFor(${waitForOptions});`,
           result: `Waited for ${text}`,
         };
       };

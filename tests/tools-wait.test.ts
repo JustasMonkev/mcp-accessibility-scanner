@@ -61,7 +61,10 @@ describe('browser_wait_for', () => {
     expect(waitFor.mock.calls).toEqual([[visible], [hidden]]);
     // Both stubs resolve immediately, so the appearance wait (first in the race) wins.
     expect(response.result()).toBe('Waited for Ready');
-    expect(response.code()).toBe(`await page.getByText("Ready").first().waitFor({ state: 'visible' });`);
+    // The generated code mirrors the effective (capped) timeout so a replay keeps the limit.
+    expect(response.code()).toBe(time
+      ? `await page.getByText("Ready").first().waitFor({ state: 'visible', timeout: 30000 });`
+      : `await page.getByText("Ready").first().waitFor({ state: 'visible' });`);
     expect(response.code()).not.toContain('setTimeout');
   });
 
