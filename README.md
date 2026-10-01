@@ -737,8 +737,8 @@ Returns credential-redacted request/response headers and body metadata for one r
 #### `browser_wait_for`
 Wait for text to appear/disappear or time to pass.
 - Parameters: `time` (optional), `text` (optional), `textGone` (optional)
-- `time` is in seconds and capped at 30. Generated code uses the capped delay; time-only results report seconds and disclose when the requested delay exceeded the cap.
-- When `text` and `textGone` are both provided, the call resolves on whichever happens first (text appears or the other text disappears) and reports which one it waited for.
+- `time` is in seconds, must be non-negative, and is capped at 30. Generated code uses the capped delay; time-only results report seconds and disclose when the requested delay exceeded the cap.
+- When `text` and `textGone` are both provided, the call resolves on whichever happens first (text appears or the other text disappears) and reports which one it waited for. The other wait is cancelled, and the generated code replays both as a `Promise.race`.
 - When `time` is combined with `text` or `textGone`, it is applied as the (capped) timeout for those waits instead of running as a separate delay; on its own, `time` still just waits out the duration.
 
 #### `browser_handle_dialog`

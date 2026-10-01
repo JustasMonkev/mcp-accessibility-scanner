@@ -27,7 +27,7 @@ const wait = defineTool({
     title: 'Wait for',
     description: 'Wait for text to appear or disappear or a specified time to pass. When both text and textGone are provided, waits for the first one to happen',
     inputSchema: z.object({
-      time: z.number().optional().describe(`The time to wait in seconds, at most ${maxWaitSeconds}. When combined with text or textGone, serves as a timeout for them instead of the default action timeout`),
+      time: z.number().min(0).optional().describe(`The time to wait in seconds, at most ${maxWaitSeconds}. When combined with text or textGone, serves as a timeout for them instead of the default action timeout`),
       text: z.string().optional().describe('The text to wait for'),
       textGone: z.string().optional().describe('The text to wait for to disappear'),
     }),
@@ -43,24 +43,31 @@ const wait = defineTool({
 
     if (params.text || params.textGone) {
       const timeoutOptions = time ? { timeout: time * 1000 } : {};
-      const waitForText = async (text: string, state: 'visible' | 'hidden') => {
-        await tab.page.getByText(text).first().waitFor({ state, ...timeoutOptions });
-        const waitForOptions = time ? `{ state: '${state}', timeout: ${time * 1000} }` : `{ state: '${state}' }`;
-        return {
-          code: `await page.getByText(${JSON.stringify(text)}).first().waitFor(${waitForOptions});`,
-          result: `Waited for ${text}`,
-        };
+      const conditions = [
+        ...(params.text ? [{ text: params.text, state: 'visible' as const }] : []),
+        ...(params.textGone ? [{ text: params.textGone, state: 'hidden' as const }] : []),
+      ];
+      const waitForCode = ({ text, state }: typeof conditions[number]) => {
+        const options = time ? `{ state: '${state}', timeout: ${time * 1000} }` : `{ state: '${state}' }`;
+        return `page.getByText(${JSON.stringify(text)}).first().waitFor(${options})`;
       };
-      const waits = [
-        params.text ? waitForText(params.text, 'visible') : undefined,
-        params.textGone ? waitForText(params.textGone, 'hidden') : undefined,
-      ].filter((wait): wait is Promise<{ code: string; result: string }> => !!wait);
-      // The wait that lost the race will eventually fail; do not report it.
+      response.addCode(conditions.length === 1
+        ? `await ${waitForCode(conditions[0])};`
+        : `await Promise.race([\n${conditions.map(condition => `  ${waitForCode(condition)},`).join('\n')}\n]);`);
+
+      // Abort the losing wait once the race settles so it does not keep polling until its timeout.
+      const abortController = new AbortController();
+      const waits = conditions.map(async ({ text, state }) => {
+        await tab.page.getByText(text).first().waitFor({ state, ...timeoutOptions, signal: abortController.signal });
+        return `Waited for ${text}`;
+      });
       for (const wait of waits)
         wait.catch(() => {});
-      const outcome = await Promise.race(waits);
-      response.addCode(outcome.code);
-      response.addResult(outcome.result);
+      try {
+        response.addResult(await Promise.race(waits));
+      } finally {
+        abortController.abort();
+      }
     } else if (time) {
       response.addCode(`await new Promise(f => setTimeout(f, ${time} * 1000));`);
       await new Promise(f => setTimeout(f, time * 1000));

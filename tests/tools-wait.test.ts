@@ -50,38 +50,82 @@ describe('browser_wait_for', () => {
       : `Waited for ${actual} seconds (requested ${requested}, maximum is 30)`);
   });
 
+  // Strip the per-call AbortSignal so option objects can be compared exactly.
+  function waitOptions(waitFor: ReturnType<typeof vi.fn>) {
+    return waitFor.mock.calls.map(([{ signal, ...options }]) => {
+      expect(signal).toBeInstanceOf(AbortSignal);
+      return options;
+    });
+  }
+
   it.each([undefined, 0, 70])('races text and textGone, using time %s as their timeout', async time => {
     const { context, response, waitFor } = setup();
     const pending = waitTools[0].handle(context, { time, text: 'Ready', textGone: 'Loading' }, response);
     await vi.runAllTimersAsync();
     await pending;
     // A clamped time becomes the waitFor timeout; a missing/zero time leaves the default.
-    const visible = time ? { state: 'visible', timeout: 30000 } : { state: 'visible' };
-    const hidden = time ? { state: 'hidden', timeout: 30000 } : { state: 'hidden' };
-    expect(waitFor.mock.calls).toEqual([[visible], [hidden]]);
+    const timeout = time ? { timeout: 30000 } : {};
+    expect(waitOptions(waitFor)).toEqual([{ state: 'visible', ...timeout }, { state: 'hidden', ...timeout }]);
     // Both stubs resolve immediately, so the appearance wait (first in the race) wins.
     expect(response.result()).toBe('Waited for Ready');
-    // The generated code mirrors the effective (capped) timeout so a replay keeps the limit.
-    expect(response.code()).toBe(time
-      ? `await page.getByText("Ready").first().waitFor({ state: 'visible', timeout: 30000 });`
-      : `await page.getByText("Ready").first().waitFor({ state: 'visible' });`);
-    expect(response.code()).not.toContain('setTimeout');
+    // The generated code replays the same race with the effective (capped) timeout.
+    const options = time ? ', timeout: 30000' : '';
+    expect(response.code()).toBe([
+      'await Promise.race([',
+      `  page.getByText("Ready").first().waitFor({ state: 'visible'${options} }),`,
+      `  page.getByText("Loading").first().waitFor({ state: 'hidden'${options} }),`,
+      ']);',
+    ].join('\n'));
+  });
+
+  it('aborts the losing wait once the race settles', async () => {
+    const { context, response, waitFor } = setup();
+    let lose: (error: Error) => void = () => {};
+    waitFor
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(({ signal }: { signal: AbortSignal }) => new Promise((_, reject) => {
+          lose = reject;
+          signal.addEventListener('abort', () => reject(new Error('aborted')));
+        }));
+    await waitTools[0].handle(context, { text: 'Ready', textGone: 'Loading' }, response);
+    const signals = waitFor.mock.calls.map(([{ signal }]) => signal as AbortSignal);
+    expect(signals.every(signal => signal.aborted)).toBe(true);
+    lose(new Error('late failure'));
+    expect(response.result()).toBe('Waited for Ready');
+  });
+
+  it('aborts the other wait when the race fails', async () => {
+    const { context, response, waitFor } = setup();
+    waitFor
+        .mockImplementationOnce(({ signal }: { signal: AbortSignal }) => new Promise((_, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted')));
+        }))
+        .mockRejectedValueOnce(new Error('Timeout 30000ms exceeded'));
+    await expect(waitTools[0].handle(context, { time: 30, text: 'Ready', textGone: 'Loading' }, response))
+        .rejects.toThrow('Timeout 30000ms exceeded');
+    expect(waitFor.mock.calls.every(([{ signal }]) => (signal as AbortSignal).aborted)).toBe(true);
   });
 
   it('waits for text to appear', async () => {
     const { context, response, waitFor } = setup();
     await waitTools[0].handle(context, { text: 'Ready' }, response);
-    expect(waitFor.mock.calls).toEqual([[{ state: 'visible' }]]);
+    expect(waitOptions(waitFor)).toEqual([{ state: 'visible' }]);
     expect(response.result()).toBe('Waited for Ready');
     expect(response.code()).toBe(`await page.getByText("Ready").first().waitFor({ state: 'visible' });`);
   });
 
-  it('waits for text to disappear', async () => {
+  it('waits for text to disappear with a timeout', async () => {
     const { context, response, waitFor } = setup();
-    await waitTools[0].handle(context, { textGone: 'Loading' }, response);
-    expect(waitFor.mock.calls).toEqual([[{ state: 'hidden' }]]);
+    await waitTools[0].handle(context, { time: 2, textGone: 'Loading' }, response);
+    expect(waitOptions(waitFor)).toEqual([{ state: 'hidden', timeout: 2000 }]);
     expect(response.result()).toBe('Waited for Loading');
-    expect(response.code()).toBe(`await page.getByText("Loading").first().waitFor({ state: 'hidden' });`);
+    expect(response.code()).toBe(`await page.getByText("Loading").first().waitFor({ state: 'hidden', timeout: 2000 });`);
+  });
+
+  it('rejects a negative time in the input schema', () => {
+    const schema = waitTools[0].schema.inputSchema;
+    expect(schema.safeParse({ time: -1, text: 'Ready' }).success).toBe(false);
+    expect(schema.safeParse({ time: 0, text: 'Ready' }).success).toBe(true);
   });
 
   it.each([{}, { time: 0 }])('preserves missing-condition errors for %j', async params => {
