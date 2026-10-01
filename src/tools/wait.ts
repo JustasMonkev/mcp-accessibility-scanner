@@ -27,7 +27,7 @@ const wait = defineTool({
     title: 'Wait for',
     description: 'Wait for text to appear or disappear or a specified time to pass. When both text and textGone are provided, waits for the first one to happen',
     inputSchema: z.object({
-      time: z.number().min(0).optional().describe(`The time to wait in seconds, at most ${maxWaitSeconds}. When combined with text or textGone, serves as a timeout for them instead of the default action timeout`),
+      time: z.number().min(0).optional().describe(`The time to wait in seconds, at most ${maxWaitSeconds}. When combined with text or textGone, serves as a timeout for them instead of the default action timeout. 0 is treated the same as omitting it`),
       text: z.string().optional().describe('The text to wait for'),
       textGone: z.string().optional().describe('The text to wait for to disappear'),
     }),
@@ -47,13 +47,22 @@ const wait = defineTool({
         ...(params.text ? [{ text: params.text, state: 'visible' as const }] : []),
         ...(params.textGone ? [{ text: params.textGone, state: 'hidden' as const }] : []),
       ];
-      const waitForCode = ({ text, state }: typeof conditions[number]) => {
-        const options = time ? `{ state: '${state}', timeout: ${time * 1000} }` : `{ state: '${state}' }`;
-        return `page.getByText(${JSON.stringify(text)}).first().waitFor(${options})`;
+      const waitForCode = ({ text, state }: typeof conditions[number], signal?: string) => {
+        const timeout = time ? `, timeout: ${time * 1000}` : '';
+        const signalOption = signal ? `, signal: ${signal}` : '';
+        return `page.getByText(${JSON.stringify(text)}).first().waitFor({ state: '${state}'${timeout}${signalOption} })`;
       };
+      // A combined wait replays as a block-scoped race that also cancels its loser.
       response.addCode(conditions.length === 1
         ? `await ${waitForCode(conditions[0])};`
-        : `await Promise.race([\n${conditions.map(condition => `  ${waitForCode(condition)},`).join('\n')}\n]);`);
+        : [
+          '{',
+          '  const abortController = new AbortController();',
+          '  await Promise.race([',
+          ...conditions.map(condition => `    ${waitForCode(condition, 'abortController.signal')},`),
+          '  ]).finally(() => abortController.abort());',
+          '}',
+        ].join('\n'));
 
       // Abort the losing wait once the race settles so it does not keep polling until its timeout.
       const abortController = new AbortController();
