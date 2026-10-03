@@ -850,9 +850,7 @@ cd mcp-accessibility-scanner
 npm install
 ```
 
-`npm run knip` checks the server's sources, tests, benchmarks and tooling. The
-standalone `video/` package is outside that project; validate it separately with
-`cd video && npm run typecheck`.
+`npm run knip` checks the server's sources, tests, benchmarks and tooling.
 
 ### Playwright upgrade gate
 
