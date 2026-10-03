@@ -58,8 +58,8 @@ export class ToolRelay {
     } finally {
       --discovery.pending;
       if (!discovery.pending) {
-        if (!this._closed && discovery.changed)
-          this._deferNotification(client, discovery);
+        if (!this._closed)
+          this._deferDiscoveryCompletion(client, discovery);
         else
           this._discovery.delete(client);
       }
@@ -84,17 +84,18 @@ export class ToolRelay {
     this._discovery.clear();
   }
 
-  private _deferNotification(client: Client, discovery: Discovery): void {
+  private _deferDiscoveryCompletion(client: Client, discovery: Discovery): void {
     if (discovery.notification)
       return;
-    // Let the outer SDK process the response (including a rejected listing)
-    // before sending the refresh hint. Every overlapping read must settle.
+    // Keep buffering through the caller's promise continuation, even if no
+    // change has arrived yet. Every overlapping read must settle first.
     discovery.notification = setImmediate(() => {
       discovery.notification = undefined;
       if (this._closed || discovery.pending)
         return;
       this._discovery.delete(client);
-      void this._notify(client);
+      if (discovery.changed)
+        void this._notify(client);
     });
   }
 

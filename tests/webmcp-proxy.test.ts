@@ -17,7 +17,7 @@
 import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/client';
 import type { Transport } from '@modelcontextprotocol/client';
-import { describe, it } from 'vitest';
+import { describe, it, vi } from 'vitest';
 import { resolveConfig } from '../src/config.js';
 import { wrapInProcess } from '../src/mcp/server.js';
 import type { ServerBackendContext } from '../src/mcp/server.js';
@@ -179,6 +179,57 @@ describe('WebMCP proxy notification races', () => {
   });
 
   for (const kind of ['direct', 'VS Code']) {
+    it.each([
+      { replacement: false, changed: false },
+      { replacement: false, changed: true },
+      { replacement: true, changed: false },
+      { replacement: true, changed: true },
+    ])(`${kind}: finishes discovery after the listing continuation (replacement: $replacement, changed: $changed)`, async ({ replacement, changed }) => {
+      const events: string[] = [];
+      let innerContext!: ServerBackendContext;
+      const connect = async () => wrapInProcess({
+        initialize: async context => { innerContext = context; },
+        listTools: async () => [{ name: 'page_tool', inputSchema: { type: 'object' as const } }],
+        callTool: async () => ({ content: [] }),
+      });
+      const backend = kind === 'direct'
+        ? new ProxyBackend([{ name: 'default', description: 'Default', connect }, { name: 'replacement', description: 'Replacement', connect }])
+        : new VSCodeProxyBackend(await resolveConfig({}), connect);
+      const listTools = Client.prototype.listTools;
+      let spy: ReturnType<typeof vi.spyOn> | undefined;
+      try {
+        await backend.initialize({ notifyToolListChanged: async () => { events.push('list changed'); } }, { name: 'test', version: '1' });
+        if (replacement) {
+          await backend.listTools();
+          await backend.callTool('browser_connect', kind === 'direct' ? { name: 'replacement' } : {});
+          events.length = 0;
+        }
+        // Resolve the actual downstream read, then deliver a notification.
+        // The SDK queues its handler after the relay's finalizer but before
+        // the adapter can accept the returned catalog and its recipient.
+        spy = vi.spyOn(Client.prototype, 'listTools').mockImplementation(function(this: Client, ...args) {
+          const response = Promise.withResolvers<Awaited<ReturnType<Client['listTools']>>>();
+          void listTools.apply(this, args).then(result => {
+            response.resolve(result);
+            if (changed)
+              void innerContext.notifyToolListChanged();
+          }, response.reject);
+          return response.promise;
+        });
+        const tools = await backend.listTools();
+        events.push('list returned');
+        assert.equal(tools[0].name, 'page_tool');
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.deepEqual(events, changed ? ['list returned', 'list changed'] : ['list returned']);
+        events.length = 0;
+        await innerContext.notifyToolListChanged();
+        assert.deepEqual(events, ['list changed'], 'completed discovery no longer buffers idle changes');
+      } finally {
+        spy?.mockRestore();
+        backend.serverClosed();
+      }
+    });
+
     for (const startSecond of ['overlapping', 'before deferred notification']) {
       it(`${kind}: retains catalog changes until ${startSecond} listings settle`, async () => {
         let notifications = 0;
@@ -294,6 +345,7 @@ describe('downstream tool relay lifetime', () => {
       gates[0].resolve();
       await relay.listTools(clients[0]);
       await contexts[0].notifyToolListChanged();
+      await new Promise<void>(resolve => setImmediate(resolve));
       assert.equal(notifications, 1);
       const pending = relay.listTools(clients[1]);
       // Begin initialization/discovery on the second client without changing
