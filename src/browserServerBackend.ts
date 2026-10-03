@@ -192,7 +192,7 @@ export class BrowserServerBackend implements ServerBackend {
       // implementations never see it. The session tools themselves are
       // excluded — they operate *on* sessions, not *in* them.
       if (tool.schema.name !== 'browser_session_open' && tool.schema.name !== 'browser_session_close') {
-        const inputSchema = mcpTool.inputSchema as { properties?: Record<string, unknown> };
+        const inputSchema = mcpTool.inputSchema;
         inputSchema.properties = {
           ...inputSchema.properties,
           browserSessionId: {
@@ -370,7 +370,7 @@ export class BrowserServerBackend implements ServerBackend {
         const sessionLog = routedSessionId !== undefined ? await context.resolveSessionLog() : await this._ensureSessionLog();
         sessionLog?.logResponse(response);
       }
-    } catch (error: any) {
+    } catch (error) {
       try {
         await response.cleanupFilesOnError();
       } catch (cleanupError) {

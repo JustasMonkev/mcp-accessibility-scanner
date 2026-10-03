@@ -430,17 +430,15 @@ function summarize(execution, tool, logPath, finalPath) {
       typeof final.evidence !== 'string' || !final.evidence.trim())
     return { status: 'INVALID_RESULT', evidence: 'Structured result must include status, tool, and nonempty evidence.' };
   if (globalFailure)
-    return { status: 'TURN_FAILED', evidence: final.evidence || 'Codex reported a failed turn.' };
+    return { status: 'TURN_FAILED', evidence: final.evidence };
   if (failedMcp)
-    return { status: 'MCP_TOOL_FAILED', evidence: final.evidence || 'At least one MCP call failed or did not complete.' };
+    return { status: 'MCP_TOOL_FAILED', evidence: final.evidence };
   if (!successfulTarget)
-    return { status: 'NO_TOOL_EVIDENCE', evidence: final.evidence || `No successful ${tool} MCP call was recorded.` };
+    return { status: 'NO_TOOL_EVIDENCE', evidence: final.evidence };
   if (final.status !== 'PASS')
-    return { status: 'MODEL_FAIL', evidence: final.evidence || 'The structured result reported FAIL.' };
+    return { status: 'MODEL_FAIL', evidence: final.evidence };
   if (final.tool !== tool)
     return { status: 'TOOL_MISMATCH', evidence: `Structured result named ${JSON.stringify(final.tool)}.` };
-  if (typeof final.evidence !== 'string' || !final.evidence.trim())
-    return { status: 'NO_EVIDENCE', evidence: 'Structured result did not include evidence.' };
   return { status: 'PASS', evidence: final.evidence };
 }
 

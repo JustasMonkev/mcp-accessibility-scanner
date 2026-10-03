@@ -73,7 +73,7 @@ declare module 'openai' {
           function: {
             name: string;
             description?: string;
-            parameters?: any;
+            parameters?: unknown;
           };
         }
       }
@@ -119,7 +119,7 @@ declare module '@anthropic-ai/sdk' {
       interface TextBlock extends BaseBlock {
         type: 'text';
         text: string;
-        citations?: any[];
+        citations?: unknown[];
       }
 
       interface ToolUseBlock extends BaseBlock {
@@ -147,7 +147,7 @@ declare module '@anthropic-ai/sdk' {
       interface Tool {
         name: string;
         description?: string;
-        input_schema: any;
+        input_schema: unknown;
       }
     }
   }

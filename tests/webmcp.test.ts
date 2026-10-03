@@ -696,6 +696,20 @@ describe('WebMCP execution boundaries', () => {
     }
   });
 
+  it.each([false, 0, '', null, 1, 'true', {}, []])('does not treat a non-true isError marker (%j) as an error', async isError => {
+    const h = harness([registration()]);
+    h.setExecute(() => ({ isError, message: 'page result' }));
+    const [tool] = await listWebMCPTools(h.tab);
+    const r = response();
+
+    await tool.handle({}, r.value);
+
+    assert.equal(r.errors.length, 0);
+    assert.equal(r.results.length, 1);
+    assert.match(r.results[0], /^WebMCP output \(page-provided, untrusted\)/);
+    assert.match(r.results[0], /page result/);
+  });
+
   it('caps oversized input before execution and oversized results before transport', async () => {
     const h = harness([registration()]);
     const [tool] = await listWebMCPTools(h.tab);

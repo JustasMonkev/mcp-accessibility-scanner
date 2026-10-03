@@ -288,7 +288,7 @@ export class CDPRelayServer {
       try {
         const message = JSON.parse(data.toString());
         await this._handlePlaywrightMessage(message);
-      } catch (error: any) {
+      } catch (error) {
         debugLogger(`Error while handling Playwright message\n${data.toString()}\n`, error);
       }
     });

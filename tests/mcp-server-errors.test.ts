@@ -16,38 +16,23 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { Client, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/client';
-import { createServer, wrapInProcess } from '../src/mcp/server.js';
+import { createServer, wrapInProcess, type ServerBackend } from '../src/mcp/server.js';
 import { InProcessTransport } from '../src/mcp/inProcessTransport.js';
 
-async function connectClient(backend: unknown) {
-  const transport = await wrapInProcess(backend as any);
+async function connectClient(backend: ServerBackend) {
+  const transport = await wrapInProcess(backend);
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   client.setRequestHandler('ping', () => ({}));
   await client.connect(transport);
   return client;
 }
 
-async function connectHeartbeatClient(backend: unknown, pingHandler: () => object | Promise<object>) {
-  const server = createServer('Test', '1.0.0', backend as any, true);
+async function connectHeartbeatClient(backend: ServerBackend, pingHandler: () => object | Promise<object>) {
+  const server = createServer('Test', '1.0.0', backend, true);
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   client.setRequestHandler('ping', pingHandler);
   await client.connect(new InProcessTransport(server));
   return { client, server };
-}
-
-async function waitForAssertion(assertion: () => void) {
-  const deadline = Date.now() + 1000;
-  let lastError: unknown;
-  while (Date.now() < deadline) {
-    try {
-      assertion();
-      return;
-    } catch (error) {
-      lastError = error;
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-  }
-  throw lastError;
 }
 
 async function withPingTimeout<T>(value: string, callback: () => Promise<T>) {
@@ -108,9 +93,7 @@ describe('mcp server error mapping', () => {
       callTool: vi.fn(async () => ({ content: [] })),
     };
 
-    const { createServer } = await import('../src/mcp/server.js');
-    const { InProcessTransport } = await import('../src/mcp/inProcessTransport.js');
-    const server = createServer('Test', '1.0.0', backend as any, false, {
+    const server = createServer('Test', '1.0.0', backend, false, {
       title: 'Test Title',
       instructions: 'Use the tools wisely.',
     });
@@ -137,7 +120,7 @@ describe('mcp server error mapping', () => {
       const { client } = await connectHeartbeatClient(backend, () => new Promise<object>(() => {}));
       try {
         await client.callTool({ name: 'some_tool', arguments: {} });
-        await waitForAssertion(() => expect(backend.serverClosed).toHaveBeenCalledTimes(1));
+        await vi.waitFor(() => expect(backend.serverClosed).toHaveBeenCalledTimes(1), { timeout: 1000, interval: 10 });
       } finally {
         await client.close();
       }
@@ -160,7 +143,7 @@ describe('mcp server error mapping', () => {
       const { client } = await connectHeartbeatClient(backend, pingHandler);
       try {
         await client.callTool({ name: 'some_tool', arguments: {} });
-        await waitForAssertion(() => expect(pingHandler).toHaveBeenCalledTimes(1));
+        await vi.waitFor(() => expect(pingHandler).toHaveBeenCalledTimes(1), { timeout: 1000, interval: 10 });
 
         // Wait past the 3s re-beat interval: the heartbeat must not retry.
         await new Promise(resolve => setTimeout(resolve, 3200));

@@ -28,7 +28,7 @@ export type ToolSchema<Input extends z.Schema> = {
   idempotent?: boolean;
 };
 
-export function toMcpTool(tool: ToolSchema<any>): mcpServer.Tool {
+export function toMcpTool(tool: ToolSchema<z.Schema>): mcpServer.Tool {
   const annotations: NonNullable<mcpServer.Tool['annotations']> = {
     title: tool.title,
     readOnlyHint: tool.type === 'readOnly',

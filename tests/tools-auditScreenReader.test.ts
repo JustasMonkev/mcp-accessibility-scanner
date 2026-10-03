@@ -12,6 +12,7 @@ import auditScreenReaderTools, {
 } from '../src/tools/auditScreenReader.js';
 import { Response } from '../src/response.js';
 import { injectAxeForNames } from '../src/tools/axe.js';
+import { measureScreenReaderElements } from '../src/tools/screenReaderMeasurement.js';
 
 function node(overrides: Partial<ScreenReaderNode>): ScreenReaderNode {
   return {
@@ -542,6 +543,97 @@ function createToolHarness(options: {
   return { context, concurrency, frameConcurrency, ownerFrames, disposals, installs, frame, frames, outputFile };
 }
 
+describe('screen-reader measurement contract', () => {
+  it('returns snapshot-indexed facts, limitations and reachable-budget progress', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf([
+        { role: 'img', ref: 'h0' },
+        ...Array.from({ length: 4 }, (_, index) => ({ role: 'button', ref: `b${index + 1}` })),
+      ]),
+      staleRefs: ref => ref === 'b2',
+      factsFor: ref => ref === 'h0' ? { ariaHidden: true } : {},
+    });
+    const reportProgress = vi.fn<(progress: { progress: number; total: number; message: string }) => Promise<void>>().mockResolvedValue(undefined);
+
+    const measured = await measureScreenReaderElements(
+        harness.context.currentTabOrDie().page, parseAriaSnapshot(await harness.context.currentTabOrDie().page.ariaSnapshot()),
+        { maxElements: 2, checkNames: false, reportProgress });
+
+    expect([...measured.factsByIndex.keys()]).toEqual([1, 2, 4]);
+    expect(measured).toMatchObject({
+      totalElements: 5,
+      analyzedElements: 4,
+      limitations: {
+        unresolvedElements: 1,
+        unmeasuredNames: 0,
+        truncatedElements: 1,
+        stoppedAtFrameWorkLimit: null,
+      },
+    });
+    expect(reportProgress.mock.calls.map(([progress]) => progress)).toEqual([
+      { progress: 2, total: 4, message: 'Measured 2 accessibility tree elements (1/2 screen-reader-reachable)' },
+      { progress: 3, total: 4, message: 'Measured 3 accessibility tree elements (1/2 screen-reader-reachable)' },
+      { progress: 4, total: 4, message: 'Measured 4 accessibility tree elements (2/2 screen-reader-reachable)' },
+    ]);
+    expect(harness.disposals.count).toBe(3);
+    expect(harness.installs.count).toBe(0);
+  });
+
+  it('bounds an entirely hidden snapshot independently of the reachable budget', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 12 }, (_, index) => ({ role: 'img', ref: `h${index}` }))),
+      factsFor: () => ({ ariaHidden: true }),
+    });
+
+    const measured = await measureScreenReaderElements(
+        harness.context.currentTabOrDie().page, parseAriaSnapshot(await harness.context.currentTabOrDie().page.ariaSnapshot()),
+        { maxElements: 5, checkNames: false });
+
+    expect(measured.analyzedElements).toBe(10);
+    expect(measured.factsByIndex.size).toBe(10);
+    expect(measured.limitations).toEqual({
+      unresolvedElements: 0,
+      unmeasuredNames: 0,
+      truncatedElements: 2,
+      stoppedAtFrameWorkLimit: null,
+    });
+  });
+
+  it('returns a stable partial measurement while late reads retain ownership until settlement', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        childFrames: true,
+        frameReadDelayFor: frameIndex => frameIndex < 2 ? 0 : 1_500,
+      });
+      const page = harness.context.currentTabOrDie().page;
+      const nodes = parseAriaSnapshot(await page.ariaSnapshot());
+      const pending = measureScreenReaderElements(page, nodes, { maxElements: 8, checkNames: false });
+      await vi.advanceTimersByTimeAsync(1_100);
+      const measured = await pending;
+
+      expect(measured.factsByIndex.size).toBe(2);
+      expect(measured.limitations).toEqual({
+        unresolvedElements: 6,
+        unmeasuredNames: 0,
+        truncatedElements: 0,
+        stoppedAtFrameWorkLimit: 4,
+      });
+      expect(harness.frameConcurrency.current).toBe(4);
+      expect(harness.disposals.count).toBe(4);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.frameConcurrency.current).toBe(0);
+      expect(harness.disposals.count).toBe(8);
+      expect(measured.factsByIndex.size).toBe(2);
+      expect(measured.limitations.unresolvedElements).toBe(6);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('audit_screen_reader tool measurement', () => {
   const tool = auditScreenReaderTools.find(entry => entry.schema.name === 'audit_screen_reader')!;
 
@@ -1066,6 +1158,26 @@ describe('collectElementFacts in a real page', () => {
     const [unmeasured] = await page.evaluate(collectElementFacts, { elements: [handle], measureNames: false } as any);
     expect([unmeasured.accessibleName, unmeasured.nameMeasured]).toEqual([null, false]);
     await page.close();
+  });
+
+  it('releases the Axe tree so the next batch measures updated names', async () => {
+    const page = await browser!.newPage();
+    try {
+      await page.setContent('<button id="control">First name</button>');
+      expect(await injectAxeForNames(page.mainFrame())).toBe(true);
+      const control = await page.$('#control');
+      if (!control)
+        throw new Error('Expected the fixture button');
+
+      const [first] = await page.evaluate(collectElementFacts, [control]);
+      await control.evaluate(element => { element.textContent = 'Updated name'; });
+      const [second] = await page.evaluate(collectElementFacts, [control]);
+
+      expect([first.accessibleName, first.nameMeasured]).toEqual(['First name', true]);
+      expect([second.accessibleName, second.nameMeasured]).toEqual(['Updated name', true]);
+    } finally {
+      await page.close();
+    }
   });
 
   it('does not take a page\'s own axe for its copy when the build cannot replace it', async () => {

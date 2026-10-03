@@ -64,7 +64,7 @@ const evaluate = defineTabTool({
       // (microsoft/playwright#39646). The public `evaluate()` serializes its
       // argument via `Function.prototype.toString`, so hand it an empty function
       // whose `toString()` returns the user-supplied source instead.
-      const func = new Function() as any;
+      const func = () => {};
       func.toString = () => source;
       const result = locator ? await locator.evaluate(func) : await tab.page.evaluate(func);
       response.addResult(JSON.stringify(result, null, 2) || 'undefined');

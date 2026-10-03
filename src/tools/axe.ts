@@ -6,6 +6,14 @@ import { truncateDataUrls } from '../utils/dataUrl.js';
 
 import type * as playwright from 'playwright';
 
+declare global {
+  interface Window {
+    axe?: typeof axe;
+    __mcpAccessibilityScannerAxe?: typeof axe;
+    __mcpAccessibilityScannerAxeReady?: string;
+  }
+}
+
 export const axeTagValues = [
   'wcag2a', 'wcag2aa', 'wcag2aaa', 'wcag21a', 'wcag21aa', 'wcag21aaa',
   'wcag22a', 'wcag22aa', 'wcag22aaa', 'section508', 'cat.aria', 'cat.color',
@@ -362,7 +370,7 @@ function describeFrame(frame: playwright.Frame): string {
 // since, or that carries only the page's own axe - answers no.
 async function hasAxe(frame: playwright.Frame, token: string): Promise<boolean> {
   return withFrameTimeout(
-      frame.evaluate(({ marker, token }) => (window as any)[marker] === token, { marker: axeReadyMarker, token }),
+      frame.evaluate(({ marker, token }) => window[marker] === token, { marker: axeReadyMarker, token } as const),
       false,
   );
 }
@@ -402,6 +410,8 @@ async function isFrameInScope(
     let matches: { included: boolean, excluded: boolean, hidden: boolean } | null;
     try {
       matches = await withFrameTimeout(element.evaluate((node, scope) => {
+        // SAFETY: Frame.frameElement() returns the embedding element, despite its generic Node typing.
+        const frameElement = node as Element;
         const composedParent = (element: Element) => {
           const root = element.getRootNode();
           if (element.assignedSlot) {
@@ -412,7 +422,7 @@ async function isFrameInScope(
         };
         const matchesAny = (selectors: string[]) => selectors.some(selector => {
           try {
-            for (let current: Element | null = node as Element; current;) {
+            for (let current: Element | null = frameElement; current;) {
               if (current.matches(selector))
                 return true;
               current = composedParent(current);
@@ -432,7 +442,7 @@ async function isFrameInScope(
               (style.display !== 'none' && !['hidden', 'collapse'].includes(style.visibility) && style.opacity !== '0');
             return visible &&
               rect.width > 0 && rect.height > 0 &&
-              (modal.getRootNode() as Document | ShadowRoot).elementsFromPoint(rect.left + 1, rect.top + 1).includes(modal);
+              root.elementsFromPoint(rect.left + 1, rect.top + 1).includes(modal);
           }));
           for (const element of root.querySelectorAll('*')) {
             if (element.shadowRoot)
@@ -440,7 +450,7 @@ async function isFrameInScope(
           }
         }
         const insideModal = modals.some(modal => {
-          for (let current: Element | null = node as Element; current;) {
+          for (let current: Element | null = frameElement; current;) {
             if (current === modal)
               return true;
             current = composedParent(current);
@@ -448,26 +458,27 @@ async function isFrameInScope(
           return false;
         });
         let hidden = !!modals.length && !insideModal;
-        for (let current: Element | null = node as Element; current;) {
+        for (let current: Element | null = frameElement; current;) {
           const parent = current.assignedSlot?.parentElement ?? current.parentElement;
           const style = getComputedStyle(current);
           const ariaHidden = current.getAttribute('aria-hidden') === 'true';
           const flattenedChildren = parent ? [...parent.children].flatMap(child => {
             if (child.localName !== 'slot')
               return [child];
+            // SAFETY: the localName check above identifies the slot before calling its DOM API.
             const assigned = (child as HTMLSlotElement).assignedElements({ flatten: true });
             return assigned.length ? assigned : [...child.children];
           }) : [];
           const closedDetails = parent?.localName === 'details' && !parent.hasAttribute('open') &&
             (current.localName !== 'summary' || flattenedChildren.find(child => child.localName === 'summary') !== current);
-          const contentHidden = current !== node && style.getPropertyValue('content-visibility') === 'hidden';
+          const contentHidden = current !== frameElement && style.getPropertyValue('content-visibility') === 'hidden';
           if (ariaHidden || style.display === 'none' || current.hasAttribute('inert') || closedDetails || contentHidden) {
             hidden = true;
             break;
           }
           current = composedParent(current);
         }
-        const visibility = getComputedStyle(node as Element).visibility;
+        const visibility = getComputedStyle(frameElement).visibility;
         hidden ||= visibility === 'hidden' || visibility === 'collapse';
         return { included: matchesAny(scope.include), excluded: matchesAny(scope.exclude), hidden };
       }, current.parentFrame() === mainFrame
@@ -576,6 +587,7 @@ async function hasReachableAxe(frame: playwright.Frame, token: string): Promise<
   let reachable: boolean;
   try {
     reachable = await withFrameTimeout(element.evaluate(node => {
+      // SAFETY: Frame.frameElement() returns the embedding element, despite its generic Node typing.
       for (let current = node as Element; ;) {
         const root = current.getRootNode();
         if (!(root instanceof ShadowRoot))
@@ -593,16 +605,16 @@ async function hasReachableAxe(frame: playwright.Frame, token: string): Promise<
 
 // Runs in the page. Keeps axe's own result shape minus the parts nothing reads:
 // per-node check arrays, and the node lists of passing/inapplicable rules.
-async function runAxeInPage({ context, options }: { context: unknown, options: unknown }) {
-  const results = await (window as any).axe.run(context ?? document, options);
-  const findings = (rules: any[]) => rules.map(rule => ({
+async function runAxeInPage({ context, options }: { context: axe.ElementContext | null, options: axe.RunOptions }) {
+  const results = await window.axe!.run(context ?? document, options);
+  const findings = (rules: axe.Result[]) => rules.map(rule => ({
     id: rule.id,
     impact: rule.impact,
     tags: rule.tags,
     help: rule.help,
     helpUrl: rule.helpUrl,
     description: rule.description,
-    nodes: rule.nodes.map((node: any) => ({
+    nodes: rule.nodes.map(node => ({
       target: node.target,
       html: node.html,
       failureSummary: node.failureSummary ?? null,
@@ -612,8 +624,8 @@ async function runAxeInPage({ context, options }: { context: unknown, options: u
     url: results.url,
     violations: findings(results.violations),
     incomplete: findings(results.incomplete),
-    passes: results.passes.map((rule: any) => ({ id: rule.id })),
-    inapplicable: results.inapplicable.map((rule: any) => ({ id: rule.id })),
+    passes: results.passes.map(rule => ({ id: rule.id })),
+    inapplicable: results.inapplicable.map(rule => ({ id: rule.id })),
   };
 }
 
@@ -627,7 +639,7 @@ export async function runAxeScan(page: playwright.Page, options: AxeScanOptions 
   // ids are the more specific request, so they win over tags — and the per-rule
   // `enabled` flag disableRules would set is ignored on that branch, which is
   // why assertRuleOptionsValid already subtracted them from the list.
-  const axeOptions: Record<string, unknown> = rules.length
+  const axeOptions: axe.RunOptions = rules.length
     ? { runOnly: { type: 'rule', values: rules } }
     : { runOnly: { type: 'tag', values: [...(options.tags ?? defaultAxeTags)] } };
   if (!rules.length && options.disableRules?.length)
@@ -638,7 +650,7 @@ export async function runAxeScan(page: playwright.Page, options: AxeScanOptions 
   const context = include.length || exclude.length ? { include: [...include], exclude: [...exclude] } : null;
 
   const unscannedFrames = await injectAxeIntoFrames(page, include, exclude);
-  const results = await page.evaluate(runAxeInPage, { context, options: axeOptions }) as AxeScanResult;
+  const results = await page.evaluate(runAxeInPage, { context, options: axeOptions });
   return { ...results, unscannedFrames };
 }
 

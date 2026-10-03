@@ -24,7 +24,23 @@ const browserName = process.env.MCP_TEST_BROWSER_NAME || 'chromium';
 if (browserName !== 'chromium' && browserName !== 'firefox' && browserName !== 'webkit')
   throw new Error(`MCP_TEST_BROWSER_NAME must be chromium, firefox or webkit, got ${browserName}`);
 const require = createRequire(import.meta.url);
+const playwrightVersion: string = require('playwright/package.json').version;
 const playwrightCoreVersion: string = require('playwright-core/package.json').version;
+const characterizedBrowsers = {
+  chromium: [
+    { version: '141.0.7390.37', platform: 'linux' },
+    { version: '153.0.8010.12', platform: 'linux' },
+    { version: '153.0.8010.12', platform: 'darwin' },
+  ],
+  firefox: [
+    { version: '155.0', platform: 'linux' },
+    { version: '155.0', platform: 'darwin' },
+  ],
+  webkit: [
+    { version: '26.6', platform: 'linux' },
+    { version: '26.6', platform: 'darwin' },
+  ],
+};
 
 // Playwright's US layout: unshifted numpad keys act with NumLock off, Shift
 // yields the digit or decimal point, and every event is at the numpad location.
@@ -36,10 +52,9 @@ const presses = [
   { press: 'Shift+NumpadDecimal', key: '.', code: 'NumpadDecimal', typed: '.' },
 ];
 
-// Deviations recorded on the paired pins with Chromium 153.0.8010.12, Firefox
-// 155.0 and WebKit 26.6 (microsoft/playwright#42913, merged after 1.63.0, and
-// #42927, unmerged when recorded). A Playwright version or browser without an
-// entry must deliver every key as modeled above.
+// Deviations recorded on the paired pins and browser/platform combinations
+// above (microsoft/playwright#42913 and #42927, merged after 1.63.0).
+// Unmeasured combinations must deliver every key as modeled above.
 const knownDeviations: Record<string, string[]> = {
   '1.63.0/chromium': [
     'NumpadSubtract keyup location is not numpad',
@@ -122,6 +137,13 @@ it(`records numpad key events delivered by browser_press_key (${browserName}, #2
       found.push(`${expected.press} typed ${JSON.stringify(typed)}`);
   }
   const pin = `${playwrightCoreVersion}/${browserName}`;
-  process.stdout.write(JSON.stringify({ pin, browserVersion: browser.version(), platform: process.platform, found, observed }) + '\n');
-  expect(found).toEqual(knownDeviations[pin] ?? []);
+  const browserVersion = browser.version();
+  const characterized = playwrightVersion === '1.63.0' && playwrightCoreVersion === '1.63.0' &&
+    characterizedBrowsers[browserName].some(({ version, platform }) => version === browserVersion && platform === process.platform);
+  const expectedDeviations = characterized ? [...knownDeviations[pin]] : [];
+  // The pinned macOS WebKit also inserts NUL; the same Linux build only emits it as an event key.
+  if (characterized && browserName === 'webkit' && process.platform === 'darwin')
+    expectedDeviations.push('NumpadDecimal typed "\\u0000"');
+  process.stdout.write(JSON.stringify({ pin, playwrightVersion, browserVersion, platform: process.platform, found, observed }) + '\n');
+  expect(found).toEqual(expectedDeviations);
 });

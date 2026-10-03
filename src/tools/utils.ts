@@ -134,7 +134,7 @@ export async function generateLocator(locator: playwright.Locator): Promise<stri
   // public `Locator.normalize()` method (microsoft/playwright). `normalize()`
   // returns a locator whose `toString()` is the resolved JavaScript locator
   // expression, which is exactly what the "Ran Playwright code" snippet needs.
-  if (typeof (locator as any).normalize === 'function') {
+  if (typeof locator.normalize === 'function') {
     try {
       const normalized = await locator.normalize();
       return normalized.toString();
@@ -144,8 +144,10 @@ export async function generateLocator(locator: playwright.Locator): Promise<stri
   }
 
   // Older cores (< 1.61) still expose the private `_resolveSelector` helper.
-  if (typeof (locator as any)._resolveSelector === 'function') {
-    const { resolvedSelector } = await (locator as any)._resolveSelector();
+  // SAFETY: older Playwright locators expose this optional method; its presence is checked before use.
+  const legacy = locator as playwright.Locator & { _resolveSelector?: () => Promise<{ resolvedSelector: string }> };
+  if (typeof legacy._resolveSelector === 'function') {
+    const { resolvedSelector } = await legacy._resolveSelector();
     return asLocator('javascript', resolvedSelector);
   }
 
@@ -156,5 +158,7 @@ export async function generateLocator(locator: playwright.Locator): Promise<stri
 }
 
 export async function callOnPageNoTrace<T>(page: playwright.Page, callback: (page: playwright.Page) => Promise<T>): Promise<T> {
-  return await (page as any)._wrapApiCall(() => callback(page), { internal: true });
+  // SAFETY: Playwright Page inherits this internal wrapper from its ChannelOwner implementation.
+  const internalPage = page as playwright.Page & { _wrapApiCall: (callback: () => Promise<T>, options: { internal: boolean }) => Promise<T> };
+  return await internalPage._wrapApiCall(() => callback(page), { internal: true });
 }

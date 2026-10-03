@@ -52,7 +52,7 @@ type LogEntry = {
   timestamp: number;
   toolCall?: {
     toolName: string;
-    toolArgs: Record<string, any>;
+    toolArgs: Record<string, unknown>;
     /** Routing metadata, kept apart from arguments the tool itself owns. */
     meta?: Record<string, unknown>;
     result: string;

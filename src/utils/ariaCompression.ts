@@ -185,6 +185,7 @@ function parseSnapshotLines(yaml: string): SnapshotLine[] {
     const role = roleOf(text);
     const hasRef = HAS_REF.test(text);
     const hasCursorPointer = HAS_CURSOR_POINTER.test(text);
+    const protectsSubtree = shouldKeepSubtree(role) || shouldKeepRefProtectedDescendants(role, hasRef) || shouldKeepCursorPointerRef(hasRef, hasCursorPointer);
     return {
       text,
       indent: indentOf(text),
@@ -194,8 +195,8 @@ function parseSnapshotLines(yaml: string): SnapshotLine[] {
       hasCursorPointer,
       signature: signature(text),
       selfHasProtectedLineRole: shouldKeepLine(role, hasRef, hasCursorPointer),
-      containsProtectedSubtreeRole: shouldKeepSubtree(role) || shouldKeepRefProtectedDescendants(role, hasRef) || shouldKeepCursorPointerRef(hasRef, hasCursorPointer),
-      selfHasProtectedSubtreeRole: shouldKeepSubtree(role) || shouldKeepRefProtectedDescendants(role, hasRef) || shouldKeepCursorPointerRef(hasRef, hasCursorPointer),
+      containsProtectedSubtreeRole: protectsSubtree,
+      selfHasProtectedSubtreeRole: protectsSubtree,
       insideProtectedSubtree: false,
       hasRowContainerAncestor: false,
     };

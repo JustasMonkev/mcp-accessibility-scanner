@@ -22,6 +22,7 @@ import { z } from 'zod';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import * as mcpServer from '../mcp/server.js';
+import { ToolRelay } from '../mcp/toolRelay.js';
 import { SharedClientSlot } from '../mcp/sharedClientSlot.js';
 import { assertToolNotBlocked, isToolBlocked } from '../mcp/toolPolicy.js';
 import { logUnhandledError } from '../utils/log.js';
@@ -66,8 +67,11 @@ export class VSCodeProxyBackend implements ServerBackend {
   private _clientVersion?: ClientVersion;
   private _backendContext: ServerBackendContext | undefined;
   private _listedClient: Client | undefined;
-  private _pendingToolLists = new Set<{ client: Client, changed: boolean }>();
-  private _toolListNotification: ReturnType<typeof setImmediate> | undefined;
+  private _providerGeneration = 0;
+  private _relay = new ToolRelay(client => {
+    if (!this._sharedSlot && this._listedClient === client)
+      return this._backendContext?.notifyToolListChanged();
+  }, logUnhandledError);
 
   constructor(private readonly _config: FullConfig, private readonly _defaultTransportFactory: () => Promise<Transport>, private readonly _sharedSlot?: SharedClientSlot) {
     this._contextSwitchTool = this._defineContextSwitchTool();
@@ -96,18 +100,17 @@ export class VSCodeProxyBackend implements ServerBackend {
   async listTools(requestContext?: Partial<Pick<mcpServer.CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]> {
     // Listing and invocation must resolve the same host-owned session even
     // while the default browsing provider is switched to a VS Code child.
+    const providerClient = this._currentClient;
+    const generation = this._providerGeneration;
     const client = await this._clientForTool('webmcp_', undefined, requestContext);
-    const pending = { client, changed: false };
-    this._pendingToolLists.add(pending);
-    try {
-      const response = await client.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined, { signal: requestContext?.signal });
+    const tools = await this._relay.listTools(client, requestContext);
+    // Host-session clients survive child-provider switches, but returning to
+    // the default provider routes even session traffic through its new client.
+    const currentProvider = generation === this._providerGeneration && client === this._currentClient;
+    const activeHostSession = client !== providerClient && !this._currentClientIsDefault;
+    if (currentProvider || activeHostSession)
       this._listedClient = client;
-      return [...response.tools, this._contextSwitchTool].filter(tool => !isToolBlocked(this._config, tool.name));
-    } finally {
-      this._pendingToolLists.delete(pending);
-      if (pending.changed && ![...this._pendingToolLists].some(entry => entry.client === client))
-        this._deferToolListChanged(client);
-    }
+    return [...tools, this._contextSwitchTool].filter(tool => !isToolBlocked(this._config, tool.name));
   }
 
   async callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
@@ -115,22 +118,7 @@ export class VSCodeProxyBackend implements ServerBackend {
     if (name === this._contextSwitchTool.name)
       return this._callContextSwitchTool(args as any, requestContext);
     const client = await this._clientForTool(name, args, requestContext);
-    const progressToken = requestContext?._meta?.progressToken;
-    return await client.callTool({
-      name,
-      arguments: args,
-      _meta: requestContext?._meta,
-    }, requestContext ? {
-      signal: requestContext.signal,
-      ...(progressToken === undefined ? {} : {
-        onprogress: (params: { progress: number; total?: number; message?: string }) => {
-          void Promise.resolve().then(() => requestContext.sendNotification({
-            method: 'notifications/progress',
-            params: { progressToken, ...params },
-          })).catch(logUnhandledError);
-        },
-      }),
-    } : undefined);
+    return await this._relay.callTool(client, name, args, requestContext);
   }
 
   /**
@@ -167,8 +155,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   serverClosed?(): void {
-    clearImmediate(this._toolListNotification);
-    this._toolListNotification = undefined;
+    this._relay.close();
     this._backendContext = undefined;
     this._listedClient = undefined;
     if (this._ownsCurrentClient)
@@ -303,6 +290,9 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   private async _setCurrentClient(transport: Transport, notifyOnChange: boolean, isDefault = false) {
+    ++this._providerGeneration;
+    if (this._listedClient === this._currentClient)
+      this._listedClient = undefined;
     await this._currentClient?.close();
     this._currentClient = undefined;
     this._currentClientIsDefault = false;
@@ -311,6 +301,8 @@ export class VSCodeProxyBackend implements ServerBackend {
     this._currentClient = client;
     this._ownsCurrentClient = true;
     this._currentClientIsDefault = isDefault;
+    if (isDefault)
+      this._listedClient = undefined;
     if (notifyOnChange)
       await this._backendContext?.notifyToolListChanged();
   }
@@ -318,40 +310,10 @@ export class VSCodeProxyBackend implements ServerBackend {
   private async _connectClient(transport: Transport): Promise<Client> {
     const client = new Client(this._clientVersion!);
     client.setRequestHandler('ping', () => ({}));
-    client.setNotificationHandler('notifications/tools/list_changed', async () => {
-      let buffered = false;
-      for (const pending of this._pendingToolLists) {
-        if (pending.client === client) {
-          pending.changed = true;
-          buffered = true;
-        }
-      }
-      if (!buffered && !this._sharedSlot && this._listedClient === client)
-        await this._backendContext?.notifyToolListChanged().catch(logUnhandledError);
-    });
+    this._relay.observe(client);
 
     await client.connect(transport);
     return client;
-  }
-
-  private _deferToolListChanged(client: Client) {
-    if (!this._backendContext || this._sharedSlot || this._listedClient !== client)
-      return;
-    clearImmediate(this._toolListNotification);
-    // The outer SDK must process the list response before a refresh arrives.
-    this._toolListNotification = setImmediate(() => {
-      this._toolListNotification = undefined;
-      if (!this._sharedSlot && this._listedClient === client && ![...this._pendingToolLists].some(entry => entry.client === client))
-        void this._backendContext?.notifyToolListChanged().catch(logUnhandledError);
-    });
-  }
-
-  private async _getExposedTools(client: Client | undefined): Promise<Tool[]> {
-    if (!client)
-      return [];
-
-    const { tools } = await client.listTools();
-    return [...tools, this._contextSwitchTool].filter(tool => !isToolBlocked(this._config, tool.name));
   }
 }
 
@@ -392,5 +354,4 @@ export async function runVSCodeTools(config: FullConfig, registerExitCleanup?: (
     createStateless: () => createBackend(true, sharedSlot),
   };
   await mcpServer.start(serverBackendFactory, config.server);
-  return;
 }

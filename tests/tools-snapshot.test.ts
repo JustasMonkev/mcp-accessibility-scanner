@@ -629,6 +629,32 @@ describe('scan_page annotated screenshots', () => {
     expect(second.evaluate.mock.calls[0][1].layerId).not.toBe(layerId);
   });
 
+  it('keeps first-seen targets and adds shared rule labels after the annotation limit', async () => {
+    const nodes = Array.from({ length: 50 }, (_, index) => ({ target: [`#n${index}`], html: `<img id="n${index}">` }));
+    const harness = scanHarness({
+      violations: [
+        { id: 'image-alt', tags: ['wcag2a'], nodes: [...nodes, nodes[0]] },
+        { id: 'color-contrast', tags: ['wcag2a'], nodes: [
+          { target: ['#overflow'], html: '<img id="overflow">' },
+          nodes[0],
+        ] },
+      ],
+      markedNodes: 51,
+    });
+    // SAFETY: scan_page only needs currentTabOrDie; path rendering only needs config.filePaths.
+    const context = { ...harness.context, config: { filePaths: 'absolute' } } as Context;
+    const response = new Response(context, 'scan_page', {});
+
+    await scanPageTool.handle(context, scanParams(), response);
+
+    expect(harness.evaluate.mock.calls[0][1].marks).toEqual(nodes.map((node, index) => ({
+      path: node.target,
+      labels: index === 0 ? ['image-alt', 'color-contrast'] : ['image-alt'],
+    })));
+    expect(response.result()).toContain('Marked 51 of 52 violating nodes.');
+    expect(response.result()).toContain('Not marked: 1 over the 50-element annotation limit, 0 hidden, zero-size or off-canvas, 0 inside an iframe.');
+  });
+
   it('should mark shadow DOM targets instead of counting them as iframe nodes', async () => {
     const harness = scanHarness({
       violations: [{ id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: [['my-card', '#shadow-img']], html: '<img>' }] }],

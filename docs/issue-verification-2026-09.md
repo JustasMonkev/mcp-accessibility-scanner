@@ -316,8 +316,8 @@ for `keydown`/`keyup`, plus the typed value. The expected model is
 Playwright's US layout: NumLock-off keys, Shift yields the digit or decimal
 point, and every event is at `DOM_KEY_LOCATION_NUMPAD` (3).
 
-Recorded with Playwright 1.63.0. Chromium 153.0.8010.12 (the bundled build, CI)
-and Chromium 141.0.7390.37 (local) produced identical events. Firefox 155.0 and
+Recorded with Playwright 1.63.0. Chromium 153.0.8010.12 (the bundled build, Linux CI)
+and Chromium 141.0.7390.37 (local Linux) produced identical events. Firefox 155.0 and
 WebKit 26.6 ran on Linux in the `keyboard-controls` CI job. Values are
 `key`, `keyCode`, `location` for keydown → keyup, then the typed value:
 
@@ -331,14 +331,29 @@ WebKit 26.6 ran on Linux in the `keyboard-controls` CI job. Values are
 Bold marks a deviation from the modeled events, which expect key `Delete` for
 `NumpadDecimal` and location 3 on every event. Firefox's `keyCode` for shifted
 digits is also the unshifted value, but it still types the digit. On Linux,
-WebKit typed nothing for `NumpadDecimal`: no U+0000 was inserted.
+WebKit typed nothing for `NumpadDecimal`: no U+0000 was inserted. The October 2
+macOS arm64 control with paired 1.63.0 and WebKit 26.6 inserts U+0000 into the
+focused textarea. It reproduces through both MCP and direct Playwright, as
+described by upstream #42927; it is not a server remapping difference.
+
+The October 3 local control used macOS 26.5.2 arm64, Node 26.5.0 and paired
+Playwright/playwright-core 1.63.0. Chromium 153.0.8010.12 and Firefox 155.0
+delivered the same events and typed values as their Linux entries above;
+WebKit 26.6 again inserted U+0000 for `NumpadDecimal`. The stricter test first
+rejected the previously unmeasured macOS Chromium and Firefox combinations
+with exactly eight and two deviations, respectively. These exact measured
+pairs are now characterized; other browser versions and platforms are not.
 
 These results match the upstream diagnoses. The Chromium keyup location is
 #42913. `NumpadDecimal` in every engine, and the Chromium shifted digits, are
-#42927. The server forwards keys unchanged; remapping them locally would diverge
-from Playwright's layout. The test pins exactly these deviations per
-`1.63.0/<engine>`. Any other Playwright version, or an engine without an entry,
-must deliver the modeled events.
+#42927. Both fixes merged after 1.63.0; the latest stable release checked on
+October 2 remains 1.63.0. The server forwards keys unchanged; remapping them
+locally would diverge from Playwright's layout. The test requires both package
+versions to be 1.63.0 and an explicitly measured browser/platform pair before
+allowing the recorded deviations: Linux Chromium 141.0.7390.37, Linux/macOS
+Chromium 153.0.8010.12, Linux/macOS Firefox 155.0, or Linux/macOS WebKit 26.6.
+Only macOS WebKit permits the recorded NUL insertion. Any different paired
+version, browser build or unmeasured platform must deliver the modeled events.
 
 Focused checks:
 

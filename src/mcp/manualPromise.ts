@@ -84,7 +84,7 @@ export class LongStandingScope {
   }
 
   async race<T>(promise: Promise<T> | Promise<T>[]): Promise<T> {
-    return this._race(Array.isArray(promise) ? promise : [promise], false) as Promise<T>;
+    return this._race(Array.isArray(promise) ? promise : [promise], false);
   }
 
   async safeRace<T>(promise: Promise<T>, defaultValue?: T): Promise<T> {

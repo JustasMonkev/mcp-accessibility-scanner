@@ -527,7 +527,7 @@ function messageToConsoleMessage(message: playwright.ConsoleMessage): ConsoleMes
   };
 }
 
-function pageErrorToConsoleMessage(errorOrValue: Error | any): ConsoleMessage {
+function pageErrorToConsoleMessage(errorOrValue: unknown): ConsoleMessage {
   if (errorOrValue instanceof Error) {
     return {
       type: undefined,

@@ -53,10 +53,10 @@ export class Response {
   private _filesToDeleteOnError = new Set<string>();
 
   readonly toolName: string;
-  readonly toolArgs: Record<string, any>;
+  readonly toolArgs: Record<string, unknown>;
   private _isError: boolean | undefined;
 
-  constructor(context: Context, toolName: string, toolArgs: Record<string, any>, requestContext?: CallToolRequestContext) {
+  constructor(context: Context, toolName: string, toolArgs: Record<string, unknown>, requestContext?: CallToolRequestContext) {
     this._context = context;
     this.toolName = toolName;
     this.toolArgs = toolArgs;
@@ -225,14 +225,12 @@ export class Response {
     this._addDownloadErrors();
     const response: string[] = [];
 
-    // Start with command result.
     if (this._result.length) {
       response.push('### Result');
       response.push(this._result.join('\n'));
       response.push('');
     }
 
-    // Add code if it exists.
     if (this._code.length) {
       response.push(`### Ran Playwright code
 \`\`\`js
@@ -241,11 +239,9 @@ ${this._code.join('\n')}
       response.push('');
     }
 
-    // List browser tabs.
     if (this._includeSnapshot || this._includeTabs)
       response.push(...renderTabsMarkdown(this._context.tabs(), this._includeTabs));
 
-    // Add snapshot if provided.
     if (this._tabSnapshot?.modalStates.length) {
       response.push(...renderModalStates(this._context, this._tabSnapshot.modalStates));
       response.push('');
@@ -254,7 +250,6 @@ ${this._code.join('\n')}
       response.push('');
     }
 
-    // Main response part
     const imagesOnly = this._context.config.imageResponses === 'only' && this._images.length > 0 && !this._isError;
     const text = imagesOnly ? this._notices.join('\n') : response.join('\n');
     const content: CallToolResult['content'] = !imagesOnly || text ? [{ type: 'text', text }] : [];
@@ -262,7 +257,6 @@ ${this._code.join('\n')}
     for (const link of this._resourceLinks)
       content.push(link);
 
-    // Image attachments.
     if (this._context.config.imageResponses !== 'omit') {
       for (const image of this._images)
         content.push({ type: 'image', data: image.data.toString('base64'), mimeType: image.contentType });
