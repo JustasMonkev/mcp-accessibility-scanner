@@ -702,6 +702,8 @@ How the separate context is provided depends on the mode:
 
 In `--vscode` serving, browser sessions are host-scoped: `browser_session_open`, `browser_session_close`, and every call carrying a `browserSessionId` always run against the default provider's session registry at the host, regardless of any `browser_connect` provider switch. A handle opened before a switch keeps working (and can be closed) while the proxy is switched to a VS Code-connected browser, and a session opened while switched is created by the default provider — the VS Code-connected browser itself reuses one live context and cannot host separate sessions. Only session-less tool calls follow the switch.
 
+After returning to the default provider, list tools again to refresh the available actions and receive its catalog-change notifications. Pending listings from the previous host-session client cannot replace that subscription.
+
 #### `browser_session_close`
 Closes a session opened with `browser_session_open` and releases its browser resources.
 - Parameters: `browserSessionId` (the handle to close)

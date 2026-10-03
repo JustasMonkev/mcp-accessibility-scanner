@@ -104,9 +104,11 @@ export class VSCodeProxyBackend implements ServerBackend {
     const generation = this._providerGeneration;
     const client = await this._clientForTool('webmcp_', undefined, requestContext);
     const tools = await this._relay.listTools(client, requestContext);
-    // Host-session clients survive provider switches; a settled old-provider
-    // response must not restore its recipient after a switch has started.
-    if (client !== providerClient || generation === this._providerGeneration)
+    // Host-session clients survive child-provider switches, but returning to
+    // the default provider routes even session traffic through its new client.
+    const currentProvider = generation === this._providerGeneration && client === this._currentClient;
+    const activeHostSession = client !== providerClient && !this._currentClientIsDefault;
+    if (currentProvider || activeHostSession)
       this._listedClient = client;
     return [...tools, this._contextSwitchTool].filter(tool => !isToolBlocked(this._config, tool.name));
   }
@@ -299,6 +301,8 @@ export class VSCodeProxyBackend implements ServerBackend {
     this._currentClient = client;
     this._ownsCurrentClient = true;
     this._currentClientIsDefault = isDefault;
+    if (isDefault)
+      this._listedClient = undefined;
     if (notifyOnChange)
       await this._backendContext?.notifyToolListChanged();
   }
