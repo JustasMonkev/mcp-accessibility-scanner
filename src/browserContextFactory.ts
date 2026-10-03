@@ -220,10 +220,10 @@ abstract class BaseContextFactory implements BrowserContextFactory {
   abstract readonly appliesStorageState: boolean;
   readonly config: FullConfig;
   private _logName: string;
-  protected _browserPromise: Promise<playwright.Browser> | undefined;
+  private _browserPromise: Promise<playwright.Browser> | undefined;
 
   // Counts live handouts per browser object, claimed BEFORE awaiting context
-  // creation — the same pattern as CdpContextFactory. A `browser.contexts()`
+  // creation or finishing owned-context cleanup. A `browser.contexts()`
   // census cannot see a sibling still inside _doCreateContext(): if session
   // A's close ran while session B's first newContext() was in flight, A saw
   // itself as the last context and closed the shared browser out from under
@@ -252,7 +252,7 @@ abstract class BaseContextFactory implements BrowserContextFactory {
   // `_browserPromise` itself so callers can register pending acquisitions
   // against it and use it for the identity guards, and the body must run
   // synchronously so obtaining and registering happen in one continuation.
-  protected _obtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser> {
+  private _obtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser> {
     if (this._browserPromise)
       return this._browserPromise;
     testDebug(`obtain browser (${this._logName})`);
@@ -265,37 +265,56 @@ abstract class BaseContextFactory implements BrowserContextFactory {
     // cached, and clearing it would churn yet another browser for the next
     // session while the successor is alive.
     void promise.then(browser => {
-      browser.on('disconnected', () => {
-        if (this._browserPromise === promise)
-          this._browserPromise = undefined;
-      });
-    }).catch(() => {
-      if (this._browserPromise === promise)
-        this._browserPromise = undefined;
-    });
+      browser.on('disconnected', () => this._evictBrowser(promise));
+    }).catch(() => this._evictBrowser(promise));
     return promise;
   }
 
   protected abstract _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser>;
 
   /**
-   * Obtains the shared browser and claims the caller's per-browser count via
-   * `claim`, atomically with the browser's delivery: the acquisition is
-   * registered in a synchronous counter before the first await, and `claim`
-   * runs in the same continuation that resolves the browser, so at every
-   * point the caller is visible either as pending or as a live handout. The
-   * close paths consult _hasPendingAcquisition() and defer the browser
-   * shutdown to a pending acquisition instead of treating themselves as last.
+   * A caller is visible either as a pending acquisition or as a live holder:
+   * pending is registered before the first await, and the holder is claimed
+   * in the same continuation that delivers the browser. Providers never see
+   * the cached promise or counters; both failure and close release this lease.
    */
-  protected async _acquireBrowser(clientInfo: ClientInfo, claim: (browser: playwright.Browser) => void): Promise<{ browser: playwright.Browser, obtainedPromise: Promise<playwright.Browser> }> {
+  private async _acquireBrowser(clientInfo: ClientInfo): Promise<{ browser: playwright.Browser, release: (context?: playwright.BrowserContext) => Promise<void> }> {
     const obtainedPromise = this._obtainBrowser(clientInfo);
     this._pendingAcquisitions.set(obtainedPromise, (this._pendingAcquisitions.get(obtainedPromise) ?? 0) + 1);
     try {
       const browser = await obtainedPromise;
-      claim(browser);
-      return { browser, obtainedPromise };
+      this._handoutCounts.set(browser, (this._handoutCounts.get(browser) ?? 0) + 1);
+      let released = false;
+      return {
+        browser,
+        release: async context => {
+          if (released)
+            return;
+          released = true;
+          // Stop handing out a browser already committed to shutdown before
+          // awaiting its last owned context's cleanup. Identity guards keep a
+          // stale lease from evicting a connection obtained after disconnect.
+          if (this._handoutCounts.get(browser) === 1 && !this._pendingAcquisitions.has(obtainedPromise))
+            this._evictBrowser(obtainedPromise);
+          if (context && this._ownsContext) {
+            testDebug(`close browser context (${this._logName})`);
+            await context.close().catch(logUnhandledError);
+          }
+          // Count the holder through its owned-context cleanup: a sibling's
+          // release must not disconnect while that cleanup is still running.
+          const remaining = this._handoutCounts.get(browser)! - 1;
+          this._handoutCounts.set(browser, remaining);
+          // A pending caller on this promise inherits responsibility for the
+          // shutdown, including if its context creation subsequently fails.
+          if (remaining === 0 && !this._pendingAcquisitions.has(obtainedPromise)) {
+            this._evictBrowser(obtainedPromise);
+            testDebug(`close browser (${this._logName})`);
+            await browser.close().catch(logUnhandledError);
+          }
+        },
+      };
     } finally {
-      const pending = (this._pendingAcquisitions.get(obtainedPromise) ?? 1) - 1;
+      const pending = this._pendingAcquisitions.get(obtainedPromise)! - 1;
       if (pending > 0)
         this._pendingAcquisitions.set(obtainedPromise, pending);
       else
@@ -303,70 +322,29 @@ abstract class BaseContextFactory implements BrowserContextFactory {
     }
   }
 
-  /**
-   * True while a createContext() has started against `obtainedPromise` but
-   * not yet claimed its per-browser count. A release that would otherwise be
-   * the last defers the browser shutdown to that acquisition — which either
-   * claims the count in the same continuation the promise resolves in (its
-   * own release then closes the browser), or fails to obtain the browser
-   * altogether, in which case there is no browser left to close (a rejected
-   * obtain never launched one).
-   */
-  protected _hasPendingAcquisition(obtainedPromise: Promise<playwright.Browser>): boolean {
-    return !!this._pendingAcquisitions.get(obtainedPromise);
+  private _evictBrowser(obtainedPromise: Promise<playwright.Browser>): void {
+    if (this._browserPromise === obtainedPromise)
+      this._browserPromise = undefined;
   }
 
-  private _releaseHandout(browser: playwright.Browser): boolean {
-    const remaining = Math.max(0, (this._handoutCounts.get(browser) ?? 1) - 1);
-    this._handoutCounts.set(browser, remaining);
-    return remaining === 0;
+  /** Only fresh, per-session contexts belong to the factory's caller. */
+  protected get _ownsContext(): boolean {
+    return true;
   }
 
   async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
     testDebug(`create browser context (${this._logName})`);
-    // `obtainedPromise` is the promise this browser came from — it guards the
-    // eager `_browserPromise` resets below: after an external disconnect a
-    // NEW promise may be in place, and clearing it would orphan the fresh
-    // connection other sessions are about to use.
-    const { browser, obtainedPromise } = await this._acquireBrowser(clientInfo, acquired => {
-      this._handoutCounts.set(acquired, (this._handoutCounts.get(acquired) ?? 0) + 1);
-    });
+    const { browser, release } = await this._acquireBrowser(clientInfo);
     let browserContext: playwright.BrowserContext;
     try {
       browserContext = await this._doCreateContext(browser);
     } catch (error) {
-      // The handout never materialized. When it was the last one, the browser
-      // must not stay behind ownerless — a sibling's close may have deferred
-      // the browser shutdown to this in-flight creation.
-      if (this._releaseHandout(browser) && !this._hasPendingAcquisition(obtainedPromise)) {
-        if (this._browserPromise === obtainedPromise)
-          this._browserPromise = undefined;
-        testDebug(`close browser (${this._logName})`);
-        await browser.close().catch(logUnhandledError);
-      }
+      // Failed creation releases the same ownership as a completed session;
+      // a live or pending sibling still keeps its own browser connection.
+      await release();
       throw error;
     }
-    let released = false;
-    return {
-      browserContext,
-      close: async () => {
-        if (released)
-          return;
-        released = true;
-        testDebug(`close browser context (${this._logName})`);
-        const last = this._releaseHandout(browser) && !this._hasPendingAcquisition(obtainedPromise);
-        // Cleared before the awaits so a createContext() arriving while this
-        // close is still in flight obtains a fresh browser instead of the
-        // closing one.
-        if (last && this._browserPromise === obtainedPromise)
-          this._browserPromise = undefined;
-        await browserContext.close().catch(logUnhandledError);
-        if (last) {
-          testDebug(`close browser (${this._logName})`);
-          await browser.close().catch(logUnhandledError);
-        }
-      },
-    };
+    return { browserContext, close: () => release(browserContext) };
   }
 
   protected abstract _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext>;
@@ -433,78 +411,10 @@ class CdpContextFactory extends BaseContextFactory {
     return 'this connection attaches to the browser\'s existing context, which every session would share (same tabs, cookies and storage). Add --isolated to give each session its own browser context.';
   }
 
-  // The CDP connection (and with it every route and page proxy) is shared by
-  // all live sessions of this factory, so nothing may close it while a
-  // sibling session still audits through it — neither a session's own
-  // close() nor the cleanup after another session's failed setup. The
-  // handout count is kept per browser object, not per factory: an external
-  // disconnect makes _obtainBrowser hand out a fresh browser while stale
-  // sessions still hold references to the old one, and a shared counter
-  // would let a stale release keep the new connection open forever (its last
-  // real user would only ever bring the count down to the stale remainder).
-  // The reference is claimed before context creation, so a sibling still
-  // inside _doCreateContext() counts and a concurrent failure cannot close
-  // the connection out from under it.
-  private _sessionCounts = new WeakMap<playwright.Browser, number>();
-
-  private _releaseBrowser(browser: playwright.Browser): boolean {
-    const remaining = Math.max(0, (this._sessionCounts.get(browser) ?? 1) - 1);
-    this._sessionCounts.set(browser, remaining);
-    return remaining === 0;
-  }
-
-  override async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
-    testDebug('create browser context (cdp)');
-    // `obtainedPromise` guards the eager `_browserPromise` evictions below —
-    // same pattern as the base class: after an external disconnect a NEW
-    // promise may be in place, and clearing it would orphan the fresh
-    // connection other sessions are about to use. The session count is
-    // claimed atomically with the browser's delivery (see _acquireBrowser),
-    // so a sibling's close inside createContext's own await window defers to
-    // this acquisition instead of disconnecting under it.
-    const { browser, obtainedPromise } = await this._acquireBrowser(clientInfo, acquired => {
-      this._sessionCounts.set(acquired, (this._sessionCounts.get(acquired) ?? 0) + 1);
-    });
-    let browserContext: playwright.BrowserContext;
-    try {
-      browserContext = await this._doCreateContext(browser);
-    } catch (error) {
-      // Without this the CDP connection stays open after e.g. an unreadable
-      // storage-state file, even though no context was ever handed out — but
-      // only when no sibling session is still using the shared connection.
-      if (this._releaseBrowser(browser) && !this._hasPendingAcquisition(obtainedPromise)) {
-        if (this._browserPromise === obtainedPromise)
-          this._browserPromise = undefined;
-        await browser.close().catch(logUnhandledError);
-      }
-      throw error;
-    }
-    let released = false;
-    return {
-      browserContext,
-      close: async () => {
-        if (released)
-          return;
-        released = true;
-        // An isolated session's context belongs to it alone — close it now,
-        // or abandoned contexts (with their pages, routes and listeners)
-        // pile up on a long-lived shared connection until the last session
-        // exits. The non-isolated context is the browser's own and shared;
-        // it stays.
-        if (this.config.browser.isolated)
-          await browserContext.close().catch(logUnhandledError);
-        if (this._releaseBrowser(browser) && !this._hasPendingAcquisition(obtainedPromise)) {
-          // Evicted before the await so a createContext() arriving while
-          // this disconnect is still in flight obtains a fresh connection
-          // instead of the closing one — the 'disconnected' event that also
-          // clears the cache fires too late to catch that window.
-          if (this._browserPromise === obtainedPromise)
-            this._browserPromise = undefined;
-          testDebug('disconnect browser (cdp)');
-          await browser.close().catch(logUnhandledError);
-        }
-      }
-    };
+  protected override get _ownsContext(): boolean {
+    // An isolated context is ours to reclaim. The attached browser's shared
+    // context (including a fallback created for that browser) stays alive.
+    return !!this.config.browser.isolated;
   }
 
   protected override async _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser> {
@@ -742,16 +652,15 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
    * so a stale exit can never untrack a successor's launch. The 'error'
    * listener covers a spawn that never produces an 'exit' (e.g. ENOENT). */
   private _trackPinnedPortChild(childProcess: ReturnType<typeof spawn>): NonNullable<CdpLaunchContextFactory['_pinnedPortLaunch']> {
-    const launch = { closing: false, exited: undefined as unknown as Promise<void> };
-    launch.exited = new Promise<void>(resolve => {
-      const done = () => {
-        if (this._pinnedPortLaunch === launch)
-          this._pinnedPortLaunch = undefined;
-        resolve();
-      };
-      childProcess.once('exit', done);
-      childProcess.once('error', done);
-    });
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const launch = { closing: false, exited: promise };
+    const done = () => {
+      if (this._pinnedPortLaunch === launch)
+        this._pinnedPortLaunch = undefined;
+      resolve();
+    };
+    childProcess.once('exit', done);
+    childProcess.once('error', done);
     this._pinnedPortLaunch = launch;
     return launch;
   }

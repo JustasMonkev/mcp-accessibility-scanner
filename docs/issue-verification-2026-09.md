@@ -331,13 +331,19 @@ WebKit 26.6 ran on Linux in the `keyboard-controls` CI job. Values are
 Bold marks a deviation from the modeled events, which expect key `Delete` for
 `NumpadDecimal` and location 3 on every event. Firefox's `keyCode` for shifted
 digits is also the unshifted value, but it still types the digit. On Linux,
-WebKit typed nothing for `NumpadDecimal`: no U+0000 was inserted.
+WebKit typed nothing for `NumpadDecimal`: no U+0000 was inserted. The October 2
+macOS arm64 control with paired 1.63.0 and WebKit 26.6 inserts U+0000 into the
+focused textarea. It reproduces through both MCP and direct Playwright, as
+described by upstream #42927; it is not a server remapping difference.
 
 These results match the upstream diagnoses. The Chromium keyup location is
 #42913. `NumpadDecimal` in every engine, and the Chromium shifted digits, are
-#42927. The server forwards keys unchanged; remapping them locally would diverge
-from Playwright's layout. The test pins exactly these deviations per
-`1.63.0/<engine>`. Any other Playwright version, or an engine without an entry,
+#42927. Both fixes merged after 1.63.0; the latest stable release checked on
+October 2 remains 1.63.0. The server forwards keys unchanged; remapping them
+locally would diverge from Playwright's layout. The test requires both package
+versions to be 1.63.0, the measured browser version, and Linux or macOS before
+allowing the recorded deviations. Only macOS WebKit permits the recorded NUL
+insertion. Any different paired version, browser build or unmeasured platform
 must deliver the modeled events.
 
 Focused checks:

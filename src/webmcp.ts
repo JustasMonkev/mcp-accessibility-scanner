@@ -547,7 +547,7 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
     let isError = false;
     try {
       const parsed: unknown = JSON.parse(json);
-      isError = !!parsed && typeof parsed === 'object' && (parsed as { isError?: unknown }).isError === true;
+      isError = !!parsed && typeof parsed === 'object' && 'isError' in parsed && parsed.isError === true;
     } catch {
       // Chromium may return plain text instead of JSON.
     }

@@ -999,7 +999,7 @@ export class InputRecorder {
     // event arrives; config.timeouts.settle may be shorter or disabled.
     const recordings = recorderHubs.get(browserContext)?.recordings;
     await new Promise(resolve => setTimeout(resolve, recorderBufferMs));
-    if (target && recordings?.get(context) === target) {
+    if (recordings?.get(context) === target) {
       recordings.delete(context);
       const hub = recorderHubs.get(browserContext);
       await hub?.standbyIfIdle().catch(logUnhandledError);

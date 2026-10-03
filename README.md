@@ -8,12 +8,12 @@
 
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/justasmonkev-mcp-accessibility-scanner-badge.png)](https://mseep.ai/app/justasmonkev-mcp-accessibility-scanner)
 
-A powerful Model Context Protocol (MCP) server that provides automated web accessibility scanning and browser automation using Playwright and Axe-core. This server enables LLMs to perform WCAG compliance checks, interact with web pages, manage persistent browser sessions, and generate detailed accessibility reports with visual annotations.
+A Model Context Protocol (MCP) server for accessibility scanning and browser automation with Playwright and Axe-core. It supports page interaction, persistent browser sessions, and accessibility reports with visual annotations.
 
 ## Features
 
 ### Accessibility Scanning
-✅ Full WCAG 2.0/2.1/2.2 compliance checking (A, AA, AAA levels)  
+✅ Automated checks for WCAG 2.0/2.1/2.2 criteria (A, AA, AAA levels)\
 📄 Detailed JSON reports with remediation guidance  
 🎯 Support for specific violation categories (color contrast, ARIA, forms, keyboard navigation, etc.)  
 
@@ -626,7 +626,7 @@ Fill multiple fields with one call.
 #### `browser_press_key`
 Press a key on the keyboard.
 - Parameters: `key` (e.g., 'ArrowLeft' or 'a')
-- Keys are delivered by Playwright's US keyboard layout. On the pinned Playwright 1.63.0, some numpad keys differ from a physical keyboard. In Chromium, Firefox and WebKit, `NumpadDecimal` sends key `"\u0000"` instead of `Delete` ([upstream fix, unmerged](https://github.com/microsoft/playwright/pull/42927)). In Chromium only, numpad `keyup` events do not report the numpad location ([upstream fix](https://github.com/microsoft/playwright/pull/42913), merged after 1.63.0), and shifted numpad digits such as `Shift+Numpad1`, and `Shift+NumpadDecimal`, type nothing (same unmerged fix). Pages that rely on numpad `key`, `location` or shifted digits may therefore not be exercised faithfully; the server passes keys through unchanged rather than remapping them. `tests/numpad-keys.integration.test.ts` records the events `browser_press_key` delivers and fails when a dependency update changes them.
+- Keys are delivered by Playwright's US keyboard layout. On the pinned Playwright 1.63.0, some numpad keys differ from a physical keyboard. In Chromium, Firefox and WebKit, `NumpadDecimal` sends key `"\u0000"` instead of `Delete`; WebKit on macOS also inserts that NUL character into the focused input ([upstream fix](https://github.com/microsoft/playwright/pull/42927), merged after 1.63.0 and not in the stable pin). In Chromium only, numpad `keyup` events do not report the numpad location ([upstream fix](https://github.com/microsoft/playwright/pull/42913), merged after 1.63.0), and shifted numpad digits such as `Shift+Numpad1`, and `Shift+NumpadDecimal`, type nothing. Pages that rely on numpad `key`, `location` or shifted digits may therefore not be exercised faithfully; the server passes keys through unchanged rather than remapping them. Use `Delete` when deletion matters more than the physical numpad identity. `tests/numpad-keys.integration.test.ts` characterizes only the measured paired versions, browser builds and platforms; other environments must satisfy the intended key contract.
 
 #### `browser_start_recording` / `browser_stop_recording`
 Record browser actions and return them as Playwright JavaScript. Start the server with `--caps devtools`, call `browser_start_recording`, perform the flow, then call `browser_stop_recording`.
@@ -839,12 +839,20 @@ Coordinate-based tools require `element` descriptions for permission checks, but
 
 ## Development
 
+The [domain glossary](CONTEXT.md) defines browser and audit terminology. See the
+[architecture decisions](docs/decisions/003-deep-module-ownership.md) for resource
+ownership, measurement lifetimes and proxy relay constraints.
+
 Clone and set up the project:
 ```bash
 git clone https://github.com/JustasMonkev/mcp-accessibility-scanner.git
 cd mcp-accessibility-scanner
 npm install
 ```
+
+`npm run knip` checks the server's sources, tests, benchmarks and tooling. The
+standalone `video/` package is outside that project; validate it separately with
+`cd video && npm run typecheck`.
 
 ### Playwright upgrade gate
 

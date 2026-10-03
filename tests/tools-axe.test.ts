@@ -745,6 +745,28 @@ describe('axe helpers', () => {
 });
 
 describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage in a real browser', () => {
+  it('preserves incomplete findings and their nodes from the browser scan', async () => {
+    const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<html lang="en"><title>Contrast fixture</title><p id="gradient" style="background:linear-gradient(white,black);color:gray">Gradient background text</p></html>');
+
+      const result = await runAxeScan(page, { rules: ['color-contrast'] });
+
+      expect(result.violations).toEqual([]);
+      expect(result.incomplete).toEqual([expect.objectContaining({
+        id: 'color-contrast',
+        nodes: [expect.objectContaining({
+          target: ['#gradient'],
+          failureSummary: expect.stringContaining('background gradient'),
+        })],
+      })]);
+      expect(result.incomplete[0].nodes[0]).not.toHaveProperty('any');
+    } finally {
+      await browser.close();
+    }
+  });
+
   it('does not warn about a failed frame outside a modal found only in a shadow root', async () => {
     const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
     try {

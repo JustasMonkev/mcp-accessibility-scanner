@@ -21,7 +21,7 @@ import { defineTabTool, defineTool } from './tool.js';
 import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
 import { prepareUploadFiles } from './files.js';
-import { axeRuleSchemaShape, axeScopeSchemaShape, axeTagValues, dedupeAxeNodes, defaultAxeTags, prepareAxeResults, runAxeScan, unscannedFrameLines } from './axe.js';
+import { axeRuleSchemaShape, axeScanOptions, axeScopeSchemaShape, axeTagValues, dedupeAxeNodes, defaultAxeTags, prepareAxeResults, runAxeScan, unscannedFrameLines } from './axe.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 
@@ -85,13 +85,7 @@ const scanPage = defineTool({
 
   handle: async (context, params, response) => {
     const tab = context.currentTabOrDie();
-    const results = await runAxeScan(tab.page, {
-      tags: params.violationsTag,
-      rules: params.withRules,
-      disableRules: params.disableRules,
-      include: params.includeSelectors,
-      exclude: params.excludeSelectors,
-    });
+    const results = await runAxeScan(tab.page, axeScanOptions(params));
 
     const annotationLines = params.annotateScreenshot
       ? await annotateAndScreenshot(tab, results.violations, response)
@@ -148,11 +142,7 @@ function nodeCountSuffix(shown: number, total: number): string {
 }
 
 
-/**
- * Draws a labelled outline over every violating element, screenshots the page,
- * then removes the markers. Returns the lines to append to the tool result.
- */
-async function annotateAndScreenshot(tab: Tab, violations: AxeViolation[], response: Response): Promise<string[]> {
+function buildAnnotationPlan(violations: AxeViolation[]) {
   const marks = new Map<string, AnnotationMark>();
   let totalNodes = 0;
   let unreachableNodes = 0;
@@ -165,8 +155,8 @@ async function annotateAndScreenshot(tab: Tab, violations: AxeViolation[], respo
       // page.evaluate cannot reach from the top document. A single step may
       // still be an array — that is a path through open shadow roots, which we
       // can walk, so flatten it rather than rejecting it as cross-frame.
-      const path = (target.length === 1 ? [target[0]].flat(Infinity) : []) as unknown[];
-      if (!path.length || path.some(step => typeof step !== 'string')) {
+      const path: unknown[] = target.length === 1 ? [target[0]].flat(Infinity) : [];
+      if (!path.length || !path.every(step => typeof step === 'string')) {
         unreachableNodes++;
         continue;
       }
@@ -177,23 +167,28 @@ async function annotateAndScreenshot(tab: Tab, violations: AxeViolation[], respo
       if (existing)
         existing.labels.push(violation.id);
       else if (marks.size < maxAnnotatedElements)
-        marks.set(key, { path: path as string[], labels: [violation.id] });
+        marks.set(key, { path, labels: [violation.id] });
       else
         continue;
       queuedNodes++;
     }
   }
+  return { marks: [...marks.values()], totalNodes, unreachableNodes, queuedNodes };
+}
 
+async function annotateAndScreenshot(tab: Tab, violations: AxeViolation[], response: Response): Promise<string[]> {
+  const { marks, totalNodes, unreachableNodes, queuedNodes } = buildAnnotationPlan(violations);
   const fileName = await tab.context.outputFile(`scan-page-annotated-${safeIsoTimestampForFileName()}.png`);
   // Unique per scan: cleanup resolves the id document-order first, so a fixed
   // id would delete the audited page's own element if it already used it.
   const layerId = `mcp-a11y-annotation-layer-${crypto.randomUUID()}`;
   let markedNodes = 0;
   try {
-    markedNodes = await drawAnnotations(tab.page, layerId, [...marks.values()]);
+    markedNodes = await drawAnnotations(tab.page, layerId, marks);
     await tab.page.screenshot({ path: fileName, fullPage: true });
   } finally {
     await tab.page.evaluate(id => {
+      // SAFETY: drawAnnotations creates this unique layer and attaches its paused animation list.
       const layer = document.getElementById(id) as (HTMLElement & { mcpPausedAnimations?: Animation[] }) | null;
       // Restart only what drawing paused, so a page that paused its own
       // animations still has them paused afterwards.
@@ -236,9 +231,8 @@ async function drawAnnotations(page: playwright.Page, layerId: string, marks: An
       animation.currentTime = animation.currentTime;
     }
 
-    const layer = document.createElement('div') as HTMLDivElement & { mcpPausedAnimations?: Animation[] };
+    const layer = Object.assign(document.createElement('div'), { mcpPausedAnimations: paused });
     layer.id = layerId;
-    layer.mcpPausedAnimations = paused;
     // Absolutely positioned and out of flow, so the layer can never reflow the
     // page we are about to photograph. It starts 100px square as a probe: the
     // rendered size of a known length reveals the scale a CSS zoom or an

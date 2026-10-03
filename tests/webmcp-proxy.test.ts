@@ -16,182 +16,304 @@
 
 import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/client';
+import type { Transport } from '@modelcontextprotocol/client';
 import { describe, it } from 'vitest';
 import { resolveConfig } from '../src/config.js';
 import { wrapInProcess } from '../src/mcp/server.js';
 import type { ServerBackendContext } from '../src/mcp/server.js';
+import { SharedClientSlot } from '../src/mcp/sharedClientSlot.js';
+import { ToolRelay } from '../src/mcp/toolRelay.js';
 import { ProxyBackend } from '../src/mcp/proxyBackend.js';
 import { VSCodeProxyBackend } from '../src/vscode/host.js';
 import type { CallToolRequestContext } from '../src/mcp/server.js';
 
-describe('WebMCP proxy routing', () => {
-  it('forwards tools/list metadata instead of falling back to the default page', async () => {
-    let received: unknown;
-    // SAFETY: this fixture exercises only listTools with an injected downstream client.
-    const backend = Object.assign(Object.create(ProxyBackend.prototype), {
-      _toolPolicy: {}, _currentClient: { listTools: async (params: unknown) => { received = params; return { tools: [] }; } },
-      _mcpProviders: [{}], _pendingToolLists: new Set(),
-    }) as ProxyBackend;
-    await backend.listTools({ _meta: { browserSessionId: 'bs_a' } });
-    assert.deepEqual(received, { _meta: { browserSessionId: 'bs_a' } });
+async function routingHarness(kind: string, switched = false) {
+  const calls: { destination: string, name?: string, args?: unknown, _meta?: CallToolRequestContext['_meta'] }[] = [];
+  const connect = async (destination: string) => wrapInProcess({
+    listTools: async request => { calls.push({ destination, _meta: request?._meta }); return []; },
+    callTool: async (name, args, request) => {
+      calls.push({ destination, name, args, _meta: request?._meta });
+      const progressToken = request?._meta?.progressToken;
+      if (progressToken !== undefined)
+        await request!.sendNotification({ method: 'notifications/progress', params: { progressToken, progress: 2, total: 3, message: 'Preparing audit' } });
+      return { content: [] };
+    },
   });
-
-  it('forwards request cancellation, metadata and progress without rewriting page arguments', async () => {
-    let params: unknown;
-    let options: { signal?: AbortSignal, onprogress?: (value: { progress: number }) => void } | undefined;
-    const notifications: unknown[] = [];
-    // SAFETY: callTool only uses the injected downstream client and switch-tool name.
-    const backend = Object.assign(Object.create(ProxyBackend.prototype), {
-      _contextSwitchTool: { name: 'browser_connect' },
-      _toolPolicy: {}, _currentClient: { callTool: async (p: unknown, o: typeof options) => { params = p; options = o; return { content: [] }; } },
-    }) as ProxyBackend;
-    const controller = new AbortController();
-    const request: CallToolRequestContext = { signal: controller.signal, requestId: 1,
-      sendNotification: async value => { notifications.push(value); },
-      _meta: { browserSessionId: 'bs_a', progressToken: 'progress' },
-    };
-    const input = { browserSessionId: 42, _meta: 'page argument' };
-    await backend.callTool('webmcp_echo_identity', input, request);
-    assert.deepEqual(params, { name: 'webmcp_echo_identity', arguments: input, _meta: request._meta });
-    assert.equal(options?.signal, controller.signal);
-    options?.onprogress?.({ progress: 1 });
-    assert.deepEqual(notifications, [{ method: 'notifications/progress', params: { progressToken: 'progress', progress: 1 } }]);
-  });
-});
-
-function vscodeHarness() {
-  const calls: { destination: string, params: unknown, options?: unknown }[] = [];
-  const client = (destination: string) => ({
-    listTools: async (params: unknown) => { calls.push({ destination, params }); return { tools: [] }; },
-    callTool: async (params: unknown, options?: unknown) => { calls.push({ destination, params, options }); return { content: [] }; },
-  });
-  // SAFETY: list/call methods need only these injected current and host clients.
-  const backend = Object.assign(Object.create(VSCodeProxyBackend.prototype), {
-    _config: {}, _currentClient: client('switched'), _currentClientIsDefault: false,
-    _sessionClient: Promise.resolve(client('host')), _pendingToolLists: new Set(), _contextSwitchTool: { name: 'browser_connect' },
-  }) as VSCodeProxyBackend;
-  return { backend, calls };
+  const slot = switched ? new SharedClientSlot() : undefined;
+  if (slot) {
+    await slot.replace(async () => {
+      const client = new Client({ name: 'switched-provider', version: '1' });
+      client.setRequestHandler('ping', () => ({}));
+      await client.connect(await connect('switched'));
+      return client;
+    });
+  }
+  const backend = kind === 'direct'
+    ? new ProxyBackend([{ name: 'default', description: 'Default', connect: () => connect('host') }])
+    : new VSCodeProxyBackend(await resolveConfig({}), () => connect('host'), slot);
+  await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'test', version: '1' });
+  return { backend, calls, close: async () => { backend.serverClosed(); await slot?.dispose(); } };
 }
 
-describe('WebMCP VS Code host routing', () => {
-  it('lists explicit-session tools at the host even after switching providers', async () => {
-    const { backend, calls } = vscodeHarness();
-    await backend.listTools({ _meta: { browserSessionId: 'bs_host' } });
-    assert.deepEqual(calls, [{ destination: 'host', params: { _meta: { browserSessionId: 'bs_host' } } }]);
-  });
+describe('WebMCP proxy routing', () => {
+  for (const kind of ['direct', 'VS Code']) {
+    it(`${kind}: forwards listing metadata and page arguments unchanged through MCP`, async () => {
+      const { backend, calls, close } = await routingHarness(kind);
+      try {
+        const _meta = { browserSessionId: 'bs_host' };
+        await backend.listTools({ _meta });
+        const args = { browserSessionId: 42, _meta: 'page-owned metadata' };
+        const request: CallToolRequestContext = { signal: new AbortController().signal, requestId: 1, sendNotification: async () => {}, _meta };
+        await backend.callTool('webmcp_page_tool', args, request);
+        assert.deepEqual(calls, [
+          { destination: 'host', _meta },
+          { destination: 'host', name: 'webmcp_page_tool', args, _meta },
+        ]);
+      } finally {
+        await close();
+      }
+    });
 
-  it('keeps page-owned browserSessionId arguments on the switched provider', async () => {
-    const { backend, calls } = vscodeHarness();
-    await backend.callTool('webmcp_page_tool', { browserSessionId: 'page input', _meta: 'page metadata' });
-    assert.equal(calls[0].destination, 'switched');
-    assert.deepEqual(calls[0].params, { name: 'webmcp_page_tool', arguments: { browserSessionId: 'page input', _meta: 'page metadata' }, _meta: undefined });
-  });
-
-  it('routes dynamic calls by metadata and preserves cancellation and original arguments', async () => {
-    const { backend, calls } = vscodeHarness();
-    const signal = new AbortController().signal;
-    const request: CallToolRequestContext = { signal, requestId: 1, sendNotification: async () => {}, _meta: { browserSessionId: 'bs_host' } };
-    await backend.callTool('webmcp_page_tool', { browserSessionId: 42 }, request);
-    assert.deepEqual(calls, [{ destination: 'host', params: { name: 'webmcp_page_tool', arguments: { browserSessionId: 42 }, _meta: request._meta }, options: { signal } }]);
-  });
-});
-
-describe('WebMCP VS Code progress forwarding', () => {
-  it('forwards progress for switched and host-routed calls without changing cancellation or page input', async () => {
-    for (const sessionId of [undefined, 'bs_host']) {
-      const { backend, calls } = vscodeHarness();
+    it(`${kind}: forwards zero-valued progress tokens through MCP`, async () => {
+      const { backend, calls, close } = await routingHarness(kind);
       const notifications: unknown[] = [];
-      const signal = new AbortController().signal;
-      const request: CallToolRequestContext = {
-        signal, requestId: 1,
-        sendNotification: async value => { notifications.push(value); },
-        _meta: { ...(sessionId ? { browserSessionId: sessionId } : {}), progressToken: 0 },
-      };
-      const args = { browserSessionId: 'page-owned value', _meta: 'page-owned metadata' };
-      await backend.callTool('webmcp_page_tool', args, request);
-      assert.equal(calls[0].destination, sessionId ? 'host' : 'switched');
-      assert.deepEqual(calls[0].params, { name: 'webmcp_page_tool', arguments: args, _meta: request._meta });
-      // SAFETY: the injected client's options are the production callTool options captured by the fixture.
-      const options = calls[0].options as { signal: AbortSignal, onprogress: (value: { progress: number; total?: number; message?: string }) => void };
-      assert.equal(options.signal, signal);
-      options.onprogress({ progress: 2, total: 3, message: 'Preparing audit' });
-      await Promise.resolve();
-      assert.deepEqual(notifications, [{ method: 'notifications/progress', params: { progressToken: 0, progress: 2, total: 3, message: 'Preparing audit' } }]);
+      try {
+        const _meta = { progressToken: 0 };
+        const args = { browserSessionId: 'page input', _meta: 'page metadata' };
+        await backend.callTool('webmcp_page_tool', args, { signal: new AbortController().signal, requestId: 1,
+          sendNotification: async value => { notifications.push(value); }, _meta });
+        // The SDK assigns a downstream token for onprogress. The relay must
+        // restore the original upstream token, including zero.
+        assert.equal(typeof calls[0]._meta?.progressToken, 'number');
+        assert.deepEqual(calls[0].args, args);
+        assert.deepEqual(notifications, [{ method: 'notifications/progress', params: { progressToken: 0, progress: 2, total: 3, message: 'Preparing audit' } }]);
+      } finally {
+        await close();
+      }
+    });
+  }
+});
+
+describe('WebMCP VS Code host routing', () => {
+  it('keeps metadata-routed tools at the host and page-owned arguments on the switched provider', async () => {
+    const { backend, calls, close } = await routingHarness('VS Code', true);
+    try {
+      await backend.listTools({ _meta: { browserSessionId: 'bs_host' } });
+      await backend.callTool('webmcp_page_tool', { browserSessionId: 'page input', _meta: 'page metadata' });
+      const _meta = { browserSessionId: 'bs_host', progressToken: 'host-progress' };
+      const notifications: unknown[] = [];
+      const args = { browserSessionId: 42 };
+      await backend.callTool('webmcp_page_tool', args, { signal: new AbortController().signal, requestId: 1,
+        sendNotification: async value => { notifications.push(value); }, _meta });
+      assert.deepEqual(calls, [
+        { destination: 'host', _meta: { browserSessionId: 'bs_host' } },
+        { destination: 'switched', name: 'webmcp_page_tool', args: { browserSessionId: 'page input', _meta: 'page metadata' }, _meta: undefined },
+        { destination: 'host', name: 'webmcp_page_tool', args, _meta: { ..._meta, progressToken: calls[2]._meta?.progressToken } },
+      ]);
+      assert.deepEqual(notifications, [{ method: 'notifications/progress', params: { progressToken: 'host-progress', progress: 2, total: 3, message: 'Preparing audit' } }]);
+    } finally {
+      await close();
     }
   });
 });
 
-describe('WebMCP VS Code notification races', () => {
-  it('waits for every overlapping listing on the same client before notifying', async () => {
+describe('WebMCP proxy notification races', () => {
+  it('VS Code: a settled old-provider listing cannot restore its notification recipient during a switch', async () => {
     let notifications = 0;
-    let innerContext!: ServerBackendContext;
-    let call = 0;
-    const started = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
-    const finish = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
-    const backend = new VSCodeProxyBackend(await resolveConfig({}), async () => wrapInProcess({
-      initialize: async context => { innerContext = context; },
-      listTools: async () => {
-        const index = call++;
-        started[index].resolve();
-        await finish[index].promise;
-        return [];
-      },
-      callTool: async () => ({ content: [] }),
-    }));
+    let connections = 0;
+    let oldContext: ServerBackendContext;
+    let emitChange = false;
+    let switchAfterResponse = false;
+    let switched: Promise<unknown> | undefined;
+    const connect = async () => {
+      const provider = connections++;
+      const inner = await wrapInProcess({
+        initialize: async context => {
+          if (provider === 0)
+            oldContext = context;
+        },
+        listTools: async () => {
+          if (provider === 0 && emitChange)
+            await oldContext.notifyToolListChanged();
+          return [{ name: `tool_${provider}`, inputSchema: { type: 'object' as const } }];
+        },
+        callTool: async () => ({ content: [] }),
+      });
+      const transport: Transport = {
+        start: async () => {
+          inner.onmessage = (message, extra) => {
+            transport.onmessage?.(message, extra);
+            // The SDK has resolved the response, but the backend's listing
+            // continuation has not run when the provider switch starts.
+            if (provider === 0 && switchAfterResponse && 'result' in message && 'tools' in message.result) {
+              switchAfterResponse = false;
+              switched = backend.callTool('browser_connect', {});
+            }
+          };
+          inner.onclose = () => transport.onclose?.();
+          inner.onerror = error => transport.onerror?.(error);
+          await inner.start();
+        },
+        send: (message, options) => inner.send(message, options),
+        close: () => inner.close(),
+      };
+      return transport;
+    };
+    const backend = new VSCodeProxyBackend(await resolveConfig({}), connect);
     try {
       await backend.initialize({ notifyToolListChanged: async () => { ++notifications; } }, { name: 'test', version: '1' });
-      const first = backend.listTools();
-      await started[0].promise;
-      const second = backend.listTools();
-      await started[1].promise;
-      await innerContext.notifyToolListChanged();
-      finish[0].resolve();
-      await first;
+      await backend.listTools();
+      emitChange = switchAfterResponse = true;
+      const oldTools = await backend.listTools();
+      assert.equal(oldTools[0].name, 'tool_0');
+      assert.ok(switched, 'the transport starts the switch after delivering the old response');
+      await switched;
       await new Promise<void>(resolve => setImmediate(resolve));
-      assert.equal(notifications, 0);
-      finish[1].resolve();
-      await second;
-      await new Promise<void>(resolve => setImmediate(resolve));
-      assert.equal(notifications, 1);
+      assert.equal(notifications, 1, 'only the provider switch announces a catalog change');
+      const newTools = await backend.listTools();
+      assert.equal(newTools[0].name, 'tool_1');
     } finally {
-      finish.forEach(gate => gate.resolve());
+      await switched;
       backend.serverClosed();
     }
   });
 
-  it('preserves notifications during the first and switched-client tool listing', async () => {
+  for (const kind of ['direct', 'VS Code']) {
+    for (const startSecond of ['overlapping', 'before deferred notification']) {
+      it(`${kind}: retains catalog changes until ${startSecond} listings settle`, async () => {
+        let notifications = 0;
+        let innerContext!: ServerBackendContext;
+        let call = 0;
+        const started = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+        const finish = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+        const connect = async () => wrapInProcess({
+          initialize: async context => { innerContext = context; },
+          listTools: async () => {
+            const index = call++;
+            started[index].resolve();
+            await finish[index].promise;
+            return [];
+          },
+          callTool: async () => ({ content: [] }),
+        });
+        const backend = kind === 'direct'
+          ? new ProxyBackend([{ name: 'default', description: 'Default', connect }])
+          : new VSCodeProxyBackend(await resolveConfig({}), connect);
+        try {
+          await backend.initialize({ notifyToolListChanged: async () => { ++notifications; } }, { name: 'test', version: '1' });
+          const first = backend.listTools();
+          await started[0].promise;
+          await innerContext.notifyToolListChanged();
+          let second: Promise<unknown>;
+          if (startSecond === 'overlapping') {
+            second = backend.listTools();
+            await started[1].promise;
+            finish[0].resolve();
+            await first;
+          } else {
+            finish[0].resolve();
+            await first;
+            // The first listing has scheduled setImmediate, but this new
+            // listing starts before that timer is allowed to run.
+            second = backend.listTools();
+            await started[1].promise;
+          }
+          await new Promise<void>(resolve => setImmediate(resolve));
+          assert.equal(notifications, 0);
+          finish[1].resolve();
+          await second;
+          await new Promise<void>(resolve => setImmediate(resolve));
+          assert.equal(notifications, 1, 'the dirty flag survives the intervening listing');
+        } finally {
+          finish.forEach(gate => gate.resolve());
+          backend.serverClosed();
+        }
+      });
+    }
+
+    it(`${kind}: preserves changes on first and replacement-provider listings and after rejected lists`, async () => {
+      let notifications = 0;
+      const innerContexts: ServerBackendContext[] = [];
+      let duringList: (() => Promise<void>) | undefined;
+      const connect = async () => wrapInProcess({
+        initialize: async context => { innerContexts.push(context); },
+        listTools: async () => { await duringList?.(); return []; },
+        callTool: async () => ({ content: [] }),
+      });
+      const backend = kind === 'direct'
+        ? new ProxyBackend([{ name: 'default', description: 'Default', connect }, { name: 'replacement', description: 'Replacement', connect }])
+        : new VSCodeProxyBackend(await resolveConfig({}), connect);
+      try {
+        await backend.initialize({ notifyToolListChanged: async () => { ++notifications; } }, { name: 'test', version: '1' });
+        duringList = () => innerContexts[0].notifyToolListChanged();
+        await backend.listTools();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(notifications, 1);
+        await backend.callTool('browser_connect', kind === 'direct' ? { name: 'replacement' } : {});
+        notifications = 0;
+        duringList = () => innerContexts[1].notifyToolListChanged();
+        await backend.listTools();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(notifications, 1);
+        duringList = async () => { await innerContexts[1].notifyToolListChanged(); throw new Error('listing failed'); };
+        notifications = 0;
+        await assert.rejects(backend.listTools(), /listing failed/);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(notifications, 1, 'failed listing retains its buffered change');
+        notifications = 0;
+        await innerContexts[1].notifyToolListChanged();
+        assert.equal(notifications, 1, 'failed listing preserves the previous recipient');
+      } finally {
+        backend.serverClosed();
+      }
+    });
+  }
+});
+
+describe('downstream tool relay lifetime', () => {
+  it('ignores obsolete-client changes and clears buffered notifications on shutdown', async () => {
+    const clients: Client[] = [];
+    const contexts: ServerBackendContext[] = [];
+    const gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    let selected: Client | undefined;
     let notifications = 0;
-    const innerContexts: ServerBackendContext[] = [];
-    let duringList: (() => Promise<void>) | undefined;
-    const backend = new VSCodeProxyBackend(await resolveConfig({}), async () => wrapInProcess({
-      initialize: async context => { innerContexts.push(context); },
-      listTools: async () => {
-        await duringList?.();
-        return [];
-      },
-      callTool: async () => ({ content: [] }),
-    }));
+    const relay = new ToolRelay(client => selected === client ? Promise.resolve().then(() => { ++notifications; }) : undefined, error => { throw error; });
     try {
-      await backend.initialize({ notifyToolListChanged: async () => { ++notifications; } }, { name: 'test', version: '1' });
-      notifications = 0;
-      duringList = () => innerContexts[0].notifyToolListChanged();
-      await backend.listTools();
+      for (let index = 0; index < 2; ++index) {
+        const client = new Client({ name: 'relay-client', version: '1' });
+        client.setRequestHandler('ping', () => ({}));
+        relay.observe(client);
+        await client.connect(await wrapInProcess({
+          initialize: async context => { contexts[index] = context; },
+          listTools: async () => { await gates[index].promise; return []; },
+          callTool: async () => ({ content: [] }),
+        }));
+        clients.push(client);
+      }
+      selected = clients[0];
+      gates[0].resolve();
+      await relay.listTools(clients[0]);
+      await contexts[0].notifyToolListChanged();
+      assert.equal(notifications, 1);
+      const pending = relay.listTools(clients[1]);
+      // Begin initialization/discovery on the second client without changing
+      // the previous completed recipient until it is ready.
       await new Promise<void>(resolve => setImmediate(resolve));
-      assert.ok(notifications > 0, 'the first listing must retain an in-flight notification');
-      // Select the host-owned session client, as happens after a provider switch.
-      Object.assign(backend, { _currentClientIsDefault: false });
-      notifications = 0;
-      duringList = () => innerContexts[1].notifyToolListChanged();
-      await backend.listTools({ _meta: { browserSessionId: 'bs_host' } });
+      await contexts[1].notifyToolListChanged();
+      gates[1].resolve();
+      await pending;
+      selected = clients[1];
+      await contexts[0].notifyToolListChanged();
+      assert.equal(notifications, 1, 'an obsolete client cannot notify the new recipient');
+      relay.close();
       await new Promise<void>(resolve => setImmediate(resolve));
-      assert.ok(notifications > 0, 'the newly selected client must retain an in-flight notification');
-      duringList = async () => { throw new Error('listing failed'); };
-      await assert.rejects(backend.listTools(), /listing failed/);
-      notifications = 0;
-      await innerContexts[1].notifyToolListChanged();
-      assert.equal(notifications, 1, 'failed listing must preserve the previous notification recipient');
+      await contexts[0].notifyToolListChanged();
+      await contexts[1].notifyToolListChanged();
+      assert.equal(notifications, 1, 'shutdown suppresses late and buffered changes');
     } finally {
-      backend.serverClosed();
+      gates.forEach(gate => gate.resolve());
+      relay.close();
+      await Promise.all(clients.map(client => client.close()));
     }
   });
 });
@@ -301,6 +423,52 @@ describe('WebMCP proxy list cancellation', () => {
         controller.abort();
         finished.resolve();
         await client.close();
+      }
+    });
+  }
+});
+
+describe('WebMCP proxy call cancellation', () => {
+  for (const kind of ['direct', 'VS Code']) {
+    it(`${kind}: cancels downstream invocation without retrying the page action`, async () => {
+      const started = Promise.withResolvers<AbortSignal>();
+      const finished = Promise.withResolvers<void>();
+      let invocations = 0;
+      const args = { browserSessionId: 42, _meta: 'page-owned' };
+      const connect = async () => wrapInProcess({
+        listTools: async () => [],
+        callTool: async (_name, received, request) => {
+          ++invocations;
+          assert.deepEqual(received, args);
+          assert.equal(request?._meta?.browserSessionId, 'bs_host');
+          const signal = request!.signal;
+          const stop = () => finished.resolve();
+          signal.addEventListener('abort', stop, { once: true });
+          started.resolve(signal);
+          await finished.promise;
+          signal.removeEventListener('abort', stop);
+          return { content: [] };
+        },
+      });
+      const backend = kind === 'direct'
+        ? new ProxyBackend([{ name: 'default', description: 'Default', connect }])
+        : new VSCodeProxyBackend(await resolveConfig({}), connect);
+      const controller = new AbortController();
+      try {
+        await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'test', version: '1' });
+        const outcome = backend.callTool('webmcp_page_tool', args, {
+          signal: controller.signal, requestId: 1, sendNotification: async () => {}, _meta: { browserSessionId: 'bs_host' },
+        }).then(() => 'completed without cancellation', String);
+        const signal = await started.promise;
+        controller.abort(new Error('cancelled action'));
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(signal.aborted, true);
+        assert.match(await outcome, /cancelled action/);
+        assert.equal(invocations, 1, 'an uncertain page action is never retried');
+      } finally {
+        controller.abort();
+        finished.resolve();
+        backend.serverClosed();
       }
     });
   }

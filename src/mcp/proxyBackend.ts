@@ -19,6 +19,7 @@ import { z } from 'zod';
 
 import { Client } from '@modelcontextprotocol/client';
 
+import { ToolRelay } from './toolRelay.js';
 import { assertToolNotBlocked, isToolBlocked } from './toolPolicy.js';
 import type { ToolPolicy } from './toolPolicy.js';
 import type { CallToolRequestContext, ServerBackend, ClientVersion, ServerBackendContext, Tool, CallToolResult, CallToolRequest } from './server.js';
@@ -64,8 +65,11 @@ export class ProxyBackend implements ServerBackend {
   private _contextSwitchTool: Tool;
   private _backendContext: ServerBackendContext | undefined;
   private _sharedSelection: SharedProxySelection | undefined;
-  private _pendingToolLists = new Set<{ client: Client, changed: boolean }>();
-  private _toolListNotification: ReturnType<typeof setImmediate> | undefined;
+  private _relay = new ToolRelay(client => {
+    // Shared stateless clients have no persistent notification recipient.
+    if (this._ownsCurrentClient && this._currentClient === client)
+      return this._backendContext?.notifyToolListChanged();
+  }, errorsDebug);
 
   constructor(mcpProviders: MCPProvider[], sharedSelection?: SharedProxySelection, private readonly _toolPolicy: ToolPolicy = {}) {
     this._mcpProviders = mcpProviders;
@@ -92,41 +96,20 @@ export class ProxyBackend implements ServerBackend {
 
   async listTools(requestContext?: Partial<Pick<CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]> {
     const client = this._currentClient!;
-    const pending = { client, changed: false };
-    this._pendingToolLists.add(pending);
-    try {
-      const response = await client.listTools(requestContext?._meta ? { _meta: requestContext._meta } : undefined, { signal: requestContext?.signal });
-      const tools = this._mcpProviders.length === 1 ? response.tools : [...response.tools, this._contextSwitchTool];
-      return tools.filter(tool => !isToolBlocked(this._toolPolicy, tool.name));
-    } finally {
-      this._pendingToolLists.delete(pending);
-      if (pending.changed)
-        this._deferToolListChanged(client);
-    }
+    const downstreamTools = await this._relay.listTools(client, requestContext);
+    const tools = this._mcpProviders.length === 1 ? downstreamTools : [...downstreamTools, this._contextSwitchTool];
+    return tools.filter(tool => !isToolBlocked(this._toolPolicy, tool.name));
   }
 
   async callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: CallToolRequestContext): Promise<CallToolResult> {
     assertToolNotBlocked(this._toolPolicy, name);
     if (name === this._contextSwitchTool.name)
       return this._callContextSwitchTool(args);
-    const progressToken = requestContext?._meta?.progressToken;
-    return await this._currentClient!.callTool({
-      name,
-      arguments: args,
-      _meta: requestContext?._meta,
-    }, requestContext ? {
-      signal: requestContext.signal,
-      ...(progressToken === undefined ? {} : {
-        onprogress: (params: { progress: number; total?: number; message?: string }) => {
-          void this._forwardProgressNotification(requestContext, progressToken, params);
-        },
-      }),
-    } : undefined);
+    return await this._relay.callTool(this._currentClient!, name, args, requestContext);
   }
 
   serverClosed?(): void {
-    clearImmediate(this._toolListNotification);
-    this._toolListNotification = undefined;
+    this._relay.close();
     this._backendContext = undefined;
     if (this._ownsCurrentClient)
       void this._currentClient?.close().catch(errorsDebug);
@@ -191,24 +174,6 @@ export class ProxyBackend implements ServerBackend {
     await previousOwned?.close().catch(errorsDebug);
   }
 
-  private async _forwardProgressNotification(
-    requestContext: CallToolRequestContext | undefined,
-    progressToken: string | number,
-    params: { progress: number; total?: number; message?: string },
-  ): Promise<void> {
-    try {
-      await requestContext?.sendNotification({
-        method: 'notifications/progress',
-        params: {
-          progressToken,
-          ...params,
-        },
-      });
-    } catch (error) {
-      errorsDebug('Failed to forward downstream progress notification: %o', error);
-    }
-  }
-
   private _defineContextSwitchTool(): Tool {
     return {
       name: 'browser_connect',
@@ -244,34 +209,10 @@ export class ProxyBackend implements ServerBackend {
   private async _connectClient(factory: MCPProvider): Promise<Client> {
     const client = new Client({ name: 'Playwright MCP Proxy', version: '0.0.0' });
     client.setRequestHandler('ping', () => ({}));
-    client.setNotificationHandler('notifications/tools/list_changed', async () => {
-      let buffered = false;
-      for (const pending of this._pendingToolLists) {
-        if (pending.client === client) {
-          pending.changed = true;
-          buffered = true;
-        }
-      }
-      // An owned connection has one upstream recipient. Shared stateless
-      // clients have no persistent recipient; callers re-list with zero TTL.
-      if (!buffered && this._ownsCurrentClient && this._currentClient === client)
-        await this._backendContext?.notifyToolListChanged().catch(errorsDebug);
-    });
+    this._relay.observe(client);
 
     const transport = await factory.connect();
     await client.connect(transport);
     return client;
-  }
-
-  private _deferToolListChanged(client: Client) {
-    if (!this._backendContext || !this._ownsCurrentClient || this._currentClient !== client)
-      return;
-    clearImmediate(this._toolListNotification);
-    // The outer SDK must process the list response before a refresh arrives.
-    this._toolListNotification = setImmediate(() => {
-      this._toolListNotification = undefined;
-      if (this._ownsCurrentClient && this._currentClient === client)
-        void this._backendContext?.notifyToolListChanged().catch(errorsDebug);
-    });
   }
 }

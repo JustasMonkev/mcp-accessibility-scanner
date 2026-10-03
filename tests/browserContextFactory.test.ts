@@ -109,14 +109,13 @@ function createMockBrowser(browserContext: any) {
   } as any;
 }
 
-function createMockPage(url: string, overrides: Record<string, any> = {}) {
+function createMockPage(url: string) {
   return {
     url: () => url,
     frames: vi.fn().mockReturnValue([]),
     reload: vi.fn().mockResolvedValue(undefined),
     goto: vi.fn().mockResolvedValue(undefined),
     close: vi.fn().mockResolvedValue(undefined),
-    ...overrides,
   };
 }
 
@@ -124,9 +123,9 @@ function createMockPage(url: string, overrides: Record<string, any> = {}) {
 // the browser, so tests exercising that path need a real, readable file.
 const recordedState = { cookies: [{ name: 'app_session', value: 'recorded', domain: 'app.example', path: '/' }], origins: [] };
 
-function writeStateFile(state: any = recordedState) {
+function writeStateFile() {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-state-')), 'auth.json');
-  fs.writeFileSync(file, JSON.stringify(state));
+  fs.writeFileSync(file, JSON.stringify(recordedState));
   return file;
 }
 
@@ -537,8 +536,72 @@ describe('browserContextFactory', () => {
     await second.close();
   });
 
+  it('waits for a closing pinned child to exit before launching its successor', async () => {
+    const childA = createMockChildProcess();
+    const childB = createMockChildProcess();
+    childA.kill.mockImplementation(() => true);
+    spawnMock.mockReturnValueOnce(childA).mockReturnValue(childB);
+    connectOverCDP.mockResolvedValue(createMockBrowser(createMockBrowserContext()));
+    const factory = contextFactory(await resolveConfig({
+      browser: { isolated: true, cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 500 } },
+    }));
+    const clientInfo = { name: 'vitest', version: '1.0.0' };
+    const signal = new AbortController().signal;
+    const first = await factory.createContext(clientInfo, signal, undefined);
+    await first.close();
+    let settled = false;
+    let second: Awaited<ReturnType<typeof factory.createContext>> | undefined;
+    const pending = factory.createContext(clientInfo, signal, undefined).then(result => {
+      second = result;
+      settled = true;
+      return null;
+    }, error => {
+      settled = true;
+      return error;
+    });
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(settled).toBe(false);
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      childA.exitCode = 0;
+      childA.emit('exit', 0);
+      expect(await pending).toBeNull();
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+    } finally {
+      childA.exitCode = 0;
+      childA.emit('exit', 0);
+      await pending;
+      await second?.close();
+    }
+  });
+
+  it('releases a pinned child on error without letting its later exit untrack a successor', async () => {
+    const childA = createMockChildProcess();
+    const childB = createMockChildProcess();
+    spawnMock.mockReturnValueOnce(childA).mockReturnValue(childB);
+    connectOverCDP.mockResolvedValue(createMockBrowser(createMockBrowserContext()));
+    const factory = contextFactory(await resolveConfig({
+      browser: { isolated: true, cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 500 } },
+    }));
+    const clientInfo = { name: 'vitest', version: '1.0.0' };
+    const signal = new AbortController().signal;
+    const first = await factory.createContext(clientInfo, signal, undefined);
+    let second: Awaited<ReturnType<typeof factory.createContext>> | undefined;
+    try {
+      expect(() => childA.emit('error', new Error('spawn failed'))).not.toThrow();
+      second = await factory.createContext(clientInfo, signal, undefined);
+      await first.close();
+      await expect(factory.createContext(clientInfo, signal, undefined))
+          .rejects.toThrow(/pinned --cdp-launch-port 9222 already serves a launched application/);
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+    } finally {
+      await first.close();
+      await second?.close();
+    }
+  });
+
   it('surfaces the missing browser executable path on the isolated launch path', async () => {
-    (playwright.chromium.launch as any).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
+    vi.mocked(playwright.chromium.launch).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
 
     const config = await resolveConfig({
       browser: {
@@ -553,7 +616,7 @@ describe('browserContextFactory', () => {
   });
 
   it('surfaces the missing browser executable path on the persistent launch path', async () => {
-    (playwright.chromium.launchPersistentContext as any).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
+    vi.mocked(playwright.chromium.launchPersistentContext).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
 
     const config = await resolveConfig({});
 
@@ -564,7 +627,7 @@ describe('browserContextFactory', () => {
   });
 
   it('falls back to the generic not-installed message when no executable path is present', async () => {
-    (playwright.chromium.launchPersistentContext as any).mockRejectedValue(new Error(`Executable doesn't exist`));
+    vi.mocked(playwright.chromium.launchPersistentContext).mockRejectedValue(new Error(`Executable doesn't exist`));
 
     const config = await resolveConfig({});
 
@@ -578,7 +641,7 @@ describe('browserContextFactory', () => {
   // it, so the factory must strip it and apply it to the launched context itself.
   it('applies the storage state to a fresh, per-context disposable profile', async () => {
     const browserContext = createMockBrowserContext();
-    (playwright.chromium.launchPersistentContext as any).mockResolvedValue(browserContext);
+    vi.mocked(playwright.chromium.launchPersistentContext).mockResolvedValue(browserContext);
     const rmSpy = vi.spyOn(fs.promises, 'rm');
 
     const config = await resolveConfig({
@@ -590,19 +653,19 @@ describe('browserContextFactory', () => {
     const factory = contextFactory(config);
     const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
 
-    expect((playwright.chromium.launchPersistentContext as any).mock.calls[0][1]).not.toHaveProperty('storageState');
+    expect(vi.mocked(playwright.chromium.launchPersistentContext).mock.calls[0][1]).not.toHaveProperty('storageState');
     expect(browserContext.setStorageState).toHaveBeenCalledWith('/tmp/auth.json');
     expect(result.browserContext).toBe(browserContext);
     // setStorageState resets origin storage only for origins in the state, so a
     // previously used profile could leak a stale signed-in identity into the
     // audit; the state must land in its own fresh profile.
-    const userDataDir = (playwright.chromium.launchPersistentContext as any).mock.calls[0][0] as string;
+    const userDataDir = vi.mocked(playwright.chromium.launchPersistentContext).mock.calls[0][0];
     expect(userDataDir).toMatch(/-storage-state-[0-9a-f]+$/);
 
     // One server can hold several live sessions: a second context must get its
     // own profile, or its setup would destroy the first one's running browser.
     const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-    const secondDir = (playwright.chromium.launchPersistentContext as any).mock.calls[1][0] as string;
+    const secondDir = vi.mocked(playwright.chromium.launchPersistentContext).mock.calls[1][0];
     expect(secondDir).not.toBe(userDataDir);
 
     // The disposable profile is removed with its context; the state file is the
@@ -621,7 +684,7 @@ describe('browserContextFactory', () => {
     process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
     try {
       const browserContext = createMockBrowserContext();
-      (playwright.chromium.launchPersistentContext as any).mockResolvedValue(browserContext);
+      vi.mocked(playwright.chromium.launchPersistentContext).mockResolvedValue(browserContext);
       const rmSpy = vi.spyOn(fs.promises, 'rm');
 
       const config = await resolveConfig({});
@@ -634,7 +697,7 @@ describe('browserContextFactory', () => {
       const first = await factory.createContext(clientInfo, signal, undefined, { browserSession: true });
       const second = await factory.createContext(clientInfo, signal, undefined, { browserSession: true });
 
-      const dirs = (playwright.chromium.launchPersistentContext as any).mock.calls.map((call: any[]) => call[0] as string);
+      const dirs = vi.mocked(playwright.chromium.launchPersistentContext).mock.calls.map(([directory]) => directory);
       // The default context keeps the stable profile so sign-in state still
       // survives restarts; each session gets a fresh guid-suffixed one.
       expect(dirs[0]).toBe(path.join(profilesDir, stableProfileName()));
@@ -665,7 +728,7 @@ describe('browserContextFactory', () => {
     process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
     try {
       const launchedDirs = new Map<any, string>();
-      (playwright.chromium.launchPersistentContext as any).mockImplementation(async (dir: string) => {
+      vi.mocked(playwright.chromium.launchPersistentContext).mockImplementation(async (dir: string) => {
         const browserContext = createMockBrowserContext();
         launchedDirs.set(browserContext, dir);
         return browserContext;
@@ -720,7 +783,7 @@ describe('browserContextFactory', () => {
     process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
     try {
       const launchedDirs = new Map<any, string>();
-      (playwright.chromium.launchPersistentContext as any).mockImplementation(async (dir: string) => {
+      vi.mocked(playwright.chromium.launchPersistentContext).mockImplementation(async (dir: string) => {
         const browserContext = createMockBrowserContext();
         launchedDirs.set(browserContext, dir);
         return browserContext;
@@ -749,7 +812,7 @@ describe('browserContextFactory', () => {
       const pendingSuccessor = factory.createContext(clientInfo, signal, undefined);
       for (let i = 0; i < 10; i++)
         await Promise.resolve();
-      expect((playwright.chromium.launchPersistentContext as any).mock.calls).toHaveLength(1);
+      expect(vi.mocked(playwright.chromium.launchPersistentContext).mock.calls).toHaveLength(1);
 
       // ...and it gets the STABLE profile once the close completes.
       finishShutdown();
@@ -783,7 +846,7 @@ describe('browserContextFactory', () => {
       return server;
     }) as any);
     try {
-      (playwright.chromium.launchPersistentContext as any).mockImplementation(async () => createMockBrowserContext());
+      vi.mocked(playwright.chromium.launchPersistentContext).mockImplementation(async () => createMockBrowserContext());
       const config = await resolveConfig({});
       const factory = contextFactory(config);
       const clientInfo = { name: 'vitest', version: '1.0.0' };
@@ -796,7 +859,7 @@ describe('browserContextFactory', () => {
       // the same port again (instead of spinning on a leaked reservation) and
       // gets the stable profile (instead of a -concurrent- fallback).
       const result = await factory.createContext(clientInfo, signal, undefined);
-      expect((playwright.chromium.launchPersistentContext as any).mock.calls[0][0])
+      expect(vi.mocked(playwright.chromium.launchPersistentContext).mock.calls[0][0])
           .toBe(path.join(profilesDir, stableProfileName()));
       await result.close();
     } finally {
@@ -818,12 +881,12 @@ describe('browserContextFactory', () => {
     process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
     try {
       const browserContext = createMockBrowserContext();
-      (playwright.chromium.launchPersistentContext as any).mockResolvedValue(browserContext);
+      vi.mocked(playwright.chromium.launchPersistentContext).mockResolvedValue(browserContext);
 
       const clientInfo = { name: 'vitest', version: '1.0.0' };
       const signal = new AbortController().signal;
       const launchedDir = (call: number) =>
-        (playwright.chromium.launchPersistentContext as any).mock.calls[call][0] as string;
+        vi.mocked(playwright.chromium.launchPersistentContext).mock.calls[call][0];
 
       // Restart parity: a fresh factory built from the same config in the
       // same workspace resolves to the same directory, so the profile's
@@ -859,7 +922,7 @@ describe('browserContextFactory', () => {
     const profilesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-profiles-'));
     process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
     try {
-      (playwright.chromium.launchPersistentContext as any).mockImplementation(async () => createMockBrowserContext());
+      vi.mocked(playwright.chromium.launchPersistentContext).mockImplementation(async () => createMockBrowserContext());
 
       const config = await resolveConfig({ saveTrace: true });
       const factory = contextFactory(config);
@@ -874,8 +937,8 @@ describe('browserContextFactory', () => {
       expect(startTraceViewerServerMock).toHaveBeenCalledTimes(1);
       // Both launches record into the one traces directory; per-context trace
       // names keep the files apart (see acquireTrace in context.ts).
-      const tracesDirs = (playwright.chromium.launchPersistentContext as any).mock.calls
-          .map((call: any[]) => call[1]?.tracesDir as string | undefined);
+      const tracesDirs = vi.mocked(playwright.chromium.launchPersistentContext).mock.calls
+          .map(([, options]) => options?.tracesDir);
       expect(tracesDirs[0]).toMatch(/traces-/);
       expect(tracesDirs[1]).toBe(tracesDirs[0]);
     } finally {
@@ -894,7 +957,7 @@ describe('browserContextFactory', () => {
     process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
     try {
       const launchGates: Array<(context: any) => void> = [];
-      (playwright.chromium.launchPersistentContext as any).mockImplementation(
+      vi.mocked(playwright.chromium.launchPersistentContext).mockImplementation(
           () => new Promise(resolve => launchGates.push(resolve)));
 
       const config = await resolveConfig({});
@@ -908,7 +971,7 @@ describe('browserContextFactory', () => {
       const pendingB = factory.createContext(clientInfo, signal, undefined, { browserSession: true });
       await vi.waitFor(() => expect(launchGates.length).toBe(2));
 
-      const ports = (playwright.chromium.launchPersistentContext as any).mock.calls
+      const ports = vi.mocked(playwright.chromium.launchPersistentContext).mock.calls
           .map((call: any[]) => call[1]?.cdpPort as number | undefined);
       expect(ports[0]).toEqual(expect.any(Number));
       expect(ports[1]).toEqual(expect.any(Number));
@@ -967,7 +1030,7 @@ describe('browserContextFactory', () => {
     const browserContext = createMockBrowserContext();
     browserContext.pages.mockReturnValue([startup]);
     const fresh = collectFreshPages(browserContext);
-    (playwright.chromium.launchPersistentContext as any).mockResolvedValue(browserContext);
+    vi.mocked(playwright.chromium.launchPersistentContext).mockResolvedValue(browserContext);
 
     const config = await resolveConfig({
       browser: {
@@ -989,7 +1052,7 @@ describe('browserContextFactory', () => {
     // The guid-suffixed directory is created before launch; a start that never
     // produces a context must not leave it behind, or every failed start piles
     // another stray profile into the registry directory.
-    (playwright.chromium.launchPersistentContext as any).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
+    vi.mocked(playwright.chromium.launchPersistentContext).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
     const rmSpy = vi.spyOn(fs.promises, 'rm');
 
     const config = await resolveConfig({
@@ -1002,7 +1065,7 @@ describe('browserContextFactory', () => {
 
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
         .rejects.toThrow('Browser specified in your config is not installed');
-    const userDataDir = (playwright.chromium.launchPersistentContext as any).mock.calls[0][0] as string;
+    const userDataDir = vi.mocked(playwright.chromium.launchPersistentContext).mock.calls[0][0];
     expect(userDataDir).toMatch(/-storage-state-[0-9a-f]+$/);
     expect(rmSpy).toHaveBeenCalledWith(userDataDir, { recursive: true, force: true });
   });
@@ -1010,7 +1073,7 @@ describe('browserContextFactory', () => {
   it('keeps the regular persistent profile when a launch without storage state fails', async () => {
     // The shared interactive profile is durable user data; launch failures must
     // never delete it — only the disposable storage-state profiles are removed.
-    (playwright.chromium.launchPersistentContext as any).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
+    vi.mocked(playwright.chromium.launchPersistentContext).mockRejectedValue(new Error(`Executable doesn't exist at /ms-playwright/chromium-1234/chrome-linux/chrome`));
     const rmSpy = vi.spyOn(fs.promises, 'rm');
 
     const config = await resolveConfig({});
@@ -1041,7 +1104,7 @@ describe('browserContextFactory', () => {
   it('closes the launched persistent browser when applying the storage state fails', async () => {
     const browserContext = createMockBrowserContext();
     browserContext.setStorageState.mockRejectedValue(new Error('ENOENT: no such file /tmp/auth.json'));
-    (playwright.chromium.launchPersistentContext as any).mockResolvedValue(browserContext);
+    vi.mocked(playwright.chromium.launchPersistentContext).mockResolvedValue(browserContext);
 
     const config = await resolveConfig({
       browser: {
@@ -1324,7 +1387,7 @@ describe('browserContextFactory', () => {
     browser.newContext
         .mockResolvedValueOnce(contextA)
         .mockImplementationOnce(() => new Promise(resolve => { releaseB = resolve; }));
-    (playwright.chromium.launch as any).mockResolvedValue(browser);
+    vi.mocked(playwright.chromium.launch).mockResolvedValue(browser);
 
     const config = await resolveConfig({ browser: { isolated: true } });
     const factory = contextFactory(config);
@@ -1363,7 +1426,7 @@ describe('browserContextFactory', () => {
       newContext: vi.fn().mockResolvedValueOnce(contextA).mockResolvedValueOnce(contextB),
       on: vi.fn(),
     } as any;
-    (playwright.chromium.launch as any).mockResolvedValue(browser);
+    vi.mocked(playwright.chromium.launch).mockResolvedValue(browser);
 
     const config = await resolveConfig({ browser: { isolated: true } });
     const factory = contextFactory(config);
@@ -1389,8 +1452,8 @@ describe('browserContextFactory', () => {
   });
 
   it('defers the CDP disconnect to a sibling createContext that has not resumed from the cached browser promise', async () => {
-    // Same window as the isolated variant, on CdpContextFactory's override:
-    // session B's session count is claimed atomically with the cached
+    // Same window as the isolated variant, on the shared-context CDP path:
+    // session B's holder count is claimed atomically with the cached
     // browser's delivery, so session A closing inside B's await window must
     // not disconnect the shared connection.
     const browserContext = createMockBrowserContext();
@@ -1430,7 +1493,7 @@ describe('browserContextFactory', () => {
     browser.newContext
         .mockResolvedValueOnce(contextA)
         .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectB = reject; }));
-    (playwright.chromium.launch as any).mockResolvedValue(browser);
+    vi.mocked(playwright.chromium.launch).mockResolvedValue(browser);
 
     const config = await resolveConfig({ browser: { isolated: true } });
     const factory = contextFactory(config);
@@ -1444,6 +1507,118 @@ describe('browserContextFactory', () => {
     rejectB!(new Error('Target crashed'));
     await expect(pendingB).rejects.toThrow('Target crashed');
     expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  describe.each([
+    { mode: 'isolated', browser: { isolated: true }, obtain: playwright.chromium.launch },
+    { mode: 'remote', browser: { remoteEndpoint: 'ws://127.0.0.1:9222' }, obtain: playwright.chromium.connect },
+    { mode: 'isolated CDP', browser: { cdpEndpoint: 'http://127.0.0.1:9222', isolated: true }, obtain: connectOverCDP },
+  ])('shared browser ownership ($mode)', ({ browser: browserOptions, obtain }) => {
+    it('waits for every owned-context cleanup, even with overlapping duplicate releases', async () => {
+      const contextA = createMockBrowserContext();
+      const contextB = createMockBrowserContext();
+      const browser = createMockBrowser(contextA);
+      browser.newContext.mockResolvedValueOnce(contextA).mockResolvedValueOnce(contextB);
+      vi.mocked(obtain).mockResolvedValue(browser);
+      let finishCleanup: () => void;
+      contextA.close.mockImplementation(() => new Promise<void>(resolve => { finishCleanup = resolve; }));
+      const factory = contextFactory(await resolveConfig({ browser: browserOptions }));
+      const signal = new AbortController().signal;
+      const first = await factory.createContext({}, signal, undefined);
+      const second = await factory.createContext({}, signal, undefined);
+
+      const closingFirst = first.close();
+      expect(contextA.close).toHaveBeenCalledTimes(1);
+      await first.close();
+      await second.close();
+      expect(contextB.close).toHaveBeenCalledTimes(1);
+      expect(browser.close).not.toHaveBeenCalled();
+
+      finishCleanup!();
+      await closingFirst;
+      await second.close();
+      expect(contextA.close).toHaveBeenCalledTimes(1);
+      expect(contextB.close).toHaveBeenCalledTimes(1);
+      expect(browser.close).toHaveBeenCalledTimes(1);
+    });
+
+    it('evicts before last owned-context cleanup and ignores stale disconnects during that cleanup', async () => {
+      const contextA = createMockBrowserContext();
+      const contextB = createMockBrowserContext();
+      const contextC = createMockBrowserContext();
+      const browserA = createMockBrowser(contextA);
+      const browserB = createMockBrowser(contextB);
+      browserB.newContext.mockResolvedValueOnce(contextB).mockResolvedValueOnce(contextC);
+      vi.mocked(obtain).mockResolvedValueOnce(browserA).mockResolvedValue(browserB);
+      let finishCleanup: () => void;
+      contextA.close.mockImplementation(() => new Promise<void>(resolve => { finishCleanup = resolve; }));
+      const factory = contextFactory(await resolveConfig({ browser: browserOptions }));
+      const signal = new AbortController().signal;
+      const first = await factory.createContext({}, signal, undefined);
+
+      const closingFirst = first.close();
+      expect(contextA.close).toHaveBeenCalledTimes(1);
+      expect(browserA.close).not.toHaveBeenCalled();
+      const second = await factory.createContext({}, signal, undefined);
+      expect(second.browserContext).toBe(contextB);
+      const staleDisconnect = browserA.on.mock.calls.find(call => call[0] === 'disconnected')[1];
+      staleDisconnect();
+      const third = await factory.createContext({}, signal, undefined);
+      expect(third.browserContext).toBe(contextC);
+      expect(obtain).toHaveBeenCalledTimes(2);
+
+      finishCleanup!();
+      await closingFirst;
+      expect(browserA.close).toHaveBeenCalledTimes(1);
+      await second.close();
+      expect(browserB.close).not.toHaveBeenCalled();
+      await third.close();
+      expect(browserB.close).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases a failed creating sibling after the previous holder deferred shutdown', async () => {
+      const browserContext = createMockBrowserContext();
+      const browser = createMockBrowser(browserContext);
+      let failCreation: (error: Error) => void;
+      browser.newContext.mockResolvedValueOnce(browserContext).mockImplementationOnce(() =>
+        new Promise((_resolve, reject) => { failCreation = reject; }));
+      vi.mocked(obtain).mockResolvedValue(browser);
+      const factory = contextFactory(await resolveConfig({ browser: browserOptions }));
+      const signal = new AbortController().signal;
+      const first = await factory.createContext({}, signal, undefined);
+      const creating = factory.createContext({}, signal, undefined);
+      await vi.waitFor(() => expect(browser.newContext).toHaveBeenCalledTimes(2));
+
+      await first.close();
+      expect(browserContext.close).toHaveBeenCalledTimes(1);
+      expect(browser.close).not.toHaveBeenCalled();
+      failCreation!(new Error('Context creation failed'));
+      await expect(creating).rejects.toThrow('Context creation failed');
+      expect(browser.close).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries after a shared failed acquisition without leaving phantom holders', async () => {
+      const browserContext = createMockBrowserContext();
+      const browser = createMockBrowser(browserContext);
+      vi.mocked(obtain).mockRejectedValueOnce(new Error('Connection failed')).mockResolvedValue(browser);
+      const factory = contextFactory(await resolveConfig({ browser: browserOptions }));
+      const signal = new AbortController().signal;
+      const pendingA = factory.createContext({}, signal, undefined);
+      const pendingB = factory.createContext({}, signal, undefined);
+      await Promise.all([
+        expect(pendingA).rejects.toThrow('Connection failed'),
+        expect(pendingB).rejects.toThrow('Connection failed'),
+      ]);
+      expect(obtain).toHaveBeenCalledTimes(1);
+      expect(browser.newContext).not.toHaveBeenCalled();
+
+      const recovered = await factory.createContext({}, signal, undefined);
+      expect(recovered.browserContext).toBe(browserContext);
+      expect(obtain).toHaveBeenCalledTimes(2);
+      await recovered.close();
+      expect(browserContext.close).toHaveBeenCalledTimes(1);
+      expect(browser.close).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('lets a later session join the context the fallback created, without resetting it', async () => {
@@ -1611,7 +1786,7 @@ describe('browserContextFactory', () => {
   it('applies the storage state to remote browser sessions', async () => {
     const browserContext = createMockBrowserContext();
     const browser = createMockBrowser(browserContext);
-    (playwright.chromium.connect as any).mockResolvedValue(browser);
+    vi.mocked(playwright.chromium.connect).mockResolvedValue(browser);
 
     const config = await resolveConfig({
       browser: {
@@ -1629,7 +1804,7 @@ describe('browserContextFactory', () => {
   it('applies the storage state to isolated browser contexts', async () => {
     const browserContext = createMockBrowserContext();
     const browser = createMockBrowser(browserContext);
-    (playwright.chromium.launch as any).mockResolvedValue(browser);
+    vi.mocked(playwright.chromium.launch).mockResolvedValue(browser);
 
     const config = await resolveConfig({
       browser: {

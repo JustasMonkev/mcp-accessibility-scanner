@@ -393,6 +393,16 @@ describe('Utils', () => {
       expect(result.output).toContain('Card 150');
     });
 
+    it('keeps repeated descendants within a cursor-pointer target', () => {
+      const snapshot = [
+        '- listitem "Card" [ref=card] [cursor=pointer]:',
+        ...Array.from({ length: 150 }, (_, index) => `  - text: Detail ${index + 1}`),
+      ].join('\n');
+
+      expect(compressAriaSnapshot(snapshot)).toEqual({ output: snapshot, removed: 0 });
+      expect(compressAriaSnapshot(snapshot.replace('[ref=card] ', '')).removed).toBe(140);
+    });
+
     it('should keep repeated non-interactive subtrees that contain interactive descendants', () => {
       const snapshot = Array.from({ length: 150 }, (_, index) => [
         '- listitem:',

@@ -386,7 +386,7 @@ const auditKeyboard = defineTabTool({
       response.deleteFileOnError(reportPath);
     const getActiveElementInfo = async (): Promise<FocusPoint> => {
       return await tab.page.evaluate(({ checkTargetSize, checkFocusObscured, minTargetSize, maxNeighborTargets, maxTextLength }) => {
-        const current = document.activeElement as HTMLElement | null;
+        const current = document.activeElement;
         const scrollX = window.scrollX;
         const scrollY = window.scrollY;
         if (!current) {

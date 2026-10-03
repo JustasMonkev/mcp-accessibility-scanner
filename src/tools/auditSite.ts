@@ -22,8 +22,6 @@ import {
   type AxeViolation,
 } from './axe.js';
 
-type CrawlStrategy = 'links' | 'nav' | 'sitemap' | 'provided';
-
 type CrawlItem = {
   url: string;
   cookieUrl: string;
@@ -888,7 +886,7 @@ const auditSite = defineTabTool({
       version: 'v2',
       metadata: {
         startUrl: startUrl.toString(),
-        strategy: params.strategy as CrawlStrategy,
+        strategy: params.strategy,
         options: {
           maxPages: params.maxPages,
           maxDepth: params.maxDepth,
