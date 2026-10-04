@@ -17,7 +17,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { pathToFileURL } from 'node:url';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chromium } from 'playwright';
 import type { Browser } from 'playwright';
 import type { JSONSchema7 } from 'json-schema';
@@ -26,7 +27,7 @@ import { toMcpTool } from '../src/mcp/tool.js';
 import * as axe from '../src/tools/axe.js';
 import { Tab } from '../src/tab.js';
 import { Response } from '../src/response.js';
-import { resolveConfig } from '../src/config.js';
+import { outputFile, resolveConfig } from '../src/config.js';
 import type { Context } from '../src/context.js';
 
 describe('Snapshot Tools', () => {
@@ -268,6 +269,154 @@ describe('Snapshot Tools', () => {
 
       expect(matched.addResult).toHaveBeenCalledExactlyOnceWith('Found 1 match for "Submit":\n\n- button "Submit"');
       expect(unmatched.addResult).toHaveBeenCalledExactlyOnceWith('No matches found for "Cancel".');
+    });
+  });
+
+  describe('browser_find saved artifacts', () => {
+    const snapshot = Array.from({ length: 17 }, (_, index) =>
+      `- button "${index % 8 === 0 ? 'Target' : 'Other'} ${index}" [ref=e${index}]`).join('\n');
+    let outputDir: string;
+    let context: Context;
+    let response: Response;
+
+    beforeEach(async () => {
+      outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'find-artifact-'));
+      const config = await resolveConfig({ outputDir });
+      const tab = {
+        modalStates: () => [],
+        page: { ariaSnapshot: async () => snapshot },
+        context: { outputFile: (name: string, exclusive: boolean) => outputFile(config, name, exclusive) },
+      };
+      // SAFETY: browser_find uses this tab's snapshot and outputFile; Response uses config and the empty download-error queue.
+      context = { config, currentTabOrDie: () => tab, takeDownloadErrors: () => [] } as Context;
+      response = new Response(context, 'browser_find', {});
+    });
+
+    afterEach(async () => {
+      vi.restoreAllMocks();
+      await fs.promises.rm(outputDir, { recursive: true, force: true });
+    });
+
+    it('exposes filename as an optional string', () => {
+      const schema = toMcpTool(findTool.schema).inputSchema;
+      expect(schema.properties?.filename).toMatchObject({ type: 'string' });
+      expect(schema.required ?? []).not.toContain('filename');
+      expect(findTool.schema.inputSchema.parse({ text: 'Target', filename: 'find.txt' }))
+          .toEqual({ text: 'Target', filename: 'find.txt' });
+      expect(() => findTool.schema.inputSchema.parse({ text: 'Target', filename: 1 })).toThrow();
+    });
+
+    it.each([
+      { text: 'target' },
+      { regex: '/target/i' },
+      { text: 'Target', maxResults: 2 },
+      { regex: '/target/i', maxResults: 2 },
+      { text: 'Target', maxResults: 3 },
+      { text: 'Target', maxResults: 4 },
+      { text: 'Missing', maxResults: 1 },
+      { regex: '/Missing/i' },
+    ])('saves the inline result without returning its contents for %j', async params => {
+      const inline = new Response(context, 'browser_find', params);
+      await findTool.handle(context, findTool.schema.inputSchema.parse(params), inline);
+      await findTool.handle(context, findTool.schema.inputSchema.parse({ ...params, filename: 'find.txt' }), response);
+
+      const file = path.join(outputDir, 'find.txt');
+      const saved = await fs.promises.readFile(file, 'utf8');
+      expect(saved).toBe(inline.result());
+      if (params.maxResults === 2) {
+        expect(saved).toContain('Found 3 matches');
+        expect(saved).toContain('(showing first 2)');
+        expect(saved).toContain('Target 8');
+        expect(saved).not.toContain('Target 16');
+      }
+      if (params.text === 'Missing')
+        expect(saved).toBe('No matches found for "Missing".');
+      expect(response.result()).toBe(`Saved find results as ${file}`);
+      expect(response.serialize().content).toEqual([
+        { type: 'text', text: `### Result\nSaved find results as ${file}\n` },
+        expect.objectContaining({ type: 'resource_link', uri: pathToFileURL(file).href, name: 'find.txt', mimeType: 'text/plain' }),
+      ]);
+    });
+
+    it('keeps data URL payloads truncated in saved snippets', async () => {
+      const tab = context.currentTabOrDie();
+      const payload = 'A'.repeat(1000);
+      vi.spyOn(tab.page, 'ariaSnapshot').mockResolvedValue(`- link "Logo" [ref=e1]:\n  - /url: data:image/png;base64,${payload}`);
+      await findTool.handle(context, { text: 'Logo', filename: 'find.txt' }, response);
+      const saved = await fs.promises.readFile(path.join(outputDir, 'find.txt'), 'utf8');
+      expect(saved).toContain('[ref=e1]');
+      expect(saved).toContain('data:image/png;base64,');
+      expect(saved).not.toContain(payload);
+    });
+
+    it.each(['relative', 'absolute'] as const)('formats the saved path as %s while keeping the resource URI absolute', async filePaths => {
+      context.config.filePaths = filePaths;
+      await findTool.handle(context, { text: 'Target', filename: 'find.txt' }, response);
+      const file = path.join(outputDir, 'find.txt');
+      const display = filePaths === 'relative' ? path.relative(process.cwd(), file) : file;
+      expect(response.result()).toBe(`Saved find results as ${display}`);
+      expect(response.resourceLinks()[0].uri).toBe(pathToFileURL(file).href);
+      expect(await fs.promises.readFile(file, 'utf8')).toContain('Found 3 matches');
+    });
+
+    it('does not reserve a file or add a link without filename', async () => {
+      const reserve = vi.spyOn(context.currentTabOrDie().context, 'outputFile');
+      await findTool.handle(context, { text: 'Target' }, response);
+      expect(response.result()).toContain('Found 3 matches');
+      expect(reserve).not.toHaveBeenCalled();
+      expect(response.resourceLinks()).toEqual([]);
+      expect(await fs.promises.readdir(outputDir)).toEqual([]);
+    });
+
+    it('contains sanitized paths in the output directory and rejects collisions', async () => {
+      await findTool.handle(context, { text: 'Target', filename: '../find.txt' }, response);
+      const [link] = response.resourceLinks();
+      expect(link.uri).toBe(pathToFileURL(path.join(outputDir, '-find.txt')).href);
+      await expect(findTool.handle(context, { text: 'Target', filename: '-find.txt' }, new Response(context, 'browser_find', {})))
+          .rejects.toThrow('Output file already exists');
+      expect(await fs.promises.readdir(outputDir)).toEqual(['-find.txt']);
+    });
+
+    it.each(['find.txt', 'missing.txt'])('never overwrites an existing %s, even for no matches', async filename => {
+      const file = path.join(outputDir, filename);
+      await fs.promises.writeFile(file, 'keep me');
+      await expect(findTool.handle(context, { text: filename === 'find.txt' ? 'Target' : 'Missing', filename }, response))
+          .rejects.toThrow('Output file already exists');
+      await response.cleanupFilesOnError();
+      expect(await fs.promises.readFile(file, 'utf8')).toBe('keep me');
+      expect(response.result()).toBe('');
+      expect(response.resourceLinks()).toEqual([]);
+    });
+
+    it.each(['', ' ', 'CON.txt', 'NUL', 'find.', 'find '])('rejects invalid filename %j without reporting success', async filename => {
+      await expect(findTool.handle(context, { text: 'Target', filename }, response)).rejects.toThrow('Invalid output filename');
+      expect(await fs.promises.readdir(outputDir)).toEqual([]);
+      expect(response.result()).toBe('');
+      expect(response.resourceLinks()).toEqual([]);
+    });
+
+    it('propagates output-directory failures without linking an artifact', async () => {
+      await fs.promises.rm(outputDir, { recursive: true });
+      await fs.promises.writeFile(outputDir, 'not a directory');
+      await expect(findTool.handle(context, { text: 'Target', filename: 'find.txt' }, response)).rejects.toThrow();
+      expect(await fs.promises.readFile(outputDir, 'utf8')).toBe('not a directory');
+      expect(response.result()).toBe('');
+      expect(response.resourceLinks()).toEqual([]);
+    });
+
+    it('propagates a partial write failure and lets backend cleanup remove the reservation', async () => {
+      const writeFile = fs.promises.writeFile.bind(fs.promises);
+      vi.spyOn(fs.promises, 'writeFile').mockImplementationOnce(async file => {
+        await writeFile(file, 'partial');
+        throw new Error('disk full');
+      });
+      await expect(findTool.handle(context, { text: 'Target', filename: 'find.txt' }, response)).rejects.toThrow('disk full');
+      expect(response.result()).toBe('');
+      expect(response.resourceLinks()).toEqual([]);
+      await response.cleanupFilesOnError();
+      expect(await fs.promises.readdir(outputDir)).toEqual([]);
+      await findTool.handle(context, { text: 'Target', filename: 'find.txt' }, response);
+      expect(await fs.promises.readFile(path.join(outputDir, 'find.txt'), 'utf8')).toContain('Found 3 matches');
     });
   });
 
