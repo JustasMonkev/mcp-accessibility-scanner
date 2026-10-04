@@ -287,7 +287,7 @@ For remote HTTP access, configure the TLS reverse proxy explicitly. For example,
 
 The server does not trust `Forwarded` or `X-Forwarded-*` to bypass its checks. Preserving the public `Host` or HTTPS `Origin` upstream returns `403`, even with a valid bearer token.
 
-Caller-supplied screenshot, PDF, scan-page-matrix, and audit report filenames use a no-clobber policy: an existing file causes the tool call to fail instead of being overwritten. Windows-reserved basenames and names ending in a dot or space are rejected on every platform so configured names behave consistently across hosts.
+Caller-supplied screenshot, PDF, find-result, scan-page-matrix, and audit report filenames use a no-clobber policy: an existing file causes the tool call to fail instead of being overwritten. Windows-reserved basenames and names ending in a dot or space are rejected on every platform so configured names behave consistently across hosts.
 
 Failed download saves are reported as tool errors in the current or next response, including after the tab closes; failed entries do not advertise a saved file or an ongoing download. The server retains up to 20 bounded error messages between responses and reports any omitted count. Full Chromium-family browsers on Playwright 1.63.0 have [verified native crashes after persistent-profile relaunch](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#persistent-profile-downloads-230). Error reporting does not fix that native crash. The explicit `--isolated` control passed, but does not preserve a profile between launches; use recorded storage state when needed for authentication. Existing profiles and browser defaults are preserved.
 
@@ -590,9 +590,11 @@ AI snapshots mark a visually present subtree excluded from accessibility queries
 
 #### `browser_find`
 Search the current page accessibility snapshot without returning the full snapshot.
-- Parameters: `text` (case-insensitive substring) or `regex` (regular expression, supports `/pattern/flags`), `maxResults` (optional positive integer; defaults to all matches)
+- Parameters: `text` (case-insensitive substring) or `regex` (regular expression, supports `/pattern/flags`), `maxResults` (optional positive integer; defaults to all matches), `filename` (optional)
 - Returns matching snapshot lines with surrounding context, shown under their path from the root of the tree; `...` marks truncated off-path context.
 - `maxResults` selects the first matching lines before building context windows and preserves their ancestor paths. Context may include additional matching lines. When truncated, the header reports the total match count and `(showing first Y)`.
+- With `filename`, saves the same text (including no-match messages and total/truncation headers) under the same `maxResults` limit. Returns `Saved find results as <path>` and a `text/plain` resource link instead of inline search results. Without `filename`, the response is unchanged.
+- Filenames follow this server's artifact policy: sanitized names contained in the configured output directory, with existing files rejected. Unlike upstream Playwright MCP, paths are not resolved against the workspace root.
 
 #### `browser_click`
 Perform click on a web page element.

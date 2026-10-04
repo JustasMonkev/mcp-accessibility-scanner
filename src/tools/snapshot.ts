@@ -15,6 +15,7 @@
  */
 
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import RE2 from 're2';
 import { z } from 'zod';
 import { defineTabTool, defineTool } from './tool.js';
@@ -65,7 +66,8 @@ const snapshotSchema = z.object({
 const findSchema = z.object({
   text: z.string().optional().describe('Plain text to search for in the page snapshot (case-insensitive substring match). Provide either text or regex, not both.'),
   regex: z.string().optional().refine(value => !value || isValidRegex(value), { message: 'Invalid regular expression' }).describe('Regular expression to search for in the page snapshot. Matching is case-sensitive by default; wrap the pattern in slashes to add flags, e.g. "/error/i" for case-insensitive. Provide either text or regex, not both.'),
-  maxResults: z.number().int().min(1).optional().describe('Maximum number of matching lines to return. Must be a positive integer. Defaults to returning all matches.'),
+  maxResults: z.number().int().min(1).optional().describe('Maximum number of matching lines to return inline or save to a file. Must be a positive integer. Defaults to returning all matches.'),
+  filename: z.string().optional().describe('Save results to this filename in the configured output directory instead of returning them inline. Existing files are never overwritten. The same maxResults limit applies.'),
 }).superRefine((params, context) => {
   if (!params.text && !params.regex)
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Provide either "text" or "regex" to search for.' });
@@ -373,7 +375,7 @@ const find = defineTabTool({
     }
 
     if (!matchedLines.length) {
-      response.addResult(`No matches found for ${query}.`);
+      await writeFindResult(tab, params.filename, response, `No matches found for ${query}.`);
       return;
     }
 
@@ -416,9 +418,21 @@ const find = defineTabTool({
     const header = matchesToRender.length < totalMatches
       ? `Found ${totalMatches} ${matchWord} for ${query} (showing first ${matchesToRender.length}):`
       : `Found ${totalMatches} ${matchWord} for ${query}:`;
-    response.addResult(`${header}\n\n${snippets.join('\n\n----\n\n')}`);
+    await writeFindResult(tab, params.filename, response, `${header}\n\n${snippets.join('\n\n----\n\n')}`);
   },
 });
+
+async function writeFindResult(tab: Tab, filename: string | undefined, response: Response, result: string) {
+  if (filename === undefined) {
+    response.addResult(result);
+    return;
+  }
+  const file = await tab.context.outputFile(filename, true);
+  response.deleteFileOnError(file);
+  await fs.promises.writeFile(file, result, 'utf-8');
+  response.addFileResourceLink(file, { title: 'Find results', mimeType: 'text/plain' });
+  response.addResult(`Saved find results as ${response.formatFilePath(file)}`);
+}
 
 function compileRegex(source: string): { regex: RE2, display: string } {
   const literal = /^\/(.*)\/([a-z]*)$/.exec(source);
