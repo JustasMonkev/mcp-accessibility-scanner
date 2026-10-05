@@ -163,11 +163,23 @@ describe('extension protocol v2', () => {
     const connectPage = new URL(`chrome-extension://${EXTENSION_ID}/connect.html`);
     connectPage.searchParams.set('mcpRelayUrl', 'ws://127.0.0.1/current');
     const connectPagePrefix = connectPage.toString();
+    // Like Chrome, debugger commands fail on a tab the debugger is not attached to.
+    const attachedTabs = new Set<number>();
     const sendCommand = vi.fn(async (method: string, params: any[]) => {
       if (method === 'chrome.tabs.create')
         return { id: 8, url: params[0].url };
-      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo') {
+      if (method === 'chrome.debugger.attach') {
+        attachedTabs.add(params[0].tabId);
+        return {};
+      }
+      if (method === 'chrome.debugger.detach') {
+        attachedTabs.delete(params[0].tabId);
+        return {};
+      }
+      if (method === 'chrome.debugger.sendCommand') {
         const tabId = params[0].tabId;
+        if (!attachedTabs.has(tabId))
+          throw new Error(`Debugger is not attached to the tab with id: ${tabId}`);
         const url = tabId === 7 ? `${connectPagePrefix}&client=current` : tabId === 10 ? 'https://example.com' : undefined;
         return { targetInfo: { targetId: `target-${tabId}`, type: 'page', url } };
       }
@@ -189,6 +201,10 @@ describe('extension protocol v2', () => {
     expect(sendCommand).toHaveBeenCalledWith('chrome.tabs.remove', [7]);
     expect(sendCommand).not.toHaveBeenCalledWith('chrome.tabs.remove', [9]);
     expect(sendCommand).not.toHaveBeenCalledWith('chrome.tabs.remove', [10]);
+    // Seeds are probed, never auto-attached: another relay's seed is left
+    // alone, and the one that navigated away is detached again.
+    expect(sendCommand).not.toHaveBeenCalledWith('chrome.debugger.attach', [{ tabId: 9 }, '1.3']);
+    expect([...attachedTabs]).toEqual([8]);
   });
 
   it('serializes concurrent auto-attach state changes', async () => {

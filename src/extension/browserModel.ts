@@ -203,9 +203,23 @@ export class BrowserModel {
       await Promise.allSettled([...this._knownTabs]
           .filter(([tabId, knownTab]) => tabId !== tab.id && knownTab.url?.startsWith(connectPagePrefix))
           .map(async ([tabId]) => {
-            const result = await this._sendDebuggerCommand({ tabId }, 'Target.getTargetInfo', undefined);
-            if (result?.targetInfo?.url?.startsWith(connectPagePrefix))
-              await this._sendToExtension('chrome.tabs.remove', [tabId]);
+            // Auto-attach covers only MCP-created tabs, so the seed has no
+            // debugger. Attach just long enough to read its live URL, without
+            // a session, so the page is never exposed to the CDP client.
+            const probing = !this._tabSessions.has(tabId);
+            if (probing)
+              await this._sendToExtension('chrome.debugger.attach', [{ tabId }, '1.3']);
+            let removed = false;
+            try {
+              const result = await this._sendDebuggerCommand({ tabId }, 'Target.getTargetInfo', undefined);
+              if (result?.targetInfo?.url?.startsWith(connectPagePrefix)) {
+                await this._sendToExtension('chrome.tabs.remove', [tabId]);
+                removed = true;
+              }
+            } finally {
+              if (probing && !removed)
+                await this._sendToExtension('chrome.debugger.detach', [{ tabId }]).catch(() => {});
+            }
           }));
     }
     return { targetId: tabSession.targetInfo?.targetId };
