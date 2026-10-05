@@ -254,9 +254,7 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
     launchOptions.chromiumSandbox = cliOptions.sandbox;
 
   if (cliOptions.proxyServer) {
-    launchOptions.proxy = {
-      server: cliOptions.proxyServer
-    };
+    launchOptions.proxy = proxySettingsFromString(cliOptions.proxyServer);
     if (cliOptions.proxyBypass)
       launchOptions.proxy.bypass = cliOptions.proxyBypass;
   }
@@ -578,6 +576,36 @@ function parseFilePaths(value: unknown): Config['filePaths'] {
   if (value === undefined || value === 'relative' || value === 'absolute')
     return value;
   throw new Error('filePaths must be "relative" or "absolute".');
+}
+
+// Moves credentials from the proxy string, e.g. "http://user:pass@myproxy:3128", into explicit fields.
+function proxySettingsFromString(proxy: string): NonNullable<LaunchOptions['proxy']> {
+  try {
+    // Browsers allow to specify proxy without a protocol, defaulting to http.
+    const trimmed = proxy.trim();
+    const url = new URL(/^\w+:\/\//.test(trimmed) ? trimmed : 'http://' + trimmed);
+    if (url.username || url.password) {
+      return {
+        server: url.protocol + '//' + url.host,
+        username: decodeProxyCredential(url.username),
+        password: decodeProxyCredential(url.password),
+      };
+    }
+  } catch {
+  }
+  return { server: proxy };
+}
+
+// Decodes each run of valid escapes on its own, so a literal '%' that does not
+// start an escape is kept as typed without leaving other escapes encoded.
+function decodeProxyCredential(value: string): string {
+  return value.replace(/(?:%[0-9a-fA-F]{2})+/g, escapes => {
+    try {
+      return decodeURIComponent(escapes);
+    } catch {
+      return escapes;
+    }
+  });
 }
 
 function envToString(value: string | undefined): string | undefined {
