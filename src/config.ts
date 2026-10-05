@@ -587,13 +587,22 @@ function proxySettingsFromString(proxy: string): NonNullable<LaunchOptions['prox
     if (url.username || url.password) {
       return {
         server: url.protocol + '//' + url.host,
-        username: decodeURIComponent(url.username),
-        password: decodeURIComponent(url.password),
+        username: decodeProxyCredential(url.username),
+        password: decodeProxyCredential(url.password),
       };
     }
   } catch {
   }
   return { server: proxy };
+}
+
+// A literal '%' that does not start an escape is kept as typed.
+function decodeProxyCredential(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function envToString(value: string | undefined): string | undefined {
