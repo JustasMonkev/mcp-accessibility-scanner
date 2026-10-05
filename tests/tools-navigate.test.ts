@@ -65,7 +65,7 @@ describe('Navigate Tools', () => {
       await navigateTool.handle(mockContext, { url: 'https://example.com' }, response);
 
       expect(mockContext.ensureTab).toHaveBeenCalled();
-      expect(mockTab.navigate).toHaveBeenCalledWith('https://example.com');
+      expect(mockTab.navigate).toHaveBeenCalledWith('https://example.com', { returnOnDialog: true });
     });
 
     it('should include snapshot after navigation', async () => {

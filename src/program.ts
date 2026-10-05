@@ -18,18 +18,21 @@ import readline from 'node:readline';
 
 import { program, Option } from 'commander';
 import * as mcpServer from './mcp/server.js';
-import { commaSeparatedList, resolveCLIConfig, semicolonSeparatedList } from './config.js';
+import { commaSeparatedList, resolveCLIConfig, semicolonSeparatedList, uploadDirectoryList } from './config.js';
 import { packageJSON } from './utils/package.js';
 import { Context } from './context.js';
-import { contextFactory } from './browserContextFactory.js';
+import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported, contextFactory, PersistentContextFactory, persistentProfileConflictRemedy } from './browserContextFactory.js';
 import { ProxyBackend } from './mcp/proxyBackend.js';
+import { toolNameList } from './mcp/toolPolicy.js';
+import { SharedClientSlot } from './mcp/sharedClientSlot.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
+import { BrowserSessionRegistry } from './browserSessions.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
 import { filteredTools, serverInstructions } from './tools.js';
 import { logUnhandledError } from './utils/log.js';
 
 import { runVSCodeTools } from './vscode/host.js';
-import type { MCPProvider } from './mcp/proxyBackend.js';
+import type { MCPProvider, SharedProxySelection } from './mcp/proxyBackend.js';
 import type { FullConfig } from './config.js';
 import type { BrowserContextFactory } from './browserContextFactory.js';
 
@@ -39,21 +42,66 @@ type ProgramContext = {
   extensionContextFactory: ExtensionContextFactory;
 };
 
-async function resolveProgramContext(options: Record<string, unknown>): Promise<ProgramContext> {
+async function resolveProgramContext(options: Record<string, unknown>, extensionProviderReachable?: boolean): Promise<ProgramContext> {
   const config = await resolveCLIConfig(options);
+  // The extension factory — the only profileDirName consumer — is selected by
+  // --extension, or reachable via the --connect-tool 'extension' provider; VS
+  // Code branches before that provider and the interactive subcommand picks
+  // its own factory, so those callers pass reachability explicitly.
+  if (config.browser.profileDirName) {
+    const reachable = extensionProviderReachable ?? (options.extension || (options.connectTool && !options.vscode));
+    if (!reachable)
+      throw new Error('--profile-dir-name is only supported in extension mode (--extension or --connect-tool).');
+    if (!config.browser.userDataDir)
+      throw new Error('--profile-dir-name requires --user-data-dir to name the profile directory inside it.');
+    if (config.browser.contextOptions?.storageState && !options.extension)
+      throw new Error('--profile-dir-name cannot reach the extension provider with a storage state: the --connect-tool extension provider refuses storage states at switch time. Drop the storage state, or run --extension without it.');
+  }
+  const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath, config.browser.profileDirName);
+  // --extension runs every tool through the extension factory, not the one
+  // contextFactory() builds, so validate the factory that will actually create
+  // the context. Checked first because contextFactory() would otherwise
+  // recommend --isolated, which does not help here.
+  if (options.extension)
+    assertStorageStateSupported(config, extensionContextFactory, '--extension attaches to the browser you are already running and uses the context it already has; --isolated does not change that. Drop the storage state and sign in in that browser before auditing.');
   const browserContextFactory = contextFactory(config);
-  const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath);
+  // Provider-switching modes with a persistent default provider must reject
+  // the profile conflict at startup: the factory itself only rejects the
+  // combination lazily, on its first browser operation, while the extension
+  // provider refuses the storage state at switch time — so the server would
+  // start advertising two providers and neither could ever create a context.
+  // (Other default providers ignore --user-data-dir, and the extension leg
+  // alone validates at switch time instead.)
+  if ((options.connectTool || options.vscode) && browserContextFactory instanceof PersistentContextFactory)
+    assertStorageStateDoesNotResetUserProfile(config, persistentProfileConflictRemedy);
   return { config, browserContextFactory, extensionContextFactory };
 }
 
 async function startMCPServer(config: FullConfig, browserContextFactory: BrowserContextFactory) {
+  // One browser-session handle registry for every backend this factory mints:
+  // handshake-free (MCP 2026-07-28) HTTP requests are each served by a fresh
+  // backend, and a browserSessionId minted in one request must resolve in the
+  // next. Stateful (stdio and v1 HTTP session) backends share it too — handles
+  // are already opaque bearer tokens scoped to this server process.
+  const sessionRegistry = new BrowserSessionRegistry();
   const factory: mcpServer.ServerBackendFactory = {
     name: 'Playwright',
     title: 'Accessibility Scanner',
     nameInConfig: 'playwright',
     version: packageJSON.version,
-    instructions: serverInstructions,
-    create: () => new BrowserServerBackend(config, browserContextFactory)
+    instructions: serverInstructions(config),
+    // The tool list is fixed per process (filteredTools(config) never changes
+    // at runtime), so 2026-07-28 clients may cache it for an hour. Scope is
+    // `private`: the list depends on this server's local configuration
+    // (--caps and connection mode), so it must not be served from a shared
+    // cache keyed only on the URL.
+    toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
+    create: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry),
+    // Handshake-free HTTP serves each request with a throwaway backend whose
+    // default context is disposed when the response ends; flagging it
+    // ephemeral gives it a disposable profile in default persistent mode, so
+    // parallel stateless requests stop contending for the one stable profile.
+    createStateless: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry, { ephemeralDefaultContext: true })
   };
   await mcpServer.start(factory, config.server);
 }
@@ -70,10 +118,13 @@ function configureBaseProgram() {
       .version('Version ' + packageJSON.version)
       .name(packageJSON.name)
       .option('--allowed-origins <origins>', 'semicolon-separated list of origins to allow the browser to request. Default is to allow all.', semicolonSeparatedList)
+      .option('--allowed-upload-dirs <dirs>', 'semicolon-separated list of directories that browser_file_upload and browser_drop may read files from. An empty list denies all file uploads and drops.', uploadDirectoryList)
       .option('--blocked-origins <origins>', 'semicolon-separated list of origins to block the browser from requesting. Blocklist is evaluated before allowlist. If used without the allowlist, requests not matching the blocklist are still allowed.', semicolonSeparatedList)
       .option('--block-service-workers', 'block service workers')
       .option('--browser <browser>', 'browser or chrome channel to use, possible values: chrome, firefox, webkit, msedge.')
-      .option('--caps <caps>', 'comma-separated list of additional capabilities to enable, possible values: vision, pdf.', commaSeparatedList)
+      .option('--allowed-tools <tools>', 'comma-separated exact tool names to enable in addition to core and capability tools (not a whitelist).', toolNameList)
+      .option('--blocked-tools <tools>', 'comma-separated exact tool names to hide and reject; takes precedence over --allowed-tools.', toolNameList)
+      .option('--caps <caps>', 'comma-separated list of additional capabilities to enable, possible values: vision, pdf, verify, devtools, install (allows browser downloads).', commaSeparatedList)
       .option('--cdp-launch-command <command>', 'launch a desktop app command and connect to its CDP endpoint.')
       .option('--cdp-launch-args <args>', 'comma-separated arguments passed to the CDP launch command.', commaSeparatedList)
       .option('--cdp-launch-cwd <path>', 'working directory for the CDP launch command.')
@@ -90,21 +141,26 @@ function configureBaseProgram() {
       .option('--host <host>', 'host to bind server to. Default is localhost. Use 0.0.0.0 to bind to all interfaces.')
       .option('--ignore-https-errors', 'ignore https errors')
       .option('--isolated', 'keep the browser profile in memory, do not save it to disk.')
-      .option('--image-responses <mode>', 'whether to send image responses to the client. Can be "allow" or "omit", Defaults to "allow".')
+      .option('--image-responses <mode>', 'image response policy: "allow" (default), "omit", or "only". "only" omits text from successful responses with images; errors, browser lifecycle notices, structured content and resource links are preserved. "auto" is an alias for "allow".')
       .option('--mobile', 'emulate a generic mobile device (Pixel 10 for Chromium, iPhone 17 for WebKit). Cannot be combined with --device, CDP attach/launch modes, remote browser endpoints, or --extension.')
       .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
       .option('--output-dir <path>', 'path to the directory for output files.')
+      .option('--file-paths <relative|absolute>', 'render output paths relative to the server working directory or as absolute paths; omitted preserves legacy rendering.')
       .option('--port <port>', 'port to listen on for MCP Streamable HTTP transport.')
+      .option('--profile-dir-name <name>', 'name of the Chrome profile directory to connect to with --extension, for example "Profile 1". Requires --user-data-dir. Defaults to the last-used profile that has the extension installed.')
       .option('--proxy-bypass <bypass>', 'comma-separated domains to bypass proxy, for example ".com,chromium.org,.domain.com"')
-      .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128" or "socks5://myproxy:8080"')
+      .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128", "http://user:password@myproxy:3128" or "socks5://myproxy:8080"')
       .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')
       .option('--save-trace', 'Whether to save the Playwright Trace of the session into the output directory.')
-      .option('--storage-state <path>', 'path to the storage state file for isolated sessions.')
+      .option('--snapshot-boxes', 'include each element\'s bounding box as [box=x,y,width,height] in snapshots. Coordinates are viewport-relative, in CSS pixels.')
+      .option('--storage-state <path>', 'path to the storage state file for a fresh context; existing CDP/VS Code contexts and --extension reject imports. Use --isolated with CDP.')
       .option('--user-agent <ua string>', 'specify user agent string')
       .option('--user-data-dir <path>', 'path to the user data directory. If not specified, a temporary directory will be created.')
       .option('--viewport-size <size>', 'specify browser viewport size in pixels, for example "1280, 720"')
       .option('--navigation-timeout <ms>', 'maximum time in milliseconds for page navigation. Defaults to 60000ms (60 seconds).', parseInt)
       .option('--default-timeout <ms>', 'default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).', parseInt)
+      .option('--timeout-settle <ms>', 'how long to wait after each action for triggered work to settle, in milliseconds. Defaults to 500ms.', parseInt)
+      .option('--timeout-idle <ms>', 'release the default browser context after inactivity, in milliseconds. Defaults to 0 (disabled).', value => value.trim() ? Number(value) : NaN)
       .addOption(new Option('--connect-tool', 'Allow to switch between different browser connection methods.').hideHelp())
       .addOption(new Option('--vscode', 'VS Code tools.').hideHelp());
 
@@ -113,46 +169,92 @@ function configureBaseProgram() {
 
 configureBaseProgram()
     .action(async options => {
-      setupExitWatchdog();
+      // Cleanups the proxy modes register for their process-scoped switched
+      // clients; they run before the contexts are disposed so a switched
+      // provider (e.g. a spawned VS Code child) shuts down deliberately
+      // instead of relying on process teardown.
+      const exitCleanups: Array<() => Promise<void>> = [];
+      setupExitWatchdog(async () => {
+        for (const cleanup of exitCleanups)
+          await cleanup().catch(logUnhandledError);
+        await Context.disposeAll();
+      });
 
       const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(options);
 
       if (options.extension) {
+        // Shared for the same reason as in startMCPServer (the extension
+        // factory vetoes browser_session_open, but the veto itself must
+        // still reach handshake-free HTTP requests consistently).
+        const sessionRegistry = new BrowserSessionRegistry();
         const serverBackendFactory: mcpServer.ServerBackendFactory = {
           name: 'Playwright w/ extension',
           title: 'Accessibility Scanner (browser extension)',
           nameInConfig: 'playwright-extension',
           version: packageJSON.version,
-          instructions: serverInstructions,
-          create: () => new BrowserServerBackend(config, extensionContextFactory)
+          instructions: serverInstructions(config),
+          // Static per process, same rationale as in startMCPServer above.
+          toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
+          create: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry),
+          createStateless: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry, { ephemeralDefaultContext: true }),
         };
         await mcpServer.start(serverBackendFactory, config.server);
         return;
       }
 
       if (options.vscode) {
-        await runVSCodeTools(config);
+        await runVSCodeTools(config, cleanup => exitCleanups.push(cleanup));
         return;
       }
 
       if (options.connectTool) {
-        const providers: MCPProvider[] = [
+        // Process-scoped, like startMCPServer's: over stateless HTTP every
+        // handshake-free POST builds a fresh proxy with a fresh inner
+        // backend, and a browserSessionId minted in one request must resolve
+        // in the next instead of dying with the response. Shared between the
+        // two providers as well, so a handle opened under one provider can
+        // still be closed after a switch (each session's Context keeps the
+        // factory it was created with).
+        const sessionRegistry = new BrowserSessionRegistry();
+        // A stateless per-request proxy flags its inner default context
+        // ephemeral (disposable profile, see startMCPServer); stateful
+        // proxies keep the stable profile.
+        const makeProviders = (ephemeralDefaultContext: boolean): MCPProvider[] => [
           {
             name: 'default',
             description: 'Starts standalone browser',
-            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, browserContextFactory)),
+            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, browserContextFactory, sessionRegistry, { ephemeralDefaultContext })),
           },
           {
             name: 'extension',
             description: 'Connect to a browser using the Playwright MCP extension',
-            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, extensionContextFactory)),
+            // Runs before the default provider is torn down, so a rejected
+            // switch keeps the session on the provider that works.
+            validate: () => assertStorageStateSupported(config, extensionContextFactory, 'The "extension" method works through the browser you are already running and uses the context it already has. Stay on the "default" method, or restart without the storage state and sign in in that browser.'),
+            connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, extensionContextFactory, sessionRegistry, { ephemeralDefaultContext })),
           },
         ];
+        // Process-scoped browser_connect selection for handshake-free HTTP:
+        // each such POST serves with a throwaway ProxyBackend, so a switch
+        // stored only there would report success and silently revert to the
+        // default provider on the next request. The shared client connects
+        // through the stateful-flavored providers — it outlives any single
+        // response, so it must not take the ephemeral per-request default
+        // context.
+        const sharedSelection: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders(false) };
+        exitCleanups.push(async () => {
+          // dispose(), not replace(undefined): shutdown must close the
+          // switched client even while in-flight requests still hold leases
+          // on it — nothing outlives the process, and waiting for a drain
+          // could stall exit forever.
+          await sharedSelection.slot.dispose();
+        });
         const factory: mcpServer.ServerBackendFactory = {
           name: 'Playwright w/ switch',
           nameInConfig: 'playwright-switch',
           version: packageJSON.version,
-          create: () => new ProxyBackend(providers),
+          create: () => new ProxyBackend(makeProviders(false), undefined, config),
+          createStateless: () => new ProxyBackend(makeProviders(true), sharedSelection, config),
         };
         await mcpServer.start(factory, config.server);
         return;
@@ -179,13 +281,14 @@ program
     .description('Start an interactive REPL for manual tool execution')
     .action(async () => {
       const parentOptions = program.opts();
-      const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(parentOptions);
+      const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(parentOptions, Boolean(parentOptions.extension));
+      if (config.imageResponses === 'only')
+        throw new Error('Interactive mode prints text only. Use --image-responses allow or omit instead of only.');
       const backend = new BrowserServerBackend(config, parentOptions.extension ? extensionContextFactory : browserContextFactory);
       const handleExit = setupExitWatchdog();
       await backend.initialize(
           { notifyToolListChanged: async () => {} },
           { name: 'interactive-cli', version: packageJSON.version },
-          [],
       );
 
       const rl = readline.createInterface({

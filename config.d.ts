@@ -25,8 +25,9 @@ export type ToolCapability =
   | 'files'
   | 'install'
   | 'testing'
-  | 'core-install'
+  | 'core-install' // Deprecated alias for 'install'; requires explicit opt-in.
   | 'core-tabs'
+  | 'devtools'
   | 'vision'
   | 'verify';
 
@@ -55,6 +56,13 @@ export type Config = {
      * Temporary directory is created by default.
      */
     userDataDir?: string;
+
+    /**
+     * Chrome profile directory name used in extension mode (for example
+     * "Default" or "Profile 1"); defaults to the last-used profile that
+     * has the extension installed.
+     */
+    profileDirName?: string;
 
     /**
      * Launch options passed to
@@ -104,6 +112,18 @@ export type Config = {
      * Remote endpoint to connect to an existing Playwright server.
      */
     remoteEndpoint?: string;
+
+    /**
+     * Directories that browser_file_upload and browser_drop may read files from.
+     * When unset (default), any absolute path is allowed; when set, upload
+     * canonical file paths must stay inside these directories. Restricted
+     * uploads accept regular files up to 50 MiB total per call. [] denies all;
+     * non-empty lists require macOS or Linux with /proc/self/fd available.
+     * Roots must exist and are canonicalized once at startup. null is invalid.
+     * blank entries are invalid. Also PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS or
+     * --allowed-upload-dirs (semicolon-separated; empty string means []).
+     */
+    allowedUploadDirs?: string[];
   },
 
   server?: {
@@ -116,6 +136,14 @@ export type Config = {
      * The host to bind the server to. Default is localhost. Use 0.0.0.0 to bind to all interfaces.
      */
     host?: string;
+
+    /**
+     * When set, HTTP transport requests must carry `Authorization: Bearer <token>`.
+     * Blank or malformed tokens are rejected. Requires a loopback listener;
+     * remote access must use a TLS reverse proxy. Also configurable through
+     * PLAYWRIGHT_MCP_AUTH_TOKEN.
+     */
+    authToken?: string;
   },
 
   /**
@@ -127,8 +155,15 @@ export type Config = {
    *   - 'wait': Wait and timing utilities.
    *   - 'files': File upload/download support.
    *   - 'install': Browser installation utilities.
+   *   - 'devtools': Browser recording utilities.
    */
   capabilities?: ToolCapability[];
+
+  /** Exact tool names enabled in addition to core and capability tools. Not a whitelist. */
+  allowedTools?: string[];
+
+  /** Exact tool names hidden and rejected on invocation. Takes precedence over allowedTools. */
+  blockedTools?: string[];
 
   /**
    * Run server that uses screenshots (Aria snapshots are used by default).
@@ -150,6 +185,12 @@ export type Config = {
    */
   outputDir?: string;
 
+  /**
+   * Render output paths relative to the server working directory or as absolute paths.
+   * Omit to preserve legacy rendering. Does not change file locations or resource URIs.
+   */
+  filePaths?: 'relative' | 'absolute';
+
   network?: {
     /**
      * List of origins to allow the browser to request. Default is to allow all. Origins matching both `allowedOrigins` and `blockedOrigins` will be blocked.
@@ -163,9 +204,19 @@ export type Config = {
   };
 
   /**
-   * Whether to send image responses to the client. Can be "allow", "omit", or "auto". Defaults to "auto", which sends images if the client can display them.
+   * Image response policy. Defaults to "allow"; "auto" is a legacy alias for "allow".
+   * "omit" excludes images. "only" omits text from successful responses containing images,
+   * but preserves errors, browser lifecycle notices, structured content and resource links. Responses without images keep text.
    */
-  imageResponses?: 'allow' | 'omit' | 'auto';
+  imageResponses?: 'allow' | 'omit' | 'auto' | 'only';
+
+  snapshot?: {
+    /**
+     * Include each element's bounding box as [box=x,y,width,height] in snapshots.
+     * Coordinates are viewport-relative CSS pixels.
+     */
+    boxes?: boolean;
+  };
 
   /**
    * Timeout settings for Playwright operations.
@@ -180,5 +231,16 @@ export type Config = {
      * Default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).
      */
     defaultTimeout?: number;
+
+    /**
+     * How long to wait after each action for triggered work to settle before responding. Defaults to 500ms.
+     */
+    settle?: number;
+
+    /**
+     * Release the default browser context after this many idle milliseconds. Zero (the default) disables it.
+     * Explicit browser sessions retain their separate idle TTL.
+     */
+    idle?: number;
   };
 };

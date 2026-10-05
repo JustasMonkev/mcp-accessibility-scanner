@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import type { Server } from '@modelcontextprotocol/server';
 import type { Config } from './config.js';
 import type { BrowserContext } from 'playwright';
 

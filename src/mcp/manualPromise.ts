@@ -54,6 +54,7 @@ export class ManualPromise<T = void> extends Promise<T> {
   }
 }
 
+/** @public */
 export class LongStandingScope {
   private _terminateError: Error | undefined;
   private _closeError: Error | undefined;
@@ -83,7 +84,7 @@ export class LongStandingScope {
   }
 
   async race<T>(promise: Promise<T> | Promise<T>[]): Promise<T> {
-    return this._race(Array.isArray(promise) ? promise : [promise], false) as Promise<T>;
+    return this._race(Array.isArray(promise) ? promise : [promise], false);
   }
 
   async safeRace<T>(promise: Promise<T>, defaultValue?: T): Promise<T> {

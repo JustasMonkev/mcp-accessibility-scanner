@@ -1,6 +1,6 @@
 {
 	"name": "mcp-accessibility-scanner",
-	"version": "2.0.17",
+	"version": "4.0.0",
 	"mcpName": "io.github.JustasMonkev/mcp-accessibility-scanner",
 	"description": "A Model Context Protocol (MCP) server for performing automated accessibility scans of web pages using Playwright and Axe-core",
 	"type": "module",
@@ -27,7 +27,7 @@
 	"scripts": {
 		"build": "tsc --project tsconfig.json",
 		"docker:build:multiarch": "docker buildx build --platform linux/amd64,linux/arm64 -t ${IMAGE:-ghcr.io/justasmonkev/mcp-accessibility-scanner}:latest -t ${IMAGE:-ghcr.io/justasmonkev/mcp-accessibility-scanner}:$npm_package_version --push .",
-		"lint": "oxlint --type-aware . && npm run typecheck",
+		"lint": "oxlint . && npm run typecheck",
 		"typecheck": "tsc --noEmit --project tsconfig.json",
 		"watch": "tsc --watch --project tsconfig.json",
 		"run-server": "node lib/browserServer.js",
@@ -35,41 +35,45 @@
 		"npm-publish": "npm run clean && npm run build && npm publish",
 		"test": "vitest run",
 		"test:docker": "bash ./tests/docker-smoke.sh",
-		"test:mcp": "node .claude/run-mcp-direct-harness.mjs",
-		"test:mcp:install": "node .claude/run-mcp-direct-harness.mjs --include-install",
+		"test:mcp": "npm run build && node .codex/run-mcp-direct-harness.mjs",
+		"test:mcp:install": "npm run build && node .codex/run-mcp-direct-harness.mjs --include-install",
+		"test:mcp:luna": "node .codex/run-mcp-tool-loop.mjs",
+		"bench": "node bench/mcp-bench.mjs",
+		"bench:compare": "node bench/mcp-bench.mjs --compare",
 		"test:watch": "vitest",
 		"test:ui": "vitest --ui",
-		"test:coverage": "vitest run --coverage"
+		"test:coverage": "vitest run --coverage",
+		"knip": "knip --strict"
 	},
 	"dependencies": {
-		"@axe-core/playwright": "^4.12.1",
-		"@cfworker/json-schema": "^4.1.1",
-		"@modelcontextprotocol/sdk": "^1.29.0",
+		"@modelcontextprotocol/client": "^2.0.0",
+		"@modelcontextprotocol/node": "^2.0.0",
+		"@modelcontextprotocol/server": "^2.0.0",
+		"axe-core": "4.13.0",
 		"commander": "^15.0.0",
 		"debug": "^4.4.3",
-		"dotenv": "^17.4.2",
-		"mime": "^4.1.0",
-		"playwright": "1.61.1",
-		"playwright-core": "1.61.1",
-		"re2": "^1.24.1",
-		"ws": "^8.21.1",
+		"playwright": "1.63.0",
+		"playwright-core": "1.63.0",
+		"re2": "^1.26.1",
+		"ws": "^8.21.3",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
 		"@stylistic/eslint-plugin": "^5.10.0",
-		"@types/chrome": "^0.2.2",
+		"@types/chrome": "^0.2.5",
 		"@types/debug": "^4.1.13",
-		"@types/node": "^26.1.1",
+		"@types/json-schema": "^7.0.15",
+		"@types/node": "^26.2.0",
 		"@types/ws": "^8.18.1",
-		"@vitest/coverage-v8": "^4.1.10",
-		"@vitest/ui": "^4.1.10",
-		"eslint": "^10.7.0",
+		"@vitest/coverage-v8": "^5.0.1",
+		"@vitest/ui": "^5.0.1",
+		"eslint": "^10.8.1",
 		"eslint-plugin-notice": "^1.0.0",
-		"happy-dom": "^20.10.6",
-		"oxlint": "^1.74.0",
-		"oxlint-tsgolint": "^0.24.0",
+		"happy-dom": "^20.11.2",
+		"knip": "^6.32.2",
+		"oxlint": "^1.78.0",
 		"typescript": "^7.0.2",
-		"vitest": "^4.1.10"
+		"vitest": "^5.0.1"
 	},
 	"keywords": [
 		"mcp",
@@ -88,7 +92,7 @@
 		"url": "git+https://github.com/JustasMonkev/mcp-accessibility-scanner.git"
 	},
 	"engines": {
-		"node": ">=24.0.0"
+		"node": "^24.15.0 || >=26.0.0"
 	},
 	"publishConfig": {
 		"access": "public"
@@ -102,6 +106,6 @@
 	"allowScripts": {
 		"fsevents@2.3.2": true,
 		"fsevents@2.3.3": true,
-		"re2@1.24.1": true
+		"re2@1.26.1": true
 	}
 }

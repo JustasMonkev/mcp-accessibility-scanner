@@ -1,3 +1,4 @@
+import { createServer } from 'node:http';
 import fs from 'fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import auditSiteTools from '../src/tools/auditSite.js';
@@ -22,13 +23,14 @@ function createViolation(id: string, html: string, target: string[] = ['#target'
   };
 }
 
-function createAxeResult(url: string, violations: any[]) {
+function createAxeResult(url: string, violations: any[], incomplete: any[] = []) {
   return {
     url,
     violations,
-    incomplete: [],
+    incomplete,
     passes: [],
     inapplicable: [],
+    unscannedFrames: [],
   } as any;
 }
 
@@ -39,7 +41,17 @@ function createHarness(
     navLinkMap?: Record<string, string[]>;
     redirectMap?: Record<string, string>;
     sitemapXmlByUrl?: Record<string, string>;
+    sitemapRedirectMap?: Record<string, string>;
+    network?: { allowedOrigins?: string[], blockedOrigins?: string[] };
+    sitemapFetch?: typeof globalThis.fetch;
+    browserProxy?: boolean;
+    remoteEndpoint?: string;
+    cdpEndpoint?: string;
+    browserContextFactoryName?: string;
     requestContext?: any;
+    cookiesForUrl?: (url: string) => { name: string, domain?: string, path?: string, expires?: number }[];
+    navigationFailsFor?: (url: string) => boolean;
+    navigationAbortsFor?: (url: string) => boolean;
   }
 ) {
   const startUrl = options?.startUrl ?? 'https://example.com/';
@@ -47,49 +59,103 @@ function createHarness(
   const navLinkMap = options?.navLinkMap ?? {};
   const redirectMap = options?.redirectMap ?? {};
 
+  let abortedNavigationClearedCookies = false;
+  // Mirrors context.cookies(urls): only cookies whose path covers one of the
+  // asked-for URLs are returned, so path-scoped session cookies stay invisible
+  // until a URL below their path is part of the query. Path matching is
+  // boundary-aware like the browser's: /app covers /app and /app/x, not
+  // /application.
+  const cookiesMock = vi.fn(async (urls?: string[]) =>
+    (abortedNavigationClearedCookies ? [] : options?.cookiesForUrl?.(currentUrl) ?? [])
+        .map(cookie => ({ domain: 'example.com', path: '/', expires: -1, ...cookie }))
+        .filter(cookie => !urls || urls.some(url => {
+          const pathname = new URL(url).pathname;
+          return pathname === cookie.path
+            || pathname.startsWith(cookie.path.endsWith('/') ? cookie.path : `${cookie.path}/`);
+        })));
+
+  // A committed navigation reports its response, navigates the main frame and
+  // runs init scripts in the newly created document, as a real page does.
+  const mainFrame = { url: () => currentUrl };
+  const documentListeners = new Set<(url: string) => Promise<void>>();
+  const emitNewDocument = () => {
+    for (const listener of documentListeners)
+      void listener(currentUrl);
+  };
+  const pageListeners = new Map<string, Set<(arg: unknown) => void>>();
+  const emitPageEvent = (event: string, arg: unknown) => {
+    for (const listener of pageListeners.get(event) ?? [])
+      listener(arg);
+  };
+  // `requestedUrl` is where the chain started when the final URL was reached by redirect.
+  const navigationRequest = (url: string, redirectedFrom: unknown = null) => ({ isNavigationRequest: () => true, url: () => url, redirectedFrom: () => redirectedFrom, redirectedTo: () => null });
+  const navigationResponse = (url: string, requestedUrl = url) => ({
+    request: () => navigationRequest(url, requestedUrl === url ? null : navigationRequest(requestedUrl)),
+    frame: () => mainFrame, status: () => 200, url: () => url,
+  });
+  const commitNavigation = (requestedUrl: string) => {
+    emitPageEvent('response', navigationResponse(currentUrl, requestedUrl));
+    emitPageEvent('framenavigated', mainFrame);
+    emitNewDocument();
+  };
   const crawlPage = {
+    mainFrame: vi.fn(() => mainFrame),
+    addInitScript: vi.fn(async (_script: unknown, { onNewDocument }: { onNewDocument: (url: string) => Promise<void> }) => {
+      documentListeners.add(onNewDocument);
+      return { dispose: vi.fn(async () => { documentListeners.delete(onNewDocument); }) };
+    }),
+    on: vi.fn((event: string, listener: (arg: unknown) => void) => {
+      pageListeners.set(event, (pageListeners.get(event) ?? new Set()).add(listener));
+    }),
+    off: vi.fn((event: string, listener: (arg: unknown) => void) => pageListeners.get(event)?.delete(listener)),
+    context: vi.fn(() => ({ cookies: cookiesMock })),
     url: vi.fn(() => currentUrl),
     title: vi.fn(async () => `Title for ${currentUrl}`),
-    evaluate: vi.fn(async (callback: () => unknown) => {
-      const callbackText = String(callback);
-      const isNavExtraction = /role=.*navigation.*a\[href\]/.test(callbackText);
-      if (isNavExtraction)
-        return navLinkMap[currentUrl] ?? [];
-      return linkMap[currentUrl] ?? [];
+    // Mirrors readPage(): one evaluate per crawled page returning the title and,
+    // when a link selector is passed, the links that selector would collect.
+    evaluate: vi.fn(async (_callback: unknown, selector?: string) => {
+      const links = !selector
+        ? []
+        : /navigation/.test(selector)
+          ? navLinkMap[currentUrl] ?? []
+          : linkMap[currentUrl] ?? [];
+      return { title: `Title for ${currentUrl}`, links };
     }),
   };
 
   const crawlTab: any = {
     page: crawlPage,
     navigate: vi.fn(async (url: string) => {
+      // A navigation that aborts leaves the tab on the previous page even though the
+      // response — and its cookie changes — already landed.
+      if (options?.navigationAbortsFor?.(url)) {
+        abortedNavigationClearedCookies = true;
+        throw new Error(`net::ERR_ABORTED navigating to ${url}`);
+      }
       currentUrl = redirectMap[url] ?? url;
+      commitNavigation(url);
+      // The response landed and the page committed, but the load never finished,
+      // which is how a hanging logout endpoint behaves.
+      if (options?.navigationFailsFor?.(currentUrl))
+        throw new Error(`Timeout 60000ms exceeded navigating to ${url}`);
     }),
     waitForTimeout: vi.fn(async () => undefined),
+    // No dialog ever opens on these tabs; the crawl only watches for one.
+    modalStates: vi.fn(() => []),
+    on: vi.fn(),
+    off: vi.fn(),
   };
 
-  const temporaryTab: any = {
-    page: {
-      request: {
-        get: vi.fn(async (sitemapUrl: string) => {
-          const xmlText = options?.sitemapXmlByUrl?.[sitemapUrl];
-          if (!xmlText) {
-            return {
-              ok: () => false,
-              status: () => 404,
-              statusText: () => 'Not Found',
-              text: async () => '',
-            };
-          }
-          return {
-            ok: () => true,
-            status: () => 200,
-            statusText: () => 'OK',
-            text: async () => xmlText,
-          };
-        }),
-      },
-    },
+  const defaultFetch = async (input: string | URL) => {
+    const url = String(input);
+    const redirect = options?.sitemapRedirectMap?.[url];
+    if (redirect)
+      return new globalThis.Response(null, { status: 302, headers: { location: redirect } });
+    const xmlText = options?.sitemapXmlByUrl?.[url];
+    return new globalThis.Response(xmlText ?? '', { status: xmlText ? 200 : 404 });
   };
+  const fetchMock = vi.fn(options?.sitemapFetch ?? defaultFetch);
+  vi.stubGlobal('fetch', fetchMock);
 
   const originalTab: any = {
     page: {
@@ -99,16 +165,10 @@ function createHarness(
   };
 
   const tabs: any[] = [originalTab];
-  let createdSitemapTab = false;
   const context = {
     currentTabOrDie: vi.fn(() => originalTab),
     tabs: vi.fn(() => tabs),
     newTab: vi.fn(async () => {
-      if (options?.sitemapXmlByUrl && !createdSitemapTab) {
-        createdSitemapTab = true;
-        tabs.push(temporaryTab);
-        return temporaryTab;
-      }
       tabs.push(crawlTab);
       return crawlTab;
     }),
@@ -118,12 +178,22 @@ function createHarness(
     }),
     selectTab: vi.fn(async () => undefined),
     outputFile: vi.fn(async () => '/tmp/audit-site.json'),
-    config: {},
+    config: {
+      browser: {
+        launchOptions: options?.browserProxy ? { proxy: { server: 'http://proxy.example' } } : {},
+        contextOptions: {},
+        remoteEndpoint: options?.remoteEndpoint,
+        cdpEndpoint: options?.cdpEndpoint,
+      },
+      network: options?.network ?? {},
+    },
+    options: {
+      browserContextFactory: { name: options?.browserContextFactoryName ?? 'chromium' },
+    },
   };
 
   originalTab.context = context;
   crawlTab.context = context;
-  temporaryTab.context = context;
 
   const response = new Response(context as any, 'audit_site', {}, options?.requestContext);
 
@@ -131,7 +201,13 @@ function createHarness(
     context,
     response,
     crawlTab,
-    temporaryTab,
+    fetchMock,
+    cookiesMock,
+    emitPageEvent,
+    emitNewDocument,
+    mainFrame,
+    navigationResponse,
+    setCurrentUrl: (url: string) => { currentUrl = url; },
   };
 }
 
@@ -141,7 +217,618 @@ describe('audit_site tool', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
+  });
+
+  it('reserves an explicit report before opening the crawl tab', async () => {
+    const { context, response } = createHarness({ 'https://example.com/': [] });
+    context.outputFile.mockRejectedValue(new Error('Output file already exists'));
+
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ reportFile: 'taken.json' }), response))
+        .rejects.toThrow('Output file already exists');
+
+    expect(context.newTab).not.toHaveBeenCalled();
+  });
+
+  it('keeps crawling and restores the caller tab when a dialog-frozen crawl tab refuses to close', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/dialog', 'https://example.com/after'],
+      'https://example.com/dialog': [],
+      'https://example.com/after': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    // /dialog leaves a dialog open on the first crawl tab, which then cannot be closed.
+    let frozen = false;
+    crawlTab.modalStates.mockImplementation(() => frozen ? [{ type: 'dialog', description: '["alert" dialog with message "Hi"]' }] : []);
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      await navigateImpl(url);
+      if (url.endsWith('/dialog'))
+        frozen = true;
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl) };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+    context.closeTab.mockImplementation(async (index: number) => {
+      if (tabs[index] === crawlTab)
+        throw new Error('page.close: Timeout 5000ms exceeded');
+      tabs.splice(index, 1);
+      return '';
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/after');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/dialog', 'scanned'],
+      ['https://example.com/after', 'scanned'],
+    ]);
+    // Retired, then retried by the final sweep; the replacement still closes and
+    // the caller's tab is selected again.
+    expect(context.closeTab).toHaveBeenCalledTimes(3);
+    expect(tabs).toEqual([expect.anything(), crawlTab]);
+    expect(context.selectTab).toHaveBeenCalledWith(0);
+  });
+
+  it('retires a crawl tab whose dialog was answered elsewhere before the next page', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/dialog', 'https://example.com/after'],
+      'https://example.com/dialog': [],
+      'https://example.com/after': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    // /dialog commits, then raises its own dialog mid-load that someone else dismisses
+    // at once, so no dialog is open by the next page; the abandoned load never settles.
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      await navigateImpl(url);
+      if (!url.endsWith('/dialog'))
+        return;
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["confirm" dialog with message "Leave?"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(crawlTab.navigate).not.toHaveBeenCalledWith('https://example.com/after');
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/after');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/dialog', 'error'],
+      ['https://example.com/after', 'scanned'],
+    ]);
+    expect(report.pages[1].error).toContain('The page opened a dialog that the crawl does not answer');
+    expect(tabs).toHaveLength(1);
+  });
+
+  it.each(['setup', 'cleanup'])('retires the tab if a late dialog blocks init-script %s', async phase => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/after'],
+      'https://example.com/after': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: (state: { type: string, description: string }) => void) => listeners.push(listener));
+    const blockWithDialog = async () => {
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Late dialog"]' });
+      return new Promise<never>(() => {});
+    };
+    const install = crawlTab.page.addInitScript.getMockImplementation()!;
+    crawlTab.page.addInitScript.mockImplementationOnce(async (scriptBody: unknown, bindings: { onNewDocument: (url: string) => Promise<void> }) => {
+      if (phase === 'setup')
+        return blockWithDialog();
+      const script = await install(scriptBody, bindings);
+      script.dispose.mockImplementation(blockWithDialog);
+      return script;
+    });
+    const replacement = { ...crawlTab, navigate: vi.fn(crawlTab.navigate.getMockImplementation()!), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/after');
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { status: string }) => page.status)).toEqual(['scanned', 'scanned']);
+    expect(report.crawlTabRestarts).toEqual([{ url: phase === 'setup' ? 'https://example.com/' : 'https://example.com/after' }]);
+    expect(tabs).toHaveLength(1);
+  });
+
+  it('audits a same-URL reload again when the outgoing document raised its dialog before the commit', async () => {
+    // /first redirects to /canonical, so the queued /canonical reloads the URL already open.
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/first', 'https://example.com/canonical'],
+      'https://example.com/canonical': [],
+    }, { redirectMap: { 'https://example.com/first': 'https://example.com/canonical' } });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // The /canonical document left open by /first alerts before the reload commits.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/canonical')
+        return navigateImpl(url);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Session ending"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/canonical');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/first', 'scanned'],
+      ['https://example.com/canonical', 'scanned'],
+    ]);
+    expect(tabs).toHaveLength(1);
+  });
+
+  it('does not count a same-document navigation by the outgoing page as the next page committing', async () => {
+    const { context, response, crawlTab, emitPageEvent, mainFrame } = createHarness({
+      'https://example.com/': ['https://example.com/next'],
+      'https://example.com/next': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // While /next is loading, the outgoing page pushes a history entry (framenavigated
+    // without a navigation response) and then alerts.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/next')
+        return navigateImpl(url);
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Saved"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/next');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/next', 'scanned'],
+    ]);
+  });
+
+  it('does not pair the next page\'s response with a same-document navigation by the outgoing page', async () => {
+    const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse } = createHarness({
+      'https://example.com/': ['https://example.com/next'],
+      'https://example.com/next': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // While /next loads: the outgoing page pushes a history entry, /next's response
+    // arrives, then the outgoing page alerts before /next commits.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/next')
+        return navigateImpl(url);
+      emitPageEvent('framenavigated', mainFrame);
+      emitPageEvent('response', navigationResponse('https://example.com/next'));
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Saved"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/next');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/next', 'scanned'],
+    ]);
+  });
+
+  it('does not count a followed redirect as a commit when the outgoing page changes to its URL', async () => {
+    const nextUrl = 'https://example.com/next';
+    const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+      'https://example.com/': [nextUrl],
+      [nextUrl]: [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== nextUrl)
+        return navigateImpl(url);
+      const redirect = navigationResponse(nextUrl);
+      emitPageEvent('response', {
+        ...redirect,
+        status: () => 302,
+        request: () => ({ ...redirect.request(), redirectedTo: () => ({ url: () => 'https://example.com/final' }) }),
+      });
+      // The outgoing document's pushState matches the intermediate response URL,
+      // but the redirect's successor has not responded or committed yet.
+      setCurrentUrl(nextUrl);
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Outgoing"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith(nextUrl);
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'], [nextUrl, 'scanned'],
+    ]);
+  });
+
+  it('does not take a navigation the outgoing page started itself for the requested page committing', async () => {
+    const { context, response, crawlTab, emitPageEvent, emitNewDocument, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+      'https://example.com/': ['https://example.com/next'],
+      'https://example.com/next': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // While /next loads, a navigation the outgoing page started to /elsewhere commits
+    // first, and that document alerts before /next commits.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/next')
+        return navigateImpl(url);
+      emitPageEvent('response', navigationResponse('https://example.com/elsewhere'));
+      setCurrentUrl('https://example.com/elsewhere');
+      emitPageEvent('framenavigated', mainFrame);
+      emitNewDocument();
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Elsewhere"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 2, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/next');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/next', 'scanned'],
+    ]);
+    expect(report.crawlTabRestarts).toEqual([{ url: 'https://example.com/next' }]);
+  });
+
+  it.each(['hash change', 'exact-URL history update'])('does not treat %s on a same-URL reload as a new document committing', async update => {
+    // /first redirects to /canonical, so the queued /canonical reloads the URL already open.
+    const { context, response, crawlTab, emitPageEvent, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+      'https://example.com/': ['https://example.com/first', 'https://example.com/canonical'],
+      'https://example.com/canonical': [],
+    }, { redirectMap: { 'https://example.com/first': 'https://example.com/canonical' } });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // The /canonical reload's response arrives, then the old document updates
+    // history (possibly keeping the identical URL) and alerts before the commit.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/canonical')
+        return navigateImpl(url);
+      emitPageEvent('response', navigationResponse('https://example.com/canonical'));
+      setCurrentUrl(`https://example.com/canonical${update === 'hash change' ? '#top' : ''}`);
+      emitPageEvent('framenavigated', mainFrame);
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Session ending"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    expect(replacement.navigate).toHaveBeenCalledWith('https://example.com/canonical');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/first', 'scanned'],
+      ['https://example.com/canonical', 'scanned'],
+    ]);
+  });
+
+  it('counts a commit whose redirect Location added a fragment as the new document', async () => {
+    const { context, response, crawlTab, emitPageEvent, emitNewDocument, mainFrame, navigationResponse, setCurrentUrl } = createHarness({
+      'https://example.com/': ['https://example.com/old', 'https://example.com/next'],
+      'https://example.com/next': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+    const listeners: ((state: { type: string, description: string }) => void)[] = [];
+    crawlTab.on.mockImplementation((_event: string, listener: any) => listeners.push(listener));
+    const navigateImpl = crawlTab.navigate.getMockImplementation()!;
+    // /old redirects to /landing#section: the response URL has no fragment, the
+    // committed frame URL does. That document then raises its own dialog.
+    crawlTab.navigate.mockImplementation(async (url: string) => {
+      if (url !== 'https://example.com/old')
+        return navigateImpl(url);
+      emitPageEvent('response', navigationResponse('https://example.com/landing', 'https://example.com/old'));
+      setCurrentUrl('https://example.com/landing#section');
+      emitPageEvent('framenavigated', mainFrame);
+      emitNewDocument();
+      for (const listener of listeners)
+        listener({ type: 'dialog', description: '["alert" dialog with message "Landing"]' });
+      return new Promise(() => {});
+    });
+    const replacement: any = { ...crawlTab, modalStates: vi.fn(() => []), navigate: vi.fn(navigateImpl), on: vi.fn(), off: vi.fn() };
+    const tabs = context.tabs();
+    context.newTab.mockImplementationOnce(async () => {
+      tabs.push(crawlTab);
+      return crawlTab;
+    }).mockImplementationOnce(async () => {
+      tabs.push(replacement);
+      return replacement;
+    });
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({ strategy: 'links', maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    // Its own dialog: reported on /old, not retried; the crawl moves on to /next.
+    expect(replacement.navigate).not.toHaveBeenCalledWith('https://example.com/old');
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/old', 'error'],
+      ['https://example.com/next', 'scanned'],
+    ]);
+    expect(report.pages[1].error).toContain('"alert" dialog with message "Landing"');
+  });
+
+  it('warns about pages whose frames the scan could not reach', async () => {
+    // A page scanned with a frame missing reports fewer violations, so a reader
+    // counting them has to know which pages those numbers are incomplete for.
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/embedded'],
+      'https://example.com/embedded': [],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => ({
+      ...createAxeResult(page.url(), []),
+      unscannedFrames: page.url() === 'https://example.com/embedded' ? ['https://widget.example/embed'] : [],
+    }));
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 5,
+      maxDepth: 1,
+      sameOriginOnly: false,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(response.result()).toContain('WARNING: Axe could not be installed in frames on 1 page(s)');
+    expect(response.result()).toContain('- https://example.com/embedded: https://widget.example/embed');
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    const embedded = report.pages.find((page: any) => page.url === 'https://example.com/embedded');
+    expect(embedded.unscannedFrames).toEqual(['https://widget.example/embed']);
+    // A client reading only structured output must be able to tell the same.
+    expect(response.structuredContent()!.pagesWithUnscannedFrames).toEqual([
+      { url: 'https://example.com/embedded', unscannedFrames: ['https://widget.example/embed'] },
+    ]);
+  });
+
+  it('says nothing about frames when every page was scanned in full', async () => {
+    const { context, response } = createHarness({ 'https://example.com/': [] });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 1,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(response.result()).not.toContain('could not be installed');
+    expect(response.structuredContent()!.pagesWithUnscannedFrames).toEqual([]);
+  });
+
+  it('passes tags, rule filters and scope selectors through to the axe scan', async () => {
+    const { context, response } = createHarness({ 'https://example.com/': [] });
+    const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan')
+        .mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 1,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      includeSelectors: ['#main'],
+      excludeSelectors: ['#chat-widget'],
+      withRules: ['image-alt'],
+      disableRules: ['color-contrast'],
+    } as any, response);
+
+    expect(runAxeScanSpy.mock.calls[0][1]).toEqual({
+      tags: ['wcag2aa'],
+      rules: ['image-alt'],
+      disableRules: ['color-contrast'],
+      include: ['#main'],
+      exclude: ['#chat-widget'],
+    });
+
+    // The report has to say which rule filter produced it, or a stored audit
+    // cannot be told apart from a full scan.
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.metadata.options.withRules).toEqual(['image-alt']);
+    expect(report.metadata.options.disableRules).toEqual(['color-contrast']);
+  });
+
+  it('reports incomplete results per page and aggregated, and drops them when disabled', async () => {
+    const runScan = async (page: any) => createAxeResult(
+        page.url(),
+        [createViolation('image-alt', '<img>')],
+        [createViolation('color-contrast', '<h1>Hi</h1>', ['h1'])]
+    );
+
+    const included = createHarness({ 'https://example.com/': [] });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(runScan);
+    const baseParams = {
+      strategy: 'links',
+      maxPages: 1,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    };
+
+    await tool.handle(included.context as any, { ...baseParams, includeIncomplete: true } as any, included.response);
+    const withIncomplete = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(withIncomplete.pages[0].incomplete.map((item: any) => item.id)).toEqual(['color-contrast']);
+    expect(withIncomplete.summary.incomplete.map((item: any) => item.id)).toEqual(['color-contrast']);
+    // Incomplete results must never leak into the violations list.
+    expect(withIncomplete.summary.violations.map((item: any) => item.id)).toEqual(['image-alt']);
+
+    writeFileSpy.mockClear();
+    const excluded = createHarness({ 'https://example.com/': [] });
+    await tool.handle(excluded.context as any, { ...baseParams, includeIncomplete: false } as any, excluded.response);
+    const withoutIncomplete = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(withoutIncomplete.pages[0].incomplete).toEqual([]);
+    expect(withoutIncomplete.summary.incomplete).toEqual([]);
+  });
+
+  it('keeps crawling through a page whose scan failed', async () => {
+    // A scoped scan throws when includeSelectors is absent from one page. If
+    // discovery hung off the scan succeeding, every descendant reachable only
+    // through that page would vanish from the audit without a trace.
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/gate'],
+      'https://example.com/gate': ['https://example.com/behind-the-gate'],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      if (page.url() === 'https://example.com/gate')
+        throw new Error('No elements matched includeSelectors: #main');
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      includeSelectors: ['#main'],
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    const byUrl = new Map<string, any>(report.pages.map((page: any) => [page.url, page]));
+    expect(byUrl.get('https://example.com/gate').status).toBe('error');
+    expect(byUrl.get('https://example.com/behind-the-gate')?.status).toBe('scanned');
+    expect(byUrl.get('https://example.com/behind-the-gate')?.discoveredFrom).toBe('https://example.com/gate');
   });
 
   it('respects BFS maxPages and maxDepth limits', async () => {
@@ -345,6 +1032,83 @@ describe('audit_site tool', () => {
     } as any, response)).rejects.toThrow('excludePathPatterns[0] is too long');
   });
 
+  it('rejects unknown rule ids before crawling anything, instead of erroring every page', async () => {
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+    const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan');
+
+    await expect(tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/', 'https://example.com/pricing', 'https://example.com/contact'],
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      withRules: ['image-altt'],
+    } as any, response)).rejects.toThrow('Unknown Axe rule id(s) in withRules: image-altt');
+
+    // The point of the up-front check: no tab opened, no page visited, no
+    // report claiming a completed audit.
+    expect(context.newTab).not.toHaveBeenCalled();
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
+    expect(runAxeScanSpy).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a disableRules set that empties withRules before crawling anything', async () => {
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/'],
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      withRules: ['image-alt'],
+      disableRules: ['image-alt'],
+    } as any, response)).rejects.toThrow('disableRules disabled every rule in withRules (image-alt)');
+
+    expect(context.newTab).not.toHaveBeenCalled();
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
+  });
+
+  it('still validates scope selectors per page, not up front', async () => {
+    // A component may legitimately be missing from some crawled pages, so an
+    // unmatched selector is a page-level error — unlike a bad rule id.
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+    vi.spyOn(axe, 'runAxeScan').mockRejectedValue(new Error('No elements matched includeSelectors: #missing'));
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/'],
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      includeSelectors: ['#missing'],
+    } as any, response);
+
+    expect(crawlTab.navigate).toHaveBeenCalledTimes(1);
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages[0].status).toBe('error');
+    expect(report.pages[0].error).toContain('No elements matched includeSelectors');
+  });
+
   it('includes subdomains when sameOriginOnly=true and includeSubdomains=true', async () => {
     const { context, response } = createHarness({
       'https://example.com/': ['https://sub.example.com/page', 'https://external.example.org/path'],
@@ -490,12 +1254,16 @@ describe('audit_site tool', () => {
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     const crawledUrls = report.pages.map((page: any) => page.url);
     expect(crawledUrls).toEqual(['https://example.com/a', 'https://example.com/b']);
-    expect(crawlTab.page.evaluate).not.toHaveBeenCalled();
+    // The page is still read for its title - `every` alone would also pass if
+    // that read disappeared - and what must not happen is link discovery, which
+    // is what a non-empty selector argument would mean.
+    expect(crawlTab.page.evaluate.mock.calls.length).toBeGreaterThan(0);
+    expect(crawlTab.page.evaluate.mock.calls.every((call: unknown[]) => !call[1])).toBe(true);
   });
 
   it('supports sitemap strategy by parsing loc entries', async () => {
     const sitemapUrl = 'https://example.com/sitemap.xml';
-    const { context, response, temporaryTab } = createHarness({
+    const { context, response, fetchMock } = createHarness({
       'https://example.com/one': [],
       'https://example.com/two': [],
     }, {
@@ -521,9 +1289,361 @@ describe('audit_site tool', () => {
       waitAfterNavigationMs: 0,
     } as any, response);
 
-    expect(temporaryTab.page.request.get).toHaveBeenCalledWith(sitemapUrl, { timeout: 15000 });
+    expect(fetchMock).toHaveBeenCalledWith(sitemapUrl, expect.objectContaining({ redirect: 'manual', credentials: 'omit' }));
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     expect(report.pages.map((page: any) => page.url)).toEqual(['https://example.com/one', 'https://example.com/two']);
+  });
+
+  it.each([
+    { remoteEndpoint: 'ws://remote.example/browser' },
+    { cdpEndpoint: 'https://remote.example:9222' },
+    { cdpEndpoint: 'wss://remote.example/devtools/browser/session' },
+    { cdpEndpoint: 'http://127.0.0.1:9222' },
+  ])('rejects sitemap strategy for an attached browser: %j', async endpoint => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      ...endpoint,
+    });
+
+    await expect(tool.handle(context as any, tool.schema.inputSchema.parse({
+      strategy: 'sitemap',
+      sitemapUrl,
+      sameOriginOnly: false,
+    }), response)).rejects.toThrow(/Use the provided URL strategy/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.newTab).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects sitemap strategy for the browser_connect provider', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      browserContextFactoryName: 'vscode',
+    });
+
+    await expect(tool.handle(context as any, tool.schema.inputSchema.parse({
+      strategy: 'sitemap',
+      sitemapUrl,
+      sameOriginOnly: false,
+    }), response)).rejects.toThrow(/remoteEndpoint|browser_connect/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.newTab).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { remoteEndpoint: 'ws://remote.example/browser' },
+    { cdpEndpoint: 'https://remote.example:9222' },
+  ])('keeps provided URL strategy available with an attached browser: %j', async endpoint => {
+    const pageUrl = 'https://example.com/page';
+    const { context, response, crawlTab } = createHarness({ [pageUrl]: [] }, {
+      ...endpoint,
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+
+    await tool.handle(context as any, tool.schema.inputSchema.parse({
+      strategy: 'provided',
+      urls: [pageUrl],
+      maxPages: 1,
+      maxDepth: 0,
+    }), response);
+
+    expect(crawlTab.navigate).toHaveBeenCalledWith(pageUrl);
+  });
+
+  it('rejects a sitemap URL outside the allowed crawl scope before fetching it', async () => {
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: {
+        'https://169.254.169.254/latest/sitemap.xml': '<urlset><url><loc>https://example.com/one</loc></url></urlset>',
+      },
+    });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl: 'https://169.254.169.254/latest/sitemap.xml',
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/outside the allowed crawl scope/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.newTab).not.toHaveBeenCalled();
+  });
+
+  it('rejects a sitemap URL with a non-http scheme', async () => {
+    const { context, response } = createHarness({});
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl: 'file:///etc/sitemap.xml',
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/Sitemap URL must use http/);
+  });
+
+  it('allows a subdomain sitemap when includeSubdomains is set', async () => {
+    const { context, response, fetchMock } = createHarness({
+      'https://example.com/one': [],
+    }, {
+      sitemapXmlByUrl: {
+        'https://blog.example.com/sitemap.xml': '<urlset><url><loc>https://example.com/one</loc></url></urlset>',
+      },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl: 'https://blog.example.com/sitemap.xml',
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: true,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(fetchMock).toHaveBeenCalledWith('https://blog.example.com/sitemap.xml', expect.objectContaining({ redirect: 'manual', credentials: 'omit' }));
+  });
+
+  it('applies the server network blocklist even when the caller disables crawl scoping', async () => {
+    const sitemapUrl = 'https://blocked.example/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      network: { blockedOrigins: ['blocked.example'] },
+    });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: false,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/blocked|network|policy|origin/i);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.newTab).not.toHaveBeenCalled();
+  });
+
+  it('rejects a sitemap redirect to a private or blocked origin before following it', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const redirectTarget = 'https://169.254.169.254/latest/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapRedirectMap: { [sitemapUrl]: redirectTarget },
+      network: { blockedOrigins: ['169.254.169.254'] },
+    });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: false,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/outside|blocked|network|policy|origin/i);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the server allowlist when the caller disables crawl scoping', async () => {
+    const sitemapUrl = 'https://allowed.example/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      network: { allowedOrigins: ['allowed.example'] },
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: false,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('follows an approved sitemap redirect', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const redirectTarget = 'https://example.com/sitemap-redirected.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapRedirectMap: { [sitemapUrl]: redirectTarget },
+      sitemapXmlByUrl: { [redirectTarget]: '<urlset />' },
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual([sitemapUrl, redirectTarget]);
+  });
+
+  it('rejects sitemap fetching when the browser uses a proxy', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      browserProxy: true,
+    });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/proxy/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('stops following a sitemap redirect chain after 20 hops', async () => {
+    const sitemapUrl = 'https://example.com/sitemap-0.xml';
+    const sitemapRedirectMap: Record<string, string> = {};
+    for (let index = 0; index <= 20; index++)
+      sitemapRedirectMap[`https://example.com/sitemap-${index}.xml`] = `https://example.com/sitemap-${index + 1}.xml`;
+    const { context, response, fetchMock } = createHarness({}, { sitemapRedirectMap });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/exceeds 20 redirects/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(21);
+  });
+
+  it('rejects a sitemap body larger than 10 MiB', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: 'x'.repeat(10 * 1024 * 1024 + 1) },
+    });
+
+    await expect(tool.handle(context as any, {
+      strategy: 'sitemap',
+      sitemapUrl,
+      maxPages: 10,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response)).rejects.toThrow(/10 MiB/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps browser cookies out of an HTTP sitemap request', async () => {
+    let receivedCookie: string | undefined;
+    let sitemapBody = '<urlset />';
+    const server = createServer((request, response) => {
+      receivedCookie = request.headers.cookie;
+      response.setHeader('content-type', 'application/xml');
+      response.end(sitemapBody);
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string')
+        throw new Error('Test server did not expose an address.');
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      const pageUrl = `${baseUrl}/page`;
+      const sitemapUrl = `${baseUrl}/sitemap.xml`;
+      sitemapBody = `<urlset><url><loc>${pageUrl}</loc></url></urlset>`;
+      const realFetch = globalThis.fetch;
+      const { context, response, fetchMock } = createHarness({ [pageUrl]: [] }, {
+        startUrl: `${baseUrl}/`,
+        sitemapFetch: realFetch,
+        cookiesForUrl: () => [{ name: 'sid' }],
+      });
+
+      await tool.handle(context as any, {
+        startUrl: `${baseUrl}/`,
+        strategy: 'sitemap',
+        sitemapUrl,
+        maxPages: 10,
+        maxDepth: 0,
+        sameOriginOnly: true,
+        includeSubdomains: false,
+        excludePathPatterns: [],
+        ignoreQueryParams: [],
+        violationsTag: ['wcag2aa'],
+        maxNodesPerViolation: 10,
+        waitAfterNavigationMs: 0,
+      } as any, response);
+
+      expect(fetchMock).toHaveBeenCalledWith(sitemapUrl, expect.objectContaining({ credentials: 'omit' }));
+      expect(receivedCookie).toBeUndefined();
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
   });
 
   it('records errored pages while continuing to scan remaining URLs', async () => {
@@ -677,5 +1797,408 @@ describe('audit_site tool', () => {
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     expect(report.summary.totals.scannedPages).toBeGreaterThanOrEqual(1);
+  });
+
+  it('reports the page where the authenticated session was lost', async () => {
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: url => url.endsWith('/account/close') || url.endsWith('/profile') ? [] : [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/account/close', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/account/close', cookies: ['sid'] }]);
+    expect(response.result()).toContain('WARNING: cookie(s) sid present when the crawl started disappeared while loading https://example.com/account/close.');
+  });
+
+  it('scopes the cookie baseline to the crawled URLs', async () => {
+    const { context, response, cookiesMock } = createHarness({}, {
+      cookiesForUrl: () => [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    expect(cookiesMock).toHaveBeenCalledWith(['https://example.com/dashboard', 'https://example.com/profile']);
+  });
+
+  it('reports a deleted auth cookie masked by a same-named cookie on another domain', async () => {
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: url => url.endsWith('/account/close')
+        ? [{ name: 'sid', domain: 'cdn.example.com' }]
+        : [{ name: 'sid', domain: 'example.com' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/account/close'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/account/close', cookies: ['sid'] }]);
+  });
+
+  it('reports the URL reached after a redirect as the page that lost the session', async () => {
+    const { context, response } = createHarness({}, {
+      redirectMap: { 'https://example.com/account/close': 'https://example.com/signed-out' },
+      cookiesForUrl: url => url.endsWith('/signed-out') ? [] : [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/account/close'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/signed-out', cookies: ['sid'] }]);
+    expect(response.result()).toContain('while loading https://example.com/signed-out.');
+  });
+
+  it('reports the page that lost the session even when its navigation failed', async () => {
+    const { context, response } = createHarness({}, {
+      navigationFailsFor: url => url.endsWith('/slow-logout'),
+      cookiesForUrl: url => url.endsWith('/slow-logout') || url.endsWith('/profile') ? [] : [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/slow-logout', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/slow-logout', cookies: ['sid'] }]);
+  });
+
+  // An aborted navigation never leaves the previous page, so the URL asked for is the
+  // only thing identifying the response that cleared the cookie.
+  it.each(['previous', 'chrome-error://chromewebdata/', 'about:neterror?e=connectionFailure'])('blames the requested URL when a failed navigation leaves %s', async errorUrl => {
+    const { context, response, crawlTab, setCurrentUrl } = createHarness({}, {
+      navigationAbortsFor: url => url.endsWith('/failing-logout'),
+      cookiesForUrl: () => [{ name: 'sid' }],
+    });
+    if (errorUrl !== 'previous') {
+      const navigate = crawlTab.navigate.getMockImplementation();
+      crawlTab.navigate.mockImplementation(async (url: string) => {
+        try {
+          await navigate(url);
+        } catch (error) {
+          setCurrentUrl(errorUrl);
+          throw error;
+        }
+      });
+    }
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/failing-logout', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/failing-logout', cookies: ['sid'] }]);
+  });
+
+  it('does not report session loss for a cookie the browser dropped at its own expiry', async () => {
+    const expired = Math.floor(Date.now() / 1000) - 60;
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: url => url.endsWith('/profile')
+        ? [{ name: 'sid' }]
+        : [{ name: 'sid' }, { name: '__cf_bm', expires: expired }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([]);
+  });
+
+  it('still reports a cookie deleted before its expiry passed', async () => {
+    const notYetExpired = Math.floor(Date.now() / 1000) + 3600;
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: url => url.endsWith('/profile') ? [] : [{ name: 'sid', expires: notYetExpired }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/profile', cookies: ['sid'] }]);
+  });
+
+  it('does not report session loss when cookies survive the crawl', async () => {
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: () => [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: ['https://example.com/dashboard', 'https://example.com/profile'],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: ['logout|signout'],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([]);
+  });
+
+  it('keeps monitoring after a cookie loss, so an unrelated one cannot mask the session cookie', async () => {
+    // `metrics` disappears first on /features; if monitoring stopped there, the
+    // real session cookie vanishing later on /account/close would go unreported.
+    const { context, response } = createHarness({}, {
+      cookiesForUrl: url => {
+        if (url.endsWith('/features') || url.endsWith('/pricing'))
+          return [{ name: 'sid' }];
+        if (url.endsWith('/account/close') || url.endsWith('/profile'))
+          return [];
+        return [{ name: 'sid' }, { name: 'metrics' }];
+      },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'provided',
+      urls: [
+        'https://example.com/dashboard',
+        'https://example.com/features',
+        'https://example.com/pricing',
+        'https://example.com/account/close',
+        'https://example.com/profile',
+      ],
+      maxPages: 5,
+      maxDepth: 0,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    // Each cookie is reported once, at the URL where it vanished.
+    expect(report.sessionLosses).toEqual([
+      { url: 'https://example.com/features', cookies: ['metrics'] },
+      { url: 'https://example.com/account/close', cookies: ['sid'] },
+    ]);
+    expect(response.result()).toContain('cookie(s) metrics present when the crawl started disappeared while loading https://example.com/features.');
+    expect(response.result()).toContain('cookie(s) sid present when the crawl started disappeared while loading https://example.com/account/close.');
+  });
+
+  it('tracks cookies scoped to URLs discovered mid-crawl, not just the start URL', async () => {
+    // app_sid is scoped to /app, so the baseline read against the start URL
+    // cannot see it; it must join tracking when /app is discovered and its loss
+    // on /app/logout must still be reported.
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/app'],
+      'https://example.com/app': ['https://example.com/app/logout'],
+      'https://example.com/app/logout': [],
+    }, {
+      cookiesForUrl: url => url.endsWith('/app/logout')
+        ? []
+        : [{ name: 'app_sid', path: '/app' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      startUrl: 'https://example.com/',
+      maxPages: 5,
+      maxDepth: 3,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/app/logout', cookies: ['app_sid'] }]);
+  });
+
+  it('preserves a discovered trailing slash when scoping cookies', async () => {
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/app/'],
+      'https://example.com/app/': ['https://example.com/app/logout'],
+      'https://example.com/app/logout': [],
+    }, {
+      redirectMap: { 'https://example.com/app': 'https://example.com/app/' },
+      cookiesForUrl: url => url.endsWith('/app/logout')
+        ? []
+        : [{ name: 'app_sid', path: '/app/' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      startUrl: 'https://example.com/',
+      maxPages: 5,
+      maxDepth: 3,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([{ url: 'https://example.com/app/logout', cookies: ['app_sid'] }]);
+  });
+
+  it('does not report a cookie minted mid-crawl as a lost crawl-start cookie', async () => {
+    // `minted` first appears while visiting /, after the crawl-start jar
+    // snapshot. The discovered URLs must not adopt it into the baseline, or its
+    // disappearance on /gone would be misreported as losing a cookie the
+    // caller signed in with.
+    const { context, response } = createHarness({
+      'https://example.com/': ['https://example.com/app'],
+      'https://example.com/app': ['https://example.com/gone'],
+      'https://example.com/gone': [],
+    }, {
+      cookiesForUrl: url => url === 'about:blank' || url.endsWith('/gone') ? [] : [{ name: 'minted' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      startUrl: 'https://example.com/',
+      maxPages: 5,
+      maxDepth: 3,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: ['utm_source'],
+      violationsTag: ['wcag2aa'],
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([]);
   });
 });

@@ -14,19 +14,31 @@
  * limitations under the License.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { chromium } from 'playwright';
+import type { Browser } from 'playwright';
 import type { JSONSchema7 } from 'json-schema';
 import snapshotTools from '../src/tools/snapshot.js';
 import { toMcpTool } from '../src/mcp/tool.js';
+import * as axe from '../src/tools/axe.js';
+import { Tab } from '../src/tab.js';
+import { Response } from '../src/response.js';
+import { outputFile, resolveConfig } from '../src/config.js';
+import type { Context } from '../src/context.js';
 
 describe('Snapshot Tools', () => {
   const snapshotTool = snapshotTools.find(tool => tool.schema.name === 'browser_snapshot')!;
   const findTool = snapshotTools.find(tool => tool.schema.name === 'browser_find')!;
 
-  it('should expose browser_snapshot with optional compression', () => {
+  it('should expose browser_snapshot with optional compression and boxes', () => {
     const mcpTool = toMcpTool(snapshotTool.schema);
     const jsonSchema = mcpTool.inputSchema as JSONSchema7;
     const compressSchema = jsonSchema.properties?.compress as JSONSchema7;
+    const boxesSchema = jsonSchema.properties?.boxes as JSONSchema7;
 
     expect(snapshotTool).toBeDefined();
     expect(snapshotTool.schema.type).toBe('readOnly');
@@ -34,9 +46,13 @@ describe('Snapshot Tools', () => {
     expect(jsonSchema.required ?? []).toEqual([]);
     expect(compressSchema.type).toBe('boolean');
     expect(compressSchema.description).toContain('more than 100 times');
+    expect(boxesSchema.type).toBe('boolean');
+    expect(boxesSchema.description).toContain('viewport-relative');
     expect(snapshotTool.schema.inputSchema.parse({})).toEqual({});
     expect(snapshotTool.schema.inputSchema.parse({ compress: true })).toEqual({ compress: true });
     expect(snapshotTool.schema.inputSchema.parse({ compress: false })).toEqual({ compress: false });
+    expect(snapshotTool.schema.inputSchema.parse({ boxes: true })).toEqual({ boxes: true });
+    expect(snapshotTool.schema.inputSchema.parse({ boxes: false })).toEqual({ boxes: false });
   });
 
   it('should request the current snapshot flow with compression disabled by default', async () => {
@@ -50,7 +66,7 @@ describe('Snapshot Tools', () => {
     await snapshotTool.handle(context as any, {}, response as any);
 
     expect(context.ensureTab).toHaveBeenCalled();
-    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(undefined);
+    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(undefined, undefined);
   });
 
   it('should pass the compression option to the snapshot response', async () => {
@@ -64,7 +80,7 @@ describe('Snapshot Tools', () => {
     await snapshotTool.handle(context as any, { compress: true }, response as any);
 
     expect(context.ensureTab).toHaveBeenCalled();
-    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(true);
+    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(true, undefined);
   });
 
   it('should pass explicit compression opt-out to the snapshot response', async () => {
@@ -78,7 +94,21 @@ describe('Snapshot Tools', () => {
     await snapshotTool.handle(context as any, { compress: false }, response as any);
 
     expect(context.ensureTab).toHaveBeenCalled();
-    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(false);
+    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(false, undefined);
+  });
+
+  it('should pass the boxes option to the snapshot response', async () => {
+    const context = {
+      ensureTab: vi.fn().mockResolvedValue(undefined),
+    };
+    const response = {
+      setIncludeSnapshot: vi.fn(),
+    };
+
+    await snapshotTool.handle(context as any, { boxes: true }, response as any);
+
+    expect(context.ensureTab).toHaveBeenCalled();
+    expect(response.setIncludeSnapshot).toHaveBeenCalledWith(undefined, true);
   });
 
   it('should expose browser_find with text and regex search options', () => {
@@ -123,6 +153,271 @@ describe('Snapshot Tools', () => {
 
     expect(response.addResult).toHaveBeenCalledWith(expect.stringContaining('Found 2 matches for /Alpha|Beta/:'));
     expect(response.addResult).not.toHaveBeenCalledWith(expect.stringContaining('----'));
+  });
+
+  describe('browser_find maxResults', () => {
+    const lines = [
+      '- main:',
+      '  - region "First":',
+      '    - navigation:',
+      '      - link "Home"',
+      '      - link "About"',
+      '      - link "Contact"',
+      '      - link "Help"',
+      '      - link "Target One"',
+      '      - link "Target Two"',
+      '      - link "News"',
+      '      - link "Careers"',
+      '      - link "Products"',
+      '      - link "Services"',
+      '      - link "Support"',
+      '  - region "Last":',
+      '    - link "Target Three"',
+    ];
+
+    it('should expose an optional positive integer limit without changing the default', () => {
+      // SAFETY: toMcpTool emits a JSON schema; this test reads only its properties and required fields.
+      const schema = toMcpTool(findTool.schema).inputSchema as JSONSchema7;
+      expect(schema.properties?.maxResults).toMatchObject({ type: 'integer', minimum: 1 });
+      expect(schema.required ?? []).not.toContain('maxResults');
+      expect(findTool.schema.inputSchema.parse({ text: 'Target' })).toEqual({ text: 'Target' });
+      expect(findTool.schema.inputSchema.parse({ text: 'Target', maxResults: 1 })).toEqual({ text: 'Target', maxResults: 1 });
+    });
+
+    it.each(['1', null, true, {}, []])('should reject a nonnumeric maxResults %j', maxResults => {
+      expect(() => findTool.schema.inputSchema.parse({ text: 'Target', maxResults })).toThrow();
+    });
+
+    it.each([0, -1, 1.5])('should reject maxResults %s at the input schema', maxResults => {
+      expect(() => findTool.schema.inputSchema.parse({ text: 'Target', maxResults })).toThrow();
+    });
+
+    it.each([
+      { params: { text: 'target', maxResults: 1 }, query: '"target"' },
+      { params: { regex: '/target/i', maxResults: 1 }, query: '/target/i' },
+    ])('should cap matching lines and preserve ancestors for $query', async ({ params, query }) => {
+      const response = findResponse();
+
+      // SAFETY: These mocks provide the tab, modal state, snapshot, and response methods used by browser_find.
+      await findTool.handle(findContext(lines.join('\n')) as any, params, response as any);
+
+      expect(response.addResult).toHaveBeenCalledExactlyOnceWith([
+        `Found 3 matches for ${query} (showing first 1):`,
+        '',
+        ...lines.slice(0, 3),
+        ...lines.slice(4, 11),
+      ].join('\n'));
+      expect(response.addError).not.toHaveBeenCalled();
+    });
+
+    it('should count matching lines rather than merged context windows', async () => {
+      const response = findResponse();
+
+      // SAFETY: These mocks provide the tab, modal state, snapshot, and response methods used by browser_find.
+      await findTool.handle(findContext(lines.join('\n')) as any, { text: 'Target', maxResults: 2 }, response as any);
+
+      expect(response.addResult).toHaveBeenCalledExactlyOnceWith([
+        'Found 3 matches for "Target" (showing first 2):',
+        '',
+        ...lines.slice(0, 3),
+        ...lines.slice(4, 12),
+      ].join('\n'));
+    });
+
+    it('should retain separated windows only for the selected matches', async () => {
+      const snapshotLines = Array.from({ length: 17 }, (_, index) =>
+        `- button "${index % 8 === 0 ? 'Target' : 'Other'} ${index}"`);
+      const response = findResponse();
+
+      // SAFETY: These mocks provide the tab, modal state, snapshot, and response methods used by browser_find.
+      await findTool.handle(findContext(snapshotLines.join('\n')) as any, { text: 'Target', maxResults: 2 }, response as any);
+
+      expect(response.addResult).toHaveBeenCalledExactlyOnceWith([
+        'Found 3 matches for "Target" (showing first 2):',
+        '',
+        ...snapshotLines.slice(0, 4),
+        '',
+        '----',
+        '',
+        ...snapshotLines.slice(5, 12),
+      ].join('\n'));
+    });
+
+    it.each([undefined, 3, 4])('should preserve all matches with maxResults %s', async maxResults => {
+      const response = findResponse();
+
+      // SAFETY: These mocks provide the tab, modal state, snapshot, and response methods used by browser_find.
+      await findTool.handle(findContext(lines.join('\n')) as any, { text: 'Target', maxResults }, response as any);
+
+      expect(response.addResult).toHaveBeenCalledExactlyOnceWith([
+        'Found 3 matches for "Target":',
+        '',
+        ...lines.slice(0, 3),
+        ...lines.slice(4),
+      ].join('\n'));
+    });
+
+    it('should keep singular and zero-match messages unchanged with a limit', async () => {
+      const context = findContext('- button "Submit"');
+      const matched = findResponse();
+      const unmatched = findResponse();
+
+      // SAFETY: These mocks provide the tab, modal state, snapshot, and response methods used by browser_find.
+      await findTool.handle(context as any, { text: 'Submit', maxResults: 1 }, matched as any);
+      // SAFETY: The same context mock and unmatched response provide all methods used by browser_find.
+      await findTool.handle(context as any, { text: 'Cancel', maxResults: 1 }, unmatched as any);
+
+      expect(matched.addResult).toHaveBeenCalledExactlyOnceWith('Found 1 match for "Submit":\n\n- button "Submit"');
+      expect(unmatched.addResult).toHaveBeenCalledExactlyOnceWith('No matches found for "Cancel".');
+    });
+  });
+
+  describe('browser_find saved artifacts', () => {
+    const snapshot = Array.from({ length: 17 }, (_, index) =>
+      `- button "${index % 8 === 0 ? 'Target' : 'Other'} ${index}" [ref=e${index}]`).join('\n');
+    let outputDir: string;
+    let context: Context;
+    let response: Response;
+
+    beforeEach(async () => {
+      outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'find-artifact-'));
+      const config = await resolveConfig({ outputDir });
+      const tab = {
+        modalStates: () => [],
+        page: { ariaSnapshot: async () => snapshot },
+        context: { outputFile: (name: string, exclusive: boolean) => outputFile(config, name, exclusive) },
+      };
+      // SAFETY: browser_find uses this tab's snapshot and outputFile; Response uses config and the empty download-error queue.
+      context = { config, currentTabOrDie: () => tab, takeDownloadErrors: () => [] } as Context;
+      response = new Response(context, 'browser_find', {});
+    });
+
+    afterEach(async () => {
+      vi.restoreAllMocks();
+      await fs.promises.rm(outputDir, { recursive: true, force: true });
+    });
+
+    it('exposes filename as an optional string', () => {
+      const schema = toMcpTool(findTool.schema).inputSchema;
+      expect(schema.properties?.filename).toMatchObject({ type: 'string' });
+      expect(schema.required ?? []).not.toContain('filename');
+      expect(findTool.schema.inputSchema.parse({ text: 'Target', filename: 'find.txt' }))
+          .toEqual({ text: 'Target', filename: 'find.txt' });
+      expect(() => findTool.schema.inputSchema.parse({ text: 'Target', filename: 1 })).toThrow();
+    });
+
+    it.each([
+      { text: 'target' },
+      { regex: '/target/i' },
+      { text: 'Target', maxResults: 2 },
+      { regex: '/target/i', maxResults: 2 },
+      { text: 'Target', maxResults: 3 },
+      { text: 'Target', maxResults: 4 },
+      { text: 'Missing', maxResults: 1 },
+      { regex: '/Missing/i' },
+    ])('saves the inline result without returning its contents for %j', async params => {
+      const inline = new Response(context, 'browser_find', params);
+      await findTool.handle(context, findTool.schema.inputSchema.parse(params), inline);
+      await findTool.handle(context, findTool.schema.inputSchema.parse({ ...params, filename: 'find.txt' }), response);
+
+      const file = path.join(outputDir, 'find.txt');
+      const saved = await fs.promises.readFile(file, 'utf8');
+      expect(saved).toBe(inline.result());
+      if (params.maxResults === 2) {
+        expect(saved).toContain('Found 3 matches');
+        expect(saved).toContain('(showing first 2)');
+        expect(saved).toContain('Target 8');
+        expect(saved).not.toContain('Target 16');
+      }
+      if (params.text === 'Missing')
+        expect(saved).toBe('No matches found for "Missing".');
+      expect(response.result()).toBe(`Saved find results as ${file}`);
+      expect(response.serialize().content).toEqual([
+        { type: 'text', text: `### Result\nSaved find results as ${file}\n` },
+        expect.objectContaining({ type: 'resource_link', uri: pathToFileURL(file).href, name: 'find.txt', mimeType: 'text/plain' }),
+      ]);
+    });
+
+    it('keeps data URL payloads truncated in saved snippets', async () => {
+      const tab = context.currentTabOrDie();
+      const payload = 'A'.repeat(1000);
+      vi.spyOn(tab.page, 'ariaSnapshot').mockResolvedValue(`- link "Logo" [ref=e1]:\n  - /url: data:image/png;base64,${payload}`);
+      await findTool.handle(context, { text: 'Logo', filename: 'find.txt' }, response);
+      const saved = await fs.promises.readFile(path.join(outputDir, 'find.txt'), 'utf8');
+      expect(saved).toContain('[ref=e1]');
+      expect(saved).toContain('data:image/png;base64,');
+      expect(saved).not.toContain(payload);
+    });
+
+    it.each(['relative', 'absolute'] as const)('formats the saved path as %s while keeping the resource URI absolute', async filePaths => {
+      context.config.filePaths = filePaths;
+      await findTool.handle(context, { text: 'Target', filename: 'find.txt' }, response);
+      const file = path.join(outputDir, 'find.txt');
+      const display = filePaths === 'relative' ? path.relative(process.cwd(), file) : file;
+      expect(response.result()).toBe(`Saved find results as ${display}`);
+      expect(response.resourceLinks()[0].uri).toBe(pathToFileURL(file).href);
+      expect(await fs.promises.readFile(file, 'utf8')).toContain('Found 3 matches');
+    });
+
+    it('does not reserve a file or add a link without filename', async () => {
+      const reserve = vi.spyOn(context.currentTabOrDie().context, 'outputFile');
+      await findTool.handle(context, { text: 'Target' }, response);
+      expect(response.result()).toContain('Found 3 matches');
+      expect(reserve).not.toHaveBeenCalled();
+      expect(response.resourceLinks()).toEqual([]);
+      expect(await fs.promises.readdir(outputDir)).toEqual([]);
+    });
+
+    it('contains sanitized paths in the output directory and rejects collisions', async () => {
+      await findTool.handle(context, { text: 'Target', filename: '../find.txt' }, response);
+      const [link] = response.resourceLinks();
+      expect(link.uri).toBe(pathToFileURL(path.join(outputDir, '-find.txt')).href);
+      await expect(findTool.handle(context, { text: 'Target', filename: '-find.txt' }, new Response(context, 'browser_find', {})))
+          .rejects.toThrow('Output file already exists');
+      expect(await fs.promises.readdir(outputDir)).toEqual(['-find.txt']);
+    });
+
+    it.each(['find.txt', 'missing.txt'])('never overwrites an existing %s, even for no matches', async filename => {
+      const file = path.join(outputDir, filename);
+      await fs.promises.writeFile(file, 'keep me');
+      await expect(findTool.handle(context, { text: filename === 'find.txt' ? 'Target' : 'Missing', filename }, response))
+          .rejects.toThrow('Output file already exists');
+      await response.cleanupFilesOnError();
+      expect(await fs.promises.readFile(file, 'utf8')).toBe('keep me');
+      expect(response.result()).toBe('');
+      expect(response.resourceLinks()).toEqual([]);
+    });
+
+    it.each(['', ' ', 'CON.txt', 'NUL', 'find.', 'find '])('rejects invalid filename %j without reporting success', async filename => {
+      await expect(findTool.handle(context, { text: 'Target', filename }, response)).rejects.toThrow('Invalid output filename');
+      expect(await fs.promises.readdir(outputDir)).toEqual([]);
+      expect(response.result()).toBe('');
+      expect(response.resourceLinks()).toEqual([]);
+    });
+
+    it('propagates output-directory failures without linking an artifact', async () => {
+      await fs.promises.rm(outputDir, { recursive: true });
+      await fs.promises.writeFile(outputDir, 'not a directory');
+      await expect(findTool.handle(context, { text: 'Target', filename: 'find.txt' }, response)).rejects.toThrow();
+      expect(await fs.promises.readFile(outputDir, 'utf8')).toBe('not a directory');
+      expect(response.result()).toBe('');
+      expect(response.resourceLinks()).toEqual([]);
+    });
+
+    it('propagates a partial write failure and lets backend cleanup remove the reservation', async () => {
+      const writeFile = fs.promises.writeFile.bind(fs.promises);
+      vi.spyOn(fs.promises, 'writeFile').mockImplementationOnce(async file => {
+        await writeFile(file, 'partial');
+        throw new Error('disk full');
+      });
+      await expect(findTool.handle(context, { text: 'Target', filename: 'find.txt' }, response)).rejects.toThrow('disk full');
+      expect(response.result()).toBe('');
+      expect(response.resourceLinks()).toEqual([]);
+      await response.cleanupFilesOnError();
+      expect(await fs.promises.readdir(outputDir)).toEqual([]);
+      await findTool.handle(context, { text: 'Target', filename: 'find.txt' }, response);
+      expect(await fs.promises.readFile(path.join(outputDir, 'find.txt'), 'utf8')).toContain('Found 3 matches');
+    });
   });
 
   it('should show browser_find matches under their path from the root', async () => {
@@ -233,7 +528,579 @@ describe('Snapshot Tools', () => {
     expect(response.addError).toHaveBeenCalledWith('Provide either "text" or "regex" to search for.');
     expect(response.addError).toHaveBeenCalledWith('Provide only one of "text" or "regex", not both.');
   });
+
+  describe.skipIf(!fs.existsSync(chromium.executablePath()))('Playwright accessible-name compatibility', () => {
+    let browser: Browser;
+
+    beforeAll(async () => {
+      browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    });
+
+    afterAll(async () => {
+      await browser?.close();
+    });
+
+    it('includes searchbox values in snapshots and browser_find', async () => {
+      const browserContext = await browser.newContext();
+      const page = await browserContext.newPage();
+      // SAFETY: This controlled page cannot download; only config and currentTabOrDie are used.
+      const tabContext = { config: { timeouts: {} }, currentTabOrDie: () => tab } as Context;
+      const tab = new Tab(tabContext, page, () => {});
+      try {
+        await page.setContent(`
+          <button aria-labelledby="text-label"></button>
+          <div id="text-label" hidden><input type="text" value="Query"></div>
+          <button aria-labelledby="search-label"></button>
+          <div id="search-label" hidden><input type="search" value="Query"></div>
+          <label for="flash">Flash the screen <input type="search" value="5"> times.</label>
+          <input type="checkbox" id="flash">
+        `);
+
+        const snapshot = await tab.captureSnapshot();
+        expect(snapshot.ariaSnapshot.match(/button "Query"/g)).toHaveLength(2);
+        expect(snapshot.ariaSnapshot).toContain('checkbox "Flash the screen 5 times."');
+
+        const response = new Response(tabContext, 'browser_find', { text: 'Flash the screen 5 times.' });
+        await findTool.handle(tabContext, { text: 'Flash the screen 5 times.' }, response);
+        expect(response.result()).toContain('Found 1 match for "Flash the screen 5 times.":');
+      } finally {
+        tab.dispose();
+        await browserContext.close();
+      }
+    });
+  });
+
+  describe('scan_page', () => {
+    const scanPageTool = snapshotTools.find(tool => tool.schema.name === 'scan_page')!;
+
+    function scanResult(violations: any[], incomplete: any[] = []) {
+      return { url: 'https://example.com/', violations, incomplete, passes: [], inapplicable: [], unscannedFrames: [] } as any;
+    }
+
+    function scanRule(id: string, nodeCount: number) {
+      return {
+        id,
+        impact: 'serious',
+        tags: ['wcag2aa'],
+        help: `${id} help`,
+        helpUrl: `https://example.com/${id}`,
+        description: `${id} description`,
+        nodes: Array.from({ length: nodeCount }, (_, index) => ({
+          target: [`#n${index}`],
+          html: `<img data-i="${index}">`,
+          failureSummary: `${id} failure`,
+        })),
+      };
+    }
+
+    function scanHarness() {
+      const context = { currentTabOrDie: vi.fn().mockReturnValue({ modalStates: vi.fn(() => []), page: {} }) };
+      const response = { addResult: vi.fn() };
+      const text = () => response.addResult.mock.calls.map(call => call[0]).join('\n');
+      return { context, response, text };
+    }
+
+    it('passes tags, rule filters and scope selectors through to the axe scan', async () => {
+      const runAxeScanSpy = vi.spyOn(axe, 'runAxeScan').mockResolvedValue(scanResult([]));
+      const { context, response } = scanHarness();
+
+      await scanPageTool.handle(context as any, {
+        violationsTag: ['wcag2aa'],
+        includeIncomplete: true,
+        maxNodesPerViolation: 10,
+        includeSelectors: ['#checkout'],
+        excludeSelectors: ['#cookie-banner'],
+        withRules: ['image-alt'],
+        disableRules: ['color-contrast'],
+      } as any, response as any);
+
+      expect(runAxeScanSpy.mock.calls[0][1]).toEqual({
+        tags: ['wcag2aa'],
+        rules: ['image-alt'],
+        disableRules: ['color-contrast'],
+        include: ['#checkout'],
+        exclude: ['#cookie-banner'],
+      });
+    });
+
+    it('warns about frames the scan could not reach, naming them', async () => {
+      // A frame Axe never reached contributes no violations, so a silent result
+      // reads as a clean page rather than a partly-scanned one.
+      vi.spyOn(axe, 'runAxeScan').mockResolvedValue({
+        ...scanResult([]),
+        unscannedFrames: ['https://widget.example/embed', 'about:blank (name="promo")'],
+      });
+      const { context, response, text } = scanHarness();
+
+      await scanPageTool.handle(context as any, {
+        violationsTag: ['wcag2aa'],
+        includeIncomplete: true,
+        maxNodesPerViolation: 10,
+      } as any, response as any);
+
+      expect(text()).toContain('WARNING: Axe could not be installed in 2 frame(s)');
+      expect(text()).toContain('- https://widget.example/embed');
+      expect(text()).toContain('- about:blank (name="promo")');
+    });
+
+    it('says nothing about frames when the scan covered all of them', async () => {
+      vi.spyOn(axe, 'runAxeScan').mockResolvedValue(scanResult([]));
+      const { context, response, text } = scanHarness();
+
+      await scanPageTool.handle(context as any, {
+        violationsTag: ['wcag2aa'],
+        includeIncomplete: true,
+        maxNodesPerViolation: 10,
+      } as any, response as any);
+
+      expect(text()).not.toContain('could not be installed');
+    });
+
+    it('reports the rule id and flags truncated node lists', async () => {
+      vi.spyOn(axe, 'runAxeScan').mockResolvedValue(scanResult([scanRule('image-alt', 3), scanRule('label', 1)]));
+      const { context, response, text } = scanHarness();
+
+      await scanPageTool.handle(context as any, {
+        violationsTag: ['wcag2aa'],
+        includeIncomplete: true,
+        maxNodesPerViolation: 2,
+      } as any, response as any);
+
+      expect(text()).toContain('Violation rule: image-alt (serious) — image-alt help');
+      expect(text()).toContain('Violations (showing 2 of 3 nodes');
+      // An untruncated rule must not carry the notice.
+      expect(text()).toContain('Violation rule: label');
+      expect(text()).not.toContain('showing 1 of 1');
+    });
+
+    it('separates incomplete results from violations and honours includeIncomplete', async () => {
+      vi.spyOn(axe, 'runAxeScan').mockResolvedValue(
+          scanResult([scanRule('image-alt', 1)], [scanRule('color-contrast', 1)])
+      );
+      const included = scanHarness();
+      const params = { violationsTag: ['wcag2aa'], maxNodesPerViolation: 10 };
+
+      await scanPageTool.handle(included.context as any, { ...params, includeIncomplete: true } as any, included.response as any);
+      expect(included.text()).toContain('Incomplete rule: color-contrast');
+      expect(included.text()).toContain('Violation rule: image-alt');
+      expect(included.text()).not.toContain('Violation rule: color-contrast');
+
+      const excluded = scanHarness();
+      await scanPageTool.handle(excluded.context as any, { ...params, includeIncomplete: false } as any, excluded.response as any);
+      expect(excluded.text()).not.toContain('Incomplete rule:');
+      expect(excluded.text()).toContain('Violation rule: image-alt');
+      // A count with no entries below it reads as findings dropped from the
+      // report, so the summary line must drop the count too.
+      expect(included.text()).toContain('Incomplete: 1');
+      expect(excluded.text()).not.toContain('Incomplete:');
+      expect(excluded.text()).toContain('Violations: 1, Passes: 0');
+    });
+  });
 });
+
+describe('scan_page annotated screenshots', () => {
+  const scanPageTool = snapshotTools.find(tool => tool.schema.name === 'scan_page')!;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('should default annotateScreenshot to off', async () => {
+    const parsed = scanPageTool.schema.inputSchema.parse({ violationsTag: ['wcag2a'] });
+    const harness = scanHarness();
+
+    await scanPageTool.handle(harness.context as any, parsed, harness.response as any);
+
+    expect(parsed.annotateScreenshot).toBe(false);
+    expect(harness.screenshot).not.toHaveBeenCalled();
+    expect(harness.evaluate).not.toHaveBeenCalled();
+    expect(harness.response.addFileResourceLink).not.toHaveBeenCalled();
+  });
+
+  it('should annotate, screenshot, then remove the markers', async () => {
+    const harness = scanHarness({ markedNodes: 2 });
+
+    await scanPageTool.handle(harness.context as any, scanParams(), harness.response as any);
+
+    expect(harness.order).toEqual(['draw', 'screenshot', 'cleanup']);
+    expect(harness.screenshot).toHaveBeenCalledWith({ path: '/out/annotated.png', fullPage: true });
+    expect(harness.response.addFileResourceLink).toHaveBeenCalledWith('/out/annotated.png', expect.objectContaining({ mimeType: 'image/png' }));
+    expect(harness.results()).toContain('Annotated screenshot: /out/annotated.png');
+    expect(harness.results()).toContain('Marked 2 of 2 violating nodes.');
+    expect(harness.results()).not.toContain('Not marked:');
+  });
+
+  it.each(['relative', 'absolute'] as const)('renders annotated screenshot paths with policy %s', async filePaths => {
+    const harness = scanHarness({ markedNodes: 2 });
+    // SAFETY: scan_page only needs currentTabOrDie; path rendering only needs config.filePaths.
+    const context = { ...harness.context, config: { filePaths } } as Context;
+    const response = new Response(context, 'scan_page', {});
+    await scanPageTool.handle(context, scanParams(), response);
+    const expected = filePaths === 'relative' ? path.relative(process.cwd(), '/out/annotated.png') : '/out/annotated.png';
+    expect(response.result().split('\n')).toContain(`Annotated screenshot: ${expected}`);
+    expect(harness.screenshot).toHaveBeenCalledWith({ path: '/out/annotated.png', fullPage: true });
+    expect(response.resourceLinks()[0].uri).toBe('file:///out/annotated.png');
+  });
+
+  it('should remove the markers even when the screenshot throws', async () => {
+    const harness = scanHarness({ markedNodes: 2, screenshotError: new Error('screenshot boom') });
+
+    await expect(scanPageTool.handle(harness.context as any, scanParams(), harness.response as any)).rejects.toThrow('screenshot boom');
+
+    expect(harness.order).toEqual(['draw', 'screenshot', 'cleanup']);
+    expect(harness.response.addFileResourceLink).not.toHaveBeenCalled();
+  });
+
+  it('should report nodes that were truncated, hidden, or inside an iframe', async () => {
+    const nodes = Array.from({ length: 60 }, (_, index) => ({ target: [`#n${index}`], html: `<img id="n${index}">` }));
+    nodes.push({ target: ['iframe', '#inner'], html: '<img id="inner">' } as any);
+    const harness = scanHarness({
+      violations: [{ id: 'image-alt', tags: ['wcag2a'], nodes }],
+      markedNodes: 48,
+    });
+
+    await scanPageTool.handle(harness.context as any, scanParams(), harness.response as any);
+
+    expect(harness.results()).toContain('Marked 48 of 61 violating nodes.');
+    expect(harness.results()).toContain('Not marked: 10 over the 50-element annotation limit, 2 hidden, zero-size or off-canvas, 1 inside an iframe.');
+  });
+
+  it('should give each scan its own layer id so cleanup never removes a page element', async () => {
+    const first = scanHarness({ markedNodes: 2 });
+    await scanPageTool.handle(first.context as any, scanParams(), first.response as any);
+    const second = scanHarness({ markedNodes: 2 });
+    await scanPageTool.handle(second.context as any, scanParams(), second.response as any);
+
+    const layerId = first.evaluate.mock.calls[0][1].layerId;
+    expect(layerId).toMatch(/^mcp-a11y-annotation-layer-[0-9a-f-]{36}$/);
+    // Cleanup must target exactly the layer that was drawn, nothing else.
+    expect(first.evaluate.mock.calls[1][1]).toBe(layerId);
+    expect(second.evaluate.mock.calls[0][1].layerId).not.toBe(layerId);
+  });
+
+  it('keeps first-seen targets and adds shared rule labels after the annotation limit', async () => {
+    const nodes = Array.from({ length: 50 }, (_, index) => ({ target: [`#n${index}`], html: `<img id="n${index}">` }));
+    const harness = scanHarness({
+      violations: [
+        { id: 'image-alt', tags: ['wcag2a'], nodes: [...nodes, nodes[0]] },
+        { id: 'color-contrast', tags: ['wcag2a'], nodes: [
+          { target: ['#overflow'], html: '<img id="overflow">' },
+          nodes[0],
+        ] },
+      ],
+      markedNodes: 51,
+    });
+    // SAFETY: scan_page only needs currentTabOrDie; path rendering only needs config.filePaths.
+    const context = { ...harness.context, config: { filePaths: 'absolute' } } as Context;
+    const response = new Response(context, 'scan_page', {});
+
+    await scanPageTool.handle(context, scanParams(), response);
+
+    expect(harness.evaluate.mock.calls[0][1].marks).toEqual(nodes.map((node, index) => ({
+      path: node.target,
+      labels: index === 0 ? ['image-alt', 'color-contrast'] : ['image-alt'],
+    })));
+    expect(response.result()).toContain('Marked 51 of 52 violating nodes.');
+    expect(response.result()).toContain('Not marked: 1 over the 50-element annotation limit, 0 hidden, zero-size or off-canvas, 0 inside an iframe.');
+  });
+
+  it('should mark shadow DOM targets instead of counting them as iframe nodes', async () => {
+    const harness = scanHarness({
+      violations: [{ id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: [['my-card', '#shadow-img']], html: '<img>' }] }],
+      markedNodes: 1,
+    });
+
+    await scanPageTool.handle(harness.context as any, scanParams(), harness.response as any);
+
+    expect(harness.evaluate.mock.calls[0][1].marks).toEqual([{ path: ['my-card', '#shadow-img'], labels: ['image-alt'] }]);
+    expect(harness.results()).toContain('Marked 1 of 1 violating nodes.');
+    expect(harness.results()).not.toContain('Not marked:');
+  });
+
+  it('should draw one box per element listing every rule that element failed', async () => {
+    const harness = scanHarness({
+      violations: [
+        { id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: ['#one'], html: '<img id="one">' }] },
+        { id: 'color-contrast', tags: ['wcag2a'], nodes: [{ target: ['#one'], html: '<img id="one">' }] },
+      ],
+      markedNodes: 2,
+    });
+
+    await scanPageTool.handle(harness.context as any, scanParams(), harness.response as any);
+
+    expect(harness.evaluate.mock.calls[0][1].marks).toEqual([{ path: ['#one'], labels: ['image-alt', 'color-contrast'] }]);
+    // Both nodes are represented by that single box, so both count as marked.
+    expect(harness.results()).toContain('Marked 2 of 2 violating nodes.');
+  });
+
+  it('should not count a hidden shared element as marked for any of its rules', async () => {
+    const harness = scanHarness({
+      violations: [
+        { id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: ['#hidden'], html: '<img id="hidden">' }] },
+        { id: 'color-contrast', tags: ['wcag2a'], nodes: [{ target: ['#hidden'], html: '<img id="hidden">' }] },
+      ],
+      markedNodes: 0,
+    });
+
+    await scanPageTool.handle(harness.context as any, scanParams(), harness.response as any);
+
+    expect(harness.results()).toContain('Marked 0 of 2 violating nodes.');
+    expect(harness.results()).toContain('Not marked: 0 over the 50-element annotation limit, 2 hidden, zero-size or off-canvas, 0 inside an iframe.');
+  });
+});
+
+describe.skipIf(!fs.existsSync(chromium.executablePath()))('scan_page annotated screenshots in a real browser', () => {
+  const scanPageTool = snapshotTools.find(tool => tool.schema.name === 'scan_page')!;
+  let browser: Browser;
+  let outputDir: string;
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-a11y-annotate-'));
+  });
+
+  afterAll(async () => {
+    await browser?.close();
+    await fs.promises.rm(outputDir, { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Runs the real tool against a real page: only the Axe scan is faked, so the
+  // in-page drawing, geometry and cleanup all execute for real. The markers only
+  // exist between drawing and cleanup, so probe them from the screenshot call.
+  async function annotate(html: string, violations: any[], viewport = { width: 800, height: 400 }) {
+    const context = await browser.newContext({ viewport });
+    const page = await context.newPage();
+    await page.setContent(html);
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue({
+      url: 'https://example.com/', violations, incomplete: [], passes: [], inapplicable: [], unscannedFrames: [],
+    } as any);
+    const screenshot = page.screenshot.bind(page);
+    let drawn: any;
+    vi.spyOn(page, 'screenshot').mockImplementation(async (options: any) => {
+      drawn = await page.evaluate(() => {
+        const layer = document.querySelector('[id^="mcp-a11y-annotation-layer-"]')!;
+        const rect = (element: Element) => {
+          const box = element.getBoundingClientRect();
+          return [box.x, box.y, box.width, box.height];
+        };
+        // Markers live in the layer's shadow root, each a clipped ring followed
+        // by its own unclipped label.
+        const children = [...layer.shadowRoot!.children];
+        const style = getComputedStyle(layer);
+        return {
+          inTopLayer: layer.matches(':popover-open'),
+          visible: style.display !== 'none' && style.visibility === 'visible' && style.opacity === '1',
+          animations: document.getAnimations().map(animation => animation.playState),
+          pendingPauseAtMeasurement: document.querySelector('#one')?.hasAttribute('data-pending-pause'),
+          target: document.querySelector('#one') && rect(document.querySelector('#one')!),
+          boxes: children.filter((_, index) => index % 2 === 0).map((box, index) => ({
+            label: children[index * 2 + 1].textContent,
+            rect: rect(box),
+            labelRect: rect(children[index * 2 + 1]),
+          })),
+        };
+      });
+      return screenshot(options);
+    });
+    const response = { addResult: vi.fn(), addError: vi.fn(), formatFilePath: (file: string) => file, addFileResourceLink: vi.fn() };
+    const tab = { page, context: { outputFile: async (name: string) => path.join(outputDir, name) } };
+    const bodyBefore = await page.evaluate(() => document.body.innerHTML);
+    await scanPageTool.handle({ currentTabOrDie: () => tab } as any, scanParams() as any, response as any);
+    const bodyAfter = await page.evaluate(() => document.body.innerHTML);
+    const targetRect = await page.evaluate(() => {
+      const box = document.querySelector('#one')?.getBoundingClientRect();
+      return box && [box.x, box.y, box.width, box.height];
+    });
+    const animationsAfter = await page.evaluate(() => document.getAnimations().map(animation => animation.playState));
+    await context.close();
+    return { results: response.addResult.mock.calls.map(call => call[0]).join('\n'), bodyBefore, bodyAfter, drawn, targetRect, animationsAfter };
+  }
+
+  it('should leave the page byte-identical, even one already using the layer id', async () => {
+    const { bodyBefore, bodyAfter, results } = await annotate(
+        '<div id="mcp-a11y-annotation-layer">page owned</div><img id="one" style="width:50px;height:50px">',
+        [{ id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: ['#one'], html: '<img id="one">' }] }],
+    );
+
+    expect(bodyAfter).toBe(bodyBefore);
+    expect(bodyAfter).toContain('page owned');
+    expect(results).toContain('Marked 1 of 1 violating nodes.');
+  });
+
+  it('should place the marker on the target under CSS zoom', async () => {
+    const { drawn, targetRect } = await annotate(
+        '<style>:root{zoom:200%}body{margin:0}#one{position:absolute;left:20px;top:30px;width:100px;height:40px}</style><div id="one"></div>',
+        [{ id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: ['#one'], html: '<div id="one">' }] }],
+        { width: 800, height: 600 },
+    );
+
+    // Without the scale correction the box came out at twice the size and offset.
+    expect(drawn.boxes[0].rect).toEqual(targetRect);
+  });
+
+  it('should draw above an open modal dialog', async () => {
+    const { drawn, results } = await annotate(
+        '<dialog id="d"><img id="one" style="width:80px;height:80px"></dialog><script>document.getElementById("d").showModal()</script>',
+        [{ id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: ['#one'], html: '<img id="one">' }] }],
+    );
+
+    // Only the top layer paints above a modal dialog; z-index alone does not.
+    expect(drawn.inTopLayer).toBe(true);
+    expect(results).toContain('Marked 1 of 1 violating nodes.');
+  });
+
+  it('should mark an element inside an open shadow root with all of its rules', async () => {
+    const target = [['my-card', '#shadow-img']];
+    const { drawn, results } = await annotate(
+        `<my-card></my-card><script>
+        class MyCard extends HTMLElement { connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<img id="shadow-img" style="width:60px;height:60px">'; } }
+        customElements.define('my-card', MyCard);
+      </script>`,
+        [
+          { id: 'image-alt', tags: ['wcag2a'], nodes: [{ target, html: '<img>' }] },
+          { id: 'color-contrast', tags: ['wcag2a'], nodes: [{ target, html: '<img>' }] },
+        ],
+    );
+
+    // One box, both rule ids on it, sitting exactly on the shadow image.
+    expect(drawn.boxes.length).toBe(1);
+    expect(drawn.boxes[0]).toMatchObject({ label: 'image-alt, color-contrast', rect: [8, 8, 60, 60] });
+    expect(results).toContain('Marked 2 of 2 violating nodes.');
+  });
+
+  it('should freeze animations so a moving target keeps its marker', async () => {
+    const { drawn, animationsAfter, results } = await annotate(
+        `<style>body{margin:0}@keyframes slide{from{left:0}to{left:700px}}#one{position:absolute;top:100px;width:80px;height:80px;animation:slide 1s linear infinite}</style><div id="one"></div>
+        <script>
+          const target = document.getElementById('one');
+          const getRect = target.getBoundingClientRect.bind(target);
+          target.getBoundingClientRect = () => {
+            if (target.getAnimations().some(animation => animation.playState === 'paused' && animation.pending))
+              target.setAttribute('data-pending-pause', 'true');
+            return getRect();
+          };
+        </script>`,
+        [{ id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: ['#one'], html: '<div id="one">' }] }],
+    );
+
+    // Paused for the capture, so the target cannot slide out from under the
+    // marker between measuring and screenshotting...
+    expect(drawn.animations).toEqual(['paused']);
+    expect(drawn.pendingPauseAtMeasurement).toBe(false);
+    expect(drawn.boxes[0].rect).toEqual(drawn.target);
+    // ...and running again once the scan is over.
+    expect(animationsAfter).toEqual(['running']);
+    expect(results).toContain('Marked 1 of 1 violating nodes.');
+  });
+
+  it('should stay visible against page CSS that would hide the overlay', async () => {
+    const { drawn, results } = await annotate(
+        `<style>body{margin:0}div{display:none!important}[popover]{opacity:0}*{visibility:hidden!important;font-size:40px!important}
+         #one{display:block!important;visibility:visible!important;width:80px;height:80px}</style><div id="one"></div>`,
+        [{ id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: ['#one'], html: '<div id="one">' }] }],
+    );
+
+    // Important inline declarations outrank the page's, and the markers sit in
+    // a shadow root the page's selectors cannot reach at all.
+    expect(drawn.visible).toBe(true);
+    expect(drawn.boxes[0].rect).toEqual(drawn.target);
+    expect(drawn.boxes[0].labelRect[3]).toBeLessThan(20);
+    expect(results).toContain('Marked 1 of 1 violating nodes.');
+  });
+
+  it('should not count an element parked outside the captured page', async () => {
+    const { drawn, results } = await annotate(
+        '<style>#one{position:absolute;left:-9999px;top:0;width:80px;height:80px}</style><div id="one"></div>',
+        [{ id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: ['#one'], html: '<div id="one">' }] }],
+    );
+
+    // A full-page screenshot is clipped to the document box, so this marker
+    // could never appear in the PNG.
+    expect(drawn.boxes).toEqual([]);
+    expect(results).toContain('Marked 0 of 1 violating nodes.');
+    expect(results).toContain('1 hidden, zero-size or off-canvas');
+  });
+
+  it('should keep the whole rule label readable on a tiny element', async () => {
+    const { drawn } = await annotate(
+        '<style>#one{width:12px;height:12px}</style><div id="one"></div>',
+        [{ id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: ['#one'], html: '<div id="one">' }] }],
+    );
+
+    // The label is a sibling of the clipped ring, so the 12px box does not cut
+    // the rule id down to a couple of pixels of text.
+    expect(drawn.boxes[0].rect[2]).toBe(12);
+    expect(drawn.boxes[0].labelRect[2]).toBeGreaterThan(40);
+  });
+
+  it('should report an unresolvable selector as hidden rather than as marked', async () => {
+    const { results } = await annotate('<div id="one"></div>', [
+      { id: 'image-alt', tags: ['wcag2a'], nodes: [{ target: [['my-card', '#gone']], html: '<img>' }] },
+    ]);
+
+    expect(results).toContain('Marked 0 of 1 violating nodes.');
+    expect(results).toContain('1 hidden, zero-size or off-canvas');
+  });
+});
+
+function scanParams() {
+  return { violationsTag: ['wcag2a' as const], annotateScreenshot: true };
+}
+
+function scanHarness(options: { violations?: any[], markedNodes?: number, screenshotError?: Error } = {}) {
+  const violations = options.violations ?? [{
+    id: 'image-alt',
+    tags: ['wcag2a'],
+    nodes: [
+      { target: ['#one'], html: '<img id="one">' },
+      { target: ['#two'], html: '<img id="two">' },
+    ],
+  }];
+  const order: string[] = [];
+
+  vi.spyOn(axe, 'runAxeScan').mockResolvedValue({
+    url: 'https://example.com/',
+    violations,
+    incomplete: [],
+    passes: [],
+    inapplicable: [],
+    unscannedFrames: [],
+  } as any);
+
+  const evaluate = vi.fn(async () => {
+    const isDraw = !order.includes('draw');
+    order.push(isDraw ? 'draw' : 'cleanup');
+    return isDraw ? options.markedNodes ?? 0 : undefined;
+  });
+  const screenshot = vi.fn(async () => {
+    order.push('screenshot');
+    if (options.screenshotError)
+      throw options.screenshotError;
+  });
+  const response = {
+    addResult: vi.fn(),
+    addError: vi.fn(),
+    formatFilePath: (file: string) => file,
+    addFileResourceLink: vi.fn(),
+  };
+  const tab = {
+    page: { evaluate, screenshot },
+    context: { outputFile: vi.fn(async () => '/out/annotated.png') },
+  };
+
+  return {
+    context: { currentTabOrDie: vi.fn().mockReturnValue(tab) },
+    response,
+    evaluate,
+    screenshot,
+    order,
+    results: () => response.addResult.mock.calls.map(call => call[0]).join('\n'),
+  };
+}
 
 function findContext(snapshot: string) {
   const tab = {
@@ -253,3 +1120,207 @@ function findResponse() {
     addError: vi.fn(),
   };
 }
+
+function dropResponse() {
+  return { setIncludeSnapshot: vi.fn(), addCode: vi.fn(), addResult: vi.fn(), addError: vi.fn() };
+}
+
+describe('browser_drop', () => {
+  const dropTool = snapshotTools.find(tool => tool.schema.name === 'browser_drop')!;
+
+  async function dropHarness(allowedUploadDirs?: string[]) {
+    const drop = vi.fn().mockResolvedValue(undefined);
+    const locator = { drop, normalize: async () => ({ toString: () => `getByTestId('zone')` }) };
+    const tab = {
+      context: { config: await resolveConfig({ browser: { allowedUploadDirs } }) },
+      modalStates: vi.fn().mockReturnValue([]),
+      refLocator: vi.fn().mockResolvedValue(locator),
+      waitForCompletion: vi.fn(async (callback: () => Promise<void>) => await callback()),
+    };
+    return { drop, tab, response: dropResponse(), context: { currentTabOrDie: () => tab } };
+  }
+
+  it('should expose a destructive tool with optional paths and data', () => {
+    const jsonSchema = toMcpTool(dropTool.schema).inputSchema as JSONSchema7;
+
+    expect(dropTool.schema.type).toBe('destructive');
+    expect(dropTool.capability).toBe('core');
+    expect((jsonSchema.required ?? []).sort()).toEqual(['element', 'ref']);
+    expect((jsonSchema.properties?.paths as JSONSchema7).type).toBe('array');
+    expect((jsonSchema.properties?.data as JSONSchema7).type).toBe('object');
+  });
+
+  it('should drop files onto the element', async () => {
+    const harness = await dropHarness();
+
+    await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', paths: ['/tmp/a.txt'] }, harness.response as any);
+
+    expect(harness.tab.refLocator).toHaveBeenCalledWith(expect.objectContaining({ ref: 'e1', element: 'Dropzone' }));
+    expect(harness.drop).toHaveBeenCalledWith({ files: ['/tmp/a.txt'] });
+    expect(harness.response.setIncludeSnapshot).toHaveBeenCalled();
+    expect(harness.response.addCode).toHaveBeenCalledWith(`await page.getByTestId('zone').drop({"files":["/tmp/a.txt"]});`);
+  });
+
+  it('should drop clipboard-like data onto the element', async () => {
+    const harness = await dropHarness([]);
+
+    await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', data: { 'text/plain': 'hello' } }, harness.response as any);
+
+    expect(harness.drop).toHaveBeenCalledWith({ data: { 'text/plain': 'hello' } });
+  });
+
+  it('should drop files and data together', async () => {
+    const harness = await dropHarness();
+
+    await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', paths: ['/tmp/a.txt'], data: { 'text/plain': 'hello' } }, harness.response as any);
+
+    expect(harness.drop).toHaveBeenCalledWith({ files: ['/tmp/a.txt'], data: { 'text/plain': 'hello' } });
+  });
+
+  it('enforces upload directories before resolving the drop target', async () => {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-drop-'));
+    const outside = path.join(dir, 'outside.txt');
+    const allowed = path.join(dir, 'allowed');
+    await fs.promises.mkdir(allowed);
+    await fs.promises.writeFile(outside, 'private');
+    try {
+      for (const dirs of [[], [allowed]]) {
+        const harness = await dropHarness(dirs);
+        await expect(dropTool.handle(harness.context as any, {
+          element: 'Dropzone', ref: 'e1', paths: [outside], data: { 'text/plain': 'hello' },
+        }, harness.response as any)).rejects.toThrow(/outside the allowed upload directories/);
+        expect(harness.tab.refLocator).not.toHaveBeenCalled();
+        expect(harness.drop).not.toHaveBeenCalled();
+      }
+    } finally {
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('drops checked file bytes while keeping paths in the replay code', async () => {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-drop-'));
+    const file = path.join(dir, 'note.txt');
+    await fs.promises.writeFile(file, 'hello');
+    const harness = await dropHarness([dir]);
+    try {
+      await dropTool.handle(harness.context as any, {
+        element: 'Dropzone', ref: 'e1', paths: [file], data: { 'text/plain': 'hello' },
+      }, harness.response as any);
+      expect(harness.drop).toHaveBeenCalledWith({
+        files: [{ name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('hello') }],
+        data: { 'text/plain': 'hello' },
+      });
+      expect(harness.response.addCode).toHaveBeenCalledWith(
+          `await page.getByTestId('zone').drop(${JSON.stringify({ files: [file], data: { 'text/plain': 'hello' } })});`);
+    } finally {
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('should reject a drop with no payload at the schema', () => {
+    const schema = dropTool.schema.inputSchema;
+
+    for (const params of [{}, { paths: [] }, { data: {} }, { paths: [], data: {} }]) {
+      const parsed = schema.safeParse({ element: 'Dropzone', ref: 'e1', ...params });
+      expect(parsed.success).toBe(false);
+      expect(parsed.error!.issues.some(issue => issue.message.includes('Provide "paths", "data" or both'))).toBe(true);
+    }
+    expect(schema.safeParse({ element: 'Dropzone', ref: 'e1', paths: ['/tmp/a.txt'] }).success).toBe(true);
+    expect(schema.safeParse({ element: 'Dropzone', ref: 'e1', data: { 'text/plain': 'x' } }).success).toBe(true);
+  });
+
+  it('should refuse to drop while a modal state is pending', async () => {
+    const harness = await dropHarness();
+    harness.tab.modalStates = vi.fn().mockReturnValue([{ type: 'dialog', description: 'alert' }]);
+    harness.tab.modalStatesMarkdown = vi.fn().mockReturnValue(['- alert']);
+
+    await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', data: { 'text/plain': 'hi' } }, harness.response as any);
+
+    expect(harness.drop).not.toHaveBeenCalled();
+    expect(harness.response.addError).toHaveBeenCalledWith(expect.stringContaining('does not handle the modal state'));
+  });
+
+  it('should settle the page through waitForCompletion', async () => {
+    const harness = await dropHarness();
+
+    await dropTool.handle(harness.context as any, { element: 'Dropzone', ref: 'e1', data: { 'text/plain': 'hi' } }, harness.response as any);
+
+    expect(harness.tab.waitForCompletion).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe.skipIf(!fs.existsSync(chromium.executablePath()))('browser_drop in a real browser', () => {
+  const dropTool = snapshotTools.find(tool => tool.schema.name === 'browser_drop')!;
+  let browser: Browser;
+  let scratchDir: string;
+
+  const dropzone = `
+    <div id="zone" style="width:200px;height:100px">drop here</div>
+    <script>
+      window.dropped = null;
+      const zone = document.getElementById('zone');
+      zone.addEventListener('dragover', event => event.preventDefault());
+      zone.addEventListener('drop', event => {
+        event.preventDefault();
+        window.dropped = {
+          text: event.dataTransfer.getData('text/plain'),
+          uri: event.dataTransfer.getData('text/uri-list'),
+          files: [...event.dataTransfer.files].map(file => ({ name: file.name, type: file.type })),
+        };
+      });
+    </script>`;
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    scratchDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-a11y-drop-'));
+  });
+
+  afterAll(async () => {
+    await browser?.close();
+    await fs.promises.rm(scratchDir, { recursive: true, force: true });
+  });
+
+  async function runDrop(html: string, params: Record<string, unknown>, allowedUploadDirs?: string[]) {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.setContent(html);
+    const tab = {
+      context: { config: await resolveConfig({ browser: { allowedUploadDirs } }) },
+      modalStates: () => [],
+      refLocator: async () => page.locator('#zone'),
+      waitForCompletion: async (callback: () => Promise<void>) => await callback(),
+    };
+    const response = dropResponse();
+    try {
+      await dropTool.handle({ currentTabOrDie: () => tab } as any, { element: 'Dropzone', ref: 'e1', ...params } as any, response as any);
+      return { dropped: await page.evaluate(() => (window as any).dropped), code: response.addCode.mock.calls.map(call => call[0]).join('\n') };
+    } finally {
+      await context.close();
+    }
+  }
+
+  it('drops clipboard-like data onto a real drop zone', async () => {
+    const { dropped, code } = await runDrop(dropzone, { data: { 'text/plain': 'hello world', 'text/uri-list': 'https://example.com' } });
+
+    expect(dropped).toMatchObject({ text: 'hello world', uri: 'https://example.com' });
+    expect(code).toContain('.drop(');
+  });
+
+  it.each([false, true])('drops a real file onto a real drop zone with restrictions %s', async restricted => {
+    const filePath = path.join(scratchDir, 'note.txt');
+    await fs.promises.writeFile(filePath, 'hello');
+
+    const { dropped } = await runDrop(dropzone, { paths: [filePath] }, restricted ? [scratchDir] : undefined);
+
+    expect(dropped.files).toEqual([{ name: 'note.txt', type: 'text/plain' }]);
+  });
+
+  it('fails when the target rejects the payload', async () => {
+    const rejecting = `<div id="zone" style="width:200px;height:100px">no drops</div>`;
+
+    // Assert the specific rejection, so a setup failure inside runDrop cannot
+    // masquerade as the behaviour under test.
+    await expect(runDrop(rejecting, { data: { 'text/plain': 'hello' } }))
+        .rejects.toThrow(/did not call preventDefault/);
+  });
+});

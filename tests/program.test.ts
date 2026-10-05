@@ -16,13 +16,37 @@
 
 import { beforeAll, describe, it, expect } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { createConnection } from '../src/index.js';
 
 const rootDir = path.resolve(__dirname, '..');
 const cliArgs = [path.join(rootDir, 'cli.js')];
 
 beforeAll(() => {
   execFileSync(process.execPath, [path.join(rootDir, 'node_modules/typescript/bin/tsc'), '--project', path.join(rootDir, 'tsconfig.json')]);
+});
+
+describe('direct MCP harness install coverage', () => {
+  it.each([
+    { args: ['--only', 'browser_install'], summary: 'Skipped: 1' },
+    { args: ['--include-install', '--only', 'browser_session_close'], summary: 'Passed: 1' },
+  ])('matches exposed tools for $args', ({ args, summary }) => {
+    const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-install-harness-'));
+    try {
+      const output = execFileSync(process.execPath, [path.join(rootDir, '.codex/run-mcp-direct-harness.mjs'), ...args], {
+        cwd: rootDir,
+        env: { ...process.env, MCP_HARNESS_RESULTS_DIR: resultsDir },
+        encoding: 'utf-8',
+        timeout: 15_000,
+      });
+      expect(output).toContain(summary);
+      expect(output).toContain('Failed: 0');
+    } finally {
+      fs.rmSync(resultsDir, { recursive: true, force: true });
+    }
+  });
 });
 
 function runCLI(args: string): string {
@@ -32,9 +56,9 @@ function runCLI(args: string): string {
   });
 }
 
-function collectOutput(args: string[], timeoutMs = 3000): Promise<{ stdout: string; stderr: string }> {
+function collectOutput(args: string[], timeoutMs = 3000, environment?: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
   return new Promise(resolve => {
-    const child = spawn(process.execPath, [...cliArgs, ...args], { stdio: 'pipe' });
+    const child = spawn(process.execPath, [...cliArgs, ...args], { stdio: 'pipe', env: environment ? { ...process.env, ...environment } : undefined });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
@@ -46,6 +70,46 @@ function collectOutput(args: string[], timeoutMs = 3000): Promise<{ stdout: stri
     child.on('close', () => resolve({ stdout, stderr }));
   });
 }
+
+describe('tool policy CLI options', () => {
+  it('advertises both flags and applies additive allow / block precedence', () => {
+    expect(runCLI('--help')).toContain('--allowed-tools <tools>');
+    expect(runCLI('--help')).toContain('--blocked-tools <tools>');
+    const output = runCLI('--allowed-tools browser_pdf_save,browser_install --blocked-tools browser_navigate,browser_install list-tools');
+    expect(output).toMatch(/^browser_pdf_save  /m);
+    expect(output).toMatch(/^browser_snapshot  /m);
+    expect(output).not.toMatch(/^browser_navigate  /m);
+    expect(output).not.toMatch(/^browser_install  /m);
+  });
+
+  it('clears an environment list with an explicitly empty CLI value', () => {
+    const output = execFileSync(process.execPath, [...cliArgs, '--blocked-tools=', 'list-tools'], {
+      encoding: 'utf-8', env: { ...process.env, PLAYWRIGHT_MCP_BLOCKED_TOOLS: 'browser_navigate' }, timeout: 15_000,
+    });
+    expect(output).toMatch(/^browser_navigate  /m);
+  });
+
+  it.each([{ mode: [] }, { mode: ['--connect-tool'] }, { mode: ['--extension'] }, { mode: ['--vscode'] }])('rejects unknown names before starting $mode', async ({ mode }) => {
+    const result = await collectOutput([...mode, '--port', '0', '--blocked-tools', 'browser_nav']);
+    expect(result.stderr).toContain('Unknown tool in blockedTools: browser_nav');
+    expect(result.stderr).not.toContain('Listening on');
+  });
+});
+
+describe('file path CLI option', () => {
+  it('advertises the accepted modes', () => {
+    expect(runCLI('--help')).toContain('--file-paths <relative|absolute>');
+  });
+
+  it.each(['relative', 'absolute'])('accepts %s at startup', async mode => {
+    const result = await collectOutput(['--file-paths', mode]);
+    expect(result.stderr).toBe('');
+  });
+
+  it('rejects an invalid mode before starting the server', () => {
+    expect(() => runCLI('--file-paths invalid')).toThrow(/filePaths must be/);
+  });
+});
 
 describe('CLI command dispatch contract', () => {
   describe('help text', () => {
@@ -66,6 +130,19 @@ describe('CLI command dispatch contract', () => {
       expect(help).toContain('--config');
       expect(help).toContain('--headless');
       expect(help).toContain('--mobile');
+      expect(help).toContain('--snapshot-boxes');
+      expect(help).toContain('--timeout-settle');
+      expect(help).toContain('--timeout-idle');
+    });
+
+    it('shows --profile-dir-name with its value placeholder', () => {
+      const help = runCLI('--help');
+      expect(help).toContain('--profile-dir-name <name>');
+    });
+
+    it('documents image-only responses and accepts the option before a subcommand', () => {
+      expect(runCLI('--help')).toContain('"only" omits text');
+      expect(runCLI('--image-responses only list-tools')).toContain('browser_take_screenshot');
     });
   });
 
@@ -74,6 +151,32 @@ describe('CLI command dispatch contract', () => {
       const { stdout } = await collectOutput([], 2000);
       expect(stdout).not.toContain('Interactive mode');
     });
+  });
+
+  it.each(['cli', 'environment', 'config'])('rejects image-only interactive output from %s before starting the REPL', async source => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-image-only-'));
+    const configFile = path.join(configDir, 'config.json');
+    fs.writeFileSync(configFile, JSON.stringify({ imageResponses: 'only' }));
+    const args = source === 'cli' ? ['--image-responses', 'only'] : source === 'config' ? ['--config', configFile] : [];
+    try {
+      const { stdout, stderr } = await collectOutput([...args, 'interactive'], 3000,
+          { PLAYWRIGHT_MCP_IMAGE_RESPONSES: source === 'environment' ? 'only' : '' });
+      expect(stderr).toContain('Interactive mode prints text only');
+      expect(stderr).toContain('--image-responses allow or omit');
+      expect(stdout).not.toContain('Interactive mode. Type');
+    } finally {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it('prints usable auth setup without exposing the configured token', async () => {
+    const secret = 'startup-secret-do-not-print';
+    const { stderr } = await collectOutput(['--port', '0'], 3000, { PLAYWRIGHT_MCP_AUTH_TOKEN: secret });
+
+    expect(stderr).toContain('Listening on');
+    expect(stderr).not.toContain(secret);
+    expect(stderr).toContain('replace <YOUR_AUTH_TOKEN> locally');
+    expect(stderr).toContain('"Authorization": "Bearer <YOUR_AUTH_TOKEN>"');
   });
 
   describe('list-tools subcommand', () => {
@@ -93,6 +196,250 @@ describe('CLI command dispatch contract', () => {
       const output = runCLI('--cdp-header X-Test:1 list-tools');
       expect(output).toContain('browser_navigate');
     });
+  });
+
+  describe('--connect-tool with a profile-conflicting storage state', () => {
+    it('rejects at startup instead of advertising two unusable providers', async () => {
+      // The persistent default provider rejects --storage-state combined with
+      // --user-data-dir only on its first browser operation, and the extension
+      // provider refuses a storage state at switch time — starting the server
+      // would advertise two providers and neither could create a context.
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-connect-tool-'));
+      const stateFile = path.join(stateDir, 'auth.json');
+      fs.writeFileSync(stateFile, JSON.stringify({ cookies: [], origins: [] }));
+      const profileDir = path.join(stateDir, 'profile');
+      const { stderr } = await collectOutput(['--connect-tool', '--storage-state', stateFile, '--user-data-dir', profileDir]);
+      expect(stderr).toContain('--storage-state and --user-data-dir contradict each other');
+    });
+  });
+
+  describe('--profile-dir-name outside extension mode', () => {
+    it('rejects at startup instead of ignoring the option', async () => {
+      const { stderr } = await collectOutput(['--profile-dir-name', 'Profile 1']);
+      expect(stderr).toContain('--profile-dir-name is only supported in extension mode');
+    });
+
+    it('rejects at startup without --user-data-dir', async () => {
+      const { stderr } = await collectOutput(['--extension', '--profile-dir-name', 'Profile 1']);
+      expect(stderr).toContain('--profile-dir-name requires --user-data-dir');
+    });
+
+    it('rejects --connect-tool interactive without --extension instead of starting a REPL', async () => {
+      const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-connect-tool-'));
+      const { stderr } = await collectOutput(['--connect-tool', '--profile-dir-name', 'Profile 1', '--user-data-dir', profileDir, 'interactive']);
+      expect(stderr).toContain('--profile-dir-name is only supported in extension mode');
+    });
+
+    it('rejects --connect-tool --vscode instead of starting the VS Code host', async () => {
+      const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-vscode-'));
+      const { stderr } = await collectOutput(['--connect-tool', '--vscode', '--profile-dir-name', 'Profile 1', '--user-data-dir', profileDir]);
+      expect(stderr).toContain('--profile-dir-name is only supported in extension mode');
+    });
+
+    it('rejects --connect-tool with a storage state instead of advertising an unreachable provider', async () => {
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-connect-tool-'));
+      const stateFile = path.join(stateDir, 'auth.json');
+      fs.writeFileSync(stateFile, JSON.stringify({}));
+      const { stderr } = await collectOutput(['--connect-tool', '--storage-state', stateFile, '--profile-dir-name', 'Profile 1', '--user-data-dir', path.join(stateDir, 'profile')]);
+      expect(stderr).toContain('--profile-dir-name cannot reach the extension provider with a storage state');
+    });
+  });
+
+  describe('createConnection browser.profileDirName guard', () => {
+    it('rejects a config carrying browser.profileDirName', async () => {
+      await expect(createConnection({ browser: { profileDirName: 'Profile 1' } }))
+          .rejects.toThrow(/browser\.profileDirName is only applied by the CLI's extension mode/);
+    });
+
+    it('constructs a server without the field', async () => {
+      const server = await createConnection();
+      await server.close();
+    });
+  });
+
+  describe('--vscode with a profile-conflicting storage state', () => {
+    it('rejects at startup instead of advertising two unusable providers', async () => {
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-vscode-'));
+      const stateFile = path.join(stateDir, 'auth.json');
+      fs.writeFileSync(stateFile, JSON.stringify({ cookies: [], origins: [] }));
+      const profileDir = path.join(stateDir, 'profile');
+      const { stderr } = await collectOutput(['--vscode', '--storage-state', stateFile, '--user-data-dir', profileDir]);
+      expect(stderr).toContain('--storage-state and --user-data-dir contradict each other');
+    });
+  });
+
+  describe('browser session handles across handshake-free requests in proxy modes', () => {
+    // Each handshake-free POST builds a fresh proxy backend with a fresh
+    // inner BrowserServerBackend. With a request-local registry, the handle
+    // minted by the first POST was unknown to the second one (and disposed
+    // when its response closed); the registry must be process-scoped, exactly
+    // like the direct startMCPServer path.
+    async function startServer(args: string[]) {
+      // Match the HTTP harness's IPv4 loopback address: IPv6 localhost may
+      // miss an environment proxy's NO_PROXY matching in Node's fetch.
+      const child = spawn(process.execPath, [...cliArgs, ...args, '--host', '127.0.0.1', '--port', '0'], { stdio: 'pipe' });
+      let stderr = '';
+      const url = await new Promise<string>((resolve, reject) => {
+        // The timeout must kill the child: the test's finally-cleanup only
+        // sees a child once startServer has returned, so a server that never
+        // announced its URL would otherwise keep running — and holding its
+        // port — for the rest of the test run.
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL');
+          reject(new Error(`server did not start:\n${stderr}`));
+        }, 25_000);
+        child.stderr.on('data', (data: Buffer) => {
+          stderr += data.toString();
+          const match = stderr.match(/Listening on (http:\S+)/);
+          if (match) {
+            clearTimeout(timer);
+            resolve(match[1]);
+          }
+        });
+        // No kill needed here: 'close' only fires once the child has already
+        // exited and its stdio streams are closed.
+        child.on('close', () => {
+          clearTimeout(timer);
+          reject(new Error(`server exited early:\n${stderr}`));
+        });
+      });
+      return { child, url };
+    }
+
+    async function callTool(url: string, id: number, name: string, args: Record<string, unknown>) {
+      const response = await fetch(`${url}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'accept': 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }),
+      });
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      const messages = response.headers.get('content-type')?.includes('application/json')
+        ? [JSON.parse(text)]
+        : text.split('\n\n')
+            .map(chunk => chunk.split('\n').filter(line => line.startsWith('data: ')).map(line => line.slice('data: '.length)).join(''))
+            .filter(Boolean)
+            .map(data => JSON.parse(data));
+      const message = messages.find(m => m.id === id);
+      expect(message?.error).toBeUndefined();
+      expect(message?.result).toBeDefined();
+      return message.result;
+    }
+
+    it.each([{ mode: [] }, { mode: ['--connect-tool'] }, { mode: ['--extension'] }, { mode: ['--vscode'] }])('enforces tool policy on separate handshake-free requests in $mode', async ({ mode }) => {
+      const { child, url } = await startServer([...mode, '--allowed-tools', 'browser_pdf_save', '--blocked-tools', 'browser_connect,browser_navigate,browser_session_open']);
+      const rpc = async (id: number, method: string, params: object) => {
+        const response = await fetch(`${url}/mcp`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'accept': 'application/json, text/event-stream' },
+          body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+        });
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        const messages = response.headers.get('content-type')?.includes('application/json')
+          ? [JSON.parse(body)]
+          : body.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)));
+        return messages.find(message => message.id === id);
+      };
+      try {
+        const listed = await rpc(1, 'tools/list', {});
+        expect(listed.error).toBeUndefined();
+        const names = listed.result.tools.map((tool: { name: string }) => tool.name);
+        expect(names).toContain('browser_pdf_save');
+        expect(names).toContain('browser_snapshot');
+        for (const [index, name] of ['browser_connect', 'browser_navigate', 'browser_session_open'].entries()) {
+          expect(names).not.toContain(name);
+          const called = await rpc(index + 2, 'tools/call', { name, arguments: { browserSessionId: 'unknown' } });
+          expect(called.error).toMatchObject({ code: -32602, message: expect.stringContaining('not found') });
+        }
+      } finally {
+        child.kill('SIGTERM');
+      }
+    });
+
+    // A browser_connect switch must survive the response that carried it:
+    // handshake-free POSTs are each served by a throwaway proxy backend, so
+    // without a process-scoped selection the switch reported success while
+    // the very next request silently ran on the default provider again.
+    it('--connect-tool keeps a browser_connect switch in force for later handshake-free POSTs', async () => {
+      const { child, url } = await startServer(['--connect-tool']);
+      try {
+        const switched = await callTool(url, 1, 'browser_connect', { name: 'extension' });
+        expect(switched.isError).not.toBe(true);
+
+        // The extension provider vetoes separate browser sessions; before
+        // the fix this call ran on the default provider and minted a handle.
+        const vetoed = await callTool(url, 2, 'browser_session_open', {});
+        expect(vetoed.isError).toBe(true);
+        expect(JSON.stringify(vetoed.content)).toContain('browser you are already running');
+
+        // Switching back re-enables the default provider for later requests.
+        const back = await callTool(url, 3, 'browser_connect', { name: 'default' });
+        expect(back.isError).not.toBe(true);
+        const opened = await callTool(url, 4, 'browser_session_open', {});
+        expect(opened.isError).not.toBe(true);
+        const browserSessionId = JSON.stringify(opened).match(/bs_[0-9a-f-]+/)?.[0];
+        expect(browserSessionId).toBeTruthy();
+        await callTool(url, 5, 'browser_session_close', { browserSessionId });
+      } finally {
+        child.kill('SIGTERM');
+      }
+    });
+
+    it('--vscode keeps a browser_connect switch in force for later handshake-free POSTs', async () => {
+      const { child, url } = await startServer(['--vscode']);
+      try {
+        // The switch spawns the child provider and handshakes with it; no
+        // browser operation runs, so the dead connection string is fine.
+        const switched = await callTool(url, 1, 'browser_connect', { connectionString: 'ws://127.0.0.1:9/never-connected', lib: 'playwright' });
+        expect(switched.isError).not.toBe(true);
+
+        // Session-less traffic runs on the switched provider, whose dead
+        // connection string surfaces on the first browser operation; before
+        // the process-scoped selection fix this request silently reverted to
+        // the default provider (and launched a real browser).
+        const navigated = await callTool(url, 2, 'browser_navigate', { url: 'data:text/html,<p>hi</p>' });
+        expect(navigated.isError).toBe(true);
+        expect(JSON.stringify(navigated.content)).toContain('127.0.0.1:9');
+
+        // The session tools are host-scoped: even while switched, the handle
+        // is minted by the default provider's registry at the host — the
+        // switched child could neither mint one (its factory vetoes
+        // sessions) nor resolve one minted before the switch.
+        const opened = await callTool(url, 3, 'browser_session_open', {});
+        expect(opened.isError).not.toBe(true);
+        const browserSessionId = JSON.stringify(opened).match(/bs_[0-9a-f-]+/)?.[0];
+        expect(browserSessionId).toBeTruthy();
+
+        // Disconnecting re-enables the default provider for later requests...
+        const back = await callTool(url, 4, 'browser_connect', {});
+        expect(back.isError).not.toBe(true);
+        // ...and the handle minted while switched still resolves at the host.
+        const closed = await callTool(url, 5, 'browser_session_close', { browserSessionId });
+        expect(closed.isError).not.toBe(true);
+        expect(JSON.stringify(closed.content)).toContain(browserSessionId);
+      } finally {
+        child.kill('SIGTERM');
+      }
+    });
+
+    for (const mode of ['--connect-tool', '--vscode']) {
+      it(`${mode} resolves a handle minted in an earlier handshake-free POST`, async () => {
+        const { child, url } = await startServer([mode]);
+        try {
+          const openResult = await callTool(url, 1, 'browser_session_open', {});
+          expect(openResult.isError).not.toBe(true);
+          const browserSessionId = JSON.stringify(openResult).match(/bs_[0-9a-f-]+/)?.[0];
+          expect(browserSessionId).toBeTruthy();
+
+          const closeResult = await callTool(url, 2, 'browser_session_close', { browserSessionId });
+          expect(closeResult.isError).not.toBe(true);
+          expect(JSON.stringify(closeResult.content)).toContain(browserSessionId);
+        } finally {
+          child.kill('SIGTERM');
+        }
+      });
+    }
   });
 
   describe('subcommand --help flags', () => {

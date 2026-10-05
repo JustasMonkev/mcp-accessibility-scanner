@@ -16,6 +16,7 @@
 
 import { z } from 'zod';
 import { defineTool, defineTabTool } from './tool.js';
+import * as javascript from '../utils/codegen.js';
 
 const navigate = defineTool({
   capability: 'core',
@@ -32,10 +33,11 @@ const navigate = defineTool({
 
   handle: async (context, params, response) => {
     const tab = await context.ensureTab();
-    await tab.navigate(params.url);
+    await tab.navigate(params.url, { returnOnDialog: true });
 
     response.setIncludeSnapshot();
-    response.addCode(`await page.goto('${params.url}');`);
+    if (!tab.modalStates().length)
+      response.addCode(`await page.goto(${javascript.quote(params.url)});`);
   },
 });
 

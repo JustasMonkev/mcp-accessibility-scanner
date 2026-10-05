@@ -1,17 +1,19 @@
 
 # MCP Accessibility Scanner 🔍
 
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.JustasMonkev%2Fmcp-accessibility-scanner.svg)](https://mcptoplist.com/server/io.github.JustasMonkev%2Fmcp-accessibility-scanner)
+
 ## Star History
 [![Star History Chart](https://api.star-history.com/svg?repos=justasmonkev%2Fmcp-accessibility-scanner&type=Date)](https://api.star-history.com/svg?repos=justasmonkev%2Fmcp-accessibility-scanner&type=Date)
 
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/justasmonkev-mcp-accessibility-scanner-badge.png)](https://mseep.ai/app/justasmonkev-mcp-accessibility-scanner)
 
-A powerful Model Context Protocol (MCP) server that provides automated web accessibility scanning and browser automation using Playwright and Axe-core. This server enables LLMs to perform WCAG compliance checks, interact with web pages, manage persistent browser sessions, and generate detailed accessibility reports with visual annotations.
+A Model Context Protocol (MCP) server for accessibility scanning and browser automation with Playwright and Axe-core. It supports page interaction, persistent browser sessions, and accessibility reports with visual annotations.
 
 ## Features
 
 ### Accessibility Scanning
-✅ Full WCAG 2.0/2.1/2.2 compliance checking (A, AA, AAA levels)  
+✅ Automated checks for WCAG 2.0/2.1/2.2 criteria (A, AA, AAA levels)\
 📄 Detailed JSON reports with remediation guidance  
 🎯 Support for specific violation categories (color contrast, ARIA, forms, keyboard navigation, etc.)  
 
@@ -76,6 +78,8 @@ The Compose configuration publishes the unauthenticated MCP HTTP transport on `1
 docker build -t mcp-accessibility-scanner .
 ```
 
+Images built from this Dockerfile include `tini` as an init process; Docker's `--init` flag is optional.
+
 #### Docker smoke test
 
 ```bash
@@ -120,6 +124,7 @@ Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.
 > browser_navigate {"url": "https://example.com"}
 > scan_page {"violationsTag": ["wcag21aa"]}
 > audit_keyboard {"maxTabs": 30}
+> audit_screen_reader {}
 ```
 
 Each line is `<tool-name> <json-arguments>`. Omit the JSON to pass `{}`.
@@ -134,11 +139,16 @@ Use `--extension` to connect through the current [Playwright Extension](https://
 npx mcp-accessibility-scanner --extension
 ```
 
-Set `PLAYWRIGHT_MCP_EXTENSION_TOKEN` to the token shown by the extension to bypass the connection approval dialog.
+Set `PLAYWRIGHT_MCP_EXTENSION_TOKEN` to the token shown by the extension to bypass the connection approval dialog. The relay's CDP WebSocket endpoint always requires a separate random token, generated per relay and appended automatically for the server's own connection. This CDP token is never passed in Chrome's launch arguments or extension URL; the extension approval token cannot authenticate a CDP client.
+Token-bypass connections are not background-safe: Chrome focuses the connection tab and window, and client-created tabs remain open after disconnect ([upstream limitation](https://github.com/microsoft/playwright/issues/42343)).
+With a token, the extension must connect and finish setup within 30 seconds after the connection page opens. Failed attempts release the relay so the next tool call can retry. Without a token, manual approval waits until you approve or cancel the call.
+When `--user-data-dir` contains multiple Chrome profiles, the profile with the extension installed is selected automatically, preferring Chrome's last-used profile. Pass `--profile-dir-name` (or set `PLAYWRIGHT_MCP_PROFILE_DIR_NAME`) to select a profile explicitly; it requires `--user-data-dir` and accepts a Chrome profile directory name such as `Default` or `Profile 1` (see "Profile Path" at `chrome://version`). The `PLAYWRIGHT_MCP_EXTENSION_TOKEN` approval token is specific to the profile, so when selecting a profile explicitly, use the token shown in that profile.
+
+Packed extensions require an enabled record in the profile's preferences; a leftover extension directory alone does not count as installed. Profiles whose preferences mark the extension disabled or uninstalled are excluded from automatic selection and rejected for explicit selection. Explicit selection with a custom executable skips local installation checks. A whitespace-only `PLAYWRIGHT_MCP_PROFILE_DIR_NAME` is treated as unset; other string environment variables retain their existing blank-value handling.
 
 ### Discovering available tools (`list-tools` subcommand)
 
-To print every tool name and its description:
+To print the built-in tool names and descriptions (page-registered WebMCP tools require a live MCP `tools/list` request):
 
 ```bash
 npx mcp-accessibility-scanner list-tools
@@ -176,6 +186,27 @@ You can pass a configuration file to customize Playwright behavior:
 }
 ```
 
+#### Exact-name tool selection
+
+```bash
+npx mcp-accessibility-scanner --allowed-tools browser_pdf_save --blocked-tools browser_evaluate,browser_file_upload
+```
+
+| CLI | Environment | JSON config |
+| --- | --- | --- |
+| `--allowed-tools` | `PLAYWRIGHT_MCP_ALLOWED_TOOLS` | `allowedTools` |
+| `--blocked-tools` | `PLAYWRIGHT_MCP_BLOCKED_TOOLS` | `blockedTools` |
+
+CLI/environment values are comma-separated exact, case-sensitive names; JSON values are arrays of strings. `allowedTools` **adds** named tools to core and enabled capabilities; it is **not a restrictive whitelist**. For example, allowing `browser_pdf_save` does not disable navigation or accessibility audits, and allowing `browser_install` explicitly enables browser downloads without `--caps install`. Omitted lists preserve existing exposure defaults.
+
+`blockedTools` wins over core tools, capabilities and `allowedTools`. Blocked tools are absent from `tools/list` and rejected on `tools/call`, even without prior listing and even when a request names a browser session. The server instructions sent at initialization stop recommending blocked tools, so clients are not directed to calls that would be rejected. If the blocked tool is the one that clears an open modal (`browser_handle_dialog` or `browser_file_upload`), the modal-state guidance names it and says it is blocked instead of offering it as the way forward; other tools keep refusing while the modal is open. The policy applies to standalone, CDP, extension, provider-switching and VS Code backends, over stdio and HTTP. `browser_session_open`, `browser_session_close`, accessibility tools and the proxy-owned `browser_connect` are not exempt. Allowing a tool does not bypass a provider's limitations or enable a connection mode; `browser_connect` still requires a mode that supplies it.
+
+Precedence is **CLI > environment > config file**, independently for each list. A higher-precedence list replaces the lower one; lists are not merged. `[]` in JSON, `--blocked-tools=`, or an empty environment value explicitly clears that list (likewise for `allowedTools`). Empty lists add/block nothing; duplicates are harmless. Blank entries inside nonempty lists, non-array JSON values, unknown names (including generated `webmcp_*` page-tool names) and wildcards fail at startup.
+
+Page-provided WebMCP tools remain discoverable by default and are **outside this policy**. Their generated `webmcp_<name>_<identity>` names hash an identity minted for each server run, document and registration, so a name copied from `tools/list` never matches after a restart or navigation. Instead of accepting a value that could never take effect, startup rejects `webmcp_*` names in both lists like any other unknown name. Page tools keep their existing scope and staleness checks; a persistent page-action policy would need a stable registration key and is not part of this feature.
+
+This controls dispatch by tool name, not equivalent actions through other tools: for example, blocking `browser_click` does not prevent a page click through `browser_evaluate`. See the [adoption decision](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/decisions/002-tool-filtering.md).
+
 #### Configuration Options
 
 Create a `config.json` file with the following options:
@@ -196,11 +227,16 @@ Create a `config.json` file with the following options:
   },
   "timeouts": {
     "navigationTimeout": 60000,
-    "defaultTimeout": 5000
+    "defaultTimeout": 5000,
+    "settle": 500,
+    "idle": 0
   },
   "network": {
     "allowedOrigins": ["example.com", "trusted-site.com"],
     "blockedOrigins": ["ads.example.com"]
+  },
+  "snapshot": {
+    "boxes": true
   }
 }
 ```
@@ -208,25 +244,158 @@ Create a `config.json` file with the following options:
 **Available Options:**
 
 - `browser.browserName`: Browser to use (`chromium`, `firefox`, `webkit`)
+
+  With WebKit on the pinned Playwright 1.63.0, the contents of an open `<details>` nested inside a closed `<details>` count as visible: they appear in `browser_snapshot` and `browser_find` results, and `browser_verify_element_visible` and `browser_verify_text_visible` succeed for them. Chromium and Firefox hide them until the outer `<details>` is opened. The [upstream fix](https://github.com/microsoft/playwright/pull/42951) is not in a stable release yet. The server does not filter snapshots or patch Playwright to work around this. See the [verification notes](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#webkit-nested-details-visibility-246).
+- `browser.allowedUploadDirs`: Restrict files sent by `browser_file_upload` and `browser_drop` to regular files inside these directories, including resolved symlink targets. Restricted uploads and drops use a checked file handle and accept up to 50 MiB total per call. Unset allows any path; `[]` denies all file uploads and drops (text-only drops still work). Blank list entries are rejected. CLI: `--allowed-upload-dirs` (semicolon-separated; `""` denies all), env: `PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS` (empty string denies all).
+
+  The list must be an array, not `null`. Roots must exist at startup: their canonical paths are resolved once and retained for the server's lifetime, so retargeting a configured symlink does not grant access to a new tree. Non-empty upload allowlists require macOS or Linux with `/proc/self/fd` available. macOS blocks ancestor symlinks during the file open; Linux checks the opened descriptor's path. Other platforms reject restricted file uploads and drops rather than rely on race-prone pathname checks. Unrestricted uploads, deny-all lists, and text-only drops keep working on all platforms.
 - `browser.launchOptions.headless`: Run browser in headless mode (default: `true` on Linux without display, `false` otherwise)
 - `browser.launchOptions.channel`: Browser channel (`chrome`, `chrome-beta`, `msedge`, etc.)
+- `browser.contextOptions.clientCertificates`: With client certificates, a configured launch proxy is also applied to fresh contexts unless `browser.contextOptions.proxy` explicitly overrides it. Playwright 1.63.0 ignores certificate-interceptor proxy bypass rules, so combining certificates with a nonblank effective `proxy.bypass` is rejected before launch. For a fresh context on a remote browser, configure its proxy explicitly; a proxy inherited only from that browser cannot be inspected. Existing attached contexts retain their current settings.
+- `browser.launchOptions.proxy`: Browser proxy (CLI: `--proxy-server`, `--proxy-bypass`; env: `PLAYWRIGHT_MCP_PROXY_SERVER`, `PLAYWRIGHT_MCP_PROXY_BYPASS`). Credentials in a CLI or environment proxy URL, such as `http://user:password@myproxy:3128`, are moved into `proxy.username` and `proxy.password` so the browser can answer `407 Proxy Authentication Required`; percent-encode reserved characters such as `@`, `:` or `/` in them. A proxy set in the config file keeps its explicit `username` and `password` fields.
+- `browser.launchOptions.chromiumSandbox`: Defaults to `false` for downloaded Chromium builds on Linux because they lack the setuid sandbox helper, and `true` otherwise. Remote and VS Code endpoints choose on the remote host. An explicit config or `PLAYWRIGHT_MCP_SANDBOX` value wins; `--no-sandbox` always disables it.
 - `browser.cdpEndpoint`: Attach to an already-running Chromium-family app with CDP enabled
 - `browser.cdpHeaders`: Map of HTTP headers to send with the CDP connect request, e.g. `{ "Authorization": "Bearer <token>" }`, for endpoints that require header-based authentication
 - `browser.cdpTimeout`: Maximum time in milliseconds to wait when connecting to the CDP endpoint (default: `30000`)
-- `browser.cdpLaunch`: Launch a Chromium-family desktop app with CDP enabled, wait for the endpoint, and manage the child process lifecycle
+- `browser.cdpLaunch`: Launch a Chromium-family desktop app with CDP enabled, wait for the endpoint, and manage the child process lifecycle. `startupTimeoutMs` (default `30000`) bounds the whole wait, attach attempts included; each attempt also stops at `browser.cdpTimeout`
 - CDP attach modes preserve the target browser's existing default-context settings instead of applying Playwright's defaults.
+- `browser.contextOptions.storageState`: Start a fresh context from a recorded Playwright storage state. Imports into existing CDP or VS Code contexts are rejected; use `--isolated` for CDP or sign in interactively. If the browser exposes no context, the server creates one with the state. CDP sessions joining that same server-created context inherit its live state without resetting it.
+- `browser.profileDirName`: Chrome profile directory name used in extension mode, for example `Default` or `Profile 1` (CLI: `--profile-dir-name`, env: `PLAYWRIGHT_MCP_PROFILE_DIR_NAME`). Requires `--user-data-dir` and extension mode (`--extension` or `--connect-tool`); defaults to the last-used profile that has the extension installed.
 - `timeouts.navigationTimeout`: Maximum time for page navigation in milliseconds (default: `60000`)
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
+- `timeouts.settle`: How long to wait after every action for triggered work to settle before responding (default: `500`). An action that finishes quietly is first watched for up to 100ms (or the settle delay, whichever is shorter) so scheduled network work can still be awaited before the settle delay.
+- `timeouts.idle`: Release the default browser context after this many idle milliseconds (default: `0`, disabled). Accepts integers from `0` to `2147483647`.
 - `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
 - `network.blockedOrigins`: List of origins to block
+- `snapshot.boxes`: Include each element's viewport-relative bounding box as `[box=x,y,width,height]` in snapshots (default: `false`; CLI: `--snapshot-boxes`, env: `PLAYWRIGHT_MCP_SNAPSHOT_BOXES=1`)
+- `imageResponses`: `allow` (default) returns text and images; `omit` excludes images; `only` omits text from successful responses containing images. Errors, browser lifecycle notices, and responses without images (including full-page screenshots) keep their text. Structured results and resource links are always preserved. In `only` mode, screenshot save-path text, generated code and any accompanying text-only findings are omitted; use `allow` if you need them. Interactive mode rejects `only` because its REPL prints text only; use `allow` or `omit` there. `auto` remains a legacy alias for `allow`. CLI: `--image-responses only`; env: `PLAYWRIGHT_MCP_IMAGE_RESPONSES=only`. Precedence: CLI, then environment, then config file.
+- `server.authToken`: When set, Streamable HTTP requests (`--port`) require `Authorization: Bearer <token>` or return `401` (env: `PLAYWRIGHT_MCP_AUTH_TOKEN`). Blank or malformed tokens fail at startup. The scheme is case-insensitive; the token is exact. Bearer auth does not encrypt traffic: authenticated listeners must bind to loopback, such as `--host 127.0.0.1`; use a TLS reverse proxy for remote access. The printed client config includes a header placeholder to replace locally, without logging the secret. Unset keeps unauthenticated access.
+- `filePaths`: Optional `relative` or `absolute` rendering for output paths in screenshot/PDF results and generated code, report metadata, annotated/keyboard screenshots, and download summaries. Relative paths are based on the **server working directory**, not the client workspace or output directory. File writes, stored report contents, and absolute `file://` resource URIs are unchanged. Omitted preserves legacy rendering: configured relative output directories produce relative paths, while default temp output paths are absolute (unlike upstream Playwright’s relative default). CLI: `--file-paths absolute`; env: `PLAYWRIGHT_MCP_FILE_PATHS=absolute`. Precedence: CLI, then environment, then config file.
+- `outputDir`: Directory for output files — reports, screenshots, traces, and session logs (CLI: `--output-dir`, env: `PLAYWRIGHT_MCP_OUTPUT_DIR`). Defaults to a fresh directory under the system temp folder, resolved once per server run so all of a run's artifacts land together. The output location is always server configuration; the deprecated MCP roots capability (client workspace folders) is no longer consulted.
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
+If CDP attachment times out after the WebSocket connects, an existing tab may be blocking Playwright's browser initialization. On the pinned Playwright 1.63.0, a tab without a renderer — one whose renderer crashed, or one discarded by Chrome's Memory Saver — is never answered, so the attach cannot succeed while that tab exists ([upstream fix, unreleased](https://github.com/microsoft/playwright/pull/42936)); a sleeping or unresponsive tab can stall it too ([upstream report](https://github.com/microsoft/playwright/issues/42730)). `--cdp-endpoint` then fails after `--cdp-timeout`, and `--cdp-launch` by `--cdp-launch-startup-timeout` (each attach attempt also stops at `--cdp-timeout`), with an error that names this cause; `--cdp-launch` stops only the application it launched. For `--cdp-endpoint`, use an explicit positive `--cdp-timeout` to bound the attempt; `0` disables it and the attach can then wait forever. Reload or close the affected tab yourself, or attach to a separate disposable browser. `noDefaults` and `--isolated` do not skip initialization of existing tabs; the server does not close or reload your tabs or bypass Playwright's initialization to work around this. See the [verification notes](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#cdp-attach-and-numpad-keys-244).
+
+Playwright 1.63 does not support back/forward-cache (BFCache) restoration: an attached browser with BFCache enabled can return unusable references and omit iframe contents after back navigation. This was reproduced with full Chromium, Chrome, and Edge. For a browser you launch yourself, include `--disable-back-forward-cache` before attaching, or use the server's normal browser launch mode, which retains Playwright's default flag. The server does not change an attached browser's flags or replace back navigation with a reload. See the [upstream maintainer's explanation](https://github.com/microsoft/playwright/issues/42777#issuecomment-5739095543), [Playwright's BFCache limitation](https://playwright.dev/docs/navigations#backforward-cache-bfcache), and the [verification and reproduction command](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#history-references-231).
+
+For remote HTTP access, configure the TLS reverse proxy explicitly. For example, with the MCP server bound using `--host 127.0.0.1 --port 8931` and `PLAYWRIGHT_MCP_AUTH_TOKEN` set:
+
+- Accept only your configured public hostname over HTTPS and forward `/mcp` to `http://127.0.0.1:8931/mcp`.
+- Set the upstream `Host` header to `127.0.0.1:8931`, not the public hostname. Forward the client's `Authorization` header unchanged; do not inject a shared token for unauthenticated clients.
+- Before removing `Origin`, reject any non-empty value outside your explicit trusted HTTPS origin list (for example, `https://mcp.example.com`). Allow absent `Origin` for non-browser clients. Then remove `Origin` upstream, or rewrite it to `http://127.0.0.1:8931`. Never strip arbitrary origins without checking them first.
+- Disable response buffering for SSE streams. Browser clients on a different origin also need a narrowly scoped CORS policy at the proxy.
+
+The server does not trust `Forwarded` or `X-Forwarded-*` to bypass its checks. Preserving the public `Host` or HTTPS `Origin` upstream returns `403`, even with a valid bearer token.
+
+Caller-supplied screenshot, PDF, find-result, scan-page-matrix, and audit report filenames use a no-clobber policy: an existing file causes the tool call to fail instead of being overwritten. Windows-reserved basenames and names ending in a dot or space are rejected on every platform so configured names behave consistently across hosts.
+
+Failed download saves are reported as tool errors in the current or next response, including after the tab closes; failed entries do not advertise a saved file or an ongoing download. The server retains up to 20 bounded error messages between responses and reports any omitted count. Full Chromium-family browsers on Playwright 1.63.0 have [verified native crashes after persistent-profile relaunch](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#persistent-profile-downloads-230). Error reporting does not fix that native crash. The explicit `--isolated` control passed, but does not preserve a profile between launches; use recorded storage state when needed for authentication. Existing profiles and browser defaults are preserved.
+
+Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies after every action so delayed DOM-only updates are included in the response; a short observation window also catches scheduled requests and waits for them before that delay.
+
+Use `--timeout-idle 300000`, `timeouts.idle`, or `PLAYWRIGHT_MCP_TIMEOUT_IDLE` to release the default browser after five idle minutes. Shared contexts stay open while any client is working; the idle window starts after the last tool call or download finishes. Explicit recordings prevent idle release until `browser_stop_recording` finishes; passive `--save-session` capture does not. Cleanup finalizes traces. The next browser tool call reopens the connection and includes a note to navigate again and refresh element references. Attached CDP, extension, and VS Code browsers are disconnected; their external pages remain open. Close and session-management tools do not relaunch an idle browser. Explicit `browser_session_open` handles keep their separate `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` behavior. Zero disables this feature; blank environment values leave the existing configuration unchanged.
+
+The VS Code `browser_connect` tool accepts only `playwright` or `playwright-core` libraries and loopback WebSocket URLs. Set `PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE=1` to allow remote endpoints, which must use `wss:`. URL userinfo credentials are rejected.
+
 #### HTTP Heartbeat
 
-When the server runs with `--port`, it sends MCP heartbeat pings for Streamable HTTP sessions. Set `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` to override the default `5000` ms timeout. Set it to `0` or any negative value to disable heartbeat pings for clients or proxies that do not answer server-initiated pings.
+When the server runs with `--port`, it sends MCP heartbeat pings after a Streamable HTTP client opens the optional event stream. POST-only clients stay connected without heartbeat because server-initiated requests cannot reach them. Set `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` to override the default `5000` ms timeout, or to `0` or any negative value to disable heartbeat pings. A client that answers `ping` with a JSON-RPC "method not found" error is treated as alive: the server stops heartbeating that session instead of closing it. Only an unanswered ping (timeout) or a transport failure closes the session.
+
+#### Clients without the initialize handshake
+
+Clients on the MCP 2026-07-28 revision no longer send the `initialize` handshake. With `--port`, requests carrying the revision's per-request `_meta` envelope are served natively on the 2026-07-28 protocol: `server/discover` is answered (so clients negotiating with `versionNegotiation: 'auto'` or a `2026-07-28` pin connect directly), results carry `resultType` and the SEP-2549 cache fields — dynamic browser tool lists use the conservative `ttlMs: 0` default instead of a one-hour cache — and the SEP-2243 standard headers (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) are validated against the request body. Older handshake-free clients (2025-era requests without the envelope) are served statelessly as before. In both cases requests receive no heartbeat pings, and in the modes where the server creates browser contexts itself each request runs against a fresh default browser session: with the default persistent profile the per-request default context runs in its own disposable profile (like an explicit browser session), so parallel handshake-free requests do not contend for the stable profile — and the stable profile's sign-in state is not visible to them — while `--isolated`, remote endpoints and isolated CDP modes mint a fresh context per request anyway. Modes that reuse one live browser context are the exception: `--extension` (and a `browser_connect` or VS Code session switched to a connected-browser provider) and CDP attach without `--isolated` serve every handshake-free request from the same shared context, so its tabs, cookies and storage persist across requests — the same sharing that makes these modes refuse `browser_session_open` (in `--vscode` serving the session tools are the exception: they are host-scoped and keep running against the default provider even while switched — see [Browser Session Tools](#browser-session-tools)). With a pinned `--cdp-launch-port`, only one launched application can be served at a time, so a second handshake-free request arriving while another request's browser context is still live is rejected with a clear error instead of silently attaching to the first request's application. With `--user-data-dir`, each handshake-free request launches a browser in the one configured profile: the profile's state persists across requests, and parallel requests contend for its browser lock and can fail with "Browser is already in use". Elsewhere, browser state that must persist across handshake-free requests belongs in an explicit browser session — a `browserSessionId` handle minted by `browser_session_open` in one request resolves in later ones (see [Browser Session Tools](#browser-session-tools)). Clients that do send `initialize` keep the classic `Mcp-Session-Id` session behavior unchanged. When several such stateful clients are connected at once in the default persistent-profile mode, the first client's default context holds the stable profile — concurrent clients' default contexts run in their own disposable profiles (without the stable profile's sign-in state) until it is freed, instead of failing with "Browser is already in use".
+
+## Auditing pages behind a login
+
+Most real audits target pages that only exist for a signed-in user. There are two ways to get there.
+
+### Interactive route (no setup)
+
+Every tool shares one browser context, and `audit_site` crawls in a temporary tab of that same context, so cookies and local storage created while you drive the browser are already available to the crawl:
+
+```text
+1. browser_navigate to the login page
+2. browser_fill_form / browser_click to sign in
+3. browser_navigate to the first page you want audited
+4. audit_site — the crawl inherits the session you just created
+```
+
+This works out of the box in every mode, including the default persistent-profile mode. With the default profile the session also survives across server restarts, so you usually only sign in once. The default profile is keyed to the server's working directory, so each workspace's server keeps its own sign-in state — servers launched for different workspaces neither share cookies nor contend for the same profile.
+
+### Storage state route (repeatable, CI-friendly)
+
+Record a session once with Playwright's codegen, then hand the file to the server:
+
+```bash
+npx playwright@1.63.0 codegen --save-storage=auth.json https://example.com/login
+```
+
+Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.
+
+Pass it to the server with the CLI flag, the environment variable, or the config file:
+
+```bash
+npx mcp-accessibility-scanner --isolated --storage-state ./auth.json
+```
+
+```bash
+PLAYWRIGHT_MCP_ISOLATED=true PLAYWRIGHT_MCP_STORAGE_STATE=./auth.json npx mcp-accessibility-scanner
+```
+
+```json
+{
+  "browser": {
+    "isolated": true,
+    "contextOptions": {
+      "storageState": "./auth.json"
+    }
+  }
+}
+```
+
+> **Every supported mode handles the state — by applying it or refusing it.**
+>
+> **Playwright 1.63.0 safety restriction:** importing into an existing context is rejected before taking a rollback snapshot or resetting any storage. On this pin, snapshot capture can execute service-worker-served scripts for a previously visited origin whose tab is no longer open ([upstream fix](https://github.com/microsoft/playwright/pull/42664)). Use a fresh context, or omit `--storage-state` and sign in interactively. Service workers are not disabled. A future dependency upgrade must also pass the recorder/shared-client checks in [#218](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/218) and IndexedDB checks in [#224](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/224) before this restriction is reconsidered.
+>
+> **IndexedDB snapshot limitation:** on pinned Playwright 1.63.0 with Chromium 153.0.8010.12 and Firefox 155.0, `storageState({ indexedDB: true })` loses `Map` and `Set` contents. Both `newContext({ storageState })` and `setStorageState()` restore them as empty plain objects; ordinary JSON records survive. Fresh contexts protect existing browser data, but cannot recover values already lost during capture. The [upstream fix](https://github.com/microsoft/playwright/pull/42707) is merged but is not in this pin. Before allowing imports into existing contexts again, verify both restore paths preserve Map/Set types and entries on each supported engine, including after a failed import. The real-browser regression in `tests/browser-failures.integration.test.ts` checks that rejecting an import leaves the original Map/Set records intact and that isolated JSON IndexedDB imports still work.
+>
+> - **Fresh-context modes** (`--isolated`, the remote-endpoint mode, or either CDP mode combined with `--isolated`): the context is created with the storage state directly.
+> - **Default persistent-profile mode with `--storage-state`**: the session runs in a fresh, disposable profile — unique to that session and removed when it closes — built from the state, so the recorded state is provably the only session data (without `--storage-state` the regular persistent profile is used and survives restarts, as before). Any page the launch opened (for example from a URL in `browser.launchOptions.args`) is parked on a blank replacement before the state lands, then the replacement is navigated to the same URL, so a still-running anonymous page cannot overwrite the recorded identity and a scan never reads its DOM. This also means `--storage-state` cannot be combined with `--user-data-dir` (a user-supplied profile carries its own session and will not be wiped; the server refuses the combination).
+> - **CDP modes without `--isolated` and the VS Code provider**: `--storage-state` is rejected when the browser already has a context. Add `--isolated` in CDP mode to create a fresh context; otherwise omit the state and sign in interactively. If the browser exposes no context, the server creates one with the state. CDP sessions joining that same server-created context inherit its live state without resetting it.
+> - **`--extension`** (with or without `--isolated`) refuses storage imports entirely: it works through the browser you are already running, where wiping cookies to install a recorded state is not an acceptable side effect, so the server refuses to start rather than doing that silently. There, sign in interactively instead — the persistent profile also keeps the session across restarts.
+
+### Keep the crawl from destroying its own session
+
+`audit_site` excludes `logout|signout` by default, which is not enough for most applications. Add anything else that ends or changes the session before you start the crawl:
+
+```json
+{
+  "excludePathPatterns": ["logout|signout", "account/(close|delete)", "sessions/revoke", "/switch-(locale|account|org)"]
+}
+```
+
+Note that `excludePathPatterns` replaces the default rather than extending it, so repeat `logout|signout` in your list.
+
+If a session cookie disappears anyway, `audit_site` says so instead of reporting a confident, wrong audit: the result starts with a `WARNING: cookie(s) … disappeared while loading <url>` line, and both the JSON report and the structured content carry a `sessionLosses` list naming, for each lost cookie, the page that dropped it — the page reached after any redirect, and reported even when that page failed to finish loading. If one of the lost cookies was the session, every page scanned after that point was audited as a signed-out user — exclude the offending URL, sign in again, and re-run.
+
+The check compares which cookies the crawled URLs carry, not their values, so a rotating CSRF token never reads as a lost session. A cookie the browser deleted at its own stated expiry is ignored for the same reason — Cloudflare's `__cf_bm` lives 30 minutes and would otherwise warn on any longer crawl. Beyond that no attempt is made to tell an authentication cookie from any other: nothing in a cookie marks it as one, so any cookie the crawl started with and later lost is reported. Monitoring does not stop at the first loss — each cookie is reported once, at the URL where it vanished, so an analytics cookie expiring early cannot mask the session cookie being dropped later. URLs discovered mid-crawl join the cookie tracking before they are visited, so a session cookie scoped to a path below the start URL (say `/app`) is watched too.
 
 ## Available Tools
+
+### Page-registered WebMCP tools
+
+When the current page exposes a supported WebMCP API, MCP `tools/list` includes its tools as `webmcp_<name>_<identity>` alongside built-in tools. In `--extension` mode without `PLAYWRIGHT_MCP_EXTENSION_TOKEN`, listing never starts the extension connection, since that waits for your approval: page tools are listed once a browser tool call has connected it, and stateless (handshake-free) requests need the token to list them at all. Use the exact returned name: names are scoped to the browser session, frame/document and registration, and stale names are rejected rather than redirected to another action. Because of that, [`--allowed-tools` / `--blocked-tools`](#exact-name-tool-selection) cannot select them. No browser flags or polyfills are installed automatically.
+
+To discover or invoke tools in an explicit browser session, put its handle in **request metadata** (`params._meta.browserSessionId`) on both `tools/list` and `tools/call`. This is separate from `params.arguments`: page-defined `browserSessionId` and `_meta` arguments are preserved unchanged. Without routing metadata, discovery and invocation use the default session. Session handles are never enumerated by discovery. Listing holds its session against closure or expiry until discovery completes or the request is cancelled.
+
+Names, descriptions, schemas, results and page errors are untrusted. Every page tool retains conservative action annotations even if the page claims it is read-only. Calls are bounded and cancellable, but a timed-out or cancelled page action may still be running; do not retry it blindly. Stateful connections receive deduplicated list-change notifications for their last listed scope; stateless clients should re-list rather than cache the result.
+
+Stateful proxies buffer catalog changes until pending tool listings return, including changes arriving just as a listing finishes, so refresh notifications follow the returned catalog.
+
+See [WebMCP usage, limits and tests](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/webmcp.md) for request examples, discovery limits and validation commands. Page descriptors must pass the MCP SDK’s tool-schema validation, and their input schemas must compile with the validator that later checks call arguments, before publication. Schemas that define `pattern` or `patternProperties` subschemas, or declare a root type other than `object`, are omitted; `format` keywords are advertised but left for the page to enforce, and argument validation is interrupted after 500 ms. An empty listing is not proof that the page has no tools: unsupported, invalid or timed-out registrations are omitted.
+
+### Built-in tools
 
 The MCP server provides comprehensive browser automation and accessibility scanning tools:
 
@@ -237,11 +406,57 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 
 **Parameters:**
 - `violationsTag`: Array of WCAG/violation tags to check
+- `includeIncomplete` (default `true`): also report Axe "incomplete" results
+- `maxNodesPerViolation` (default `10`): cap on nodes reported per rule
+- `includeSelectors` / `excludeSelectors`: CSS selectors that scope the scan
+- `withRules` / `disableRules`: Axe rule ids that narrow which rules run
+- `annotateScreenshot` (default `false`): capture an annotated screenshot of the violations
+
+**Annotated screenshots:**
+When `annotateScreenshot` is `true`, each violating element is outlined and labelled with the rule ids it failed, a full-page PNG is written to the MCP output directory (`scan-page-annotated-{timestamp}-{token}.png`) and returned as a resource link, and the markers are then removed so the page is left exactly as it was. The markers are drawn in an out-of-flow overlay clipped to each element's own box, so they never reflow the page. The overlay uses a fresh id per scan, is placed in the browser's top layer so it stays visible over an open dialog, popover or fullscreen element, and compensates for a CSS `zoom` or a scaled ancestor so markers line up with what is rendered.
+An element that fails several rules gets one box listing every rule id, and elements inside open shadow roots are marked by walking the shadow path Axe reports.
+Running animations are frozen at their current time before the elements are measured and resumed after the capture, so a moving target keeps its marker. The markers themselves live in a shadow root under an overlay whose own styles are `!important`, so page CSS cannot restyle or hide what the report counts, and each rule label sits outside the clipped box so it stays readable on an element smaller than its own label.
+At most 50 elements are annotated per scan. The result text always reports how many nodes were marked out of the total, plus how many were left out because they exceeded the limit, were hidden, zero-size or off-canvas (a full-page screenshot is clipped to the document box), or were inside an iframe (cross-frame selectors cannot be resolved from the top document).
 
 **Supported Violation Tags:**
-- WCAG standards: `wcag2a`, `wcag2aa`, `wcag2aaa`, `wcag21a`, `wcag21aa`, `wcag21aaa`, `wcag22a`, `wcag22aa`, `wcag22aaa`
-- Section 508: `section508`
-- Categories: `cat.aria`, `cat.color`, `cat.forms`, `cat.keyboard`, `cat.language`, `cat.name-role-value`, `cat.parsing`, `cat.semantics`, `cat.sensory-and-visual-cues`, `cat.structure`, `cat.tables`, `cat.text-alternatives`, `cat.time-and-media`
+- WCAG standards (in the default set): `wcag2a`, `wcag2aa`, `wcag2aaa`, `wcag21a`, `wcag21aa`, `wcag21aaa`, `wcag22a`, `wcag22aa`, `wcag22aaa`
+- Section 508 (in the default set): `section508`
+- Categories (opt-in): `cat.aria`, `cat.color`, `cat.forms`, `cat.keyboard`, `cat.language`, `cat.name-role-value`, `cat.parsing`, `cat.semantics`, `cat.sensory-and-visual-cues`, `cat.structure`, `cat.tables`, `cat.text-alternatives`, `cat.time-and-media`
+- Non-conformance tags (opt-in): `best-practice`, `experimental` (see the caveat below -- a few experimental rules also carry a WCAG tag and run by default)
+
+The default set is the WCAG and Section 508 tags only, so a default report means "this fails a conformance criterion". Category tags are opt-in for that reason: Axe matches requested tags with OR, so asking for `cat.keyboard` also pulls in best-practice rules such as `region` and `skip-link` that carry both tags. No live conformance rule is lost by leaving them out: the only rules reachable *only* through a `cat.*` tag are `duplicate-id` and `duplicate-id-active`, which Axe marks deprecated because WCAG removed SC 4.1.1. Add `best-practice` (landmark structure, heading order, `tabindex` hygiene) or a `cat.*` tag when you want that broader review.
+
+The same OR semantics apply to `experimental`, with one deliberate exception: five experimental rules -- `css-orientation-lock` (SC 1.3.4), `label-content-name-mismatch` (SC 2.5.3), `p-as-heading`, `table-fake-caption` and `td-has-header` (SC 1.3.1) -- also carry a `wcag*` tag and so run in the default set. In Axe, `experimental` describes how settled the heuristic is, not whether the criterion is real, so these are kept rather than filtered out. Adding the `experimental` tag pulls in the remaining experimental rules, which have no conformance tag of their own.
+
+**Scan scoping:**
+`scan_page`, `audit_site`, and `scan_page_matrix` accept `includeSelectors` and `excludeSelectors` to limit what Axe looks at. Use `includeSelectors` to audit one component (`["#checkout-form"]`) and `excludeSelectors` to drop third-party noise that pollutes every report (`["#cookie-banner", "iframe.intercom-frame"]`). Exclusions are applied after inclusions, so you can carve a widget out of an included subtree.
+
+Selectors are resolved before the scan runs:
+- Syntactically invalid CSS fails the scan, naming the selector.
+- An `includeSelectors` entry that matches nothing fails the scan. Axe on its own would accept a partly-matching include set and quietly scan less than you asked for, so the scanner refuses rather than returning a clean-looking report with half the scope missing.
+- An `excludeSelectors` entry that matches nothing is a no-op, not an error -- a crawl legitimately visits pages that lack the excluded widget.
+
+In `audit_site`, selectors apply to every crawled page, so an `includeSelectors` value that is absent from a given page marks *that page* as errored in the report while the crawl continues. Link discovery runs before the scan, so pages reachable only through an errored page are still crawled.
+
+**Rule-level control:**
+`scan_page`, `audit_site`, and `scan_page_matrix` accept `withRules` and `disableRules` to pick individual Axe rules instead of whole tag sets. Use `withRules` to re-check one rule after a fix (`["color-contrast"]`) and `disableRules` to mute a rule you have already triaged (`["region"]`). Rule ids are the ones Axe reports (`image-alt`, `color-contrast`, ...); see the [Deque rule reference](https://dequeuniversity.com/rules/axe/).
+
+- **`withRules` overrides `violationsTag`.** Axe can run either a rule list or a tag list, never both, so when `withRules` is set the tags are ignored entirely -- `withRules: ["image-alt"]` runs exactly that one rule regardless of `violationsTag`. Rule ids are the more specific request, so they win.
+- **`disableRules` subtracts from whatever is selected.** It applies to `violationsTag` and `withRules` alike. (Axe itself ignores disabled rules once you give it an explicit rule list; the scanner subtracts them up front so the two options mean the same thing together as apart.) Disabling every rule in `withRules` is an error rather than an empty scan.
+- **An explicitly empty `withRules` is an error too.** `withRules: []` selects no rules, and silently falling back to the tag set would run a different scan than the one requested — omit the option to scan by tags instead. Clients that build the list dynamically should drop the key when the list comes out empty.
+- **Unknown rule ids fail the scan, naming the id.** Both options are checked against Axe's rule catalogue before the browser is touched, so a typo is reported as `Unknown Axe rule id(s) in withRules: image-altt` rather than surfacing later as an `frame.evaluate` failure from inside the page. Rule ids apply to a whole run, so `audit_site` and `scan_page_matrix` check them once before they touch the page -- a bad id fails the call outright instead of crawling every URL, or reloading and re-emulating the page, before rejecting the argument.
+
+`audit_site` and `scan_page_matrix` record both values in their JSON report metadata, so a stored report can be told apart from a full scan.
+
+**Incomplete ("needs review") results:**
+Axe returns `incomplete` for checks it cannot decide on its own -- contrast over a background image or gradient, ambiguous labels, elements it could not fully evaluate. `scan_page`, `audit_site`, and `scan_page_matrix` report these in a section separate from violations so you can resolve them by inspecting the page (screenshot, snapshot, `browser_evaluate`). Set `includeIncomplete: false` to suppress them.
+
+**Frames that could not be scanned:**
+Axe is installed into every frame of the page before the scan runs. A frame that navigates mid-injection, or whose renderer does not answer within a second, is left out -- and its contents then contribute no findings. Rather than let that pass as a clean result, all three scan tools print a `WARNING: Axe could not be installed in N frame(s)` block listing the frame URLs, and `audit_site` and `scan_page_matrix` also record them per page and per variant in their JSON reports (`unscannedFrames`) and in `structuredContent`. A frame that was still loading usually succeeds on a re-run; one that fails consistently has to be audited on its own.
+
+A nested frame is reported when any frame above it went unscanned, even if its own injection succeeded: Axe reaches a nested document only by relaying through the frames above it, so an outer frame without Axe takes everything below it out of the scan.
+
+A frame you scoped out yourself is not reported: with `excludeSelectors: ["iframe.intercom-frame"]` that widget failing to load is the outcome you asked for, not a gap. Scope is resolved through the whole frame chain and across shadow boundaries, so an `includeSelectors` entry naming an ancestor still covers frames nested several levels below it or inside a shadow root, and excluding an outer frame or a shadow host silences everything inside it. Anything the check cannot resolve is reported rather than hidden.
 
 ### Audit Tools
 
@@ -249,7 +464,10 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 Crawls and scans multiple internal pages, then aggregates violations across the site.
 - Default strategy: link-based BFS from the current URL
 - Supports `links`, `nav`, `sitemap`, and `provided` URL strategies
-- Always writes a JSON report (default filename: `audit-site-{timestamp}.json`)
+- Sitemap URLs and every redirect must pass the server network policy and crawl scope. Fetches run on the MCP host, use HTTP(S) without browser cookies or auth headers, and have a 15-second total timeout, 20-redirect cap, and 10 MiB response limit. Browser proxy settings, `browser.remoteEndpoint`, `browser.cdpEndpoint` (including loopback endpoints, which may tunnel to remote browsers), and switched `browser_connect` providers are rejected for this strategy; use `provided` URLs in these modes. Sitemap TLS certificates must be valid even when browser HTTPS errors are ignored.
+- Always writes a JSON report (default filename: `audit-site-{timestamp}-{token}.json`)
+- A page that opens an `alert`, `confirm` or `prompt` while it is being audited is reported as an errored page as soon as the dialog opens, with the dialog named in its `error`. This includes terminal HTTP 3xx pages (for example, `300` or `302` without a `Location`) that commit a document instead of redirecting. The crawl never answers a dialog: it closes that page's tab and continues with the next URL in a fresh one, so one such page does not fail or hang the pages after it. A dialog the previous page raises while the crawl is already navigating away is not blamed on the next page, which is audited again in the fresh tab. Same-document history updates, even ones that keep the exact URL unchanged, do not count as the next page loading. A fresh tab starts without the old tab's `sessionStorage`, so the result then starts with a `WARNING: … continued in a fresh tab from <url>` line and both the JSON report and the structured content carry a `crawlTabRestarts` list; if the site keeps its session in `sessionStorage`, pages from that URL on may have been audited in a different session. The tab the tool was called from is not touched.
+- Warns and records `sessionLosses` if the crawl loses cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login). If navigation fails on a browser-internal error page, the warning names the requested URL instead.
 
 **Example flow:**
 ```text
@@ -262,7 +480,8 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 Runs Axe scans on the same page across viewport/media/zoom variants and compares deltas against baseline.
 - Default variants: baseline, mobile, desktop, forced-colors, reduced-motion, zoom-200
 - Supports custom variants and optional reload between variants
-- Always writes a JSON report (default filename: `scan-matrix-{timestamp}.json`)
+- Always writes a JSON report (default filename: `scan-matrix-{timestamp}-{token}.json`)
+- JSON report and structured result schema `v2` set baseline deltas to `null` when either scan left frames unscanned, because their coverage is not comparable
 
 **Example flow:**
 ```text
@@ -274,8 +493,31 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 #### `audit_keyboard`
 Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) with practical heuristics.
 - Checks skip links, focus visibility, focus jumps, and possible focus traps
+- Checks target size against WCAG 2.2 SC 2.5.8 (`checkTargetSize`, default on)
+- Checks that focus is not entirely obscured, WCAG 2.2 SC 2.4.11 (`checkFocusObscured`, default on)
 - Optional issue screenshots (`screenshotOnIssue`)
-- Always writes a JSON report (default filename: `audit-keyboard-{timestamp}.json`)
+- Always writes a JSON report (default filename: `audit-keyboard-{timestamp}-{token}.json`)
+
+**Limits of the WCAG 2.2 checks** — these are heuristics, not a conformance verdict:
+- Target size only inspects elements the tab order actually reaches, so pointer-only targets are never measured.
+- Of the SC 2.5.8 exceptions, only *spacing* (a 24px-diameter circle centered on the target must reach neither another
+  target's box nor another undersized target's circle) and *inline* (an inline-level target — `inline`, `inline-block`,
+  `inline-flex`, … — inside surrounding sentence text, found by walking out through inline wrappers such as `<strong>`
+  to the containing block) are evaluated. The *user agent control*, *essential*, and *equivalent* exceptions cannot be
+  detected from the DOM, so a target relying on one of them is still reported and needs manual triage.
+- Spacing neighbours use the same pointer-target rule as the focused element, so rendered `:disabled` controls are not
+  counted as neighbours, and `contenteditable` regions are counted as targets on both sides.
+- Target size uses the element's bounding box, so an inline target wrapped over several lines is measured as one
+  union box rather than per line, and a target whose visible area is cut down by an `overflow` or `clip-path` ancestor
+  is measured at its full unclipped size.
+- SC 2.4.11 is the Minimum (AA) level: a focused element is only reported when *every* sampled point of its box is
+  covered by other content. Partially covered focus passes here, and the stricter SC 2.4.12 (AAA) is not checked.
+  It applies to every focus stop with a rendered box, including elements that are not pointer targets such as iframes.
+- Coverage is measured by hit-testing sample points and then checking that the element hit actually paints (visible,
+  non-zero opacity all the way up to the first wrapper shared with the focused element, non-transparent background or
+  background image). A transparent click-catching overlay therefore does *not* count as obscuration, but a covering
+  layer with `pointer-events: none` is never returned by hit testing and is missed. Semi-transparent overlays that
+  still leave content legible are reported.
 
 **Example flow:**
 ```text
@@ -284,12 +526,46 @@ Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) wit
 3. Review focus findings and open the generated JSON report path
 ```
 
+#### `audit_screen_reader`
+Audits what a screen reader actually announces, using the browser's own accessibility tree (`page.ariaSnapshot`) plus element geometry. No screen reader is installed or driven; this is a static reading of the exposed tree.
+
+**Checks (`checkNames`)**
+- `missing-accessible-name`: controls and images exposed with no accessible name (WCAG 4.1.2)
+- `uninformative-accessible-name`: names such as "click here", "read more", "image" that mean nothing out of context (WCAG 2.4.4)
+- `filename-as-accessible-name`: image alt text that is a file name, e.g. `IMG_1234.jpg`, `DSC00123` (WCAG 1.1.1). Only images are checked: a link or button legitimately named after the file it downloads (`logo.png`) is not a defect.
+- `label-in-name-mismatch`: the accessible name does not contain the visible label, which breaks voice control (WCAG 2.5.3). The visible label of `<input type="submit|button|reset">` is read from its `value`, and a web component's label is read from its open shadow root.
+- `duplicate-accessible-name`: sibling links with the same name that lead to different URLs (WCAG 2.4.4)
+
+**Check (`checkReadingOrder`)**
+- `reading-order-mismatch`: accessibility tree order (what is read) versus visual position (WCAG 1.3.2), i.e. `order`, `flex-direction: row-reverse`, absolute positioning
+
+**What it deliberately does not detect**
+- Reading order is only compared between siblings that form a single row or a single column. Genuine two-dimensional layouts (grid, CSS multi-column, wrapped flex) have no single correct linear order and are skipped rather than guessed.
+- Elements are excluded from the reading-order comparison when they render no text, are `aria-hidden`, floated, `position: fixed`, off-canvas, or clipped to 1px, because their visual position is decoupled from source order by design. Tolerance: two boxes count as swapped only when they are fully separated along the compared axis (1px), and right-to-left containers are compared right-to-left.
+- Duplicate names are only reported when the destinations differ *and* are observable, which today means resolved link URLs (`/help` and `https://site/help` are the same destination). Two `Save` submit buttons in one form are never called ambiguous, because nothing in the exposed tree says whether they do different things.
+- Only elements the AI snapshot gives a `ref` are analyzed, and Playwright refs the elements that are visible and receive pointer events. A control that is announced but not interactable (`pointer-events: none`, some off-canvas widgets) is therefore skipped: without a ref it cannot be measured, so neither its `aria-hidden` state nor a selector to fix it can be established, and reporting it would mostly surface decorative `aria-hidden` icons.
+- Heading levels and landmark structure are not checked; axe already reports those (`heading-order`, `region`, `landmark-one-main`), so use `scan_page` for them.
+- Findings for names overlap with axe rules such as `link-name`, `button-name` and `image-alt`; this tool adds the quality checks (generic names, file names, label-in-name, duplicates) that axe cannot make.
+- It reports the page as currently rendered. Content behind a collapsed panel or another viewport is judged in that state.
+
+**How names are measured:** the AI snapshot omits a name that a control's rendered children carry (`<a><strong>Docs</strong></a>`, a button whose label sits in a `<span>`), so the audit installs its own copy of axe-core in each frame it measures and takes the accessible name axe computes there. The page's own `window.axe`, if any, is left as it was. Installing is bounded (10 s for the main frame, 1 s per child frame). A frame that refuses the copy (a blocking CSP, a page that removes it) is measured without names. The result says so: a `WARNING: accessible names could not be measured for N of these` line, `elementsWithoutMeasuredName` in the structured summary, and `elements.unmeasuredNames` in the JSON report. In those frames the snapshot's own names stand, including literal slash-delimited names such as `/` and `/docs/`, so a `missing-accessible-name` finding for a control named only through its children may be a false positive; treat the name findings of a run with a non-zero count as partial and confirm them by hand. A frame that times out or stops answering is not evaluated by any check: its elements are counted as `unresolved` (with their own warning), and if that leaves nothing evaluated the audit fails rather than report a clean page. Every read of a frame is bounded by the same budgets (10 s main frame, 1 s child frame; the lookup that tells which frame owns an element gets the larger one), so a frame that stops answering cannot hold the audit open. At most four frame operations per page stay in flight across overlapping audits; if four timed-out operations are still running, no more frame work starts and the result says where measurement stopped.
+
+**Bounds:** `maxElements` (default 400) caps how many *screen-reader-reachable* accessibility tree elements are analyzed. The snapshot also refs `aria-hidden` subtrees, which no check reports, so measuring continues past them until the budget is filled with reachable elements (up to a hard ceiling of twice `maxElements` measured, so a page built mostly of hidden refs stays bounded). `maxFindingsPerCheck` (default 20) caps the findings listed per check. Both truncations are stated in the summary and the JSON report, and the full counts are always reported. Always writes a JSON report (default filename: `audit-screen-reader-{timestamp}-{token}.json`).
+
+**Example flow:**
+```text
+1. Navigate to the target page and let it fully load
+2. Run audit_screen_reader (optionally raise maxElements for a large page)
+3. Review the accessibility findings and open the generated JSON report path
+```
+
 ### Navigation Tools
 
 #### `browser_navigate`
 Navigate to a URL.
 - Parameters: `url` (string)
 - Non-2xx main-document responses are shown as an `HTTP status` line in page state.
+- If a page opens a dialog while loading, navigation returns the pending dialog so you can resolve it with `browser_handle_dialog`. It does not dismiss the dialog automatically, and the interrupted response omits the `page.goto` replay snippet. A navigation attempt while a modal is already open fails with handling guidance. If the interrupted navigation later fails, the error appears in page console messages unless the document has changed.
 
 #### `browser_navigate_back`
 Go back to the previous page.
@@ -307,14 +583,19 @@ Set default operation timeout for existing tabs.
 #### `browser_snapshot`
 Capture accessibility snapshot of the current page (better than screenshot for analysis).
 Large `data:` URL payloads in snapshot output are truncated to their media type prefix.
-- Parameters: `compress` (optional boolean, default false)
-  - When true, repeated non-interactive ARIA snapshot nodes are collapsed in the rendered response when a repeated structural pattern appears more than 100 times. The first 10 examples of each collapsed pattern are kept.
+AI snapshots mark a visually present subtree excluded from accessibility queries with `[aria-hidden]` on its boundary element. Descendants are not marked again.
+- Parameters: `compress` (optional boolean, default false), `boxes` (optional boolean; overrides `snapshot.boxes` for this call)
+  - When `compress` is true, repeated non-interactive ARIA snapshot nodes are collapsed in the rendered response when a repeated structural pattern appears more than 100 times. The first 10 examples of each collapsed pattern are kept.
   - Use `browser_evaluate()` to retrieve the full uncompressed list when needed.
+  - When `boxes` is true, each element includes `[box=x,y,width,height]` in viewport-relative CSS pixels.
 
 #### `browser_find`
 Search the current page accessibility snapshot without returning the full snapshot.
-- Parameters: `text` (case-insensitive substring) or `regex` (regular expression, supports `/pattern/flags`)
+- Parameters: `text` (case-insensitive substring) or `regex` (regular expression, supports `/pattern/flags`), `maxResults` (optional positive integer; defaults to all matches), `filename` (optional)
 - Returns matching snapshot lines with surrounding context, shown under their path from the root of the tree; `...` marks truncated off-path context.
+- `maxResults` selects the first matching lines before building context windows and preserves their ancestor paths. Context may include additional matching lines. When truncated, the header reports the total match count and `(showing first Y)`.
+- With `filename`, saves the same text (including no-match messages and total/truncation headers) under the same `maxResults` limit. Returns `Saved find results as <path>` and a `text/plain` resource link instead of inline search results. Without `filename`, the response is unchanged.
+- Filenames follow this server's artifact policy: sanitized names contained in the configured output directory, with existing files rejected. Unlike upstream Playwright MCP, paths are not resolved against the workspace root.
 
 #### `browser_click`
 Perform click on a web page element.
@@ -332,6 +613,13 @@ Hover over element on page.
 Perform drag and drop between two elements.
 - Parameters: `startElement`, `startRef`, `endElement`, `endRef`
 
+#### `browser_drop`
+Simulate an external drag and drop of files or clipboard-like data onto an element, for testing drop zones that never see a drag start inside the page.
+- Parameters: `element`, `ref`, `paths` (optional array of absolute file paths), `data` (optional map of mime type to value, e.g. `{"text/plain": "hello"}`)
+- At least one of `paths` or `data` is required.
+- Fails if the target's `dragover` handler does not accept the payload.
+- `paths` are read from the filesystem of the machine running the server, exactly as `browser_file_upload` does, and a relative path resolves against the server's working directory. Unlike `browser_file_upload` this needs no file chooser to be open, so any page with a `dragover` handler is a valid target — treat it as a tool that can hand local file contents to the page.
+
 #### `browser_select_option`
 Select an option in a dropdown.
 - Parameters: `element`, `ref`, `values` (array)
@@ -343,27 +631,47 @@ Fill multiple fields with one call.
 #### `browser_press_key`
 Press a key on the keyboard.
 - Parameters: `key` (e.g., 'ArrowLeft' or 'a')
+- Keys are delivered by Playwright's US keyboard layout. On the pinned Playwright 1.63.0, some numpad keys differ from a physical keyboard. In Chromium, Firefox and WebKit, `NumpadDecimal` sends key `"\u0000"` instead of `Delete`; WebKit on macOS also inserts that NUL character into the focused input ([upstream fix](https://github.com/microsoft/playwright/pull/42927), merged after 1.63.0 and not in the stable pin). In Chromium only, numpad `keyup` events do not report the numpad location ([upstream fix](https://github.com/microsoft/playwright/pull/42913), merged after 1.63.0), and shifted numpad digits such as `Shift+Numpad1`, and `Shift+NumpadDecimal`, type nothing. Pages that rely on numpad `key`, `location` or shifted digits may therefore not be exercised faithfully; the server passes keys through unchanged rather than remapping them. Use `Delete` when deletion matters more than the physical numpad identity. `tests/numpad-keys.integration.test.ts` characterizes only the measured paired versions, browser builds and platforms; other environments must satisfy the intended key contract.
+
+#### `browser_start_recording` / `browser_stop_recording`
+Record browser actions and return them as Playwright JavaScript. Start the server with `--caps devtools`, call `browser_start_recording`, perform the flow, then call `browser_stop_recording`.
+
+Multi-tab recordings include the `context.newPage()` declarations needed by generated page aliases.
+Recorded assertions include the `playwright/test` `expect` setup they need to run.
+
+Handshake-free HTTP clients must first call `browser_session_open`, then pass its `browserSessionId` to both recording tools so the recording survives across requests. Modes that cannot open separate browser sessions, such as `--extension` and non-isolated CDP attach, need a stateful MCP connection for recording.
 
 #### `browser_evaluate`
 Evaluate a JavaScript expression on the page, or on a specific element when a `ref` is provided. The function's return value is serialized back as the result.
 - Parameters: `function` (e.g., `() => document.title` or `(element) => element.textContent`), `element` (optional), `ref` (optional)
+- `element` and `ref` must be supplied together, or not at all; supplying one without the other is rejected.
+- A bare expression is also accepted and is wrapped automatically: `document.title` behaves like `() => document.title`, and, when `element` and `ref` are both given, `element.textContent` behaves like `(element) => element.textContent`. The parameter is always named `element`.
+- Whether the input is a function or an expression is decided from its source form, never from what it evaluates to, so an expression such as `window.open` is returned rather than called.
 
 ### Screenshot & Visual Tools
 
 #### `browser_take_screenshot`
 Take a screenshot of the current page.
-- Parameters: `filename` (optional), `type` (`png` or `jpeg`), `scale` (`css` or `device`, default `css`), `fullPage` (optional), `element`/`ref` pair (for element screenshots)
+- Parameters: `filename` (optional), `type` (`png`, `jpeg`, or `webp`), `scale` (`css` or `device`, default `css`), `fullPage` (optional), `element`/`ref` pair (for element screenshots)
 - `scale: device` captures a high-resolution screenshot using device pixels (accounts for the device pixel ratio); `scale: css` keeps the image sized in CSS pixels.
+- An empty capture is an error, and its output file is removed, including automatically named files. The requested format is never silently changed. If a WebP capture is empty, reduce its dimensions or explicitly request PNG/JPEG.
 
 #### `browser_pdf_save`
 Save page as PDF.
-- Parameters: `filename` (optional, defaults to `page-{timestamp}.pdf`)
+- Parameters: `filename` (optional, defaults to `page-{timestamp}-{token}.pdf`)
 
-This tool requires `--caps pdf` in the CLI.
+Enable this tool with `--caps pdf` or `--allowed-tools browser_pdf_save`.
 
 #### `browser_install`
 Install the configured browser engine (use when browser executable is missing).
 - Parameters: none
+- A completed install reports `Browser <channel> installed successfully.` even when no tabs are open.
+
+Disabled by default. Enable it at server startup with `--caps install`, `PLAYWRIGHT_MCP_CAPS=install`, or `"capabilities": ["install"]` in the config file. Exact-name opt-in via `--allowed-tools browser_install` or `allowedTools` is also supported. Explicit `core-install` settings remain supported as a deprecated alias; use `install` in new configurations. Without this opt-in, the tool is neither listed nor callable; existing browser installations can still be used.
+
+This tool invokes Playwright's installer, which downloads executable code. In [Playwright 1.63.0](https://github.com/microsoft/playwright/blob/v1.63.0/packages/playwright-core/src/server/registry/oopDownloadBrowserMain.ts), browser archives have no checksum or signature verification before extraction; the default download hosts use HTTPS. Only enable installation when you trust the download source and TLS configuration, including any custom `PLAYWRIGHT_DOWNLOAD_HOST`, browser-specific host overrides, or TLS-inspecting proxy. Do not disable TLS certificate validation.
+
+For deployments that require independently verified binaries, provision the browser through your trusted deployment process and use `--executable-path` or an existing browser connection. The capability opt-in limits MCP-triggered installation; it does not add archive verification or change manual, CI, or Docker build downloads.
 
 ### Browser Management
 
@@ -374,11 +682,42 @@ Close the page.
 Resize the browser window.
 - Parameters: `width`, `height`
 
+#### `browser_emulate_media`
+Emulate CSS media features on the current page without resetting omitted features.
+- Parameters: `colorScheme` (`light` or `dark`), `reducedMotion` (`reduce` or `no-preference`), `forcedColors` (`active` or `none`), `contrast` (`more` or `no-preference`), and `media` (`screen` or `print`); provide at least one.
+
 ### Tab Management
 
 #### `browser_tabs`
 Manage browser tabs in one tool.
 - Parameters: `action` (`list`, `new`, `close`, `select`) and optional `index` (for `close` and `select`).
+
+### Browser Session Tools
+
+Following the MCP 2026-07-28 stateless prescription, browser state can be named by an explicit server-minted handle instead of living implicitly in the connection. Every built-in browser tool except the two session tools accepts an optional `browserSessionId` argument; when it is omitted, the tool runs in the default session and behaves exactly as before. Dynamic `webmcp_*` tools instead use request metadata for routing, as described above, so page arguments are not overwritten.
+
+#### `browser_session_open`
+Opens a separate browser session — its own browser context with its own tabs, cookies and storage — and returns its opaque handle (`bs_...`) both in the result text and as `structuredContent.browserSessionId`. Pass that handle as the `browserSessionId` argument of other browser tools to run them in this session.
+
+How the separate context is provided depends on the mode:
+
+- **Default persistent-profile mode**: each session runs in its own fresh, disposable profile (removed when the session closes or expires); only the default session uses the stable persistent profile, whose sign-in state keeps surviving restarts. This is required — one profile directory can back only one running browser at a time.
+- **`--isolated`, remote endpoints, and CDP/`--cdp-launch` with `--isolated`**: each session gets its own fresh browser context. In `--cdp-launch` mode each context launches its own instance of the configured application on its own free port — which is why combining `--cdp-launch-port` with `--isolated` also rejects `browser_session_open`: a pinned port can serve only one launched instance, so a second session would silently attach to the first session's application. A second concurrent browser context on the pinned port (e.g. from a parallel client) is likewise rejected with an error rather than attaching to the first context's application.
+- **Modes that reuse one live browser context** — CDP attach or `--cdp-launch` without `--isolated`, `--extension`, the VS Code bridge, and servers created with a custom context getter — cannot create a separate context, so `browser_session_open` is rejected with an explanation instead of handing out a handle that would share the same tabs, cookies and storage as everything else. The same applies in the default mode when `--user-data-dir` pins all browsing to one user-supplied profile.
+
+In `--vscode` serving, browser sessions are host-scoped: `browser_session_open`, `browser_session_close`, and every call carrying a `browserSessionId` always run against the default provider's session registry at the host, regardless of any `browser_connect` provider switch. A handle opened before a switch keeps working (and can be closed) while the proxy is switched to a VS Code-connected browser, and a session opened while switched is created by the default provider — the VS Code-connected browser itself reuses one live context and cannot host separate sessions. Only session-less tool calls follow the switch.
+
+After returning to the default provider, list tools again to refresh the available actions and receive its catalog-change notifications. Pending listings from the previous host-session client cannot replace that subscription.
+
+#### `browser_session_close`
+Closes a session opened with `browser_session_open` and releases its browser resources.
+- Parameters: `browserSessionId` (the handle to close)
+
+Closing is refused with a tool error while a tool call is still running in that session — a close that disposed the browser mid-call would fail the running tool; wait for it to finish and retry.
+
+If a pending download fails while a session closes, the response includes the download error alongside the confirmation that the session was closed. That session handle has already been removed.
+
+Sessions that stay idle expire automatically after 30 minutes; the timer is refreshed on every use and while a tool is running in the session (overlapping calls each count, so the session survives until the last one finishes), so a long `audit_site` crawl is never expired mid-run. Set `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` to override the idle TTL in milliseconds (`0` or a negative value disables expiry). Passing an unknown or expired handle produces a tool error pointing back to `browser_session_open`; the error deliberately does not list other open sessions' handles, since handles are bearer tokens that route tool calls into their sessions. With `--save-session`, logged tool calls record the `browserSessionId` they were routed with (`webmcp_*` calls, routed by request metadata, record it in a separate `Metadata` block so page arguments stay unchanged), and recorded user actions from an explicit session carry the same `browserSessionId` in their logged args, so entries from different sessions stay distinguishable (default-session entries stay untagged). Because handles are bearer tokens, the log records each one as a stable `bs_redacted_<8 hex>` label derived from it, never the live handle, including in `browser_session_open`'s logged result.
 
 ### Information & Monitoring Tools
 
@@ -387,22 +726,37 @@ Returns all console messages from the page.
 Large `data:` URL payloads in console messages are truncated to their media type prefix.
 
 #### `browser_network_requests`
-Returns all network requests since loading the page.
+Returns all network requests since loading the page, numbered so a single one can be inspected with `browser_network_request`.
 Large `data:` URL payloads in request URLs are truncated to their media type prefix.
+When there is at least one request, a closing line points at `browser_network_request`.
+
+#### `browser_network_request`
+Returns credential-redacted request/response headers and body metadata for one request from the `browser_network_requests` listing.
+- Parameters: `index` (the number shown in the listing, starting at 1)
+- The listing is cleared by `browser_navigate` and when the tab closes; other navigations (link clicks, form submits, `history` calls) leave it in place and keep appending. Re-run `browser_network_requests` to get current indexes.
+- Credential-bearing headers (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`) are reported as `<redacted, N characters>`, so their presence and size stay visible but the secret never reaches the transcript. All other headers are reported in full, one line each.
+- Request and response body contents are never returned because they can contain submitted credentials or private API data. Non-empty bodies are reported as `<redacted, N bytes, mime/type>`; empty bodies remain `<empty>`.
+- A request that failed after its response arrived reports both the status and the failure.
+- Sections that could not be read are reported in place (`<headers unavailable: ...>`, `<body unavailable: ...>`) rather than failing the whole call; reads are bounded by the default timeout, so a still-streaming response cannot hang the tool.
 
 ### Utility Tools
 
 #### `browser_wait_for`
 Wait for text to appear/disappear or time to pass.
 - Parameters: `time` (optional), `text` (optional), `textGone` (optional)
+- `time` is in seconds, must be non-negative, and is capped at 30. `0` is treated the same as omitting it. Generated code uses the capped delay; time-only results report seconds and disclose when the requested delay exceeded the cap.
+- When `text` and `textGone` are both provided, the call resolves on whichever happens first (text appears or the other text disappears) and reports which one it waited for. The other wait is cancelled, and the generated code replays both as a `Promise.race` that cancels its loser the same way.
+- When `time` is combined with `text` or `textGone`, it is applied as the (capped) timeout for those waits instead of running as a separate delay; on its own, `time` still just waits out the duration.
 
 #### `browser_handle_dialog`
 Handle browser dialogs (alerts, confirms, prompts).
 - Parameters: `accept` (boolean), `promptText` (optional)
+- If the dialog was already closed outside the session (e.g. dismissed manually in a headed browser), the call succeeds, reports the dialog as already closed, and clears its leftover state instead of failing.
 
 #### `browser_file_upload`
 Upload files to the page.
 - Parameters: `paths` (array of absolute file paths)
+- If `setFiles` fails, the chooser stays available for another upload attempt; `paths: []` clears the selection and completes the chooser. A successful upload clears only that chooser and waits for page activity and the configured settle delay.
 
 #### `browser_verify_element_visible`
 Verify an element by ARIA role/name.
@@ -420,11 +774,11 @@ Verify list items at a snapshot reference.
 Verify an element value or checked state.
 - Parameters: `type`, `element`, `ref`, `value`
 
-These verification tools require `--caps verify`:
+Enable these verification tools with `--caps verify`, or select individual names with `--allowed-tools`:
 
 ### Vision Mode Tools (Coordinate-based Interaction)
 
-These tools require `--caps vision`:
+Enable these tools with `--caps vision`, or select individual names with `--allowed-tools`:
 
 #### `browser_mouse_move_xy`
 Move mouse to specific coordinates.
@@ -492,12 +846,160 @@ Coordinate-based tools require `element` descriptions for permission checks, but
 
 ## Development
 
+The [domain glossary](CONTEXT.md) defines browser and audit terminology. See the
+[architecture decisions](docs/decisions/003-deep-module-ownership.md) for resource
+ownership, measurement lifetimes and proxy relay constraints.
+
 Clone and set up the project:
 ```bash
 git clone https://github.com/JustasMonkev/mcp-accessibility-scanner.git
 cd mcp-accessibility-scanner
 npm install
 ```
+
+`npm run knip` checks the server's sources, tests, benchmarks and tooling.
+
+### Playwright upgrade gate
+
+The September 16, 2026 review keeps `playwright` and `playwright-core` paired at
+**1.63.0**, the [latest stable release](https://github.com/microsoft/playwright/releases/tag/v1.63.0)
+on that date. Keep the local `InputRecorder` hub and the existing factory reference
+counts: multiple MCP clients share one client-side browser context, while the hub
+multiplexes session logs and explicit recordings and excludes sibling tool actions.
+A dependency bump alone must not change that ownership model.
+
+Before adopting a stable release containing [upstream #42627](https://github.com/microsoft/playwright/pull/42627),
+adapt the hub from `_enableRecorder` / `_disableRecorder` to
+`_startRecording({ language: 'javascript' }, sink)` / `_stopRecording()` and verify
+the per-client event contract against the installed runtime. Do not ship a
+prerelease bump or an untested method-name fallback. Migrating to the separate
+connections in [#42622](https://github.com/microsoft/playwright/pull/42622) is a
+separate ownership change requiring the same lifecycle checks.
+
+Install the pinned Chromium browser, then run the real recorder gate alongside
+its failure and concurrency tests:
+
+```bash
+npx playwright install chromium
+npx vitest run tests/recorder.integration.test.ts tests/context.test.ts tests/browserSessions.test.ts tests/browserContextFactory.test.ts tests/tools-recorder.test.ts tests/sessionLog.test.ts
+```
+
+The real-browser tests cover concurrent starts, duplicate-start rejection,
+shared CDP clients, sibling-action attribution, stop/disconnect/restart,
+`--save-session`, and recording across stateless explicit sessions. Existing unit
+tests also cover failed-start recovery and overlapping start/stop. The recorder
+must receive the final input event before stop; unbuffered input delivered after
+stop begins is excluded, while buffered clicks/navigation get a 500 ms drain.
+
+Also recheck the dependency fixes motivating the upgrade. On 1.63.0 Chromium,
+both full-page and oversized element screenshots changed `navigator.maxTouchPoints`
+from 1 to 0 and `(pointer: coarse)` from true to false; navigation restored the
+properties ([#42617](https://github.com/microsoft/playwright/pull/42617)).
+The fixed-header/smooth-scroll retry fixture clicked successfully but emitted 19
+scroll events rather than instant jumps ([#42626](https://github.com/microsoft/playwright/pull/42626)).
+A candidate upgrade must preserve touch properties after full-page and element
+screenshots and navigation, and complete retry scrolling without smooth animation.
+These are dependency limitations; the recorder gate alone does not verify them.
+
+### Newly reported browser limitations (#251)
+
+The September 28, 2026 validation retains the paired Playwright **1.63.0** pins;
+no containing stable release is available. See the [platform results and rerun
+commands](docs/browser-upgrade-validation-251.md) before upgrading.
+
+- **Preloaded CDP pages:** nested cross-site/sandboxed frames can redirect
+  evaluation, locators and scans into an iframe even while `page.url()` shows the
+  top URL. Both `--cdp-endpoint` and `--cdp-launch` reproduced this. Prefer a fresh
+  isolated context when losing the existing tab state is acceptable; do not trust
+  a top-level URL alone as proof of the scan target. This is separate from the
+  crashed-tab attach timeout in #244.
+- **Full-page screenshots on macOS:** bundled Chromium headless shell changed
+  actual fonts and layout after capture. Chrome changed the monospace font but
+  retained the measured geometry. Viewport screenshots did not change either.
+  Keyboard-audit issue screenshots and `scan_page` with
+  `annotateScreenshot: true` also use full-page capture; run them after
+  layout-sensitive checks, or disable those screenshots with
+  `screenshotOnIssue: false` and `annotateScreenshot: false`. The server does
+  not reset fonts or reload pages.
+- **Firefox on macOS:** `browser_press_key` with `Alt+a` inserted `a`; Chromium
+  and WebKit controls did not. The Firefox r1553 roll addressing Option-key and
+  frame-focus behavior is merged but unreleased. Keys remain passed through.
+- **WebKit on macOS 14:** page creation fails with
+  `Unknown setting: PushAPIEnabled` in the frozen r2251 bundle, reproduced on a
+  hosted macOS 14.8.9 arm64 runner. The macOS 26/r2359 control passed. Use a
+  separately validated browser/OS combination if affected, rather than blindly
+  downgrading Playwright.
+
+The WebKit provisional-load event-order race was also reproduced on Linux: a
+cancelled navigation waited for its configured timeout instead of reporting the
+abort promptly. Keep a finite navigation timeout; it bounds the wait but does
+not fix the missed error. Linux Firefox crash cycles showed increased parent
+RSS, but context closure alone does not prove native windows were freed. These
+remain separate upgrade checks. No engine patches, alpha upgrades, or browser
+default changes are applied.
+
+### MCP harnesses
+
+The npm wrappers build first, then the direct harness calls every exposed MCP
+tool with prepared fixtures:
+
+```bash
+npm run test:mcp
+npm run test:mcp:install
+```
+
+The Luna wrapper runs each prompt through Codex `gpt-6-luna` with xhigh
+reasoning. It uses a repo-scoped scanner MCP server, read-only Codex sandbox,
+structured PASS/FAIL evidence, and a per-prompt timeout:
+
+```bash
+npm run test:mcp:luna
+npm run test:mcp:luna -- --only browser_snapshot
+npm run test:mcp:luna -- --skip-optional --limit 1
+```
+
+The prompt suite covers all 34 core/install tools, including session management,
+media emulation, network request details, drop actions, and screen-reader audits.
+The optional `browser_install` prompt is included by default and enables the
+server's `install` capability for that prompt only; use `--skip-optional` to omit it.
+
+Results are written under `test-results/mcp-direct-harness-results/` or
+`test-results/mcp-tool-loop-results/`. Set `MCP_HARNESS_RESULTS_DIR` to use another output root.
+The Luna harness checks Codex login before starting any prompts. Its site-audit
+prompt uses a local HTTP fixture, not a public website.
+PASS requires a completed target MCP call, no failed or unfinished MCP calls,
+and a successful structured result. Invalid logs, failed turns, and timeouts
+fail the run. Non-fatal startup notices about ignored malformed local agent
+roles remain in the logs; they do not count as tool failures. Recovered Codex
+connection retries are accepted only when the turn completes successfully.
+Canceling the run exits with status 130.
+
+### Benchmarking tool latency
+
+`bench/mcp-bench.mjs` measures what a client actually waits for: it serves a fixed
+synthetic site, speaks MCP to the built server over stdio, and times real
+`tools/call` round trips for navigation, interaction, snapshots and every audit
+tool. Build first — it runs the compiled server from `lib/`.
+
+```bash
+npm run build
+npm run bench -- --out after.json --label after
+```
+
+Useful flags: `--iterations <n>` and `--warmups <n>` (defaults 5 and 1),
+`--browser`/`--executable-path` when the browser lives outside Playwright's own
+download directory, and `--server <path/to/cli.js>` plus `--lib <path/to/lib>`
+(supplied together) to point at a different build — that is how revisions compare:
+
+```bash
+git worktree add /tmp/baseline main && (cd /tmp/baseline && npm install && npm run build)
+npm run bench -- --server /tmp/baseline/cli.js --lib /tmp/baseline/lib --out before.json --label before
+npm run bench -- --out after.json --label after
+npm run bench:compare -- before.json after.json
+```
+
+The comparison total uses only end-to-end scenarios present in both reports,
+so adding or removing a scenario does not distort the reported speedup.
 
 ## License
 

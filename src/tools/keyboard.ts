@@ -36,8 +36,7 @@ const pressKey = defineTabTool({
 
   handle: async (tab, params, response) => {
     response.setIncludeSnapshot();
-    response.addCode(`// Press ${params.key}`);
-    response.addCode(`await page.keyboard.press('${params.key}');`);
+    response.addCode(`await page.keyboard.press(${javascript.quote(params.key)});`);
 
     await tab.waitForCompletion(async () => {
       await tab.page.keyboard.press(params.key);

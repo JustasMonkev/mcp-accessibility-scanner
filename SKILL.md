@@ -50,14 +50,15 @@ npx mcp-accessibility-scanner --headless --browser chrome
 |--------|-------------|
 | `--browser <browser>` | Browser to use: `chrome`, `firefox`, `webkit`, `msedge` |
 | `--headless` | Run browser in headless mode (headed by default) |
-| `--caps <caps>` | Comma-separated extra capabilities: `vision`, `pdf`, `verify` |
+| `--caps <caps>` | Comma-separated extra capabilities: `vision`, `pdf`, `verify`, `devtools`, `install` (allows browser downloads) |
 | `--viewport-size <size>` | Browser viewport, e.g. `"1280, 720"` |
 | `--device <device>` | Device emulation, e.g. `"iPhone 15"` |
 | `--output-dir <path>` | Directory for output files (reports, screenshots) |
 | `--config <path>` | Path to configuration file |
 | `--user-data-dir <path>` | Browser profile directory |
+| `--profile-dir-name <name>` | Chrome profile directory for extension mode (`--extension`/`--connect-tool` only), e.g. `Profile 1`; requires `--user-data-dir` |
 | `--isolated` | Keep browser profile in memory only |
-| `--storage-state <path>` | Storage state file for isolated sessions |
+| `--storage-state <path>` | Storage state file for a fresh context; existing CDP/VS Code contexts and `--extension` reject imports. Use `--isolated` with CDP, or omit the state and sign in interactively. |
 | `--executable-path <path>` | Custom browser executable |
 | `--cdp-endpoint <endpoint>` | Connect to existing CDP endpoint |
 | `--cdp-header <header>` | CDP connect header, e.g. `"Authorization: Bearer <token>"`. Repeat the flag for multiple |
@@ -67,7 +68,7 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--cdp-launch-cwd <path>` | Working directory for the launched app |
 | `--cdp-launch-port <port>` | Fixed CDP port for the launched app |
 | `--cdp-launch-startup-timeout <ms>` | How long to wait for the launched app CDP endpoint |
-| `--proxy-server <proxy>` | Proxy server, e.g. `"http://myproxy:3128"` |
+| `--proxy-server <proxy>` | Proxy server, e.g. `"http://myproxy:3128"`; credentials in the URL (`"http://user:password@myproxy:3128"`) are sent as proxy username/password |
 | `--proxy-bypass <bypass>` | Comma-separated domains to bypass proxy |
 | `--allowed-origins <origins>` | Semicolon-separated allowed origins |
 | `--blocked-origins <origins>` | Semicolon-separated blocked origins |
@@ -78,10 +79,12 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--port <port>` | Port for MCP Streamable HTTP transport |
 | `--navigation-timeout <ms>` | Page navigation timeout (default: 60000) |
 | `--default-timeout <ms>` | Default Playwright operation timeout (default: 5000) |
+| `--timeout-idle <ms>` | Release the default browser after inactivity; reopen on the next tool call (default: 0, disabled). Explicit browser sessions retain their separate TTL. |
 | `--save-session` | Save session to output directory |
 | `--save-trace` | Save Playwright trace to output directory |
+| `--snapshot-boxes` | Include viewport-relative `[box=x,y,width,height]` metadata in snapshots |
 | `--no-sandbox` | Disable browser sandboxing |
-| `--image-responses <mode>` | `"allow"` or `"omit"` image responses (default: allow) |
+| `--image-responses <mode>` | `"allow"` (default), `"omit"`, or `"only"`. `only` removes text from successful MCP responses containing images while retaining errors, browser lifecycle notices, structured content and resource links; interactive mode rejects it because the REPL prints text only. `"auto"` aliases `"allow"`. |
 
 ## Accessibility Scanning Tools
 
@@ -93,7 +96,7 @@ Scan the current page for accessibility violations using Axe.
 {"violationsTag": ["wcag2aa", "wcag21aa", "wcag22aa"]}
 ```
 
-For Electron CDP targets, `scan_page` may currently fail with `Target.createTarget: Not supported`. If that happens, keep using the CLI session, select the live app tab with `browser_tabs`, and run Axe through `browser_evaluate` by injecting the local `node_modules/axe-core/axe.min.js` bundle.
+The scan injects Axe into the frames that are already open and runs it there; it no longer opens a helper page, which is what used to fail on Electron CDP targets with `Target.createTarget: Not supported`. If a scan still fails on such a target, keep using the CLI session, select the live app tab with `browser_tabs`, and run Axe through `browser_evaluate` by injecting the local `node_modules/axe-core/axe.min.js` bundle.
 
 ### audit_site
 
@@ -122,6 +125,8 @@ Crawl and aggregate accessibility violations across multiple pages. Writes a JSO
 - `includeSubdomains` - Allow subdomains when `sameOriginOnly=true`
 - `excludePathPatterns` - Regex patterns to skip (default: `logout|signout`)
 - `reportFile` - Custom output filename
+
+**Behind a login:** the crawl shares the browser context, so signing in with `browser_navigate` / `browser_fill_form` first is enough. Alternatively record a session with `npx playwright@1.63.0 codegen --save-storage=auth.json <login-url>` (pinned to the server's own Playwright, so the recorded state matches what it replays) and start the server with `--storage-state ./auth.json` — fresh contexts receive it at creation, and default persistent mode uses a disposable profile that cannot combine with `--user-data-dir`. Existing CDP and VS Code contexts reject imports before taking a snapshot or resetting storage; add `--isolated` for CDP, or sign in interactively. `--extension` refuses storage imports entirely. On Playwright 1.63.0, IndexedDB snapshots can lose `Map` and `Set` contents, so a captured state is not a lossless backup of those records. Extend `excludePathPatterns` with anything else that ends the session (account deletion, session revocation, account/locale switchers) — it replaces the default, so keep `logout|signout` in the list. If the crawl loses cookies it started with, the result opens with `WARNING: cookie(s) …` lines and the report carries a `sessionLosses` list naming, per lost cookie, the page reached after any redirect, even when that page failed to load; if one of them was the session cookie, everything scanned after that page was audited signed-out. Monitoring continues past the first loss (each cookie is reported once, where it vanished), and URLs discovered mid-crawl join cookie tracking before being visited. Cookie values are not compared and a cookie the browser dropped at its own expiry is ignored, but any other cookie the crawl started with and lost is reported — nothing marks a cookie as an authentication one.
 
 ### scan_page_matrix
 
@@ -192,8 +197,9 @@ These tools are always available and work in the interactive REPL.
 | `browser_navigate_back` | Go back to previous page |
 | `browser_close` | Close the page |
 | `browser_resize` | Resize window: `{"width": 1280, "height": 720}` |
-| `browser_snapshot` | Capture accessibility snapshot |
-| `browser_take_screenshot` | Take screenshot (png/jpeg, fullPage option) |
+| `browser_emulate_media` | Emulate color scheme, reduced motion, forced colors, contrast, or print/screen media |
+| `browser_snapshot` | Capture accessibility snapshot; pass `{"boxes": true}` to include element bounds |
+| `browser_take_screenshot` | Take screenshot (png/jpeg/webp, fullPage option) |
 | `browser_wait_for` | Wait for text/time: `{"text": "loaded"}` or `{"time": 5}` |
 
 ### Interaction
@@ -205,11 +211,12 @@ These tools are always available and work in the interactive REPL.
 | `browser_press_key` | Press key: `{"key": "Enter"}` |
 | `browser_hover` | Hover over element |
 | `browser_drag` | Drag between elements |
+| `browser_drop` | Drop external files or data onto an element: `{"element": "Dropzone", "ref": "e7", "paths": ["/path/to/file"]}` (paths are read on the server host) |
 | `browser_select_option` | Select dropdown option |
 | `browser_fill_form` | Fill multiple form fields at once |
 | `browser_file_upload` | Upload files: `{"paths": ["/path/to/file"]}` |
 | `browser_handle_dialog` | Handle browser dialog: `{"accept": true}` |
-| `browser_evaluate` | Run JavaScript on page |
+| `browser_evaluate` | Run JavaScript on page: a function or a bare expression such as `{"function": "document.title"}` |
 
 ### Tabs & Config
 
@@ -218,21 +225,28 @@ These tools are always available and work in the interactive REPL.
 | `browser_tabs` | Manage tabs: `{"action": "list"}`, `{"action": "new"}`, `{"action": "close"}`, `{"action": "select", "index": 1}` |
 | `browser_navigation_timeout` | Set navigation timeout (30s-20min) |
 | `browser_default_timeout` | Set default operation timeout (30s-20min) |
+| `browser_session_open` | Open a separate browser session (its own browser context: tabs, cookies, storage); returns a `browserSessionId` that the non-session browser tools accept as an optional argument (omit it for the default session). Rejected in modes that share one live browser context (non-isolated CDP attach, extension) |
+| `browser_session_close` | Close a session opened with `browser_session_open`: `{"browserSessionId": "bs_..."}` |
 
 ### Diagnostics
 
 | Tool | Description |
 |------|-------------|
 | `browser_console_messages` | Get all console messages |
-| `browser_network_requests` | Get all network requests |
+| `browser_network_requests` | Get all network requests, numbered |
+| `browser_network_request` | Get credential-redacted headers and body metadata for one request: `{"index": 3}` |
 
 ### Optional Tools (require `--caps`)
+
+**`--caps install`:** `browser_install {}` - Install the configured browser. Disabled by default. If the browser is missing and installation is authorized, restart the REPL with `npx mcp-accessibility-scanner --caps install interactive`, preserving the existing browser options, then call `browser_install {}`. This downloads executable code through Playwright without independent archive checksum/signature verification; trust the download source and TLS configuration before enabling it. Alternatively, use a provisioned browser with `--executable-path`. Explicit `core-install` settings remain supported as a deprecated alias for `install`.
 
 **`--caps pdf`:** `browser_pdf_save` - Save page as PDF
 
 **`--caps verify`:** `browser_verify_element_visible`, `browser_verify_text_visible`, `browser_verify_list_visible`, `browser_verify_value`
 
 **`--caps vision`:** `browser_mouse_move_xy`, `browser_mouse_click_xy`, `browser_mouse_drag_xy`
+
+**`--caps devtools`:** `browser_start_recording`, `browser_stop_recording` - Record a browser flow as Playwright JavaScript. Handshake-free HTTP clients must open a browser session and pass its `browserSessionId` to both tools; shared-context modes need a stateful MCP connection.
 
 ## Common Recipes
 
@@ -307,7 +321,7 @@ Typical REPL flow:
 > browser_evaluate {"function":"() => document.querySelector('SELECTOR_FOR_NEXT_STEP')?.click()"}
 ```
 
-If `scan_page {}` fails on the Electron target, use this Axe fallback from the same REPL session:
+If `scan_page {}` still fails on the Electron target, use this Axe fallback from the same REPL session:
 
 ```json
 {

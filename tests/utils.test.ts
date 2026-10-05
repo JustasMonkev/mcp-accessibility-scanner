@@ -17,7 +17,8 @@
 import fs from 'fs';
 import { chromium, type Browser } from 'playwright';
 import { describe, it, expect } from 'vitest';
-import { createGuid, createHash } from '../src/utils/guid.js';
+import { createGuid, createHash, createShortGuid } from '../src/utils/guid.js';
+import { safeIsoTimestampForFileName } from '../src/utils/fileUtils.js';
 import { compressAriaSnapshot } from '../src/utils/ariaCompression.js';
 import { truncateDataUrl, truncateDataUrls } from '../src/utils/dataUrl.js';
 
@@ -74,6 +75,33 @@ describe('Utils', () => {
     });
   });
 
+  describe('createShortGuid', () => {
+    it('should generate 8 hex character tokens', () => {
+      const ids = Array.from({ length: 10 }, () => createShortGuid());
+      ids.forEach(id => expect(id).toMatch(/^[a-f0-9]{8}$/));
+    });
+
+    it('should generate unique tokens', () => {
+      const ids = Array.from({ length: 100 }, () => createShortGuid());
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+  });
+
+  describe('safeIsoTimestampForFileName', () => {
+    it('is filename-safe and collision-resistant within one millisecond', () => {
+      // Default artifact names (screenshots, PDFs, reports) land in an output
+      // directory shared by concurrent sessions; a timestamp alone let two
+      // same-millisecond artifacts overwrite each other.
+      const values = Array.from({ length: 25 }, () => safeIsoTimestampForFileName());
+      for (const value of values) {
+        // No characters the path sanitizer would need to rewrite (it keeps
+        // the final extension-style dot of the ISO milliseconds).
+        expect(value).toMatch(/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9-]+\.[0-9]{3}Z-[a-f0-9]{8}$/);
+      }
+      expect(new Set(values).size).toBe(values.length);
+    });
+  });
+
   describe('createHash', () => {
     it('should generate hash from data', () => {
       const hash = createHash('test data');
@@ -123,6 +151,17 @@ describe('Utils', () => {
       expect(result).not.toContain(payload);
       expect(result).not.toContain('<svg');
       expect(result).not.toContain('<text>');
+    });
+
+    it('should truncate data URLs whatever the case of the scheme', () => {
+      expect(truncateDataUrls('- /url: DATA:TEXT/HTML;BASE64,PHAgLz4=')).toBe('- /url: DATA:TEXT/HTML;BASE64,...');
+      expect(truncateDataUrls('?src=Data%3Atext/html;base64%2CPHAgLz4=')).toBe('?src=Data%3Atext/html;base64%2C...');
+    });
+
+    it('should keep offsets correct when text before the URL lower-cases to a different length', () => {
+      // "İ".toLowerCase() is two code units, so matching against a lower-cased
+      // copy of the text would shift every later offset by one.
+      expect(truncateDataUrls('İ data:text/html;base64,PHAgLz4=')).toBe('İ data:text/html;base64,...');
     });
 
     it('should truncate data URLs embedded in query strings', () => {
@@ -352,6 +391,16 @@ describe('Utils', () => {
 
       expect(result).toEqual({ output: snapshot, removed: 0 });
       expect(result.output).toContain('Card 150');
+    });
+
+    it('keeps repeated descendants within a cursor-pointer target', () => {
+      const snapshot = [
+        '- listitem "Card" [ref=card] [cursor=pointer]:',
+        ...Array.from({ length: 150 }, (_, index) => `  - text: Detail ${index + 1}`),
+      ].join('\n');
+
+      expect(compressAriaSnapshot(snapshot)).toEqual({ output: snapshot, removed: 0 });
+      expect(compressAriaSnapshot(snapshot.replace('[ref=card] ', '')).removed).toBe(140);
     });
 
     it('should keep repeated non-interactive subtrees that contain interactive descendants', () => {

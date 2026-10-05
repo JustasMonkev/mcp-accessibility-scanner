@@ -1,15 +1,19 @@
-import fs from 'node:fs';
 import { z } from 'zod';
+import type * as playwright from 'playwright';
 import { defineTabTool } from './tool.js';
-import { sanitizeForFilePath } from '../utils/fileUtils.js';
+import { writeJsonReport } from './report.js';
+import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 import {
-  axeTagValues,
-  dedupeAxeNodes,
+  assertRuleOptionsValid,
+  axeRuleSchemaShape,
+  axeScanOptions,
+  axeScanSchemaShape,
+  axeScopeSchemaShape,
+  prepareAxeResults,
   runAxeScan,
   summarizeAxeViolations,
-  trimAxeResults,
-  type AxeTag,
-  type TrimmedAxeViolation
+  unscannedFrameLines,
+  type AxeViolation,
 } from './axe.js';
 
 type VariantResult = {
@@ -25,13 +29,20 @@ type VariantResult = {
     zoomPercent: number | null;
   };
   summary: ReturnType<typeof summarizeAxeViolations>;
-  violations: TrimmedAxeViolation[];
+  violations: AxeViolation[];
+  incomplete: AxeViolation[];
+  // Frames Axe never reached for this variant, so a variant that looks clean is
+  // distinguishable from one that was only partly scanned.
+  unscannedFrames: string[];
   nodeCountByRuleId: Record<string, number>;
+  // null when this variant or the baseline left frames unscanned: the two runs
+  // then covered different documents, and a delta between them would report a
+  // coverage artefact as a fixed or newly introduced violation.
   diffFromBaseline: {
     newViolationIds: string[];
     resolvedViolationIds: string[];
     changedCounts: Record<string, { baseline: number; variant: number }>;
-  };
+  } | null;
 };
 
 const variantSchema = z.object({
@@ -77,25 +88,55 @@ const defaultVariants: z.output<typeof variantSchema>[] = [
 
 const scanPageMatrixSchema = z.object({
   variants: z.array(variantSchema).min(1).optional().describe('Variant list to run. Defaults to baseline/mobile/desktop/forced-colors/reduced-motion/zoom-200.'),
-  violationsTag: z.array(z.enum(axeTagValues)).min(1).default([...axeTagValues]).describe('Axe tags to include in scans.'),
-  maxNodesPerViolation: z.number().int().min(1).max(50).default(10).describe('Maximum nodes kept per violation in the report.'),
+  includeIncomplete: z.boolean().default(true).describe('Also collect Axe "incomplete" results per variant — checks Axe could not decide automatically.'),
   waitAfterApplyMs: z.number().int().min(0).max(5000).default(250).describe('Wait after applying each variant before scanning.'),
   reloadBetweenVariants: z.boolean().default(false).describe('Reload page between variants.'),
-  reportFile: z.string().optional().describe('Output JSON report file name.'),
+  ...axeScanSchemaShape,
+  ...axeScopeSchemaShape,
+  ...axeRuleSchemaShape,
 });
 
-function normalizeMedia(variantMedia: z.output<typeof variantSchema>['media'] | undefined) {
+type MediaState = VariantResult['applied']['media'];
+
+// Playwright has no getter for a page's media emulation, and passing null to
+// emulateMedia resets a feature to the browser default rather than to whatever
+// the context was created with: a context made with `colorScheme: 'dark'` reads
+// light again after a null. So the effective state is measured from the page
+// before the first variant and used both as the per-variant fallback and to put
+// the page back afterwards - the same way the viewport and zoom already are.
+async function readPageState(page: playwright.Page): Promise<{ zoom: string, media: MediaState }> {
+  return await page.evaluate(() => ({
+    zoom: document.documentElement.style.zoom || '',
+    media: {
+      // Neither query matching is a third state, not light. Pinning it to light
+      // would emulate a preference the page never had, so it is left
+      // un-emulated - the same treatment the unrepresentable contrast values get.
+      colorScheme: matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark' as const
+        : matchMedia('(prefers-color-scheme: light)').matches ? 'light' as const : null,
+      forcedColors: matchMedia('(forced-colors: active)').matches ? 'active' as const : 'none' as const,
+      reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduce' as const : 'no-preference' as const,
+      // `less` and `custom` are values emulateMedia cannot express. Leaving the
+      // feature un-emulated reproduces them exactly, naming a value cannot.
+      contrast: matchMedia('(prefers-contrast: more)').matches
+        ? 'more' as const
+        : matchMedia('(prefers-contrast: no-preference)').matches ? 'no-preference' as const : null,
+    },
+  }));
+}
+
+// An unset property means "whatever this page had before the scan started", not
+// "the browser default" - undoing the previous variant must not also undo the
+// media emulation the session was configured with.
+function normalizeMedia(variantMedia: z.output<typeof variantSchema>['media'] | undefined, original: MediaState): MediaState {
   return {
-    colorScheme: variantMedia?.colorScheme ?? null,
-    forcedColors: variantMedia?.forcedColors ?? null,
-    contrast: variantMedia?.contrast ?? null,
-    reducedMotion: variantMedia?.reducedMotion ?? null,
+    colorScheme: variantMedia?.colorScheme ?? original.colorScheme,
+    forcedColors: variantMedia?.forcedColors ?? original.forcedColors,
+    contrast: variantMedia?.contrast ?? original.contrast,
+    reducedMotion: variantMedia?.reducedMotion ?? original.reducedMotion,
   };
 }
 
-function safeIsoTimestampForFileName() {
-  return sanitizeForFilePath(new Date().toISOString());
-}
 
 function countNodesByRule(violations: { id: string; nodes: unknown[] }[]): Record<string, number> {
   const counts: Record<string, number> = {};
@@ -134,52 +175,70 @@ const scanPageMatrix = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
+    // Rule ids apply to the whole run, so a bad one must fail before the first
+    // variant is applied. The finally block restores viewport/media/zoom, but
+    // reloadBetweenVariants has already thrown away form and application state
+    // by the time the per-scan check would reject the argument.
+    assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
+
+    const reportFileName = params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`;
+    const reportPath = await tab.context.outputFile(reportFileName, params.reportFile !== undefined);
+    if (params.reportFile !== undefined)
+      response.deleteFileOnError(reportPath);
     const variants = params.variants ?? defaultVariants;
     const originalViewport = tab.page.viewportSize() ?? await tab.page.evaluate(() => ({
       width: window.innerWidth,
       height: window.innerHeight,
     }));
-    const originalZoom = await tab.page.evaluate(() => document.documentElement.style.zoom || '');
+    const { zoom: originalZoom, media: originalMedia } = await readPageState(tab.page);
 
     const variantResults: VariantResult[] = [];
     try {
       for (const variant of variants) {
         // Apply each property once per variant: the variant value when set,
         // otherwise the original page state (undoing the previous variant).
+        // Strictly in this order, not in parallel: a page that reacts to a
+        // viewport or media change by writing document.documentElement.style.zoom
+        // would overwrite a zoom applied alongside it, and the variant would be
+        // scanned - and reported - at a zoom it never actually had.
         await tab.page.setViewportSize(variant.viewport ?? originalViewport);
-        await tab.page.emulateMedia(normalizeMedia(variant.media));
+        // One value, applied and then reported, so `applied.media` cannot drift
+        // from what the variant was actually scanned under.
+        const media = normalizeMedia(variant.media, originalMedia);
+        await tab.page.emulateMedia(media);
+
+        // Before the zoom, not after it. Viewport and media emulation survive a
+        // reload, but the zoom is an inline style on documentElement and the new
+        // document does not have it - applying it first would scan the variant
+        // unzoomed while `applied.zoomPercent` still claimed the requested zoom.
+        if (params.reloadBetweenVariants)
+          await tab.page.reload({ waitUntil: 'domcontentloaded' });
+
         await tab.page.evaluate(zoom => {
           document.documentElement.style.zoom = zoom;
         }, variant.zoomPercent !== undefined ? `${variant.zoomPercent}%` : originalZoom);
 
-        if (params.reloadBetweenVariants)
-          await tab.page.reload({ waitUntil: 'domcontentloaded' });
-
         await tab.waitForTimeout(params.waitAfterApplyMs);
 
-        const axeResult = await runAxeScan(tab.page, params.violationsTag as AxeTag[]);
-        const dedupedViolations = axeResult.violations.map(violation => ({
-          ...violation,
-          nodes: dedupeAxeNodes(violation.nodes),
-        }));
-        const trimmedViolations = trimAxeResults({ violations: dedupedViolations }, { maxNodesPerViolation: params.maxNodesPerViolation, dedupe: false });
-        const nodeCountByRuleId = countNodesByRule(dedupedViolations);
+        const axeResult = await runAxeScan(tab.page, axeScanOptions(params));
+        const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
+        const nodeCountByRuleId = countNodesByRule(violations.deduped);
 
         variantResults.push({
           name: variant.name,
           applied: {
             viewport: variant.viewport ?? null,
-            media: normalizeMedia(variant.media),
+            media,
             zoomPercent: variant.zoomPercent ?? null,
           },
-          summary: summarizeAxeViolations(trimmedViolations),
-          violations: trimmedViolations,
+          summary: summarizeAxeViolations(violations.trimmed),
+          unscannedFrames: axeResult.unscannedFrames,
+          violations: violations.trimmed,
+          incomplete: params.includeIncomplete
+            ? prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation).trimmed
+            : [],
           nodeCountByRuleId,
-          diffFromBaseline: {
-            newViolationIds: [],
-            resolvedViolationIds: [],
-            changedCounts: {},
-          },
+          diffFromBaseline: null,
         });
 
         await response.reportProgress({
@@ -189,29 +248,42 @@ const scanPageMatrix = defineTabTool({
         });
       }
 
-      const baselineCounts = variantResults[0]?.nodeCountByRuleId ?? {};
-      for (const result of variantResults)
-        result.diffFromBaseline = computeDiffFromBaseline(baselineCounts, result.nodeCountByRuleId);
+      const baseline = variantResults[0];
+      const baselineCounts = baseline?.nodeCountByRuleId ?? {};
+      for (const result of variantResults) {
+        // Only comparable when both sides scanned the same documents. With a
+        // frame missed on either side, a rule absent from one run may simply
+        // live in the document that went unscanned, and calling that "resolved"
+        // - or its reappearance "new" - states an accessibility outcome the run
+        // cannot support. The warning already says coverage differs; the
+        // numbers must not quietly contradict it.
+        const comparable = !result.unscannedFrames.length && !baseline?.unscannedFrames.length;
+        result.diffFromBaseline = comparable
+          ? computeDiffFromBaseline(baselineCounts, result.nodeCountByRuleId)
+          : null;
+      }
     } finally {
+      // Same ordering as the apply path, and for the same reason.
       await tab.page.setViewportSize(originalViewport);
-      await tab.page.emulateMedia({
-        colorScheme: null,
-        forcedColors: null,
-        contrast: null,
-        reducedMotion: null,
-      });
+      await tab.page.emulateMedia(originalMedia);
       await tab.page.evaluate(zoom => {
         document.documentElement.style.zoom = zoom;
       }, originalZoom);
     }
 
     const report = {
-      version: 'v1',
+      // v2 allows diffFromBaseline to be null when scan coverage differs.
+      version: 'v2',
       metadata: {
         url: tab.page.url(),
         baselineVariant: variantResults[0]?.name ?? 'baseline',
         options: {
           violationsTag: params.violationsTag,
+          includeIncomplete: params.includeIncomplete,
+          includeSelectors: params.includeSelectors ?? null,
+          excludeSelectors: params.excludeSelectors ?? null,
+          withRules: params.withRules ?? null,
+          disableRules: params.disableRules ?? null,
           maxNodesPerViolation: params.maxNodesPerViolation,
           waitAfterApplyMs: params.waitAfterApplyMs,
           reloadBetweenVariants: params.reloadBetweenVariants,
@@ -221,24 +293,15 @@ const scanPageMatrix = defineTabTool({
       variants: variantResults,
     };
 
-    const reportFileName = sanitizeForFilePath(params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`);
-    const reportPath = await tab.context.outputFile(reportFileName);
-    await fs.promises.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8');
-    const reportResourceLink = response.addFileResourceLink(reportPath, {
+    const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'scan-page-matrix-report',
       title: 'Scan page matrix JSON report',
       description: 'JSON report containing per-variant Axe results and baseline deltas.',
-      mimeType: 'application/json',
     });
     response.setStructuredContent({
       kind: 'scan_page_matrix',
-      report: {
-        path: reportPath,
-        uri: reportResourceLink.uri,
-        name: reportResourceLink.name,
-        title: reportResourceLink.title ?? null,
-        mimeType: reportResourceLink.mimeType ?? null,
-      },
+      version: 'v2',
+      report: reportResource,
       page: {
         url: tab.page.url(),
       },
@@ -247,22 +310,53 @@ const scanPageMatrix = defineTabTool({
         name: result.name,
         totalViolations: result.summary.totalRules,
         totalNodes: result.summary.totalNodes,
-        newViolationIds: result.diffFromBaseline.newViolationIds,
-        resolvedViolationIds: result.diffFromBaseline.resolvedViolationIds,
-        changedRuleIds: Object.keys(result.diffFromBaseline.changedCounts),
-        reportUri: reportResourceLink.uri,
+        // null, not 0, when collection is off: structuredContent does not carry
+        // includeIncomplete, so a 0 here is indistinguishable from a variant
+        // with no needs-review findings. Matches the "-" in the markdown table.
+        totalIncomplete: params.includeIncomplete ? result.incomplete.length : null,
+        // Without this a client reading only structured output cannot tell a
+        // partly-scanned variant from a clean one.
+        unscannedFrames: result.unscannedFrames,
+        // null, not [], when the coverage differs from the baseline's: an empty
+        // list reads as "nothing changed", which is the one thing an incomplete
+        // pair of scans cannot establish.
+        newViolationIds: result.diffFromBaseline?.newViolationIds ?? null,
+        resolvedViolationIds: result.diffFromBaseline?.resolvedViolationIds ?? null,
+        changedRuleIds: result.diffFromBaseline ? Object.keys(result.diffFromBaseline.changedCounts) : null,
+        reportUri: reportResource.uri,
       })),
     });
 
+    const variantsWithUnscannedFrames = variantResults.filter(result => result.unscannedFrames.length);
     const lines = [
-      'Variant | Violations | Nodes | Top new vs baseline',
-      '--- | --- | --- | ---',
+      ...unscannedFrameLines(
+          variantsWithUnscannedFrames.map(result => `${result.name}: ${result.unscannedFrames.join(', ')}`),
+          {
+            unit: 'variant(s)',
+            trailingLines: [
+              'Baseline deltas are reported as "n/a" wherever the two scans did not cover the same documents.',
+              '',
+            ],
+          }
+      ),
+      'Variant | Violations | Nodes | Incomplete | Top new vs baseline',
+      '--- | --- | --- | --- | ---',
       ...variantResults.map(result => {
-        const topNew = result.diffFromBaseline.newViolationIds.slice(0, 5).join(', ') || '-';
-        return `${result.name} | ${result.summary.totalRules} | ${result.summary.totalNodes} | ${topNew}`;
+        // "n/a" rather than "-": "-" means "compared, nothing new", which is a
+        // claim a pair of scans with differing coverage cannot make. The reason
+        // names neither side, because the gap may be in the baseline - in which
+        // case every other row is uncomparable through no fault of its own.
+        const topNew = result.diffFromBaseline
+          ? result.diffFromBaseline.newViolationIds.slice(0, 5).join(', ') || '-'
+          : 'n/a (coverage differs)';
+        // "-" rather than 0: with collection off, 0 is indistinguishable from
+        // "no needs-review findings". audit_site omits its section for the same
+        // reason.
+        const incomplete = params.includeIncomplete ? String(result.incomplete.length) : '-';
+        return `${result.name} | ${result.summary.totalRules} | ${result.summary.totalNodes} | ${incomplete} | ${topNew}`;
       }),
       '',
-      `JSON report: ${reportPath}`,
+      `JSON report: ${reportResource.path}`,
     ];
     response.addCode('// Applied viewport/media/zoom variants and compared Axe deltas against baseline.');
     response.addResult(lines.join('\n'));

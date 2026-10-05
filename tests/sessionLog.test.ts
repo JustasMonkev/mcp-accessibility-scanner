@@ -1,0 +1,273 @@
+/**
+ * Copyright (c) Microsoft Corporation.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resolveConfig } from '../src/config.js';
+import { SessionLog } from '../src/sessionLog.js';
+
+const handle = (n: number) => `bs_${n.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`;
+const label = (value: string) => `bs_redacted_${createHash('sha256').update(value).digest('hex').slice(0, 8)}`;
+
+describe('session log folders', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('gives sessions created in the same millisecond distinct folders', async () => {
+    // A purely timestamp-based name made two connections arriving in the
+    // same millisecond share a folder: interleaved session.md entries and
+    // overwritten snapshot ordinals.
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-session-folders-'));
+    vi.spyOn(Date, 'now').mockReturnValue(1735689600000);
+    // SessionLog.create() announces every session folder with
+    // `console.error('Session: <folder>')`; silence the five copies so the
+    // test output stays clean.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const config = await resolveConfig({ saveSession: true, outputDir });
+      await Promise.all(Array.from({ length: 5 }, () => SessionLog.create(config)));
+
+      const folders = fs.readdirSync(outputDir);
+      expect(folders).toHaveLength(5);
+      for (const folder of folders)
+        expect(folder).toMatch(/^session-1735689600000-[a-f0-9]{8}$/);
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('scopes user-action merging per context and tags session actions with their handle', async () => {
+    // One log is shared by a backend's default context and every explicit
+    // session: an update matched against the globally-last pending entry
+    // merged one context's action into ANOTHER context's same-named one, and
+    // untagged entries made concurrent sessions' actions unattributable.
+    vi.useFakeTimers();
+    try {
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const log = new SessionLog('/unused', storage);
+      const sessionContext = { options: { browserSessionId: handle(1) } } as any;
+      const defaultContext = { options: {} } as any;
+      const sessionTab = { context: sessionContext, page: { url: () => 'https://session.example/' } } as any;
+      const defaultTab = { context: defaultContext, page: { url: () => 'https://default.example/' } } as any;
+
+      log.logUserAction({ name: 'fill', text: 'session-1' } as any, sessionTab, `await page.fill('#a', 'session-1');`, false);
+      log.logUserAction({ name: 'fill', text: 'default-1' } as any, defaultTab, `await page.fill('#b', 'default-1');`, false);
+      // The session's update must merge into ITS pending action, not into the
+      // default context's more recent same-named one.
+      log.logUserAction({ name: 'fill', text: 'session-2' } as any, sessionTab, `await page.fill('#a', 'session-2');`, true);
+
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
+      const blocks = appended.split('### User action: fill');
+      // Two entries, not three: the update merged into the session's own entry.
+      expect(blocks).toHaveLength(3);
+      const [, sessionBlock, defaultBlock] = blocks;
+      expect(sessionBlock).toContain('"text": "session-2"');
+      expect(sessionBlock).toContain(`"browserSessionId": "${label(handle(1))}"`);
+      expect(appended).not.toContain(handle(1));
+      expect(appended).not.toContain('session-1');
+      // The default context's entry is intact and stays untagged, as before.
+      expect(defaultBlock).toContain('"text": "default-1"');
+      expect(defaultBlock).not.toContain('browserSessionId');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('applies an action update to its original tab', async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const log = new SessionLog('/unused', storage);
+      const context = { options: {} } as any;
+      const firstTab = { context, page: { url: () => 'https://first.example/' } } as any;
+      const secondTab = { context, page: { url: () => 'https://second.example/' } } as any;
+
+      log.logUserAction({ name: 'click' } as any, firstTab, 'first action', false);
+      log.logUserAction({ name: 'click' } as any, secondTab, 'second action', false);
+      log.logUserAction({ name: 'click' } as any, firstTab, 'first action with popup', true);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
+      expect(appended).toContain('first action with popup');
+      expect(appended).not.toMatch(/```js\nfirst action\n/);
+      expect(appended).toContain('second action');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('replaces a flushed action and its arguments with a late update', async () => {
+    vi.useFakeTimers();
+    try {
+      let content = '';
+      const storage = {
+        readFile: vi.fn(async () => content),
+        writeFile: vi.fn(async (filePath: string, value: string) => {
+          if (filePath.endsWith('session.md'))
+            content = value;
+        }),
+        appendFile: vi.fn(async (_filePath: string, value: string) => { content += value; }),
+      };
+      const log = new SessionLog('/unused', storage);
+      const context = { options: {} } as any;
+      const tab = { context, page: { url: () => 'https://example.com/' } } as any;
+      const initial = { name: 'fill', text: 'H' } as any;
+      const updated = { name: 'fill', text: 'Hi' } as any;
+
+      log.logUserAction(initial, tab, "await page.fill('#name', 'H');", false);
+      await vi.advanceTimersByTimeAsync(1000);
+      log.logUserAction(updated, tab, "await page.fill('#name', 'Hi');", true);
+      await (log as any)._sessionFileQueue;
+
+      expect(content.match(/### User action: fill/g)).toHaveLength(1);
+      expect(content).toContain('"text": "Hi"');
+      expect(content).toContain("await page.fill('#name', 'Hi');");
+      expect(content).not.toContain('"text": "H"');
+      expect(content).not.toContain("await page.fill('#name', 'H');");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never writes a live session handle, keeping sessions distinguishable by label', async () => {
+    vi.useFakeTimers();
+    try {
+      let content = '';
+      const storage = {
+        readFile: vi.fn(async () => content),
+        writeFile: vi.fn(async (filePath: string, value: string) => {
+          if (filePath.endsWith('session.md'))
+            content = value;
+        }),
+        appendFile: vi.fn(async (_filePath: string, value: string) => { content += value; }),
+      };
+      const log = new SessionLog('/unused', storage);
+      // browser_session_open returns the new handle in its result text.
+      log.logResponse({
+        context: { options: {} }, toolName: 'browser_session_open', toolArgs: {},
+        result: () => `Opened browser session ${handle(3)}.`, isError: () => false, code: () => '', tabSnapshot: () => undefined,
+      } as any);
+      log.logResponse({
+        context: { options: {} }, toolName: 'browser_tabs', toolArgs: { action: 'list', browserSessionId: handle(4) },
+        result: () => 'ok', isError: () => false, code: () => '', tabSnapshot: () => undefined,
+      } as any);
+      const tab = { context: { options: { browserSessionId: handle(3) } }, page: { url: () => 'https://example.com/' } } as any;
+      log.logUserAction({ name: 'fill', text: 'H' } as any, tab, "await page.fill('#name', 'H');", false);
+      await vi.advanceTimersByTimeAsync(1000);
+      // An update after the flush rewrites the block already on disk.
+      log.logUserAction({ name: 'fill', text: 'Hi' } as any, tab, "await page.fill('#name', 'Hi');", true);
+      await (log as any)._sessionFileQueue;
+
+      expect(content).not.toContain(handle(3));
+      expect(content).not.toContain(handle(4));
+      expect(content).toContain(`Opened browser session ${label(handle(3))}.`);
+      expect(content).toContain(`"browserSessionId": "${label(handle(4))}"`);
+      expect(content).toContain(`"browserSessionId": "${label(handle(3))}"`);
+      expect(content).toContain('"text": "Hi"');
+      expect(content).not.toContain('"text": "H"');
+      expect(label(handle(3))).not.toBe(label(handle(4)));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('records routing metadata apart from tool-owned arguments', async () => {
+    // A page-registered WebMCP tool may define its own browserSessionId
+    // argument, so the metadata route cannot be merged into the logged args.
+    vi.useFakeTimers();
+    try {
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const log = new SessionLog('/unused', storage);
+      const response = (toolArgs: Record<string, unknown>) => ({
+        context: { options: {} },
+        toolName: 'webmcp_echo',
+        toolArgs,
+        result: () => 'ok',
+        isError: () => false,
+        code: () => '',
+        tabSnapshot: () => undefined,
+      }) as any;
+      log.logResponse(response({ browserSessionId: 42 }), { browserSessionId: handle(2) });
+      log.logResponse(response({ value: 'default' }));
+      await vi.advanceTimersByTimeAsync(1000);
+      await (log as any)._sessionFileQueue;
+
+      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
+      expect(appended).toContain([
+        '### Tool call: webmcp_echo',
+        '- Metadata',
+        '```json',
+        JSON.stringify({ browserSessionId: label(handle(2)) }, null, 2),
+        '```',
+        '- Args',
+        '```json',
+        JSON.stringify({ browserSessionId: 42 }, null, 2),
+      ].join('\n'));
+      expect(appended.match(/- Metadata/g)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a return navigation after intervening log entries', async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = {
+        writeFile: vi.fn().mockResolvedValue(undefined),
+        appendFile: vi.fn().mockResolvedValue(undefined),
+      };
+      const log = new SessionLog('/unused', storage);
+      const context = { options: {} } as any;
+      const tab = { context, page: { url: () => 'https://a.example/' } } as any;
+      const navigate = { name: 'navigate', url: 'https://a.example/' } as any;
+
+      log.logUserAction(navigate, tab, "await page.goto('https://a.example/');", false);
+      log.logResponse({
+        context,
+        toolName: 'browser_navigate',
+        toolArgs: { url: 'https://b.example/' },
+        result: () => '',
+        isError: () => false,
+        code: () => "await page.goto('https://b.example/');",
+        tabSnapshot: () => ({ url: 'https://b.example/' }),
+      } as any);
+      log.logUserAction(navigate, tab, "await page.goto('https://a.example/');", false);
+      log.logUserAction({ name: 'click' } as any, tab, "await page.getByText('Ready').click();", false);
+      log.logUserAction(navigate, tab, "await page.goto('https://a.example/');", false);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const appended = storage.appendFile.mock.calls.map(call => call[1]).join('');
+      expect(appended.match(/### User action: navigate/g)).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

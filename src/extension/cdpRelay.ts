@@ -23,15 +23,19 @@
  */
 
 import { spawn } from 'node:child_process';
+import { timingSafeEqual } from 'node:crypto';
+import fs from 'node:fs/promises';
 import http from 'node:http';
+import path from 'node:path';
 import debug from 'debug';
 import { WebSocket, WebSocketServer } from 'ws';
-import { httpAddressToString } from '../mcp/http.js';
+import { httpAddressToString, parseAuthority } from '../mcp/http.js';
 import { logUnhandledError } from '../utils/log.js';
 import { ManualPromise } from '../mcp/manualPromise.js';
 import { ExtensionProtocolV2 } from './cdpRelayV2.js';
 import * as protocol from './protocol.js';
 
+import type { Duplex } from 'node:stream';
 import type websocket from 'ws';
 import type { ClientInfo } from '../browserContextFactory.js';
 import type { CDPMessage } from './browserModel.js';
@@ -52,36 +56,106 @@ type CDPCommand = {
 
 type CDPResponse = CDPMessage;
 
+// The relay only ever bridges the local Playwright client and a Chrome
+// extension over loopback, so its upgrade allowlist is loopback-only —
+// deliberately narrower than the HTTP transport's server-derived allowlist,
+// which widens to a non-loopback bind address. parseAuthority collapses every
+// 127.0.0.0/8 address and *.localhost name onto these three.
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '::1', '127.0.0.1']);
+
+// Guards the relay WebSocket upgrade. A cross-origin web page can open a
+// WebSocket to a loopback port, so path secrecy alone is not enough: reject a
+// Host header that is not loopback (DNS rebinding) and any http/https Origin (a
+// web page). The local Playwright client sends no Origin and the extension
+// sends a chrome-extension:// Origin, both of which pass.
+function validateUpgradeRequest(request: http.IncomingMessage): { statusCode: number, message: string } | undefined {
+  const hostHeader = request.headers.host;
+  const host = typeof hostHeader === 'string' ? parseAuthority(hostHeader) : undefined;
+  if (!host || !LOOPBACK_HOSTNAMES.has(host.hostname))
+    return { statusCode: 403, message: 'Forbidden Host header' };
+
+  const originHeader = request.headers.origin;
+  if (originHeader === undefined)
+    return;
+  let origin: URL;
+  try {
+    origin = new URL(originHeader);
+  } catch {
+    return { statusCode: 400, message: 'Invalid Origin header' };
+  }
+  if (origin.protocol === 'http:' || origin.protocol === 'https:')
+    return { statusCode: 403, message: 'Forbidden Origin header' };
+}
+
 export class CDPRelayServer {
+  private _server: http.Server;
   private _wsHost: string;
   private _browserChannel: string;
   private _userDataDir?: string;
   private _executablePath?: string;
+  private _profileDirName?: string;
+  private readonly _token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
   private _cdpPath: string;
+  private readonly _cdpToken = crypto.randomUUID();
   private _extensionPath: string;
+  private _connectPagePrefix: string;
   private _wss: WebSocketServer;
   private _playwrightConnection: WebSocket | null = null;
   private _extensionConnection: ExtensionConnection | null = null;
   private _handler!: ExtensionProtocolV2;
   private _extensionConnectionPromise!: ManualPromise<void>;
 
-  constructor(server: http.Server, browserChannel: string, userDataDir?: string, executablePath?: string) {
+  constructor(server: http.Server, browserChannel: string, userDataDir?: string, executablePath?: string, profileDirName?: string) {
+    this._server = server;
     this._wsHost = httpAddressToString(server.address()).replace(/^http/, 'ws');
     this._browserChannel = browserChannel;
     this._userDataDir = userDataDir;
     this._executablePath = executablePath;
+    this._profileDirName = profileDirName;
 
     const uuid = crypto.randomUUID();
     this._cdpPath = `/cdp/${uuid}`;
     this._extensionPath = `/extension/${uuid}`;
+    const connectPageUrl = new URL(`chrome-extension://${protocol.EXTENSION_ID}/connect.html`);
+    connectPageUrl.searchParams.set('mcpRelayUrl', this.extensionEndpoint());
+    this._connectPagePrefix = connectPageUrl.toString();
 
     this._resetExtensionConnection();
-    this._wss = new WebSocketServer({ server });
+    // Own the upgrade handshake (noServer) so Host/Origin are validated before
+    // the socket is upgraded. The legitimate clients are the local Playwright
+    // CDP client (no Origin) and the Chrome extension (a chrome-extension://
+    // Origin); reject a non-loopback Host (DNS rebinding) or a web-page
+    // (http/https) Origin as defense-in-depth over the unguessable UUID paths.
+    this._wss = new WebSocketServer({ noServer: true });
     this._wss.on('connection', this._onConnection.bind(this));
+    this._server.on('upgrade', this._onUpgrade);
+  }
+
+  private _onUpgrade = (request: http.IncomingMessage, socket: Duplex, head: Buffer): void => {
+    const rejection = validateUpgradeRequest(request) ?? this._validateCdpToken(request);
+    if (rejection) {
+      debugLogger(`Rejecting upgrade: ${rejection.message}`);
+      socket.write(`HTTP/1.1 ${rejection.statusCode} ${rejection.message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+      socket.destroy();
+      return;
+    }
+    this._wss.handleUpgrade(request, socket, head, ws => this._wss.emit('connection', ws, request));
+  };
+
+  // The extension approval token is passed in Chrome argv. The CDP credential
+  // must stay separate and only reach the in-process Playwright client.
+  private _validateCdpToken(request: http.IncomingMessage): { statusCode: number, message: string } | undefined {
+    const url = new URL(`http://localhost${request.url}`);
+    if (url.pathname !== this._cdpPath)
+      return;
+    const provided = Buffer.from(url.searchParams.get('token') ?? '');
+    const expectedBuffer = Buffer.from(this._cdpToken);
+    if (provided.length !== expectedBuffer.length || !timingSafeEqual(provided, expectedBuffer))
+      return { statusCode: 401, message: 'Unauthorized' };
   }
 
   cdpEndpoint() {
-    return `${this._wsHost}${this._cdpPath}`;
+    return `${this._wsHost}${this._cdpPath}?token=${this._cdpToken}`;
   }
 
   extensionEndpoint() {
@@ -92,32 +166,49 @@ export class CDPRelayServer {
     debugLogger('Ensuring extension connection for MCP context');
     if (abortSignal.aborted)
       throw abortSignal.reason;
-    // Protocol v2 requires explicit tab selection; the legacy newTab hint hides its only approval controls.
-    if (!this._extensionConnection)
-      this._connectBrowser(clientInfo);
-    debugLogger('Waiting for incoming extension connection');
-    // Manual approval is intentionally unbounded; callers cancel it through the abort signal.
-    await Promise.race([
-      Promise.all([this._extensionConnectionPromise, this._handler.ready()]),
-      new Promise((_, reject) => abortSignal.addEventListener('abort', reject))
-    ]);
+    let abortListener = () => {};
+    let connectionTimer: ReturnType<typeof setTimeout> | undefined;
+    const abortPromise = new Promise<never>((_, reject) => {
+      abortListener = () => reject(abortSignal.reason);
+      abortSignal.addEventListener('abort', abortListener, { once: true });
+    });
+    try {
+      // Protocol v2 requires explicit tab selection; the legacy newTab hint hides its only approval controls.
+      if (!this._extensionConnection)
+        await Promise.race([this._connectBrowser(clientInfo, abortSignal), abortPromise]);
+      debugLogger('Waiting for incoming extension connection');
+      // Token connections need no human approval, so a missing/rejected token must not hang forever.
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        if (this._token) {
+          connectionTimer = setTimeout(() => reject(new Error(
+              'Playwright extension did not connect within 30s after opening the connect page. Make sure the extension is installed in the selected Chrome profile and PLAYWRIGHT_MCP_EXTENSION_TOKEN matches its token.'
+          )), 30_000);
+        }
+      });
+      // Without a token, manual approval remains unbounded and cancellable.
+      await Promise.race([
+        Promise.all([this._extensionConnectionPromise, this._handler.ready()]),
+        abortPromise,
+        timeoutPromise,
+      ]);
+    } finally {
+      clearTimeout(connectionTimer);
+      abortSignal.removeEventListener('abort', abortListener);
+    }
     debugLogger('Extension connection established');
   }
 
-  private _connectBrowser(clientInfo: ClientInfo) {
-    const mcpRelayEndpoint = `${this._wsHost}${this._extensionPath}`;
+  private async _connectBrowser(clientInfo: ClientInfo, abortSignal: AbortSignal) {
     // Need to specify "key" in the manifest.json to make the id stable when loading from file.
-    const url = new URL(`chrome-extension://${protocol.EXTENSION_ID}/connect.html`);
-    url.searchParams.set('mcpRelayUrl', mcpRelayEndpoint);
+    const url = new URL(this._connectPagePrefix);
     const client = {
       name: clientInfo.name,
       version: clientInfo.version,
     };
     url.searchParams.set('client', JSON.stringify(client));
     url.searchParams.set('protocolVersion', process.env.PWMCP_TEST_PROTOCOL_VERSION ?? protocol.VERSION.toString());
-    const token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
-    if (token)
-      url.searchParams.set('token', token);
+    if (this._token)
+      url.searchParams.set('token', this._token);
     const href = url.toString();
 
     let executablePath = this._executablePath;
@@ -131,8 +222,18 @@ export class CDPRelayServer {
     }
 
     const args: string[] = [];
-    if (this._userDataDir)
+    if (this._userDataDir) {
       args.push(`--user-data-dir=${this._userDataDir}`);
+      // An explicit profile wins over last-used auto-selection; with a custom
+      // executable the data dir may live on another filesystem (e.g. WSL2),
+      // so its contents cannot be checked from here.
+      const profileDirectory = this._profileDirName ?? await findPlaywrightExtensionProfile(this._userDataDir);
+      if (this._profileDirName && !this._executablePath && !await isExtensionInstalledInProfile(this._userDataDir, this._profileDirName))
+        throw new Error(`Playwright Extension is not installed in profile "${this._profileDirName}" of ${this._userDataDir}. Install it in that profile or pass the directory name of a profile that has it.`);
+      if (profileDirectory)
+        args.push(`--profile-directory=${profileDirectory}`);
+    }
+    abortSignal.throwIfAborted();
     args.push(href);
 
     spawn(executablePath, args, {
@@ -145,7 +246,11 @@ export class CDPRelayServer {
 
   stop(): void {
     this.closeConnections('Server stopped');
+    this._server.removeListener('upgrade', this._onUpgrade);
     this._wss.close();
+    // ws only closes the HTTP server it created itself; ours is passed in,
+    // so close it explicitly or the relay port stays bound after stop().
+    this._server.close();
   }
 
   closeConnections(reason: string) {
@@ -183,7 +288,7 @@ export class CDPRelayServer {
       try {
         const message = JSON.parse(data.toString());
         await this._handlePlaywrightMessage(message);
-      } catch (error: any) {
+      } catch (error) {
         debugLogger(`Error while handling Playwright message\n${data.toString()}\n`, error);
       }
     });
@@ -216,7 +321,7 @@ export class CDPRelayServer {
       if (!this._extensionConnection)
         throw new Error('Extension not connected');
       return this._extensionConnection.send(method as keyof ExtensionCommandV2, params);
-    });
+    }, this._connectPagePrefix);
   }
 
   private _closePlaywrightConnection(reason: string) {
@@ -283,6 +388,76 @@ export class CDPRelayServer {
   private _sendToPlaywright(message: CDPResponse): void {
     debugLogger('→ Playwright:', `${message.method ?? `response(id=${message.id})`}`);
     this._playwrightConnection?.send(JSON.stringify(message));
+  }
+}
+
+async function isExtensionInstalledInProfile(userDataDir: string, profile: string): Promise<boolean> {
+  const profileDir = path.join(userDataDir, profile);
+  // Web store installs unpack into <profile>/Extensions/<id>; --load-extension
+  // only leaves a settings record in the preferences.
+  const packedDirectoryExists = await pathExists(path.join(profileDir, 'Extensions', protocol.EXTENSION_ID));
+  let installed = false;
+  // `extensions.settings` lives in Preferences or Secure Preferences depending on the platform.
+  for (const fileName of ['Preferences', 'Secure Preferences']) {
+    let prefs: { extensions?: { settings?: Record<string, unknown> } };
+    try {
+      prefs = JSON.parse(await fs.readFile(path.join(profileDir, fileName), 'utf8'));
+    } catch {
+      // Missing or unreadable preferences carry no extension record.
+      continue;
+    }
+    const record = prefs?.extensions?.settings?.[protocol.EXTENSION_ID];
+    if (typeof record !== 'object' || record === null)
+      continue;
+    // An explicit disabled/uninstalled state vetoes both install forms, even
+    // when the other preferences file contains an enabled record.
+    const state = 'state' in record ? record.state : undefined;
+    if (state !== undefined && state !== 1)
+      return false;
+    // Packed files may survive uninstall; only an enabled registration counts.
+    if (packedDirectoryExists && state === 1)
+      installed = true;
+    // Unpacked records can outlive their source directory. Store-relative
+    // paths are covered by the Extensions/<id> check above.
+    const recordPath = 'path' in record ? record.path : undefined;
+    if (typeof recordPath === 'string' && path.isAbsolute(recordPath) && await pathExists(path.join(recordPath, 'manifest.json')))
+      installed = true;
+  }
+  return installed;
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function findPlaywrightExtensionProfile(userDataDir: string): Promise<string | undefined> {
+  let profiles: string[];
+  try {
+    profiles = (await fs.readdir(userDataDir, { withFileTypes: true }))
+        .filter(entry => entry.isDirectory() && (entry.name === 'Default' || /^Profile \d+$/.test(entry.name)))
+        .map(entry => entry.name)
+        .sort((a, b) => a === 'Default' ? -1 : b === 'Default' ? 1 : parseInt(a.slice(8), 10) - parseInt(b.slice(8), 10));
+  } catch {
+    return;
+  }
+
+  try {
+    const localState = JSON.parse(await fs.readFile(path.join(userDataDir, 'Local State'), 'utf8'));
+    const lastUsed = localState?.profile?.last_used;
+    if (typeof lastUsed === 'string' && profiles.includes(lastUsed))
+      profiles = [lastUsed, ...profiles.filter(profile => profile !== lastUsed)];
+  } catch {
+    // Fall back to the deterministic profile order when Local State is unavailable.
+  }
+
+  for (const profile of profiles) {
+    if (await isExtensionInstalledInProfile(userDataDir, profile))
+      return profile;
   }
 }
 

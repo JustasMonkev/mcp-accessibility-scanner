@@ -17,15 +17,17 @@
 import { z } from 'zod';
 import { defineTool } from './tool.js';
 
+const maxWaitSeconds = 30;
+
 const wait = defineTool({
   capability: 'core',
 
   schema: {
     name: 'browser_wait_for',
     title: 'Wait for',
-    description: 'Wait for text to appear or disappear or a specified time to pass',
+    description: 'Wait for text to appear or disappear or a specified time to pass. When both text and textGone are provided, waits for the first one to happen',
     inputSchema: z.object({
-      time: z.number().optional().describe('The time to wait in seconds'),
+      time: z.number().min(0).optional().describe(`The time to wait in seconds, at most ${maxWaitSeconds}. When combined with text or textGone, serves as a timeout for them instead of the default action timeout. 0 is treated the same as omitting it`),
       text: z.string().optional().describe('The text to wait for'),
       textGone: z.string().optional().describe('The text to wait for to disappear'),
     }),
@@ -36,26 +38,53 @@ const wait = defineTool({
     if (!params.text && !params.textGone && !params.time)
       throw new Error('Either time, text or textGone must be provided');
 
-    if (params.time) {
-      response.addCode(`await new Promise(f => setTimeout(f, ${params.time!} * 1000));`);
-      await new Promise(f => setTimeout(f, Math.min(30000, params.time! * 1000)));
-    }
-
     const tab = context.currentTabOrDie();
-    const locator = params.text ? tab.page.getByText(params.text).first() : undefined;
-    const goneLocator = params.textGone ? tab.page.getByText(params.textGone).first() : undefined;
+    const time = params.time ? Math.min(maxWaitSeconds, params.time) : undefined;
 
-    if (goneLocator) {
-      response.addCode(`await page.getByText(${JSON.stringify(params.textGone)}).first().waitFor({ state: 'hidden' });`);
-      await goneLocator.waitFor({ state: 'hidden' });
+    if (params.text || params.textGone) {
+      const timeoutOptions = time ? { timeout: time * 1000 } : {};
+      const conditions = [
+        ...(params.text ? [{ text: params.text, state: 'visible' as const }] : []),
+        ...(params.textGone ? [{ text: params.textGone, state: 'hidden' as const }] : []),
+      ];
+      const waitForCode = ({ text, state }: typeof conditions[number], signal?: string) => {
+        const timeout = time ? `, timeout: ${time * 1000}` : '';
+        const signalOption = signal ? `, signal: ${signal}` : '';
+        return `page.getByText(${JSON.stringify(text)}).first().waitFor({ state: '${state}'${timeout}${signalOption} })`;
+      };
+      // A combined wait replays as a block-scoped race that also cancels its loser.
+      response.addCode(conditions.length === 1
+        ? `await ${waitForCode(conditions[0])};`
+        : [
+          '{',
+          '  const abortController = new AbortController();',
+          '  await Promise.race([',
+          ...conditions.map(condition => `    ${waitForCode(condition, 'abortController.signal')},`),
+          '  ]).finally(() => abortController.abort());',
+          '}',
+        ].join('\n'));
+
+      // Abort the losing wait once the race settles so it does not keep polling until its timeout.
+      const abortController = new AbortController();
+      const waits = conditions.map(async ({ text, state }) => {
+        await tab.page.getByText(text).first().waitFor({ state, ...timeoutOptions, signal: abortController.signal });
+        return `Waited for ${text}`;
+      });
+      for (const wait of waits)
+        wait.catch(() => {});
+      try {
+        response.addResult(await Promise.race(waits));
+      } finally {
+        abortController.abort();
+      }
+    } else if (time) {
+      response.addCode(`await new Promise(f => setTimeout(f, ${time} * 1000));`);
+      await new Promise(f => setTimeout(f, time * 1000));
+      if (time !== params.time)
+        response.addResult(`Waited for ${time} seconds (requested ${params.time}, maximum is ${maxWaitSeconds})`);
+      else
+        response.addResult(`Waited for ${time} seconds`);
     }
-
-    if (locator) {
-      response.addCode(`await page.getByText(${JSON.stringify(params.text)}).first().waitFor({ state: 'visible' });`);
-      await locator.waitFor({ state: 'visible' });
-    }
-
-    response.addResult(`Waited for ${params.text || params.textGone || params.time}`);
     response.setIncludeSnapshot();
   },
 });

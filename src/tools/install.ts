@@ -22,7 +22,7 @@ import { defineTool } from './tool.js';
 
 
 const install = defineTool({
-  capability: 'core-install',
+  capability: 'install',
   schema: {
     name: 'browser_install',
     title: 'Install the browser specified in the config',
@@ -49,6 +49,7 @@ const install = defineTool({
           reject(new Error(`Failed to install browser: ${output.join('')}`));
       });
     });
+    response.addResult(`Browser ${channel} installed successfully.`);
     response.setIncludeTabs();
   },
 });

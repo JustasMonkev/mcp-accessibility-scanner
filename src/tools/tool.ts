@@ -22,13 +22,13 @@ import type { Tab } from '../tab.js';
 import type { Response } from '../response.js';
 import type { ToolSchema } from '../mcp/tool.js';
 
-export type FileUploadModalState = {
+type FileUploadModalState = {
   type: 'fileChooser';
   description: string;
   fileChooser: playwright.FileChooser;
 };
 
-export type DialogModalState = {
+type DialogModalState = {
   type: 'dialog';
   description: string;
   dialog: playwright.Dialog;
@@ -39,6 +39,9 @@ export type ModalState = FileUploadModalState | DialogModalState;
 export type Tool<Input extends z.Schema = z.Schema> = {
   capability: ToolCapability;
   schema: ToolSchema<Input>;
+  // Set by the tab tools that resolve a modal state, so a blocked tab can name
+  // the tool that unblocks it.
+  clearsModalState?: ModalState['type'];
   handle: (context: Context, params: z.output<Input>, response: Response) => Promise<void>;
 };
 

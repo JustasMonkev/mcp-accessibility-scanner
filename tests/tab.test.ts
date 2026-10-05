@@ -14,7 +14,9 @@
  * limitations under the License.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import path from 'node:path';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { chromium, type Browser } from 'playwright';
 import { Tab, renderModalStates } from '../src/tab.js';
 import type { Context } from '../src/context.js';
 import { EventEmitter } from 'events';
@@ -23,6 +25,7 @@ describe('Tab', () => {
   let mockContext: Context;
   let mockPage: any;
   let onPageClose: any;
+  let locatorSnapshot: string | undefined;
 
   beforeEach(() => {
     mockPage = new EventEmitter();
@@ -35,8 +38,14 @@ describe('Tab', () => {
     mockPage.setDefaultTimeout = vi.fn();
     mockPage.goBack = vi.fn().mockResolvedValue(null);
     mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+    locatorSnapshot = 'button "Submit" [ref=1]';
     mockPage.locator = vi.fn().mockReturnValue({
       describe: vi.fn().mockReturnValue({}),
+      ariaSnapshot: vi.fn(async () => {
+        if (locatorSnapshot === undefined)
+          throw new Error('Element not found');
+        return locatorSnapshot;
+      }),
     });
 
     mockContext = {
@@ -47,7 +56,10 @@ describe('Tab', () => {
         },
       },
       currentTab: vi.fn(),
+      outputFile: vi.fn().mockResolvedValue('/tmp/download'),
+      trackPendingDownload: vi.fn(),
       tools: [],
+      modalStateTools: [],
     } as any;
 
     onPageClose = vi.fn();
@@ -89,18 +101,6 @@ describe('Tab', () => {
     });
   });
 
-  describe('forPage', () => {
-    it('should retrieve tab for page', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
-      expect(Tab.forPage(mockPage as any)).toBe(tab);
-    });
-
-    it('should return undefined for unknown page', () => {
-      const otherPage = {} as any;
-      expect(Tab.forPage(otherPage)).toBeUndefined();
-    });
-  });
-
   describe('modalStates', () => {
     it('should return empty array initially', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
@@ -128,6 +128,98 @@ describe('Tab', () => {
       tab.setModalState(modalState);
       tab.clearModalState(modalState);
       expect(tab.modalStates()).toEqual([]);
+    });
+  });
+
+  describe('out-of-band dialog close', () => {
+    const makeDialog = (message = 'Hello') => ({
+      type: () => 'alert',
+      message: () => message,
+    }) as any;
+
+    it('sets a dialog modal state when a dialog opens', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.emit('dialog', makeDialog());
+      expect(tab.modalStates()).toHaveLength(1);
+      expect(tab.modalStates()[0].type).toBe('dialog');
+    });
+
+    it('clears the dialog modal state when the dialog closes out of band', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const dialog = makeDialog();
+      mockPage.emit('dialog', dialog);
+      expect(tab.modalStates()).toHaveLength(1);
+
+      mockPage.emit('dialogclosed', dialog);
+      expect(tab.modalStates()).toEqual([]);
+    });
+
+    it('unblocks snapshots after the dialog closes out of band', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const dialog = makeDialog();
+      mockPage.emit('dialog', dialog);
+
+      const blocked = await tab.captureSnapshot();
+      expect(blocked.ariaSnapshot).toBe('');
+      expect(blocked.modalStates).toHaveLength(1);
+
+      mockPage.emit('dialogclosed', dialog);
+
+      const unblocked = await tab.captureSnapshot();
+      expect(unblocked.ariaSnapshot).toBe('button "Submit" [ref=1]');
+      expect(unblocked.modalStates).toEqual([]);
+    });
+
+    it('only clears the state of the dialog that actually closed', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const first = makeDialog('first');
+      const second = makeDialog('second');
+      mockPage.emit('dialog', first);
+      mockPage.emit('dialog', second);
+      expect(tab.modalStates()).toHaveLength(2);
+
+      mockPage.emit('dialogclosed', first);
+      expect(tab.modalStates()).toHaveLength(1);
+      expect(tab.modalStates()[0].description).toContain('second');
+    });
+
+    it('ignores a close event for a dialog it never tracked', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tracked = makeDialog();
+      mockPage.emit('dialog', tracked);
+
+      mockPage.emit('dialogclosed', makeDialog('untracked'));
+      expect(tab.modalStates()).toHaveLength(1);
+    });
+
+    it('leaves non-dialog modal states alone', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.emit('filechooser', {});
+      const dialog = makeDialog();
+      mockPage.emit('dialog', dialog);
+
+      mockPage.emit('dialogclosed', dialog);
+      expect(tab.modalStates()).toHaveLength(1);
+      expect(tab.modalStates()[0].type).toBe('fileChooser');
+    });
+
+    it('is a no-op when no modal states exist', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      expect(() => mockPage.emit('dialogclosed', makeDialog())).not.toThrow();
+      expect(tab.modalStates()).toEqual([]);
+    });
+
+    it('stops listening after dispose', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const dialog = makeDialog();
+      mockPage.emit('dialog', dialog);
+      expect(mockPage.listenerCount('dialogclosed')).toBe(1);
+
+      tab.dispose();
+      expect(mockPage.listenerCount('dialogclosed')).toBe(0);
+
+      mockPage.emit('dialogclosed', dialog);
+      expect(tab.modalStates()).toHaveLength(1);
     });
   });
 
@@ -198,7 +290,295 @@ describe('Tab', () => {
       await updatePromise;
 
       expect(finished).toBe(true);
+      expect(tab.operationTimeout()).toBe(75);
       expect(mockPage.setDefaultTimeout).toHaveBeenLastCalledWith(75);
+    });
+  });
+
+  describe('navigate', () => {
+    it('rejects an existing modal without clearing collected artifacts or navigating', async () => {
+      mockPage.goto = vi.fn();
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockPage.emit('pageerror', new Error('Previous page error'));
+      mockPage.emit('dialog', { type: () => 'alert', message: () => 'Already open' });
+
+      await expect(tab.navigate('https://example.com/other', { returnOnDialog: true })).rejects.toThrow('Cannot navigate while a modal state is present');
+      expect(mockPage.goto).not.toHaveBeenCalled();
+      expect(tab.consoleMessages()[0].text).toBe('Previous page error');
+      expect(tab.modalStates()).toHaveLength(1);
+    });
+
+    it.each(['alert', 'confirm', 'prompt'])('returns an unresolved load-time %s without handling it', async type => {
+      let finishNavigation!: () => void;
+      mockPage.goto = vi.fn().mockReturnValue(new Promise<void>(resolve => { finishNavigation = resolve; }));
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const dialog = { type: () => type, message: () => 'During load', accept: vi.fn(), dismiss: vi.fn() };
+      let returned = false;
+      const navigation = tab.navigate('https://example.com/dialog', { returnOnDialog: true }).then(() => { returned = true; });
+
+      try {
+        mockPage.emit('dialog', dialog);
+        await vi.waitFor(() => expect(returned).toBe(true));
+        expect(tab.modalStates()).toEqual([expect.objectContaining({ type: 'dialog', dialog })]);
+        expect(dialog.accept).not.toHaveBeenCalled();
+        expect(dialog.dismiss).not.toHaveBeenCalled();
+        expect(mockPage.listenerCount('download')).toBe(2);
+        expect(tab.listenerCount('modalState')).toBe(0);
+      } finally {
+        finishNavigation();
+        await navigation;
+      }
+      await vi.waitFor(() => expect(mockPage.listenerCount('download')).toBe(1));
+    });
+
+    it('also returns a dialog opened while waiting for the load event', async () => {
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      let finishLoad!: () => void;
+      mockPage.waitForLoadState = vi.fn(() => {
+        mockPage.emit('dialog', { type: () => 'alert', message: () => 'After DOMContentLoaded' });
+        return new Promise<void>(resolve => { finishLoad = resolve; });
+      });
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      let returned = false;
+      const navigation = tab.navigate('https://example.com/dialog', { returnOnDialog: true }).then(() => { returned = true; });
+
+      try {
+        await vi.waitFor(() => expect(returned).toBe(true));
+        expect(tab.modalStates()).toHaveLength(1);
+        expect(mockPage.listenerCount('download')).toBe(1);
+        expect(tab.listenerCount('modalState')).toBe(0);
+      } finally {
+        finishLoad();
+        await navigation;
+      }
+    });
+
+    it('observes a navigation rejection after returning a dialog', async () => {
+      let failNavigation!: (error: Error) => void;
+      mockPage.goto = vi.fn().mockReturnValue(new Promise((_, reject) => { failNavigation = reject; }));
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const navigation = tab.navigate('https://example.com/dialog', { returnOnDialog: true });
+      mockPage.emit('dialog', { type: () => 'alert', message: () => 'Still open' });
+
+      await navigation;
+      failNavigation(new Error('page.goto: Target page has been closed'));
+      await new Promise(resolve => setImmediate(resolve));
+      expect(tab.consoleMessages()[0].text).toContain('Navigation failed after dialog interruption: page.goto: Target page has been closed');
+      // browser_console_messages prints toString(): no stack into this server's own files.
+      expect(tab.consoleMessages()[0].toString()).toBe(`Error: ${tab.consoleMessages()[0].text}`);
+      expect(tab.listenerCount('modalState')).toBe(0);
+      expect(mockPage.listenerCount('download')).toBe(1);
+    });
+
+    it('does not attribute a late navigation error to a newer document', async () => {
+      let failNavigation!: (error: Error) => void;
+      mockPage.goto = vi.fn().mockReturnValue(new Promise((_, reject) => { failNavigation = reject; }));
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const navigation = tab.navigate('https://example.com/dialog', { returnOnDialog: true });
+      mockPage.emit('dialog', { type: () => 'alert', message: () => 'Still open' });
+
+      await navigation;
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      failNavigation(new Error('old navigation aborted'));
+      await new Promise(resolve => setImmediate(resolve));
+      expect(tab.consoleMessages()).toEqual([]);
+      expect(mockPage.listenerCount('download')).toBe(1);
+    });
+
+    it('keeps download handling active after returning a dialog', async () => {
+      vi.useFakeTimers();
+      let failNavigation!: (error: Error) => void;
+      mockPage.goto = vi.fn().mockReturnValue(new Promise((_, reject) => { failNavigation = reject; }));
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const navigation = tab.navigate('https://example.com/dialog', { returnOnDialog: true });
+      mockPage.emit('dialog', { type: () => 'confirm', message: () => 'Download?' });
+      await navigation;
+      tab.clearModalState(tab.modalStates()[0]);
+
+      failNavigation(new Error('Download is starting'));
+      await vi.advanceTimersByTimeAsync(0);
+      const download = { suggestedFilename: () => 'report.txt', saveAs: vi.fn().mockResolvedValue(undefined) };
+      mockPage.emit('download', download);
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(download.saveAs).toHaveBeenCalledWith('/tmp/download');
+      expect(tab.consoleMessages()).toEqual([]);
+      expect(mockPage.listenerCount('download')).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('does not wait for a download after an unrelated aborted navigation', async () => {
+      mockPage.goto = vi.fn().mockRejectedValue(new Error('page.goto: net::ERR_ABORTED'));
+      mockPage.waitForEvent = vi.fn().mockReturnValue(new Promise(() => {}));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      await expect(tab.navigate('chrome://crash', { returnOnDialog: true })).rejects.toThrow('net::ERR_ABORTED');
+      expect(tab.listenerCount('modalState')).toBe(0);
+      expect(mockPage.listenerCount('download')).toBe(1);
+    });
+
+    it('waits for an explicitly reported download', async () => {
+      const download = {
+        suggestedFilename: vi.fn().mockReturnValue('download.txt'),
+        saveAs: vi.fn().mockResolvedValue(undefined),
+      };
+      mockPage.goto = vi.fn(async () => {
+        mockPage.emit('download', download);
+        throw new Error('Download is starting');
+      });
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      await expect(tab.navigate('https://example.com/download', { returnOnDialog: true })).resolves.toBeUndefined();
+      expect(download.saveAs).toHaveBeenCalledWith('/tmp/download');
+      expect(mockPage.listenerCount('download')).toBe(1);
+    });
+
+    it('rethrows when an explicitly reported download never arrives', async () => {
+      vi.useFakeTimers();
+      mockPage.goto = vi.fn().mockRejectedValue(new Error('Download is starting'));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const result = expect(tab.navigate('https://example.com/download', { returnOnDialog: true })).rejects.toThrow('Download is starting');
+      await vi.advanceTimersByTimeAsync(6000);
+      await result;
+      expect(mockPage.listenerCount('download')).toBe(1);
+    });
+  });
+
+  describe('downloads', () => {
+    function makeDownload(suggested: string) {
+      return {
+        suggestedFilename: vi.fn().mockReturnValue(suggested),
+        saveAs: vi.fn().mockResolvedValue(undefined),
+      };
+    }
+
+    beforeEach(() => {
+      // Echo the requested file name back as the full path, like the real
+      // outputFile() does, so the assertions can see what would be written.
+      (mockContext.outputFile as any).mockImplementation(async (name: string) => `/tmp/out/${name}`);
+    });
+
+    it('retains a failed save without advertising it as pending or completed', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const download = makeDownload('report.txt');
+      download.saveAs.mockRejectedValue(new Error('disk full'));
+      mockPage.emit('download', download);
+      const tracked = vi.mocked(mockContext.trackPendingDownload).mock.calls[0][0];
+      await expect(tracked).rejects.toThrow('disk full');
+      const snapshot = await tab.captureSnapshot();
+      expect(snapshot.downloads).toEqual([expect.objectContaining({ finished: false, error: 'disk full' })]);
+    });
+
+    it('saves two downloads suggesting the same name to distinct files, keeping the name recognizable', async () => {
+      // Sessions share one output directory; saving under the suggested name
+      // alone let two concurrent "report.pdf" downloads overwrite each other.
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const first = makeDownload('report.pdf');
+      const second = makeDownload('report.pdf');
+      mockPage.emit('download', first);
+      mockPage.emit('download', second);
+      await vi.waitFor(() => {
+        expect(first.saveAs).toHaveBeenCalledTimes(1);
+        expect(second.saveAs).toHaveBeenCalledTimes(1);
+      });
+
+      const firstPath = first.saveAs.mock.calls[0][0] as string;
+      const secondPath = second.saveAs.mock.calls[0][0] as string;
+      expect(firstPath).not.toBe(secondPath);
+      // The suggested name stays the recognizable part, extension preserved.
+      expect(path.basename(firstPath)).toMatch(/^report-.+\.pdf$/);
+      expect(path.basename(secondPath)).toMatch(/^report-.+\.pdf$/);
+    });
+
+    it('suffixes an extensionless download name at the end', async () => {
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const download = makeDownload('LICENSE');
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+      expect(path.basename(download.saveAs.mock.calls[0][0] as string)).toMatch(/^LICENSE-.+$/);
+    });
+
+    it('falls back to a generic name when the page suggests none', async () => {
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const download = makeDownload('');
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+      expect(path.basename(download.saveAs.mock.calls[0][0] as string)).toMatch(/^download-.+$/);
+    });
+
+    it.each([
+      ['report.', /^report-.+$/],
+      ['report.txt ', /^report-.+\.txt$/],
+    ])('normalizes a generated download name ending in a dot or space: %s', async (suggested, expected) => {
+      new Tab(mockContext, mockPage, onPageClose);
+      const download = makeDownload(suggested);
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+      const savedName = path.basename(download.saveAs.mock.calls[0][0]);
+      expect(savedName).toMatch(expected);
+      expect(savedName).not.toMatch(/[. ]$/);
+    });
+
+    it('keeps a long suggested name within the 255-byte filename limit', async () => {
+      // A long but valid Content-Disposition name plus the uniqueness suffix
+      // used to exceed the filesystem's 255-byte component cap and fail
+      // saveAs() with ENAMETOOLONG.
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const download = makeDownload('a'.repeat(300) + '.pdf');
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+
+      const name = path.basename(download.saveAs.mock.calls[0][0] as string);
+      expect(Buffer.byteLength(name, 'utf8')).toBeLessThanOrEqual(255);
+      // Extension and uniqueness token survive the truncation.
+      expect(name).toMatch(/^a+-[0-9TZ.-]+-[0-9a-f]{8}\.pdf$/);
+    });
+
+    it('truncates multibyte names by whole code points, not mid-sequence', async () => {
+      new Tab(mockContext, mockPage as any, onPageClose);
+      // 120 x 3-byte code points = 360 bytes before the suffix.
+      const download = makeDownload('€'.repeat(120) + '.bin');
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+
+      const name = path.basename(download.saveAs.mock.calls[0][0] as string);
+      expect(Buffer.byteLength(name, 'utf8')).toBeLessThanOrEqual(255);
+      // Only whole euro signs remain in the base — a split UTF-8 sequence
+      // would leave a lone surrogate/replacement character here.
+      expect(name).toMatch(/^€+-[0-9TZ.-]+-[0-9a-f]{8}\.bin$/);
+    });
+
+    it('caps an extensionless long name too', async () => {
+      new Tab(mockContext, mockPage as any, onPageClose);
+      const download = makeDownload('b'.repeat(300));
+      mockPage.emit('download', download);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+
+      const name = path.basename(download.saveAs.mock.calls[0][0] as string);
+      expect(Buffer.byteLength(name, 'utf8')).toBeLessThanOrEqual(255);
+      expect(name).toMatch(/^b+-[0-9TZ.-]+-[0-9a-f]{8}$/);
+    });
+
+    it('registers the in-flight save with the context so disposal can wait for it', async () => {
+      // The save outlives the tool call; untracked, context disposal closed
+      // the browser mid-stream and the reported file never materialized.
+      new Tab(mockContext, mockPage as any, onPageClose);
+      let finishSave = () => {};
+      const download = {
+        suggestedFilename: vi.fn().mockReturnValue('report.pdf'),
+        saveAs: vi.fn().mockReturnValue(new Promise<void>(resolve => finishSave = resolve)),
+      };
+      mockPage.emit('download', download);
+      expect(mockContext.trackPendingDownload).toHaveBeenCalledTimes(1);
+
+      const tracked = (mockContext.trackPendingDownload as any).mock.calls[0][0] as Promise<unknown>;
+      let settled = false;
+      void tracked.then(() => settled = true);
+      await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
+      expect(settled).toBe(false);
+      finishSave();
+      await tracked;
     });
   });
 
@@ -209,7 +589,15 @@ describe('Tab', () => {
       expect(snapshot.url).toBe('https://example.com');
       expect(snapshot.title).toBe('Example Page');
       expect(snapshot.ariaSnapshot).toBe('button "Submit" [ref=1]');
-      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: undefined });
+    });
+
+    it('should include element boxes when requested', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      await tab.captureSnapshot(true);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: true });
     });
 
     it('should include console messages in snapshot', async () => {
@@ -268,6 +656,121 @@ describe('Tab', () => {
       expect(snapshot.ariaSnapshot).toContain('capturing page accessibility snapshot');
     });
 
+    it('does not cache an accessibility snapshot that resolves after its timeout', async () => {
+      vi.useFakeTimers();
+      mockContext.config.timeouts.defaultTimeout = 25;
+      let resolveSnapshot!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(resolve => { resolveSnapshot = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const snapshotPromise = tab.captureSnapshot();
+      await vi.advanceTimersByTimeAsync(25);
+      await snapshotPromise;
+      resolveSnapshot('button "Submit" [ref=1]');
+      await Promise.resolve();
+
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=2]');
+      await expect(
+          tab.refLocators([{ element: 'Submit', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not return an accessibility snapshot captured before navigation', async () => {
+      let resolveSnapshot!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(resolve => { resolveSnapshot = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const snapshotPromise = tab.captureSnapshot();
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      resolveSnapshot('button "Old page" [ref=1]');
+      const snapshot = await snapshotPromise;
+
+      expect(snapshot.ariaSnapshot).toContain('Page snapshot unavailable');
+      expect(snapshot.ariaSnapshot).not.toContain('Old page');
+    });
+
+    it('does not invalidate a newer overlapping snapshot when an old capture resolves', async () => {
+      let resolveOld!: (snapshot: string) => void;
+      let resolveFresh!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn()
+          .mockReturnValueOnce(new Promise(resolve => { resolveOld = resolve; }))
+          .mockReturnValueOnce(new Promise(resolve => { resolveFresh = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const oldCapture = tab.captureSnapshot();
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      const freshCapture = tab.captureSnapshot();
+      resolveFresh('button "Fresh page" [ref=2]');
+      expect((await freshCapture).ariaSnapshot).toContain('Fresh page');
+      resolveOld('button "Old page" [ref=1]');
+      expect((await oldCapture).ariaSnapshot).toContain('Page snapshot unavailable');
+
+      locatorSnapshot = 'button "Fresh page" [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=3]');
+      await tab.refLocators([{ element: 'Fresh page', ref: '2' }]);
+      expect(mockPage.ariaSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('does not invalidate a newer overlapping snapshot when an old capture times out', async () => {
+      vi.useFakeTimers();
+      mockContext.config.timeouts.defaultTimeout = 25;
+      mockPage.ariaSnapshot = vi.fn()
+          .mockReturnValueOnce(new Promise(() => {}))
+          .mockResolvedValueOnce('button "Fresh page" [ref=2]');
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const oldCapture = tab.captureSnapshot();
+      const freshCapture = tab.captureSnapshot();
+      expect((await freshCapture).ariaSnapshot).toContain('Fresh page');
+      await vi.advanceTimersByTimeAsync(25);
+      expect((await oldCapture).ariaSnapshot).toContain('Page snapshot unavailable');
+
+      locatorSnapshot = 'button "Fresh page" [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=3]');
+      await tab.refLocators([{ element: 'Fresh page', ref: '2' }]);
+      expect(mockPage.ariaSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('does not cache a snapshot completed after a modal interrupts capture', async () => {
+      let resolveSnapshot!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(resolve => { resolveSnapshot = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const pending = tab.captureSnapshot();
+      const modal = { type: 'dialog', description: 'Dialog', dialog: {} } as any;
+      tab.setModalState(modal);
+      expect((await pending).ariaSnapshot).toBe('');
+      tab.clearModalState(modal);
+      resolveSnapshot('button "Unseen" [ref=2]');
+      await Promise.resolve();
+
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Current" [ref=3]');
+      await expect(tab.refLocators([{ element: 'Unseen', ref: '2' }])).rejects.toThrow('Ref 2 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('caches overlapping snapshots in completion order', async () => {
+      let resolveFirst!: (snapshot: string) => void;
+      let resolveSecond!: (snapshot: string) => void;
+      mockPage.ariaSnapshot = vi.fn()
+          .mockReturnValueOnce(new Promise(resolve => { resolveFirst = resolve; }))
+          .mockReturnValueOnce(new Promise(resolve => { resolveSecond = resolve; }));
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+
+      const first = tab.captureSnapshot();
+      const second = tab.captureSnapshot();
+      resolveSecond('button "B" [ref=2]');
+      await second;
+      resolveFirst('button "A" [ref=1]');
+      await first;
+
+      locatorSnapshot = 'button "A" [ref=1]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=3]');
+      await tab.refLocators([{ element: 'A', ref: '1' }]);
+      expect(mockPage.ariaSnapshot).not.toHaveBeenCalled();
+    });
+
     it('keeps data URL payloads in captured accessibility snapshots for session logs', async () => {
       const payload = '<svg viewBox="0 0 10 10"><text>Hello</text></svg>';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- link "Example" [ref=e1]:\n  - /url: data:image/svg+xml,${payload}`);
@@ -284,7 +787,7 @@ describe('Tab', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
       await tab.refLocator({ element: 'Submit button', ref: '1' });
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
-      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: undefined });
     });
 
     it('should throw error if ref not found', async () => {
@@ -294,7 +797,7 @@ describe('Tab', () => {
       await expect(
           tab.refLocator({ element: 'Submit button', ref: '999' })
       ).rejects.toThrow('Ref 999 not found');
-      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: undefined });
     });
   });
 
@@ -311,7 +814,208 @@ describe('Tab', () => {
       expect(locators).toHaveLength(2);
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=2');
-      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: undefined });
+    });
+
+    it('resolves refs against the snapshot already returned to the caller', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      // The ref came from that snapshot, so re-reading the page adds nothing.
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+      expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
+    });
+
+    it('reuses refs from boxed snapshots without treating geometry as semantics', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- 'button "Submit" [ref=1] [box=10,20,80,30]'`);
+      locatorSnapshot = `- 'button "Submit" [ref=1]'`;
+      await tab.captureSnapshot(true);
+
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('reuses a boxed ref whose YAML key has an inline value', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- 'heading "Welcome" [ref=1] [box=10,20,80,30]': Label`);
+      locatorSnapshot = `- 'heading "Welcome" [ref=1]': Label`;
+      await tab.captureSnapshot(true);
+
+      await tab.refLocators([{ element: 'Welcome', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-captures when a cached ref no longer resolves to an element', async () => {
+      // The element was removed after the snapshot went out: the ref is still in
+      // the cached text, but it matches nothing, and handing back that locator
+      // would fail as an action timeout instead of a useful message.
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+      locatorSnapshot = undefined;
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other" [ref=2]');
+
+      await expect(
+          tab.refLocators([{ element: 'Submit', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-captures when a cached ref has different accessible semantics', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      await tab.captureSnapshot();
+      locatorSnapshot = 'button "Delete" [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Delete" [ref=2]');
+
+      await expect(
+          tab.refLocators([{ element: 'Submit', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-captures when the page navigates during cached ref validation', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      await tab.captureSnapshot();
+      let resolveValidation!: (snapshot: string) => void;
+      mockPage.locator = vi.fn().mockReturnValue({
+        ariaSnapshot: vi.fn().mockReturnValue(new Promise(resolve => { resolveValidation = resolve; })),
+        describe: vi.fn().mockReturnValue({}),
+      });
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "New page" [ref=2]');
+
+      const locators = tab.refLocators([{ element: 'Submit', ref: '1' }]);
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      resolveValidation('button "Submit" [ref=1]');
+
+      await expect(locators).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not accept a generated locator that only partially matches the old name', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Save" [ref=1]');
+      await tab.captureSnapshot();
+      locatorSnapshot = 'button "Save 2" [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Save 2" [ref=2]');
+
+      await expect(
+          tab.refLocators([{ element: 'Save', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('revalidates YAML-quoted snapshot entries without a full-page capture', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      locatorSnapshot = `- 'button "Warning: Delete" [ref=1]'`;
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- 'button "Warning: Delete" [ref=1]'`);
+      await tab.captureSnapshot();
+
+      await tab.refLocators([{ element: 'Delete', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('accepts Playwright synthetic roles when the public ARIA role is empty', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      locatorSnapshot = 'generic [ref=1]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('generic [ref=1]');
+      await tab.captureSnapshot();
+
+      await tab.refLocators([{ element: 'Target', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('reuses a cached aria-hidden ref when validation carries the same marker', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      locatorSnapshot = 'generic [aria-hidden] [ref=1]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('generic [aria-hidden] [ref=1]');
+      await tab.captureSnapshot();
+
+      await tab.refLocators([{ element: 'Hidden subtree', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('reuses a cached ref whose long name is omitted from the snapshot', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      locatorSnapshot = 'button [ref=1]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button [ref=1]');
+      await tab.captureSnapshot();
+
+      await tab.refLocators([{ element: 'Long name', ref: '1' }]);
+      await tab.refLocators([{ element: 'Long name', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-captures when an omitted long name changes the Playwright ref', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button [ref=1]');
+      await tab.captureSnapshot();
+      locatorSnapshot = 'button [ref=2]';
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button [ref=2]');
+
+      await expect(
+          tab.refLocators([{ element: 'Long name', ref: '1' }])
+      ).rejects.toThrow('Ref 1 not found');
+    });
+
+    it('re-reads the page for a ref the last snapshot does not hold', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1] button "Added" [ref=2]');
+
+      await tab.refLocators([{ element: 'Added', ref: '2' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: undefined });
+      expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=2');
+    });
+
+    it('stops trusting the cached snapshot once the tab navigates', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      await tab.navigate('https://example.com/next');
+
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      // Two captures: the first one described a page that is gone.
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops trusting the cached snapshot after any main-frame navigation', async () => {
+      // goBack(), page.reload() and a page-driven location change never reach
+      // Tab.navigate(), so the cache is keyed on the navigation event itself.
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps the cached snapshot when only a sub-frame navigates', async () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
+      await tab.captureSnapshot();
+
+      mockPage.emit('framenavigated', { parentFrame: () => ({}) });
+      await tab.refLocators([{ element: 'Submit', ref: '1' }]);
+
+      expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -411,9 +1115,63 @@ describe('Tab', () => {
   });
 });
 
+const hasBundledChromium = await chromium.launch({ headless: true, chromiumSandbox: false })
+    .then(async browser => {
+      await browser.close();
+      return true;
+    })
+    .catch(() => false);
+
+describe.skipIf(!hasBundledChromium)('Playwright AI snapshot compatibility', () => {
+  let browser: Browser;
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+  });
+
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it('surfaces one aria-hidden boundary marker without invalidating its cached ref', async () => {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <h2>Visible heading</h2>
+      <div aria-hidden="true">
+        <h1>Hidden heading</h1>
+        <p>Hidden content</p>
+      </div>
+    `);
+    const context = {
+      config: { timeouts: { navigationTimeout: 30000, defaultTimeout: 6000 } },
+      tools: [],
+    } as Context;
+    expect(await page.locator('body').ariaSnapshot()).not.toContain('Hidden content');
+    const snapshotSpy = vi.spyOn(page, 'ariaSnapshot');
+    const tab = new Tab(context, page, () => {});
+
+    try {
+      const { ariaSnapshot } = await tab.captureSnapshot();
+      const hiddenBoundary = ariaSnapshot.match(/generic \[aria-hidden\] \[ref=([^\]]+)\]/);
+
+      expect(hiddenBoundary).not.toBeNull();
+      expect(ariaSnapshot.match(/\[aria-hidden\]/g)).toHaveLength(1);
+
+      const capturesBeforeValidation = snapshotSpy.mock.calls.length;
+      await tab.refLocators([{ element: 'Hidden subtree', ref: hiddenBoundary![1] }]);
+      expect(snapshotSpy).toHaveBeenCalledTimes(capturesBeforeValidation);
+    } finally {
+      await page.close();
+    }
+  });
+});
+
 describe('renderModalStates', () => {
+  const dialogHandler = { schema: { name: 'browser_handle_dialog' }, clearsModalState: 'dialog' };
+  const modalStates = [{ type: 'dialog' as const, description: 'Test dialog', dialog: {} as any }];
+
   it('should render empty modal states', () => {
-    const mockContext = { tools: [] } as any;
+    const mockContext = { modalStateTools: [], config: {} } as any;
     const result = renderModalStates(mockContext, []);
     const text = result.join('\n');
     expect(text).toContain('### Modal state');
@@ -421,22 +1179,28 @@ describe('renderModalStates', () => {
   });
 
   it('should render dialog modal state', () => {
-    const mockContext = {
-      tools: [{
-        schema: { name: 'browser_handle_dialog' },
-        clearsModalState: 'dialog',
-      }],
-    } as any;
-
-    const modalStates = [{
-      type: 'dialog' as const,
-      description: 'Test dialog',
-      dialog: {} as any,
-    }];
+    const mockContext = { modalStateTools: [dialogHandler], config: {} } as any;
 
     const result = renderModalStates(mockContext, modalStates);
     const text = result.join('\n');
     expect(text).toContain('Test dialog');
-    expect(text).toContain('browser_handle_dialog');
+    expect(text).toContain('can be handled by the "browser_handle_dialog" tool');
+  });
+
+  it('should say so when the handler for a modal state is blocked', () => {
+    // The handler is hidden from Context.tools but its metadata is kept, so the
+    // guidance names it instead of rendering the "undefined" tool.
+    const mockContext = { tools: [], modalStateTools: [dialogHandler], config: { blockedTools: ['browser_handle_dialog'] } } as any;
+
+    const text = renderModalStates(mockContext, modalStates).join('\n');
+    expect(text).toContain('[Test dialog]: would be handled by the "browser_handle_dialog" tool, but this server blocks it (blockedTools)');
+    expect(text).not.toContain('undefined');
+    expect(text).not.toContain('can be handled by');
+  });
+
+  it('should not report an unrelated blocked tool as the handler', () => {
+    const mockContext = { modalStateTools: [dialogHandler], config: { blockedTools: ['browser_file_upload'] } } as any;
+
+    expect(renderModalStates(mockContext, modalStates).join('\n')).toContain('can be handled by the "browser_handle_dialog" tool');
   });
 });

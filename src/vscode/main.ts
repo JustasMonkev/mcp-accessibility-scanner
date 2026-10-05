@@ -14,46 +14,28 @@
  * limitations under the License.
  */
 
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import * as mcpServer from '../mcp/server.js';
 import { BrowserServerBackend } from '../browserServerBackend.js';
-import type { BrowserContextFactory, ClientInfo } from '../browserContextFactory.js';
+import { VSCodeBrowserContextFactory } from './browserContextFactory.js';
+import { validateBrowserConnectConnectionString, validateBrowserConnectLib } from './validation.js';
 import type { FullConfig } from '../config.js';
-import type { BrowserContext } from 'playwright-core';
-
-class VSCodeBrowserContextFactory implements BrowserContextFactory {
-  name = 'vscode';
-  description = 'Connect to a browser running in the Playwright VS Code extension';
-
-  constructor(private _config: FullConfig, private _playwright: typeof import('playwright'), private _connectionString: string) {}
-
-  async createContext(clientInfo: ClientInfo, abortSignal: AbortSignal): Promise<{ browserContext: BrowserContext; close: () => Promise<void>; }> {
-    let launchOptions: any = this._config.browser.launchOptions;
-    if (this._config.browser.userDataDir) {
-      launchOptions = {
-        ...launchOptions,
-        ...this._config.browser.contextOptions,
-        userDataDir: this._config.browser.userDataDir,
-      };
-    }
-    const connectionString = new URL(this._connectionString);
-    connectionString.searchParams.set('launch-options', JSON.stringify(launchOptions));
-
-    const browserType = this._playwright.chromium; // it could also be firefox or webkit, we just need some browser type to call `connect` on
-    const browser = await browserType.connect(connectionString.toString());
-
-    const context = browser.contexts()[0] ?? await browser.newContext(this._config.browser.contextOptions);
-
-    return {
-      browserContext: context,
-      close: async () => {
-        await browser.close();
-      }
-    };
-  }
-}
 
 async function main(config: FullConfig, connectionString: string, lib: string) {
+  // Defense-in-depth: the child must not trust parent argv blindly — the
+  // host already validated both values before spawning (see validation.ts).
+  const libError = validateBrowserConnectLib(lib);
+  if (libError) {
+    // eslint-disable-next-line no-console
+    console.error(`browser_connect: ${libError}`);
+    process.exit(1);
+  }
+  const connectionError = validateBrowserConnectConnectionString(connectionString);
+  if (connectionError) {
+    // eslint-disable-next-line no-console
+    console.error(`browser_connect: ${connectionError}`);
+    process.exit(1);
+  }
   const playwright = await import(lib).then(mod => mod.default ?? mod);
   const factory = new VSCodeBrowserContextFactory(config, playwright, connectionString);
   await mcpServer.connect(
@@ -64,7 +46,6 @@ async function main(config: FullConfig, connectionString: string, lib: string) {
         version: 'unused'
       },
       new StdioServerTransport(),
-      Promise.resolve(),
       false
   );
 }

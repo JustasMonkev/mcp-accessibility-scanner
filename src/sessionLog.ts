@@ -14,23 +14,31 @@
  * limitations under the License.
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
 import { Response } from './response.js';
+import { createShortGuid } from './utils/guid.js';
 import { logUnhandledError } from './utils/log.js';
 import { outputFile } from './config.js';
 
 import type { FullConfig } from './config.js';
 import type * as actions from './actions.js';
+import type { Context } from './context.js';
 import type { Tab, TabSnapshot } from './tab.js';
 
 export interface IFileStorage {
+  readFile(filePath: string): Promise<string>;
   writeFile(filePath: string, content: string): Promise<void>;
   appendFile(filePath: string, content: string): Promise<void>;
 }
 
 class NodeFileStorage implements IFileStorage {
+  async readFile(filePath: string): Promise<string> {
+    return await fs.promises.readFile(filePath, 'utf-8');
+  }
+
   async writeFile(filePath: string, content: string): Promise<void> {
     await fs.promises.writeFile(filePath, content);
   }
@@ -44,14 +52,59 @@ type LogEntry = {
   timestamp: number;
   toolCall?: {
     toolName: string;
-    toolArgs: Record<string, any>;
+    toolArgs: Record<string, unknown>;
+    /** Routing metadata, kept apart from arguments the tool itself owns. */
+    meta?: Record<string, unknown>;
     result: string;
     isError?: boolean;
   };
   userAction?: actions.Action;
+  /**
+   * The Context this entry originated from. One log is shared by a backend's
+   * default context and every explicit session it opens, so the pending-entry
+   * bookkeeping (action-update merging, navigate dedup) must be scoped by
+   * originating context — "the last entry" globally is whichever context
+   * wrote last, and merging into it would fold one session's action into
+   * another's whenever the action names match.
+   */
+  source?: Context;
+  /** The tab this user action came from; used only while pending. */
+  tab?: Tab;
+  /** Tags a session context's user actions in session.md; see logUserAction. */
+  browserSessionId?: string;
   code: string;
   tabSnapshot?: TabSnapshot;
 };
+
+// Session handles are bearer tokens: whoever holds a live one can route tool
+// calls into that session. session.md keeps entries attributable with a
+// stable label instead, wherever a handle appears (routing, arguments,
+// results such as browser_session_open's).
+const sessionHandlePattern = /\bbs_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+
+function redactSessionHandles(text: string): string {
+  return text.replace(sessionHandlePattern, handle => `bs_redacted_${createHash('sha256').update(handle).digest('hex').slice(0, 8)}`);
+}
+
+function renderUserAction(action: actions.Action, browserSessionId: string | undefined, code: string): string[] {
+  const actionData: Record<string, unknown> = { ...action };
+  delete actionData.ariaSnapshot;
+  delete actionData.selector;
+  delete actionData.signals;
+  const loggedAction = browserSessionId !== undefined
+    ? { browserSessionId, ...actionData }
+    : actionData;
+  const lines = [
+    `### User action: ${action.name}`,
+    `- Args`,
+    '```json',
+    JSON.stringify(loggedAction, null, 2),
+    '```',
+  ];
+  if (code)
+    lines.push(`- Code`, '```js', code, '```');
+  return lines;
+}
 
 export class SessionLog {
   private _folder: string;
@@ -61,6 +114,7 @@ export class SessionLog {
   private _sessionFileQueue = Promise.resolve();
   private _flushEntriesTimeout: NodeJS.Timeout | undefined;
   private _storage: IFileStorage;
+  private _lastFlushedAction = new WeakMap<Tab, { action: actions.Action; browserSessionId?: string; code: string; marker: string }>();
 
   constructor(sessionFolder: string, storage: IFileStorage = new NodeFileStorage()) {
     this._folder = sessionFolder;
@@ -68,23 +122,34 @@ export class SessionLog {
     this._storage = storage;
   }
 
-  static async create(config: FullConfig, rootPath: string | undefined): Promise<SessionLog> {
-    const sessionFolder = await outputFile(config, rootPath, `session-${Date.now()}`);
+  static async create(config: FullConfig): Promise<SessionLog> {
+    // The random suffix keeps two sessions created in the same millisecond
+    // (e.g. concurrent HTTP connections) from sharing a folder — a collision
+    // would interleave their session.md entries and overwrite each other's
+    // snapshot ordinals. Nothing parses the folder name back.
+    const sessionFolder = await outputFile(config, `session-${Date.now()}-${createShortGuid()}`);
     await fs.promises.mkdir(sessionFolder, { recursive: true });
     // eslint-disable-next-line no-console
     console.error(`Session: ${sessionFolder}`);
     return new SessionLog(sessionFolder);
   }
 
-  logResponse(response: Response) {
+  /**
+   * `meta` records request metadata that routed the call. Page-registered
+   * WebMCP tools own every argument name, including `browserSessionId`, so
+   * their routing handle cannot be folded into the logged args.
+   */
+  logResponse(response: Response, meta?: Record<string, unknown>) {
     const entry: LogEntry = {
       timestamp: performance.now(),
       toolCall: {
         toolName: response.toolName,
         toolArgs: response.toolArgs,
+        meta,
         result: response.result(),
         isError: response.isError(),
       },
+      source: response.context,
       code: response.code(),
       tabSnapshot: response.tabSnapshot(),
     };
@@ -93,23 +158,59 @@ export class SessionLog {
 
   logUserAction(action: actions.Action, tab: Tab, code: string, isUpdate: boolean) {
     code = code.trim();
+    // All bookkeeping is scoped to the context and tab the recorder event came from:
+    // with the log shared across a backend's contexts, an update matched
+    // against the globally-last entry could merge into ANOTHER session's
+    // same-named pending action, and a navigate could be deduplicated
+    // against another session's location.
+    const source = tab.context;
+    const lastEntry = this._lastPendingEntryFor(source, tab);
     if (isUpdate) {
-      const lastEntry = this._pendingEntries[this._pendingEntries.length - 1];
-      if (lastEntry.userAction?.name === action.name) {
+      if (lastEntry?.userAction?.name === action.name) {
         lastEntry.userAction = action;
         lastEntry.code = code;
         return;
       }
+      const flushed = this._lastFlushedAction.get(tab);
+      if (flushed?.action.name !== action.name)
+        return;
+      const previousAction = flushed.action;
+      const previousCode = flushed.code;
+      flushed.action = action;
+      flushed.code = code;
+      this._sessionFileQueue = this._sessionFileQueue
+          .catch(logUnhandledError)
+          .then(async () => {
+            const content = await this._storage.readFile(this._file);
+            const oldBlock = redactSessionHandles(renderUserAction(previousAction, flushed.browserSessionId, previousCode).join('\n'));
+            const newBlock = redactSessionHandles(renderUserAction(flushed.action, flushed.browserSessionId, flushed.code).join('\n'));
+            const markerIndex = content.indexOf(flushed.marker);
+            if (markerIndex === -1)
+              return;
+            const blockIndex = content.lastIndexOf(oldBlock, markerIndex);
+            if (blockIndex !== -1)
+              await this._storage.writeFile(this._file, content.slice(0, blockIndex) + newBlock + content.slice(blockIndex + oldBlock.length));
+          })
+          .catch(logUnhandledError);
+      return;
     }
     if (action.name === 'navigate') {
       // Already logged at this location.
-      const lastEntry = this._pendingEntries[this._pendingEntries.length - 1];
-      if (lastEntry?.tabSnapshot?.url === action.url)
+      const lastContextEntry = this._lastPendingEntryFor(source);
+      if (lastContextEntry?.userAction?.name === 'navigate' && lastContextEntry.tab === tab && lastContextEntry.tabSnapshot?.url === action.url)
         return;
     }
     const entry: LogEntry = {
       timestamp: performance.now(),
       userAction: action,
+      source,
+      tab,
+      // Session contexts' recorded actions carry their session in session.md
+      // (as a redacted label), mirroring how routed tool calls log a
+      // browserSessionId in their args — otherwise concurrent sessions' user
+      // actions would be indistinguishable in the shared log. Default-context
+      // actions stay untagged, exactly as before.
+      browserSessionId: source.options.browserSessionId,
       code,
       tabSnapshot: {
         url: tab.page.url(),
@@ -121,6 +222,15 @@ export class SessionLog {
       },
     };
     this._appendEntry(entry);
+  }
+
+  /** The last not-yet-flushed entry this tab wrote. */
+  private _lastPendingEntryFor(source: Context, tab?: Tab): LogEntry | undefined {
+    for (let i = this._pendingEntries.length - 1; i >= 0; i--) {
+      if (this._pendingEntries[i].source === source && (!tab || this._pendingEntries[i].tab === tab))
+        return this._pendingEntries[i];
+    }
+    return undefined;
   }
 
   private _appendEntry(entry: LogEntry) {
@@ -139,8 +249,10 @@ export class SessionLog {
     for (const entry of entries) {
       const ordinal = (++this._ordinal).toString().padStart(3, '0');
       if (entry.toolCall) {
+        lines.push(`### Tool call: ${entry.toolCall.toolName}`);
+        if (entry.toolCall.meta)
+          lines.push(`- Metadata`, '```json', JSON.stringify(entry.toolCall.meta, null, 2), '```');
         lines.push(
-            `### Tool call: ${entry.toolCall.toolName}`,
             `- Args`,
             '```json',
             JSON.stringify(entry.toolCall.toolArgs, null, 2),
@@ -156,33 +268,24 @@ export class SessionLog {
         }
       }
 
-      if (entry.userAction) {
-        const actionData = { ...entry.userAction } as any;
-        delete actionData.ariaSnapshot;
-        delete actionData.selector;
-        delete actionData.signals;
-
-        lines.push(
-            `### User action: ${entry.userAction.name}`,
-            `- Args`,
-            '```json',
-            JSON.stringify(actionData, null, 2),
-            '```',
-        );
-      }
-
-      if (entry.code) {
-        lines.push(
-            `- Code`,
-            '```js',
-            entry.code,
-            '```');
-      }
+      if (entry.userAction)
+        lines.push(...renderUserAction(entry.userAction, entry.browserSessionId, entry.code));
+      else if (entry.code)
+        lines.push(`- Code`, '```js', entry.code, '```');
 
       if (entry.tabSnapshot) {
         const fileName = `${ordinal}.snapshot.yml`;
         this._storage.writeFile(path.join(this._folder, fileName), entry.tabSnapshot.ariaSnapshot).catch(logUnhandledError);
-        lines.push(`- Snapshot: ${fileName}`);
+        const marker = `- Snapshot: ${fileName}`;
+        lines.push(marker);
+        if (entry.userAction && entry.tab) {
+          this._lastFlushedAction.set(entry.tab, {
+            action: entry.userAction,
+            browserSessionId: entry.browserSessionId,
+            code: entry.code,
+            marker,
+          });
+        }
       }
 
       lines.push('', '');
@@ -190,7 +293,7 @@ export class SessionLog {
 
     this._sessionFileQueue = this._sessionFileQueue
         .catch(logUnhandledError)
-        .then(() => this._storage.appendFile(this._file, lines.join('\n')))
+        .then(() => this._storage.appendFile(this._file, redactSessionHandles(lines.join('\n'))))
         .catch(logUnhandledError);
   }
 }

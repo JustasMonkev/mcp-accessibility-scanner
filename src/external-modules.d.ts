@@ -25,6 +25,8 @@ declare module 'playwright-core/lib/coreBundle' {
   interface CoreBundle {
     readonly iso: {
       asLocator(lang: string, selector: string): string;
+      urlMatches(baseURL: string | undefined, urlString: string, match: string): boolean;
+      getMimeTypeForPath(path: string): string | null;
     };
     readonly registry: {
       readonly registryDirectory: string;
@@ -38,27 +40,6 @@ declare module 'playwright-core/lib/coreBundle' {
   }
   const coreBundle: CoreBundle;
   export default coreBundle;
-}
-declare module 'dotenv' {
-  export interface DotenvConfigOptions {
-    path?: string;
-    encoding?: string;
-    debug?: boolean;
-    override?: boolean;
-  }
-
-  export interface DotenvConfigOutput {
-    parsed?: Record<string, string>;
-    error?: Error;
-  }
-
-  export function config(options?: DotenvConfigOptions): DotenvConfigOutput;
-
-  const dotenv: {
-    config: typeof config;
-  };
-
-  export default dotenv;
 }
 
 declare module 'openai' {
@@ -92,7 +73,7 @@ declare module 'openai' {
           function: {
             name: string;
             description?: string;
-            parameters?: any;
+            parameters?: unknown;
           };
         }
       }
@@ -138,7 +119,7 @@ declare module '@anthropic-ai/sdk' {
       interface TextBlock extends BaseBlock {
         type: 'text';
         text: string;
-        citations?: any[];
+        citations?: unknown[];
       }
 
       interface ToolUseBlock extends BaseBlock {
@@ -166,7 +147,7 @@ declare module '@anthropic-ai/sdk' {
       interface Tool {
         name: string;
         description?: string;
-        input_schema: any;
+        input_schema: unknown;
       }
     }
   }

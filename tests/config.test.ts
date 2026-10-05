@@ -17,18 +17,195 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, it, expect } from 'vitest';
-import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders } from '../src/config.js';
+import { afterEach, beforeEach, describe, it, expect, onTestFinished, vi } from 'vitest';
+import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders, resolveOutputDir, uploadDirectoryList } from '../src/config.js';
 import type { Config } from '../config.js';
 
 async function writeConfigFile(config: Config): Promise<string> {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-config-test-'));
+  onTestFinished(() => fs.promises.rm(dir, { recursive: true, force: true }));
   const configFile = path.join(dir, 'config.json');
   await fs.promises.writeFile(configFile, JSON.stringify(config), 'utf-8');
   return configFile;
 }
 
 describe('Config', () => {
+  describe('tool policy precedence', () => {
+    beforeEach(() => {
+      vi.stubEnv('PLAYWRIGHT_MCP_ALLOWED_TOOLS', undefined);
+      vi.stubEnv('PLAYWRIGHT_MCP_BLOCKED_TOOLS', undefined);
+    });
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('replaces each array in file < environment < CLI order, including explicit empty lists', async () => {
+      const config = await writeConfigFile({ allowedTools: ['browser_pdf_save'], blockedTools: ['browser_navigate'] });
+      expect(await resolveCLIConfig({ config })).toMatchObject({ allowedTools: ['browser_pdf_save'], blockedTools: ['browser_navigate'] });
+      vi.stubEnv('PLAYWRIGHT_MCP_ALLOWED_TOOLS', 'browser_install, browser_mouse_move_xy');
+      vi.stubEnv('PLAYWRIGHT_MCP_BLOCKED_TOOLS', 'browser_evaluate');
+      expect(await resolveCLIConfig({ config })).toMatchObject({ allowedTools: ['browser_install', 'browser_mouse_move_xy'], blockedTools: ['browser_evaluate'] });
+      expect(await resolveCLIConfig({ config, allowedTools: ['browser_pdf_save'], blockedTools: [] })).toMatchObject({ allowedTools: ['browser_pdf_save'], blockedTools: [] });
+      vi.stubEnv('PLAYWRIGHT_MCP_ALLOWED_TOOLS', '');
+      vi.stubEnv('PLAYWRIGHT_MCP_BLOCKED_TOOLS', ' ');
+      expect(await resolveCLIConfig({ config })).toMatchObject({ allowedTools: [], blockedTools: [] });
+    });
+
+    it('rejects malformed lists from environment and JSON, but validates only the winning source', async () => {
+      const config = await writeConfigFile({ blockedTools: ['unknown_tool'] });
+      await expect(resolveCLIConfig({ config })).rejects.toThrow('Unknown tool');
+      vi.stubEnv('PLAYWRIGHT_MCP_BLOCKED_TOOLS', 'browser_navigate,');
+      await expect(resolveCLIConfig({ config })).rejects.toThrow('non-blank');
+      expect(await resolveCLIConfig({ config, blockedTools: [] })).toMatchObject({ blockedTools: [] });
+    });
+  });
+
+  describe('client certificate proxy routing', () => {
+    const clientCertificates = [{ origin: 'https://fixture.test', certPath: '/fixture.crt', keyPath: '/fixture.key' }];
+    const proxy = { server: 'http://proxy.test:3128', username: 'fixture', password: 'disposable' };
+    afterEach(() => vi.unstubAllEnvs());
+
+    it.each([false, true])('preserves the launch proxy with certificates (isolated: %s)', async isolated => {
+      const config = await resolveConfig({ browser: { isolated, launchOptions: { proxy }, contextOptions: { clientCertificates } } });
+      expect(config.browser.contextOptions.proxy).toEqual(proxy);
+      expect(config.browser.launchOptions.proxy).toEqual(proxy);
+    });
+
+    it('preserves a context proxy override, including an empty bypass overriding launch bypass', async () => {
+      const contextProxy = { server: 'http://context-proxy.test:3128', bypass: '' };
+      const config = await resolveConfig({ browser: {
+        launchOptions: { proxy: { ...proxy, bypass: 'private.test' } },
+        contextOptions: { clientCertificates, proxy: contextProxy },
+      } });
+      expect(config.browser.contextOptions.proxy).toEqual(contextProxy);
+    });
+
+    it.each(['launch', 'context'])('rejects an effective %s proxy bypass with certificates', async level => {
+      const options = { proxy: { ...proxy, bypass: 'private.test' } };
+      await expect(resolveConfig({ browser: {
+        launchOptions: level === 'launch' ? options : {},
+        contextOptions: { clientCertificates, ...(level === 'context' ? options : {}) },
+      } })).rejects.toThrow('clientCertificates with proxy.bypass is unsupported');
+    });
+
+    it('validates the merged CLI, environment and file proxy settings', async () => {
+      const config = await writeConfigFile({ browser: { contextOptions: { clientCertificates } } });
+      expect((await resolveCLIConfig({ config, proxyServer: proxy.server })).browser.contextOptions.proxy).toEqual({ server: proxy.server });
+      await expect(resolveCLIConfig({ config, proxyServer: proxy.server, proxyBypass: 'private.test' })).rejects.toThrow('proxy.bypass');
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', proxy.server);
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', 'private.test');
+      await expect(resolveCLIConfig({ config })).rejects.toThrow('proxy.bypass');
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', '');
+      expect((await resolveCLIConfig({ config })).browser.contextOptions.proxy).toEqual({ server: proxy.server });
+    });
+
+    it.each([undefined, []])('leaves proxy behavior unchanged without client certificates (%j)', async clientCertificates => {
+      const config = await resolveConfig({ browser: { launchOptions: { proxy: { ...proxy, bypass: 'private.test' } }, contextOptions: { clientCertificates } } });
+      expect(config.browser.contextOptions.proxy).toBeUndefined();
+      expect(config.browser.launchOptions.proxy?.bypass).toBe('private.test');
+    });
+
+    it('allows certificates without a configured proxy', async () => {
+      const config = await resolveConfig({ browser: { contextOptions: { clientCertificates } } });
+      expect(config.browser.contextOptions.proxy).toBeUndefined();
+    });
+  });
+
+  describe('proxy server credentials', () => {
+    beforeEach(() => {
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', '');
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', '');
+    });
+    afterEach(() => vi.unstubAllEnvs());
+
+    it.each([
+      ['http://user:p%40ss@proxy.test:3128', { server: 'http://proxy.test:3128', username: 'user', password: 'p@ss' }],
+      ['http://user:pa%ss@proxy.test:3128', { server: 'http://proxy.test:3128', username: 'user', password: 'pa%ss' }],
+      ['http://us%C3%A9r:p%40ss%word@proxy.test:3128', { server: 'http://proxy.test:3128', username: 'usér', password: 'p@ss%word' }],
+      ['http://user:%FF%40@proxy.test:3128', { server: 'http://proxy.test:3128', username: 'user', password: '%FF%40' }],
+      ['user:secret@proxy.test:3128', { server: 'http://proxy.test:3128', username: 'user', password: 'secret' }],
+      ['socks5://user@proxy.test:1080', { server: 'socks5://proxy.test:1080', username: 'user', password: '' }],
+      ['http://proxy.test:3128', { server: 'http://proxy.test:3128' }],
+      ['proxy.test:3128', { server: 'proxy.test:3128' }],
+    ])('moves credentials out of --proxy-server %s', async (proxyServer, expected) => {
+      expect((await resolveCLIConfig({ proxyServer, proxyBypass: 'private.test' })).browser.launchOptions.proxy).toEqual({ ...expected, bypass: 'private.test' });
+    });
+
+    it('moves credentials out of PLAYWRIGHT_MCP_PROXY_SERVER', async () => {
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', 'http://user:secret@proxy.test:3128');
+      expect((await resolveCLIConfig({})).browser.launchOptions.proxy).toEqual({ server: 'http://proxy.test:3128', username: 'user', password: 'secret' });
+    });
+  });
+
+  describe('file paths', () => {
+    beforeEach(() => vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', ''));
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('preserves the legacy default', async () => {
+      expect((await resolveConfig({})).filePaths).toBeUndefined();
+      expect((await resolveCLIConfig({})).filePaths).toBeUndefined();
+    });
+
+    it.each(['relative', 'absolute'] as const)('resolves %s from every source', async filePaths => {
+      expect((await resolveConfig({ filePaths })).filePaths).toBe(filePaths);
+      const config = await writeConfigFile({ filePaths });
+      expect((await resolveCLIConfig({ config })).filePaths).toBe(filePaths);
+      vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', filePaths);
+      expect((await resolveCLIConfig({})).filePaths).toBe(filePaths);
+      vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', '');
+      expect((await resolveCLIConfig({ filePaths })).filePaths).toBe(filePaths);
+    });
+
+    it.each(['relative', 'absolute'] as const)('applies CLI > env > config precedence for %s', async mode => {
+      const other = mode === 'relative' ? 'absolute' : 'relative';
+      const config = await writeConfigFile({ filePaths: other });
+      vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', mode);
+      expect((await resolveCLIConfig({ config })).filePaths).toBe(mode);
+      expect((await resolveCLIConfig({ config, filePaths: other })).filePaths).toBe(other);
+    });
+
+    it.each(['relative', 'absolute'] as const)('lets CLI %s override an invalid environment value', async filePaths => {
+      vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', 'invalid');
+      expect((await resolveCLIConfig({ filePaths })).filePaths).toBe(filePaths);
+    });
+
+    it.each(['invalid', '', null, 0])('rejects invalid config value %j', async filePaths => {
+      // SAFETY: deliberately pass invalid runtime input to test configuration validation.
+      const config = { filePaths } as Config;
+      await expect(resolveConfig(config)).rejects.toThrow('filePaths');
+      await expect(resolveCLIConfig({ config: await writeConfigFile(config) })).rejects.toThrow('filePaths');
+    });
+
+    it('rejects invalid environment and CLI values', async () => {
+      await expect(resolveCLIConfig({ filePaths: 'invalid' })).rejects.toThrow('filePaths');
+      vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', 'invalid');
+      await expect(resolveCLIConfig({})).rejects.toThrow('filePaths');
+    });
+  });
+
+  describe('image responses', () => {
+    beforeEach(() => vi.stubEnv('PLAYWRIGHT_MCP_IMAGE_RESPONSES', ''));
+    afterEach(() => vi.unstubAllEnvs());
+
+    it.each(['allow', 'omit', 'auto', 'only'] as const)('resolves %s from config, environment and CLI', async mode => {
+      expect((await resolveConfig({ imageResponses: mode })).imageResponses).toBe(mode);
+      const configFile = await writeConfigFile({ imageResponses: mode });
+      expect((await resolveCLIConfig({ config: configFile })).imageResponses).toBe(mode);
+      vi.stubEnv('PLAYWRIGHT_MCP_IMAGE_RESPONSES', mode);
+      expect((await resolveCLIConfig({})).imageResponses).toBe(mode);
+      vi.stubEnv('PLAYWRIGHT_MCP_IMAGE_RESPONSES', '');
+      expect((await resolveCLIConfig({ imageResponses: mode })).imageResponses).toBe(mode);
+    });
+
+    it('applies file, environment and CLI precedence including allow overrides', async () => {
+      const configFile = await writeConfigFile({ imageResponses: 'only' });
+      vi.stubEnv('PLAYWRIGHT_MCP_IMAGE_RESPONSES', 'omit');
+      expect((await resolveCLIConfig({ config: configFile })).imageResponses).toBe('omit');
+      expect((await resolveCLIConfig({ config: configFile, imageResponses: 'only' })).imageResponses).toBe('only');
+      expect((await resolveCLIConfig({ config: configFile, imageResponses: 'allow' })).imageResponses).toBe('allow');
+      vi.stubEnv('PLAYWRIGHT_MCP_IMAGE_RESPONSES', 'allow');
+      expect((await resolveCLIConfig({ config: configFile })).imageResponses).toBe('allow');
+    });
+  });
+
   describe('resolveConfig', () => {
     it('should resolve default config when empty config provided', async () => {
       const config = await resolveConfig({});
@@ -36,6 +213,8 @@ describe('Config', () => {
       expect(config.browser.browserName).toBe('chromium');
       expect(config.timeouts.navigationTimeout).toBe(60000);
       expect(config.timeouts.defaultTimeout).toBe(5000);
+      expect(config.timeouts.settle).toBe(500);
+      expect(config.timeouts.idle).toBe(0);
       expect(config.saveTrace).toBe(false);
     });
 
@@ -60,6 +239,7 @@ describe('Config', () => {
         timeouts: {
           navigationTimeout: 30000,
           defaultTimeout: 10000,
+          settle: 250,
         },
       };
 
@@ -67,6 +247,7 @@ describe('Config', () => {
 
       expect(config.timeouts.navigationTimeout).toBe(30000);
       expect(config.timeouts.defaultTimeout).toBe(10000);
+      expect(config.timeouts.settle).toBe(250);
     });
 
     it('should merge network config', async () => {
@@ -105,6 +286,224 @@ describe('Config', () => {
       expect(config.browser.browserName).toBe('webkit');
       expect(config.timeouts.navigationTimeout).toBe(60000);
       expect(config.saveTrace).toBe(false);
+    });
+
+    it('should reject an invalid browser profile directory name', async () => {
+      await expect(resolveConfig({ browser: { profileDirName: 'my-profile' } }))
+          .rejects.toThrow(/Invalid browser profile directory name/);
+    });
+  });
+
+  describe('security-sensitive string configuration', () => {
+    const savedAuthToken = process.env.PLAYWRIGHT_MCP_AUTH_TOKEN;
+    const savedUploadDirs = process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS;
+    const savedOutputDir = process.env.PLAYWRIGHT_MCP_OUTPUT_DIR;
+
+    afterEach(() => {
+      if (savedAuthToken === undefined)
+        delete process.env.PLAYWRIGHT_MCP_AUTH_TOKEN;
+      else
+        process.env.PLAYWRIGHT_MCP_AUTH_TOKEN = savedAuthToken;
+      if (savedUploadDirs === undefined)
+        delete process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS;
+      else
+        process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS = savedUploadDirs;
+      if (savedOutputDir === undefined)
+        delete process.env.PLAYWRIGHT_MCP_OUTPUT_DIR;
+      else
+        process.env.PLAYWRIGHT_MCP_OUTPUT_DIR = savedOutputDir;
+    });
+
+    it('rejects blank auth tokens from config, CLI, and environment', async () => {
+      await expect(resolveConfig({ server: { authToken: '' } })).rejects.toThrow(/authToken.*blank/i);
+      await expect(resolveConfig({ server: { authToken: '   ' } })).rejects.toThrow(/authToken.*blank/i);
+      await expect(resolveCLIConfig({ authToken: '   ' })).rejects.toThrow(/authToken.*blank/i);
+      const configFile = await writeConfigFile({ server: { authToken: '   ' } });
+      await expect(resolveCLIConfig({ config: configFile })).rejects.toThrow(/authToken.*blank/i);
+
+      process.env.PLAYWRIGHT_MCP_AUTH_TOKEN = '   ';
+      await expect(resolveCLIConfig({})).rejects.toThrow(/authToken.*blank/i);
+    });
+
+    it('keeps an explicitly empty upload directory list as deny-all', async () => {
+      expect(uploadDirectoryList('')).toEqual([]);
+      process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS = '';
+      expect((await resolveCLIConfig({})).browser.allowedUploadDirs).toEqual([]);
+
+      process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS = '/safe; ;/also-safe';
+      await expect(resolveCLIConfig({})).rejects.toThrow(/allowedUploadDirs.*blank/i);
+      await expect(resolveConfig({ browser: { allowedUploadDirs: ['/safe', ' '] } })).rejects.toThrow(/allowedUploadDirs.*blank/i);
+    });
+
+    it('rejects a whitespace-only output directory from the environment', async () => {
+      process.env.PLAYWRIGHT_MCP_OUTPUT_DIR = '   ';
+      await expect(resolveCLIConfig({})).rejects.toThrow(/outputDir.*blank/i);
+    });
+
+    it.each(['null', '{}', '"/safe"', '1', 'false', '[1]'])('rejects malformed upload directories from JSON: %s', async value => {
+      delete process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS;
+      const malformed = JSON.parse(`{"browser":{"allowedUploadDirs":${value}}}`);
+      const configFile = await writeConfigFile(malformed);
+      try {
+        await expect(resolveConfig(malformed)).rejects.toThrow(/allowedUploadDirs/);
+        await expect(resolveCLIConfig({ config: configFile })).rejects.toThrow(/allowedUploadDirs/);
+      } finally {
+        await fs.promises.rm(path.dirname(configFile), { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('sandbox defaults', () => {
+    const savedSandbox = process.env.PLAYWRIGHT_MCP_SANDBOX;
+
+    beforeEach(() => {
+      delete process.env.PLAYWRIGHT_MCP_SANDBOX;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      if (savedSandbox === undefined)
+        delete process.env.PLAYWRIGHT_MCP_SANDBOX;
+      else
+        process.env.PLAYWRIGHT_MCP_SANDBOX = savedSandbox;
+    });
+
+    it('disables only the default sandbox for bundled Chromium on Linux', async () => {
+      vi.spyOn(os, 'platform').mockReturnValue('linux');
+
+      expect((await resolveCLIConfig({ browser: 'chromium' })).browser.launchOptions.chromiumSandbox).toBe(false);
+      expect((await resolveCLIConfig({ browser: 'chrome' })).browser.launchOptions.chromiumSandbox).toBe(true);
+      expect((await resolveCLIConfig({ browser: 'chromium', executablePath: '/usr/bin/chromium' })).browser.launchOptions.chromiumSandbox).toBe(true);
+      expect((await resolveConfig({
+        browser: { browserName: 'chromium', remoteEndpoint: 'ws://remote.example', launchOptions: { channel: 'chromium' } },
+      })).browser.launchOptions.chromiumSandbox).toBeUndefined();
+      expect((await resolveConfig({
+        browser: { launchOptions: { channel: 'chromium', chromiumSandbox: true } },
+      })).browser.launchOptions.chromiumSandbox).toBe(true);
+
+      process.env.PLAYWRIGHT_MCP_SANDBOX = 'true';
+      expect((await resolveCLIConfig({ browser: 'chromium' })).browser.launchOptions.chromiumSandbox).toBe(true);
+    });
+  });
+
+  it('reads the settle timeout from the environment and lets CLI override it', async () => {
+    const previous = process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE;
+    process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE = '250';
+    try {
+      expect((await resolveCLIConfig({})).timeouts.settle).toBe(250);
+      expect((await resolveCLIConfig({ settleTimeout: 100 })).timeouts.settle).toBe(100);
+    } finally {
+      if (previous === undefined)
+        delete process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE;
+      else
+        process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE = previous;
+    }
+  });
+
+  describe('idle timeout', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('merges config, environment, and CLI values and preserves explicit zero', async () => {
+      const config = await writeConfigFile({ timeouts: { idle: 1000 } });
+      vi.stubEnv('PLAYWRIGHT_MCP_TIMEOUT_IDLE', '');
+      expect((await resolveCLIConfig({ config })).timeouts.idle).toBe(1000);
+      vi.stubEnv('PLAYWRIGHT_MCP_TIMEOUT_IDLE', '  ');
+      expect((await resolveCLIConfig({ config })).timeouts.idle).toBe(1000);
+      vi.stubEnv('PLAYWRIGHT_MCP_TIMEOUT_IDLE', '2000');
+      expect((await resolveCLIConfig({ config })).timeouts.idle).toBe(2000);
+      expect((await resolveCLIConfig({ config, timeoutIdle: 0 })).timeouts.idle).toBe(0);
+      expect((await resolveConfig({ timeouts: { idle: 2147483647 } })).timeouts.idle).toBe(2147483647);
+    });
+
+    it.each([-1, 0.5, Infinity, NaN, 2147483648])('rejects invalid numeric idle timeout %s before browser setup', async idle => {
+      await expect(resolveConfig({ timeouts: { idle } })).rejects.toThrow('timeouts.idle must be an integer');
+      await expect(resolveCLIConfig({ timeoutIdle: idle })).rejects.toThrow('timeouts.idle must be an integer');
+    });
+
+    it.each(['-1', '1.5', 'NaN', 'Infinity', '123ms', '2147483648'])('rejects invalid environment idle timeout %s', async idle => {
+      vi.stubEnv('PLAYWRIGHT_MCP_TIMEOUT_IDLE', idle);
+      await expect(resolveCLIConfig({})).rejects.toThrow('timeouts.idle must be an integer');
+    });
+  });
+
+  describe('snapshot boxes', () => {
+    const saved = process.env.PLAYWRIGHT_MCP_SNAPSHOT_BOXES;
+
+    afterEach(() => {
+      if (saved === undefined)
+        delete process.env.PLAYWRIGHT_MCP_SNAPSHOT_BOXES;
+      else
+        process.env.PLAYWRIGHT_MCP_SNAPSHOT_BOXES = saved;
+    });
+
+    it('accepts a default in the config object', async () => {
+      expect((await resolveConfig({ snapshot: { boxes: true } })).snapshot?.boxes).toBe(true);
+    });
+
+    it('applies config file, environment, and CLI precedence', async () => {
+      const configFile = await writeConfigFile({ snapshot: { boxes: true } });
+      expect((await resolveCLIConfig({ config: configFile })).snapshot?.boxes).toBe(true);
+
+      process.env.PLAYWRIGHT_MCP_SNAPSHOT_BOXES = '0';
+      expect((await resolveCLIConfig({ config: configFile })).snapshot?.boxes).toBe(false);
+      expect((await resolveCLIConfig({ config: configFile, snapshotBoxes: true })).snapshot?.boxes).toBe(true);
+    });
+  });
+
+  describe('resolveCLIConfig browser.profileDirName', () => {
+    const saved = process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME;
+
+    afterEach(() => {
+      if (saved === undefined)
+        delete process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME;
+      else
+        process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = saved;
+    });
+
+    it('resolves the profile directory name from the CLI option', async () => {
+      expect((await resolveCLIConfig({
+        extension: true,
+        userDataDir: '/tmp/x',
+        profileDirName: 'Profile 7',
+      })).browser.profileDirName).toBe('Profile 7');
+    });
+
+    it('applies config file, environment, and CLI precedence', async () => {
+      const configFile = await writeConfigFile({ browser: { profileDirName: 'Default' } });
+      expect((await resolveCLIConfig({ config: configFile })).browser.profileDirName).toBe('Default');
+
+      process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = 'Profile 1';
+      expect((await resolveCLIConfig({ config: configFile })).browser.profileDirName).toBe('Profile 1');
+      expect((await resolveCLIConfig({ config: configFile, profileDirName: 'Profile 2' })).browser.profileDirName).toBe('Profile 2');
+    });
+
+    it('treats an empty environment value as unset', async () => {
+      process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = '';
+      expect((await resolveCLIConfig({})).browser.profileDirName).toBeUndefined();
+    });
+
+    it('treats a whitespace-only environment value as unset and keeps the file fallback', async () => {
+      const configFile = await writeConfigFile({ browser: { profileDirName: 'Profile 1' } });
+      process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME = '   ';
+      expect((await resolveCLIConfig({ config: configFile })).browser.profileDirName).toBe('Profile 1');
+    });
+
+    it.each(['my-profile', 'Default/../../etc', 'Profile 1 ', ''])('rejects an invalid profile directory name from the CLI: %s', async profileDirName => {
+      await expect(resolveCLIConfig({ profileDirName })).rejects.toThrow(/Invalid browser profile directory name/);
+    });
+
+    it.each([
+      ['["Default"]', 'Invalid browser profile directory name ["Default"]'],
+      ['null', 'Invalid browser profile directory name null'],
+    ])('rejects a non-string profile directory name from a config file: %s', async (value, message) => {
+      const malformed = JSON.parse(`{"browser":{"profileDirName":${value}}}`);
+      const configFile = await writeConfigFile(malformed);
+      try {
+        await expect(resolveConfig(malformed)).rejects.toThrow(message);
+        await expect(resolveCLIConfig({ config: configFile })).rejects.toThrow(message);
+      } finally {
+        await fs.promises.rm(path.dirname(configFile), { recursive: true, force: true });
+      }
     });
   });
 
@@ -318,7 +717,7 @@ describe('Config', () => {
   describe('outputFile', () => {
     it('should generate output file path with filename', async () => {
       const config = await resolveConfig({});
-      const result = await outputFile(config, '/tmp', 'test.txt');
+      const result = await outputFile(config, 'test.txt');
 
       expect(result).toContain('test.txt');
     });
@@ -328,7 +727,7 @@ describe('Config', () => {
         outputDir: '/tmp/custom/output',
       });
 
-      const result = await outputFile(config, '/tmp', 'test.txt');
+      const result = await outputFile(config, 'test.txt');
 
       expect(result).toContain('/tmp/custom/output');
       expect(result).toContain('test.txt');
@@ -337,10 +736,130 @@ describe('Config', () => {
     it('should sanitize file paths', async () => {
       const config = await resolveConfig({});
 
-      const result = await outputFile(config, '/tmp', 'test/../../../etc/passwd');
+      const result = await outputFile(config, 'test/../../../etc/passwd');
 
       // Should sanitize to prevent directory traversal
       expect(result).not.toContain('../');
+    });
+
+    it('rejects non-portable Windows reserved names on every platform', async () => {
+      const outputDir = path.join(os.tmpdir(), `mcp-invalid-output-${Date.now()}-${Math.random()}`);
+      const config = await resolveConfig({ outputDir });
+
+      await expect(outputFile(config, 'NUL.png')).rejects.toThrow('portable, non-reserved');
+      await expect(outputFile(config, 'report.')).rejects.toThrow('portable, non-reserved');
+      await expect(outputFile(config, 'report.json ')).rejects.toThrow('portable, non-reserved');
+      await expect(outputFile(config, '   ')).rejects.toThrow('portable, non-reserved');
+      expect(fs.existsSync(outputDir)).toBe(false);
+    });
+
+    it('atomically refuses to reserve an existing explicit filename', async () => {
+      const outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-output-collision-'));
+      try {
+        const config = await resolveConfig({ outputDir });
+        const existing = path.join(outputDir, 'report.json');
+        await fs.promises.writeFile(existing, 'keep me');
+
+        await expect(outputFile(config, 'report.json', true)).rejects.toThrow('Output file already exists');
+        expect(await fs.promises.readFile(existing, 'utf-8')).toBe('keep me');
+      } finally {
+        await fs.promises.rm(outputDir, { recursive: true, force: true });
+      }
+    });
+
+    it('allows only one concurrent reservation for an explicit filename', async () => {
+      const outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-output-race-'));
+      try {
+        const config = await resolveConfig({ outputDir });
+        const results = await Promise.allSettled([
+          outputFile(config, 'report.json', true),
+          outputFile(config, 'report.json', true),
+        ]);
+
+        expect(results.map(result => result.status).sort()).toEqual(['fulfilled', 'rejected']);
+        expect(results).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            status: 'rejected',
+            reason: expect.objectContaining({ message: expect.stringContaining('Output file already exists') }),
+          }),
+        ]));
+      } finally {
+        await fs.promises.rm(outputDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps every artifact of one server in one fallback directory', async () => {
+      // The timestamped fallback used to be recomputed per call, scattering
+      // one audit's screenshots, reports, traces and session logs across a
+      // different temp directory per millisecond tick.
+      const config = await resolveConfig({});
+
+      const first = await outputFile(config, 'screenshot.png');
+      // Cross a millisecond tick so a recomputed timestamp would differ.
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const second = await outputFile(config, 'report.json');
+
+      expect(path.dirname(second)).toBe(path.dirname(first));
+    });
+
+    it('keeps one fallback directory across a config serialization boundary', async () => {
+      // The VS Code integration JSON-serializes the config into a spawned
+      // provider process (src/vscode/host.ts); the round-trip mints a new
+      // object the WeakMap memo has never seen. Materializing the resolved
+      // fallback into the serialized copy keeps the child's artifacts in the
+      // parent's directory instead of a second temp root.
+      const config = await resolveConfig({});
+      const parentFile = await outputFile(config, 'parent.txt');
+
+      const childConfig = JSON.parse(JSON.stringify({ ...config, outputDir: resolveOutputDir(config) }));
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const childFile = await outputFile(childConfig, 'child.txt');
+
+      expect(path.dirname(childFile)).toBe(path.dirname(parentFile));
+    });
+
+    it('gives two server configurations distinct fallback directories', async () => {
+      // Two servers in one process must not interleave artifacts: the
+      // fallback is memoized per resolved config, not process-wide.
+      const first = await outputFile(await resolveConfig({}), 'file.txt');
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const second = await outputFile(await resolveConfig({}), 'file.txt');
+
+      expect(path.dirname(first)).not.toBe(path.dirname(second));
+    });
+
+    it('rejects a blank outputDir at resolution instead of redirecting artifacts to a temp directory', async () => {
+      // An explicitly-empty outputDir must not be coerced into the omitted
+      // default: the user configured a destination, and "" silently falling
+      // back to the temp root would strand the artifacts they asked to keep.
+      // Rejected at startup — honoring "" would only fail on mkdir('') at
+      // the first artifact write, deep into a run.
+      await expect(resolveConfig({ outputDir: '' })).rejects.toThrow('outputDir must not be blank');
+      await expect(resolveConfig({ outputDir: '   ' })).rejects.toThrow('outputDir must not be blank');
+      await expect(resolveCLIConfig({ outputDir: '' })).rejects.toThrow('outputDir must not be blank');
+    });
+
+    it('keeps the temp-directory fallback when outputDir is omitted', async () => {
+      const config = await resolveConfig({});
+      expect(config.outputDir).toBeUndefined();
+      const result = await outputFile(config, 'artifact.txt');
+      expect(path.dirname(result)).toContain('playwright-mcp-output');
+    });
+
+    it('recreates an output directory removed after an earlier artifact', async () => {
+      const outputDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-output-recreate-'));
+      try {
+        const config = await resolveConfig({ outputDir });
+        await outputFile(config, 'first.txt');
+        await fs.promises.rm(outputDir, { recursive: true });
+        expect(fs.existsSync(outputDir)).toBe(false);
+
+        const recreated = await outputFile(config, 'second.txt');
+        expect(recreated).toBe(path.join(outputDir, 'second.txt'));
+        expect(fs.existsSync(outputDir)).toBe(true);
+      } finally {
+        await fs.promises.rm(outputDir, { recursive: true, force: true });
+      }
     });
   });
 });

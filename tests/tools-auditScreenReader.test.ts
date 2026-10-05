@@ -1,0 +1,1679 @@
+import fs from 'fs';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { chromium, type Browser } from 'playwright';
+import auditScreenReaderTools, {
+  analyzeScreenReader,
+  collectElementFacts,
+  parseAriaSnapshot,
+  type ElementFacts,
+  type Rect,
+  type ScreenReaderCheck,
+  type ScreenReaderNode,
+} from '../src/tools/auditScreenReader.js';
+import { Response } from '../src/response.js';
+import { injectAxeForNames } from '../src/tools/axe.js';
+import { measureScreenReaderElements } from '../src/tools/screenReaderMeasurement.js';
+
+function node(overrides: Partial<ScreenReaderNode>): ScreenReaderNode {
+  return {
+    role: 'generic',
+    name: null,
+    level: null,
+    ref: 'e1',
+    depth: 0,
+    parent: null,
+    tagName: 'div',
+    selector: 'div',
+    visibleText: null,
+    href: null,
+    accessibleName: null,
+    nameMeasured: false,
+    rect: null,
+    direction: 'ltr',
+    positionFixed: false,
+    floating: false,
+    ariaHidden: false,
+    childCount: 0,
+    ...overrides,
+  };
+}
+
+function rect(x: number, y: number, width = 100, height = 20): Rect {
+  return { x, y, width, height };
+}
+
+function analyze(nodes: ScreenReaderNode[], maxFindingsPerCheck = 20) {
+  return analyzeScreenReader(nodes, { checkNames: true, checkReadingOrder: true, maxFindingsPerCheck });
+}
+
+function checks(nodes: ScreenReaderNode[]): ScreenReaderCheck[] {
+  return analyze(nodes).findings.map(finding => finding.check);
+}
+
+describe('parseAriaSnapshot', () => {
+  it('parses roles, names, refs, levels and parent links', () => {
+    const nodes = parseAriaSnapshot([
+      '- generic [active] [ref=e1]:',
+      '  - link "click here" [ref=e2] [cursor=pointer]:',
+      '    - /url: /a',
+      '  - heading "Title" [level=2] [ref=e3]',
+      '  - button "Say \\"hi\\" now" [ref=e4]: Hi',
+      '  - text: loose text',
+    ].join('\n'));
+
+    expect(nodes.map(entry => entry.role)).toEqual(['generic', 'link', 'heading', 'button', 'text']);
+    expect(nodes[1]).toMatchObject({ name: 'click here', ref: 'e2', parent: 0 });
+    expect(nodes[2]).toMatchObject({ level: 2, ref: 'e3', parent: 0 });
+    expect(nodes[3].name).toBe('Say "hi" now');
+    expect(nodes[4].ref).toBeNull();
+  });
+
+  it('parses keys Playwright YAML-quotes because of the accessible name', () => {
+    // Verified against Playwright 1.61.1: yamlEscapeKeyIfNeeded single-quotes the
+    // whole key (role, name, ref) for ": ", " #", braces and backticks.
+    const nodes = parseAriaSnapshot([
+      '- generic [active] [ref=e1]:',
+      '  - \'button "Warning: Delete" [ref=e2]\'',
+      '  - \'link "Item #1" [ref=e3] [cursor=pointer]\':',
+      '    - /url: /a',
+      '  - \'button "It\'\'s {here}" [ref=e4]\': Go',
+      '  - \'menu "Files:" [ref=e5]\':',
+      '    - menuitem "Open" [ref=e6]',
+    ].join('\n'));
+
+    expect(nodes.map(entry => entry.role)).toEqual(['generic', 'button', 'link', 'button', 'menu', 'menuitem']);
+    expect(nodes[1]).toMatchObject({ name: 'Warning: Delete', ref: 'e2', parent: 0 });
+    expect(nodes[2]).toMatchObject({ name: 'Item #1', ref: 'e3', parent: 0 });
+    expect(nodes[3]).toMatchObject({ name: 'It\'s {here}', ref: 'e4', parent: 0 });
+    // A dropped container used to re-parent its children onto the grandparent.
+    expect(nodes[5]).toMatchObject({ name: 'Open', ref: 'e6', parent: 4 });
+  });
+
+  it('preserves literal slash names without consuming metadata or inline text', () => {
+    const nodes = parseAriaSnapshot([
+      '- generic [ref=e1]:',
+      '  - button / [ref=e2]: /',
+      '  - link /docs/ [ref=e3]:',
+      '    - /url: /docs/',
+      '  - heading /[ref=fake] [level=8]/ [level=2] [ref=e4]: /elsewhere/',
+      '  - button /\\d+ "quoted"/ [ref=e5]',
+      '  - \'button /Warning: it\'\'s {here}/ [ref=e6]\': /text/',
+      '  - button "/quoted/" [ref=e7]: /text/',
+      '  - button [ref=e8]: /text/',
+    ].join('\n'));
+
+    expect(nodes.slice(1).map(entry => [entry.name, entry.ref, entry.level, entry.parent])).toEqual([
+      ['/', 'e2', null, 0],
+      ['/docs/', 'e3', null, 0],
+      ['/[ref=fake] [level=8]/', 'e4', 2, 0],
+      ['/\\d+ "quoted"/', 'e5', null, 0],
+      ['/Warning: it\'s {here}/', 'e6', null, 0],
+      ['/quoted/', 'e7', null, 0],
+      [null, 'e8', null, 0],
+    ]);
+    // Names must survive even when the page refuses axe name measurement.
+    expect(analyze(nodes.map(entry => node(entry))).countByCheck['missing-accessible-name']).toBe(1);
+  });
+});
+
+describe('analyzeScreenReader accessible names', () => {
+  it('flags controls and images with no accessible name', () => {
+    expect(checks([node({ role: 'textbox', ref: 'e1' })])).toEqual(['missing-accessible-name']);
+    expect(checks([node({ role: 'img', ref: 'e1' })])).toEqual(['missing-accessible-name']);
+  });
+
+  it('ignores aria-hidden elements, which the snapshot still lists', () => {
+    expect(checks([
+      node({ role: 'img', ref: 'e1', ariaHidden: true }),
+      node({ role: 'button', ref: 'e2', ariaHidden: true, visibleText: 'Decorative' }),
+      node({ role: 'link', ref: 'e3', ariaHidden: true, name: 'Read more', href: '/a' }),
+    ])).toEqual([]);
+  });
+
+  it('inherits aria-hidden across an iframe, where closest() cannot see it', () => {
+    // Playwright inlines the child frame's tree under the iframe node, but inside
+    // that document nothing links back to <iframe aria-hidden="true">.
+    const frame = (ariaHidden: boolean) => [
+      node({ role: 'iframe', ref: 'e1', tagName: 'iframe', ariaHidden }),
+      node({ role: 'generic', ref: 'f1e1', parent: 0 }),
+      node({ role: 'button', ref: 'f1e2', parent: 1 }),
+    ];
+    expect(checks(frame(true))).toEqual([]);
+    expect(checks(frame(false))).toEqual(['missing-accessible-name']);
+  });
+
+  it('takes a name the AI snapshot dropped from the accessible name measured in the page', () => {
+    // Playwright 1.62+ distils `<a><strong>Docs</strong></a>` to `- link:` over
+    // `- strong: Docs`; the link is named, the snapshot just left it out. The
+    // page's accessibility tree still has it, whatever the role and however
+    // the name was built.
+    expect(checks([
+      node({ role: 'link', ref: 'e1', href: '/docs', depth: 0, accessibleName: 'Docs' }),
+      node({ role: 'strong', ref: 'e2', parent: 0, depth: 1 }),
+      node({ role: 'button', ref: 'e3', depth: 0, accessibleName: 'Save' }),
+      node({ role: 'listbox', ref: 'e4', depth: 0, accessibleName: 'Colors' }),
+      node({ role: 'heading', ref: 'e5', parent: 3, depth: 1, name: 'Colors', level: 3 }),
+    ])).toEqual([]);
+  });
+
+  it('judges a restored name like any other and leaves a control the page names nothing unnamed', () => {
+    const findings = analyze([
+      node({ role: 'link', ref: 'e1', href: '/a', depth: 0, accessibleName: 'Read more' }),
+      node({ role: 'strong', ref: 'e2', parent: 0, depth: 1 }),
+      node({ role: 'button', ref: 'e3', depth: 0 }),
+      node({ role: 'generic', ref: 'e4', parent: 2, depth: 1, ariaHidden: true }),
+      node({ role: 'img', ref: 'e5', depth: 0, accessibleName: 'photo.jpg' }),
+    ]).findings;
+
+    expect(findings.map(finding => [finding.check, finding.ref, finding.name])).toEqual([
+      ['uninformative-accessible-name', 'e1', 'Read more'],
+      ['missing-accessible-name', 'e3', null],
+      ['filename-as-accessible-name', 'e5', 'photo.jpg'],
+    ]);
+  });
+
+  it('never replaces a name the snapshot carries with the measured one', () => {
+    expect(checks([
+      node({ role: 'link', ref: 'e1', href: '/pricing', name: 'Pricing details', accessibleName: 'click here' }),
+    ])).toEqual([]);
+  });
+
+  it('does not flag containers, text nodes or named controls', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      node({ role: 'paragraph', ref: 'e2', visibleText: 'Some prose' }),
+      node({ role: 'button', ref: 'e3', name: 'Save', visibleText: 'Save' }),
+      node({ role: 'button', ref: null, name: null }),
+    ])).toEqual([]);
+  });
+
+  it('flags names that are useless out of context but keeps specific ones', () => {
+    expect(checks([node({ role: 'link', ref: 'e1', name: 'Read more', visibleText: 'Read more', href: '/a' })]))
+        .toEqual(['uninformative-accessible-name']);
+    expect(checks([node({ role: 'link', ref: 'e1', name: 'Read more about pricing', visibleText: 'Read more about pricing', href: '/a' })]))
+        .toEqual([]);
+    expect(checks([node({ role: 'link', ref: 'e1', name: 'Click here!', visibleText: 'Click here!', href: '/a' })]))
+        .toEqual(['uninformative-accessible-name']);
+  });
+
+  it('flags an exposed option with no name but not a named one', () => {
+    // A closed <select> exposes no refs, so this only fires for a rendered
+    // listbox, where a blank row is an unpickable choice.
+    expect(checks([node({ role: 'option', ref: 'e1' })])).toEqual(['missing-accessible-name']);
+    expect(checks([node({ role: 'option', ref: 'e1', name: 'Apples', visibleText: 'Apples' })])).toEqual([]);
+  });
+
+  it('flags file names used as alt text but not descriptions that mention a photo', () => {
+    expect(checks([node({ role: 'img', ref: 'e1', name: 'IMG_1234.jpg' })]))
+        .toEqual(['filename-as-accessible-name']);
+    expect(checks([node({ role: 'img', ref: 'e1', name: 'DSC00123' })]))
+        .toEqual(['filename-as-accessible-name']);
+    expect(checks([node({ role: 'img', ref: 'e1', name: 'Photo of the 2024 team offsite' })]))
+        .toEqual([]);
+  });
+
+  it('does not read a link or button named after a file as bad alt text', () => {
+    // Only an image is described by its name; a download link named after the
+    // file it fetches has nothing to fix.
+    expect(checks([node({ role: 'link', ref: 'e1', name: 'logo.png', visibleText: 'logo.png', href: '/logo.png' })]))
+        .toEqual([]);
+    expect(checks([node({ role: 'button', ref: 'e1', name: 'IMG_1234.jpg', visibleText: 'IMG_1234.jpg' })]))
+        .toEqual([]);
+  });
+
+  it('flags visible label and accessible name mismatches without punctuation or case noise', () => {
+    expect(checks([node({ role: 'button', ref: 'e1', name: 'Submit form', visibleText: 'Send' })]))
+        .toEqual(['label-in-name-mismatch']);
+    expect(checks([node({ role: 'button', ref: 'e1', name: 'Search products', visibleText: 'Search' })]))
+        .toEqual([]);
+    expect(checks([node({ role: 'button', ref: 'e1', name: 'save changes', visibleText: 'SAVE CHANGES!' })]))
+        .toEqual([]);
+  });
+
+  it('does not treat container text or icon-only controls as a label mismatch', () => {
+    expect(checks([
+      node({ role: 'link', ref: 'e1', name: 'Product card', visibleText: 'Nice hat 19.99 Add to cart', childCount: 3 }),
+      node({ role: 'button', ref: 'e2', name: 'Close dialog', visibleText: '×' }),
+    ])).toEqual([]);
+  });
+
+  it('flags sibling controls that share a name but lead elsewhere', () => {
+    const siblings = [
+      node({ role: 'list', ref: 'e1' }),
+      node({ role: 'link', ref: 'e2', parent: 0, name: 'Download', visibleText: 'Download', href: '/a.pdf' }),
+      node({ role: 'link', ref: 'e3', parent: 0, name: 'Download', visibleText: 'Download', href: '/b.pdf' }),
+    ];
+    expect(checks(siblings)).toEqual(['duplicate-accessible-name']);
+  });
+
+  it('does not flag repeated names with the same target or in different containers', () => {
+    expect(checks([
+      node({ role: 'list', ref: 'e1' }),
+      node({ role: 'link', ref: 'e2', parent: 0, name: 'Home', visibleText: 'Home', href: '/' }),
+      node({ role: 'link', ref: 'e3', parent: 0, name: 'Home', visibleText: 'Home', href: '/' }),
+    ])).toEqual([]);
+
+    expect(checks([
+      node({ role: 'listitem', ref: 'e1' }),
+      node({ role: 'listitem', ref: 'e2' }),
+      node({ role: 'button', ref: 'e3', parent: 0, name: 'Edit', visibleText: 'Edit' }),
+      node({ role: 'button', ref: 'e4', parent: 1, name: 'Edit', visibleText: 'Edit' }),
+    ])).toEqual([]);
+  });
+
+  it('does not claim controls differ when their destination is not observable', () => {
+    // Two "Save" submit buttons in one form, or an ARIA link with no href: the
+    // audit cannot see what either one does, so it cannot call them ambiguous.
+    expect(checks([
+      node({ role: 'form', ref: 'e1' }),
+      node({ role: 'button', ref: 'e2', parent: 0, name: 'Save', visibleText: 'Save' }),
+      node({ role: 'button', ref: 'e3', parent: 0, name: 'Save', visibleText: 'Save' }),
+    ])).toEqual([]);
+
+    expect(checks([
+      node({ role: 'list', ref: 'e1' }),
+      node({ role: 'link', ref: 'e2', parent: 0, name: 'Download', visibleText: 'Download', href: '/a.pdf' }),
+      node({ role: 'link', ref: 'e3', parent: 0, name: 'Download', visibleText: 'Download' }),
+    ])).toEqual([]);
+  });
+});
+
+describe('analyzeScreenReader reading order', () => {
+  // Every reading-order participant needs rendered text; see the icon-only test below.
+  function block(ref: string, text: string, x: number, y: number, overrides: Partial<ScreenReaderNode> = {}) {
+    return node({ role: 'paragraph', ref, parent: 0, name: null, visibleText: text, rect: rect(x, y), ...overrides });
+  }
+
+  it('flags a single row whose visual order is reversed', () => {
+    const result = analyze([
+      node({ role: 'generic', ref: 'e1', selector: 'div.toolbar', visibleText: 'First in DOM Second in DOM' }),
+      block('e2', 'First in DOM', 200, 10, { role: 'button', name: 'First in DOM' }),
+      block('e3', 'Second in DOM', 50, 10, { role: 'button', name: 'Second in DOM' }),
+    ]);
+    expect(result.findings.map(finding => finding.check)).toEqual(['reading-order-mismatch']);
+    expect(result.findings[0].problem).toContain('First in DOM');
+    expect(result.findings[0].fix).toContain('Reorder the source');
+  });
+
+  it('flags a column whose visual order is reversed by absolute positioning', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Lower but first in DOM', 10, 200),
+      block('e3', 'Upper but second in DOM', 10, 10),
+    ])).toEqual(['reading-order-mismatch']);
+  });
+
+  it('accepts a matching row, a matching column and a right-to-left row', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Back', 10, 10, { role: 'button', name: 'Back' }),
+      block('e3', 'Next', 200, 10, { role: 'button', name: 'Next' }),
+    ])).toEqual([]);
+
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Top paragraph', 10, 10),
+      block('e3', 'Bottom paragraph', 10, 200),
+    ])).toEqual([]);
+
+    expect(checks([
+      node({ role: 'generic', ref: 'e1', direction: 'rtl' }),
+      block('e2', 'الأول', 300, 10, { role: 'link', name: 'الأول', href: '/1', direction: 'rtl' }),
+      block('e3', 'الثاني', 150, 10, { role: 'link', name: 'الثاني', href: '/2', direction: 'rtl' }),
+    ])).toEqual([]);
+  });
+
+  it('flags a right-to-left row only when it contradicts right-to-left reading', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1', direction: 'rtl' }),
+      block('e2', 'الأول', 150, 10, { role: 'link', name: 'الأول', href: '/1', direction: 'rtl' }),
+      block('e3', 'الثاني', 300, 10, { role: 'link', name: 'الثاني', href: '/2', direction: 'rtl' }),
+    ])).toEqual(['reading-order-mismatch']);
+  });
+
+  it('ignores two-dimensional layouts such as CSS multi-column and grids', () => {
+    // DOM order goes down column one then column two; row-major comparison would
+    // wrongly call this a mismatch.
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Column one top', 10, 100),
+      block('e3', 'Column one bottom', 10, 140),
+      block('e4', 'Column two top', 200, 100),
+      block('e5', 'Column two bottom', 200, 140),
+    ])).toEqual([]);
+  });
+
+  it('ignores an icon-only control rendered before its label', () => {
+    // Disclosure arrows and leading icons carry no text, so their position is a
+    // rendering detail rather than a change of reading sequence.
+    expect(checks([
+      node({ role: 'listitem', ref: 'e1' }),
+      block('e2', 'Legislation', 60, 200, { role: 'link', name: 'Legislation', href: '#legislation' }),
+      node({ role: 'button', ref: 'e3', parent: 0, name: 'Toggle Legislation subsection', visibleText: '', rect: rect(37, 201, 22, 22) }),
+    ])).toEqual([]);
+  });
+
+  it('ignores floated media placed beside a later paragraph', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Figure caption', 756, 628, { role: 'figure', name: 'Figure caption', floating: true }),
+      block('e3', 'Body paragraph', 264, 347),
+    ])).toEqual([]);
+  });
+
+  it('ignores off-canvas, clipped, fixed and overlapping boxes', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Skip to content', -9999, 10, { role: 'link', name: 'Skip to content' }),
+      block('e3', 'Clipped', 10, 10, { role: 'link', name: 'Clipped', rect: rect(10, 10, 1, 1) }),
+      block('e4', 'Sticky header', 10, 500, { role: 'banner', positionFixed: true }),
+      block('e5', 'First paragraph', 10, 10),
+      block('e6', 'Overlapping paragraph', 15, 15),
+    ])).toEqual([]);
+  });
+
+  it('reads direction from the children when the parent carries none of its own', () => {
+    // An iframe element's direction is the embedding page's, and a parent that
+    // was never measured has no direction at all; both would otherwise be read
+    // as ltr and turn a correct right-to-left row into a false mismatch.
+    const rtlRow = (parent: Partial<ScreenReaderNode>) => [
+      node({ role: 'iframe', ref: 'e1', tagName: 'iframe', direction: 'ltr', ...parent }),
+      block('f1e2', 'rishon', 300, 10, { role: 'link', name: 'rishon', href: '/1', direction: 'rtl' }),
+      block('f1e3', 'sheni', 150, 10, { role: 'link', name: 'sheni', href: '/2', direction: 'rtl' }),
+    ];
+    expect(checks(rtlRow({ rect: rect(0, 0, 300, 80) }))).toEqual([]);
+    expect(checks(rtlRow({ ref: null, rect: null, tagName: null }))).toEqual([]);
+
+    // The same row in the wrong right-to-left order is still reported.
+    expect(checks([
+      node({ role: 'iframe', ref: 'e1', tagName: 'iframe', rect: rect(0, 0, 300, 80) }),
+      block('f1e2', 'rishon', 150, 10, { role: 'link', name: 'rishon', href: '/1', direction: 'rtl' }),
+      block('f1e3', 'sheni', 300, 10, { role: 'link', name: 'sheni', href: '/2', direction: 'rtl' }),
+    ])).toEqual(['reading-order-mismatch']);
+  });
+
+  it('ignores elements that were not measured', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Unmeasured', 0, 0, { rect: null }),
+      block('e3', 'Measured', 10, 10),
+    ])).toEqual([]);
+  });
+});
+
+describe('analyzeScreenReader bounds and toggles', () => {
+  it('caps findings per check while still counting and reporting the truncation', () => {
+    const nodes = Array.from({ length: 5 }, (_, index) => node({ role: 'textbox', ref: `e${index + 1}` }));
+    const result = analyze(nodes, 2);
+    expect(result.findings).toHaveLength(2);
+    expect(result.countByCheck['missing-accessible-name']).toBe(5);
+    expect(result.truncatedChecks).toEqual(['missing-accessible-name']);
+  });
+
+  it('honours the check toggles', () => {
+    const nodes = [
+      node({ role: 'textbox', ref: 'e1' }),
+      node({ role: 'generic', ref: 'e2' }),
+      node({ role: 'button', ref: 'e3', parent: 1, name: 'Back', visibleText: 'Back', rect: rect(200, 10) }),
+      node({ role: 'button', ref: 'e4', parent: 1, name: 'Next', visibleText: 'Next', rect: rect(50, 10) }),
+    ];
+    expect(analyzeScreenReader(nodes, { checkNames: false, checkReadingOrder: true, maxFindingsPerCheck: 20 })
+        .findings.map(finding => finding.check)).toEqual(['reading-order-mismatch']);
+    expect(analyzeScreenReader(nodes, { checkNames: true, checkReadingOrder: false, maxFindingsPerCheck: 20 })
+        .findings.map(finding => finding.check)).toEqual(['missing-accessible-name']);
+  });
+});
+
+const baseFacts: ElementFacts = {
+  tagName: 'div',
+  selector: 'div',
+  visibleText: null,
+  href: null,
+  accessibleName: null,
+  nameMeasured: false,
+  rect: null,
+  direction: 'ltr',
+  positionFixed: false,
+  floating: false,
+  ariaHidden: false,
+};
+
+function snapshotOf(entries: { role: string; ref: string }[]): string {
+  return ['- generic:', ...entries.map(entry => `  - ${entry.role} [ref=${entry.ref}]`)].join('\n');
+}
+
+function createToolHarness(options: {
+  snapshot: string;
+  factsFor?: (ref: string) => Partial<ElementFacts>;
+  staleRefs?: (ref: string) => boolean;
+  staleDelayMs?: number;
+  /**
+   * What the frame does with the axe installation: accept, reject, or never
+   * answer within its budget. 'hang' alone is a busy frame that answers the
+   * evaluations after it; with `frozen` the frame answers nothing at all.
+   */
+  installAxe?: 'accept' | 'reject' | 'hang';
+  installAxeDelayFor?: (frameIndex: number) => number;
+  frozen?: boolean;
+  /** Give every fake frame the child-frame timeout instead of modeling frame 0 as the main frame. */
+  childFrames?: boolean;
+  frameCount?: number;
+  frameReadDelayMs?: number;
+  frameReadDelayFor?: (frameIndex: number) => number;
+  ownerFrameDelayMs?: number;
+}) {
+  const concurrency = { current: 0, max: 0 };
+  const frameConcurrency = { current: 0, max: 0 };
+  const ownerFrames = { calls: 0, current: 0, max: 0 };
+  const disposals = { count: 0 };
+  const installs = { count: 0 };
+  const frames: any[] = Array.from({ length: options.frameCount ?? 1 }, (_, frameIndex) => ({
+    parentFrame: () => options.childFrames || frameIndex > 0 ? ({}) : null,
+    evaluate: vi.fn(async (collect: unknown, input: { elements: { ref: string }[]; measureNames: boolean }) => {
+      frameConcurrency.current++;
+      try {
+        frameConcurrency.max = Math.max(frameConcurrency.max, frameConcurrency.current);
+        if (options.frozen)
+          await new Promise(() => undefined);
+        if (typeof collect !== 'string') {
+          const delay = options.frameReadDelayFor?.(frameIndex) ?? options.frameReadDelayMs;
+          if (delay)
+            await new Promise(resolve => setTimeout(resolve, delay));
+          const measured = input.measureNames && installs.count > 0 && (options.installAxe ?? 'accept') === 'accept';
+          return input.elements.map(handle => ({ ...baseFacts, nameMeasured: measured, ...options.factsFor?.(handle.ref) }));
+        }
+        installs.count++;
+        const installDelay = options.installAxeDelayFor?.(frameIndex);
+        if (installDelay)
+          await new Promise(resolve => setTimeout(resolve, installDelay));
+        if (options.installAxe === 'reject')
+          throw new Error('Evaluation failed');
+        if (options.installAxe === 'hang')
+          await new Promise(() => undefined);
+        return undefined;
+      } finally {
+        frameConcurrency.current--;
+      }
+    }),
+  }));
+  const frame = frames[0];
+  const page: any = {
+    ariaSnapshot: vi.fn(async () => options.snapshot),
+    frames: vi.fn(() => frames),
+    mainFrame: vi.fn(() => frame),
+    url: vi.fn(() => 'https://example.com/'),
+    locator: vi.fn((selector: string) => ({
+      elementHandle: async () => {
+        const ref = selector.replace('aria-ref=', '');
+        const stale = options.staleRefs?.(ref) ?? false;
+        concurrency.current++;
+        concurrency.max = Math.max(concurrency.max, concurrency.current);
+        await new Promise(resolve => setTimeout(resolve, stale ? options.staleDelayMs ?? 0 : 0));
+        concurrency.current--;
+        const owner = frames[Number(ref.replace(/\D/g, '')) % frames.length];
+        return stale ? null : {
+          ref,
+          ownerFrame: async () => {
+            ownerFrames.calls++;
+            ownerFrames.current++;
+            frameConcurrency.current++;
+            try {
+              ownerFrames.max = Math.max(ownerFrames.max, ownerFrames.current);
+              frameConcurrency.max = Math.max(frameConcurrency.max, frameConcurrency.current);
+              if (options.ownerFrameDelayMs)
+                await new Promise(resolve => setTimeout(resolve, options.ownerFrameDelayMs));
+              return owner;
+            } finally {
+              ownerFrames.current--;
+              frameConcurrency.current--;
+            }
+          },
+          dispose: async () => { disposals.count++; },
+        };
+      },
+    })),
+  };
+  const outputFile = vi.fn(async (name: string) => `/tmp/${name}`);
+  const tab: any = {
+    modalStates: () => [],
+    page,
+    context: { outputFile },
+  };
+  const context: any = { currentTabOrDie: () => tab, config: {} };
+  return { context, concurrency, frameConcurrency, ownerFrames, disposals, installs, frame, frames, outputFile };
+}
+
+describe('screen-reader measurement contract', () => {
+  it('returns snapshot-indexed facts, limitations and reachable-budget progress', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf([
+        { role: 'img', ref: 'h0' },
+        ...Array.from({ length: 4 }, (_, index) => ({ role: 'button', ref: `b${index + 1}` })),
+      ]),
+      staleRefs: ref => ref === 'b2',
+      factsFor: ref => ref === 'h0' ? { ariaHidden: true } : {},
+    });
+    const reportProgress = vi.fn<(progress: { progress: number; total: number; message: string }) => Promise<void>>().mockResolvedValue(undefined);
+
+    const measured = await measureScreenReaderElements(
+        harness.context.currentTabOrDie().page, parseAriaSnapshot(await harness.context.currentTabOrDie().page.ariaSnapshot()),
+        { maxElements: 2, checkNames: false, reportProgress });
+
+    expect([...measured.factsByIndex.keys()]).toEqual([1, 2, 4]);
+    expect(measured).toMatchObject({
+      totalElements: 5,
+      analyzedElements: 4,
+      limitations: {
+        unresolvedElements: 1,
+        unmeasuredNames: 0,
+        truncatedElements: 1,
+        stoppedAtFrameWorkLimit: null,
+      },
+    });
+    expect(reportProgress.mock.calls.map(([progress]) => progress)).toEqual([
+      { progress: 2, total: 4, message: 'Measured 2 accessibility tree elements (1/2 screen-reader-reachable)' },
+      { progress: 3, total: 4, message: 'Measured 3 accessibility tree elements (1/2 screen-reader-reachable)' },
+      { progress: 4, total: 4, message: 'Measured 4 accessibility tree elements (2/2 screen-reader-reachable)' },
+    ]);
+    expect(harness.disposals.count).toBe(3);
+    expect(harness.installs.count).toBe(0);
+  });
+
+  it('bounds an entirely hidden snapshot independently of the reachable budget', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 12 }, (_, index) => ({ role: 'img', ref: `h${index}` }))),
+      factsFor: () => ({ ariaHidden: true }),
+    });
+
+    const measured = await measureScreenReaderElements(
+        harness.context.currentTabOrDie().page, parseAriaSnapshot(await harness.context.currentTabOrDie().page.ariaSnapshot()),
+        { maxElements: 5, checkNames: false });
+
+    expect(measured.analyzedElements).toBe(10);
+    expect(measured.factsByIndex.size).toBe(10);
+    expect(measured.limitations).toEqual({
+      unresolvedElements: 0,
+      unmeasuredNames: 0,
+      truncatedElements: 2,
+      stoppedAtFrameWorkLimit: null,
+    });
+  });
+
+  it('returns a stable partial measurement while late reads retain ownership until settlement', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        childFrames: true,
+        frameReadDelayFor: frameIndex => frameIndex < 2 ? 0 : 1_500,
+      });
+      const page = harness.context.currentTabOrDie().page;
+      const nodes = parseAriaSnapshot(await page.ariaSnapshot());
+      const pending = measureScreenReaderElements(page, nodes, { maxElements: 8, checkNames: false });
+      await vi.advanceTimersByTimeAsync(1_100);
+      const measured = await pending;
+
+      expect(measured.factsByIndex.size).toBe(2);
+      expect(measured.limitations).toEqual({
+        unresolvedElements: 6,
+        unmeasuredNames: 0,
+        truncatedElements: 0,
+        stoppedAtFrameWorkLimit: 4,
+      });
+      expect(harness.frameConcurrency.current).toBe(4);
+      expect(harness.disposals.count).toBe(4);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.frameConcurrency.current).toBe(0);
+      expect(harness.disposals.count).toBe(8);
+      expect(measured.factsByIndex.size).toBe(2);
+      expect(measured.limitations.unresolvedElements).toBe(6);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('audit_screen_reader tool measurement', () => {
+  const tool = auditScreenReaderTools.find(entry => entry.schema.name === 'audit_screen_reader')!;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
+  });
+
+  async function run(harness: ReturnType<typeof createToolHarness>, maxElements: number, checkNames = true) {
+    const response = new Response(harness.context, 'audit_screen_reader', {});
+    await tool.handle(harness.context, {
+      checkNames,
+      checkReadingOrder: true,
+      maxElements,
+      maxFindingsPerCheck: 20,
+    } as any, response);
+    return response.result();
+  }
+
+  it('reserves an explicit report before reading the accessibility tree', async () => {
+    const harness = createToolHarness({ snapshot: '- button "Save" [ref=e1]' });
+    harness.outputFile.mockRejectedValue(new Error('Output file already exists'));
+    const response = new Response(harness.context, 'audit_screen_reader', {});
+
+    await expect(tool.handle(harness.context, tool.schema.inputSchema.parse({ reportFile: 'taken.json' }), response))
+        .rejects.toThrow('Output file already exists');
+
+    expect(harness.context.currentTabOrDie().page.ariaSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('spends the element budget on elements a screen reader can reach', async () => {
+    // The AI snapshot also refs aria-hidden subtrees: slicing the raw ref list
+    // let 60 decorative icons eat the whole budget and hide the two real defects.
+    const harness = createToolHarness({
+      snapshot: snapshotOf([
+        ...Array.from({ length: 60 }, (_, index) => ({ role: 'img', ref: `h${index}` })),
+        { role: 'button', ref: 'b1' },
+        { role: 'button', ref: 'b2' },
+      ]),
+      factsFor: ref => ref.startsWith('h') ? { ariaHidden: true } : {},
+    });
+
+    const result = await run(harness, 50);
+    expect(result).toContain('Elements analyzed: 62');
+    expect(result).toContain('missing-accessible-name | 2');
+  });
+
+  it('still stops at the budget when every element is reachable', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 62 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+    });
+
+    const result = await run(harness, 50);
+    expect(result).toContain('Elements analyzed: 50');
+    expect(result).toContain('truncated: analyzed the first 50 of 62');
+    expect(result).toContain('missing-accessible-name | 50');
+  });
+
+  it('stops at the budget when it is not a multiple of the chunk size', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 120 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+    });
+
+    // A whole extra chunk used to be taken: 100 elements analyzed for maxElements 51.
+    expect(await run(harness, 51)).toContain('Elements analyzed: 51');
+    expect(await run(createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 120 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+    }), 5)).toContain('Elements analyzed: 5');
+  });
+
+  it('resolves refs in parallel batches so a stale snapshot cannot stall the audit', async () => {
+    // Every ref of a rerendered page times out; resolving them one at a time
+    // costs one full timeout per element.
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 120 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      staleRefs: () => true,
+      staleDelayMs: 5,
+    });
+
+    // Nothing resolved means nothing was evaluated: reporting "Findings: 0"
+    // here would present an unaudited page as clean.
+    await expect(run(harness, 50)).rejects.toThrow(/None of the 100 accessibility tree elements could be resolved/);
+    expect(harness.concurrency.max).toBe(50);
+  });
+
+  it('measures frame batches through the bounded concurrency pool', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      frameCount: 8,
+      frameReadDelayMs: 10,
+    });
+
+    await run(harness, 8, false);
+    expect(harness.frameConcurrency.max).toBe(4);
+  });
+
+  it.each([
+    { name: 'fact reads', checkNames: false, frameReadDelayMs: 1_500 },
+    { name: 'axe installations', checkNames: true, installAxe: 'hang' as const },
+  ])('does not replace four timed-out $name with more frame work', async ({ checkNames, ...options }) => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        childFrames: true,
+        ...options,
+      });
+
+      const audit = run(harness, 8, checkNames);
+      const outcome = audit.then(() => 'resolved', () => 'rejected');
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(harness.frameConcurrency.max).toBe(4);
+      expect(harness.frameConcurrency.current).toBe(4);
+      expect(harness.frames.reduce((sum, frame) => sum + frame.evaluate.mock.calls.length, 0)).toBe(4);
+      expect(await outcome).toBe('rejected');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps timed-out owner-frame lookups inside the shared limit', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        ownerFrameDelayMs: 10_500,
+      });
+
+      const outcome = run(harness, 8, false).then(() => 'resolved', () => 'rejected');
+      await vi.advanceTimersByTimeAsync(10_100);
+      expect(harness.ownerFrames.calls).toBe(4);
+      expect(harness.ownerFrames.current).toBe(4);
+      expect(harness.ownerFrames.max).toBe(4);
+      expect(harness.disposals.count).toBe(4);
+      expect(await outcome).toBe('rejected');
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.disposals.count).toBe(8);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shares the frame-work limit across overlapping audits of one page', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        childFrames: true,
+        frameReadDelayMs: 1_500,
+      });
+
+      const outcomes = [run(harness, 8, false), run(harness, 8, false)]
+          .map(audit => audit.then(() => 'resolved', () => 'rejected'));
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(harness.frameConcurrency.max).toBe(4);
+      expect(harness.frameConcurrency.current).toBe(4);
+      expect(harness.frames.reduce((sum, frame) => sum + frame.evaluate.mock.calls.length, 0)).toBe(4);
+      expect(await Promise.all(outcomes)).toEqual(['rejected', 'rejected']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits for healthy frame work from an overlapping audit', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      frameCount: 8,
+      frameReadDelayMs: 10,
+    });
+
+    const results = await Promise.all([run(harness, 8, false), run(harness, 8, false)]);
+    expect(results.every(result => result.includes('Elements analyzed: 8'))).toBe(true);
+    expect(harness.frameConcurrency.max).toBe(4);
+    expect(harness.frames.reduce((sum, frame) => sum + frame.evaluate.mock.calls.length, 0)).toBe(16);
+  });
+
+  it('reports where measurement stopped when timed-out work fills the pool', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 60 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        childFrames: true,
+        frameReadDelayFor: frameIndex => frameIndex < 2 ? 0 : 1_500,
+      });
+
+      const audit = run(harness, 60, false);
+      await vi.advanceTimersByTimeAsync(1_100);
+      const result = await audit;
+      expect(result).toContain('stopped after 50 of 60: timed-out frame work reached the 4-operation limit');
+      expect(result).toContain('WARNING: 36 of these went stale before measurement');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not retry a frame that timed out in an earlier chunk', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 200 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        childFrames: true,
+        frameReadDelayMs: 1_500,
+      });
+
+      const outcome = run(harness, 200, false).then(() => 'resolved', () => 'rejected');
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(harness.frame.evaluate).toHaveBeenCalledTimes(1);
+      expect(harness.frameConcurrency.current).toBe(1);
+      expect(harness.disposals.count).toBe(150);
+      expect(await outcome).toBe('rejected');
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.disposals.count).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    { name: 'fact read', checkNames: false, installAxe: undefined },
+    { name: 'axe installation', checkNames: true, installAxe: undefined },
+    { name: 'rejected axe installation', checkNames: true, installAxe: 'reject' as const },
+  ])('retries a frame after a timed-out $name settles', async ({ checkNames, installAxe }) => {
+    vi.useFakeTimers();
+    try {
+      let slowCalls = 0;
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 100 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        childFrames: true,
+        installAxe,
+        installAxeDelayFor: frameIndex => checkNames && frameIndex === 0 && slowCalls++ === 0 ? 1_500 : 0,
+        frameReadDelayFor: frameIndex => !checkNames && frameIndex === 0 && slowCalls++ === 0 ? 1_500 : frameIndex ? 900 : 0,
+      });
+
+      const audit = run(harness, 100, checkNames);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await audit).toContain('Elements analyzed: 100');
+      const frameZeroReads = harness.frames[0].evaluate.mock.calls
+          .filter(([collect]: [unknown]) => typeof collect !== 'string');
+      expect(frameZeroReads).toHaveLength(checkNames ? 1 : 2);
+      const frameZeroInstalls = harness.frames[0].evaluate.mock.calls
+          .filter(([collect]: [unknown]) => typeof collect === 'string');
+      expect(frameZeroInstalls).toHaveLength(checkNames ? 1 : 0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports saturation and cleans up when it happens in the final chunk', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 8 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        frameCount: 8,
+        childFrames: true,
+        frameReadDelayFor: frameIndex => frameIndex < 2 ? 0 : 1_500,
+      });
+
+      const audit = run(harness, 8, false);
+      await vi.advanceTimersByTimeAsync(1_100);
+      const result = await audit;
+      expect(result).toContain('stopped after 8 of 8: timed-out frame work reached the 4-operation limit');
+      expect(result).toContain('WARNING: 6 of these went stale before measurement');
+      expect(harness.disposals.count).toBe(4);
+      const report = JSON.parse(vi.mocked(fs.promises.writeFile).mock.calls[0][1] as string);
+      expect(report.elements.truncated).toBe(true);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.disposals.count).toBe(8);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('warns when part of the snapshot went stale instead of silently skipping it', async () => {
+    // A partial rerender: the resolved half is still audited, but the result
+    // must say the other half was never evaluated.
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 10 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      staleRefs: ref => Number(ref.slice(1)) >= 5,
+    });
+
+    const result = await run(harness, 50);
+    expect(result).toContain('Elements analyzed: 10');
+    expect(result).toContain('WARNING: 5 of these went stale before measurement');
+    // The five resolved nameless buttons are still reported.
+    expect(result).toContain('missing-accessible-name | 5');
+  });
+
+  it('installs axe once per frame for the name checks, and not at all without them', async () => {
+    const entries = Array.from({ length: 60 }, (_, index) => ({ role: 'button', ref: `b${index}` }));
+
+    const withNames = createToolHarness({ snapshot: snapshotOf(entries) });
+    await run(withNames, 100);
+    // Two batches of the same frame, one installation.
+    expect(withNames.installs.count).toBe(1);
+
+    const withoutNames = createToolHarness({ snapshot: snapshotOf(entries) });
+    const result = await run(withoutNames, 100, false);
+    expect(withoutNames.installs.count).toBe(0);
+    expect(result).not.toContain('accessible names could not be measured');
+    // The collector is told not to measure, so a copy an earlier audit left
+    // in the page is not used either.
+    expect(withoutNames.frame.evaluate.mock.calls.every(([, input]: any[]) => input.measureNames === false)).toBe(true);
+  });
+
+  it('counts unmeasured names from the measurement itself, not from the installation', async () => {
+    // The copy can be in the frame and still fail to build its tree.
+    const harness = createToolHarness({
+      snapshot: snapshotOf([{ role: 'button', ref: 'b1' }, { role: 'button', ref: 'b2' }, { role: 'button', ref: 'b3' }]),
+      factsFor: ref => ref === 'b2' ? { nameMeasured: false } : {},
+    });
+
+    const result = await run(harness, 50);
+    expect(harness.installs.count).toBe(1);
+    expect(result).toContain('WARNING: accessible names could not be measured for 1 of these');
+  });
+
+  it('says so when the frame rejects the axe installation instead of reporting distilled names as missing', async () => {
+    // Without a measured name a control named through its children looks
+    // unnamed, so a clean-looking count must carry the caveat.
+    const harness = createToolHarness({
+      snapshot: snapshotOf([{ role: 'button', ref: 'b1' }, { role: 'button', ref: 'b2' }]),
+      installAxe: 'reject',
+    });
+
+    const result = await run(harness, 50);
+    expect(harness.installs.count).toBe(1);
+    expect(result).toContain('WARNING: accessible names could not be measured for 2 of these');
+    expect(result).toContain('missing-accessible-name | 2');
+  });
+
+  it('does not ask a frame that refused the axe copy to measure names', async () => {
+    // Every batch of that frame is collected without names, not just the one
+    // whose installation failed: the copy is not there to read from.
+    const harness = createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 60 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      installAxe: 'reject',
+    });
+
+    const result = await run(harness, 60);
+    const collects = harness.frame.evaluate.mock.calls.filter(([collect]: [unknown]) => typeof collect !== 'string');
+    expect(collects.length).toBeGreaterThan(1);
+    expect(collects.every(([, input]: [unknown, { measureNames: boolean }]) => input.measureNames === false)).toBe(true);
+    expect(result).toContain('WARNING: accessible names could not be measured for 60 of these');
+  });
+
+  it('ends instead of hanging when a frame never answers anything', async () => {
+    // The installation timeout does not stop the work inside the frame; the
+    // audit must not queue measurement behind it. With nothing measured it
+    // ends the way an all-stale page does: an error, not a clean report.
+    const harness = createToolHarness({
+      snapshot: snapshotOf([{ role: 'button', ref: 'b1' }, { role: 'button', ref: 'b2' }]),
+      installAxe: 'hang',
+      frozen: true,
+      childFrames: true,
+    });
+
+    await expect(run(harness, 50)).rejects.toThrow('None of the 2 accessibility tree elements could be resolved');
+  });
+
+  it('is bounded on a child frame that stops answering even when names are not checked', async () => {
+    // Without an installation there is no refusal to learn from, so a child
+    // frame is read under the scan's budget on every read.
+    const harness = createToolHarness({
+      snapshot: snapshotOf([{ role: 'button', ref: 'b1' }]),
+      frozen: true,
+      childFrames: true,
+    });
+
+    await expect(run(harness, 50, false)).rejects.toThrow('None of the 1 accessibility tree elements could be resolved');
+    expect(harness.installs.count).toBe(0);
+  });
+
+  it('is bounded on a main frame that stops answering, under its larger budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf([{ role: 'button', ref: 'b1' }]),
+        frozen: true,
+      });
+
+      const audit = run(harness, 50, false);
+      const outcome = audit.then(() => 'resolved', () => 'rejected');
+      // The child budget alone is not enough for the main frame.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(harness.frame.evaluate).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(await outcome).toBe('rejected');
+      await expect(audit).rejects.toThrow('None of the 1 accessibility tree elements could be resolved');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives a hanging main-frame installation the main frame\'s budget, not a child\'s', async () => {
+    // The installation carries no timeout of its own: the frame-work pool
+    // supplies it, from the frame the call names. Named the wrong frame, a
+    // main frame that is merely slow to install would be abandoned after the
+    // child budget and its names reported unmeasured.
+    vi.useFakeTimers();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf([{ role: 'button', ref: 'b1' }]),
+        installAxe: 'hang',
+      });
+
+      const audit = run(harness, 50);
+      let settled = false;
+      const outcome = audit.then(() => 'resolved', () => 'rejected').then(value => {
+        settled = true;
+        return value;
+      });
+      // Well past the child budget, still waiting on the installation alone.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect([settled, harness.installs.count]).toEqual([false, 1]);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(await outcome).toBe('rejected');
+      await expect(audit).rejects.toThrow('None of the 1 accessibility tree elements could be resolved');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('collectElementFacts in a real page', () => {
+  let browser: Browser | undefined;
+
+  beforeEach(async () => {
+    browser ??= await chromium.launch();
+  });
+
+  // Shared scaffold for the pure visible-text measurements; tests asserting
+  // other facts (ariaHidden, href) keep their own setup.
+  async function measureVisibleText(html: string, selectors: string[]) {
+    const page = await browser!.newPage();
+    await page.setContent(html);
+    const handles = await Promise.all(selectors.map(selector => page.$(selector)));
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+    await page.close();
+    return facts.map(fact => fact.visibleText);
+  }
+
+  it('audits literal slash names from real AI snapshots without measured-name fallback', async () => {
+    const page = await browser!.newPage();
+    const names = ['/', '/docs/', '/123/', '/\\d+/', '/[ref=fake] [level=8]/', '/Warning: it\'s {here}/', '/Read more/', 'Ordinary 123', ''];
+    try {
+      await page.setContent('<main></main>');
+      await page.evaluate(labels => {
+        for (const label of labels) {
+          const button = document.createElement('button');
+          button.textContent = label;
+          document.querySelector('main')!.append(button);
+        }
+      }, names);
+      const snapshot = await page.ariaSnapshot({ mode: 'ai' });
+      const buttons = parseAriaSnapshot(snapshot).filter(entry => entry.role === 'button');
+
+      // AI mode keeps numeric names literal; regex conversion belongs to
+      // assertion generation, and /\\d+/ here is a page-supplied name.
+      expect(buttons.map(entry => entry.name)).toEqual(names.map(name => name || null));
+      expect(buttons.every(entry => /^e\d+$/.test(entry.ref ?? '') && entry.level === null)).toBe(true);
+      const findings = analyze(buttons.map(entry => node({ ...entry, parent: null }))).findings;
+      expect(findings.map(finding => [finding.check, finding.name])).toEqual([
+        ['uninformative-accessible-name', '/Read more/'],
+        ['missing-accessible-name', null],
+      ]);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('measures the accessible name the snapshot leaves out, from the tree the page builds', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <a id="docs" href="/docs"><strong>Docs</strong></a>
+      <button id="save"><span>Save</span><svg aria-hidden="true"><title></title></svg></button>
+      <a id="empty" href="/x"><svg aria-hidden="true"></svg></a>`);
+    const controls = parseAriaSnapshot(await page.ariaSnapshot({ mode: 'ai' }))
+        .filter(entry => entry.role === 'link' || entry.role === 'button');
+    const handles = await Promise.all(['#docs', '#save', '#empty'].map(selector => page.$(selector)));
+    // Until axe is in the page nothing is measured and the snapshot stands.
+    const bare = await page.evaluate(collectElementFacts, handles as any);
+    await injectAxeForNames(page.mainFrame());
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+    await page.close();
+
+    // The link's name is distilled into its strong child; the button keeps its
+    // own, its text being rendered inline on the button's line.
+    expect(controls.map(entry => entry.name)).toEqual([null, 'Save', null]);
+    expect(bare.map(fact => [fact.accessibleName, fact.nameMeasured])).toEqual([[null, false], [null, false], [null, false]]);
+    expect(facts.map(fact => [fact.accessibleName, fact.nameMeasured])).toEqual([['Docs', true], ['Save', true], [null, true]]);
+
+    // Only the icon-only link is unnamed; the two with distilled names are not.
+    const result = analyze(controls.map((entry, index) => ({ ...entry, ...facts[index], childCount: 0 })));
+    expect(result.findings.map(finding => [finding.check, finding.role])).toEqual([['missing-accessible-name', 'link']]);
+    expect(result.countByCheck['missing-accessible-name']).toBe(1);
+  });
+
+  it('leaves the page\'s own window.axe alone and keeps its copy to itself', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`<a id="docs" href="/docs"><strong>Docs</strong></a>`);
+    const handle = await page.$('#docs');
+
+    // A page with no axe of its own does not gain one.
+    expect(await injectAxeForNames(page.mainFrame())).toBe(true);
+    expect(await page.evaluate(() => 'axe' in window)).toBe(false);
+    // The literal is the one collectElementFacts reads; a measured name below proves they agree.
+    expect(await page.evaluate(() => typeof (window as any).__mcpAccessibilityScannerAxe)).toBe('object');
+
+    // A page that carries its own keeps it, and names are still measured.
+    await page.evaluate(() => { (window as any).axe = { theirs: true }; });
+    expect(await injectAxeForNames(page.mainFrame())).toBe(true);
+    expect(await page.evaluate(() => (window as any).axe)).toEqual({ theirs: true });
+    const [facts] = await page.evaluate(collectElementFacts, [handle] as any);
+    expect(facts.accessibleName).toBe('Docs');
+
+    // Told not to measure, the collector leaves the copy alone even though it is there.
+    const [unmeasured] = await page.evaluate(collectElementFacts, { elements: [handle], measureNames: false } as any);
+    expect([unmeasured.accessibleName, unmeasured.nameMeasured]).toEqual([null, false]);
+    await page.close();
+  });
+
+  it('releases the Axe tree so the next batch measures updated names', async () => {
+    const page = await browser!.newPage();
+    try {
+      await page.setContent('<button id="control">First name</button>');
+      expect(await injectAxeForNames(page.mainFrame())).toBe(true);
+      const control = await page.$('#control');
+      if (!control)
+        throw new Error('Expected the fixture button');
+
+      const [first] = await page.evaluate(collectElementFacts, [control]);
+      await control.evaluate(element => { element.textContent = 'Updated name'; });
+      const [second] = await page.evaluate(collectElementFacts, [control]);
+
+      expect([first.accessibleName, first.nameMeasured]).toEqual(['First name', true]);
+      expect([second.accessibleName, second.nameMeasured]).toEqual(['Updated name', true]);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('does not take a page\'s own axe for its copy when the build cannot replace it', async () => {
+    // The build assigns window.axe in sloppy mode; on a page whose axe is not
+    // writable that assignment does nothing, and the page's object must not
+    // be trusted for names.
+    const page = await browser!.newPage();
+    await page.setContent(`<a id="docs" href="/docs"><strong>Docs</strong></a>`);
+    await page.evaluate(() => {
+      Object.defineProperty(window, 'axe', { value: { theirs: true }, writable: false, configurable: true });
+    });
+    const handle = await page.$('#docs');
+
+    expect(await injectAxeForNames(page.mainFrame())).toBe(false);
+    expect(await page.evaluate(() => [(window as any).axe, typeof (window as any).__mcpAccessibilityScannerAxe])).toEqual([{ theirs: true }, 'undefined']);
+    const [facts] = await page.evaluate(collectElementFacts, [handle] as any);
+    expect([facts.accessibleName, facts.nameMeasured]).toEqual([null, false]);
+    await page.close();
+  });
+
+  it('names a button labelled by its own heading after that heading alone, with the children it really has', async () => {
+    // `<div role="button" aria-labelledby="l"><h2 id="l">Read more</h2><span>Pricing</span></div>`
+    // is named "Read more"; the snapshot drops the name because the heading is
+    // rendered beneath the button. Rebuilt from every descendant it would read
+    // "Read more Pricing" and pass the uninformative-name check. The button
+    // has two children, so the label-in-name check, which reads leaf controls
+    // only, does not apply to it.
+    const page = await browser!.newPage();
+    await page.setContent(`<div id="b" role="button" tabindex="0" aria-labelledby="l"><h2 id="l">Read more</h2><span>Pricing</span></div>`);
+    const snapshot = parseAriaSnapshot(await page.ariaSnapshot({ mode: 'ai' }));
+    const button = snapshot.findIndex(entry => entry.role === 'button');
+    const handle = await page.$('#b');
+    await injectAxeForNames(page.mainFrame());
+    const [facts] = await page.evaluate(collectElementFacts, [handle] as any);
+    await page.close();
+
+    expect(snapshot[button].name).toBeNull();
+    const childCount = snapshot.filter(entry => entry.parent === button).length;
+    expect(childCount).toBe(2);
+
+    const nodes = snapshot.map((entry, index) => index === button
+      ? { ...entry, ...facts, childCount }
+      : { ...entry, ...baseFacts, ref: null, childCount: 0 });
+    expect(analyze(nodes).findings.map(finding => [finding.check, finding.name])).toEqual([
+      ['uninformative-accessible-name', 'Read more'],
+    ]);
+  });
+
+  it('takes the visible label of button-like inputs from value', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <input type="submit" id="send" value="Send" aria-label="Submit form">
+      <input type="reset" id="clear" value="Clear">
+      <input type="submit" id="bare">
+      <input type="text" id="text" value="typed text" aria-label="Query">
+      <button id="save">Save</button>
+      <button id="icon"><svg width="12" height="12"></svg></button>`);
+    const handles = await Promise.all(['#send', '#clear', '#bare', '#text', '#save', '#icon']
+        .map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // #bare has no value: the UA renders "Submit" but exposes no label to copy,
+    // and #text holds user input rather than a label.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', 'Clear', null, null, 'Save', null]);
+    await page.close();
+  });
+
+  it('reads the visible label a web component renders in its shadow root', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <my-btn id="host" role="button" aria-label="Cancel"></my-btn>
+      <my-empty id="empty" role="button" aria-label="Menu"></my-empty>
+      <script>
+        customElements.define('my-btn', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<span>Send</span>'; }
+        });
+        customElements.define('my-empty', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<svg width="12" height="12"></svg>'; }
+        });
+      </script>`);
+    const handles = await Promise.all(['#host', '#empty'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // The icon-only host still has no visible label to mismatch against.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
+    await page.close();
+  });
+
+  it('treats aria-hidden values case-insensitively, as ARIA enumerated tokens are', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div aria-hidden="TRUE"><button id="upper">Hidden upper</button></div>
+      <div aria-hidden="true"><button id="lower">Hidden lower</button></div>
+      <div aria-hidden="false"><button id="shown">Shown</button></div>`);
+    const handles = await Promise.all(['#upper', '#lower', '#shown'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // aria-hidden="TRUE" removes the subtree from the accessibility tree exactly
+    // like "true"; a case-sensitive selector reported its content as reachable.
+    expect(facts.map(fact => fact.ariaHidden)).toEqual([true, true, false]);
+    await page.close();
+  });
+
+  it('collects no visible text from an element that is itself hidden from sight', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <button id="ghost" style="opacity:0" aria-label="Submit">Send</button>
+      <button id="gone" style="visibility:hidden" aria-label="Submit">Send</button>
+      <button id="folded" style="visibility:collapse" aria-label="Submit">Send</button>
+      <button id="shown" aria-label="Submit">Send</button>`);
+    const handles = await Promise.all(['#ghost', '#gone', '#folded', '#shown'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // A fully invisible control shows no label at all, so its child text must
+    // not feed a label-in-name mismatch; only #shown really displays "Send".
+    // visibility:collapse renders like hidden outside table rows/columns.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, null, null, 'Send']);
+    await page.close();
+  });
+
+  it('counts only slot-assigned light children of a shadow host as visible', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <my-slotted id="slotted" role="button" aria-label="Cancel"><span>Slotted</span></my-slotted>
+      <my-noslot id="noslot" role="button" aria-label="Cancel"><span>Ghost</span></my-noslot>
+      <my-fallback id="fallback" role="button" aria-label="Cancel"></my-fallback>
+      <script>
+        customElements.define('my-slotted', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<slot></slot>'; }
+        });
+        customElements.define('my-noslot', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<span>Shadow label</span>'; }
+        });
+        customElements.define('my-fallback', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<slot>Fallback</slot>'; }
+        });
+      </script>`);
+    const handles = await Promise.all(['#slotted', '#noslot', '#fallback'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // A shadow tree replaces the host's light children: only slot-assigned
+    // nodes render. "Ghost" has no slot to land in, so it shows nowhere; an
+    // empty slot renders its own fallback content.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Slotted', 'Shadow label', 'Fallback']);
+    await page.close();
+  });
+
+  it('keeps text from a descendant that restores visibility under a hidden ancestor', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <button id="restored" style="visibility:hidden" aria-label="Submit"><span style="visibility:visible">Send</span></button>
+      <button id="inherited" style="visibility:hidden" aria-label="Submit"><span>Send</span></button>`);
+    const handles = await Promise.all(['#restored', '#inherited'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // visibility, unlike display/opacity/clip, is restorable below a hidden
+    // ancestor: the first span renders, so "Send" really is the visible label;
+    // the second inherits hidden and shows nothing.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
+    await page.close();
+  });
+
+  it('measures the accessible name of aria-labelledby targets, not their text content', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div id="labelled" role="button" aria-labelledby="l1 l2"><span>Pricing</span><h2 id="l1">Read</h2></div>
+      <span id="l2">more <span style="display:none">(hidden)</span><img alt="soon" src="x"></span>
+      <div id="attr" role="button" aria-labelledby="l3 l4"><span id="l3" aria-label="Filter">ignored</span><input id="l4" value="typed"></div>
+      <div id="dangling" role="button" aria-labelledby="nowhere"><span>Save</span></div>
+      <my-host id="host"></my-host>
+      <script>
+        customElements.define('my-host', class extends HTMLElement {
+          connectedCallback() {
+            this.attachShadow({ mode: 'open' }).innerHTML =
+              '<div id="inner" role="button" aria-labelledby="shadow-label"><span id="shadow-label">Shadow name</span></div>';
+          }
+        });
+      </script>`);
+    const hostHandle = await page.$('#host');
+    const inner = await hostHandle!.evaluateHandle(host => host.shadowRoot!.getElementById('inner'));
+    const handles = [...await Promise.all(['#labelled', '#attr', '#dangling'].map(selector => page.$(selector))), inner];
+    await injectAxeForNames(page.mainFrame());
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+    await page.close();
+
+    // Reference order rather than document order, hidden text skipped, alt
+    // text, aria-label and an input's value counted, a reference to nothing
+    // falling back to the contents, and an IDREF inside a shadow tree resolved
+    // against that tree: what a screen reader hears, not what textContent holds.
+    expect(facts.map(fact => fact.accessibleName)).toEqual(['Read more soon', 'Filter typed', 'Save', 'Shadow name']);
+  });
+
+  it('walks content of boxless and collapsed-but-overflowing elements', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div id="contents" style="display:contents">Send</div>
+      <div id="contents-clip" style="display:contents; clip-path: inset(0)">Send</div>
+      <div id="overflowing" style="width:1px;height:1px;overflow:visible">Send</div>
+      <div id="clipped" style="width:1px;height:1px;overflow:hidden">Send</div>`);
+    const handles = await Promise.all(['#contents', '#contents-clip', '#overflowing', '#clipped'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // display:contents has a 0x0 rect but renders its content in the parent's
+    // box — with no box there is nothing for a clip-path to clip either, even
+    // one whose inset would swallow the 0x0 rect — and a collapsed box with
+    // visible overflow paints its text outside itself; only the clipping
+    // collapsed box (the sr-only shape) hides it.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', 'Send', 'Send', null]);
+    await page.close();
+  });
+
+  it('honours legacy clip only where it applies, on positioned elements', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div id="static-clip" style="clip: rect(0 0 0 0)">Send</div>
+      <div id="positioned-clip" style="position: absolute; clip: rect(0 0 0 0)">Send</div>`);
+    const handles = await Promise.all(['#static-clip', '#positioned-clip'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // clip is inert on statically positioned boxes — that text really renders —
+    // while the classic sr-only shape (absolute + clip) hides everything.
+    expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
+    await page.close();
+  });
+
+  it('collects no text from a control hidden by an ancestor its own style cannot see', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div style="opacity:0"><button id="in-opacity" aria-label="Submit">Send</button></div>
+      <div style="position:absolute;width:1px;height:1px;overflow:hidden"><button id="in-sronly" aria-label="Submit">Send</button></div>
+      <div><button id="in-visible" aria-label="Submit">Send</button></div>`);
+    const handles = await Promise.all(['#in-opacity', '#in-sronly', '#in-visible'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // opacity is not inherited and a clipping wrapper leaves the child's rect
+    // untouched, so neither shows up in the control's own computed style — the
+    // ancestors must be walked, or invisible labels feed label-in-name checks.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, null, 'Send']);
+    await page.close();
+  });
+
+  it('hides a clip-path inset only when it leaves no painted area', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <div id="sr-only" style="clip-path: inset(50%); width:100px; height:100px">Send</div>
+      <div id="half" style="clip-path: inset(50% 0 0 0); width:100px; height:100px">Send</div>
+      <div id="swallowed" style="clip-path: inset(0 0 100% 0); width:100px; height:100px">Send</div>`);
+    const handles = await Promise.all(['#sr-only', '#half', '#swallowed'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // inset(50% 0 0 0) computes to "inset(50% 0px 0px)" — the same prefix as
+    // the sr-only inset(50%) — yet paints the whole bottom half; only insets
+    // whose remaining region has no area hide the text, whichever edge
+    // combination collapses it.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, 'Send', null]);
+    await page.close();
+  });
+
+  it('walks a slotted element through its slot, catching hidden shadow wrappers', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <ghost-card id="in-hidden-wrapper" role="button" aria-label="Submit"><span>Send</span></ghost-card>
+      <plain-card id="in-visible-wrapper" role="button" aria-label="Submit"><span>Send</span></plain-card>
+      <script>
+        customElements.define('ghost-card', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<div style="opacity:0"><slot></slot></div>'; }
+        });
+        customElements.define('plain-card', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<div><slot></slot></div>'; }
+        });
+      </script>`);
+    const handles = await Promise.all(
+        ['#in-hidden-wrapper span', '#in-visible-wrapper span'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // A slotted element renders where its slot sits: its flat-tree ancestors
+    // are the slot and the shadow-tree wrapper around it, not the host's light
+    // parent chain. parentElement skips straight to the host, so a walk using
+    // it misses the opacity:0 wrapper and reports text nobody can see.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, 'Send']);
+    await page.close();
+  });
+
+  it('treats zero-scale transforms as hidden, but not other transforms', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <button id="scale0" style="transform: scale(0)" aria-label="Submit">Send</button>
+      <button id="scalex0" style="transform: scaleX(0)" aria-label="Submit">Send</button>
+      <button id="rotated" style="transform: rotate(45deg)" aria-label="Submit">Send</button>
+      <div style="transform: scale(0)"><button id="in-scale0" aria-label="Submit">Send</button></div>`);
+    const handles = await Promise.all(['#scale0', '#scalex0', '#rotated', '#in-scale0'].map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // A singular transform collapses the painted area — overflow included, so
+    // the collapsed-box exception for visible overflow must not apply. A
+    // rotation keeps the full area painted and its label really shows. The
+    // wrapper case needs the ancestor walk: the child's own rect collapses but
+    // its computed transform is none.
+    expect(facts.map(fact => fact.visibleText)).toEqual([null, null, 'Send', null]);
+    await page.close();
+  });
+
+  it('measures inset clips against the untransformed reference box', async () => {
+    const visibleText = await measureVisibleText(`
+      <div id="strip" style="width:100px;height:40px;clip-path:inset(0 30px)">Send</div>
+      <div id="rotated-strip" style="width:100px;height:40px;clip-path:inset(0 30px);transform:rotate(90deg)">Send</div>
+      <div id="swallowing" style="width:100px;height:40px;clip-path:inset(0 50px);transform:rotate(90deg)">Send</div>`,
+    ['#strip', '#rotated-strip', '#swallowing']);
+
+    // clip-path insets resolve against the untransformed border box: the
+    // rotated strip still paints 40px of the element even though its
+    // transformed bounding rect is only 40px wide — comparing the 30px insets
+    // against that rect wrongly swallowed it. A genuinely swallowing inset
+    // (50px each side of a 100px box) hides rotated or not.
+    expect(visibleText).toEqual(['Send', 'Send', null]);
+  });
+
+  it('collects labels that escape a collapsed clip box during text descent', async () => {
+    const visibleText = await measureVisibleText(`
+      <button id="btn-escape" style="position:relative" aria-label="Submit"><span style="display:block;width:1px;height:1px;overflow:hidden"><span style="position:absolute;top:0;left:0">Send</span></span></button>
+      <button id="btn-sronly" aria-label="Submit"><span style="display:block;position:absolute;width:1px;height:1px;overflow:hidden">Send</span></button>
+      <button id="btn-bound" style="position:relative" aria-label="Submit"><span style="display:block;width:1px;height:1px;overflow:hidden"><span style="position:relative;display:block"><span style="position:absolute;top:0;left:0">Send</span></span></span></button>`,
+    ['#btn-escape', '#btn-sronly', '#btn-bound']);
+
+    // The descent mirrors the ancestor walk's containing-block model: the
+    // first label rides an absolutely positioned span whose containing block
+    // (the relative button) sits outside the collapsed clip box, so it paints
+    // and belongs in the button's visible text. The sr-only shape (the clip
+    // box is positioned, so it is its own containing block) and the bound
+    // case (a relative wrapper inside the clip box anchors the escapee)
+    // genuinely paint nothing.
+    expect(visibleText).toEqual(['Send', null, null]);
+  });
+
+  it('measures inset clips against the geometry box the clip-path names', async () => {
+    const visibleText = await measureVisibleText(`
+      <div id="content-swallowed" style="width:100px;padding:50px;clip-path:inset(0 60px) content-box">Send</div>
+      <div id="content-partial" style="width:100px;padding:50px;clip-path:inset(0 30px) content-box">Send</div>
+      <div id="margin-partial" style="width:100px;height:40px;margin:50px;clip-path:inset(0 60px) margin-box">Send</div>
+      <div id="padding-partial" style="width:100px;padding:50px;border:10px solid;clip-path:inset(0 90px) padding-box">Send</div>`,
+    ['#content-swallowed', '#content-partial', '#margin-partial', '#padding-partial']);
+
+    // A geometry-box suffix changes what the insets resolve against:
+    // inset(0 60px) content-box on a 100px content box (200px border box)
+    // paints nothing — measured against the border box it would look like an
+    // 80px strip — while the same insets against the 200px margin box, and
+    // 90px insets against the 200px padding box, leave painted slivers.
+    expect(visibleText).toEqual([null, 'Send', 'Send', 'Send']);
+  });
+
+  it('keeps perspective projections visible while flat edge-on planes hide', async () => {
+    const visibleText = await measureVisibleText(`
+      <button id="persp" style="transform: perspective(500px) translateX(100px) rotateY(90deg)" aria-label="Submit">Send</button>
+      <button id="edgeon" style="transform: rotateY(90deg)" aria-label="Submit">Send</button>`,
+    ['#persp', '#edgeon']);
+
+    // Under perspective an edge-on-but-offset plane still projects to a
+    // quadrilateral with positive area — its matrix3d() x/y part is singular
+    // all the same, so the determinant test alone would wrongly hide it.
+    // Without perspective the projection is orthographic and the edge-on
+    // plane really paints nothing.
+    expect(visibleText).toEqual(['Send', null]);
+  });
+
+  it('keeps edge-on transforms visible when an ancestor supplies perspective', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="perspective:500px;perspective-origin:0 0">
+        <button id="projected" style="margin-left:100px;transform:rotateY(90deg)" aria-label="Submit">Send</button>
+      </div>`,
+    ['#projected']);
+
+    expect(visibleText).toEqual(['Send']);
+  });
+
+  it('keeps near-singular transforms visible when a descendant can counter them', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="transform: scale(0.0001)"><button id="counter" style="transform: scale(10000)" aria-label="Submit">Send</button></div>
+      <div style="transform: scale(0)"><button id="zero" style="transform: scale(10000)" aria-label="Submit">Send</button></div>`,
+    ['#counter', '#zero']);
+
+    // A determinant of 1e-8 is small but not singular: the counter-scaled
+    // button composes back to identity and paints at full size, so the label
+    // really shows. Only the exact-zero parent — singular under every
+    // descendant transform — hides its subtree.
+    expect(visibleText).toEqual(['Send', null]);
+  });
+
+  it('keeps counter-rotated descendants visible in preserved 3-D', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="transform-style:preserve-3d;transform:rotateY(90deg)">
+        <button id="counter-rotated" style="transform:rotateY(-90deg)" aria-label="Submit">Send</button>
+      </div>`,
+    ['#counter-rotated']);
+
+    expect(visibleText).toEqual(['Send']);
+  });
+
+  it('lets an out-of-flow control escape a collapsed clip box that is not its containing block', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="position:relative">
+        <div style="width:1px;height:1px;overflow:hidden">
+          <button id="escaped" style="position:absolute;top:0;left:0" aria-label="Submit">Send</button>
+        </div>
+      </div>
+      <div style="position:absolute;width:1px;height:1px;overflow:hidden">
+        <button id="contained" style="position:absolute;top:0;left:0" aria-label="Submit">Send</button>
+      </div>
+      <div style="width:1px;height:1px;overflow:hidden">
+        <button id="inflow" aria-label="Submit">Send</button>
+      </div>`,
+    ['#escaped', '#contained', '#inflow']);
+
+    // Overflow clips bind only descendants whose containing block sits at or
+    // below the clipping box: #escaped is positioned by the wrapper OUTSIDE
+    // the 1px box and renders in full, while #contained's containing block IS
+    // the clipping box (sr-only behavior stands) and in-flow #inflow is
+    // clipped by any collapsed ancestor.
+    expect(visibleText).toEqual(['Send', null, null]);
+  });
+
+  it('does not bind fixed controls to merely positioned clip ancestors', async () => {
+    const visibleText = await measureVisibleText(`
+      <div style="position:relative;width:1px;height:1px;overflow:hidden">
+        <button id="fixed" style="position:fixed;top:20px;left:20px" aria-label="Submit">Send</button>
+      </div>
+      <div style="transform:translateZ(0);width:1px;height:1px;overflow:hidden">
+        <button id="bound-fixed" style="position:fixed;top:20px;left:20px" aria-label="Submit">Send</button>
+      </div>`,
+    ['#fixed', '#bound-fixed']);
+
+    expect(visibleText).toEqual(['Send', null]);
+  });
+
+  it('treats aria-hidden on a shadow host as hiding the host\'s shadow content', async () => {
+    const page = await browser!.newPage();
+    await page.setContent(`
+      <hidden-card id="hidden-host" aria-hidden="true"></hidden-card>
+      <plain-host id="shown-host"></plain-host>
+      <script>
+        customElements.define('hidden-card', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<button id="in-hidden">Send</button>'; }
+        });
+        customElements.define('plain-host', class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: 'open' }).innerHTML = '<button id="in-shown">Send</button>'; }
+        });
+      </script>`);
+    const handles = await Promise.all([
+      page.$('#hidden-host button'),
+      page.$('#shown-host button'),
+    ]);
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    // closest() stops at the shadow boundary, so an aria-hidden host used to
+    // leave its shadow content marked reachable; the composed-tree walk sees
+    // through the boundary like the visibility checks do.
+    expect(facts.map(fact => fact.ariaHidden)).toEqual([true, false]);
+    await page.close();
+  });
+
+  it('resolves link destinations so relative and absolute forms compare equal', async () => {
+    const page = await browser!.newPage();
+    await page.route('https://example.com/**', route => route.fulfill({
+      contentType: 'text/html',
+      body: `
+        <a id="relative" href="/help">Help</a>
+        <a id="absolute" href="https://example.com/help">Help</a>
+        <a id="other" href="/support">Help</a>
+        <a id="nohref">Help</a>`,
+    }));
+    await page.goto('https://example.com/docs/');
+    const handles = await Promise.all(['#relative', '#absolute', '#other', '#nohref']
+        .map(selector => page.$(selector)));
+
+    const facts = await page.evaluate(collectElementFacts, handles as any);
+
+    expect(facts[0].href).toBe(facts[1].href);
+    expect(facts[2].href).not.toBe(facts[0].href);
+    // No href at all stays unobservable, so duplicate names are never claimed.
+    expect(facts[3].href).toBeNull();
+    await page.close();
+  });
+
+  afterAll(async () => {
+    await browser?.close();
+  });
+});

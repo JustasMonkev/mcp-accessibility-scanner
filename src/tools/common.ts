@@ -16,6 +16,9 @@
 
 import { z } from 'zod';
 import { defineTabTool, defineTool } from './tool.js';
+import * as javascript from '../utils/codegen.js';
+
+import type * as playwright from 'playwright';
 
 const close = defineTool({
   capability: 'core',
@@ -56,7 +59,46 @@ const resize = defineTabTool({
   },
 });
 
+const emulateMedia = defineTabTool({
+  capability: 'core',
+  schema: {
+    name: 'browser_emulate_media',
+    title: 'Emulate media features',
+    description: 'Emulate CSS media features for the page. Omitted parameters keep their current state.',
+    inputSchema: z.object({
+      colorScheme: z.enum(['light', 'dark']).optional().describe('Emulates prefers-color-scheme'),
+      reducedMotion: z.enum(['reduce', 'no-preference']).optional().describe('Emulates prefers-reduced-motion'),
+      forcedColors: z.enum(['active', 'none']).optional().describe('Emulates forced-colors'),
+      contrast: z.enum(['more', 'no-preference']).optional().describe('Emulates prefers-contrast'),
+      media: z.enum(['screen', 'print']).optional().describe('Changes the CSS media type'),
+    }),
+    type: 'stateChanging',
+    idempotent: true,
+  },
+
+  handle: async (tab, params, response) => {
+    const requested = {
+      colorScheme: params.colorScheme,
+      contrast: params.contrast,
+      forcedColors: params.forcedColors,
+      media: params.media,
+      reducedMotion: params.reducedMotion,
+    };
+    // SAFETY: filtering removes only undefined values and preserves every key and value type from requested.
+    const options = Object.fromEntries(Object.entries(requested).filter(([, value]) => value !== undefined)) as NonNullable<Parameters<playwright.Page['emulateMedia']>[0]>;
+    if (!Object.keys(options).length) {
+      response.addError('Specify at least one media feature to emulate.');
+      return;
+    }
+    response.addCode(`await page.emulateMedia(${javascript.formatObject(options)});`);
+    await tab.waitForCompletion(async () => {
+      await tab.page.emulateMedia(options);
+    });
+  },
+});
+
 export default [
   close,
-  resize
+  resize,
+  emulateMedia,
 ];

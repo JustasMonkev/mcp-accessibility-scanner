@@ -22,10 +22,23 @@ export type ToolSchema<Input extends z.Schema> = {
   title: string;
   description: string;
   inputSchema: Input;
-  type: 'readOnly' | 'destructive';
+  // State-changing tools default to non-idempotent; convergent setters can
+  // explicitly opt into safe retries.
+  type: 'readOnly' | 'stateChanging' | 'destructive';
+  idempotent?: boolean;
 };
 
-export function toMcpTool(tool: ToolSchema<any>): mcpServer.Tool {
+export function toMcpTool(tool: ToolSchema<z.Schema>): mcpServer.Tool {
+  const annotations: NonNullable<mcpServer.Tool['annotations']> = {
+    title: tool.title,
+    readOnlyHint: tool.type === 'readOnly',
+    destructiveHint: tool.type === 'destructive',
+    openWorldHint: true,
+  };
+  if (tool.idempotent !== undefined)
+    annotations.idempotentHint = tool.idempotent;
+  else if (tool.type === 'stateChanging')
+    annotations.idempotentHint = false;
   return {
     name: tool.name,
     // Top-level title takes precedence over annotations.title on spec
@@ -33,15 +46,11 @@ export function toMcpTool(tool: ToolSchema<any>): mcpServer.Tool {
     title: tool.title,
     description: tool.description,
     inputSchema: z.toJSONSchema(tool.inputSchema) as mcpServer.Tool['inputSchema'],
-    annotations: {
-      title: tool.title,
-      readOnlyHint: tool.type === 'readOnly',
-      destructiveHint: tool.type === 'destructive',
-      openWorldHint: true,
-    },
+    annotations,
   };
 }
 
+/** @public */
 export function defineToolSchema<Input extends z.Schema>(tool: ToolSchema<Input>): ToolSchema<Input> {
   return tool;
 }

@@ -3,9 +3,6 @@
   "categories": {
     "correctness": "off"
   },
-  "options": {
-    "typeAware": true
-  },
   "env": {
     "builtin": true
   },
@@ -231,13 +228,27 @@
         "src/tools/auditSite.ts",
         "src/tools/scanPageMatrix.ts",
         "src/tools/auditKeyboard.ts",
+        "src/tools/auditScreenReader.ts",
+        "src/tools/report.ts",
+        "tests/tools-auditScreenReader.test.ts",
         "tests/tools-auditSite.test.ts",
+        "tests/tools-axe.test.ts",
         "tests/tools-scanPageMatrix.test.ts",
         "tests/tools-auditKeyboard.test.ts",
-        "tests/tools-auditSite.integration.test.ts"
+        "tests/tools-auditSite.integration.test.ts",
+        "bench/**"
       ],
       "rules": {
         "notice/notice": "off"
+      }
+    },
+    {
+      "files": [
+        ".codex/run-mcp-direct-harness.mjs",
+        ".codex/run-mcp-tool-loop.mjs"
+      ],
+      "rules": {
+        "no-console": "off"
       }
     }
   ]

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/index.ts!",
+    "src/program.ts!",
+    "src/vscode/main.ts!",
+    "bench/*.mjs",
+    "tests/*-probe.mjs",
+    "utils/copyright.js",
+    ".codex/run-mcp-direct-harness.mjs",
+    ".codex/run-mcp-tool-loop.mjs"
+  ],
+  "project": [
+    "*.{js,mjs,ts,tsx}!",
+    "src/**/*.{js,mjs,ts,tsx}!",
+    "tests/**/*.{js,mjs,ts,tsx}!",
+    "bench/**/*.{js,mjs,ts,tsx}!",
+    "utils/**/*.{js,mjs,ts,tsx}!",
+    ".codex/**/*.{js,mjs,ts,tsx}!"
+  ],
+  "ignore": [".codex/worktrees/**", ".claude/worktrees/**"]
+}

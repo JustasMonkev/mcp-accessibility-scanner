@@ -19,16 +19,21 @@ import os from 'node:os';
 import path from 'node:path';
 import type { BrowserContextOptions, LaunchOptions } from 'playwright';
 import { devices } from 'playwright';
-import { sanitizeForFilePath } from './utils/fileUtils.js';
+import { toolNameList } from './mcp/toolPolicy.js';
+import { safeIsoTimestampForFileName, sanitizeForFilePath } from './utils/fileUtils.js';
 
 import type { Config, ToolCapability } from '../config.js';
 
 export type CLIOptions = {
     allowedOrigins?: string[];
+    allowedUploadDirs?: string[];
+    authToken?: string;
     blockedOrigins?: string[];
     blockServiceWorkers?: boolean;
     browser?: string;
     caps?: string[];
+    allowedTools?: string[];
+    blockedTools?: string[];
     cdpLaunchArgs?: string[];
     cdpLaunchCommand?: string;
     cdpLaunchCwd?: string;
@@ -45,21 +50,26 @@ export type CLIOptions = {
     host?: string;
     ignoreHttpsErrors?: boolean;
     isolated?: boolean;
-    imageResponses?: 'allow' | 'omit';
+    imageResponses?: Config['imageResponses'];
     mobile?: boolean;
     sandbox?: boolean;
     outputDir?: string;
+    filePaths?: string;
     port?: number;
+    profileDirName?: string;
     proxyBypass?: string;
     proxyServer?: string;
     saveSession?: boolean;
     saveTrace?: boolean;
+    snapshotBoxes?: boolean;
     storageState?: string;
     userAgent?: string;
     userDataDir?: string;
     viewportSize?: string;
     navigationTimeout?: number;
     defaultTimeout?: number;
+    settleTimeout?: number;
+    timeoutIdle?: number;
 };
 
 const defaultConfig: FullConfig = {
@@ -68,7 +78,6 @@ const defaultConfig: FullConfig = {
     launchOptions: {
       channel: 'chrome',
       headless: os.platform() === 'linux' && !process.env.DISPLAY,
-      chromiumSandbox: true,
     },
     contextOptions: {
       viewport: null,
@@ -83,6 +92,8 @@ const defaultConfig: FullConfig = {
   timeouts: {
     navigationTimeout: 60000,
     defaultTimeout: 5000,
+    settle: 500,
+    idle: 0,
   },
 };
 
@@ -91,26 +102,82 @@ type BrowserUserConfig = NonNullable<Config['browser']>;
 export type FullConfig = Config & {
     browser: Omit<BrowserUserConfig, 'browserName'> & {
         browserName: 'chromium' | 'firefox' | 'webkit';
+        chromiumSandboxDefaulted?: boolean;
         launchOptions: NonNullable<BrowserUserConfig['launchOptions']>;
         contextOptions: NonNullable<BrowserUserConfig['contextOptions']>;
     },
     network: NonNullable<Config['network']>,
     saveTrace: boolean;
     server: NonNullable<Config['server']>,
-    timeouts: NonNullable<Config['timeouts']>,
+    // mergeConfig() always materializes all timeouts from defaultConfig, so a
+    // resolved config never has a missing timeout to fall back on.
+    timeouts: Required<NonNullable<Config['timeouts']>>,
 };
 
 export async function resolveConfig(config: Config): Promise<FullConfig> {
-  return mergeConfig(defaultConfig, config);
+  return validateResolvedConfig(mergeConfig(defaultConfig, config));
 }
 
 export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConfig> {
   const configInFile = await loadConfig(cliOptions.config);
   const envOptions = cliOptionsFromEnv();
-  const envOverrides = configFromCLIOptions(envOptions);
+  const envOverrides = configFromCLIOptions(envOptions, true);
   const cliOverrides = configFromCLIOptions(cliOptions);
   const result = mergeCLIConfigSources(configInFile, envOverrides, cliOverrides);
-  return applyMobileConfig(result, configInFile, envOverrides, cliOverrides, envOptions, cliOptions);
+  return validateResolvedConfig(applyMobileConfig(result, configInFile, envOverrides, cliOverrides, envOptions, cliOptions));
+}
+
+// A blank outputDir is an explicit value with no usable meaning, and both
+// ways of tolerating it go wrong silently: honoring it would fail on
+// mkdir('') only at the first artifact write — deep into a run — while
+// treating it as omitted (what a truthiness check on the resolved value does)
+// would quietly redirect artifacts the user configured a destination for
+// into a temp directory. Rejected here instead, at startup like the other
+// config validations, on the merged result so every source (config file,
+// env, CLI, programmatic Config) is covered. Only undefined/null count as
+// omitted — the nullish semantics the fallback historically used.
+async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
+  if (config.allowedTools !== undefined || config.blockedTools !== undefined) {
+    const { validateToolPolicy } = await import('./tools.js');
+    validateToolPolicy(config);
+  }
+  validateAuthToken(config.server.authToken);
+  parseFilePaths(config.filePaths);
+  const { contextOptions, launchOptions } = config.browser;
+  if (contextOptions.clientCertificates?.length) {
+    // Playwright 1.63's certificate interceptor only sees the context proxy.
+    // Preserve an explicit context override, otherwise carry the launch route
+    // into every fresh-context factory (including remote browser connections).
+    const proxy = contextOptions.proxy ?? launchOptions.proxy;
+    if (proxy?.bypass?.trim())
+      throw new Error('clientCertificates with proxy.bypass is unsupported on Playwright 1.63.0: the certificate interceptor ignores bypass rules. Use a separate browser configuration for these routes; no browser was started.');
+    if (proxy)
+      contextOptions.proxy = proxy;
+  }
+  if (!Number.isInteger(config.timeouts.idle) || config.timeouts.idle < 0 || config.timeouts.idle > 2_147_483_647)
+    throw new Error('timeouts.idle must be an integer from 0 to 2147483647 milliseconds. Use 0 to disable idle shutdown.');
+  const uploadDirs = config.browser.allowedUploadDirs;
+  if (uploadDirs !== undefined) {
+    if (!Array.isArray(uploadDirs))
+      throw new Error('allowedUploadDirs must be an array of directory paths. Use [] to deny all uploads.');
+    if (uploadDirs.some(dir => typeof dir !== 'string' || !dir.trim()))
+      throw new Error('allowedUploadDirs must not contain blank directory entries. Use [] to deny all uploads.');
+    // Resolve once at trusted startup; uploads must not follow a retargeted root.
+    config.browser.allowedUploadDirs = await Promise.all(uploadDirs.map(dir => fs.promises.realpath(dir)));
+  }
+  if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
+    throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
+  const profileDirName = config.browser.profileDirName;
+  if (profileDirName !== undefined && (typeof profileDirName !== 'string' || !/^(?:Default|Profile \d+)$/.test(profileDirName)))
+    throw new Error(`Invalid browser profile directory name ${JSON.stringify(profileDirName)}: must be a Chrome profile directory name such as "Default" or "Profile 1" (see "Profile Path" at chrome://version).`);
+  if (config.browser.browserName === 'chromium' && !config.browser.remoteEndpoint && config.browser.launchOptions.chromiumSandbox === undefined) {
+    const { channel, executablePath } = config.browser.launchOptions;
+    config.browser.launchOptions.chromiumSandbox = os.platform() !== 'linux'
+      || executablePath !== undefined
+      || (channel !== undefined && channel !== 'chromium' && channel !== 'chrome-for-testing');
+    config.browser.chromiumSandboxDefaulted = true;
+  }
+  return config;
 }
 
 type MobileSource = 'env' | 'cli';
@@ -150,7 +217,7 @@ function applyMobileConfig(resolved: FullConfig, configInFile: Config, envOverri
   return mergeCLIConfigSources(configInFile, envOverrides, cliOverrides, mobileOverride, source);
 }
 
-export function configFromCLIOptions(cliOptions: CLIOptions): Config {
+function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = false): Config {
   let browserName: 'chromium' | 'firefox' | 'webkit' | undefined;
   let channel: string | undefined;
   switch (cliOptions.browser) {
@@ -181,14 +248,13 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
     headless: cliOptions.headless,
   };
 
-  // --no-sandbox was passed, disable the sandbox
-  if (cliOptions.sandbox === false)
-    launchOptions.chromiumSandbox = false;
+  // Commander reports true when --no-sandbox is omitted, while true from the
+  // environment is explicit and must override the platform default.
+  if (cliOptions.sandbox === false || (sandboxTrueIsExplicit && cliOptions.sandbox === true))
+    launchOptions.chromiumSandbox = cliOptions.sandbox;
 
   if (cliOptions.proxyServer) {
-    launchOptions.proxy = {
-      server: cliOptions.proxyServer
-    };
+    launchOptions.proxy = proxySettingsFromString(cliOptions.proxyServer);
     if (cliOptions.proxyBypass)
       launchOptions.proxy.bypass = cliOptions.proxyBypass;
   }
@@ -237,6 +303,8 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
       browserName,
       isolated: cliOptions.isolated,
       userDataDir: cliOptions.userDataDir,
+      profileDirName: cliOptions.profileDirName,
+      allowedUploadDirs: cliOptions.allowedUploadDirs,
       launchOptions,
       contextOptions,
       cdpLaunch,
@@ -247,19 +315,27 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
     server: {
       port: cliOptions.port,
       host: cliOptions.host,
+      authToken: cliOptions.authToken,
     },
     capabilities: cliOptions.caps as ToolCapability[],
+    allowedTools: cliOptions.allowedTools,
+    blockedTools: cliOptions.blockedTools,
     network: {
       allowedOrigins: cliOptions.allowedOrigins,
       blockedOrigins: cliOptions.blockedOrigins,
     },
     saveSession: cliOptions.saveSession,
     saveTrace: cliOptions.saveTrace,
+    snapshot: cliOptions.snapshotBoxes !== undefined ? { boxes: cliOptions.snapshotBoxes } : undefined,
     outputDir: cliOptions.outputDir,
+    // SAFETY: resolveCLIConfig validates the merged value before returning it to consumers.
+    filePaths: cliOptions.filePaths as Config['filePaths'],
     imageResponses: cliOptions.imageResponses,
     timeouts: {
       navigationTimeout: cliOptions.navigationTimeout,
       defaultTimeout: cliOptions.defaultTimeout,
+      settle: cliOptions.settleTimeout,
+      idle: cliOptions.timeoutIdle,
     }
   };
 }
@@ -267,10 +343,14 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
 function cliOptionsFromEnv(): CLIOptions {
   const options: CLIOptions = {};
   options.allowedOrigins = semicolonSeparatedList(process.env.PLAYWRIGHT_MCP_ALLOWED_ORIGINS);
+  options.allowedUploadDirs = uploadDirectoryList(process.env.PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS);
+  options.authToken = process.env.PLAYWRIGHT_MCP_AUTH_TOKEN;
   options.blockedOrigins = semicolonSeparatedList(process.env.PLAYWRIGHT_MCP_BLOCKED_ORIGINS);
   options.blockServiceWorkers = envToBoolean(process.env.PLAYWRIGHT_MCP_BLOCK_SERVICE_WORKERS);
   options.browser = envToString(process.env.PLAYWRIGHT_MCP_BROWSER);
   options.caps = commaSeparatedList(process.env.PLAYWRIGHT_MCP_CAPS);
+  options.allowedTools = toolNameList(process.env.PLAYWRIGHT_MCP_ALLOWED_TOOLS);
+  options.blockedTools = toolNameList(process.env.PLAYWRIGHT_MCP_BLOCKED_TOOLS);
   options.cdpLaunchArgs = commaSeparatedList(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_ARGS);
   options.cdpLaunchCommand = envToString(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND);
   options.cdpLaunchCwd = envToString(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_CWD);
@@ -286,21 +366,27 @@ function cliOptionsFromEnv(): CLIOptions {
   options.host = envToString(process.env.PLAYWRIGHT_MCP_HOST);
   options.ignoreHttpsErrors = envToBoolean(process.env.PLAYWRIGHT_MCP_IGNORE_HTTPS_ERRORS);
   options.isolated = envToBoolean(process.env.PLAYWRIGHT_MCP_ISOLATED);
-  if (process.env.PLAYWRIGHT_MCP_IMAGE_RESPONSES === 'omit')
-    options.imageResponses = 'omit';
+  const imageResponses = process.env.PLAYWRIGHT_MCP_IMAGE_RESPONSES;
+  if (imageResponses === 'allow' || imageResponses === 'omit' || imageResponses === 'auto' || imageResponses === 'only')
+    options.imageResponses = imageResponses;
   options.mobile = envToBoolean(process.env.PLAYWRIGHT_MCP_MOBILE);
   options.sandbox = envToBoolean(process.env.PLAYWRIGHT_MCP_SANDBOX);
   options.outputDir = envToString(process.env.PLAYWRIGHT_MCP_OUTPUT_DIR);
+  options.filePaths = envToString(process.env.PLAYWRIGHT_MCP_FILE_PATHS);
   options.port = envToNumber(process.env.PLAYWRIGHT_MCP_PORT);
   options.proxyBypass = envToString(process.env.PLAYWRIGHT_MCP_PROXY_BYPASS);
   options.proxyServer = envToString(process.env.PLAYWRIGHT_MCP_PROXY_SERVER);
   options.saveTrace = envToBoolean(process.env.PLAYWRIGHT_MCP_SAVE_TRACE);
+  options.snapshotBoxes = envToBoolean(process.env.PLAYWRIGHT_MCP_SNAPSHOT_BOXES);
   options.storageState = envToString(process.env.PLAYWRIGHT_MCP_STORAGE_STATE);
   options.userAgent = envToString(process.env.PLAYWRIGHT_MCP_USER_AGENT);
   options.userDataDir = envToString(process.env.PLAYWRIGHT_MCP_USER_DATA_DIR);
+  options.profileDirName = envToString(process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME) || undefined;
   options.viewportSize = envToString(process.env.PLAYWRIGHT_MCP_VIEWPORT_SIZE);
   options.navigationTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT);
   options.defaultTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_DEFAULT_TIMEOUT);
+  options.settleTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE);
+  options.timeoutIdle = envToNumber(process.env.PLAYWRIGHT_MCP_TIMEOUT_IDLE?.trim());
   return options;
 }
 
@@ -315,14 +401,55 @@ async function loadConfig(configFile: string | undefined): Promise<Config> {
   }
 }
 
-export async function outputFile(config: FullConfig, rootPath: string | undefined, name: string): Promise<string> {
-  const outputDir = config.outputDir
-        ?? (rootPath ? path.join(rootPath, '.playwright-mcp') : undefined)
-        ?? path.join(os.tmpdir(), 'playwright-mcp-output', sanitizeForFilePath(new Date().toISOString()));
+// One fallback output directory per resolved config — i.e. per server, which
+// resolves its FullConfig once and hands the same object to every consumer.
+// Recomputing the timestamped path per call scattered one audit's artifacts
+// (screenshots, JSON reports, traces, session logs) across a different temp
+// directory per millisecond tick. Keyed weakly on the config object so two
+// server instances in one process still get distinct fallback directories.
+const defaultOutputDirs = new WeakMap<FullConfig, string>();
 
+/**
+ * Resolves the output directory this config's artifacts land in, memoizing
+ * the timestamped fallback when no `outputDir` is configured. Exported so a
+ * config that crosses an identity boundary — the VS Code integration
+ * serializes it into a spawned provider process, where JSON.parse mints a new
+ * object the WeakMap has never seen — can materialize the resolved fallback
+ * into the serialized copy instead of letting the other side mint a second
+ * temp root.
+ */
+export function resolveOutputDir(config: FullConfig): string {
+  if (config.outputDir)
+    return config.outputDir;
+  let outputDir = defaultOutputDirs.get(config);
+  if (!outputDir) {
+    // The random token keeps two servers starting in the same millisecond
+    // from sharing a fallback directory — the per-call timestamp used to
+    // make that unlikely; a per-server one no longer would.
+    outputDir = path.join(os.tmpdir(), 'playwright-mcp-output', safeIsoTimestampForFileName());
+    defaultOutputDirs.set(config, outputDir);
+  }
+  return outputDir;
+}
+
+export async function outputFile(config: FullConfig, name: string, exclusive = false): Promise<string> {
+  const fileName = name.trim() ? sanitizeForFilePath(name) : '';
+  if (!fileName || fileName === '.' || fileName === '..' || /[. ]$/.test(name) || /[. ]$/.test(fileName) || /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/i.test(fileName))
+    throw new Error(`Invalid output filename "${name}": use a portable, non-reserved file name.`);
+  const outputDir = resolveOutputDir(config);
   await fs.promises.mkdir(outputDir, { recursive: true });
-  const fileName = sanitizeForFilePath(name);
-  return path.join(outputDir, fileName);
+  const filePath = path.join(outputDir, fileName);
+  if (!exclusive)
+    return filePath;
+  try {
+    const handle = await fs.promises.open(filePath, 'wx');
+    await handle.close();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+      throw new Error(`Output file already exists: ${filePath}. Choose a different filename.`, { cause: error });
+    throw error;
+  }
+  return filePath;
 }
 
 function pickDefined<T extends object>(obj: T | undefined): Partial<T> {
@@ -366,6 +493,8 @@ function mergeConfig(base: FullConfig, overrides: Config): FullConfig {
     timeouts: {
       navigationTimeout: overrides.timeouts?.navigationTimeout ?? base.timeouts.navigationTimeout,
       defaultTimeout: overrides.timeouts?.defaultTimeout ?? base.timeouts.defaultTimeout,
+      settle: overrides.timeouts?.settle ?? base.timeouts.settle,
+      idle: overrides.timeouts?.idle !== undefined ? overrides.timeouts.idle : base.timeouts.idle,
     },
   } as FullConfig;
 }
@@ -374,6 +503,17 @@ export function semicolonSeparatedList(value: string | undefined): string[] | un
   if (!value)
     return undefined;
   return value.split(';').map(v => v.trim());
+}
+
+export function uploadDirectoryList(value: string | undefined): string[] | undefined {
+  if (value === undefined)
+    return undefined;
+  return value === '' ? [] : value.split(';').map(dir => dir.trim());
+}
+
+export function validateAuthToken(token: string | undefined): void {
+  if (token !== undefined && (typeof token !== 'string' || !/^[A-Za-z0-9._~+/-]+=*$/.test(token)))
+    throw new Error('server.authToken must be a non-blank Bearer token without whitespace.');
 }
 
 export function commaSeparatedList(value: string | undefined): string[] | undefined {
@@ -387,7 +527,7 @@ export function commaSeparatedList(value: string | undefined): string[] | undefi
  * empties. Used for `PLAYWRIGHT_MCP_CDP_HEADERS` so that commas inside header
  * values (e.g. `Forwarded: for=a, for=b`) are preserved.
  */
-export function newlineSeparatedList(value: string | undefined): string[] | undefined {
+function newlineSeparatedList(value: string | undefined): string[] | undefined {
   if (!value)
     return undefined;
   const entries = value.split('\n').map(v => v.trim()).filter(Boolean);
@@ -399,6 +539,8 @@ export function newlineSeparatedList(value: string | undefined): string[] | unde
  * newline-separated `PLAYWRIGHT_MCP_CDP_HEADERS` env var) into a header map.
  * Only the first colon is treated as the name/value separator, so colons inside
  * the value are preserved.
+ *
+ * @public
  */
 export function parseCdpHeaders(entries: string[] | undefined): Record<string, string> | undefined {
   if (!entries || !entries.length)
@@ -428,6 +570,42 @@ function envToBoolean(value: string | undefined): boolean | undefined {
   if (value === 'false' || value === '0')
     return false;
   return undefined;
+}
+
+function parseFilePaths(value: unknown): Config['filePaths'] {
+  if (value === undefined || value === 'relative' || value === 'absolute')
+    return value;
+  throw new Error('filePaths must be "relative" or "absolute".');
+}
+
+// Moves credentials from the proxy string, e.g. "http://user:pass@myproxy:3128", into explicit fields.
+function proxySettingsFromString(proxy: string): NonNullable<LaunchOptions['proxy']> {
+  try {
+    // Browsers allow to specify proxy without a protocol, defaulting to http.
+    const trimmed = proxy.trim();
+    const url = new URL(/^\w+:\/\//.test(trimmed) ? trimmed : 'http://' + trimmed);
+    if (url.username || url.password) {
+      return {
+        server: url.protocol + '//' + url.host,
+        username: decodeProxyCredential(url.username),
+        password: decodeProxyCredential(url.password),
+      };
+    }
+  } catch {
+  }
+  return { server: proxy };
+}
+
+// Decodes each run of valid escapes on its own, so a literal '%' that does not
+// start an escape is kept as typed without leaving other escapes encoded.
+function decodeProxyCredential(value: string): string {
+  return value.replace(/(?:%[0-9a-fA-F]{2})+/g, escapes => {
+    try {
+      return decodeURIComponent(escapes);
+    } catch {
+      return escapes;
+    }
+  });
 }
 
 function envToString(value: string | undefined): string | undefined {

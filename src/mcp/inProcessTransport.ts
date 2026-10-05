@@ -14,9 +14,7 @@
  * limitations under the License.
  */
 
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import type { Transport, TransportSendOptions } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { JSONRPCMessage, MessageExtraInfo } from '@modelcontextprotocol/sdk/types.js';
+import type { JSONRPCMessage, MessageExtraInfo, Server, Transport, TransportSendOptions } from '@modelcontextprotocol/server';
 
 export class InProcessTransport implements Transport {
   private _server: Server;

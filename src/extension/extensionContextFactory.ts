@@ -24,14 +24,28 @@ import type { BrowserContextFactory, ClientInfo } from '../browserContextFactory
 const debugLogger = debug('pw:mcp:relay');
 
 export class ExtensionContextFactory implements BrowserContextFactory {
+  readonly sharedContext = true;
+  // Without a token, attaching waits until the user approves the connection;
+  // with one, the extension connects on its own within a bounded time.
+  get attachNeedsUser(): boolean {
+    return !process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
+  }
+  // The relay attaches to the browser the user is already running and hands back
+  // its existing context, so contextOptions — storage state included — never apply.
+  readonly appliesStorageState = false;
+  // That existing context is the only one there is: every browser session
+  // opened here would share the user's own tabs, cookies and storage.
+  readonly sessionsUnsupportedReason = '--extension works through the browser you are already running and uses its existing context, which every session would share (same tabs, cookies and storage).';
   private _browserChannel: string;
   private _userDataDir?: string;
   private _executablePath?: string;
+  private _profileDirName?: string;
 
-  constructor(browserChannel: string, userDataDir: string | undefined, executablePath: string | undefined) {
+  constructor(browserChannel: string, userDataDir: string | undefined, executablePath: string | undefined, profileDirName: string | undefined) {
     this._browserChannel = browserChannel;
     this._userDataDir = userDataDir;
     this._executablePath = executablePath;
+    this._profileDirName = profileDirName;
   }
 
   async createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
@@ -47,8 +61,15 @@ export class ExtensionContextFactory implements BrowserContextFactory {
 
   private async _obtainBrowser(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<playwright.Browser> {
     const relay = await this._startRelay(abortSignal);
-    await relay.ensureExtensionConnectionForMCPContext(clientInfo, abortSignal, toolName);
-    return await playwright.chromium.connectOverCDP(relay.cdpEndpoint());
+    try {
+      await relay.ensureExtensionConnectionForMCPContext(clientInfo, abortSignal, toolName);
+      const browser = await playwright.chromium.connectOverCDP(relay.cdpEndpoint());
+      browser.on('disconnected', () => relay.stop());
+      return browser;
+    } catch (error) {
+      relay.stop();
+      throw error;
+    }
   }
 
   private async _startRelay(abortSignal: AbortSignal) {
@@ -57,8 +78,10 @@ export class ExtensionContextFactory implements BrowserContextFactory {
       httpServer.close();
       throw new Error(abortSignal.reason);
     }
-    const cdpRelayServer = new CDPRelayServer(httpServer, this._browserChannel, this._userDataDir, this._executablePath);
-    abortSignal.addEventListener('abort', () => cdpRelayServer.stop());
+    const cdpRelayServer = new CDPRelayServer(httpServer, this._browserChannel, this._userDataDir, this._executablePath, this._profileDirName);
+    const stop = () => cdpRelayServer.stop();
+    abortSignal.addEventListener('abort', stop, { once: true });
+    httpServer.once('close', () => abortSignal.removeEventListener('abort', stop));
     debugLogger(`CDP relay server started, extension endpoint: ${cdpRelayServer.extensionEndpoint()}.`);
     return cdpRelayServer;
   }

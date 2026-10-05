@@ -18,16 +18,72 @@ import debug from 'debug';
 import type * as playwright from 'playwright';
 
 import { logUnhandledError } from './utils/log.js';
+import { createShortGuid } from './utils/guid.js';
 import { Tab } from './tab.js';
 import { outputFile } from './config.js';
+import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
+import { truncateDataUrls } from './utils/dataUrl.js';
+import { truncateToUtf8Bytes } from './utils/fileUtils.js';
 
 import type { FullConfig } from './config.js';
 import type { Tool } from './tools/tool.js';
 import type { BrowserContextFactory, ClientInfo } from './browserContextFactory.js';
+import type { BrowserSessionBroker } from './browserSessions.js';
 import type * as actions from './actions.js';
 import type { SessionLog } from './sessionLog.js';
 
 const testDebug = debug('pw:mcp:test');
+const recorderBufferMs = 500;
+const recorderControlTools = new Set(['browser_start_recording', 'browser_stop_recording']);
+const expectPrelude = "const { expect } = require('playwright/test');";
+const pendingPageCloses = new WeakMap<playwright.Page, Promise<void>>();
+
+function pendingPageClose(page: playwright.Page): Promise<void> {
+  const pending = pendingPageCloses.get(page);
+  if (pending)
+    return pending;
+  const close = page.close();
+  pendingPageCloses.set(page, close);
+  const clear = () => {
+    if (pendingPageCloses.get(page) === close)
+      pendingPageCloses.delete(page);
+  };
+  void close.then(clear, clear);
+  return close;
+}
+
+/**
+ * Chromium can acknowledge Target.closeTarget while a racing navigation keeps
+ * the target alive. Retry the public close call instead of letting one tool or
+ * an entire crawl wait forever.
+ */
+async function closePage(page: playwright.Page, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0)
+      break;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        pendingPageClose(page),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms while closing the page.`)), remaining);
+          timer.unref?.();
+        }),
+      ]);
+      if (page.isClosed())
+        return;
+    } catch (error) {
+      if (page.isClosed())
+        return;
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error(`Failed to close the page after 3 attempts within ${timeoutMs}ms.`);
+}
 
 class ContextRegistry {
   private readonly _contexts = new Set<Context>();
@@ -47,33 +103,172 @@ class ContextRegistry {
 
 const contextRegistry = new ContextRegistry();
 
+type TraceHub = { users: number, ready: Promise<void> };
+const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
+
+type IdleGroup = {
+  browserContext: playwright.BrowserContext;
+  contexts: Set<Context>;
+  timer?: ReturnType<typeof setTimeout>;
+  closing?: Promise<void>;
+};
+const idleGroups = new WeakMap<playwright.BrowserContext, IdleGroup>();
+
+async function acquireTrace(browserContext: playwright.BrowserContext): Promise<void> {
+  let hub = traceHubs.get(browserContext);
+  if (!hub) {
+    const created: TraceHub = {
+      users: 0,
+      // The name is unique per context: with --isolated (or a remote/CDP
+      // browser) several sessions' contexts share the browser's one cached
+      // tracesDir, and a fixed name would make every context write the same
+      // trace.trace/trace.network files — concurrent corruption, and later
+      // sessions overwriting earlier traces. The 'trace' prefix is kept
+      // because the printed viewer URL (…/trace.json) is served as a
+      // prefix-matched descriptor over the traces directory.
+      ready: browserContext.tracing.start({
+        name: `trace-${createShortGuid()}`,
+        screenshots: false,
+        snapshots: true,
+        sources: false,
+      }),
+    };
+    traceHubs.set(browserContext, created);
+    created.ready.catch(() => {
+      if (traceHubs.get(browserContext) === created)
+        traceHubs.delete(browserContext);
+    });
+    hub = created;
+  }
+  hub.users++;
+  try {
+    await hub.ready;
+  } catch (error) {
+    hub.users--;
+    throw error;
+  }
+}
+
+async function releaseTrace(browserContext: playwright.BrowserContext): Promise<void> {
+  const hub = traceHubs.get(browserContext);
+  if (!hub || --hub.users)
+    return;
+  traceHubs.delete(browserContext);
+  try {
+    await browserContext.tracing.stop();
+  } catch (originalError) {
+    // Playwright's stop sends the server-side tracingStop only after the
+    // chunk export succeeds, so a stop that fails midway (an unwritable
+    // export target, a channel hiccup) leaves tracing started while the
+    // hub above is already gone — every later session on this browser
+    // context would fail its start with "Tracing has been already started".
+    // One bare retry ends the recording; when it succeeds the session
+    // recovered (the original failure is not worth surfacing), and when it
+    // also fails the original error is the real one to report. try/catch,
+    // not a .catch() chain, so a synchronously throwing stop is retried too.
+    try {
+      await browserContext.tracing.stop();
+    } catch {
+      throw originalError;
+    }
+  }
+}
+
 type ContextOptions = {
   tools: Tool[];
+  /**
+   * Tools that clear a modal state, including ones hidden by `blockedTools`,
+   * so a blocked tab can still name the handler it needs. Defaults to `tools`.
+   */
+  modalStateTools?: Tool[];
   config: FullConfig;
   browserContextFactory: BrowserContextFactory;
-  sessionLog: SessionLog | undefined;
+  /**
+   * Resolves the `--save-session` log this context writes to, called when
+   * the context first launches its browser context. The log is created
+   * lazily at that point rather than eagerly by the owning backend: over
+   * stateless HTTP every request builds a fresh backend, and a request that
+   * only lists tools or routes to an existing browser session must not mint
+   * an empty session directory. A backend hands the same async-once
+   * supplier to its default context and to every session it opens, so all
+   * of them share one log.
+   */
+  sessionLog: (() => Promise<SessionLog | undefined>) | undefined;
   clientInfo: ClientInfo;
+  browserSessions?: BrowserSessionBroker;
+  /**
+   * True when this Context backs an explicitly opened browser session
+   * (`browser_session_open`) or the ephemeral default context of a stateless
+   * per-request HTTP backend, rather than the long-lived default one;
+   * forwarded to the context factory so e.g. the persistent factory mints a
+   * disposable profile instead of contending for the stable one.
+   */
+  browserSession?: boolean;
+  /**
+   * The registry handle (`bs_...`) this Context serves when it backs an
+   * explicitly opened browser session. The `--save-session` log is shared by
+   * a backend's default context and every session it opens, so recorded user
+   * actions are tagged with this handle — the same identity routed tool
+   * calls already carry in their logged args — and the log scopes its
+   * pending-action merging by originating context. Absent for the default
+   * context (including the ephemeral stateless-HTTP one, which has no
+   * handle).
+   */
+  browserSessionId?: string;
 };
 
 export class Context {
   readonly tools: Tool[];
+  readonly modalStateTools: Tool[];
   readonly config: FullConfig;
-  readonly sessionLog: SessionLog | undefined;
   readonly options: ContextOptions;
-  private _browserContextPromise: Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> | undefined;
+  private _browserContextPromise: Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void>, closeStarting?: () => void }> | undefined;
   private _browserContextFactory: BrowserContextFactory;
   private _tabs: Tab[] = [];
   private _currentTab: Tab | undefined;
   private _clientInfo: ClientInfo;
 
   private _closeBrowserContextPromise: Promise<void> | undefined;
-  private _runningToolName: string | undefined;
+  // A multiset, not a single slot: tool calls on one Context can overlap, and
+  // with a single marker the first call to finish would clear it while the
+  // second still ran — letting the session TTL reaper (or a session close)
+  // dispose the browser mid-operation.
+  private _runningTools: string[] = [];
+  private _sessionHolds = 0;
+  private _lastToolCallEndedAt = -Infinity;
+  // In-flight download saves (Tab hands them over as they start). A download
+  // outlives the tool call that triggered it — the response reports it as
+  // "still downloading" — so disposal must wait for these before closing the
+  // browser, or saveAs() is aborted mid-stream and the reported file ends up
+  // missing or partial (the stateless HTTP path disposes the backend's
+  // default context the moment the response closes).
+  private _pendingDownloads = new Set<Promise<unknown>>();
+  // Pages ensureTab() has requested but not yet adopted. Closing waits for
+  // them briefly, so a page requested just before the close began is closed
+  // while the browser is still connected instead of outliving the Context.
+  private _openingPages = new Set<Promise<unknown>>();
+  // The page request that ensureTab() callers share, with their signals.
+  private _openingTab: { attaching: Promise<unknown>, request: Promise<void>, waiting: (AbortSignal | undefined)[] } | undefined;
+  private _downloadErrors: string[] = [];
+  private _omittedDownloadErrors = 0;
   private _abortController = new AbortController();
+  private _removePageObserver: (() => void) | undefined;
+  private _inputRecorder: InputRecorder | undefined;
+  private _removeRecorderContext: (() => void) | undefined;
+  private _recordingStartFinished: Promise<void> | undefined;
+  private _recording: Recording | undefined;
+  private _recordingStops = new Set<Promise<void>>();
+  private _closeAfterRecording = false;
+  // Resolved from options.sessionLog at the first browser context launch.
+  private _sessionLog: SessionLog | undefined;
+  private _idleGroup: IdleGroup | undefined;
+  private _lastActivityAt = Date.now();
+  private _idleClosePromise: Promise<void> | undefined;
 
   constructor(options: ContextOptions) {
     this.tools = options.tools;
+    this.modalStateTools = options.modalStateTools ?? options.tools;
     this.config = options.config;
-    this.sessionLog = options.sessionLog;
     this.options = options;
     this._browserContextFactory = options.browserContextFactory;
     this._clientInfo = options.clientInfo;
@@ -85,12 +280,39 @@ export class Context {
     await contextRegistry.disposeAll();
   }
 
+  get sessionLog(): SessionLog | undefined {
+    return this._sessionLog;
+  }
+
+  /**
+   * Resolves this context's `--save-session` log through the supplier handed
+   * in by the backend that created it, caching the result. Called at the
+   * first browser context launch, and by the owning backend for routed tool
+   * calls: a no-browser tool (e.g. browser_default_timeout) routed to a
+   * freshly opened session must land in the opener backend's log even though
+   * the session has not launched a browser yet — reading the cached field
+   * alone would silently skip it.
+   */
+  async resolveSessionLog(): Promise<SessionLog | undefined> {
+    this._sessionLog ??= await this.options.sessionLog?.();
+    return this._sessionLog;
+  }
+
   tabs(): Tab[] {
     return this._tabs;
   }
 
   currentTab(): Tab | undefined {
     return this._currentTab;
+  }
+
+  // Resolves within this session's own wrappers: on a shared (non-isolated
+  // CDP) context, several sessions wrap the same page, and an event belongs
+  // to whichever session is asking — a global page→tab map would hand every
+  // session the last writer's wrapper and lose the entry when that session
+  // closes.
+  tabForPage(page: playwright.Page): Tab | undefined {
+    return this._tabs.find(tab => tab.page === page);
   }
 
   currentTabOrDie(): Tab {
@@ -115,11 +337,140 @@ export class Context {
     return tab;
   }
 
-  async ensureTab(): Promise<Tab> {
-    const { browserContext } = await this._ensureBrowserContext();
-    if (!this._currentTab)
-      await browserContext.newPage();
+  /**
+   * Attaching can outlast both a cancelled caller and this Context (a
+   * stateless response disposes it as soon as the cancelled request is
+   * answered). The attachment itself follows this Context's own abort
+   * signal, which dispose() fires, and closing releases whatever it attached;
+   * the page opened afterwards is what `signal` and the close check guard, as
+   * a shared browser would otherwise keep it with no owner. Callers arriving
+   * while that page is pending share it, and it is closed on arrival only
+   * when every one of them has been cancelled.
+   */
+  async ensureTab(signal?: AbortSignal): Promise<Tab> {
+    const attaching = this._ensureBrowserContext();
+    const { browserContext } = await attaching;
+    if (!this._currentTab) {
+      signal?.throwIfAborted();
+      if (this._browserContextPromise !== attaching)
+        throw new Error('The browser context closed while a tab was being opened.');
+      let opening = this._openingTab;
+      if (opening?.attaching !== attaching) {
+        const waiting: (AbortSignal | undefined)[] = [];
+        const request = browserContext.newPage().then(async page => {
+          // Once settled, a later caller starts its own request.
+          if (this._openingTab?.waiting === waiting)
+            this._openingTab = undefined;
+          if (this._browserContextPromise === attaching && waiting.some(waiter => !waiter?.aborted))
+            return;
+          await page.close().catch(logUnhandledError);
+          if (this._browserContextPromise !== attaching)
+            throw new Error('The browser context closed while a tab was being opened.');
+          throw new Error('The tab request was cancelled.');
+        });
+        opening = this._openingTab = { attaching, request, waiting };
+        this._openingPages.add(request);
+      }
+      opening.waiting.push(signal);
+      try {
+        await opening.request;
+      } catch (error) {
+        signal?.throwIfAborted();
+        throw error;
+      } finally {
+        this._openingPages.delete(opening.request);
+        if (this._openingTab === opening)
+          this._openingTab = undefined;
+      }
+    }
     return this._currentTab!;
+  }
+
+  async startRecording(): Promise<void> {
+    this.assertRecordingCanStart();
+    await this._startRecording();
+  }
+
+  async startRecordingOnCurrentTab(): Promise<void> {
+    this.assertRecordingCanStart();
+    let finishStart: () => void;
+    const startFinished = new Promise<void>(resolve => finishStart = resolve);
+    this._recordingStartFinished = startFinished;
+    try {
+      const tab = await this.ensureTab();
+      await tab.page.bringToFront();
+      await this._startRecording();
+    } finally {
+      if (this._recordingStartFinished === startFinished)
+        this._recordingStartFinished = undefined;
+      finishStart!();
+      this._scheduleIdleTimeout();
+    }
+  }
+
+  private async _startRecording(): Promise<void> {
+    const actions: RecordedAction[] = [];
+    const target: RecordingTarget = { actions, pageIndexes: new Map(), state: { stopping: false } };
+    const ready = this._ensureBrowserContext().then(async ({ browserContext }) => {
+      await InputRecorder.startRecording(this, browserContext, target);
+      return browserContext;
+    });
+    const recording: Recording = { target, ready, lastActivityAt: Date.now() };
+    this._recording = recording;
+    try {
+      await ready;
+    } catch (error) {
+      if (this._recording === recording)
+        this._recording = undefined;
+      this._scheduleIdleTimeout();
+      this._closeBrowserContextAfterRecording();
+      throw error;
+    }
+  }
+
+  async stopRecording(): Promise<string[] | undefined> {
+    this.assertRecordingCanPersist();
+    if (this._recordingStartFinished)
+      await this._recordingStartFinished;
+    const recording = this._recording;
+    if (!recording)
+      return undefined;
+    this._recording = undefined;
+    recording.target.state.stopping = true;
+    let finishStop: () => void;
+    const stopFinished = new Promise<void>(resolve => finishStop = resolve);
+    this._recordingStops.add(stopFinished);
+    try {
+      const browserContext = await recording.ready;
+      await InputRecorder.stopRecording(this, browserContext, recording.target);
+      return recording.target.actions.map(action => action.code.trim()).filter(Boolean);
+    } finally {
+      this._recordingStops.delete(stopFinished);
+      finishStop!();
+      this._lastActivityAt = Date.now();
+      this._scheduleIdleTimeout();
+      this._closeBrowserContextAfterRecording();
+    }
+  }
+
+  recordingActivityAt(): number | undefined {
+    return this._recording?.lastActivityAt;
+  }
+
+  markRecordingActivity(): void {
+    if (this._recording)
+      this._recording.lastActivityAt = Date.now();
+  }
+
+  assertRecordingCanPersist(): void {
+    if (this.options.browserSession && !this.options.browserSessionId)
+      throw new Error('Recording over stateless HTTP requires a browserSessionId. Call browser_session_open, then pass its browserSessionId to browser_start_recording and browser_stop_recording. Shared-context modes that cannot open browser sessions require a stateful MCP connection.');
+  }
+
+  assertRecordingCanStart(): void {
+    this.assertRecordingCanPersist();
+    if (this._recording || this._recordingStartFinished)
+      throw new Error('Recording is already in progress.');
   }
 
   async closeTab(index: number | undefined): Promise<string> {
@@ -127,15 +478,27 @@ export class Context {
     if (!tab)
       throw new Error(`Tab ${index} not found`);
     const url = tab.page.url();
-    await tab.page.close();
+    await closePage(tab.page, tab.operationTimeout());
     return url;
   }
 
-  async outputFile(name: string): Promise<string> {
-    return outputFile(this.config, this._clientInfo.rootPath, name);
+  async outputFile(name: string, exclusive = false): Promise<string> {
+    return outputFile(this.config, name, exclusive);
+  }
+
+  /**
+   * The registry behind `browser_session_open` / `browser_session_close`.
+   * Provided by BrowserServerBackend; absent when the Context is constructed
+   * outside of it (e.g. directly in tests).
+   */
+  browserSessions(): BrowserSessionBroker {
+    if (!this.options.browserSessions)
+      throw new Error('Browser session management is not available in this environment.');
+    return this.options.browserSessions;
   }
 
   private _onPageCreated(page: playwright.Page) {
+    this._closeAfterRecording = false;
     const tab = new Tab(this, page, tab => this._onPageClosed(tab));
     this._tabs.push(tab);
     if (!this._currentTab)
@@ -150,23 +513,212 @@ export class Context {
 
     if (this._currentTab === tab)
       this._currentTab = this._tabs[Math.min(index, this._tabs.length - 1)];
-    if (!this._tabs.length)
-      void this.closeBrowserContext();
+    if (!this._tabs.length) {
+      if (this._recording || this._recordingStops.size)
+        this._closeAfterRecording = true;
+      else
+        void this.closeBrowserContext();
+    }
   }
 
   async closeBrowserContext() {
+    if (this._idleClosePromise) {
+      await this._idleClosePromise;
+      this._idleClosePromise = undefined;
+    }
     if (!this._closeBrowserContextPromise)
       this._closeBrowserContextPromise = this._closeBrowserContextImpl().catch(logUnhandledError);
     await this._closeBrowserContextPromise;
     this._closeBrowserContextPromise = undefined;
   }
 
-  isRunningTool() {
-    return this._runningToolName !== undefined;
+  private _closeBrowserContextAfterRecording(): void {
+    if (!this._closeAfterRecording || this._recording || this._recordingStops.size || this._closeBrowserContextPromise)
+      return;
+    this._closeAfterRecording = false;
+    void this.closeBrowserContext();
   }
 
-  setRunningTool(name: string | undefined) {
-    this._runningToolName = name;
+  /** True while any tool call or lifetime hold is active, overlap included. */
+  isRunningTool() {
+    return this._runningTools.length > 0 || this._sessionHolds > 0;
+  }
+
+  isRunningToolForRecording(buffered: boolean): boolean {
+    return this._runningTools.some(name => !recorderControlTools.has(name)) || buffered && Date.now() - this._lastToolCallEndedAt <= recorderBufferMs;
+  }
+
+  /**
+   * Registers an in-flight download save. Disposal waits (bounded) for the
+   * registered saves before closing the browser context, and the session TTL
+   * reaper holds off like it does for running tools — a download routinely
+   * outlives the tool call that started it. The save's rejection is handled
+   * here: an aborted download must not surface as an unhandled rejection,
+   * and its error must survive the tab closing until a tool can report it.
+   */
+  trackPendingDownload(promise: Promise<unknown>, filename?: string): void {
+    const settled = promise.catch(error => {
+      if (this._downloadErrors.length < 20) {
+        const label = filename ? ` "${filename}"` : '';
+        const cause = error instanceof Error ? error.message : String(error);
+        const message = truncateDataUrls(`Failed to save download${label}: ${cause}`);
+        const bounded = truncateToUtf8Bytes(message, 2000);
+        this._downloadErrors.push(bounded === message ? message : `${bounded}… [truncated]`);
+      } else {
+        ++this._omittedDownloadErrors;
+      }
+      logUnhandledError(error);
+    });
+    this._pendingDownloads.add(settled);
+    this._scheduleIdleTimeout();
+    void settled.then(() => {
+      this._pendingDownloads.delete(settled);
+      this._lastActivityAt = Date.now();
+      this._scheduleIdleTimeout();
+    });
+  }
+
+  /** True while a download save is still writing its file. */
+  hasPendingDownloads(): boolean {
+    return this._pendingDownloads.size > 0;
+  }
+
+  takeDownloadErrors(): string[] {
+    const errors = this._downloadErrors.splice(0);
+    if (this._omittedDownloadErrors)
+      errors.push(`Omitted ${this._omittedDownloadErrors} additional download failure(s).`);
+    this._omittedDownloadErrors = 0;
+    return errors;
+  }
+
+  /**
+   * Gives a page request already in flight the chance to land while the
+   * browser is still connected, so ensureTab() can close it. Bounded: a
+   * newPage() the browser never answers must not hold the close, because
+   * closing the connection is what ends it.
+   */
+  private async _waitForOpeningPages(timeoutMs = 5_000): Promise<void> {
+    if (!this._openingPages.size)
+      return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled([...this._openingPages]),
+        new Promise<void>(resolve => {
+          timer = setTimeout(resolve, timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Waits for in-flight download saves, bounded at 30s: the same order as the
+   * default navigation timeout, so a download that network conditions allow
+   * to finish gets to — while disposal (a stateless HTTP response closing,
+   * process shutdown, the TTL reaper) can never hang indefinitely on a
+   * stalled download. Past the cap the download is abandoned, exactly as
+   * every download was before this wait existed. Loops because a page can
+   * start another download while an earlier one is awaited; the cap spans
+   * the whole wait, not each download.
+   */
+  private async _waitForPendingDownloads(timeoutMs = 30_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this._pendingDownloads.size) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0)
+        return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all([...this._pendingDownloads]),
+          new Promise<void>(resolve => {
+            timer = setTimeout(resolve, remaining);
+            timer.unref?.();
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  }
+
+  /**
+   * Marks a tool call as running and returns the release callback for that
+   * specific call (idempotent, and releasing out of completion order is
+   * fine). isRunningTool() stays true until every overlapping call released.
+   */
+  beginToolCall(name: string): () => void {
+    this._runningTools.push(name);
+    this._scheduleIdleTimeout();
+    let released = false;
+    return () => {
+      if (released)
+        return;
+      released = true;
+      const index = this._runningTools.lastIndexOf(name);
+      if (index !== -1)
+        this._runningTools.splice(index, 1);
+      if (!recorderControlTools.has(name))
+        this._lastToolCallEndedAt = Date.now();
+      this._lastActivityAt = Date.now();
+      this._scheduleIdleTimeout();
+    };
+  }
+
+  /** Holds session lifetime without suppressing manual input recording. */
+  beginSessionHold(): () => void {
+    this._sessionHolds++;
+    this._scheduleIdleTimeout();
+    let released = false;
+    return () => {
+      if (released)
+        return;
+      released = true;
+      this._sessionHolds--;
+      this._lastActivityAt = Date.now();
+      this._scheduleIdleTimeout();
+    };
+  }
+
+  async resumeAfterIdle(): Promise<string | undefined> {
+    if (!this._idleClosePromise)
+      return;
+    await this._idleClosePromise;
+    await this._ensureBrowserContext();
+    this._idleClosePromise = undefined;
+    return 'The browser connection was released after inactivity and has been reopened. Use browser_navigate to navigate again if needed; previous element references are no longer valid.';
+  }
+
+  private _scheduleIdleTimeout() {
+    const group = this._idleGroup;
+    if (!group)
+      return;
+    clearTimeout(group.timer);
+    group.timer = undefined;
+    if (group.closing || !group.contexts.size)
+      return;
+    let deadline = 0;
+    for (const context of group.contexts) {
+      if (!context.config.timeouts.idle || context.options.browserSession || context.isRunningTool() || context.hasPendingDownloads() || context._recording || context._recordingStartFinished || context._recordingStops.size)
+        return;
+      deadline = Math.max(deadline, context._lastActivityAt + context.config.timeouts.idle);
+    }
+    group.timer = setTimeout(() => {
+      group.timer = undefined;
+      const contexts = [...group.contexts];
+      // Invoke every close synchronously before another tool can acquire a
+      // shared context. Factory release hooks preserve external ownership.
+      group.closing = Promise.all(contexts.map(context => context.closeBrowserContext())).then(() => {
+        idleGroups.delete(group.browserContext);
+      });
+      for (const context of contexts)
+        context._idleClosePromise = group.closing;
+      void group.closing.catch(logUnhandledError);
+    }, Math.max(0, deadline - Date.now()));
+    group.timer.unref?.();
   }
 
   private async _closeBrowserContextImpl() {
@@ -175,13 +727,52 @@ export class Context {
 
     testDebug('close context');
 
+    // Unpublished BEFORE the download drain below: the drain can hold this
+    // close open for up to 30s, and with the promise still published a tool
+    // call arriving in that window (browser_navigate after the last tab
+    // closed with a download pending) was handed the closing context — its
+    // fresh tab was silently torn down when the drain settled. Unpublishing
+    // first routes such calls into _setupBrowserContext(), whose
+    // _closeBrowserContextPromise check rejects them with the existing
+    // "Another browser context is being closed" error.
     const promise = this._browserContextPromise;
     this._browserContextPromise = undefined;
 
-    await promise.then(async ({ browserContext, close }) => {
-      if (this.config.saveTrace)
-        await browserContext.tracing.stop();
-      await close();
+    await promise.then(async ({ browserContext, close, closeStarting }) => {
+      // Advance notice for the factory, ahead of the download drain: the
+      // persistent factory uses it to tell a stable-profile holder that is
+      // closing apart from one that is concurrently alive, so a default
+      // context arriving mid-drain waits for the release instead of being
+      // silently demoted to a disposable profile.
+      closeStarting?.();
+      // Before the browser goes away — whoever is closing it: a stateless
+      // HTTP response's disposal, browser_session_close, the TTL reaper, the
+      // last tab closing — give in-flight download saves their bounded
+      // window to finish, so the files tool responses reported as "still
+      // downloading" actually materialize.
+      await this._waitForPendingDownloads();
+      if (this._recording)
+        await this.stopRecording().catch(logUnhandledError);
+      await Promise.all(this._recordingStops);
+      await this._waitForOpeningPages();
+      this._detachFromBrowserContext();
+      // close() is the factory's only cleanup hook — for storage-state
+      // sessions it also removes the disposable profile — and this close
+      // attempt is the only one (_browserContextPromise is already cleared),
+      // so a failing trace stop must not skip it.
+      try {
+        if (this.config.saveTrace)
+          await releaseTrace(browserContext);
+      } catch (error) {
+        // The symmetric race to the tolerated "already started" on setup: on
+        // a shared context the sibling that closed first already stopped the
+        // one recording, which is an expected shutdown, not an error worth
+        // logging. Anything else still surfaces.
+        if (!(error instanceof Error && /already stopped|Must start tracing before stopping/i.test(error.message)))
+          throw error;
+      } finally {
+        await close();
+      }
     });
   }
 
@@ -192,17 +783,32 @@ export class Context {
   }
 
   private async _setupRequestInterception(context: playwright.BrowserContext) {
-    if (this.config.network?.allowedOrigins?.length) {
-      await context.route('**', route => route.abort('blockedbyclient'));
+    await ensureNetworkPolicyRoutes(this.config, context);
+  }
 
-      for (const origin of this.config.network.allowedOrigins)
-        await context.route(`*://${origin}/**`, route => route.continue());
+  // The browser context can outlive this session (non-isolated CDP siblings
+  // share it), so the session's observers must not: a leftover 'page'
+  // listener would keep creating tabs inside a disposed Context, and the tab
+  // wrappers' own page listeners would pile up with session churn.
+  private _detachFromBrowserContext() {
+    if (this._idleGroup) {
+      this._idleGroup.contexts.delete(this);
+      this._scheduleIdleTimeout();
+      if (!this._idleGroup.contexts.size && !this._idleGroup.closing)
+        idleGroups.delete(this._idleGroup.browserContext);
+      this._idleGroup = undefined;
     }
-
-    if (this.config.network?.blockedOrigins?.length) {
-      for (const origin of this.config.network.blockedOrigins)
-        await context.route(`*://${origin}/**`, route => route.abort('blockedbyclient'));
-    }
+    this._removePageObserver?.();
+    this._removePageObserver = undefined;
+    this._removeRecorderContext?.();
+    this._removeRecorderContext = undefined;
+    this._inputRecorder?.dispose();
+    this._inputRecorder = undefined;
+    this._closeAfterRecording = false;
+    for (const tab of this._tabs)
+      tab.dispose();
+    this._tabs = [];
+    this._currentTab = undefined;
   }
 
   private _ensureBrowserContext() {
@@ -215,33 +821,124 @@ export class Context {
     return this._browserContextPromise;
   }
 
-  private async _setupBrowserContext(): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  private async _setupBrowserContext(): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void>, closeStarting?: () => void }> {
     if (this._closeBrowserContextPromise)
       throw new Error('Another browser context is being closed.');
     // TODO: move to the browser context factory to make it based on isolation mode.
-    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningToolName);
-    const { browserContext } = result;
-    await this._setupRequestInterception(browserContext);
-    if (this.sessionLog)
-      await InputRecorder.create(this, browserContext);
-    for (const page of browserContext.pages())
-      this._onPageCreated(page);
-    browserContext.on('page', page => this._onPageCreated(page));
-    if (this.config.saveTrace) {
-      await browserContext.tracing.start({
-        name: 'trace',
-        screenshots: false,
-        snapshots: true,
-        sources: false,
-      });
+    // The factory gets the most recently started call's name — with overlap
+    // that is the call whose execution is creating the context right now.
+    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningTools[this._runningTools.length - 1], { browserSession: this.options.browserSession });
+    const closingGroup = idleGroups.get(result.browserContext)?.closing;
+    if (closingGroup) {
+      // A new client can acquire a shared factory lease during idle cleanup.
+      // Release it before waiting so the last old client can close the browser.
+      await result.close();
+      await closingGroup;
+      return this._setupBrowserContext();
+    }
+    let group = idleGroups.get(result.browserContext);
+    if (!group) {
+      group = { browserContext: result.browserContext, contexts: new Set() };
+      idleGroups.set(result.browserContext, group);
+    }
+    group.contexts.add(this);
+    this._idleGroup = group;
+    this._lastActivityAt = Date.now();
+    this._scheduleIdleTimeout();
+    // The factory handed ownership over with close(); a setup failure past
+    // this point would otherwise discard that callback with the browser still
+    // running — and, for storage-state sessions, the disposable profile
+    // pinned forever.
+    try {
+      const { browserContext } = result;
+      await this._setupRequestInterception(browserContext);
+      this._removeRecorderContext = InputRecorder.attachContext(this, browserContext);
+      // First real use of this context: resolve — and, once per backend,
+      // create — the session log before deciding whether to record input.
+      await this.resolveSessionLog();
+      if (this.sessionLog)
+        this._inputRecorder = await InputRecorder.create(this, browserContext);
+      for (const page of browserContext.pages())
+        this._onPageCreated(page);
+      const onPage = (page: playwright.Page) => this._onPageCreated(page);
+      browserContext.on('page', onPage);
+      this._removePageObserver = () => browserContext.off('page', onPage);
+      if (this.config.saveTrace)
+        await acquireTrace(browserContext);
+    } catch (error) {
+      // The shared context may survive this close (siblings hold it), so the
+      // observers registered above must come off explicitly.
+      this._detachFromBrowserContext();
+      await result.close().catch(() => {});
+      throw error;
     }
     return result;
   }
 }
 
+// Playwright's _enableRecorder supports a single event sink per browser
+// context, and a shared (non-isolated CDP) context can serve several sessions
+// at once — a second _enableRecorder call would silently replace the first
+// session's callbacks, and a departing session would leave the sink pointing
+// at its disposed Context. One hub therefore owns a dispatching sink per
+// context. Session logs and on-demand recordings register and deregister with
+// it. The hub carries the enablement promise: a session
+// joining while (or after) another session's _enableRecorder call is in
+// flight must not report recording as ready before it is, and a failed
+// enablement evicts the hub so the next session retries instead of silently
+// recording nothing. When the last consumer leaves, the recorder returns to
+// standby; the same hub arms it again for the next recording.
+type RecordedAction = { page: playwright.Page, code: string, sequence?: number };
+type RecordingTarget = {
+  actions: RecordedAction[];
+  pageIndexes: Map<playwright.Page, number>;
+  state: { stopping: boolean };
+};
+type Recording = { target: RecordingTarget, ready: Promise<playwright.BrowserContext>, lastActivityAt: number };
+const actionIsBuffered = (action: actions.Action): boolean =>
+  action.name === 'click' && action.button === 'left' || action.name === 'navigate';
+const pageAliasFromCode = (code: string): string | undefined =>
+  code.match(/^\s*await\s+(page\d*)\./m)?.[1]
+    ?? code.match(/^\s*await\s+expect\((page\d*)(?:\.|\))/m)?.[1];
+const addMissingPageAlias = (
+  recorded: RecordedAction[],
+  page: playwright.Page,
+  code: string,
+  pageIndexes: Map<playwright.Page, number>,
+  browserContext: playwright.BrowserContext,
+) => {
+  const alias = pageAliasFromCode(code);
+  if (!alias || alias === 'page')
+    return;
+  const declaration = new RegExp(`^\\s*const\\s+${alias}\\s*=`, 'm');
+  if (declaration.test(code) || recorded.some(action => declaration.test(action.code)))
+    return;
+  const initialPageIndex = pageIndexes.get(page);
+  const pageIndex = initialPageIndex ?? browserContext.pages().indexOf(page);
+  if (pageIndex === -1)
+    return;
+  const declarationAction = { page, code: `const ${alias} = context.pages()[${pageIndex}];` };
+  if (initialPageIndex === undefined)
+    recorded.push(declarationAction);
+  else
+    recorded.unshift(declarationAction);
+};
+type RecorderHub = {
+  recorders: Set<InputRecorder>;
+  recordings: Map<Context, RecordingTarget>;
+  starting: number;
+  ready: Promise<void>;
+  arm: () => Promise<void>;
+  ensureArmed: () => Promise<void>;
+  standbyIfIdle: () => Promise<void>;
+};
+const recorderHubs = new WeakMap<playwright.BrowserContext, RecorderHub>();
+const recorderContexts = new WeakMap<playwright.BrowserContext, Set<Context>>();
+
 export class InputRecorder {
   private _context: Context;
   private _browserContext: playwright.BrowserContext;
+  private _lastActions = new WeakMap<playwright.Page, { action: actions.Action, sequence: number }>();
 
   private constructor(context: Context, browserContext: playwright.BrowserContext) {
     this._context = context;
@@ -250,44 +947,232 @@ export class InputRecorder {
 
   static async create(context: Context, browserContext: playwright.BrowserContext) {
     const recorder = new InputRecorder(context, browserContext);
-    await recorder._initialize();
+    const existingHub = recorderHubs.get(browserContext);
+    const hub = InputRecorder._ensureHub(browserContext);
+    hub.recorders.add(recorder);
+    try {
+      await hub.ready;
+      if (existingHub)
+        await hub.ensureArmed();
+    } catch (error) {
+      hub.recorders.delete(recorder);
+      throw error;
+    }
     return recorder;
   }
 
-  private async _initialize() {
-    const sessionLog = this._context.sessionLog!;
-    await (this._browserContext as any)._enableRecorder({
-      mode: 'recording',
-      recorderMode: 'api',
-    }, {
-      actionAdded: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
-        if (this._context.isRunningTool())
+  static attachContext(context: Context, browserContext: playwright.BrowserContext): () => void {
+    let contexts = recorderContexts.get(browserContext);
+    if (!contexts) {
+      contexts = new Set();
+      recorderContexts.set(browserContext, contexts);
+    }
+    contexts.add(context);
+    return () => contexts.delete(context);
+  }
+
+  static async startRecording(context: Context, browserContext: playwright.BrowserContext, target: RecordingTarget): Promise<void> {
+    const existingHub = recorderHubs.get(browserContext);
+    const hub = InputRecorder._ensureHub(browserContext);
+    ++hub.starting;
+    try {
+      await hub.ready;
+      if (existingHub) {
+        await new Promise(resolve => setTimeout(resolve, recorderBufferMs));
+        await hub.arm();
+      }
+      for (const [index, page] of browserContext.pages().entries())
+        target.pageIndexes.set(page, index);
+      hub.recordings.set(context, target);
+    } catch (error) {
+      if (hub.recordings.get(context) === target)
+        hub.recordings.delete(context);
+      throw error;
+    } finally {
+      --hub.starting;
+    }
+  }
+
+  static async stopRecording(context: Context, browserContext: playwright.BrowserContext, target: RecordingTarget): Promise<void> {
+    // Playwright buffers clicks and navigations for 500ms so a later
+    // event can refine them. Keep this recording registered until that last
+    // event arrives; config.timeouts.settle may be shorter or disabled.
+    const recordings = recorderHubs.get(browserContext)?.recordings;
+    await new Promise(resolve => setTimeout(resolve, recorderBufferMs));
+    if (recordings?.get(context) === target) {
+      recordings.delete(context);
+      const hub = recorderHubs.get(browserContext);
+      await hub?.standbyIfIdle().catch(logUnhandledError);
+    }
+  }
+
+  dispose() {
+    const hub = recorderHubs.get(this._browserContext);
+    hub?.recorders.delete(this);
+    void hub?.standbyIfIdle().catch(logUnhandledError);
+  }
+
+  private static _ensureHub(browserContext: playwright.BrowserContext): RecorderHub {
+    const hub = recorderHubs.get(browserContext);
+    if (hub)
+      return hub;
+
+    const recorders = new Set<InputRecorder>();
+    const recordings = new Map<Context, RecordingTarget>();
+    let actionSequence = 0;
+    const lastActionSequence = new WeakMap<playwright.Page, number>();
+    let armed = false;
+    let transition = Promise.resolve();
+    const enqueue = (callback: () => Promise<void>) => {
+      const result = transition.then(callback, callback);
+      transition = result.catch(() => {});
+      return result;
+    };
+    const dispatch = (
+      buffered: boolean,
+      flushable: boolean,
+      log: (recorder: InputRecorder) => void,
+      record: (target: RecordingTarget) => void,
+    ) => {
+      const contexts = new Set<Context>(recorderContexts.get(browserContext));
+      for (const context of recordings.keys())
+        contexts.add(context);
+      const running = [...contexts].filter(context => context.isRunningToolForRecording(buffered));
+      if (!running.length) {
+        for (const recorder of recorders)
+          log(recorder);
+      }
+      for (const [context, target] of recordings) {
+        if ((!target.state.stopping || flushable) && !running.some(runningContext => runningContext !== context)) {
+          record(target);
+          context.markRecordingActivity();
+        }
+      }
+    };
+    const params = {
+        mode: 'recording',
+        recorderMode: 'api',
+        omitCallTracking: true,
+        language: 'javascript',
+    };
+    const sink = {
+        actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
+          const sequence = ++actionSequence;
+          lastActionSequence.set(page, sequence);
+          const action = 'action' in data ? data.action : data;
+          const isAssertion = action.name.startsWith('assert');
+          if (isAssertion)
+            code = code.replace(/^(\s*)\/\/ ?/gm, '$1');
+          const buffered = actionIsBuffered(action);
+          dispatch(
+              buffered,
+              buffered || action.name === 'closePage',
+              recorder => recorder._actionAdded(page, action, isAssertion ? `${expectPrelude}\n${code}` : code, sequence),
+              target => {
+                if (isAssertion && !target.actions.some(action => action.code === expectPrelude))
+                  target.actions.push({ page, code: expectPrelude });
+                addMissingPageAlias(target.actions, page, code, target.pageIndexes, browserContext);
+                target.actions.push({ page, code, sequence });
+              },
+          );
+        },
+        actionUpdated: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
+          const sequence = lastActionSequence.get(page);
+          if (sequence === undefined)
+            return;
+          const action = 'action' in data ? data.action : data;
+          dispatch(
+              true,
+              true,
+              recorder => recorder._actionUpdated(page, action, code, sequence),
+              target => {
+                const recorded = target.actions.findLast(action => action.sequence === sequence);
+                if (recorded)
+                  recorded.code = code;
+              },
+          );
+        },
+        signalAdded: (page: playwright.Page, data: actions.Signal | actions.SignalInContext, code: string) => {
+          const sequence = lastActionSequence.get(page);
+          const signal = 'signal' in data ? data.signal : data;
+          dispatch(
+              true,
+              true,
+              recorder => recorder._signalAdded(page, signal, code, sequence),
+              target => {
+                if (sequence === undefined)
+                  return;
+                const action = target.actions.findLast(action => action.sequence === sequence);
+                if (action && code)
+                  action.code = code;
+              },
+          );
+        },
+    };
+    const arm = async () => {
+      await (browserContext as any)._enableRecorder(params, sink);
+      armed = true;
+    };
+    const created: RecorderHub = {
+      recorders,
+      recordings,
+      starting: 0,
+      ready: enqueue(arm),
+      arm: () => enqueue(arm),
+      ensureArmed: () => enqueue(async () => {
+        if (armed)
           return;
-        const tab = Tab.forPage(page);
-        if (tab)
-          sessionLog.logUserAction(data.action, tab, code, false);
-      },
-      actionUpdated: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
-        if (this._context.isRunningTool())
+        await arm();
+      }),
+      standbyIfIdle: () => enqueue(async () => {
+        if (created.starting || recorders.size || recordings.size)
           return;
-        const tab = Tab.forPage(page);
-        if (tab)
-          sessionLog.logUserAction(data.action, tab, code, true);
-      },
-      signalAdded: (page: playwright.Page, data: actions.SignalInContext) => {
-        if (this._context.isRunningTool())
-          return;
-        if (data.signal.name !== 'navigation')
-          return;
-        const tab = Tab.forPage(page);
-        const navigateAction: actions.Action = {
-          name: 'navigate',
-          url: data.signal.url,
-          signals: [],
-        };
-        if (tab)
-          sessionLog.logUserAction(navigateAction, tab, `await page.goto('${data.signal.url}');`, false);
-      },
+        try {
+          await (browserContext as any)._disableRecorder();
+        } finally {
+          armed = false;
+        }
+      }),
+    };
+    created.ready.catch(() => {
+      if (recorderHubs.get(browserContext) === created)
+        recorderHubs.delete(browserContext);
     });
+    recorderHubs.set(browserContext, created);
+    return created;
+  }
+
+  private _actionAdded(page: playwright.Page, action: actions.Action, code: string, sequence: number) {
+    this._lastActions.set(page, { action, sequence });
+    const tab = this._context.tabForPage(page);
+    if (tab)
+      this._context.sessionLog!.logUserAction(action, tab, code, false);
+  }
+
+  private _actionUpdated(page: playwright.Page, action: actions.Action, code: string, sequence: number) {
+    if (this._lastActions.get(page)?.sequence !== sequence)
+      return;
+    this._lastActions.set(page, { action, sequence });
+    const tab = this._context.tabForPage(page);
+    if (tab)
+      this._context.sessionLog!.logUserAction(action, tab, code, true);
+  }
+
+  private _signalAdded(page: playwright.Page, signal: actions.Signal, code: string, sequence?: number) {
+    const lastAction = this._lastActions.get(page);
+    if (sequence !== undefined && lastAction?.sequence !== sequence)
+      return;
+    const tab = this._context.tabForPage(page);
+    if (signal.name !== 'navigation' && tab && code && lastAction)
+      this._context.sessionLog!.logUserAction(lastAction.action, tab, code, true);
+    if (signal.name !== 'navigation')
+      return;
+    const navigateAction: actions.Action = {
+      name: 'navigate',
+      url: signal.url,
+      signals: [],
+    };
+    if (tab)
+      this._context.sessionLog!.logUserAction(navigateAction, tab, `await page.goto('${signal.url}');`, false);
   }
 }

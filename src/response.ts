@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-import { basename } from 'node:path';
+import fs from 'node:fs';
+import { basename, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import debug from 'debug';
 
@@ -23,7 +24,7 @@ import { compressAriaSnapshot } from './utils/ariaCompression.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
 
 import type { Tab, TabSnapshot } from './tab.js';
-import type { CallToolResult, ResourceLink } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, ResourceLink } from '@modelcontextprotocol/server';
 import type { Context } from './context.js';
 import type { CallToolRequestContext } from './mcp/server.js';
 
@@ -37,30 +38,47 @@ const errorsDebug = debug('pw:mcp:errors');
 
 export class Response {
   private _result: string[] = [];
+  private _notices: string[] = [];
   private _code: string[] = [];
   private _images: { contentType: string, data: Buffer }[] = [];
   private _resourceLinks: ResourceLink[] = [];
   private _context: Context;
   private _includeSnapshot = false;
   private _includeSnapshotCompress: boolean | undefined;
+  private _includeSnapshotBoxes: boolean | undefined;
   private _includeTabs = false;
   private _tabSnapshot: TabSnapshot | undefined;
   private _requestContext: CallToolRequestContext | undefined;
   private _structuredContent: Record<string, unknown> | undefined;
+  private _filesToDeleteOnError = new Set<string>();
 
   readonly toolName: string;
-  readonly toolArgs: Record<string, any>;
+  readonly toolArgs: Record<string, unknown>;
   private _isError: boolean | undefined;
 
-  constructor(context: Context, toolName: string, toolArgs: Record<string, any>, requestContext?: CallToolRequestContext) {
+  constructor(context: Context, toolName: string, toolArgs: Record<string, unknown>, requestContext?: CallToolRequestContext) {
     this._context = context;
     this.toolName = toolName;
     this.toolArgs = toolArgs;
     this._requestContext = requestContext;
   }
 
+  /**
+   * The Context the tool call ran in. The `--save-session` log uses it as
+   * the entry's originating identity: the log is shared backend-wide, and
+   * its pending-action bookkeeping is scoped per context.
+   */
+  get context(): Context {
+    return this._context;
+  }
+
   addResult(result: string) {
     this._result.push(result);
+  }
+
+  addNotice(notice: string) {
+    this._notices.push(notice);
+    this._result.push(notice);
   }
 
   addError(error: string) {
@@ -97,6 +115,14 @@ export class Response {
     return link;
   }
 
+  formatFilePath(filePath: string): string {
+    if (this._context.config.filePaths === 'absolute')
+      return resolve(filePath);
+    if (this._context.config.filePaths === 'relative')
+      return relative(process.cwd(), filePath) || '.';
+    return filePath;
+  }
+
   addFileResourceLink(filePath: string, options?: {
     name?: string;
     title?: string;
@@ -113,6 +139,16 @@ export class Response {
     });
   }
 
+  deleteFileOnError(filePath: string) {
+    this._filesToDeleteOnError.add(filePath);
+  }
+
+  async cleanupFilesOnError() {
+    const files = [...this._filesToDeleteOnError];
+    this._filesToDeleteOnError.clear();
+    await Promise.all(files.map(file => fs.promises.rm(file, { force: true })));
+  }
+
   resourceLinks() {
     return this._resourceLinks;
   }
@@ -125,9 +161,10 @@ export class Response {
     return this._structuredContent;
   }
 
-  setIncludeSnapshot(compress?: boolean) {
+  setIncludeSnapshot(compress?: boolean, boxes?: boolean) {
     this._includeSnapshot = true;
     this._includeSnapshotCompress = compress;
+    this._includeSnapshotBoxes = boxes ?? this._context.config.snapshot?.boxes;
   }
 
   setIncludeTabs() {
@@ -157,13 +194,25 @@ export class Response {
     // All the async snapshotting post-action is happening here.
     // Everything below should race against modal states.
     const currentTab = this._context.currentTab();
-    if (this._includeSnapshot && currentTab)
-      this._tabSnapshot = await currentTab.captureSnapshot();
-
+    // The snapshot of the current tab and the titles of the others are
+    // independent page reads, so they go out together rather than one after the
+    // other. Only the current tab's snapshot also refreshes its title.
     const tabsToUpdate = this._includeTabs
       ? this._context.tabs().filter(tab => !this._includeSnapshot || tab !== currentTab)
       : currentTab && !this._includeSnapshot ? [currentTab] : [];
-    await Promise.allSettled(tabsToUpdate.map(tab => tab.updateTitle()));
+    const [snapshot] = await Promise.all([
+      this._includeSnapshot && currentTab ? currentTab.captureSnapshot(this._includeSnapshotBoxes) : undefined,
+      Promise.allSettled(tabsToUpdate.map(tab => tab.updateTitle())),
+    ]);
+    this._tabSnapshot = snapshot;
+    this._addDownloadErrors();
+  }
+
+  private _addDownloadErrors() {
+    // Saves can fail after their page disappears or after the initiating tool
+    // returns. Report each failure once, without waiting on ongoing downloads.
+    for (const error of this._context.takeDownloadErrors())
+      this.addError(truncateDataUrls(error));
   }
 
   tabSnapshot(): TabSnapshot | undefined {
@@ -171,16 +220,17 @@ export class Response {
   }
 
   serialize(): Pick<CallToolResult, 'content' | 'structuredContent' | 'isError'> {
+    // Also covers failed handlers, which never reach finish(), and saves that
+    // reject during asynchronous session logging after the snapshot completes.
+    this._addDownloadErrors();
     const response: string[] = [];
 
-    // Start with command result.
     if (this._result.length) {
       response.push('### Result');
       response.push(this._result.join('\n'));
       response.push('');
     }
 
-    // Add code if it exists.
     if (this._code.length) {
       response.push(`### Ran Playwright code
 \`\`\`js
@@ -189,28 +239,24 @@ ${this._code.join('\n')}
       response.push('');
     }
 
-    // List browser tabs.
     if (this._includeSnapshot || this._includeTabs)
       response.push(...renderTabsMarkdown(this._context.tabs(), this._includeTabs));
 
-    // Add snapshot if provided.
     if (this._tabSnapshot?.modalStates.length) {
       response.push(...renderModalStates(this._context, this._tabSnapshot.modalStates));
       response.push('');
     } else if (this._tabSnapshot) {
-      response.push(renderTabSnapshot(this._tabSnapshot, { compress: this._includeSnapshotCompress }));
+      response.push(renderTabSnapshot(this._tabSnapshot, file => this.formatFilePath(file), { compress: this._includeSnapshotCompress }));
       response.push('');
     }
 
-    // Main response part
-    const content: CallToolResult['content'] = [
-      { type: 'text', text: response.join('\n') },
-    ];
+    const imagesOnly = this._context.config.imageResponses === 'only' && this._images.length > 0 && !this._isError;
+    const text = imagesOnly ? this._notices.join('\n') : response.join('\n');
+    const content: CallToolResult['content'] = !imagesOnly || text ? [{ type: 'text', text }] : [];
 
     for (const link of this._resourceLinks)
       content.push(link);
 
-    // Image attachments.
     if (this._context.config.imageResponses !== 'omit') {
       for (const image of this._images)
         content.push({ type: 'image', data: image.data.toString('base64'), mimeType: image.contentType });
@@ -224,7 +270,7 @@ ${this._code.join('\n')}
   }
 }
 
-function renderTabSnapshot(tabSnapshot: TabSnapshot, options: { compress?: boolean } = {}): string {
+function renderTabSnapshot(tabSnapshot: TabSnapshot, formatFilePath: (file: string) => string, options: { compress?: boolean } = {}): string {
   const lines: string[] = [];
   const ariaSnapshot = options.compress ? compressAriaSnapshot(tabSnapshot.ariaSnapshot).output : tabSnapshot.ariaSnapshot;
 
@@ -238,8 +284,10 @@ function renderTabSnapshot(tabSnapshot: TabSnapshot, options: { compress?: boole
   if (tabSnapshot.downloads.length) {
     lines.push(`### Downloads`);
     for (const entry of tabSnapshot.downloads) {
-      if (entry.finished)
-        lines.push(`- Downloaded file ${entry.download.suggestedFilename()} to ${entry.outputFile}`);
+      if (entry.error !== undefined)
+        lines.push(`- Failed to download ${entry.download.suggestedFilename()}: ${truncateDataUrls(entry.error)}`);
+      else if (entry.finished)
+        lines.push(`- Downloaded file ${entry.download.suggestedFilename()} to ${formatFilePath(entry.outputFile)}`);
       else
         lines.push(`- Downloading file ${entry.download.suggestedFilename()} ...`);
     }
