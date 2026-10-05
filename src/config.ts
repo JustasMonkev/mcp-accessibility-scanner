@@ -596,13 +596,16 @@ function proxySettingsFromString(proxy: string): NonNullable<LaunchOptions['prox
   return { server: proxy };
 }
 
-// A literal '%' that does not start an escape is kept as typed.
+// Decodes each run of valid escapes on its own, so a literal '%' that does not
+// start an escape is kept as typed without leaving other escapes encoded.
 function decodeProxyCredential(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
+  return value.replace(/(?:%[0-9a-fA-F]{2})+/g, escapes => {
+    try {
+      return decodeURIComponent(escapes);
+    } catch {
+      return escapes;
+    }
+  });
 }
 
 function envToString(value: string | undefined): string | undefined {

@@ -119,6 +119,8 @@ describe('Config', () => {
     it.each([
       ['http://user:p%40ss@proxy.test:3128', { server: 'http://proxy.test:3128', username: 'user', password: 'p@ss' }],
       ['http://user:pa%ss@proxy.test:3128', { server: 'http://proxy.test:3128', username: 'user', password: 'pa%ss' }],
+      ['http://us%C3%A9r:p%40ss%word@proxy.test:3128', { server: 'http://proxy.test:3128', username: 'usér', password: 'p@ss%word' }],
+      ['http://user:%FF%40@proxy.test:3128', { server: 'http://proxy.test:3128', username: 'user', password: '%FF%40' }],
       ['user:secret@proxy.test:3128', { server: 'http://proxy.test:3128', username: 'user', password: 'secret' }],
       ['socks5://user@proxy.test:1080', { server: 'socks5://proxy.test:1080', username: 'user', password: '' }],
       ['http://proxy.test:3128', { server: 'http://proxy.test:3128' }],
