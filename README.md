@@ -139,6 +139,8 @@ Use `--extension` to connect through the current [Playwright Extension](https://
 npx mcp-accessibility-scanner --extension
 ```
 
+The server only attaches to tabs it creates itself through the extension. Tabs that are already open in your browser, and tabs you open while connected, are never attached or exposed to MCP clients, so tools run in a new tab rather than in the tab you had open.
+
 Set `PLAYWRIGHT_MCP_EXTENSION_TOKEN` to the token shown by the extension to bypass the connection approval dialog. The relay's CDP WebSocket endpoint always requires a separate random token, generated per relay and appended automatically for the server's own connection. This CDP token is never passed in Chrome's launch arguments or extension URL; the extension approval token cannot authenticate a CDP client.
 Token-bypass connections are not background-safe: Chrome focuses the connection tab and window, and client-created tabs remain open after disconnect ([upstream limitation](https://github.com/microsoft/playwright/issues/42343)).
 With a token, the extension must connect and finish setup within 30 seconds after the connection page opens. Failed attempts release the relay so the next tool call can retry. Without a token, manual approval waits until you approve or cancel the call.

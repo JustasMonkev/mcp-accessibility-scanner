@@ -86,6 +86,14 @@ describe('extension protocol v2', () => {
     expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(0);
     expect(messages).toEqual([]);
 
+    // A tab the user opens once auto-attach is on was not created by MCP either.
+    const userTab = { id: 9, index: 2, windowId: 1, url: 'https://example.net', active: false, pinned: false };
+    tabs.set(9, userTab);
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [userTab]);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(0);
+    expect(messages).toEqual([]);
+
     await expect(handler.handleCDPCommand('Target.createTarget', { url: 'https://example.org' }, undefined))
         .resolves.toEqual({ result: { targetId: 'target-8' } });
     expect(sendCommand.mock.calls.filter(([method, params]) => method === 'chrome.debugger.attach' && params[0].tabId === 8)).toHaveLength(1);
