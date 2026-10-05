@@ -68,7 +68,7 @@ npx mcp-accessibility-scanner --headless --browser chrome
 | `--cdp-launch-cwd <path>` | Working directory for the launched app |
 | `--cdp-launch-port <port>` | Fixed CDP port for the launched app |
 | `--cdp-launch-startup-timeout <ms>` | How long to wait for the launched app CDP endpoint |
-| `--proxy-server <proxy>` | Proxy server, e.g. `"http://myproxy:3128"` |
+| `--proxy-server <proxy>` | Proxy server, e.g. `"http://myproxy:3128"`; credentials in the URL (`"http://user:password@myproxy:3128"`) are sent as proxy username/password |
 | `--proxy-bypass <bypass>` | Comma-separated domains to bypass proxy |
 | `--allowed-origins <origins>` | Semicolon-separated allowed origins |
 | `--blocked-origins <origins>` | Semicolon-separated blocked origins |

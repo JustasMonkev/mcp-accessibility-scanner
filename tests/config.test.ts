@@ -109,6 +109,29 @@ describe('Config', () => {
     });
   });
 
+  describe('proxy server credentials', () => {
+    beforeEach(() => {
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', '');
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', '');
+    });
+    afterEach(() => vi.unstubAllEnvs());
+
+    it.each([
+      ['http://user:p%40ss@proxy.test:3128', { server: 'http://proxy.test:3128', username: 'user', password: 'p@ss' }],
+      ['user:secret@proxy.test:3128', { server: 'http://proxy.test:3128', username: 'user', password: 'secret' }],
+      ['socks5://user@proxy.test:1080', { server: 'socks5://proxy.test:1080', username: 'user', password: '' }],
+      ['http://proxy.test:3128', { server: 'http://proxy.test:3128' }],
+      ['proxy.test:3128', { server: 'proxy.test:3128' }],
+    ])('moves credentials out of --proxy-server %s', async (proxyServer, expected) => {
+      expect((await resolveCLIConfig({ proxyServer, proxyBypass: 'private.test' })).browser.launchOptions.proxy).toEqual({ ...expected, bypass: 'private.test' });
+    });
+
+    it('moves credentials out of PLAYWRIGHT_MCP_PROXY_SERVER', async () => {
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', 'http://user:secret@proxy.test:3128');
+      expect((await resolveCLIConfig({})).browser.launchOptions.proxy).toEqual({ server: 'http://proxy.test:3128', username: 'user', password: 'secret' });
+    });
+  });
+
   describe('file paths', () => {
     beforeEach(() => vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', ''));
     afterEach(() => vi.unstubAllEnvs());

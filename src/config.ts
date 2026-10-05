@@ -254,9 +254,7 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
     launchOptions.chromiumSandbox = cliOptions.sandbox;
 
   if (cliOptions.proxyServer) {
-    launchOptions.proxy = {
-      server: cliOptions.proxyServer
-    };
+    launchOptions.proxy = proxySettingsFromString(cliOptions.proxyServer);
     if (cliOptions.proxyBypass)
       launchOptions.proxy.bypass = cliOptions.proxyBypass;
   }
@@ -578,6 +576,24 @@ function parseFilePaths(value: unknown): Config['filePaths'] {
   if (value === undefined || value === 'relative' || value === 'absolute')
     return value;
   throw new Error('filePaths must be "relative" or "absolute".');
+}
+
+// Moves credentials from the proxy string, e.g. "http://user:pass@myproxy:3128", into explicit fields.
+function proxySettingsFromString(proxy: string): NonNullable<LaunchOptions['proxy']> {
+  try {
+    // Browsers allow to specify proxy without a protocol, defaulting to http.
+    const trimmed = proxy.trim();
+    const url = new URL(/^\w+:\/\//.test(trimmed) ? trimmed : 'http://' + trimmed);
+    if (url.username || url.password) {
+      return {
+        server: url.protocol + '//' + url.host,
+        username: decodeURIComponent(url.username),
+        password: decodeURIComponent(url.password),
+      };
+    }
+  } catch {
+  }
+  return { server: proxy };
 }
 
 function envToString(value: string | undefined): string | undefined {
