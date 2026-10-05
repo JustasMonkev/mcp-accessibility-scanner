@@ -29,7 +29,7 @@ import type { Tab } from '../src/extension/protocol.js';
 vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
 
 describe('extension protocol v2', () => {
-  it('tracks tabs and routes top-level, child, and browser CDP commands', async () => {
+  it('only attaches to MCP-created tabs and routes top-level, child, and browser CDP commands', async () => {
     const tabs = new Map<number, Tab>([
       [7, { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false }],
     ]);
@@ -56,80 +56,80 @@ describe('extension protocol v2', () => {
 
     await expect(handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined))
         .resolves.toEqual({ result: {} });
-    expect(sendCommand).toHaveBeenNthCalledWith(1, 'chrome.debugger.attach', [{ tabId: 7 }, '1.3']);
-    expect(sendCommand).toHaveBeenNthCalledWith(2, 'chrome.debugger.sendCommand', [{ tabId: 7 }, 'Target.getTargetInfo']);
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(0);
+    expect(messages).toEqual([]);
+
+    await expect(handler.handleCDPCommand('Target.createTarget', { url: 'https://example.org' }, undefined))
+        .resolves.toEqual({ result: { targetId: 'target-8' } });
+    expect(sendCommand.mock.calls.filter(([method, params]) => method === 'chrome.debugger.attach' && params[0].tabId === 8)).toHaveLength(1);
     expect(messages[0]).toMatchObject({
       method: 'Target.attachedToTarget',
-      params: { sessionId: 'pw-tab-1', targetInfo: { targetId: 'target-7', attached: true } },
+      params: { sessionId: 'pw-tab-1', targetInfo: { targetId: 'target-8', attached: true } },
     });
 
     await handler.forwardToExtension('Runtime.evaluate', { expression: '1 + 1' }, 'pw-tab-1');
     expect(sendCommand).toHaveBeenLastCalledWith('chrome.debugger.sendCommand', [
-      { tabId: 7, sessionId: undefined },
+      { tabId: 8, sessionId: undefined },
       'Runtime.evaluate',
       { expression: '1 + 1' },
     ]);
 
     await handler.forwardToExtension('Page.enable', undefined, 'pw-tab-1');
     expect(sendCommand).toHaveBeenLastCalledWith('chrome.debugger.sendCommand', [
-      { tabId: 7, sessionId: undefined },
+      { tabId: 8, sessionId: undefined },
       'Page.enable',
     ]);
 
     handler.handleExtensionEvent('chrome.debugger.onEvent', [
-      { tabId: 7 },
+      { tabId: 8 },
       'Target.attachedToTarget',
       { sessionId: 'child-1' },
     ]);
     await handler.forwardToExtension('Runtime.enable', {}, 'child-1');
     expect(sendCommand).toHaveBeenLastCalledWith('chrome.debugger.sendCommand', [
-      { tabId: 7, sessionId: 'child-1' },
+      { tabId: 8, sessionId: 'child-1' },
       'Runtime.enable',
       {},
     ]);
 
-    await expect(handler.handleCDPCommand('Target.createTarget', { url: 'https://example.org' }, undefined))
-        .resolves.toEqual({ result: { targetId: 'target-8' } });
-    expect(sendCommand.mock.calls.filter(([method, params]) => method === 'chrome.debugger.attach' && params[0].tabId === 8)).toHaveLength(1);
-    await expect(handler.handleCDPCommand('Target.closeTarget', { targetId: 'target-8' }, undefined))
-        .resolves.toEqual({ result: { success: true } });
-    expect(sendCommand).toHaveBeenLastCalledWith('chrome.tabs.remove', [8]);
-
     await handler.forwardToExtension('Storage.getCookies', {}, undefined);
     expect(sendCommand).toHaveBeenLastCalledWith('chrome.debugger.sendCommand', [
-      { tabId: 7 },
+      { tabId: 8 },
       'Storage.getCookies',
       {},
     ]);
 
+    await expect(handler.handleCDPCommand('Target.closeTarget', { targetId: 'target-8' }, undefined))
+        .resolves.toEqual({ result: { success: true } });
+    expect(sendCommand).toHaveBeenLastCalledWith('chrome.tabs.remove', [8]);
+
     await expect(handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: false }, undefined))
         .resolves.toEqual({ result: {} });
     expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.detach')).toEqual([
-      ['chrome.debugger.detach', [{ tabId: 7 }]],
       ['chrome.debugger.detach', [{ tabId: 8 }]],
     ]);
-    expect(messages.filter(message => message.method === 'Target.detachedFromTarget')).toHaveLength(2);
+    expect(messages.filter(message => message.method === 'Target.detachedFromTarget')).toHaveLength(1);
   });
 
-  it('rejects initial auto-attach when an existing tab cannot be attached', async () => {
-    const sendCommand = vi.fn(async (method: string) => {
+  it('rejects target creation when the created tab cannot be attached', async () => {
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.tabs.create')
+        return { id: 7, index: 0, windowId: 1, url: params[0].url, active: true, pinned: false };
       if (method === 'chrome.debugger.attach')
         throw new Error('attach failed');
       return {};
     });
     const handler = new ExtensionProtocolV2(sendCommand);
-    handler.handleExtensionEvent('chrome.tabs.onCreated', [
-      { id: 7, index: 0, windowId: 1, active: true, pinned: false },
-    ]);
-
-    await expect(handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined))
+    await expect(handler.handleCDPCommand('Target.createTarget', { url: 'https://example.org' }, undefined))
         .rejects.toThrow('attach failed');
   });
 
   it('serializes concurrent auto-attach state changes', async () => {
     let resolveDetach!: () => void;
     const detach = new Promise<void>(resolve => resolveDetach = resolve);
-    const sendCommand = vi.fn(async (method: string) => {
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.tabs.create')
+        return { id: 7, index: 0, windowId: 1, url: params[0].url, active: true, pinned: false };
       if (method === 'chrome.debugger.sendCommand')
         return { targetInfo: { targetId: 'target-7', type: 'page' } };
       if (method === 'chrome.debugger.detach')
@@ -137,10 +137,8 @@ describe('extension protocol v2', () => {
       return {};
     });
     const handler = new ExtensionProtocolV2(sendCommand);
-    handler.handleExtensionEvent('chrome.tabs.onCreated', [
-      { id: 7, index: 0, windowId: 1, active: true, pinned: false },
-    ]);
     await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+    await handler.handleCDPCommand('Target.createTarget', { url: 'https://example.org' }, undefined);
 
     const disabling = handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: false }, undefined);
     await vi.waitFor(() => expect(sendCommand.mock.calls.some(([method]) => method === 'chrome.debugger.detach')).toBe(true));

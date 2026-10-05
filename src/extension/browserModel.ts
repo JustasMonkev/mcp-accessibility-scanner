@@ -42,6 +42,7 @@ export class BrowserModel {
   private _sendToCDPClient: SendToCDPClient | null = null;
   private _knownTabs = new Map<number, Tab>();
   private _tabSessions = new Map<number, TabSession>();
+  private _attachableTabIds = new Set<number>();
   private _tabAttachmentPromises = new Map<number, Promise<TabSession>>();
   private _autoAttachOperation = Promise.resolve();
   private _autoAttach = false;
@@ -63,12 +64,13 @@ export class BrowserModel {
     if (tab.id === undefined)
       return;
     this._knownTabs.set(tab.id, tab);
-    if (this._autoAttach)
+    if (this._autoAttach && this._attachableTabIds.has(tab.id))
       void this._attachTab(tab.id).catch(logUnhandledError);
   }
 
   onTabRemoved(tabId: number): void {
     this._knownTabs.delete(tabId);
+    this._attachableTabIds.delete(tabId);
     this._detachTab(tabId);
   }
 
@@ -94,7 +96,7 @@ export class BrowserModel {
   enableAutoAttach(): Promise<void> {
     return this._runAutoAttachOperation(async () => {
       this._autoAttach = true;
-      await Promise.all([...this._knownTabs.keys()].map(tabId => this._attachTab(tabId)));
+      await Promise.all([...this._attachableTabIds].map(tabId => this._attachTab(tabId)));
     });
   }
 
@@ -114,6 +116,7 @@ export class BrowserModel {
     if (tab?.id === undefined)
       throw new Error('Failed to create tab');
     this._knownTabs.set(tab.id, tab);
+    this._attachableTabIds.add(tab.id);
     const tabSession = await this._attachTab(tab.id);
     return { targetId: tabSession.targetInfo?.targetId };
   }
