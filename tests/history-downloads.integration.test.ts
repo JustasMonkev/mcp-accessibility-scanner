@@ -31,9 +31,9 @@ const channel = process.env.MCP_TEST_BROWSER_CHANNEL || 'chromium';
 const enableBFCache = process.env.MCP_TEST_ENABLE_BFCACHE === '1';
 const require = createRequire(import.meta.url);
 const versions = { playwright: require('playwright/package.json').version, playwrightCore: require('playwright-core/package.json').version };
-// Exact native crash controls captured in CI runs 35692199642 and 36224901523
-// and on local macOS. New versions must prove saved bytes; they do not inherit
-// an assumed browser limitation.
+// Exact native crash controls captured in CI runs 35692199642, 36224901523,
+// 37364186991 and 37364651745, and on local macOS. New versions must prove
+// saved bytes; they do not inherit an assumed browser limitation.
 const observedNativeCrashes = new Set([
   'darwin/chromium/153.0.8010.12',
   'linux/chromium/153.0.8010.12',
@@ -41,8 +41,10 @@ const observedNativeCrashes = new Set([
   'win32/chrome/153.0.8010.53',
   'win32/chrome/154.0.8037.58',
   'win32/chrome/154.0.8037.93',
+  'win32/chrome/154.0.8037.98',
   'win32/msedge/153.0.4234.48',
   'win32/msedge/154.0.4258.37',
+  'win32/msedge/154.0.4258.62',
 ]);
 const restoreProbe = '<script>addEventListener("pageshow", e => document.body.dataset.restored = String(e.persisted))</script>';
 const downloadBytes = Buffer.from('Local download: verified after profile reuse.\n');
@@ -564,14 +566,26 @@ it.each(['context', 'browser'] as const)('reports a named error when the %s is c
   // Reported once: the failure is consumed, not repeated on every later response.
   expect(textOf(await client.callTool({ name: 'browser_snapshot', arguments: {} }))).not.toContain('Failed to save download');
   await client.ping();
-  // A relaunch of the reused profile can hit the observed native crash; only
-  // other tuples are required to prove the server recovers with a new browser.
-  if (!isObservedNativeCrashTuple(browser)) {
-    await call(client, 'browser_navigate', { url: `${origin}/slow-downloads` });
+  // Every tuple must try to recover with a new browser. A relaunch of the
+  // reused profile can hit the observed native crash, which excuses the
+  // recovery checks only when it is seen: a new browser launched, then gone,
+  // and a call failed. A failure before any relaunch is never excused.
+  const navigated = await client.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/slow-downloads` } });
+  // Read raw: after the known crash the snapshot itself can be an error result.
+  const snapshotted = navigated.isError ? undefined : await client.callTool({ name: 'browser_snapshot', arguments: {} });
+  const relaunched = launched.at(-1)!;
+  const crashed = isObservedNativeCrashTuple(browser) && launched.length > 1 && relaunched !== first
+    && !relaunched.browser()?.isConnected() && (navigated.isError || snapshotted?.isError);
+  if (crashed) {
+    process.stdout.write(JSON.stringify({ case: 'known-native-crash-on-recovery', closing, platform: process.platform, channel,
+      browser: browser.version(), ...versions }) + '\n');
+  } else {
+    expect(navigated.isError, textOf(navigated)).not.toBe(true);
     expect(launched.length).toBeGreaterThan(1);
-    expect(launched.at(-1)).not.toBe(first);
-    expect(launched.at(-1)!.browser()!.isConnected()).toBe(true);
-    expect(await call(client, 'browser_snapshot')).toContain('Slow download fixture');
+    expect(relaunched).not.toBe(first);
+    expect(relaunched.browser()!.isConnected()).toBe(true);
+    expect(snapshotted!.isError, textOf(snapshotted!)).not.toBe(true);
+    expect(textOf(snapshotted!)).toContain('Slow download fixture');
   }
   await client.ping();
   expect(await stopWatching()).toEqual([]);
