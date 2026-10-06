@@ -568,13 +568,14 @@ it.each(['context', 'browser'] as const)('reports a named error when the %s is c
   await client.ping();
   // Every tuple must try to recover with a new browser. A relaunch of the
   // reused profile can hit the observed native crash, which excuses the
-  // recovery checks only when it is seen: the new browser gone and a call failed.
+  // recovery checks only when it is seen: a new browser launched, then gone,
+  // and a call failed. A failure before any relaunch is never excused.
   const navigated = await client.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/slow-downloads` } });
   // Read raw: after the known crash the snapshot itself can be an error result.
   const snapshotted = navigated.isError ? undefined : await client.callTool({ name: 'browser_snapshot', arguments: {} });
   const relaunched = launched.at(-1)!;
-  const crashed = isObservedNativeCrashTuple(browser) && !relaunched.browser()?.isConnected()
-    && (navigated.isError || snapshotted?.isError);
+  const crashed = isObservedNativeCrashTuple(browser) && launched.length > 1 && relaunched !== first
+    && !relaunched.browser()?.isConnected() && (navigated.isError || snapshotted?.isError);
   if (crashed) {
     process.stdout.write(JSON.stringify({ case: 'known-native-crash-on-recovery', closing, platform: process.platform, channel,
       browser: browser.version(), ...versions }) + '\n');
