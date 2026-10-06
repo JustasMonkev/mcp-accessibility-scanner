@@ -56,6 +56,11 @@ export class BrowserModel {
   private _attachableTabIds = new Set<number>();
   // Set once the extension has finished reporting the tabs the user shared.
   private _initialized = false;
+  // The connect page this relay launched Chrome with: the first reported tab
+  // showing it. Cleaned up at most once, then forgotten, so a copy of the page
+  // or a seed the user navigated away is never probed again.
+  private _seedTabId: number | undefined;
+  private _seedSettled = false;
   private _tabAttachmentPromises = new Map<number, Promise<TabSession>>();
   // Every attempt from start to settlement. A detach cancels an attempt by
   // removing it from _tabAttachmentPromises before it settles, so that map
@@ -93,6 +98,8 @@ export class BrowserModel {
     if (tab.id === undefined)
       return;
     this._knownTabs.set(tab.id, tab);
+    if (!this._seedSettled && this._seedTabId === undefined && this._isThisRelaysConnectPage(tab.url))
+      this._seedTabId = tab.id;
     if (this._isSharedOrOpenedByControlledTab(tab))
       this._attachableTabIds.add(tab.id);
     if (this._autoAttach && this._attachableTabIds.has(tab.id))
@@ -113,7 +120,26 @@ export class BrowserModel {
     return tab.openerTabId !== undefined && this._attachableTabIds.has(tab.openerTabId);
   }
 
+  private _isThisRelaysConnectPage(url: string | undefined): boolean {
+    if (!this._connectPagePrefix || !url)
+      return false;
+    // Compare the relay endpoint exactly: a prefix match would also take
+    // another relay whose endpoint merely starts with this one.
+    try {
+      const page = new URL(url);
+      const expected = new URL(this._connectPagePrefix);
+      return page.origin === expected.origin && page.pathname === expected.pathname
+        && page.searchParams.get('mcpRelayUrl') === expected.searchParams.get('mcpRelayUrl');
+    } catch {
+      return false;
+    }
+  }
+
   onTabRemoved(tabId: number): void {
+    if (tabId === this._seedTabId) {
+      this._seedTabId = undefined;
+      this._seedSettled = true;
+    }
     this._knownTabs.delete(tabId);
     this._attachableTabIds.delete(tabId);
     this._pendingStaleDetaches.delete(tabId);
@@ -226,34 +252,33 @@ export class BrowserModel {
         throw new Error(`Failed to attach tab ${tab.id}: ${retryError} (first attempt: ${firstError})`, { cause: firstError });
       }
     });
-    if (this._connectPagePrefix) {
-      const connectPagePrefix = this._connectPagePrefix;
-      await Promise.allSettled([...this._knownTabs]
-          .filter(([tabId, knownTab]) => tabId !== tab.id && knownTab.url?.startsWith(connectPagePrefix))
-          .map(async ([tabId]) => {
-            // The connect page is never attachable, so the seed has no
-            // debugger. The seed is the connect page this relay launched
-            // Chrome with, and only its live URL can tell whether the user
-            // navigated it somewhere else, which must not be closed. Attach
-            // just long enough to read that URL: no session is created, so
-            // no event or command for the page ever reaches the CDP client.
-            const probing = !this._tabSessions.has(tabId);
-            if (probing)
-              await this._sendToExtension('chrome.debugger.attach', [{ tabId }, '1.3']);
-            let removed = false;
-            try {
-              const result = await this._sendDebuggerCommand({ tabId }, 'Target.getTargetInfo', undefined);
-              if (result?.targetInfo?.url?.startsWith(connectPagePrefix)) {
-                await this._sendToExtension('chrome.tabs.remove', [tabId]);
-                removed = true;
-              }
-            } finally {
-              if (probing && !removed)
-                await this._sendToExtension('chrome.debugger.detach', [{ tabId }]).catch(() => {});
-            }
-          }));
+    const seedTabId = this._seedTabId;
+    if (seedTabId !== undefined && seedTabId !== tab.id) {
+      this._seedTabId = undefined;
+      this._seedSettled = true;
+      await this._closeSeedIfUnchanged(seedTabId).catch(() => {});
     }
     return { targetId: tabSession.targetInfo?.targetId };
+  }
+
+  private async _closeSeedIfUnchanged(tabId: number): Promise<void> {
+    // The connect page is never attachable, so the seed has no debugger, and
+    // only its live URL can tell whether the user navigated it somewhere
+    // else, which must not be closed. Attach just long enough to read that
+    // URL: no session is created, so no event or command for the page ever
+    // reaches the CDP client. This happens once per connection.
+    await this._sendToExtension('chrome.debugger.attach', [{ tabId }, '1.3']);
+    let removed = false;
+    try {
+      const result = await this._sendDebuggerCommand({ tabId }, 'Target.getTargetInfo', undefined);
+      if (this._isThisRelaysConnectPage(result?.targetInfo?.url)) {
+        await this._sendToExtension('chrome.tabs.remove', [tabId]);
+        removed = true;
+      }
+    } finally {
+      if (!removed)
+        await this._sendToExtension('chrome.debugger.detach', [{ tabId }]).catch(() => {});
+    }
   }
 
   async closeTarget(targetId: string | undefined): Promise<{ success: boolean }> {
