@@ -204,8 +204,11 @@ export class BrowserModel {
           .filter(([tabId, knownTab]) => tabId !== tab.id && knownTab.url?.startsWith(connectPagePrefix))
           .map(async ([tabId]) => {
             // Auto-attach covers only MCP-created tabs, so the seed has no
-            // debugger. Attach just long enough to read its live URL, without
-            // a session, so the page is never exposed to the CDP client.
+            // debugger. The seed is the connect page this relay launched
+            // Chrome with, and only its live URL can tell whether the user
+            // navigated it somewhere else, which must not be closed. Attach
+            // just long enough to read that URL: no session is created, so
+            // no event or command for the page ever reaches the CDP client.
             const probing = !this._tabSessions.has(tabId);
             if (probing)
               await this._sendToExtension('chrome.debugger.attach', [{ tabId }, '1.3']);

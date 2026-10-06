@@ -180,6 +180,9 @@ describe('extension protocol v2', () => {
         const tabId = params[0].tabId;
         if (!attachedTabs.has(tabId))
           throw new Error(`Debugger is not attached to the tab with id: ${tabId}`);
+        // A probed page keeps emitting its own events while attached.
+        if (tabId === 10)
+          handler.handleExtensionEvent('chrome.debugger.onEvent', [{ tabId }, 'Page.frameNavigated', { frame: { url: 'https://example.com' } }]);
         const url = tabId === 7 ? `${connectPagePrefix}&client=current` : tabId === 10 ? 'https://example.com' : undefined;
         return { targetInfo: { targetId: `target-${tabId}`, type: 'page', url } };
       }
@@ -187,12 +190,17 @@ describe('extension protocol v2', () => {
         throw new Error('tab already closed');
       return {};
     });
+    const messages: CDPMessage[] = [];
     const handler = new ExtensionProtocolV2(sendCommand, connectPagePrefix);
-    handler.handleExtensionEvent('chrome.tabs.onCreated', [
+    handler.connectOverCDP(message => messages.push(message));
+    // Tab 10 still reports the connect page it was created with, but the user
+    // has since navigated it to a page of their own.
+    for (const tab of [
       { id: 7, url: `${connectPagePrefix}&client=current` },
       { id: 9, url: `chrome-extension://${EXTENSION_ID}/connect.html?mcpRelayUrl=ws%3A%2F%2F127.0.0.1%2Fother` },
       { id: 10, url: `${connectPagePrefix}&client=current` },
-    ]);
+    ])
+      handler.handleExtensionEvent('chrome.tabs.onCreated', [tab]);
 
     await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
     await expect(handler.handleCDPCommand('Target.createTarget', {}, undefined))
@@ -204,7 +212,12 @@ describe('extension protocol v2', () => {
     // Seeds are probed, never auto-attached: another relay's seed is left
     // alone, and the one that navigated away is detached again.
     expect(sendCommand).not.toHaveBeenCalledWith('chrome.debugger.attach', [{ tabId: 9 }, '1.3']);
+    expect(sendCommand).toHaveBeenCalledWith('chrome.debugger.detach', [{ tabId: 10 }]);
     expect([...attachedTabs]).toEqual([8]);
+    // A probe creates no session: the CDP client only ever learns of the tab
+    // MCP created, never of a seed or the page the user navigated one to.
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ method: 'Target.attachedToTarget', params: { targetInfo: { targetId: 'target-8' } } });
   });
 
   it('serializes concurrent auto-attach state changes', async () => {
