@@ -66,6 +66,7 @@ export class ExtensionProtocolV2 {
         break;
       }
       case 'extension.initialized': {
+        this._model.onInitialized();
         this._ready.resolve();
         break;
       }

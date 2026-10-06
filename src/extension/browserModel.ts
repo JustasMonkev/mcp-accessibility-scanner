@@ -15,6 +15,7 @@
  */
 
 import { logUnhandledError } from '../utils/log.js';
+import { EXTENSION_ID } from './protocol.js';
 
 import type { DebuggerSession, Debuggee, Tab } from './protocol.js';
 
@@ -42,12 +43,19 @@ type TabSession = {
 // fresh attachment. Auto-attach must not fail its initialization over it.
 class TabDetachedWhileAttachingError extends Error {}
 
+const CONNECT_PAGE_URL = `chrome-extension://${EXTENSION_ID}/connect.html`;
+
 export class BrowserModel {
   private _sendToExtension: SendCommand;
   private _sendToCDPClient: SendToCDPClient | null = null;
   private _knownTabs = new Map<number, Tab>();
   private _tabSessions = new Map<number, TabSession>();
+  // The tabs this connection may attach: the ones the user shared, the ones
+  // MCP created, and the ones those opened. Every other reported tab is only
+  // recorded.
   private _attachableTabIds = new Set<number>();
+  // Set once the extension has finished reporting the tabs the user shared.
+  private _initialized = false;
   private _tabAttachmentPromises = new Map<number, Promise<TabSession>>();
   // Every attempt from start to settlement. A detach cancels an attempt by
   // removing it from _tabAttachmentPromises before it settles, so that map
@@ -77,12 +85,32 @@ export class BrowserModel {
     this._sendToCDPClient?.(message);
   }
 
+  onInitialized(): void {
+    this._initialized = true;
+  }
+
   onTabCreated(tab: Tab): void {
     if (tab.id === undefined)
       return;
     this._knownTabs.set(tab.id, tab);
+    if (this._isSharedOrOpenedByControlledTab(tab))
+      this._attachableTabIds.add(tab.id);
     if (this._autoAttach && this._attachableTabIds.has(tab.id))
       void this._attachTab(tab.id).catch(logUnhandledError);
+  }
+
+  private _isSharedOrOpenedByControlledTab(tab: Tab): boolean {
+    // The connect page is the extension's own UI, never a page to automate.
+    if (tab.url?.startsWith(CONNECT_PAGE_URL))
+      return false;
+    // Before initialization the extension reports exactly the tabs the user
+    // approved for this connection.
+    if (!this._initialized)
+      return true;
+    // Afterwards a reported tab is one opened in the browser. Only a popup or
+    // link target opened by a tab this connection controls belongs to it; a
+    // tab the user opens on their own stays private.
+    return tab.openerTabId !== undefined && this._attachableTabIds.has(tab.openerTabId);
   }
 
   onTabRemoved(tabId: number): void {
@@ -203,7 +231,7 @@ export class BrowserModel {
       await Promise.allSettled([...this._knownTabs]
           .filter(([tabId, knownTab]) => tabId !== tab.id && knownTab.url?.startsWith(connectPagePrefix))
           .map(async ([tabId]) => {
-            // Auto-attach covers only MCP-created tabs, so the seed has no
+            // The connect page is never attachable, so the seed has no
             // debugger. The seed is the connect page this relay launched
             // Chrome with, and only its live URL can tell whether the user
             // navigated it somewhere else, which must not be closed. Attach
