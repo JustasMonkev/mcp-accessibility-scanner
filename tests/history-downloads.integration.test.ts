@@ -566,14 +566,25 @@ it.each(['context', 'browser'] as const)('reports a named error when the %s is c
   // Reported once: the failure is consumed, not repeated on every later response.
   expect(textOf(await client.callTool({ name: 'browser_snapshot', arguments: {} }))).not.toContain('Failed to save download');
   await client.ping();
-  // A relaunch of the reused profile can hit the observed native crash; only
-  // other tuples are required to prove the server recovers with a new browser.
-  if (!isObservedNativeCrashTuple(browser)) {
-    await call(client, 'browser_navigate', { url: `${origin}/slow-downloads` });
+  // Every tuple must try to recover with a new browser. A relaunch of the
+  // reused profile can hit the observed native crash, which excuses the
+  // recovery checks only when it is seen: the new browser gone and a call failed.
+  const navigated = await client.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/slow-downloads` } });
+  // Read raw: after the known crash the snapshot itself can be an error result.
+  const snapshotted = navigated.isError ? undefined : await client.callTool({ name: 'browser_snapshot', arguments: {} });
+  const relaunched = launched.at(-1)!;
+  const crashed = isObservedNativeCrashTuple(browser) && !relaunched.browser()?.isConnected()
+    && (navigated.isError || snapshotted?.isError);
+  if (crashed) {
+    process.stdout.write(JSON.stringify({ case: 'known-native-crash-on-recovery', closing, platform: process.platform, channel,
+      browser: browser.version(), ...versions }) + '\n');
+  } else {
+    expect(navigated.isError, textOf(navigated)).not.toBe(true);
     expect(launched.length).toBeGreaterThan(1);
-    expect(launched.at(-1)).not.toBe(first);
-    expect(launched.at(-1)!.browser()!.isConnected()).toBe(true);
-    expect(await call(client, 'browser_snapshot')).toContain('Slow download fixture');
+    expect(relaunched).not.toBe(first);
+    expect(relaunched.browser()!.isConnected()).toBe(true);
+    expect(snapshotted!.isError, textOf(snapshotted!)).not.toBe(true);
+    expect(textOf(snapshotted!)).toContain('Slow download fixture');
   }
   await client.ping();
   expect(await stopWatching()).toEqual([]);
