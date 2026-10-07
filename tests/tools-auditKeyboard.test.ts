@@ -342,18 +342,24 @@ describe('runKeyboardFocusAudit', () => {
     expect(goBack).not.toHaveBeenCalled();
   });
 
-  it('navigates back when skip-link activation triggers full-page navigation', async () => {
+  it.each([
+    ['https://example.com/start', 'https://example.com/target'],
+    ['https://example.com/start', 'https://example.com/target#main'],
+    ['https://example.com/start#skip', 'https://example.com/target'],
+    ['https://example.com/start', 'https://other.example/start#main'],
+    ['https://example.com/start', 'https://example.com/start?view=main#main'],
+  ])('navigates back when skip-link activation leaves %s for %s', async (urlBefore, urlAfter) => {
     const sequence: FocusPoint[] = [
       focusPoint({ role: 'document', tagName: 'BODY' }),
-      focusPoint({ role: 'link', name: 'Skip to content', text: 'Skip to content', tagName: 'A', href: 'https://example.com/target' }),
+      focusPoint({ role: 'link', name: 'Skip to content', text: 'Skip to content', tagName: 'A', href: urlAfter }),
       focusPoint({ role: 'heading', name: 'Destination', tagName: 'H1' }),
     ];
 
     let index = 0;
     const goBack = vi.fn(async () => undefined);
     const getCurrentUrl = vi.fn()
-        .mockResolvedValueOnce('https://example.com/start')
-        .mockResolvedValueOnce('https://example.com/target');
+        .mockResolvedValueOnce(urlBefore)
+        .mockResolvedValueOnce(urlAfter);
 
     const result = await runKeyboardFocusAudit({
       maxTabs: 1,

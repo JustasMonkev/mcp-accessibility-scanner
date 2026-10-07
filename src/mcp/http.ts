@@ -80,7 +80,18 @@ export async function installHttpTransport(httpServer: http.Server, serverBacken
       res.end(validationError.message);
       return;
     }
-    await sessions.handleRequest(req, res);
+    try {
+      await sessions.handleRequest(req, res);
+    } catch (error) {
+      testDebug(error);
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null }));
+    }
   });
 }
 

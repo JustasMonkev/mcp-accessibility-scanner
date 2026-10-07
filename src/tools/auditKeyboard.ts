@@ -284,8 +284,7 @@ export async function runKeyboardFocusAudit(
         lastKnownPoint = afterActivation;
         const urlAfter = callbacks.getCurrentUrl ? await callbacks.getCurrentUrl() : null;
         const hashChanged = didUrlHashChange(urlBefore, urlAfter);
-        const fullUrlChanged = urlBefore !== null && urlAfter !== null && urlBefore !== urlAfter;
-        const navigationOccurred = fullUrlChanged && !hashChanged;
+        const navigationOccurred = urlBefore !== null && urlAfter !== null && urlBefore.split('#', 1)[0] !== urlAfter.split('#', 1)[0];
         skipLinkActivation = {
           attempted: true,
           hashChanged,

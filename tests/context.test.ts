@@ -1497,13 +1497,32 @@ describe('Context', () => {
     });
   });
 
-  describe('ensureTab after its owner gives up', () => {
+  describe('opening tabs', () => {
     const createContext = () => new Context({
       tools: [],
       config: defaultConfig,
       browserContextFactory: mockBrowserContextFactory,
       sessionLog: undefined,
       clientInfo: {},
+    });
+
+    it('returns each newly requested tab when page requests resolve together', async () => {
+      const context = createContext();
+      const pages = Array.from({ length: 2 }, () => Object.assign(new EventEmitter(), {
+        setDefaultNavigationTimeout: vi.fn(),
+        setDefaultTimeout: vi.fn(),
+      }));
+      let nextPage = 0;
+      mockBrowserContext.newPage = vi.fn(async () => {
+        const page = pages[nextPage++];
+        mockBrowserContext.emit('page', page);
+        return page;
+      });
+
+      const tabs = await Promise.all([context.newTab(), context.newTab()]);
+
+      expect(tabs.map(tab => tab.page)).toEqual(pages);
+      expect(context.currentTab()).toBe(tabs[1]);
     });
 
     it('does not open a page for a caller cancelled during attachment', async () => {
@@ -1518,12 +1537,12 @@ describe('Context', () => {
       expect(mockBrowserContext.newPage).not.toHaveBeenCalled();
     });
 
-    it('does not open a page once disposal began during attachment', async () => {
+    it.each(['ensureTab', 'newTab'] as const)('%s does not open a page once disposal began during attachment', async method => {
       const attached = Promise.withResolvers<{ browserContext: any, close: () => Promise<void> }>();
       const close = vi.fn().mockResolvedValue(undefined);
       vi.mocked(mockBrowserContextFactory.createContext).mockReturnValue(attached.promise);
       const context = createContext();
-      const pending = context.ensureTab();
+      const pending = context[method]();
       const disposed = context.dispose();
       attached.resolve({ browserContext: mockBrowserContext, close });
       await expect(pending).rejects.toThrow('closed while a tab was being opened');
@@ -1532,13 +1551,13 @@ describe('Context', () => {
       expect(close).toHaveBeenCalledTimes(1);
     });
 
-    it('closes a page that finishes opening after disposal began, before releasing the browser', async () => {
+    it.each(['ensureTab', 'newTab'] as const)('%s closes a page that finishes opening after disposal began, before releasing the browser', async method => {
       const opened = Promise.withResolvers<{ close: () => Promise<void> }>();
       const close = vi.fn().mockResolvedValue(undefined);
       mockBrowserContext.newPage = vi.fn(() => opened.promise);
       vi.mocked(mockBrowserContextFactory.createContext).mockResolvedValue({ browserContext: mockBrowserContext, close });
       const context = createContext();
-      const pending = context.ensureTab();
+      const pending = context[method]();
       await vi.waitFor(() => expect(mockBrowserContext.newPage).toHaveBeenCalled());
       const disposed = context.dispose();
       await new Promise(resolve => setTimeout(resolve, 0));
@@ -1589,7 +1608,7 @@ describe('Context', () => {
       expect(page.close).not.toHaveBeenCalled();
     });
 
-    it('does not let a page request the browser never answers hold the close', async () => {
+    it.each(['ensureTab', 'newTab'] as const)('%s does not let a page request the browser never answers hold the close', async method => {
       vi.useFakeTimers();
       try {
         const opened = Promise.withResolvers<{ close: () => Promise<void> }>();
@@ -1598,7 +1617,7 @@ describe('Context', () => {
         mockBrowserContext.newPage = vi.fn(() => opened.promise);
         vi.mocked(mockBrowserContextFactory.createContext).mockResolvedValue({ browserContext: mockBrowserContext, close });
         const context = createContext();
-        const pending = expect(context.ensureTab()).rejects.toThrow('Target closed');
+        const pending = expect(context[method]()).rejects.toThrow('Target closed');
         await vi.advanceTimersByTimeAsync(0);
         expect(mockBrowserContext.newPage).toHaveBeenCalled();
         const disposed = context.dispose();

@@ -19,6 +19,7 @@ import http from 'http';
 import net, { type Socket } from 'net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { BrowserSessionRegistry } from '../src/browserSessions.js';
 import { resolveConfig } from '../src/config.js';
@@ -133,6 +134,71 @@ describe('mcp http transport hardening', () => {
     expect(Buffer.byteLength(body)).toBe(Number(headers.match(/\r\nContent-Length: (\d+)\r\n/i)?.[1]));
     expect(JSON.parse(body)).toMatchObject({ error: { code: -32600 } });
   }
+
+  it('contains backend construction failures and serves subsequent requests', async () => {
+    let failConstruction = true;
+    const { server, port } = await startServer({
+      ...probeFactory,
+      create: () => {
+        if (failConstruction)
+          throw new Error('private backend construction details');
+        return probeFactory.create();
+      },
+    });
+    const requestHandler = server.listeners('request')[0];
+    const escapedErrors: unknown[] = [];
+    server.removeListener('request', requestHandler);
+    server.on('request', (req, res) => {
+      void Promise.resolve(requestHandler(req, res)).catch(error => {
+        escapedErrors.push(error);
+        res.statusCode = 599;
+        res.end('Unhandled request rejection');
+      });
+    });
+    const options = {
+      method: 'POST',
+      accept: 'application/json, text/event-stream',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    };
+    const failed = await sendRequest(port, options);
+    expect(failed.statusCode).toBe(500);
+    expect(JSON.parse(failed.body)).toEqual({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
+    expect(escapedErrors).toEqual([]);
+
+    failConstruction = false;
+    const recovered = await sendRequest(port, options);
+    expect(recovered.statusCode).toBe(200);
+    expect(recovered.body).toContain('probe');
+  });
+
+  it('closes a partial response when transport handling fails after headers', async () => {
+    const { server, port } = await startServer();
+    const requestHandler = server.listeners('request')[0];
+    const escapedErrors: unknown[] = [];
+    server.removeListener('request', requestHandler);
+    server.on('request', (req, res) => {
+      void Promise.resolve(requestHandler(req, res)).catch(error => {
+        escapedErrors.push(error);
+        res.destroy();
+      });
+    });
+    const handleRequest = vi.spyOn(NodeStreamableHTTPServerTransport.prototype, 'handleRequest').mockImplementationOnce(async (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: ');
+      throw new Error('Transport failed after response started');
+    });
+    try {
+      await expect(fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+        signal: AbortSignal.timeout(2000),
+      }).then(response => response.text())).rejects.toThrow(/fetch failed|terminated/);
+      expect(escapedErrors).toEqual([]);
+    } finally {
+      handleRequest.mockRestore();
+    }
+  });
 
   // Opens a request and resolves as soon as response headers arrive, then
   // aborts — needed for SSE streams that never end.
