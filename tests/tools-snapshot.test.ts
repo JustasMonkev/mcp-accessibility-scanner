@@ -849,6 +849,76 @@ describe('scan_page annotated screenshots', () => {
   });
 });
 
+describe.skipIf(!fs.existsSync(chromium.executablePath()))('scan_page live states in a real browser', () => {
+  const scanPageTool = snapshotTools.find(tool => tool.schema.name === 'scan_page')!;
+
+  it('scans the current dialog and validation states without navigating or losing form input', async () => {
+    const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<!doctype html>
+        <html lang="en"><title>Dynamic state fixture</title><body>
+          <main>
+            <h1>Contact form</h1>
+            <button onclick="document.querySelector('dialog').showModal()">Open dialog</button>
+            <dialog aria-label="Contact options">
+              <button id="dialog-close" onclick="this.closest('dialog').close()"></button>
+            </dialog>
+            <form novalidate onsubmit="event.preventDefault(); document.querySelector('#validation-error').hidden = this.checkValidity()">
+              <input id="email" type="email" required aria-label="Email address">
+              <p id="validation-error" role="alert" hidden style="color:#aaa;background:#fff">Enter a valid email address.</p>
+              <button>Send</button>
+            </form>
+          </main>
+        </body></html>`);
+      const email = page.locator('#email');
+      await email.fill('invalid-address');
+      let navigations = 0;
+      page.on('framenavigated', () => ++navigations);
+      // SAFETY: without annotations, the real scan_page handler only needs the current page.
+      const context = { currentTabOrDie: () => ({ page }) } as Context;
+      const params = scanPageTool.schema.inputSchema.parse({ withRules: ['button-name', 'color-contrast'] });
+      async function scan() {
+        const response = new Response(context, 'scan_page', params);
+        await scanPageTool.handle(context, params, response);
+        expect(response.isError()).not.toBe(true);
+        return response.result();
+      }
+
+      const initial = await scan();
+      expect(initial).toContain('Violations: 0, Incomplete: 0');
+      expect(initial).toMatch(/Passes: [1-9]\d*/);
+      expect(await page.locator('dialog').isVisible()).toBe(false);
+
+      await page.getByRole('button', { name: 'Open dialog' }).click();
+      const dialog = await scan();
+      expect(dialog).toContain('Violations: 1, Incomplete: 0');
+      expect(dialog).toContain('Violation rule: button-name');
+      expect(dialog).toContain('"#dialog-close"');
+      expect(await page.locator('dialog').isVisible()).toBe(true);
+      expect(await email.inputValue()).toBe('invalid-address');
+
+      await page.locator('#dialog-close').click();
+      await page.getByRole('button', { name: 'Send' }).click();
+      const invalid = await scan();
+      expect(invalid).toContain('Violations: 1, Incomplete: 0');
+      expect(invalid).toContain('Violation rule: color-contrast');
+      expect(invalid).toContain('"#validation-error"');
+      expect(await email.inputValue()).toBe('invalid-address');
+
+      await email.fill('person@example.com');
+      await page.getByRole('button', { name: 'Send' }).click();
+      const corrected = await scan();
+      expect(corrected).toContain('Violations: 0, Incomplete: 0');
+      expect(await page.locator('#validation-error').isVisible()).toBe(false);
+      expect(await email.inputValue()).toBe('person@example.com');
+      expect(navigations).toBe(0);
+    } finally {
+      await browser.close();
+    }
+  });
+});
+
 describe.skipIf(!fs.existsSync(chromium.executablePath()))('scan_page annotated screenshots in a real browser', () => {
   const scanPageTool = snapshotTools.find(tool => tool.schema.name === 'scan_page')!;
   let browser: Browser;
