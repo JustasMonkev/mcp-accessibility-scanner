@@ -33,7 +33,7 @@ const canRun = !!process.env.MCP_TEST_BROWSER_NAME || existsSync(chromium.execut
 const server = http.createServer((request, response) => {
   const url = new URL(request.url || '/', 'http://localhost');
   response.writeHead(200, { 'content-type': 'text/html' });
-  if (url.pathname === '/prior' || url.pathname === '/target') {
+  if (['/prior', '/target', '/forward'].includes(url.pathname)) {
     response.end(`<button id="${url.pathname.slice(1)}">Other document</button>`);
     return;
   }
@@ -44,6 +44,11 @@ const server = http.createServer((request, response) => {
       event.preventDefault();
       history.${kind}State({}, '', '/rewritten?view=main#main');
       document.getElementById('main').focus();
+    });
+  </script>` : kind === 'location-replace' ? `<script>
+    document.getElementById('skip').addEventListener('click', event => {
+      event.preventDefault();
+      location.replace('/target#main');
     });
   </script>` : kind === 'reload' ? `<script>
     document.getElementById('skip').addEventListener('click', event => {
@@ -88,7 +93,7 @@ async function ok(name: string, args = {}) {
   return text;
 }
 
-it.skipIf(!canRun).each(['replace', 'push', 'fragment', 'document', 'reload'])(
+it.skipIf(!canRun).each(['replace', 'push', 'fragment', 'document', 'reload', 'location-replace', 'document-forward'])(
   'continues auditing the original document after %s skip-link activation', async kind => {
     directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-navigation-'));
     const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory });
@@ -97,6 +102,11 @@ it.skipIf(!canRun).each(['replace', 'push', 'fragment', 'document', 'reload'])(
     await ok('browser_navigate', { url: `${origin}/prior` });
     const startUrl = `${origin}/start?kind=${kind}`;
     await ok('browser_navigate', { url: startUrl });
+    if (kind === 'document-forward') {
+      await ok('browser_navigate', { url: `${origin}/forward` });
+      await ok('browser_navigate_back');
+    }
+    await ok('browser_evaluate', { function: '() => sessionStorage.setItem("keyboard-history-length", String(history.length))' });
     await ok('audit_keyboard', {
       maxTabs: 2,
       activateSkipLink: true,
@@ -108,7 +118,7 @@ it.skipIf(!canRun).each(['replace', 'push', 'fragment', 'document', 'reload'])(
       reportFile: 'keyboard.json',
     });
     const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
-    const replacedDocument = kind === 'document' || kind === 'reload';
+    const replacedDocument = ['document', 'reload', 'location-replace', 'document-forward'].includes(kind);
     expect(report.skipLink.activation.navigationOccurred).toBe(replacedDocument);
     expect(report.skipLink.activation.hashChanged).toBe(kind !== 'reload');
     if (replacedDocument)
@@ -117,5 +127,18 @@ it.skipIf(!canRun).each(['replace', 'push', 'fragment', 'document', 'reload'])(
       expect(report.stops[1].id).toBe('audited-action');
     expect(report.metadata.url).toBe(replacedDocument ? startUrl : kind === 'fragment' ? `${startUrl}#main` : `${origin}/rewritten?view=main#main`);
     expect(await ok('browser_evaluate', { function: '() => !!document.getElementById("audited-action")' })).toContain('true');
+    const historyDelta = ['push', 'fragment', 'document'].includes(kind) ? 1 : 0;
+    expect(await ok('browser_evaluate', {
+      function: `() => history.length === Number(sessionStorage.getItem("keyboard-history-length")) + ${historyDelta}`,
+    })).toContain('true');
+    if (kind === 'location-replace' || kind === 'document-forward') {
+      await ok('browser_navigate_back');
+      const expectedUrl = kind === 'location-replace' ? `${origin}/prior` : startUrl;
+      expect(await ok('browser_evaluate', { function: '() => location.href' })).toContain(expectedUrl);
+    }
+    if (kind === 'document') {
+      await ok('browser_evaluate', { function: '() => history.forward()' });
+      expect(await ok('browser_evaluate', { function: '() => location.pathname === "/target"' })).toContain('true');
+    }
   }
 );

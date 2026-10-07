@@ -60,7 +60,7 @@ type KeyboardAuditCallbacks = {
   onStep?: (stop: FocusStop) => Promise<void>;
   getCurrentUrl?: () => Promise<string>;
   activateSkipLink?: () => Promise<boolean>;
-  goBack?: () => Promise<void>;
+  restorePage?: (urlBefore: string) => Promise<void>;
   captureScreenshot?: (label: string) => Promise<string>;
 };
 
@@ -298,8 +298,8 @@ export async function runKeyboardFocusAudit(
           urlBefore,
           urlAfter,
         };
-        if (navigationOccurred && urlBefore !== urlAfter && callbacks.goBack) {
-          await callbacks.goBack();
+        if (navigationOccurred && urlBefore !== null && urlBefore !== urlAfter && callbacks.restorePage) {
+          await callbacks.restorePage(urlBefore);
           lastKnownPoint = null;
         }
         skipLinkActivated = true;
@@ -598,11 +598,13 @@ const auditKeyboard = defineTabTool({
       });
     };
 
+    let historyLengthBeforeActivation = 0;
     const result = await runKeyboardFocusAudit(auditOptions, {
       pressKey,
       activateSkipLink: async () => {
-        const documentState = await tab.page.evaluateHandle(() => ({ document }));
+        const documentState = await tab.page.evaluateHandle(() => ({ document, historyLength: history.length }));
         try {
+          historyLengthBeforeActivation = await documentState.evaluate(state => state.historyLength);
           await pressKey('Enter');
           try {
             return !await tab.page.evaluate(state => state.document === document, documentState);
@@ -624,8 +626,15 @@ const auditKeyboard = defineTabTool({
         });
       },
       getCurrentUrl: async () => tab.page.url(),
-      goBack: async () => {
-        await tab.goBack({ waitUntil: 'domcontentloaded' });
+      restorePage: async urlBefore => {
+        if (await tab.page.evaluate(() => history.length) === historyLengthBeforeActivation + 1)
+          await tab.goBack({ waitUntil: 'domcontentloaded' });
+        if (tab.page.url() !== urlBefore) {
+          await tab.waitForCompletion(async () => {
+            await tab.page.evaluate(url => window.location.replace(url), urlBefore);
+            await tab.page.waitForURL(url => url.href === urlBefore, { waitUntil: 'domcontentloaded' });
+          });
+        }
       },
       captureScreenshot,
     });

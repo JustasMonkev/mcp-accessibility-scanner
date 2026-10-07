@@ -334,10 +334,9 @@ class SessionStore {
     const eventStreamReady = new ManualPromise<void>();
     const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
-      onsessioninitialized: async sessionId => {
+      onsessioninitialized: sessionId => {
         testDebug(`create http session: ${transport.sessionId}`);
         this._sessions.set(sessionId, { transport, eventStreamReady });
-        await mcpServer.connect(this._serverBackendFactory, transport, true, eventStreamReady);
       }
     });
 
@@ -348,7 +347,16 @@ class SessionStore {
       testDebug(`delete http session: ${transport.sessionId}`);
     };
 
-    await transport.handleRequest(req, res, parsedBody);
+    try {
+      await mcpServer.connect(this._serverBackendFactory, transport, true, eventStreamReady);
+      await transport.handleRequest(req, res, parsedBody);
+      if (!transport.sessionId)
+        await transport.close();
+    } catch (error) {
+      await transport.close().catch(e => testDebug(e));
+      testDebug(error);
+      sendInternalError(req, res, parsedBody);
+    }
   }
 }
 

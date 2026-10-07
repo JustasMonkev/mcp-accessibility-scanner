@@ -15,6 +15,7 @@
  */
 
 import { EventEmitter } from 'events';
+import crypto from 'crypto';
 import http from 'http';
 import net, { type Socket } from 'net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -584,20 +585,101 @@ describe('mcp http transport hardening', () => {
   // transport lands, POST without Mcp-Session-Id must initialize a session,
   // requests carrying the header must route to it, and unknown ids must 404.
   describe('v1 Mcp-Session-Id compatibility', () => {
-    async function initializeSession(port: number) {
+    async function initializeSession(port: number, id: string | number = 1) {
       const response = await sendRequest(port, {
         method: 'POST',
         hostHeader: `127.0.0.1:${port}`,
         accept: 'application/json, text/event-stream',
         body: JSON.stringify({
           jsonrpc: '2.0',
-          id: 1,
+          id,
           method: 'initialize',
           params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'raw-client', version: '1.0.0' } },
         }),
       });
       return response;
     }
+
+    it.each([0, ''])('contains stateful backend construction failures for initialize ID %j', async id => {
+      let failConstruction = true;
+      const { port } = await startServer({
+        ...probeFactory,
+        create: () => {
+          if (failConstruction)
+            throw new Error('private stateful backend construction details');
+          return probeFactory.create();
+        },
+      });
+      const attemptedSessionId = '00000000-0000-4000-8000-000000000001';
+      const randomUUID = vi.spyOn(crypto, 'randomUUID').mockReturnValueOnce(attemptedSessionId);
+      try {
+        const failed = await initializeSession(port, id);
+        expect(JSON.parse(failed.body)).toEqual({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id });
+        expect(failed.statusCode).toBe(500);
+        expect(failed.headers['mcp-session-id']).toBeUndefined();
+
+        const abandoned = await sendRequest(port, { sessionId: attemptedSessionId, accept: 'text/event-stream' });
+        expect(abandoned.statusCode).toBe(404);
+        expect(abandoned.body).toBe('Session not found');
+
+        failConstruction = false;
+        const recovered = await initializeSession(port, id);
+        expect(recovered.statusCode).toBe(200);
+        const sessionId = recovered.headers['mcp-session-id'];
+        if (typeof sessionId !== 'string')
+          throw new Error('Expected recovered stateful session');
+        const ping = await sendRequest(port, {
+          method: 'POST', sessionId, accept: 'application/json, text/event-stream',
+          body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' }),
+        });
+        expect(ping.statusCode).toBe(200);
+        const deleted = await sendRequest(port, { method: 'DELETE', sessionId });
+        expect(deleted.statusCode).toBe(200);
+      } finally {
+        randomUUID.mockRestore();
+      }
+    });
+
+    it('disposes the stateful backend when transport startup rejects', async () => {
+      const closedBackends: string[] = [];
+      const { port } = await startServer({
+        ...probeFactory,
+        create: () => ({ ...probeFactory.create(), serverClosed: () => closedBackends.push('stateful') }),
+      });
+      const start = vi.spyOn(NodeStreamableHTTPServerTransport.prototype, 'start').mockRejectedValueOnce(new Error('private stateful transport startup details'));
+      try {
+        const failed = await initializeSession(port, 'startup');
+        expect(failed.statusCode).toBe(500);
+        expect(JSON.parse(failed.body)).toEqual({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: 'startup' });
+        expect(failed.headers['mcp-session-id']).toBeUndefined();
+        expect(closedBackends).toEqual(['stateful']);
+      } finally {
+        start.mockRestore();
+      }
+    });
+
+    it.each([
+      { accept: 'application/json', batch: false, statusCode: 406 },
+      { accept: 'application/json, text/event-stream', batch: true, statusCode: 400 },
+    ])('leaves no stateful backend after SDK initialize rejection $statusCode', async ({ accept, batch, statusCode }) => {
+      let activeBackends = 0;
+      const { port } = await startServer({
+        ...probeFactory,
+        create: () => {
+          ++activeBackends;
+          return { ...probeFactory.create(), serverClosed: () => --activeBackends };
+        },
+      });
+      const initialize = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'raw-client', version: '1.0.0' } } };
+      const rejected = await sendRequest(port, {
+        method: 'POST', accept,
+        body: JSON.stringify(batch ? [initialize, { jsonrpc: '2.0', id: 2, method: 'ping' }] : initialize),
+      });
+
+      expect(rejected.statusCode).toBe(statusCode);
+      expect(rejected.headers['mcp-session-id']).toBeUndefined();
+      expect(activeBackends).toBe(0);
+    });
 
     it('returns 404 for an unknown session id', async () => {
       const { port } = await startServer();

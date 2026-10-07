@@ -288,7 +288,7 @@ For remote HTTP access, configure the TLS reverse proxy explicitly. For example,
 
 The server does not trust `Forwarded` or `X-Forwarded-*` to bypass its checks. Preserving the public `Host` or HTTPS `Origin` upstream returns `403`, even with a valid bearer token.
 
-Unexpected HTTP request setup failures return HTTP status `500`. Parsed legacy JSON-RPC requests retain their IDs, batch errors omit notifications, and notification-only failures have an empty response body. If the request body is still unread or the response has already started, the connection is closed instead of remaining available for reuse.
+Unexpected HTTP request setup failures, including stateful initialization, return a generic error with HTTP status `500`. Parsed legacy JSON-RPC requests retain their IDs, batch errors omit notifications, and notification-only failures have an empty response body. Failed or rejected initialization disposes its unregistered backend. If the request body is still unread or the response has already started, the connection is closed instead of remaining available for reuse.
 
 Caller-supplied screenshot, PDF, find-result, scan-page-matrix, and audit report filenames use a no-clobber policy: an existing file causes the tool call to fail instead of being overwritten. Windows-reserved basenames and names ending in a dot or space are rejected on every platform so configured names behave consistently across hosts.
 
@@ -506,7 +506,7 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 #### `audit_keyboard`
 Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) with practical heuristics.
 - Checks skip links, focus visibility, focus jumps, and possible focus traps
-- Uses document replacement and a changed URL to decide whether to go Back after skip-link activation. Fragment jumps, same-document history changes, and same-URL reloads do not consume an earlier history entry.
+- Restores the original URL after cross-document skip-link navigation. It uses Back for a single observed history-entry increase, verifies the restored URL, and otherwise replaces the current entry with the original URL. Fragment jumps, same-document history changes, and same-URL reloads do not consume an earlier history entry. When forward history was truncated or an entry was replaced, restoration can reload the audited page rather than recover its previous document state.
 - Checks target size against WCAG 2.2 SC 2.5.8 (`checkTargetSize`, default on)
 - Checks that focus is not entirely obscured, WCAG 2.2 SC 2.4.11 (`checkFocusObscured`, default on)
 - Optional issue screenshots (`screenshotOnIssue`)
