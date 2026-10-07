@@ -272,6 +272,22 @@ npx mcp-accessibility-scanner --headless interactive
 > scan_page {"violationsTag":["wcag2aa"]}
 ```
 
+### Scan an interactive state
+
+Keep navigation, interactions and scans in the same REPL session. A URL crawl opens a temporary tab and does not reproduce the current tab's open dialogs or validation errors.
+
+```text
+1. browser_navigate to the test page, wait for ready content, then scan_page {}
+2. browser_snapshot, then browser_click with a current ref to open an HTML dialog
+3. browser_wait_for the dialog text, then scan_page {}
+4. Submit invalid test data, wait for the validation message, then scan_page {}
+5. Capture browser_take_screenshot and record the state and reproduction steps
+```
+
+`scan_page` scans the live tab without navigation. `browser_handle_dialog` is for JavaScript alert/confirm/prompt dialogs, not HTML modals. Keep `reloadBetweenVariants: false` when using `scan_page_matrix` on transient UI, and check that responsive changes did not reset it. Review incomplete results and coverage warnings; test keyboard behavior and error announcements separately. See the README's [interactive-state workflow](README.md#scan-dialogs-and-validation-states).
+
+For login controls requiring individual key events, clear the field with `browser_type` and `text: ""`, then type with `slowly: true` (which appends). Confirm a signed-in page before auditing. See [login troubleshooting](README.md#when-a-login-form-does-not-advance), including container networking.
+
 ### Responsive + media variant scan
 
 ```bash

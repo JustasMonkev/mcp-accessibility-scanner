@@ -312,7 +312,7 @@ Most real audits target pages that only exist for a signed-in user. There are tw
 
 ### Interactive route (no setup)
 
-Every tool shares one browser context, and `audit_site` crawls in a temporary tab of that same context, so cookies and local storage created while you drive the browser are already available to the crawl:
+Keep every step in the same browser session. Within that session, `audit_site` crawls in a temporary tab of the same browser context, so cookies and local storage created while you drive the browser are available to the crawl:
 
 ```text
 1. browser_navigate to the login page
@@ -321,7 +321,18 @@ Every tool shares one browser context, and `audit_site` crawls in a temporary ta
 4. audit_site — the crawl inherits the session you just created
 ```
 
-This works out of the box in every mode, including the default persistent-profile mode. With the default profile the session also survives across server restarts, so you usually only sign in once. The default profile is keyed to the server's working directory, so each workspace's server keeps its own sign-in state — servers launched for different workspaces neither share cookies nor contend for the same profile.
+The interactive CLI, stdio MCP and initialized stateful HTTP connections can use their default session for this sequence. **Handshake-free HTTP clients must call `browser_session_open` first and pass the returned `browserSessionId` to every navigation, interaction and scan call** when using a mode that creates contexts per request. Otherwise the next request starts a new default context and loses the login and page state. Shared-context modes such as `--extension` and non-isolated CDP attach reject `browser_session_open`; use their shared context or a stateful connection instead. See [Browser Session Tools](#browser-session-tools) for mode-specific behavior.
+
+With the default persistent profile, sign-in state also survives across server restarts, so you usually only sign in once. The default profile is keyed to the server's working directory, so each workspace's server keeps its own sign-in state — servers launched for different workspaces neither share cookies nor contend for the same profile.
+
+### When a login form does not advance
+
+- Take a fresh `browser_snapshot` after a rerender and use its current field references. Wait for an application-specific ready message with `browser_wait_for` before entering data.
+- `browser_fill_form` and ordinary `browser_type` use Playwright's `fill`. If the application requires individual key events, clear the field with `browser_type` and `text: ""`, then use `browser_type` with `slowly: true`. Slow typing appends characters; it does not clear an existing value.
+- Verify an authenticated page or account-specific element before scanning. A filled field or successful click is not proof of a successful login. Inspect `browser_console_messages` and `browser_network_requests` if submission fails; avoid sharing passwords, tokens or private response bodies in bug reports.
+- In Docker, the browser runs inside the container: `localhost` names the container, not your host's development server. Use a host address reachable from that container and configure the development server to accept that specific address. Check its bind address, allowed hosts and authentication origin/redirect settings; do not disable host checks or widen CORS as a blanket fix.
+
+Direct DOM value assignments can bypass application event handlers, and synthetic setters are not a general fix for controlled inputs. Report the scanner version, browser mode, exact tool arguments (with secrets removed) and a minimal local reproduction if the standard interactions still fail.
 
 ### Storage state route (repeatable, CI-friendly)
 
@@ -818,6 +829,25 @@ Coordinate-based tools require `element` descriptions for permission checks, but
 5. Run scan_page on the login page
 6. Take a browser_take_screenshot to capture the final state
 ```
+
+### Scan dialogs and validation states
+
+A URL crawl is a baseline, not a traversal of every UI state. `audit_site` navigates a temporary tab through URLs; it does not replay the current tab's open dialog, filled form or validation errors. `scan_page` runs against the currently selected tab without navigation, so use it after each relevant interaction in the same browser session:
+
+```text
+1. Navigate once, wait for the application to be ready, and run scan_page for the initial state
+2. Use browser_snapshot and browser_click to open the dialog or expand the panel
+3. Wait for its visible content, take a fresh browser_snapshot, then run scan_page again
+4. Submit the form with deliberately invalid test data, wait for the validation message, and run scan_page again
+5. Capture browser_take_screenshot and record the state, reproduction steps and findings for each scan
+6. Close or reset the UI, then repeat for the next state
+```
+
+HTML `<dialog>` elements and in-page modal components are page content. `browser_handle_dialog` handles JavaScript `alert`, `confirm` and `prompt` dialogs; it does not open or dismiss an HTML modal.
+
+`scan_page_matrix` varies viewport/media/zoom, not application state. Keep `reloadBetweenVariants: false` for a transient state, and verify that responsive rerenders did not close or reset it. Run `audit_keyboard` separately for keyboard behavior; it moves focus and may activate skip links, so restore the intended state before comparing scans. A modal's intentional focus containment is not automatically a keyboard trap: verify an accessible way to dismiss it and that focus returns appropriately.
+
+Review Axe's `incomplete` results, frame coverage warnings and sampled node counts. Zero automated violations do not establish conformance or cover states you never opened. Manually check keyboard operation, focus appearance/order and whether error messages are understandable and announced.
 
 ### Page Analysis
 ```
