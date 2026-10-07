@@ -296,7 +296,10 @@ describe('runKeyboardFocusAudit', () => {
     expect(pressKey.mock.calls.map(call => call[0])).toEqual(['Tab', 'Shift+Tab', 'Tab', 'Shift+Tab']);
   });
 
-  it('activates skip link and does not goBack for hash-only URL changes', async () => {
+  it.each([
+    'https://example.com/#main',
+    'https://example.com/rewritten?view=main#main',
+  ])('does not infer document navigation from a URL change to %s', async urlAfter => {
     const sequence: FocusPoint[] = [
       focusPoint({ role: 'document', tagName: 'BODY' }),
       focusPoint({ role: 'link', name: 'Skip to content', text: 'Skip to content', tagName: 'A', href: 'https://example.com/#main' }),
@@ -304,10 +307,10 @@ describe('runKeyboardFocusAudit', () => {
     ];
 
     let index = 0;
-    const goBack = vi.fn(async () => undefined);
+    const restorePage = vi.fn(async () => undefined);
     const getCurrentUrl = vi.fn()
         .mockResolvedValueOnce('https://example.com/')
-        .mockResolvedValueOnce('https://example.com/#main');
+        .mockResolvedValueOnce(urlAfter);
 
     const result = await runKeyboardFocusAudit({
       maxTabs: 1,
@@ -333,27 +336,34 @@ describe('runKeyboardFocusAudit', () => {
         return point;
       }),
       getCurrentUrl,
-      goBack,
+      restorePage,
     });
 
     expect(result.skipLink.activation?.attempted).toBe(true);
     expect(result.skipLink.activation?.hashChanged).toBe(true);
     expect(result.skipLink.activation?.navigationOccurred).toBe(false);
-    expect(goBack).not.toHaveBeenCalled();
+    expect(restorePage).not.toHaveBeenCalled();
   });
 
-  it('navigates back when skip-link activation triggers full-page navigation', async () => {
+  it.each([
+    ['https://example.com/start', 'https://example.com/target'],
+    ['https://example.com/start', 'https://example.com/target#main'],
+    ['https://example.com/start#skip', 'https://example.com/target'],
+    ['https://example.com/start', 'https://other.example/start#main'],
+    ['https://example.com/start', 'https://example.com/start?view=main#main'],
+  ])('restores the audited page when skip-link activation replaces the document at %s with %s', async (urlBefore, urlAfter) => {
     const sequence: FocusPoint[] = [
       focusPoint({ role: 'document', tagName: 'BODY' }),
-      focusPoint({ role: 'link', name: 'Skip to content', text: 'Skip to content', tagName: 'A', href: 'https://example.com/target' }),
+      focusPoint({ role: 'link', name: 'Skip to content', text: 'Skip to content', tagName: 'A', href: urlAfter }),
       focusPoint({ role: 'heading', name: 'Destination', tagName: 'H1' }),
     ];
 
     let index = 0;
-    const goBack = vi.fn(async () => undefined);
+    const restorePage = vi.fn(async () => undefined);
     const getCurrentUrl = vi.fn()
-        .mockResolvedValueOnce('https://example.com/start')
-        .mockResolvedValueOnce('https://example.com/target');
+        .mockResolvedValueOnce(urlBefore)
+        .mockResolvedValueOnce(urlAfter);
+    const activateSkipLink = vi.fn(async () => true);
 
     const result = await runKeyboardFocusAudit({
       maxTabs: 1,
@@ -379,11 +389,12 @@ describe('runKeyboardFocusAudit', () => {
         return point;
       }),
       getCurrentUrl,
-      goBack,
+      activateSkipLink,
+      restorePage,
     });
 
     expect(result.skipLink.activation?.navigationOccurred).toBe(true);
-    expect(goBack).toHaveBeenCalledTimes(1);
+    expect(restorePage).toHaveBeenCalledExactlyOnceWith(urlBefore);
   });
 
   it('captures screenshots for issues up to maxIssueScreenshots', async () => {

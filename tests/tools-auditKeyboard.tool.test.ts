@@ -45,14 +45,20 @@ function focusPoint(overrides: Partial<FocusPoint>): FocusPoint {
 
 function createHarness(sequence: FocusPoint[], requestContext?: any) {
   let index = 0;
+  const documentState = {
+    evaluate: vi.fn(async () => 1),
+    dispose: vi.fn(async () => undefined),
+  };
   const page = {
-    evaluate: vi.fn(async () => {
+    evaluate: vi.fn(async (_callback: unknown, _argument?: unknown): Promise<FocusPoint | boolean | number | undefined> => {
       const point = sequence[index];
       index++;
       return point;
     }),
+    evaluateHandle: vi.fn(async () => documentState),
+    waitForURL: vi.fn(async () => undefined),
     keyboard: {
-      press: vi.fn(async () => undefined),
+      press: vi.fn(async (_key: string) => undefined),
     },
     url: vi.fn(() => 'https://example.com/'),
     goBack: vi.fn(async () => undefined),
@@ -73,7 +79,7 @@ function createHarness(sequence: FocusPoint[], requestContext?: any) {
   };
 
   const response = new Response(context, 'audit_keyboard', {}, requestContext);
-  return { context, tab, page, outputFile, response };
+  return { context, tab, page, outputFile, response, documentState };
 }
 
 describe('audit_keyboard tool', () => {
@@ -93,6 +99,56 @@ describe('audit_keyboard tool', () => {
         .rejects.toThrow('Output file already exists');
 
     expect(page.keyboard.press).not.toHaveBeenCalled();
+  });
+
+  it.each(['history capture', 'keypress', 'document comparison'])(
+    'preserves a skip-link %s failure and releases its document handle', async failure => {
+      const { context, page, response, documentState } = createHarness([
+        focusPoint({ role: 'document', tagName: 'BODY' }),
+        focusPoint({ role: 'link', tagName: 'A', name: 'Skip to content', href: '#main' }),
+      ]);
+      const error = new Error(`Failed ${failure}`);
+      if (failure === 'history capture') {
+        documentState.evaluate.mockRejectedValueOnce(error);
+      } else if (failure === 'keypress') {
+        page.keyboard.press.mockImplementation(async key => {
+          if (key === 'Enter')
+            throw error;
+        });
+      } else {
+        page.evaluate
+            .mockResolvedValueOnce(focusPoint({ role: 'document', tagName: 'BODY' }))
+            .mockResolvedValueOnce(focusPoint({ role: 'link', tagName: 'A', name: 'Skip to content', href: '#main' }))
+            .mockRejectedValueOnce(error);
+      }
+      await expect(tool.handle(context, tool.schema.inputSchema.parse({ maxTabs: 1, activateSkipLink: true }), response))
+          .rejects.toBe(error);
+      expect(documentState.dispose).toHaveBeenCalledOnce();
+    }
+  );
+
+  it('propagates restoration failure without continuing keyboard traversal or writing a report', async () => {
+    const initial = focusPoint({ role: 'document', tagName: 'BODY' });
+    const skip = focusPoint({ role: 'link', tagName: 'A', name: 'Skip to content', href: 'https://example.com/target#main' });
+    const { context, page, response } = createHarness([initial, skip]);
+    const error = new Error('Restored document did not load');
+    page.url.mockReturnValueOnce('https://example.com/start').mockReturnValue('https://example.com/target#main');
+    page.waitForURL.mockRejectedValueOnce(error);
+    page.evaluate
+        .mockResolvedValueOnce(initial)
+        .mockResolvedValueOnce(skip)
+        .mockRejectedValueOnce(new Error('JSHandles can be evaluated only in the context they were created!'))
+        .mockResolvedValueOnce(focusPoint({ role: 'document', tagName: 'BODY', id: 'target' }))
+        .mockResolvedValueOnce(1)
+        .mockResolvedValueOnce(undefined);
+
+    await expect(tool.handle(context, tool.schema.inputSchema.parse({ maxTabs: 2, activateSkipLink: true }), response))
+        .rejects.toBe(error);
+    expect(page.keyboard.press.mock.calls.map(([key]) => key)).toEqual(['Tab', 'Enter']);
+    const focusReads = page.evaluate.mock.calls.filter(([, argument]) =>
+      typeof argument === 'object' && argument !== null && 'checkTargetSize' in argument);
+    expect(focusReads).toHaveLength(3);
+    expect(writeFileSpy).not.toHaveBeenCalled();
   });
 
   it('writes report with custom reportFile name', async () => {

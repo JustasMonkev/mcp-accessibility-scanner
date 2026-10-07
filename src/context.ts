@@ -322,10 +322,24 @@ export class Context {
   }
 
   async newTab(): Promise<Tab> {
-    const { browserContext } = await this._ensureBrowserContext();
-    const page = await browserContext.newPage();
-    this._currentTab = this._tabs.find(t => t.page === page)!;
-    return this._currentTab;
+    const attaching = this._ensureBrowserContext();
+    const { browserContext } = await attaching;
+    if (this._browserContextPromise !== attaching)
+      throw new Error('The browser context closed while a tab was being opened.');
+    const opening = browserContext.newPage().then(async page => {
+      if (this._browserContextPromise !== attaching) {
+        await closePage(page, 5_000).catch(logUnhandledError);
+        throw new Error('The browser context closed while a tab was being opened.');
+      }
+      this._currentTab = this._tabs.find(t => t.page === page)!;
+      return this._currentTab;
+    });
+    this._openingPages.add(opening);
+    try {
+      return await opening;
+    } finally {
+      this._openingPages.delete(opening);
+    }
   }
 
   async selectTab(index: number) {
@@ -363,7 +377,7 @@ export class Context {
             this._openingTab = undefined;
           if (this._browserContextPromise === attaching && waiting.some(waiter => !waiter?.aborted))
             return;
-          await page.close().catch(logUnhandledError);
+          await closePage(page, 5_000).catch(logUnhandledError);
           if (this._browserContextPromise !== attaching)
             throw new Error('The browser context closed while a tab was being opened.');
           throw new Error('The tab request was cancelled.');

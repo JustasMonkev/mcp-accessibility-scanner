@@ -288,6 +288,8 @@ For remote HTTP access, configure the TLS reverse proxy explicitly. For example,
 
 The server does not trust `Forwarded` or `X-Forwarded-*` to bypass its checks. Preserving the public `Host` or HTTPS `Origin` upstream returns `403`, even with a valid bearer token.
 
+Unexpected HTTP request setup failures, including stateful initialization, return a generic error with HTTP status `500`. Parsed legacy JSON-RPC requests retain their IDs, batch errors omit notifications, and notification-only failures have an empty response body. Failed or rejected initialization disposes its unregistered backend. If the request body is still unread or the response has already started, the connection is closed instead of remaining available for reuse.
+
 Caller-supplied screenshot, PDF, find-result, scan-page-matrix, and audit report filenames use a no-clobber policy: an existing file causes the tool call to fail instead of being overwritten. Windows-reserved basenames and names ending in a dot or space are rejected on every platform so configured names behave consistently across hosts.
 
 Failed download saves are reported as tool errors in the current or next response, including after the tab closes; failed entries do not advertise a saved file or an ongoing download. The server retains up to 20 bounded error messages between responses and reports any omitted count. Full Chromium-family browsers on Playwright 1.63.0 have [verified native crashes after persistent-profile relaunch](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#persistent-profile-downloads-230). Error reporting does not fix that native crash. The explicit `--isolated` control passed, but does not preserve a profile between launches; use recorded storage state when needed for authentication. Existing profiles and browser defaults are preserved.
@@ -504,6 +506,7 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 #### `audit_keyboard`
 Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) with practical heuristics.
 - Checks skip links, focus visibility, focus jumps, and possible focus traps
+- Restores the original URL after cross-document skip-link navigation. It uses Back for a single observed history-entry increase, verifies the restored URL, and otherwise replaces the current entry with the original URL. Fragment jumps, same-document history changes, and same-URL reloads do not consume an earlier history entry. When forward history was truncated or an entry was replaced, restoration can reload the audited page rather than recover its previous document state.
 - Checks target size against WCAG 2.2 SC 2.5.8 (`checkTargetSize`, default on)
 - Checks that focus is not entirely obscured, WCAG 2.2 SC 2.4.11 (`checkFocusObscured`, default on)
 - Optional issue screenshots (`screenshotOnIssue`)
@@ -702,6 +705,7 @@ Emulate CSS media features on the current page without resetting omitted feature
 #### `browser_tabs`
 Manage browser tabs in one tool.
 - Parameters: `action` (`list`, `new`, `close`, `select`) and optional `index` (for `close` and `select`).
+- If the browser context closes during tab creation, the request fails. Late-created pages receive bounded close attempts that verify whether the target closed; an unresponsive target cannot hold shutdown indefinitely.
 
 ### Browser Session Tools
 

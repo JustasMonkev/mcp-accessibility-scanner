@@ -59,7 +59,8 @@ type KeyboardAuditCallbacks = {
   getActiveElementInfo: () => Promise<FocusPoint>;
   onStep?: (stop: FocusStop) => Promise<void>;
   getCurrentUrl?: () => Promise<string>;
-  goBack?: () => Promise<void>;
+  activateSkipLink?: () => Promise<boolean>;
+  restorePage?: (urlBefore: string) => Promise<void>;
   captureScreenshot?: (label: string) => Promise<string>;
 };
 
@@ -279,13 +280,15 @@ export async function runKeyboardFocusAudit(
       if (options.activateSkipLink && !skipLinkActivated) {
         const beforeActivation = stop;
         const urlBefore = callbacks.getCurrentUrl ? await callbacks.getCurrentUrl() : null;
-        await callbacks.pressKey('Enter');
+        let navigationOccurred = false;
+        if (callbacks.activateSkipLink)
+          navigationOccurred = await callbacks.activateSkipLink();
+        else
+          await callbacks.pressKey('Enter');
         const afterActivation = await callbacks.getActiveElementInfo();
         lastKnownPoint = afterActivation;
         const urlAfter = callbacks.getCurrentUrl ? await callbacks.getCurrentUrl() : null;
         const hashChanged = didUrlHashChange(urlBefore, urlAfter);
-        const fullUrlChanged = urlBefore !== null && urlAfter !== null && urlBefore !== urlAfter;
-        const navigationOccurred = fullUrlChanged && !hashChanged;
         skipLinkActivation = {
           attempted: true,
           hashChanged,
@@ -295,9 +298,8 @@ export async function runKeyboardFocusAudit(
           urlBefore,
           urlAfter,
         };
-        if (navigationOccurred && callbacks.goBack) {
-          await callbacks.goBack();
-          // Focus state is unknown after navigating back; re-query next step.
+        if (navigationOccurred && urlBefore !== null && urlBefore !== urlAfter && callbacks.restorePage) {
+          await callbacks.restorePage(urlBefore);
           lastKnownPoint = null;
         }
         skipLinkActivated = true;
@@ -590,11 +592,30 @@ const auditKeyboard = defineTabTool({
       return fileName;
     };
 
+    const pressKey = async (key: PressableKey) => {
+      await tab.waitForCompletion(async () => {
+        await tab.page.keyboard.press(key);
+      });
+    };
+
+    let historyLengthBeforeActivation = 0;
     const result = await runKeyboardFocusAudit(auditOptions, {
-      pressKey: async key => {
-        await tab.waitForCompletion(async () => {
-          await tab.page.keyboard.press(key);
-        });
+      pressKey,
+      activateSkipLink: async () => {
+        const documentState = await tab.page.evaluateHandle(() => ({ document, historyLength: history.length }));
+        try {
+          historyLengthBeforeActivation = await documentState.evaluate(state => state.historyLength);
+          await pressKey('Enter');
+          try {
+            return !await tab.page.evaluate(state => state.document === document, documentState);
+          } catch (error) {
+            if (error instanceof Error && /JSHandles can be evaluated only in the context they were created|Execution context was destroyed/.test(error.message))
+              return true;
+            throw error;
+          }
+        } finally {
+          await documentState.dispose();
+        }
       },
       getActiveElementInfo,
       onStep: async stop => {
@@ -605,8 +626,15 @@ const auditKeyboard = defineTabTool({
         });
       },
       getCurrentUrl: async () => tab.page.url(),
-      goBack: async () => {
-        await tab.goBack({ waitUntil: 'domcontentloaded' });
+      restorePage: async urlBefore => {
+        if (await tab.page.evaluate(() => history.length) === historyLengthBeforeActivation + 1)
+          await tab.goBack({ waitUntil: 'domcontentloaded' });
+        if (tab.page.url() !== urlBefore) {
+          await tab.waitForCompletion(async () => {
+            await tab.page.evaluate(url => window.location.replace(url), urlBefore);
+            await tab.page.waitForURL(url => url.href === urlBefore, { waitUntil: 'domcontentloaded' });
+          });
+        }
       },
       captureScreenshot,
     });
