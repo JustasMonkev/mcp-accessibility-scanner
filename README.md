@@ -625,7 +625,7 @@ Select an option in a dropdown.
 - Parameters: `element`, `ref`, `values` (array)
 
 #### `browser_fill_form`
-Fill multiple fields with one call.
+Fill multiple fields with one call. Generated Playwright code preserves checkbox/radio booleans and selects combobox options by label, matching the performed action.
 - Parameters: `fields` (array of objects with `name`, `type`, `ref`, and `value`)
 
 #### `browser_press_key`

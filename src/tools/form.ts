@@ -47,10 +47,10 @@ const fillForm = defineTabTool({
         response.addCode(`${locatorSource}.fill(${javascript.quote(field.value)});`);
       } else if (field.type === 'checkbox' || field.type === 'radio') {
         await locator.setChecked(field.value === 'true');
-        response.addCode(`${locatorSource}.setChecked(${javascript.quote(field.value)});`);
+        response.addCode(`${locatorSource}.setChecked(${field.value === 'true'});`);
       } else if (field.type === 'combobox') {
         await locator.selectOption({ label: field.value });
-        response.addCode(`${locatorSource}.selectOption(${javascript.quote(field.value)});`);
+        response.addCode(`${locatorSource}.selectOption({ label: ${javascript.quote(field.value)} });`);
       }
     }
   },
