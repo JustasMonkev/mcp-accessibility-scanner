@@ -296,7 +296,10 @@ describe('runKeyboardFocusAudit', () => {
     expect(pressKey.mock.calls.map(call => call[0])).toEqual(['Tab', 'Shift+Tab', 'Tab', 'Shift+Tab']);
   });
 
-  it('activates skip link and does not goBack for hash-only URL changes', async () => {
+  it.each([
+    'https://example.com/#main',
+    'https://example.com/rewritten?view=main#main',
+  ])('does not infer document navigation from a URL change to %s', async urlAfter => {
     const sequence: FocusPoint[] = [
       focusPoint({ role: 'document', tagName: 'BODY' }),
       focusPoint({ role: 'link', name: 'Skip to content', text: 'Skip to content', tagName: 'A', href: 'https://example.com/#main' }),
@@ -307,7 +310,7 @@ describe('runKeyboardFocusAudit', () => {
     const goBack = vi.fn(async () => undefined);
     const getCurrentUrl = vi.fn()
         .mockResolvedValueOnce('https://example.com/')
-        .mockResolvedValueOnce('https://example.com/#main');
+        .mockResolvedValueOnce(urlAfter);
 
     const result = await runKeyboardFocusAudit({
       maxTabs: 1,
@@ -348,7 +351,7 @@ describe('runKeyboardFocusAudit', () => {
     ['https://example.com/start#skip', 'https://example.com/target'],
     ['https://example.com/start', 'https://other.example/start#main'],
     ['https://example.com/start', 'https://example.com/start?view=main#main'],
-  ])('navigates back when skip-link activation leaves %s for %s', async (urlBefore, urlAfter) => {
+  ])('navigates back when skip-link activation replaces the document at %s with %s', async (urlBefore, urlAfter) => {
     const sequence: FocusPoint[] = [
       focusPoint({ role: 'document', tagName: 'BODY' }),
       focusPoint({ role: 'link', name: 'Skip to content', text: 'Skip to content', tagName: 'A', href: urlAfter }),
@@ -360,6 +363,7 @@ describe('runKeyboardFocusAudit', () => {
     const getCurrentUrl = vi.fn()
         .mockResolvedValueOnce(urlBefore)
         .mockResolvedValueOnce(urlAfter);
+    const activateSkipLink = vi.fn(async () => true);
 
     const result = await runKeyboardFocusAudit({
       maxTabs: 1,
@@ -385,6 +389,7 @@ describe('runKeyboardFocusAudit', () => {
         return point;
       }),
       getCurrentUrl,
+      activateSkipLink,
       goBack,
     });
 

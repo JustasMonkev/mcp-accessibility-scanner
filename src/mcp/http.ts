@@ -22,7 +22,7 @@ import { validateAuthToken } from '../config.js';
 
 import debug from 'debug';
 
-import { createMcpHandler, isInitializeRequest, isLegacyRequest, STDIO_DEFAULT_MAX_BUFFER_SIZE } from '@modelcontextprotocol/server';
+import { createMcpHandler, isInitializeRequest, isJSONRPCRequest, isLegacyRequest, STDIO_DEFAULT_MAX_BUFFER_SIZE } from '@modelcontextprotocol/server';
 import { NodeStreamableHTTPServerTransport, toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
 import { ManualPromise } from './manualPromise.js';
 import * as mcpServer from './server.js';
@@ -84,15 +84,32 @@ export async function installHttpTransport(httpServer: http.Server, serverBacken
       await sessions.handleRequest(req, res);
     } catch (error) {
       testDebug(error);
-      if (res.headersSent) {
-        res.destroy();
-        return;
-      }
-      res.statusCode = 500;
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null }));
+      sendInternalError(req, res);
     }
   });
+}
+
+function sendInternalError(req: http.IncomingMessage, res: http.ServerResponse, parsedBody?: unknown) {
+  if (res.headersSent) {
+    res.destroy();
+    return;
+  }
+  const error = { code: -32603, message: 'Internal server error' };
+  const messages = Array.isArray(parsedBody) ? parsedBody : [parsedBody];
+  let responseBody: unknown = { jsonrpc: '2.0', error, id: null };
+  if (parsedBody !== undefined) {
+    const responses = messages.filter(isJSONRPCRequest).map(message => ({ jsonrpc: '2.0', error, id: message.id }));
+    if (!responses.length)
+      responseBody = undefined;
+    else
+      responseBody = Array.isArray(parsedBody) ? responses : responses[0];
+  }
+  res.statusCode = 500;
+  if (!req.complete)
+    res.setHeader('Connection', 'close');
+  if (responseBody !== undefined)
+    res.setHeader('Content-Type', 'application/json');
+  res.end(responseBody === undefined ? undefined : JSON.stringify(responseBody));
 }
 
 // Optional bearer-token gate for the HTTP transport. The loopback Host/Origin
@@ -307,13 +324,9 @@ class SessionStore {
       await this._createStatelessServer().connect(transport);
       await transport.handleRequest(req, res, parsedBody);
     } catch (error) {
-      // A failure before the response is written leaves the connection open,
-      // and res 'close' — the disposal path above — only fires once the
-      // client abandons it, which can be arbitrarily late. Close eagerly so
-      // the transport (and any backend state behind it) does not linger;
-      // close() is idempotent, so the 'close' listener firing later is fine.
       await transport.close().catch(e => testDebug(e));
-      throw error;
+      testDebug(error);
+      sendInternalError(req, res, parsedBody);
     }
   }
 

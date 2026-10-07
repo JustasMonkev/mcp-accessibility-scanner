@@ -45,14 +45,16 @@ function focusPoint(overrides: Partial<FocusPoint>): FocusPoint {
 
 function createHarness(sequence: FocusPoint[], requestContext?: any) {
   let index = 0;
+  const documentState = { dispose: vi.fn(async () => undefined) };
   const page = {
     evaluate: vi.fn(async () => {
       const point = sequence[index];
       index++;
       return point;
     }),
+    evaluateHandle: vi.fn(async () => documentState),
     keyboard: {
-      press: vi.fn(async () => undefined),
+      press: vi.fn(async (_key: string) => undefined),
     },
     url: vi.fn(() => 'https://example.com/'),
     goBack: vi.fn(async () => undefined),
@@ -73,7 +75,7 @@ function createHarness(sequence: FocusPoint[], requestContext?: any) {
   };
 
   const response = new Response(context, 'audit_keyboard', {}, requestContext);
-  return { context, tab, page, outputFile, response };
+  return { context, tab, page, outputFile, response, documentState };
 }
 
 describe('audit_keyboard tool', () => {
@@ -94,6 +96,30 @@ describe('audit_keyboard tool', () => {
 
     expect(page.keyboard.press).not.toHaveBeenCalled();
   });
+
+  it.each(['keypress', 'document comparison'])(
+    'preserves a skip-link %s failure and releases its document handle', async failure => {
+      const { context, page, response, documentState } = createHarness([
+        focusPoint({ role: 'document', tagName: 'BODY' }),
+        focusPoint({ role: 'link', tagName: 'A', name: 'Skip to content', href: '#main' }),
+      ]);
+      const error = new Error(`Failed ${failure}`);
+      if (failure === 'keypress') {
+        page.keyboard.press.mockImplementation(async key => {
+          if (key === 'Enter')
+            throw error;
+        });
+      } else {
+        page.evaluate
+            .mockResolvedValueOnce(focusPoint({ role: 'document', tagName: 'BODY' }))
+            .mockResolvedValueOnce(focusPoint({ role: 'link', tagName: 'A', name: 'Skip to content', href: '#main' }))
+            .mockRejectedValueOnce(error);
+      }
+      await expect(tool.handle(context, tool.schema.inputSchema.parse({ maxTabs: 1, activateSkipLink: true }), response))
+          .rejects.toBe(error);
+      expect(documentState.dispose).toHaveBeenCalledOnce();
+    }
+  );
 
   it('writes report with custom reportFile name', async () => {
     const { context, response } = createHarness([

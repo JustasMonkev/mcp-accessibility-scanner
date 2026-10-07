@@ -77,6 +77,11 @@ describe('mcp http transport hardening', () => {
     }),
   };
 
+  const failingFactory: ServerBackendFactory = {
+    ...probeFactory,
+    create: () => { throw new Error('private backend construction details'); },
+  };
+
   async function startServer(serverBackendFactory = testBackendFactory, authToken?: string) {
     const server = await startHttpServer({ host: '127.0.0.1', port: 0 });
     servers.add(server);
@@ -162,7 +167,7 @@ describe('mcp http transport hardening', () => {
     };
     const failed = await sendRequest(port, options);
     expect(failed.statusCode).toBe(500);
-    expect(JSON.parse(failed.body)).toEqual({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
+    expect(JSON.parse(failed.body)).toEqual({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: 1 });
     expect(escapedErrors).toEqual([]);
 
     failConstruction = false;
@@ -170,6 +175,142 @@ describe('mcp http transport hardening', () => {
     expect(recovered.statusCode).toBe(200);
     expect(recovered.body).toContain('probe');
   });
+
+  it.each([42, 0, 'request-id', ''])('correlates stateless setup errors with request ID %j', async id => {
+    const { port } = await startServer(failingFactory);
+    const failed = await sendRequest(port, {
+      method: 'POST',
+      accept: 'application/json, text/event-stream',
+      body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/list' }),
+    });
+
+    expect(failed.statusCode).toBe(500);
+    expect(JSON.parse(failed.body)).toEqual({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id });
+  });
+
+  it('correlates mixed batch setup errors without responding to notifications', async () => {
+    const { port } = await startServer(failingFactory);
+    const failed = await sendRequest(port, {
+      method: 'POST',
+      accept: 'application/json, text/event-stream',
+      body: JSON.stringify([
+        { jsonrpc: '2.0', id: 0, method: 'tools/list' },
+        { jsonrpc: '2.0', method: 'notifications/initialized' },
+        { jsonrpc: '2.0', id: '', method: 'tools/list' },
+      ]),
+    });
+
+    expect(failed.statusCode).toBe(500);
+    expect(JSON.parse(failed.body)).toEqual([
+      { jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: 0 },
+      { jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: '' },
+    ]);
+  });
+
+  it.each([false, true])('does not send JSON-RPC setup errors for notifications (batch: %j)', async batch => {
+    const { port } = await startServer(failingFactory);
+    const notification = { jsonrpc: '2.0', method: 'notifications/initialized' };
+    const failed = await sendRequest(port, {
+      method: 'POST',
+      accept: 'application/json, text/event-stream',
+      body: JSON.stringify(batch ? [notification, notification] : notification),
+    });
+
+    expect(failed.statusCode).toBe(500);
+    expect(failed.body).toBe('');
+  });
+
+  it('does not answer posted JSON-RPC responses when setup fails', async () => {
+    const { port } = await startServer(failingFactory);
+    const failed = await sendRequest(port, {
+      method: 'POST',
+      accept: 'application/json, text/event-stream',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }),
+    });
+
+    expect(failed.statusCode).toBe(500);
+    expect(failed.body).toBe('');
+  });
+
+  it.each([
+    { body: null, message: 'Bad Request: the request body is not a valid JSON-RPC message' },
+    { body: [], message: 'Bad Request: empty JSON-RPC batch' },
+    { body: { jsonrpc: '2.0', id: true, method: 'tools/list' }, message: 'Bad Request: the request body is not a valid JSON-RPC message' },
+    { body: { jsonrpc: '2.0', id: null, method: 'tools/list' }, message: 'Bad Request: the request body is not a valid JSON-RPC message' },
+  ])('preserves invalid-body rejection before backend setup for $body', async ({ body, message }) => {
+    const { port } = await startServer(failingFactory);
+    const failed = await sendRequest(port, {
+      method: 'POST',
+      accept: 'application/json, text/event-stream',
+      body: JSON.stringify(body),
+    });
+
+    expect(failed.statusCode).toBe(400);
+    expect(JSON.parse(failed.body)).toEqual({ jsonrpc: '2.0', error: { code: -32600, message }, id: null });
+  });
+
+  it.each([false, true])('preserves notification acceptance without setup failure (batch: %j)', async batch => {
+    const { port } = await startServer(probeFactory);
+    const notification = { jsonrpc: '2.0', method: 'notifications/initialized' };
+    const response = await sendRequest(port, {
+      method: 'POST',
+      accept: 'application/json, text/event-stream',
+      body: JSON.stringify(batch ? [notification, notification] : notification),
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.body).toBe('');
+  });
+
+  it.each([true, null])('preserves the SDK invalid-message rejection for request ID %j', async id => {
+    const { port } = await startServer(probeFactory);
+    const response = await sendRequest(port, {
+      method: 'POST',
+      accept: 'application/json, text/event-stream',
+      body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/list' }),
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body)).toEqual({ jsonrpc: '2.0', error: { code: -32600, message: 'Bad Request: the request body is not a valid JSON-RPC message' }, id: null });
+  });
+
+  it.each(['declared', 'chunked'])('closes unread %s non-JSON uploads after setup failure', async framing => {
+    const { port } = await startServer(failingFactory);
+    const agent = new http.Agent({ keepAlive: true });
+    let request: http.ClientRequest | undefined;
+    let resolveClosed: (() => void) | undefined;
+    const socketClosed = new Promise<void>(resolve => resolveClosed = resolve);
+    try {
+      const failed = await new Promise<{ statusCode: number, headers: http.IncomingHttpHeaders, body: string, complete: boolean }>((resolve, reject) => {
+        request = http.request({
+          host: '127.0.0.1', port, path: '/mcp', method: 'POST', agent,
+          headers: {
+            'content-type': 'text/plain',
+            'accept': 'application/json, text/event-stream',
+            ...(framing === 'declared' ? { 'content-length': '1000' } : { 'transfer-encoding': 'chunked' }),
+          },
+        }, res => {
+          const chunks: Buffer[] = [];
+          res.on('data', chunk => chunks.push(chunk));
+          res.once('end', () => resolve({ statusCode: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString('utf8'), complete: res.complete }));
+          res.once('error', reject);
+        });
+        request.once('socket', socket => socket.once('close', () => resolveClosed?.()));
+        request.once('error', reject);
+        request.setTimeout(2000, () => request?.destroy(new Error('Stalled setup-error response')));
+        request.write('partial');
+      });
+
+      expect(failed.statusCode).toBe(500);
+      expect(failed.headers.connection).toBe('close');
+      expect(failed.complete).toBe(true);
+      expect(JSON.parse(failed.body)).toEqual({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
+      await socketClosed;
+    } finally {
+      request?.destroy();
+      agent.destroy();
+    }
+  }, 3000);
 
   it('closes a partial response when transport handling fails after headers', async () => {
     const { server, port } = await startServer();
@@ -612,7 +753,7 @@ describe('mcp http transport hardening', () => {
       });
 
       expect(response.statusCode).toBe(400);
-      expect(JSON.parse(response.body)).toMatchObject({ error: { code: -32700 } });
+      expect(JSON.parse(response.body)).toEqual({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error: Invalid JSON' }, id: null });
     });
 
     it('rejects oversized bodies with 413 before buffering them', async () => {
@@ -954,6 +1095,16 @@ describe('mcp http transport hardening', () => {
       });
       return { statusCode: response.status, json: await response.json() as any };
     }
+
+    it.each([0, ''])('preserves SDK modern setup-error correlation for request ID %j', async id => {
+      const { port } = await startServer(failingFactory);
+      const { statusCode, json } = await modernPost(port,
+          { jsonrpc: '2.0', id, method: 'tools/list', params: { _meta: envelope } },
+          { 'Mcp-Method': 'tools/list', 'Mcp-Name': 'raw-modern' });
+
+      expect(statusCode).toBe(500);
+      expect(json).toEqual({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id });
+    });
 
     it('serves a modern-mode v2 client end to end without initialize or a session', async () => {
       const serverClosed = vi.fn();

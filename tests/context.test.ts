@@ -1552,7 +1552,7 @@ describe('Context', () => {
     });
 
     it.each(['ensureTab', 'newTab'] as const)('%s closes a page that finishes opening after disposal began, before releasing the browser', async method => {
-      const opened = Promise.withResolvers<{ close: () => Promise<void> }>();
+      const opened = Promise.withResolvers<{ close: () => Promise<void>, isClosed: () => boolean }>();
       const close = vi.fn().mockResolvedValue(undefined);
       mockBrowserContext.newPage = vi.fn(() => opened.promise);
       vi.mocked(mockBrowserContextFactory.createContext).mockResolvedValue({ browserContext: mockBrowserContext, close });
@@ -1562,7 +1562,7 @@ describe('Context', () => {
       const disposed = context.dispose();
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(close).not.toHaveBeenCalled();
-      const page = { close: vi.fn().mockResolvedValue(undefined) };
+      const page = { close: vi.fn().mockResolvedValue(undefined), isClosed: () => true };
       opened.resolve(page);
       await expect(pending).rejects.toThrow('closed while a tab was being opened');
       await disposed;
@@ -1571,8 +1571,75 @@ describe('Context', () => {
       expect(page.close.mock.invocationCallOrder[0]).toBeLessThan(close.mock.invocationCallOrder[0]);
     });
 
+    it.each(['ensureTab', 'newTab'] as const)('%s confirms a late target closed before releasing a shared browser', async method => {
+      vi.useFakeTimers();
+      try {
+        let closed = false;
+        let closedAtRelease = false;
+        const opened = Promise.withResolvers<{ close: () => Promise<void>, isClosed: () => boolean }>();
+        const closing = Promise.withResolvers<void>();
+        const page = {
+          close: vi.fn().mockResolvedValueOnce(undefined).mockImplementationOnce(async () => {
+            await closing.promise;
+            closed = true;
+          }),
+          isClosed: () => closed,
+        };
+        const close = vi.fn(async () => { closedAtRelease = closed; });
+        mockBrowserContext.newPage = vi.fn(() => opened.promise);
+        vi.mocked(mockBrowserContextFactory.createContext).mockResolvedValue({ browserContext: mockBrowserContext, close });
+        const context = createContext();
+        const pending = expect(context[method]()).rejects.toThrow('closed while a tab was being opened');
+        await vi.advanceTimersByTimeAsync(0);
+        const disposed = context.dispose();
+        opened.resolve(page);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(closed).toBe(false);
+        closing.resolve();
+        await pending;
+        await disposed;
+        expect(closedAtRelease).toBe(true);
+        expect(page.close).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(['ensureTab', 'newTab'] as const)('%s bounds cleanup when a late target never answers close', async method => {
+      vi.useFakeTimers();
+      try {
+        const opened = Promise.withResolvers<{ close: () => Promise<void>, isClosed: () => boolean }>();
+        const page = { close: vi.fn(() => new Promise<void>(() => {})), isClosed: () => false };
+        const close = vi.fn().mockResolvedValue(undefined);
+        mockBrowserContext.newPage = vi.fn(() => opened.promise);
+        vi.mocked(mockBrowserContextFactory.createContext).mockResolvedValue({ browserContext: mockBrowserContext, close });
+        const context = createContext();
+        let settled = false;
+        let openingError: unknown;
+        const pending = context[method]().then(
+            () => { settled = true; },
+            error => { settled = true; openingError = error; },
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        const disposed = context.dispose();
+        opened.resolve(page);
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(close).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        await disposed;
+        expect(settled).toBe(true);
+        await pending;
+        expect(openingError).toMatchObject({ message: 'The browser context closed while a tab was being opened.' });
+        expect(close).toHaveBeenCalledTimes(1);
+        expect(page.close).toHaveBeenCalledTimes(1);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('shares one page request and closes it when every waiting caller was cancelled', async () => {
-      const opened = Promise.withResolvers<{ close: () => Promise<void> }>();
+      const opened = Promise.withResolvers<{ close: () => Promise<void>, isClosed: () => boolean }>();
       mockBrowserContext.newPage = vi.fn(() => opened.promise);
       vi.mocked(mockBrowserContextFactory.createContext).mockResolvedValue({ browserContext: mockBrowserContext, close: vi.fn().mockResolvedValue(undefined) });
       const context = createContext();
@@ -1582,13 +1649,18 @@ describe('Context', () => {
       await vi.waitFor(() => expect(mockBrowserContext.newPage).toHaveBeenCalled());
       first.abort(new Error('first cancelled'));
       second.abort(new Error('second cancelled'));
-      const page = { close: vi.fn().mockResolvedValue(undefined) };
+      let closed = false;
+      const page = {
+        close: vi.fn().mockResolvedValueOnce(undefined).mockImplementationOnce(async () => { closed = true; }),
+        isClosed: () => closed,
+      };
       opened.resolve(page);
       const [a, b] = await settled;
       expect(a.status === 'rejected' && a.reason.message).toBe('first cancelled');
       expect(b.status === 'rejected' && b.reason.message).toBe('second cancelled');
       expect(mockBrowserContext.newPage).toHaveBeenCalledTimes(1);
-      expect(page.close).toHaveBeenCalledTimes(1);
+      expect(closed).toBe(true);
+      expect(page.close).toHaveBeenCalledTimes(2);
     });
 
     it('keeps a shared page for a caller that is still waiting', async () => {
