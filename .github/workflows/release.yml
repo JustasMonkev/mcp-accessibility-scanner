@@ -21,6 +21,8 @@ concurrency:
 
 jobs:
   publish:
+    # Deleting a v* tag also fires a push event, with github.sha set to the default branch.
+    if: ${{ !github.event.deleted }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: npm

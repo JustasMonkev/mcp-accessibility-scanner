@@ -90,6 +90,8 @@ git tag -f v4.0.1 origin/main
 git push origin v4.0.1
 ```
 
+Deleting the tag also fires the workflow, but the job skips tag deletions, so only the recreated tag publishes.
+
 If the publish step itself succeeded, the version is final. npm never allows republishing a version, even after unpublishing it. Release a new patch version instead.
 
 ## npm 12 rules that affect this package
@@ -140,11 +142,13 @@ npm 12 requires Node.js `^22.22.2 || ^24.15.0 || >=26.0.0`, and trusted publishi
 
 ## Staged publishing (optional)
 
-For a human 2FA approval on every release, switch the publish step in `release.yml` to:
+For a human 2FA approval on every release, change only the last line of the **Publish to npm** step in `release.yml` from `npm publish --tag "$DIST_TAG"` to:
 
-```yaml
-run: npm stage publish --tag "$DIST_TAG"
+```bash
+npm stage publish --tag "$DIST_TAG"
 ```
+
+Keep the dist-tag check that comes before it in the same step.
 
 Then restrict the trusted publisher to `npm stage publish` only. npm fixes a connection's required fields once it is created, and may not let you change its allowed actions in place either. If the settings page does not offer to turn off `npm publish`, delete the connection and add a new one with the same values from [step 1](#1-add-the-trusted-publisher-on-npmjscom), leaving `npm publish` disabled. The new connection gets its own 2-day window, so release within 2 days of recreating it. CI uploads the version in a non-public state, and a maintainer makes it public with `npm stage approve <stage-id>`, which requires 2FA. `npm stage reject <stage-id>` discards it.
 
