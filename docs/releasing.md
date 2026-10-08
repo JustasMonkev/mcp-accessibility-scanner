@@ -68,7 +68,7 @@ After the first successful trusted publish, open **Settings → Publishing acces
 
 - The tag points at a commit already on `main`.
 - The tag equals `v` + `package.json` `version`. Pushing `v4.0.1` while `package.json` says `4.0.0` fails.
-- That version is not yet on npm.
+- That version is not yet on npm, and it is newer than the version the target dist-tag (`latest` or `next`) points at. Publishing passes `--tag` explicitly, which skips npm's own lower-version check, so without this an older tag would move `latest` or `next` backward.
 - `npm ci` passes under npm 12 with `strict-allow-scripts`. Any dependency install script not approved in `allowScripts` fails the release (see below).
 - Lint, typecheck, unit tests, and a clean build pass. `npm pack --dry-run` lists the tarball contents in the log.
 
@@ -142,7 +142,7 @@ For a human 2FA approval on every release, switch the publish step in `release.y
 run: npm stage publish --tag "$DIST_TAG"
 ```
 
-Then disable `npm publish` in the trusted publisher's allowed actions. CI uploads the version in a non-public state, and a maintainer makes it public with `npm stage approve <stage-id>`, which requires 2FA. `npm stage reject <stage-id>` discards it.
+Then restrict the trusted publisher to `npm stage publish` only. npm fixes a connection's required fields once it is created, and may not let you change its allowed actions in place either. If the settings page does not offer to turn off `npm publish`, delete the connection and add a new one with the same values from [step 1](#1-add-the-trusted-publisher-on-npmjscom), leaving `npm publish` disabled. The new connection gets its own 2-day window, so release within 2 days of recreating it. CI uploads the version in a non-public state, and a maintainer makes it public with `npm stage approve <stage-id>`, which requires 2FA. `npm stage reject <stage-id>` discards it.
 
 ## Troubleshooting
 
@@ -150,6 +150,7 @@ Then disable `npm publish` in the trusted publisher's allowed actions. CI upload
 | --- | --- |
 | `Tag vX does not match package.json version` | Bump `package.json` on `main` first, or tag the right version. |
 | `... is already on npm` | That version was already published. Bump to a new version. |
+| `... is not newer than the current latest` (or `next`) | The tag is older than what that dist-tag already points at. Bump to a higher version. To publish a backport to an older release line, publish it by hand with a separate dist-tag, for example `npm publish --tag v3-latest`. |
 | `is not on main` | The tag points at a branch commit. Tag the merge commit on `main`. |
 | `--strict-allow-scripts: ... not covered by allowScripts` | A dependency's install script is new or its version changed. Review it, run `npm install-scripts approve <pkg>` or `deny`, and commit `package.json`. |
 | `E404`/`ENEEDAUTH`/`403` on publish | The trusted publisher is missing, expired, or mismatched. Check the owner, repository, `release.yml`, the `npm` environment, and that `npm publish` is allowed. |
