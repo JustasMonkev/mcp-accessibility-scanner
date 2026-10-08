@@ -64,6 +64,13 @@ After the first successful trusted publish, open **Settings → Publishing acces
    npm audit signatures   # run in a project that depends on the package
    ```
 
+### How the workflow runs
+
+The workflow has two jobs:
+
+1. **build** runs every check below, installs dependencies, runs the tests, and packs the tarball. It has read-only repository access and cannot mint the npm publish credential, so a compromised dependency install script or test cannot publish.
+2. **publish** runs in the `npm` environment and is the only job with `id-token: write`. It downloads the tarball from **build**, checks the dist-tag again, and publishes that tarball. It does not install dependencies or run repository code. If the environment requires reviewers, approval is requested after the tests pass.
+
 ### What the workflow checks before publishing
 
 - The tag points at a commit already on `main`.
@@ -71,7 +78,7 @@ After the first successful trusted publish, open **Settings → Publishing acces
 - `server.json` `version` and every `packages[].version` equal that version too, so the MCP Registry entry cannot drift from npm.
 - That version is not yet on npm, and it is newer than the version the target dist-tag (`latest` or `next`) points at. Publishing passes `--tag` explicitly, which skips npm's own lower-version check, so without this an older tag would move `latest` or `next` backward.
 - `npm ci` passes under npm 12 with `strict-allow-scripts`. Any dependency install script not approved in `allowScripts` fails the release (see below).
-- Lint, typecheck, unit tests, and a clean build pass. `npm pack --dry-run` lists the tarball contents in the log.
+- Lint, typecheck, unit tests, and a clean build pass. `npm pack` lists the tarball contents in the log.
 
 Releases run one at a time. Tags pushed while a release is running, or waiting for environment approval, queue up instead of replacing each other. GitHub does not guarantee the queue order, so if a newer tag happens to run first, the older one fails the dist-tag check rather than moving `latest` backward. Push one release tag at a time and wait for it to finish.
 
@@ -142,10 +149,10 @@ npm 12 requires Node.js `^22.22.2 || ^24.15.0 || >=26.0.0`, and trusted publishi
 
 ## Staged publishing (optional)
 
-For a human 2FA approval on every release, change only the last line of the **Publish to npm** step in `release.yml` from `npm publish --tag "$DIST_TAG"` to:
+For a human 2FA approval on every release, change only the last line of the **Publish to npm** step in `release.yml` from `npm publish "${TARBALLS[0]}" --tag "$DIST_TAG"` to:
 
 ```bash
-npm stage publish --tag "$DIST_TAG"
+npm stage publish "${TARBALLS[0]}" --tag "$DIST_TAG"
 ```
 
 Keep the dist-tag check that comes before it in the same step.

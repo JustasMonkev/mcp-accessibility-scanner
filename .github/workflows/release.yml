@@ -20,15 +20,19 @@ concurrency:
   queue: max
 
 jobs:
-  publish:
+  # Tests and packs the release without OIDC access, so dependency install scripts and
+  # project code never run in a job that can mint the npm publish credential.
+  build:
     # Deleting a v* tag also fires a push event, with github.sha set to the default branch.
     if: ${{ !github.event.deleted }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: npm
     permissions:
       contents: read
-      id-token: write
+    outputs:
+      name: ${{ steps.version.outputs.name }}
+      version: ${{ steps.version.outputs.version }}
+      dist_tag: ${{ steps.version.outputs.dist_tag }}
 
     steps:
       - name: Checkout tagged commit
@@ -103,17 +107,32 @@ jobs:
               process.exit(1);
             }
           ' "$VERSION"
-          if [ -n "$(npm view "$NAME@$VERSION" version 2>/dev/null)" ]; then
-            echo "::error::$NAME@$VERSION is already on npm. Bump the version before tagging."
+          # Any lookup error stops the release instead of reading as "not published".
+          if ! PUBLISHED="$(npm view "$NAME" versions --json)"; then
+            echo "::error::Could not read the published versions of $NAME from npm."
             exit 1
           fi
-          # npm refuses to publish a prerelease to `latest` without an explicit tag.
-          case "$VERSION" in
-            *-*) DIST_TAG=next ;;
-            *) DIST_TAG=latest ;;
-          esac
-          echo "Publishing $NAME@$VERSION with dist-tag $DIST_TAG"
-          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+          SEMVER="$(npm root -g)/npm/node_modules/semver"
+          DIST_TAG="$(node -e '
+            const [semverPath, version, published] = process.argv.slice(1);
+            const semver = require(semverPath);
+            if (!semver.valid(version)) {
+              console.error(`::error::package.json version ${version} is not valid SemVer.`);
+              process.exit(1);
+            }
+            if ([].concat(JSON.parse(published)).includes(version)) {
+              console.error(`::error::${version} is already on npm. Bump the version before tagging.`);
+              process.exit(1);
+            }
+            // npm refuses to publish a prerelease to latest without an explicit tag.
+            console.log(semver.prerelease(version) ? "next" : "latest");
+          ' "$SEMVER" "$VERSION" "$PUBLISHED")"
+          echo "Releasing $NAME@$VERSION with dist-tag $DIST_TAG"
+          {
+            echo "name=$NAME"
+            echo "version=$VERSION"
+            echo "dist_tag=$DIST_TAG"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: npm ci
@@ -133,18 +152,81 @@ jobs:
       - name: Build
         run: npm run clean && npm run build
 
-      - name: Show package contents
-        run: npm pack --dry-run
+      - name: Pack
+        run: |
+          mkdir release
+          npm pack --pack-destination release
+
+      - name: Upload package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-package
+          path: release/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  # Publishes the tarball built above. Only this job can mint the OIDC token npm trusts,
+  # and it runs nothing from the repository or its dependencies.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Select installed supported Node.js
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { execFileSync } = require('node:child_process');
+          const supported = version => {
+            if (!/^\d+\.\d+\.\d+$/.test(version)) return false;
+            const [major, minor] = version.split('.').map(Number);
+            return (major === 24 && minor >= 15) || major >= 26;
+          };
+          const root = process.env.RUNNER_TOOL_CACHE && path.join(process.env.RUNNER_TOOL_CACHE, 'node');
+          const versions = root && fs.existsSync(root)
+            ? fs.readdirSync(root).filter(supported)
+              .sort((a, b) => b.localeCompare(a, undefined, { numeric: true })) : [];
+          const executable = versions.map(version => path.join(root, version, process.arch,
+            process.platform === 'win32' ? 'node.exe' : 'bin/node')).find(file => fs.existsSync(file)) || process.execPath;
+          const version = execFileSync(executable, ['--version'], { encoding: 'utf8' }).trim();
+          if (!supported(version.replace(/^v/, '')))
+            throw new Error(`Runner needs Node ^24.15.0 or >=26.0.0; found ${version}`);
+          fs.appendFileSync(process.env.GITHUB_PATH, path.dirname(executable) + '\n');
+          NODE
+
+      - name: Install npm 12
+        run: |
+          npm install -g npm@12.2.0
+          node --version
+          npm --version
+
+      - name: Download package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-package
+          path: release
 
       # Trusted publishing exchanges the job's OIDC token for a short-lived publish token
       # and attaches provenance automatically for this public repository.
       - name: Publish to npm
         shell: bash
         env:
-          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
+          NAME: ${{ needs.build.outputs.name }}
+          VERSION: ${{ needs.build.outputs.version }}
+          DIST_TAG: ${{ needs.build.outputs.dist_tag }}
         run: |
-          VERSION="$(node -p "require('./package.json').version")"
-          NAME="$(node -p "require('./package.json').name")"
+          TARBALLS=(release/*.tgz)
+          if [ "${#TARBALLS[@]}" -ne 1 ] || [ ! -f "${TARBALLS[0]}" ]; then
+            echo "::error::Expected exactly one package tarball, found: ${TARBALLS[*]}"
+            exit 1
+          fi
           # An explicit --tag skips npm's lower-version guard, so refuse to move the tag backward.
           # This runs right before publishing so a release published meanwhile is seen.
           # A missing tag prints nothing and succeeds; any lookup error stops the release.
@@ -159,4 +241,4 @@ jobs:
             echo "::error::$NAME@$VERSION is not newer than the current $DIST_TAG ($CURRENT). Publishing it would move $DIST_TAG backward."
             exit 1
           fi
-          npm publish --tag "$DIST_TAG"
+          npm publish "${TARBALLS[0]}" --tag "$DIST_TAG"
