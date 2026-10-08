@@ -110,19 +110,6 @@ jobs:
             *-*) DIST_TAG=next ;;
             *) DIST_TAG=latest ;;
           esac
-          # An explicit --tag skips npm's lower-version guard, so refuse to move the tag backward.
-          # A missing tag prints nothing and succeeds; any lookup error stops the release.
-          if ! CURRENT="$(npm view "$NAME" "dist-tags.$DIST_TAG")"; then
-            echo "::error::Could not read the current $DIST_TAG dist-tag from npm."
-            exit 1
-          fi
-          if [ -n "$CURRENT" ] && ! node -e '
-            const semver = require(process.argv[1]);
-            process.exit(semver.gt(process.argv[2], process.argv[3]) ? 0 : 1);
-          ' "$(npm root -g)/npm/node_modules/semver" "$VERSION" "$CURRENT"; then
-            echo "::error::$NAME@$VERSION is not newer than the current $DIST_TAG ($CURRENT). Publishing it would move $DIST_TAG backward."
-            exit 1
-          fi
           echo "Publishing $NAME@$VERSION with dist-tag $DIST_TAG"
           echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
 
@@ -150,6 +137,24 @@ jobs:
       # Trusted publishing exchanges the job's OIDC token for a short-lived publish token
       # and attaches provenance automatically for this public repository.
       - name: Publish to npm
+        shell: bash
         env:
           DIST_TAG: ${{ steps.version.outputs.dist_tag }}
-        run: npm publish --tag "$DIST_TAG"
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          NAME="$(node -p "require('./package.json').name")"
+          # An explicit --tag skips npm's lower-version guard, so refuse to move the tag backward.
+          # This runs right before publishing so a release published meanwhile is seen.
+          # A missing tag prints nothing and succeeds; any lookup error stops the release.
+          if ! CURRENT="$(npm view "$NAME" "dist-tags.$DIST_TAG")"; then
+            echo "::error::Could not read the current $DIST_TAG dist-tag from npm."
+            exit 1
+          fi
+          if [ -n "$CURRENT" ] && ! node -e '
+            const semver = require(process.argv[1]);
+            process.exit(semver.gt(process.argv[2], process.argv[3]) ? 0 : 1);
+          ' "$(npm root -g)/npm/node_modules/semver" "$VERSION" "$CURRENT"; then
+            echo "::error::$NAME@$VERSION is not newer than the current $DIST_TAG ($CURRENT). Publishing it would move $DIST_TAG backward."
+            exit 1
+          fi
+          npm publish --tag "$DIST_TAG"
