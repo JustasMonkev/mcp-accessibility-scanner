@@ -2,7 +2,7 @@
 
 Use the local CLI when you want direct automation without attaching an MCP client.
 
-For AI agents using this skill: always launch the interactive REPL with `npx mcp-accessibility-scanner interactive` and send tool calls there. Do not use the default MCP server mode from this skill.
+For AI agents using this skill: always launch the interactive REPL with `npx --allow-scripts=re2 mcp-accessibility-scanner interactive` and send tool calls there. Do not use the default MCP server mode from this skill.
 
 For Electron apps, prefer launching them through this CLI with `--cdp-launch-command` instead of using a separate automation layer.
 
@@ -13,8 +13,8 @@ For Electron apps, prefer launching them through this CLI with `--cdp-launch-com
 Start a readline prompt for tool execution. This is the required mode for AI agents using this skill. Type `<tool-name> <json>` to call tools.
 
 ```bash
-npx mcp-accessibility-scanner interactive
-npx mcp-accessibility-scanner --headless interactive
+npx --allow-scripts=re2 mcp-accessibility-scanner interactive
+npx --allow-scripts=re2 mcp-accessibility-scanner --headless interactive
 ```
 
 REPL example session:
@@ -31,8 +31,8 @@ REPL example session:
 Print all available tools and their descriptions.
 
 ```bash
-npx mcp-accessibility-scanner list-tools
-npx mcp-accessibility-scanner --caps vision,pdf list-tools
+npx --allow-scripts=re2 mcp-accessibility-scanner list-tools
+npx --allow-scripts=re2 mcp-accessibility-scanner --caps vision,pdf list-tools
 ```
 
 ### MCP Server (do not use from this skill)
@@ -40,8 +40,8 @@ npx mcp-accessibility-scanner --caps vision,pdf list-tools
 Running the CLI without a subcommand starts the MCP server over stdio for MCP clients. This skill does not use that mode.
 
 ```bash
-npx mcp-accessibility-scanner
-npx mcp-accessibility-scanner --headless --browser chrome
+npx --allow-scripts=re2 mcp-accessibility-scanner
+npx --allow-scripts=re2 mcp-accessibility-scanner --headless --browser chrome
 ```
 
 ## Global CLI Options
@@ -238,7 +238,7 @@ These tools are always available and work in the interactive REPL.
 
 ### Optional Tools (require `--caps`)
 
-**`--caps install`:** `browser_install {}` - Install the configured browser. Disabled by default. If the browser is missing and installation is authorized, restart the REPL with `npx mcp-accessibility-scanner --caps install interactive`, preserving the existing browser options, then call `browser_install {}`. This downloads executable code through Playwright without independent archive checksum/signature verification; trust the download source and TLS configuration before enabling it. Alternatively, use a provisioned browser with `--executable-path`. Explicit `core-install` settings remain supported as a deprecated alias for `install`.
+**`--caps install`:** `browser_install {}` - Install the configured browser. Disabled by default. If the browser is missing and installation is authorized, restart the REPL with `npx --allow-scripts=re2 mcp-accessibility-scanner --caps install interactive`, preserving the existing browser options, then call `browser_install {}`. This downloads executable code through Playwright without independent archive checksum/signature verification; trust the download source and TLS configuration before enabling it. Alternatively, use a provisioned browser with `--executable-path`. Explicit `core-install` settings remain supported as a deprecated alias for `install`.
 
 **`--caps pdf`:** `browser_pdf_save` - Save page as PDF
 
@@ -253,7 +253,7 @@ These tools are always available and work in the interactive REPL.
 ### Full WCAG 2.2 AA audit of a site
 
 ```bash
-npx mcp-accessibility-scanner --headless interactive
+npx --allow-scripts=re2 mcp-accessibility-scanner --headless interactive
 ```
 
 ```
@@ -264,7 +264,7 @@ npx mcp-accessibility-scanner --headless interactive
 ### Quick single-page scan
 
 ```bash
-npx mcp-accessibility-scanner --headless interactive
+npx --allow-scripts=re2 mcp-accessibility-scanner --headless interactive
 ```
 
 ```
@@ -291,7 +291,7 @@ For login controls requiring individual key events, clear the field with `browse
 ### Responsive + media variant scan
 
 ```bash
-npx mcp-accessibility-scanner --headless interactive
+npx --allow-scripts=re2 mcp-accessibility-scanner --headless interactive
 ```
 
 ```
@@ -302,7 +302,7 @@ npx mcp-accessibility-scanner --headless interactive
 ### Keyboard accessibility audit with screenshots
 
 ```bash
-npx mcp-accessibility-scanner --headless interactive
+npx --allow-scripts=re2 mcp-accessibility-scanner --headless interactive
 ```
 
 ```
@@ -313,7 +313,7 @@ npx mcp-accessibility-scanner --headless interactive
 ### Scan specific pages from a list
 
 ```bash
-npx mcp-accessibility-scanner --headless interactive
+npx --allow-scripts=re2 mcp-accessibility-scanner --headless interactive
 ```
 
 ```
@@ -325,7 +325,7 @@ npx mcp-accessibility-scanner --headless interactive
 Launch the app binary directly if `open -a` does not expose the CDP port. If the app is already running, quit it first so the debug flag is applied on a clean start.
 
 ```bash  
-npx mcp-accessibility-scanner interactive --cdp-launch-command /Applications/YourApp.app/Contents/MacOS/YourApp --cdp-launch-args=--remote-debugging-port={port} --cdp-launch-port 9222 --cdp-launch-startup-timeout 20000
+npx --allow-scripts=re2 mcp-accessibility-scanner interactive --cdp-launch-command /Applications/YourApp.app/Contents/MacOS/YourApp --cdp-launch-args=--remote-debugging-port={port} --cdp-launch-port 9222 --cdp-launch-startup-timeout 20000
 ```
 
 Typical REPL flow:

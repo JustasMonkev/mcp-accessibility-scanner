@@ -81,6 +81,7 @@ A version with a prerelease suffix, such as `4.1.0-beta.1` tagged `v4.1.0-beta.1
 If the run fails before the publish step, fix the problem on `main`, then move the tag to the fixed commit:
 
 ```bash
+git fetch origin main                  # pick up the merged fix
 git push origin :refs/tags/v4.0.1      # delete the remote tag
 git tag -f v4.0.1 origin/main
 git push origin v4.0.1

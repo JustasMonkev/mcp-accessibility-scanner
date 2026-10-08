@@ -111,7 +111,7 @@ The scanner can run in two modes depending on how you use it.
 When launched without a subcommand, the process starts an MCP server that communicates over stdio. This is the mode used by MCP clients such as Claude Desktop, VS Code, and Claude Code -- you should never need to run it by hand.
 
 ```bash
-npx mcp-accessibility-scanner            # starts the MCP server (stdio)
+npx --allow-scripts=re2 mcp-accessibility-scanner            # starts the MCP server (stdio)
 ```
 
 All of the MCP client configuration examples in this README already use this default mode.
@@ -121,7 +121,7 @@ All of the MCP client configuration examples in this README already use this def
 For manual terminal use, the `interactive` subcommand starts a readline REPL where you can call any tool directly:
 
 ```bash
-$ npx mcp-accessibility-scanner interactive
+$ npx --allow-scripts=re2 mcp-accessibility-scanner interactive
 Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.
 > browser_navigate {"url": "https://example.com"}
 > scan_page {"violationsTag": ["wcag21aa"]}
@@ -130,7 +130,7 @@ Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.
 ```
 
 Each line is `<tool-name> <json-arguments>`. Omit the JSON to pass `{}`.
-Global browser connection flags still apply here, for example `npx mcp-accessibility-scanner --headless interactive`.
+Global browser connection flags still apply here, for example `npx --allow-scripts=re2 mcp-accessibility-scanner --headless interactive`.
 Use `--mobile` or `PLAYWRIGHT_MCP_MOBILE=1` to emulate a generic mobile device (`Pixel 10` for Chromium, `iPhone 17` for WebKit). It cannot be combined with `--device`, CDP attach/launch modes, remote browser endpoints, or `--extension`.
 
 ### Browser extension mode
@@ -138,7 +138,7 @@ Use `--mobile` or `PLAYWRIGHT_MCP_MOBILE=1` to emulate a generic mobile device (
 Use `--extension` to connect through the current [Playwright Extension](https://github.com/microsoft/playwright/blob/main/packages/extension/README.md), which must support extension protocol v2.
 
 ```bash
-npx mcp-accessibility-scanner --extension
+npx --allow-scripts=re2 mcp-accessibility-scanner --extension
 ```
 
 Set `PLAYWRIGHT_MCP_EXTENSION_TOKEN` to the token shown by the extension to bypass the connection approval dialog. The relay's CDP WebSocket endpoint always requires a separate random token, generated per relay and appended automatically for the server's own connection. This CDP token is never passed in Chrome's launch arguments or extension URL; the extension approval token cannot authenticate a CDP client.
@@ -153,7 +153,7 @@ Packed extensions require an enabled record in the profile's preferences; a left
 To print the built-in tool names and descriptions (page-registered WebMCP tools require a live MCP `tools/list` request):
 
 ```bash
-npx mcp-accessibility-scanner list-tools
+npx --allow-scripts=re2 mcp-accessibility-scanner list-tools
 ```
 
 > **Note:** Tool names like `browser_navigate` and `scan_page` are MCP tool identifiers (and REPL commands in interactive mode). They are not shell subcommands -- you cannot run `npx mcp-accessibility-scanner browser_navigate`.
@@ -191,7 +191,7 @@ You can pass a configuration file to customize Playwright behavior:
 #### Exact-name tool selection
 
 ```bash
-npx mcp-accessibility-scanner --allowed-tools browser_pdf_save --blocked-tools browser_evaluate,browser_file_upload
+npx --allow-scripts=re2 mcp-accessibility-scanner --allowed-tools browser_pdf_save --blocked-tools browser_evaluate,browser_file_upload
 ```
 
 | CLI | Environment | JSON config |
@@ -351,11 +351,11 @@ Sign in in the opened browser, then close it — `auth.json` now holds the cooki
 Pass it to the server with the CLI flag, the environment variable, or the config file:
 
 ```bash
-npx mcp-accessibility-scanner --isolated --storage-state ./auth.json
+npx --allow-scripts=re2 mcp-accessibility-scanner --isolated --storage-state ./auth.json
 ```
 
 ```bash
-PLAYWRIGHT_MCP_ISOLATED=true PLAYWRIGHT_MCP_STORAGE_STATE=./auth.json npx mcp-accessibility-scanner
+PLAYWRIGHT_MCP_ISOLATED=true PLAYWRIGHT_MCP_STORAGE_STATE=./auth.json npx --allow-scripts=re2 mcp-accessibility-scanner
 ```
 
 ```json
