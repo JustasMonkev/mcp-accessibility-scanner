@@ -40,7 +40,7 @@ Using npm:
 npm install -g mcp-accessibility-scanner --allow-scripts=re2
 ```
 
-npm 12 does not run dependency install scripts unless you allow them. The scanner depends on [`re2`](https://www.npmjs.com/package/re2), a native module whose install script downloads or builds `re2.node`; without it the server fails to start with `Cannot find module './build/Release/re2.node'`. Pass `--allow-scripts=re2` to `npm install -g` and `npx` (older npm versions accept and ignore the flag), or run `npm install-scripts approve re2` when you add the package to a project. To allow it for every global install, run `npm config set allow-scripts=re2 --location=user`.
+npm 12 does not run dependency install scripts unless you allow them. The scanner depends on [`re2`](https://www.npmjs.com/package/re2), a native module whose install script downloads or builds `re2.node`; without it the server fails to start with `Cannot find module './build/Release/re2.node'`. Pass `--allow-scripts=re2` to `npm install -g` and `npx` (older npm versions accept and ignore the flag), or, when you add the package to a project, run `npm install-scripts approve re2` followed by `npm rebuild re2` (approving does not run the script that was already skipped). To allow it for every global install, run `npm config set allow-scripts=re2 --location=user`.
 
 ### Installation with Docker
 

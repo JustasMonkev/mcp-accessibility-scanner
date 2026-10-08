@@ -16,6 +16,8 @@ permissions:
 concurrency:
   group: release-npm
   cancel-in-progress: false
+  # Keep every pushed tag queued; the default keeps only the newest pending run.
+  queue: max
 
 jobs:
   publish:
@@ -100,7 +102,11 @@ jobs:
             *) DIST_TAG=latest ;;
           esac
           # An explicit --tag skips npm's lower-version guard, so refuse to move the tag backward.
-          CURRENT="$(npm view "$NAME" "dist-tags.$DIST_TAG" 2>/dev/null || true)"
+          # A missing tag prints nothing and succeeds; any lookup error stops the release.
+          if ! CURRENT="$(npm view "$NAME" "dist-tags.$DIST_TAG")"; then
+            echo "::error::Could not read the current $DIST_TAG dist-tag from npm."
+            exit 1
+          fi
           if [ -n "$CURRENT" ] && ! node -e '
             const semver = require(process.argv[1]);
             process.exit(semver.gt(process.argv[2], process.argv[3]) ? 0 : 1);

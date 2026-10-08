@@ -72,6 +72,8 @@ After the first successful trusted publish, open **Settings → Publishing acces
 - `npm ci` passes under npm 12 with `strict-allow-scripts`. Any dependency install script not approved in `allowScripts` fails the release (see below).
 - Lint, typecheck, unit tests, and a clean build pass. `npm pack --dry-run` lists the tarball contents in the log.
 
+Releases run one at a time. Tags pushed while a release is running, or waiting for environment approval, queue up and run in order instead of replacing each other.
+
 ### Prereleases
 
 A version with a prerelease suffix, such as `4.1.0-beta.1` tagged `v4.1.0-beta.1`, is published under the `next` dist-tag. `latest` keeps pointing at the last stable release. Users install a prerelease with `npm install mcp-accessibility-scanner@next`.
@@ -110,6 +112,7 @@ The entries are pinned to exact versions. When a dependency update (for example 
 ```bash
 npm install-scripts ls            # list scripts and their approval state
 npm install-scripts approve re2   # approve and pin the resolved version
+npm rebuild re2                   # run the script that the earlier install skipped
 npm install-scripts deny <pkg>    # deny explicitly
 ```
 
@@ -124,7 +127,7 @@ npm install -g mcp-accessibility-scanner --allow-scripts=re2
 npx -y --allow-scripts=re2 mcp-accessibility-scanner
 ```
 
-Older npm versions accept the flag and ignore it. For a project dependency, users run `npm install-scripts approve re2` in their project instead. The README installation section documents this for users.
+Older npm versions accept the flag and ignore it. For a project dependency, users run `npm install-scripts approve re2` and then `npm rebuild re2` in their project instead. Approving records the decision but does not run the script that was already skipped. The README installation section documents this for users.
 
 ### Git and remote-URL dependencies are blocked
 
@@ -153,5 +156,6 @@ Then restrict the trusted publisher to `npm stage publish` only. npm fixes a con
 | `... is not newer than the current latest` (or `next`) | The tag is older than what that dist-tag already points at. Bump to a higher version. To publish a backport to an older release line, publish it by hand with a separate dist-tag, for example `npm publish --tag v3-latest`. |
 | `is not on main` | The tag points at a branch commit. Tag the merge commit on `main`. |
 | `--strict-allow-scripts: ... not covered by allowScripts` | A dependency's install script is new or its version changed. Review it, run `npm install-scripts approve <pkg>` or `deny`, and commit `package.json`. |
+| `Could not read the current latest dist-tag` (or `next`) | The registry lookup failed, so the release stops instead of skipping the downgrade check. Re-run the job once npm is reachable. |
 | `E404`/`ENEEDAUTH`/`403` on publish | The trusted publisher is missing, expired, or mismatched. Check the owner, repository, `release.yml`, the `npm` environment, and that `npm publish` is allowed. |
 | Publish succeeds without provenance | Provenance is generated only when both the repository and the package are public. |
