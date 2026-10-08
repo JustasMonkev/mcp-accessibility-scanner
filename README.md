@@ -37,8 +37,10 @@ You can install the package using any of these methods:
 
 Using npm:
 ```bash
-npm install -g mcp-accessibility-scanner
+npm install -g mcp-accessibility-scanner --allow-scripts=re2
 ```
+
+npm 12 does not run dependency install scripts unless you allow them. The scanner depends on [`re2`](https://www.npmjs.com/package/re2), a native module whose install script downloads or builds `re2.node`; without it the server fails to start with `Cannot find module './build/Release/re2.node'`. Pass `--allow-scripts=re2` to `npm install -g` and `npx` (older npm versions accept and ignore the flag), or run `npm install-scripts approve re2` when you add the package to a project. To allow it for every global install, run `npm config set allow-scripts=re2 --location=user`.
 
 ### Installation with Docker
 
@@ -92,12 +94,12 @@ Install the Accessibility Scanner in VS Code using the VS Code CLI:
 
 For VS Code:
 ```bash
-code --add-mcp '{"name":"accessibility-scanner","command":"npx","args":["mcp-accessibility-scanner"]}'
+code --add-mcp '{"name":"accessibility-scanner","command":"npx","args":["--allow-scripts=re2","mcp-accessibility-scanner"]}'
 ```
 
 For VS Code Insiders:
 ```bash
-code-insiders --add-mcp '{"name":"accessibility-scanner","command":"npx","args":["mcp-accessibility-scanner"]}'
+code-insiders --add-mcp '{"name":"accessibility-scanner","command":"npx","args":["--allow-scripts=re2","mcp-accessibility-scanner"]}'
 ```
 
 ## CLI Modes
@@ -165,7 +167,7 @@ Here's the Claude Desktop configuration:
   "mcpServers": {
     "accessibility-scanner": {
       "command": "npx",
-      "args": ["-y", "mcp-accessibility-scanner"]
+      "args": ["-y", "--allow-scripts=re2", "mcp-accessibility-scanner"]
     }
   }
 }
@@ -180,7 +182,7 @@ You can pass a configuration file to customize Playwright behavior:
   "mcpServers": {
     "accessibility-scanner": {
       "command": "npx",
-      "args": ["-y", "mcp-accessibility-scanner", "--config", "/path/to/config.json"]
+      "args": ["-y", "--allow-scripts=re2", "mcp-accessibility-scanner", "--config", "/path/to/config.json"]
     }
   }
 }
@@ -1034,6 +1036,10 @@ npm run bench:compare -- before.json after.json
 
 The comparison total uses only end-to-end scenarios present in both reports,
 so adding or removing a scenario does not distort the reported speedup.
+
+### Releasing
+
+Pushing a `vX.Y.Z` tag on `main` publishes the package to npm through `.github/workflows/release.yml`, using trusted publishing (OIDC) with provenance. See [docs/releasing.md](docs/releasing.md) for the one-time npm setup, the release steps, and the npm 12 install-script rules.
 
 ## License
 

@@ -1,0 +1,131 @@
+name: Release
+
+# Publishes the package to npm when a version tag (for example v4.0.1) is pushed.
+# Authentication uses npm trusted publishing (OIDC): no NPM_TOKEN secret is stored.
+# The npm trusted publisher must name this file (release.yml) and the `npm` environment.
+# See docs/releasing.md for the one-time setup and the release steps.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout tagged commit
+        shell: bash
+        env:
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
+          git checkout --detach "$CHECKOUT_SHA"
+
+      - name: Require the tag to point at a commit on main
+        shell: bash
+        env:
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$CHECKOUT_SHA" FETCH_HEAD; then
+            echo "::error::Tag $GITHUB_REF_NAME points at $CHECKOUT_SHA, which is not on main. Tag a commit that is already merged to main."
+            exit 1
+          fi
+
+      - name: Select installed supported Node.js
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { execFileSync } = require('node:child_process');
+          const supported = version => {
+            if (!/^\d+\.\d+\.\d+$/.test(version)) return false;
+            const [major, minor] = version.split('.').map(Number);
+            return (major === 24 && minor >= 15) || major >= 26;
+          };
+          const root = process.env.RUNNER_TOOL_CACHE && path.join(process.env.RUNNER_TOOL_CACHE, 'node');
+          const versions = root && fs.existsSync(root)
+            ? fs.readdirSync(root).filter(supported)
+              .sort((a, b) => b.localeCompare(a, undefined, { numeric: true })) : [];
+          const executable = versions.map(version => path.join(root, version, process.arch,
+            process.platform === 'win32' ? 'node.exe' : 'bin/node')).find(file => fs.existsSync(file)) || process.execPath;
+          const version = execFileSync(executable, ['--version'], { encoding: 'utf8' }).trim();
+          if (!supported(version.replace(/^v/, '')))
+            throw new Error(`Runner needs Node ^24.15.0 or >=26.0.0; found ${version}`);
+          fs.appendFileSync(process.env.GITHUB_PATH, path.dirname(executable) + '\n');
+          NODE
+
+      # npm 12 is pinned so installs follow its rules (dependency install scripts run only
+      # when package.json `allowScripts` approves them) and publishing supports OIDC.
+      - name: Install npm 12
+        run: |
+          npm install -g npm@12.2.0
+          node --version
+          npm --version
+
+      - name: Check tag, version, and registry state
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          NAME="$(node -p "require('./package.json').name")"
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $VERSION (expected tag v$VERSION)."
+            exit 1
+          fi
+          if [ -n "$(npm view "$NAME@$VERSION" version 2>/dev/null)" ]; then
+            echo "::error::$NAME@$VERSION is already on npm. Bump the version before tagging."
+            exit 1
+          fi
+          # npm refuses to publish a prerelease to `latest` without an explicit tag.
+          case "$VERSION" in
+            *-*) DIST_TAG=next ;;
+            *) DIST_TAG=latest ;;
+          esac
+          echo "Publishing $NAME@$VERSION with dist-tag $DIST_TAG"
+          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          # Fail instead of warn when a dependency install script is not reviewed in allowScripts.
+          NPM_CONFIG_STRICT_ALLOW_SCRIPTS: 'true'
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium chrome
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build
+        run: npm run clean && npm run build
+
+      - name: Show package contents
+        run: npm pack --dry-run
+
+      # Trusted publishing exchanges the job's OIDC token for a short-lived publish token
+      # and attaches provenance automatically for this public repository.
+      - name: Publish to npm
+        env:
+          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
+        run: npm publish --tag "$DIST_TAG"
