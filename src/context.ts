@@ -1034,7 +1034,10 @@ export class InputRecorder {
     const recorders = new Set<InputRecorder>();
     const recordings = new Map<Context, RecordingTarget>();
     let actionSequence = 0;
-    const lastActionSequence = new WeakMap<playwright.Page, number>();
+    // Retain attribution until the next action, including updates delivered
+    // after the tool's 500ms window has expired.
+    type Attribution = { suppressedLogs: boolean, suppressedRecordings: WeakSet<Context> };
+    const lastActionSequence = new WeakMap<playwright.Page, Attribution & { sequence: number }>();
     let armed = false;
     let transition = Promise.resolve();
     const enqueue = (callback: () => Promise<void>) => {
@@ -1047,32 +1050,36 @@ export class InputRecorder {
       flushable: boolean,
       log: (recorder: InputRecorder) => void,
       record: (target: RecordingTarget) => void,
-    ) => {
+      attribution?: Attribution,
+    ): Attribution => {
       const contexts = new Set<Context>(recorderContexts.get(browserContext));
       for (const context of recordings.keys())
         contexts.add(context);
       const running = [...contexts].filter(context => context.isRunningToolForRecording(buffered));
-      if (!running.length) {
+      if (!running.length && !attribution?.suppressedLogs) {
         for (const recorder of recorders)
           log(recorder);
       }
       for (const [context, target] of recordings) {
-        if ((!target.state.stopping || flushable) && !running.some(runningContext => runningContext !== context)) {
+        if ((!target.state.stopping || flushable) && !attribution?.suppressedRecordings.has(context) && !running.some(runningContext => runningContext !== context)) {
           record(target);
           context.markRecordingActivity();
         }
       }
+      return {
+        suppressedLogs: !!running.length,
+        suppressedRecordings: new WeakSet([...recordings.keys()].filter(context => running.some(runningContext => runningContext !== context))),
+      };
     };
     const sink = {
         actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
           const sequence = ++actionSequence;
-          lastActionSequence.set(page, sequence);
           const action = 'action' in data ? data.action : data;
           const isAssertion = action.name.startsWith('assert');
           if (isAssertion)
             code = code.replace(/^(\s*)\/\/ ?/gm, '$1');
           const buffered = actionIsBuffered(action);
-          dispatch(
+          const attribution = dispatch(
               buffered,
               buffered || action.name === 'closePage',
               recorder => recorder._actionAdded(page, action, isAssertion ? `${expectPrelude}\n${code}` : code, sequence),
@@ -1083,11 +1090,13 @@ export class InputRecorder {
                 target.actions.push({ page, code, sequence });
               },
           );
+          lastActionSequence.set(page, { sequence, ...attribution });
         },
         actionUpdated: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
-          const sequence = lastActionSequence.get(page);
-          if (sequence === undefined)
+          const attribution = lastActionSequence.get(page);
+          if (!attribution)
             return;
+          const { sequence } = attribution;
           const action = 'action' in data ? data.action : data;
           dispatch(
               true,
@@ -1102,10 +1111,12 @@ export class InputRecorder {
                   target.actions.push({ page, code, sequence });
                 }
               },
+              attribution,
           );
         },
         signalAdded: (page: playwright.Page, data: actions.Signal | actions.SignalInContext, code: string) => {
-          const sequence = lastActionSequence.get(page);
+          const attribution = lastActionSequence.get(page);
+          const sequence = attribution?.sequence;
           const signal = 'signal' in data ? data.signal : data;
           dispatch(
               true,
@@ -1118,6 +1129,7 @@ export class InputRecorder {
                 if (action && code)
                   action.code = code;
               },
+              attribution,
           );
         },
     };

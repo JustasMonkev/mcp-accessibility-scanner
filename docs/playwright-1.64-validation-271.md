@@ -2,7 +2,7 @@
 
 ## Decision — 2026-10-08
 
-This is a **draft migration**, not approval to change the stable default in
+This is a **candidate migration**, not approval to change the stable default in
 `main`. Both dependencies and their lockfile entries move together from exact
 1.63.0 to exact 1.64.0. Keep the PR unmerged until the missing browser/platform
 gates pass and the #257 ARIA result is resolved or explicitly assessed.
@@ -55,6 +55,58 @@ Firefox initially crashed on page creation because the container cannot create
 its content-process user namespace. The successful **local fixture-only** run
 used `MOZ_DISABLE_CONTENT_SANDBOX=1`. This is a validation-environment setting,
 not a repository/browser default change. Repeat on an ordinary supported runner.
+
+## PR #272 review follow-up — 2026-10-08
+
+The hub now retains the original action's tool attribution for later updates
+and signals. Suppression is per recording owner and applies to session logs;
+weak references avoid retaining departed contexts. The click regression remains,
+and a separate fill case checks updates at 499 ms and 501 ms, excludes sibling
+input from both outputs, and accepts the next manual sequence. The genuine
+coalesced-fill restart test stays separate.
+
+The browser-control fixture logs starts and elapsed times for launch, context
+creation, page creation, backend initialization and the initial snapshot. A
+stalled phase therefore remains visible in CI even if it never returns. Both
+mobile screenshot operations have an explicit 15-second timeout and the case
+has a 60-second total budget; other operations retain the 3-second default.
+Mobile config tests assert touch and screen options for Chromium and WebKit.
+The runtime test logs the resolved options and initial properties before its
+strict preservation checks.
+
+The review's missing-iPhone-17 diagnosis is contradicted by the tagged
+[v1.64.0 device registry](https://github.com/microsoft/playwright/blob/v1.64.0/packages/isomorphic/deviceDescriptorsSource.json)
+and the installed package: iPhone 17 exists with `hasTouch: true`,
+`isMobile: true` and a 402×874 screen. Changing the descriptor would not establish
+that the Linux WebKit touch failure is fixed. Its real-browser gate stays strict.
+
+The ARIA test now reports all snapshot mismatches in one run using soft
+assertions (which still fail the test), and enables the `verify` capability so
+its positive controls can execute. It still requires `Shadow`, excludes `Light`
+and closed-details text, and verifies slotted and shadow controls. No candidate
+failure is converted into a skip, expected failure, or broader pin exemption.
+
+| Review validation | Result |
+| --- | --- |
+| Local seven-file unit gate | 370 passed, 4 skipped. |
+| Local lint/typecheck and build | Passed. |
+| Local full default suite | 1498 passed, 84 failed, 62 skipped; missing Chromium/Chrome still blocks browser checks. |
+| Local Firefox four-suite gate | 10 passed, 1 failed (#257 ARIA), 4 skipped. All five fixture timing phases completed. |
+| Suppression mutation checks | Removing log suppression leaked the delayed fill into the session log; removing recording suppression inserted the delayed fill into the explicit recording. Both failed the new fill regression; restored code passed. |
+| Slop-check on follow-up TypeScript | Clean across four files. |
+
+Hosted [CI run 456](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/37727045903)
+validated the **previous PR head**, not these follow-up edits. Its Linux main
+suite passed 1635 tests and failed three browser controls: a 3-second mobile
+screenshot timeout, #257 ARIA, and changed monospace fonts/geometry. Linux
+WebKit passed recorder restarts, numpad, desktop screen, overlays, focus and all
+350 fresh navigation rounds, but failed initial touch (`maxTouchPoints: 0`)
+and ARIA. macOS Chromium passed recorder checks but failed ARIA and font
+preservation. macOS 14 WebKit stalled during page setup, including the separate
+bounded setup probe. Windows Chromium and Chrome history/download gates passed;
+Edge failed two persistent-profile download cases. These are remaining upgrade
+blockers, not platform passes. The next hosted run must use the follow-up commit
+and capture the new setup/mobile diagnostics.
 
 ## Restrictions and checks still required
 

@@ -958,34 +958,50 @@ describe('Context', () => {
       }
     });
 
-    it('does not apply an update whose initial action was suppressed', async () => {
+    it.each(['click', 'fill'])('does not apply a late %s update whose initial action was suppressed', async name => {
       vi.useFakeTimers();
       try {
         mockBrowserContext._startRecording = vi.fn().mockResolvedValue(undefined);
-        const makeContext = () => new Context({
-          tools: [],
-          config: { timeouts: {} } as any,
-          browserContextFactory: mockBrowserContextFactory,
-          sessionLog: undefined,
-          clientInfo: {},
+        const sessionLog = { logUserAction: vi.fn() };
+        const config = await resolveConfig({});
+        const recordingContext = new Context({
+          tools: [], config, browserContextFactory: mockBrowserContextFactory,
+          sessionLog: () => Promise.resolve(sessionLog), clientInfo: {},
         });
-        const recordingContext = makeContext();
-        const siblingContext = makeContext();
-        await recordingContext.startRecording();
+        const siblingContext = new Context({
+          tools: [], config, browserContextFactory: mockBrowserContextFactory,
+          sessionLog: undefined, clientInfo: {},
+        });
+        const starting = recordingContext.startRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        await starting;
         await siblingContext.newTab();
+        const page = Object.assign(new EventEmitter(), {
+          setDefaultNavigationTimeout: vi.fn(), setDefaultTimeout: vi.fn(), url: () => 'about:blank',
+        });
+        mockBrowserContext.emit('page', page);
         const sink = mockBrowserContext._startRecording.mock.calls[0][1];
-        const page = {} as any;
-        sink.actionAdded(page, { name: 'click', button: 'left', selector: '#query' }, 'manual click');
+        const action = { name, button: 'left', selector: '#query' };
+        sink.actionAdded(page, action, 'manual action');
 
-        const endSiblingTool = siblingContext.beginToolCall('browser_click');
-        sink.actionAdded(page, { name: 'click', button: 'left', selector: '#query' }, 'suppressed click');
+        const endSiblingTool = siblingContext.beginToolCall(name === 'fill' ? 'browser_fill_form' : 'browser_click');
+        sink.actionAdded(page, action, 'suppressed action');
         endSiblingTool();
-        await vi.advanceTimersByTimeAsync(501);
-        sink.actionUpdated(page, { name: 'click', button: 'left', selector: '#query' }, 'late suppressed update');
+        await vi.advanceTimersByTimeAsync(499);
+        sink.actionUpdated(page, action, 'suppressed buffered update');
+        await vi.advanceTimersByTimeAsync(2);
+        sink.actionUpdated(page, action, 'late suppressed update');
+        expect(sessionLog.logUserAction).toHaveBeenCalledTimes(1);
 
+        // A new manual sequence must still be accepted after suppression.
+        sink.actionAdded(page, action, 'next manual action');
+        sink.actionUpdated(page, action, 'next manual update');
         const stopping = recordingContext.stopRecording();
         await vi.advanceTimersByTimeAsync(500);
-        await expect(stopping).resolves.toEqual(['manual click']);
+        await expect(stopping).resolves.toEqual(['manual action', 'next manual update']);
+        expect(sessionLog.logUserAction.mock.calls.map(call => [call[2], call[3]])).toEqual([
+          ['manual action', false], ['next manual action', false], ['next manual update', true],
+        ]);
       } finally {
         vi.useRealTimers();
       }

@@ -56,16 +56,28 @@ afterEach(async () => {
   }
 });
 
+/** Prints the pending phase as well as its duration, so a stalled WebKit setup is identifiable in CI. */
+async function setupStep<T>(phase: string, operation: () => Promise<T>): Promise<T> {
+  const started = Date.now();
+  const metadata = { browserName, channel: channel || 'bundled', platform: process.platform, arch: process.arch, phase, ...versions };
+  process.stdout.write(JSON.stringify({ ...metadata, status: 'started' }) + '\n');
+  try {
+    return await operation();
+  } finally {
+    process.stdout.write(JSON.stringify({ ...metadata, status: 'finished', elapsed: Date.now() - started }) + '\n');
+  }
+}
+
 async function setup(contextOptions: playwright.BrowserContextOptions = {}) {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-upgrade-controls-'));
-  browser = await browserType.launch({ channel });
-  const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, ...contextOptions });
-  const page = await context.newPage();
+  browser = await setupStep('launch', () => browserType.launch({ channel }));
+  const context = await setupStep('newContext', () => browser!.newContext({ viewport: { width: 1280, height: 720 }, ...contextOptions }));
+  const page = await setupStep('newPage', () => context.newPage());
   backend = new BrowserServerBackend(await resolveConfig({
-    outputDir: directory, timeouts: { navigationTimeout: 3000, defaultTimeout: 3000, settle: 50 },
+    capabilities: ['verify'], outputDir: directory, timeouts: { navigationTimeout: 3000, defaultTimeout: 3000, settle: 50 },
   }), { createContext: async () => ({ browserContext: context, close: () => context.close() }) });
-  await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'upgrade-controls', version: '1' });
-  const snapshot = await backend.callTool('browser_snapshot', {});
+  await setupStep('initialize', () => backend!.initialize({ notifyToolListChanged: async () => {} }, { name: 'upgrade-controls', version: '1' }));
+  const snapshot = await setupStep('browser_snapshot', () => backend!.callTool('browser_snapshot', {}));
   expect(snapshot.isError, JSON.stringify(snapshot.content)).not.toBe(true);
   process.stdout.write(JSON.stringify({ browserName, channel: channel || 'bundled', browserVersion: browser.version(), platform: process.platform, arch: process.arch, ...versions }) + '\n');
   return { page, backend };
@@ -94,6 +106,9 @@ it('forwards device screen dimensions and preserves explicit screen overrides (#
 
 it.skipIf(browserName === 'firefox')('preserves mobile touch properties after full-page/element screenshots and navigation (#42617)', async () => {
   const config = await resolveCLIConfig({ mobile: true, browser: browserName });
+  expect(config.browser.contextOptions.hasTouch).toBe(true);
+  expect(config.browser.contextOptions.isMobile).toBe(true);
+  process.stdout.write(JSON.stringify({ mobileContextOptions: config.browser.contextOptions, browserName, ...versions }) + '\n');
   const { page } = await setup(config.browser.contextOptions);
   const html = 'data:text/html,<div style="width:2000px;height:3000px">Oversized element</div>';
   await page.goto(html);
@@ -103,16 +118,17 @@ it.skipIf(browserName === 'firefox')('preserves mobile touch properties after fu
     screen: { width: window.screen.width, height: window.screen.height },
   }));
   const before = await properties();
+  process.stdout.write(JSON.stringify({ mobileProperties: before, browserName }) + '\n');
   expect(before.touch).toBeGreaterThan(0);
   expect(before.coarse).toBe(true);
   expect(before.screen).toEqual(config.browser.contextOptions.screen);
-  await page.screenshot({ fullPage: true });
+  await page.screenshot({ fullPage: true, timeout: 15000 });
   expect(await properties()).toEqual(before);
-  await page.locator('div').screenshot();
+  await page.locator('div').screenshot({ timeout: 15000 });
   expect(await properties()).toEqual(before);
   await page.reload();
   expect(await properties()).toEqual(before);
-});
+}, 60000);
 
 it('scrolls instantly on pointer retry with a fixed header and smooth scrolling (#42626)', async () => {
   const { page } = await setup();
@@ -145,14 +161,14 @@ it('excludes unrendered ARIA text and retains slotted/open-details controls (#25
   const snapshot = await backend.callTool('browser_snapshot', {});
   expect(snapshot.isError).not.toBe(true);
   const text = snapshot.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
-  expect(text).toContain('button "Shadow"');
-  expect(text).toContain('button "Slotted"');
-  expect(text).toContain('Visible direct text');
-  expect(text).not.toContain('Light');
-  expect(text).not.toContain('Hidden direct text');
-  for (const name of ['Shadow', 'Slotted']) {
+  expect.soft(text).toContain('button "Shadow"');
+  expect.soft(text).toContain('button "Slotted"');
+  expect.soft(text).toContain('Visible direct text');
+  expect.soft(text).not.toContain('Light');
+  expect.soft(text).not.toContain('Hidden direct text');
+  for (const name of ['Slotted', 'Shadow']) {
     const verification = await backend.callTool('browser_verify_element_visible', { role: 'button', accessibleName: name });
-    expect(verification.isError, JSON.stringify(verification.content)).not.toBe(true);
+    expect.soft(verification.isError, JSON.stringify(verification.content)).not.toBe(true);
   }
 });
 

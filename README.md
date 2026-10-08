@@ -922,7 +922,7 @@ npx vitest run tests/recorder.integration.test.ts tests/context.test.ts tests/br
 The real-browser tests cover concurrent starts, duplicate-start rejection,
 shared CDP clients, sibling-action attribution, stop/disconnect/restart,
 `--save-session`, and recording across stateless explicit sessions. Existing unit
-tests also cover failed-start recovery and overlapping start/stop. The recorder
+tests also cover failed-start recovery, overlapping start/stop, and delayed sibling-tool click/fill updates excluded from recordings and saved session logs. The recorder
 must receive the final input event before stop; unbuffered input delivered after
 stop begins is excluded, while buffered clicks/navigation get a 500 ms drain.
 
