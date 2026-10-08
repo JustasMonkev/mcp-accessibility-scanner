@@ -103,7 +103,7 @@ class ContextRegistry {
 
 const contextRegistry = new ContextRegistry();
 
-type TraceHub = { users: number, ready: Promise<void> };
+type TraceHub = { users: number, ready: ReturnType<playwright.Tracing['start']> };
 const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
 
 type IdleGroup = {
@@ -890,14 +890,14 @@ export class Context {
   }
 }
 
-// Playwright's _enableRecorder supports a single event sink per browser
+// Playwright's _startRecording supports a single event sink per browser
 // context, and a shared (non-isolated CDP) context can serve several sessions
-// at once — a second _enableRecorder call would silently replace the first
-// session's callbacks, and a departing session would leave the sink pointing
+// at once — a second start replaces the client sink before the server rejects
+// it, and a departing session would leave the sink pointing
 // at its disposed Context. One hub therefore owns a dispatching sink per
 // context. Session logs and on-demand recordings register and deregister with
 // it. The hub carries the enablement promise: a session
-// joining while (or after) another session's _enableRecorder call is in
+// joining while (or after) another session's _startRecording call is in
 // flight must not report recording as ready before it is, and a failed
 // enablement evicts the hub so the next session retries instead of silently
 // recording nothing. When the last consumer leaves, the recorder returns to
@@ -1063,12 +1063,6 @@ export class InputRecorder {
         }
       }
     };
-    const params = {
-        mode: 'recording',
-        recorderMode: 'api',
-        omitCallTracking: true,
-        language: 'javascript',
-    };
     const sink = {
         actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
           const sequence = ++actionSequence;
@@ -1097,12 +1091,16 @@ export class InputRecorder {
           const action = 'action' in data ? data.action : data;
           dispatch(
               true,
-              true,
+              actionIsBuffered(action),
               recorder => recorder._actionUpdated(page, action, code, sequence),
               target => {
                 const recorded = target.actions.findLast(action => action.sequence === sequence);
-                if (recorded)
+                if (recorded) {
                   recorded.code = code;
+                } else if (action.name === 'fill') {
+                  addMissingPageAlias(target.actions, page, code, target.pageIndexes, browserContext);
+                  target.actions.push({ page, code, sequence });
+                }
               },
           );
         },
@@ -1123,8 +1121,15 @@ export class InputRecorder {
           );
         },
     };
+    // SAFETY: Paired Playwright 1.64.0 exposes this private contract; the real recorder gate verifies its events and lifecycle.
+    const recordingContext = browserContext as playwright.BrowserContext & {
+      _startRecording(params: { language: 'javascript' }, eventSink: typeof sink): Promise<void>;
+      _stopRecording(): Promise<void>;
+    };
     const arm = async () => {
-      await (browserContext as any)._enableRecorder(params, sink);
+      if (armed)
+        return;
+      await recordingContext._startRecording({ language: 'javascript' }, sink);
       armed = true;
     };
     const created: RecorderHub = {
@@ -1133,16 +1138,12 @@ export class InputRecorder {
       starting: 0,
       ready: enqueue(arm),
       arm: () => enqueue(arm),
-      ensureArmed: () => enqueue(async () => {
-        if (armed)
-          return;
-        await arm();
-      }),
+      ensureArmed: () => enqueue(arm),
       standbyIfIdle: () => enqueue(async () => {
         if (created.starting || recorders.size || recordings.size)
           return;
         try {
-          await (browserContext as any)._disableRecorder();
+          await recordingContext._stopRecording();
         } finally {
           armed = false;
         }
@@ -1164,8 +1165,11 @@ export class InputRecorder {
   }
 
   private _actionUpdated(page: playwright.Page, action: actions.Action, code: string, sequence: number) {
-    if (this._lastActions.get(page)?.sequence !== sequence)
+    if (this._lastActions.get(page)?.sequence !== sequence) {
+      if (action.name === 'fill')
+        this._actionAdded(page, action, code, sequence);
       return;
+    }
     this._lastActions.set(page, { action, sequence });
     const tab = this._context.tabForPage(page);
     if (tab)
