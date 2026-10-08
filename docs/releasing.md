@@ -68,11 +68,12 @@ After the first successful trusted publish, open **Settings → Publishing acces
 
 - The tag points at a commit already on `main`.
 - The tag equals `v` + `package.json` `version`. Pushing `v4.0.1` while `package.json` says `4.0.0` fails.
+- `server.json` `version` and every `packages[].version` equal that version too, so the MCP Registry entry cannot drift from npm.
 - That version is not yet on npm, and it is newer than the version the target dist-tag (`latest` or `next`) points at. Publishing passes `--tag` explicitly, which skips npm's own lower-version check, so without this an older tag would move `latest` or `next` backward.
 - `npm ci` passes under npm 12 with `strict-allow-scripts`. Any dependency install script not approved in `allowScripts` fails the release (see below).
 - Lint, typecheck, unit tests, and a clean build pass. `npm pack --dry-run` lists the tarball contents in the log.
 
-Releases run one at a time. Tags pushed while a release is running, or waiting for environment approval, queue up and run in order instead of replacing each other.
+Releases run one at a time. Tags pushed while a release is running, or waiting for environment approval, queue up instead of replacing each other. GitHub does not guarantee the queue order, so if a newer tag happens to run first, the older one fails the dist-tag check rather than moving `latest` backward. Push one release tag at a time and wait for it to finish.
 
 ### Prereleases
 
@@ -147,11 +148,14 @@ run: npm stage publish --tag "$DIST_TAG"
 
 Then restrict the trusted publisher to `npm stage publish` only. npm fixes a connection's required fields once it is created, and may not let you change its allowed actions in place either. If the settings page does not offer to turn off `npm publish`, delete the connection and add a new one with the same values from [step 1](#1-add-the-trusted-publisher-on-npmjscom), leaving `npm publish` disabled. The new connection gets its own 2-day window, so release within 2 days of recreating it. CI uploads the version in a non-public state, and a maintainer makes it public with `npm stage approve <stage-id>`, which requires 2FA. `npm stage reject <stage-id>` discards it.
 
+The workflow's dist-tag check runs when a version is staged, not when it is approved. If more than one version is staged at once, approving them out of order can still move `latest` or `next` backward. Before each approval, run `npm view mcp-accessibility-scanner dist-tags`, approve staged versions in increasing version order, and reject any staged version that is not newer than the dist-tag it targets.
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 | --- | --- |
 | `Tag vX does not match package.json version` | Bump `package.json` on `main` first, or tag the right version. |
+| `server.json versions (...) must all equal X` | Set `version` and `packages[].version` in `server.json` to the release version in the version-bump pull request. |
 | `... is already on npm` | That version was already published. Bump to a new version. |
 | `... is not newer than the current latest` (or `next`) | The tag is older than what that dist-tag already points at. Bump to a higher version. To publish a backport to an older release line, publish it by hand with a separate dist-tag, for example `npm publish --tag v3-latest`. |
 | `is not on main` | The tag points at a branch commit. Tag the merge commit on `main`. |

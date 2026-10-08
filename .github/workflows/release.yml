@@ -92,6 +92,15 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $VERSION (expected tag v$VERSION)."
             exit 1
           fi
+          # server.json is the MCP Registry entry; its versions must match the npm release.
+          node -e '
+            const server = require("./server.json");
+            const versions = [server.version, ...server.packages.map(pkg => pkg.version)];
+            if (versions.some(version => version !== process.argv[1])) {
+              console.log(`::error::server.json versions (${versions.join(", ")}) must all equal ${process.argv[1]}.`);
+              process.exit(1);
+            }
+          ' "$VERSION"
           if [ -n "$(npm view "$NAME@$VERSION" version 2>/dev/null)" ]; then
             echo "::error::$NAME@$VERSION is already on npm. Bump the version before tagging."
             exit 1
