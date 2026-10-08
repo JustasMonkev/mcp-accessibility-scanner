@@ -95,18 +95,71 @@ failure is converted into a skip, expected failure, or broader pin exemption.
 | Suppression mutation checks | Removing log suppression leaked the delayed fill into the session log; removing recording suppression inserted the delayed fill into the explicit recording. Both failed the new fill regression; restored code passed. |
 | Slop-check on follow-up TypeScript | Clean across four files. |
 
-Hosted [CI run 456](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/37727045903)
-validated the **previous PR head**, not these follow-up edits. Its Linux main
-suite passed 1635 tests and failed three browser controls: a 3-second mobile
-screenshot timeout, #257 ARIA, and changed monospace fonts/geometry. Linux
-WebKit passed recorder restarts, numpad, desktop screen, overlays, focus and all
-350 fresh navigation rounds, but failed initial touch (`maxTouchPoints: 0`)
-and ARIA. macOS Chromium passed recorder checks but failed ARIA and font
-preservation. macOS 14 WebKit stalled during page setup, including the separate
-bounded setup probe. Windows Chromium and Chrome history/download gates passed;
-Edge failed two persistent-profile download cases. These are remaining upgrade
-blockers, not platform passes. The next hosted run must use the follow-up commit
-and capture the new setup/mobile diagnostics.
+Hosted [CI run 457](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/37731336455)
+validated commit `8e43698`, including the review fixes. Linux main passed
+**1637 tests** and failed **two**: #257 ARIA and changed monospace fonts/geometry.
+The Chromium mobile screenshot case now passes. Linux WebKit passed recorder
+restarts, numpad, desktop screen, overlays, focus and all 350 fresh navigation
+rounds; it failed initial touch (`maxTouchPoints: 0`) and ARIA. Its resolved
+mobile options are correct (`hasTouch: true`, `isMobile: true`, screen 402×874).
+macOS 14 WebKit's new diagnostics locate the stall at **`newPage`**, after
+successful launch and context creation, before backend initialization or snapshot.
+Windows Chromium and Chrome history/download gates passed. Edge passed 17 tests
+and failed the idle-profile relaunch download: the native process exited with
+`3221225477` while saving `second.txt`, rather than saving the required bytes.
+This candidate does not match the exact 1.63.0 native-crash allowance.
+
+### Remaining ARIA review and final investigation
+
+The remaining review finding is valid and remains unresolved. The proposed
+[upstream ARIA fix #42982](https://github.com/microsoft/playwright/pull/42982)
+was **closed without merging**; stable 1.64.0 still has the defect. The linked
+[#257 acceptance criteria](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/257)
+require checking release inclusion and prohibit vendoring private engine code.
+We must not rewrite the expected snapshot to `LightShadow`, accept hidden text,
+or patch the installed Playwright bundle to manufacture a passing upgrade gate.
+
+The regression now also checks exact native role names and `browser_find` on
+both hidden and visible controls. This closes a diagnostic blind spot:
+`browser_verify_element_visible` uses substring name matching, so verifying
+`Shadow` alone accepted the incorrect `LightShadow` name. The exact native
+lookup finds zero matching buttons. In the repeated local Firefox four-suite
+run, **10 tests passed, 1 failed, 4 skipped**. That one ARIA case reported seven
+real mismatches: three snapshot assertions, the exact role name, the visible
+Shadow search, and the two hidden-text searches. Slotted/open-details positive
+controls passed. The visibility tool's existing matching semantics are unchanged.
+
+Mobile assertions also collect failures without stopping at the initial touch
+check: full-page capture, oversized-element capture and navigation still execute
+and compare touch, pointer and screen values. A failed initial touch assertion
+continues to fail the whole test; this is not a candidate exemption. WebKit needs
+a new hosted run to validate these additional diagnostic paths.
+
+Other native blockers remain independently confirmed:
+[font-family loss #42962](https://github.com/microsoft/playwright/issues/42962)
+is open and labelled for 1.65, and
+[macOS 14 WebKit #42964](https://github.com/microsoft/playwright/issues/42964)
+was closed as not planned. Neither supplies a validated 1.64.0 fix.
+No browser job is removed, no old-pin allowance is widened, and `main` remains
+on its paired stable 1.63.0 pin.
+
+### MCP and Luna validation
+
+The Luna harness unit suite passed **31 tests** locally and in hosted CI.
+Those tests exercise the runner with a mocked Codex CLI; they are not proof of
+a live model invoking MCP. The live single-tool `browser_snapshot` run timed out
+at 20 seconds without producing a JSON event. An independent minimal Codex CLI
+execution without MCP also stalled, isolating this environment's CLI problem
+from the server. Live Luna validation therefore **has not passed**.
+
+The direct SDK harness with the built server and explicitly selected cached
+Firefox passed **all 33 core tool scenarios**, then passed `browser_install`
+separately using that cached browser. Its temporary validation copy only changed
+the child startup to `--browser firefox` and forwarded the fixture-only
+`MOZ_DISABLE_CONTENT_SANDBOX=1`; test assertions were unchanged. The normal SDK
+stdio environment does not inherit those parent settings automatically, so the
+default Chrome run failed for the absent executable. These results do not
+validate Chrome/Chromium, a fresh browser download, or the independent ARIA gate.
 
 ## Restrictions and checks still required
 

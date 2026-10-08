@@ -119,15 +119,15 @@ it.skipIf(browserName === 'firefox')('preserves mobile touch properties after fu
   }));
   const before = await properties();
   process.stdout.write(JSON.stringify({ mobileProperties: before, browserName }) + '\n');
-  expect(before.touch).toBeGreaterThan(0);
-  expect(before.coarse).toBe(true);
-  expect(before.screen).toEqual(config.browser.contextOptions.screen);
+  expect.soft(before.touch).toBeGreaterThan(0);
+  expect.soft(before.coarse).toBe(true);
+  expect.soft(before.screen).toEqual(config.browser.contextOptions.screen);
   await page.screenshot({ fullPage: true, timeout: 15000 });
-  expect(await properties()).toEqual(before);
+  expect.soft(await properties(), 'after full-page screenshot').toEqual(before);
   await page.locator('div').screenshot({ timeout: 15000 });
-  expect(await properties()).toEqual(before);
+  expect.soft(await properties(), 'after element screenshot').toEqual(before);
   await page.reload();
-  expect(await properties()).toEqual(before);
+  expect.soft(await properties(), 'after navigation').toEqual(before);
 }, 60000);
 
 it('scrolls instantly on pointer retry with a fixed header and smooth scrolling (#42626)', async () => {
@@ -167,8 +167,20 @@ it('excludes unrendered ARIA text and retains slotted/open-details controls (#25
   expect.soft(text).not.toContain('Light');
   expect.soft(text).not.toContain('Hidden direct text');
   for (const name of ['Slotted', 'Shadow']) {
+    // A substring role match would incorrectly accept "LightShadow" for "Shadow".
+    expect.soft(await page.getByRole('button', { name, exact: true }).count(), name).toBe(1);
     const verification = await backend.callTool('browser_verify_element_visible', { role: 'button', accessibleName: name });
     expect.soft(verification.isError, JSON.stringify(verification.content)).not.toBe(true);
+  }
+  for (const query of ['button "Shadow"', 'button "Slotted"', 'Visible direct text']) {
+    const found = await backend.callTool('browser_find', { text: query });
+    expect.soft(found.isError, JSON.stringify(found.content)).not.toBe(true);
+    expect.soft(found.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain(`Found 1 match for "${query}":`);
+  }
+  for (const query of ['Light', 'Hidden direct text']) {
+    const found = await backend.callTool('browser_find', { text: query });
+    expect.soft(found.isError, JSON.stringify(found.content)).not.toBe(true);
+    expect.soft(found.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain(`No matches found for "${query}".`);
   }
 });
 
