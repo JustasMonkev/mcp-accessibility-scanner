@@ -103,7 +103,7 @@ class ContextRegistry {
 
 const contextRegistry = new ContextRegistry();
 
-type TraceHub = { users: number, ready: Promise<void> };
+type TraceHub = { users: number, ready: ReturnType<playwright.Tracing['start']> };
 const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
 
 type IdleGroup = {
@@ -890,14 +890,14 @@ export class Context {
   }
 }
 
-// Playwright's _enableRecorder supports a single event sink per browser
+// Playwright's _startRecording supports a single event sink per browser
 // context, and a shared (non-isolated CDP) context can serve several sessions
-// at once — a second _enableRecorder call would silently replace the first
-// session's callbacks, and a departing session would leave the sink pointing
+// at once — a second start replaces the client sink before the server rejects
+// it, and a departing session would leave the sink pointing
 // at its disposed Context. One hub therefore owns a dispatching sink per
 // context. Session logs and on-demand recordings register and deregister with
 // it. The hub carries the enablement promise: a session
-// joining while (or after) another session's _enableRecorder call is in
+// joining while (or after) another session's _startRecording call is in
 // flight must not report recording as ready before it is, and a failed
 // enablement evicts the hub so the next session retries instead of silently
 // recording nothing. When the last consumer leaves, the recorder returns to
@@ -1034,7 +1034,10 @@ export class InputRecorder {
     const recorders = new Set<InputRecorder>();
     const recordings = new Map<Context, RecordingTarget>();
     let actionSequence = 0;
-    const lastActionSequence = new WeakMap<playwright.Page, number>();
+    // Retain attribution until the next action, including updates delivered
+    // after the tool's 500ms window has expired.
+    type Attribution = { suppressedLogs: boolean, suppressedRecordings: WeakSet<Context> };
+    const lastActionSequence = new WeakMap<playwright.Page, Attribution & { sequence: number }>();
     let armed = false;
     let transition = Promise.resolve();
     const enqueue = (callback: () => Promise<void>) => {
@@ -1047,38 +1050,36 @@ export class InputRecorder {
       flushable: boolean,
       log: (recorder: InputRecorder) => void,
       record: (target: RecordingTarget) => void,
-    ) => {
+      attribution?: Attribution,
+    ): Attribution => {
       const contexts = new Set<Context>(recorderContexts.get(browserContext));
       for (const context of recordings.keys())
         contexts.add(context);
       const running = [...contexts].filter(context => context.isRunningToolForRecording(buffered));
-      if (!running.length) {
+      if (!running.length && !attribution?.suppressedLogs) {
         for (const recorder of recorders)
           log(recorder);
       }
       for (const [context, target] of recordings) {
-        if ((!target.state.stopping || flushable) && !running.some(runningContext => runningContext !== context)) {
+        if ((!target.state.stopping || flushable) && !attribution?.suppressedRecordings.has(context) && !running.some(runningContext => runningContext !== context)) {
           record(target);
           context.markRecordingActivity();
         }
       }
-    };
-    const params = {
-        mode: 'recording',
-        recorderMode: 'api',
-        omitCallTracking: true,
-        language: 'javascript',
+      return {
+        suppressedLogs: !!running.length,
+        suppressedRecordings: new WeakSet([...recordings.keys()].filter(context => running.some(runningContext => runningContext !== context))),
+      };
     };
     const sink = {
         actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
           const sequence = ++actionSequence;
-          lastActionSequence.set(page, sequence);
           const action = 'action' in data ? data.action : data;
           const isAssertion = action.name.startsWith('assert');
           if (isAssertion)
             code = code.replace(/^(\s*)\/\/ ?/gm, '$1');
           const buffered = actionIsBuffered(action);
-          dispatch(
+          const attribution = dispatch(
               buffered,
               buffered || action.name === 'closePage',
               recorder => recorder._actionAdded(page, action, isAssertion ? `${expectPrelude}\n${code}` : code, sequence),
@@ -1089,25 +1090,33 @@ export class InputRecorder {
                 target.actions.push({ page, code, sequence });
               },
           );
+          lastActionSequence.set(page, { sequence, ...attribution });
         },
         actionUpdated: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
-          const sequence = lastActionSequence.get(page);
-          if (sequence === undefined)
+          const attribution = lastActionSequence.get(page);
+          if (!attribution)
             return;
+          const { sequence } = attribution;
           const action = 'action' in data ? data.action : data;
           dispatch(
               true,
-              true,
+              actionIsBuffered(action),
               recorder => recorder._actionUpdated(page, action, code, sequence),
               target => {
                 const recorded = target.actions.findLast(action => action.sequence === sequence);
-                if (recorded)
+                if (recorded) {
                   recorded.code = code;
+                } else if (action.name === 'fill') {
+                  addMissingPageAlias(target.actions, page, code, target.pageIndexes, browserContext);
+                  target.actions.push({ page, code, sequence });
+                }
               },
+              attribution,
           );
         },
         signalAdded: (page: playwright.Page, data: actions.Signal | actions.SignalInContext, code: string) => {
-          const sequence = lastActionSequence.get(page);
+          const attribution = lastActionSequence.get(page);
+          const sequence = attribution?.sequence;
           const signal = 'signal' in data ? data.signal : data;
           dispatch(
               true,
@@ -1120,11 +1129,19 @@ export class InputRecorder {
                 if (action && code)
                   action.code = code;
               },
+              attribution,
           );
         },
     };
+    // SAFETY: Paired Playwright 1.64.0 exposes this private contract; the real recorder gate verifies its events and lifecycle.
+    const recordingContext = browserContext as playwright.BrowserContext & {
+      _startRecording(params: { language: 'javascript' }, eventSink: typeof sink): Promise<void>;
+      _stopRecording(): Promise<void>;
+    };
     const arm = async () => {
-      await (browserContext as any)._enableRecorder(params, sink);
+      if (armed)
+        return;
+      await recordingContext._startRecording({ language: 'javascript' }, sink);
       armed = true;
     };
     const created: RecorderHub = {
@@ -1133,16 +1150,12 @@ export class InputRecorder {
       starting: 0,
       ready: enqueue(arm),
       arm: () => enqueue(arm),
-      ensureArmed: () => enqueue(async () => {
-        if (armed)
-          return;
-        await arm();
-      }),
+      ensureArmed: () => enqueue(arm),
       standbyIfIdle: () => enqueue(async () => {
         if (created.starting || recorders.size || recordings.size)
           return;
         try {
-          await (browserContext as any)._disableRecorder();
+          await recordingContext._stopRecording();
         } finally {
           armed = false;
         }
@@ -1164,8 +1177,11 @@ export class InputRecorder {
   }
 
   private _actionUpdated(page: playwright.Page, action: actions.Action, code: string, sequence: number) {
-    if (this._lastActions.get(page)?.sequence !== sequence)
+    if (this._lastActions.get(page)?.sequence !== sequence) {
+      if (action.name === 'fill')
+        this._actionAdded(page, action, code, sequence);
       return;
+    }
     this._lastActions.set(page, { action, sequence });
     const tab = this._context.tabForPage(page);
     if (tab)

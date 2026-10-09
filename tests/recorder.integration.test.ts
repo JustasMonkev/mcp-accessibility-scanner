@@ -18,7 +18,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { chromium, type BrowserContext } from 'playwright';
+import { chromium, firefox, webkit, type BrowserContext } from 'playwright';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { BrowserSessionRegistry } from '../src/browserSessions.js';
 import { contextFactory, type BrowserContextFactory } from '../src/browserContextFactory.js';
@@ -26,6 +26,10 @@ import { resolveConfig, type FullConfig } from '../src/config.js';
 
 const resultText = (result: Awaited<ReturnType<BrowserServerBackend['callTool']>>) =>
   result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+const browserName = process.env.MCP_TEST_BROWSER_NAME || 'chromium';
+if (browserName !== 'chromium' && browserName !== 'firefox' && browserName !== 'webkit')
+  throw new Error(`Unsupported MCP_TEST_BROWSER_NAME: ${browserName}`);
+const browserType = { chromium, firefox, webkit }[browserName];
 
 // Real recorder events: no mocked private methods or hand-dispatched sink events.
 describe('recorder compatibility with pinned Playwright (#218)', () => {
@@ -67,7 +71,7 @@ describe('recorder compatibility with pinned Playwright (#218)', () => {
     return result;
   }
 
-  it('shares real CDP recording across clients, filters sibling tools, and survives stop/disconnect/restart', async () => {
+  it.skipIf(browserName !== 'chromium')('shares real CDP recording across clients, filters sibling tools, and survives stop/disconnect/restart', async () => {
     directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-recorder-'));
     const profile = path.join(directory, 'profile');
     ownedContext = await chromium.launchPersistentContext(profile, { args: ['--remote-debugging-port=0'] });
@@ -127,7 +131,7 @@ describe('recorder compatibility with pinned Playwright (#218)', () => {
   });
 
   it('retains explicit recording across stateless backends and rejects ephemeral recording', async () => {
-    const browser = await chromium.launch();
+    const browser = await browserType.launch();
     try {
       registry = new BrowserSessionRegistry();
       const config = await resolveConfig({ capabilities: ['devtools'], timeouts: { settle: 50 } });
@@ -177,6 +181,33 @@ describe('recorder compatibility with pinned Playwright (#218)', () => {
       expect(browser.contexts()).toHaveLength(0);
     } finally {
       await registry?.disposeAll();
+      await browser.close();
+    }
+  });
+
+  it('records repeated fills across restart while a session log keeps the hub armed', async () => {
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-recorder-fills-'));
+    const browser = await browserType.launch();
+    try {
+      ownedContext = await browser.newContext();
+      const page = await ownedContext.newPage();
+      await page.setContent('<input aria-label="Name">');
+      const config = await resolveConfig({ capabilities: ['devtools'], saveSession: true, outputDir: directory, timeouts: { settle: 50 } });
+      const instance = await backend(config, {
+        createContext: async () => ({ browserContext: ownedContext!, close: async () => {} }),
+      });
+      for (const text of ['First recording', 'Restarted recording']) {
+        await call(instance, 'browser_start_recording');
+        await page.getByRole('textbox').fill(text);
+        const folders = (await fs.readdir(directory)).filter(name => name.startsWith('session-'));
+        await expect.poll(async () => (await fs.readFile(path.join(directory!, folders[0], 'session.md'), 'utf8')).includes(`fill('${text}')`), { timeout: 10_000 }).toBe(true);
+        const recording = resultText(await call(instance, 'browser_stop_recording'));
+        expect(recording).toContain(`fill('${text}')`);
+        if (text === 'Restarted recording')
+          expect(recording).not.toContain("fill('First recording')");
+      }
+      await call(instance, 'browser_close');
+    } finally {
       await browser.close();
     }
   });

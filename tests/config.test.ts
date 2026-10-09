@@ -630,6 +630,8 @@ describe('Config', () => {
 
       expect(config.browser.contextOptions.isMobile).toBe(true);
       expect(config.browser.contextOptions.userAgent).toContain('Pixel 10');
+      expect(config.browser.contextOptions.hasTouch).toBe(true);
+      expect(config.browser.contextOptions.screen).toEqual({ width: 360, height: 808 });
     });
 
     it('uses a WebKit mobile device for WebKit', async () => {
@@ -637,6 +639,8 @@ describe('Config', () => {
 
       expect(config.browser.contextOptions.isMobile).toBe(true);
       expect(config.browser.contextOptions.viewport).toEqual({ width: 402, height: 681 });
+      expect(config.browser.contextOptions.hasTouch).toBe(true);
+      expect(config.browser.contextOptions.screen).toEqual({ width: 402, height: 874 });
     });
 
     it('uses the config-file browser when selecting the mobile device', async () => {
