@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weekend Workshop · Accessibility demo</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #edf2f5; color: #172e3c; font: 18px/1.5 system-ui, sans-serif; }
+    header { background: #172e3c; color: white; padding: 24px 56px; }
+    header p { margin: 0; font-size: 16px; }
+    main { max-width: 888px; margin: 32px auto; padding: 32px 40px; background: white; border-radius: 12px; }
+    h1 { margin: 0 0 8px; font-size: 36px; }
+    .intro { margin: 0 0 28px; }
+    .content { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; }
+    h2 { margin: 0 0 24px; font-size: 24px; }
+    img { display: block; width: 100%; height: 140px; border-radius: 6px; }
+    .muted { color: #a9b5bd; margin: 28px 0 0; }
+    .field-heading { margin: 0 0 24px; }
+    input { display: block; width: 100%; height: 48px; padding: 12px; border: 2px solid #738895; border-radius: 4px; font: inherit; }
+    .actions { display: flex; gap: 24px; margin-top: 40px; align-items: center; }
+    button { border: 0; border-radius: 4px; background: #172e3c; color: white; min-height: 48px; padding: 12px 22px; font: inherit; }
+    button:focus { outline: none; }
+    .icon { width: 64px; }
+    .note { margin: 40px 0 0; border-top: 1px solid #ced8de; padding-top: 20px; font-size: 15px; }
+    @media (max-width: 700px) { header { padding: 24px; } main { margin: 24px; padding: 24px; } .content { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header><p>WEEKEND WORKSHOP / DEMO</p></header>
+  <main>
+    <h1>Make something this weekend</h1>
+    <p class="intro">A small local page with deliberate accessibility mistakes.</p>
+    <div class="content">
+      <section>
+        <h2>The workshop</h2>
+        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='344' height='140' viewBox='0 0 344 140'%3E%3Crect width='344' height='140' fill='%23dce9ee'/%3E%3Crect x='48' y='38' width='88' height='64' rx='4' fill='%23436778'/%3E%3Ccircle cx='207' cy='70' r='34' fill='%23c08051'/%3E%3Cpath d='M254 102L284 38L314 102Z' fill='%23436778'/%3E%3C/svg%3E">
+        <p class="muted">All materials are included.</p>
+      </section>
+      <section>
+        <h2>Reserve your place</h2>
+        <p class="field-heading">Email address</p>
+        <input id="email" type="email">
+        <div class="actions">
+          <button type="button">Join the workshop</button>
+          <button class="icon" type="button"><span aria-hidden="true">→</span></button>
+        </div>
+      </section>
+    </div>
+    <p class="note">Intentionally flawed demo. No submissions, tracking or external requests.</p>
+  </main>
+</body>
+</html>
