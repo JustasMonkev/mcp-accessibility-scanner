@@ -1089,6 +1089,17 @@ npm run bench:compare -- before.json after.json
 The comparison total uses only end-to-end scenarios present in both reports,
 so adding or removing a scenario does not distort the reported speedup.
 
+To time the reading-order analyzer alone, build both revisions and run:
+
+```bash
+node bench/reading-order-bench.mjs /tmp/baseline/lib/tools/auditScreenReader.js lib/tools/auditScreenReader.js
+```
+
+This checks identical results on fixed 400- and 2,000-sibling sorted, reversed,
+late-inversion and diagonal layouts, then alternates revisions for 10 warmups
+and 20 timed samples per layout. Diagonal layouts exercise the no-overlap
+worst case. These function timings exclude browser measurement and MCP latency.
+
 ### Releasing
 
 Pushing a `vX.Y.Z` tag on `main` publishes the package to npm through `.github/workflows/release.yml`, using trusted publishing (OIDC) with provenance. See [docs/releasing.md](docs/releasing.md) for the one-time npm setup, the release steps, and the npm 12 install-script rules.

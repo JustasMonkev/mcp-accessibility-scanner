@@ -157,13 +157,21 @@ function countBands(rects: Rect[], axis: 'x' | 'y'): number {
     }
     return root;
   };
+  let components = rects.length;
   for (let i = 0; i < rects.length; i++) {
     for (let j = i + 1; j < rects.length; j++) {
-      if (overlapRatio(rects[i], rects[j], axis) >= bandOverlapRatio)
-        band[rootOf(j)] = rootOf(i);
+      if (!(overlapRatio(rects[i], rects[j], axis) >= bandOverlapRatio))
+        continue;
+      const first = rootOf(i);
+      const second = rootOf(j);
+      if (first === second)
+        continue;
+      band[second] = first;
+      if (--components === 1)
+        return 1;
     }
   }
-  return new Set(rects.map((_, index) => rootOf(index))).size;
+  return components;
 }
 
 function isLayoutRelevant(node: ScreenReaderNode): boolean {
@@ -350,14 +358,16 @@ function checkReadingOrder(nodes: ScreenReaderNode[], push: (finding: ScreenRead
       ? (rtl ? a.x + a.width <= b.x + layoutTolerancePx : a.x >= b.x + b.width - layoutTolerancePx)
       : a.y >= b.y + b.height - layoutTolerancePx;
 
-    let inversions = 0;
-    for (let i = 0; i < siblings.length; i++) {
+    let inverted = false;
+    for (let i = 0; i < siblings.length && !inverted; i++) {
       for (let j = i + 1; j < siblings.length; j++) {
-        if (isInverted(rects[i], rects[j]))
-          inversions++;
+        if (isInverted(rects[i], rects[j])) {
+          inverted = true;
+          break;
+        }
       }
     }
-    if (!inversions)
+    if (!inverted)
       continue;
 
     const sortKey = (rect: Rect) => horizontal ? (rtl ? -(rect.x + rect.width) : rect.x) : rect.y;

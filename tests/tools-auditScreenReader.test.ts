@@ -343,6 +343,47 @@ describe('analyzeScreenReader reading order', () => {
     ])).toEqual([]);
   });
 
+  it('keeps a transitive overlap chain in one band', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'First in DOM', 400, 10),
+      block('e3', 'Second in DOM', 200, 20),
+      block('e4', 'Third in DOM', 10, 30),
+    ])).toEqual(['reading-order-mismatch']);
+  });
+
+  it('does not count repeated unions as joining a separate band', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'First row left', 10, 10),
+      block('e3', 'First row middle', 200, 10),
+      block('e4', 'First row right', 400, 10),
+      block('e5', 'Second row left', 10, 100),
+    ])).toEqual([]);
+  });
+
+  it('finds an inversion after all earlier pairs agree with DOM order', () => {
+    const result = analyze([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'First', 10, 10),
+      block('e3', 'Second', 200, 10),
+      block('e4', 'Third', 600, 10),
+      block('e5', 'Fourth', 400, 10),
+    ]);
+
+    expect(result.countByCheck['reading-order-mismatch']).toBe(1);
+    expect(result.findings[0].problem).toContain('visual order is [paragraph showing "First" (div) -> paragraph showing "Second" (div) -> paragraph showing "Fourth" (div) -> paragraph showing "Third" (div)]');
+  });
+
+  it('ignores diagonal siblings with no overlapping row or column', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Lower right', 400, 400),
+      block('e3', 'Upper left', 10, 10),
+      block('e4', 'Middle', 200, 200),
+    ])).toEqual([]);
+  });
+
   it('ignores an icon-only control rendered before its label', () => {
     // Disclosure arrows and leading icons carry no text, so their position is a
     // rendering detail rather than a change of reading sequence.
