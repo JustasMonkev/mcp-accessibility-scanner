@@ -55,9 +55,9 @@ const goBack = defineTabTool({
     // History traversal / bfcache restore can update the URL without Playwright
     // observing the `load` lifecycle event, so wait only for the navigation to
     // commit to avoid spurious timeouts. See microsoft/playwright#41153.
-    const modalStates = await tab.goBackReturningOnDialog({ waitUntil: 'commit' });
+    await tab.goBackReturningOnDialog({ waitUntil: 'commit' });
     response.setIncludeSnapshot();
-    if (!modalStates.length)
+    if (!tab.modalStates().length)
       response.addCode(`await page.goBack();`);
   },
 });

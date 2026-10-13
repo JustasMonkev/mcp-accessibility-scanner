@@ -21,6 +21,7 @@ import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Route } from 'playwright';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { resolveConfig } from '../src/config.js';
+import { Tab } from '../src/tab.js';
 
 describe('navigation interrupted by a load-time dialog', () => {
   let browser: Browser;
@@ -366,6 +367,33 @@ describe('navigation interrupted by a load-time dialog', () => {
       await browserContext.close();
       await audit;
       await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the back-navigation replay code when the dialog is closed outside MCP before the response', async () => {
+    await backend.callTool('browser_navigate', { url: 'http://fixture.local/first' });
+    await backend.callTool('browser_navigate', { url: 'http://fixture.local/beforeunload' });
+    const page = browserContext.pages()[0];
+    await page.click('button');
+    const dialogOpened = page.waitForEvent('dialog');
+    const goBack = Tab.prototype.goBackReturningOnDialog;
+    const interception = vi.spyOn(Tab.prototype, 'goBackReturningOnDialog').mockImplementation(async function(this: Tab, options) {
+      const states = await goBack.call(this, options);
+      expect(states).toHaveLength(1);
+      await (await dialogOpened).accept();
+      await vi.waitFor(() => expect(this.modalStates()).toEqual([]));
+      await vi.waitFor(() => expect(page.url()).toBe('http://fixture.local/first'));
+      return states;
+    });
+
+    try {
+      const result = await backend.callTool('browser_navigate_back', {});
+      expect(result.isError).not.toBe(true);
+      expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('await page.goBack();') });
+      expect(result.content[0]).toMatchObject({ type: 'text', text: expect.not.stringContaining('"beforeunload" dialog') });
+      expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('http://fixture.local/first') });
+    } finally {
+      interception.mockRestore();
     }
   });
 
