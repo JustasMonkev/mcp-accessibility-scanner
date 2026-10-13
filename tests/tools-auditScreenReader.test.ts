@@ -343,6 +343,90 @@ describe('analyzeScreenReader reading order', () => {
     ])).toEqual([]);
   });
 
+  it('keeps a transitive overlap chain in one band', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'First in DOM', 400, 10),
+      block('e3', 'Second in DOM', 200, 20),
+      block('e4', 'Third in DOM', 10, 30),
+    ])).toEqual(['reading-order-mismatch']);
+  });
+
+  it('connects unequal intervals through a later long bridge without changing DOM order', () => {
+    const result = analyze([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'First in DOM', 400, 60, { rect: rect(400, 60, 100, 40) }),
+      block('e3', 'Second in DOM', 200, 20, { rect: rect(200, 20, 100, 10) }),
+      block('e4', 'Last in DOM', 10, 0, { rect: rect(10, 0, 100, 100) }),
+    ]);
+
+    expect(result.countByCheck['reading-order-mismatch']).toBe(1);
+    expect(result.findings[0].problem).toContain('DOM order [paragraph showing "First in DOM" (div) -> paragraph showing "Second in DOM" (div) -> paragraph showing "Last in DOM" (div)]');
+    expect(result.findings[0].problem).toContain('visual order is [paragraph showing "Last in DOM" (div) -> paragraph showing "Second in DOM" (div) -> paragraph showing "First in DOM" (div)]');
+  });
+
+  it.each(['ltr', 'rtl'] as const)('matches reading order on seeded %s rows without mutating geometry', direction => {
+    let seed = 42;
+    const random = (limit: number) => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed % limit;
+    };
+    for (let sample = 0; sample < 60; sample++) {
+      const length = 2 + random(38);
+      const positions = Array.from({ length }, (_, index) => index);
+      if (sample % 3 === 1) {
+        positions.reverse();
+      } else if (sample % 3 === 2) {
+        for (let index = positions.length - 1; index > 0; index--) {
+          const other = random(index + 1);
+          [positions[index], positions[other]] = [positions[other], positions[index]];
+        }
+      }
+      const nodes = [node({ role: 'generic', ref: 'e1', direction }), ...positions.map((position, index) =>
+        block(`e${index + 2}`, `Paragraph ${index}`, position * 120 + 10, 10, {
+          direction,
+          rect: rect(position * 120 + 10, 10, 3 + random(80), 3 + random(40)),
+        }))];
+      const before = structuredClone(nodes);
+      const mismatch = positions.some((position, index) => position !== (direction === 'rtl' ? length - index - 1 : index));
+
+      expect(analyze(nodes).countByCheck['reading-order-mismatch']).toBe(mismatch ? 1 : 0);
+      expect(nodes).toEqual(before);
+    }
+  });
+
+  it('does not count repeated unions as joining a separate band', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'First row left', 10, 10),
+      block('e3', 'First row middle', 200, 10),
+      block('e4', 'First row right', 400, 10),
+      block('e5', 'Second row left', 10, 100),
+    ])).toEqual([]);
+  });
+
+  it('finds an inversion after all earlier pairs agree with DOM order', () => {
+    const result = analyze([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'First', 10, 10),
+      block('e3', 'Second', 200, 10),
+      block('e4', 'Third', 600, 10),
+      block('e5', 'Fourth', 400, 10),
+    ]);
+
+    expect(result.countByCheck['reading-order-mismatch']).toBe(1);
+    expect(result.findings[0].problem).toContain('visual order is [paragraph showing "First" (div) -> paragraph showing "Second" (div) -> paragraph showing "Fourth" (div) -> paragraph showing "Third" (div)]');
+  });
+
+  it('ignores diagonal siblings with no overlapping row or column', () => {
+    expect(checks([
+      node({ role: 'generic', ref: 'e1' }),
+      block('e2', 'Lower right', 400, 400),
+      block('e3', 'Upper left', 10, 10),
+      block('e4', 'Middle', 200, 200),
+    ])).toEqual([]);
+  });
+
   it('ignores an icon-only control rendered before its label', () => {
     // Disclosure arrows and leading icons carry no text, so their position is a
     // rendering detail rather than a change of reading sequence.
