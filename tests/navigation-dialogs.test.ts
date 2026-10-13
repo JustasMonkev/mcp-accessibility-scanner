@@ -65,9 +65,12 @@ describe('navigation interrupted by a load-time dialog', () => {
               : type === 'outgoing-pushstate'
                 // A same-document navigation first, which Playwright also reports as framenavigated.
                 ? '<script>fetch("/hold").then(() => { history.pushState(null, "", location.pathname + "#moved"); alert("From the previous page"); });</script>'
-                : ['alert', 'confirm', 'prompt'].includes(type)
-                  ? `<script>window.dialogResult = ${type}('During load');</script>`
-                  : '';
+                : type === 'beforeunload'
+                  // Asks to confirm leaving once the user has interacted with the page.
+                  ? '<script>addEventListener("beforeunload", e => { e.preventDefault(); e.returnValue = ""; });</script>'
+                  : ['alert', 'confirm', 'prompt'].includes(type)
+                    ? `<script>window.dialogResult = ${type}('During load');</script>`
+                    : '';
           return route.fulfill({
             contentType: 'text/html',
             body: `<!doctype html><html lang="en"><head><title>Load dialog</title></head><body>${script}<button>Loaded</button></body></html>`,
@@ -364,5 +367,27 @@ describe('navigation interrupted by a load-time dialog', () => {
       await audit;
       await rm(outputDir, { recursive: true, force: true });
     }
+  });
+
+  it('returns a beforeunload dialog raised by browser_navigate_back and allows handling it', async () => {
+    await backend.callTool('browser_navigate', { url: 'http://fixture.local/first' });
+    await backend.callTool('browser_navigate', { url: 'http://fixture.local/beforeunload' });
+    const page = browserContext.pages()[0];
+    // Chromium only raises beforeunload after a user gesture on the page.
+    await page.click('button');
+
+    const back = backend.callTool('browser_navigate_back', {});
+    let backReturned = false;
+    void back.then(() => { backReturned = true; });
+    // Well below the 15-second navigation timeout the unfixed tool waits out.
+    await vi.waitFor(() => expect(backReturned).toBe(true), { timeout: 5000 });
+    const backResult = await back;
+    expect(backResult.isError).not.toBe(true);
+    expect(backResult.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('"beforeunload" dialog') });
+    expect(backResult.content[0]).toMatchObject({ type: 'text', text: expect.not.stringContaining('await page.goBack(') });
+
+    const handled = await backend.callTool('browser_handle_dialog', { accept: true });
+    expect(handled.isError).not.toBe(true);
+    await vi.waitFor(() => expect(page.url()).toBe('http://fixture.local/first'));
   });
 });

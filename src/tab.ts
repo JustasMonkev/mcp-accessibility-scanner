@@ -327,6 +327,24 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this.page.goBack(options);
   }
 
+  // A beforeunload or load-time dialog blocks the history navigation until
+  // another tool handles it. Return its modal state immediately instead.
+  async goBackReturningOnDialog(options?: Parameters<playwright.Page['goBack']>[0]): Promise<ModalState[]> {
+    let navigation: Promise<unknown> | undefined;
+    const modalStates = await this._raceAgainstModalStates(async () => {
+      navigation = this.goBack(options);
+      await navigation;
+    });
+    if (modalStates.length && navigation) {
+      const pageGeneration = this._pageGeneration;
+      void navigation.catch(error => {
+        if (pageGeneration === this._pageGeneration)
+          this._handleConsoleMessage(navigationFailureToConsoleMessage(error));
+      });
+    }
+    return modalStates;
+  }
+
   consoleMessages(): ConsoleMessage[] {
     return this._consoleMessages;
   }
