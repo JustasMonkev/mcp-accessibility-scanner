@@ -637,6 +637,7 @@ Navigate to a URL.
 
 #### `browser_navigate_back`
 Go back to the previous page.
+- If the page opens a `beforeunload` dialog, the tool returns the pending dialog without dismissing it. Navigation remains pending until you use `browser_handle_dialog` to accept leaving or dismiss it to stay on the page. While the dialog remains open, the response omits the `page.goBack` replay snippet. A later navigation failure appears in page console messages unless the document has changed.
 
 #### `browser_navigation_timeout`
 Set default navigation timeout for existing tabs.

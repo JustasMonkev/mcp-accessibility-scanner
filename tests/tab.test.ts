@@ -20,6 +20,8 @@ import { chromium, type Browser } from 'playwright';
 import { Tab, renderModalStates } from '../src/tab.js';
 import type { Context } from '../src/context.js';
 import { EventEmitter } from 'events';
+import navigateTools from '../src/tools/navigate.js';
+import { Response } from '../src/response.js';
 
 describe('Tab', () => {
   let mockContext: Context;
@@ -292,6 +294,70 @@ describe('Tab', () => {
       expect(finished).toBe(true);
       expect(tab.operationTimeout()).toBe(75);
       expect(mockPage.setDefaultTimeout).toHaveBeenLastCalledWith(75);
+    });
+  });
+
+  describe('goBackReturningOnDialog', () => {
+    it.each(['unchanged', 'subframe', 'main frame'])('handles a delayed failure after a dialog with %s navigation', async frame => {
+      const pending = Promise.withResolvers<null>();
+      mockPage.goBack.mockReturnValue(pending.promise);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const navigation = tab.goBackReturningOnDialog({ waitUntil: 'commit' });
+      const dialog = { type: () => 'beforeunload', message: () => '' };
+      mockPage.emit('dialog', dialog);
+
+      expect(await navigation).toEqual([expect.objectContaining({ type: 'dialog', dialog })]);
+      mockPage.emit('dialogclosed', dialog);
+      if (frame !== 'unchanged')
+        mockPage.emit('framenavigated', { parentFrame: () => frame === 'subframe' ? {} : null });
+      pending.reject(new Error('page.goBack: Target page has been closed'));
+      await new Promise(resolve => setImmediate(resolve));
+
+      if (frame === 'main frame') {
+        expect(tab.consoleMessages()).toEqual([]);
+      } else {
+        expect(tab.consoleMessages()).toHaveLength(1);
+        expect(tab.consoleMessages()[0].toString()).toBe('Error: Navigation failed after dialog interruption: page.goBack: Target page has been closed');
+      }
+      expect(tab.listenerCount('modalState')).toBe(0);
+    });
+
+    it('propagates a navigation failure before any dialog opens', async () => {
+      mockPage.goBack.mockRejectedValue(new Error('page.goBack: net::ERR_FAILED'));
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+
+      await expect(tab.goBackReturningOnDialog()).rejects.toThrow('page.goBack: net::ERR_FAILED');
+      expect(tab.consoleMessages()).toEqual([]);
+      expect(tab.listenerCount('modalState')).toBe(0);
+    });
+
+    it.each([false, true])('keeps replay code consistent with a dialog closed out of band: %s', async closed => {
+      const pending = Promise.withResolvers<null>();
+      mockPage.goBack.mockReturnValue(pending.promise);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockContext.currentTabOrDie = () => tab;
+      const response = new Response(mockContext, 'browser_navigate_back', {});
+      const backTool = navigateTools.find(tool => tool.schema.name === 'browser_navigate_back')!;
+      const dialog = { type: () => 'beforeunload', message: () => '' };
+      const goBack = tab.goBackReturningOnDialog.bind(tab);
+      vi.spyOn(tab, 'goBackReturningOnDialog').mockImplementation(async options => {
+        const states = await goBack(options);
+        if (closed)
+          mockPage.emit('dialogclosed', dialog);
+        return states;
+      });
+
+      try {
+        const navigation = backTool.handle(mockContext, {}, response);
+        mockPage.emit('dialog', dialog);
+        await navigation;
+
+        expect(response.code()).toBe(closed ? 'await page.goBack();' : '');
+        expect((await tab.captureSnapshot()).modalStates).toHaveLength(closed ? 0 : 1);
+      } finally {
+        pending.resolve(null);
+        tab.dispose();
+      }
     });
   });
 
