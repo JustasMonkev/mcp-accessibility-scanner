@@ -1096,9 +1096,11 @@ node bench/reading-order-bench.mjs /tmp/baseline/lib/tools/auditScreenReader.js 
 ```
 
 This checks identical results on fixed 400- and 2,000-sibling sorted, reversed,
-late-inversion and diagonal layouts, then alternates revisions for 10 warmups
-and 20 timed samples per layout. Diagonal layouts exercise the no-overlap
-worst case. These function timings exclude browser measurement and MCP latency.
+late-inversion, diagonal, fully overlapping and dense-cluster-with-outlier layouts,
+then alternates revisions for 10 warmups and 20 timed samples per layout.
+Disconnected dense clusters and inversion searches without an early mismatch
+can still take quadratic work. These function timings exclude browser measurement
+and MCP latency.
 
 ### Releasing
 

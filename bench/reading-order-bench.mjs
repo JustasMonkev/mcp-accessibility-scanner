@@ -18,7 +18,7 @@ const iterations = 20;
 const results = [];
 
 for (const count of [400, 2000]) {
-  for (const order of ['sorted', 'reversed', 'late-inversion', 'diagonal']) {
+  for (const order of ['sorted', 'reversed', 'late-inversion', 'diagonal', 'all-overlap', 'cluster-outlier']) {
     const nodes = fixture(count, order);
     const expected = analyzers[0].run(nodes, options);
     assert.equal(expected.countByCheck['reading-order-mismatch'], order === 'reversed' || order === 'late-inversion' ? 1 : 0);
@@ -62,13 +62,14 @@ function fixture(count, order) {
     positionFixed: false, floating: false, ariaHidden: false, childCount: count,
   };
   return [parent, ...Array.from({ length: count }, (_, index) => {
-    const position = order === 'reversed' ? count - index - 1
+    const position = order === 'all-overlap' || (order === 'cluster-outlier' && index < count - 1) ? 0
+      : order === 'reversed' ? count - index - 1
       : order === 'late-inversion' && index >= count - 2 ? 2 * count - 3 - index
       : index;
     return {
       ...parent, role: 'paragraph', ref: `e${index}`, depth: 1, parent: 0,
       visibleText: `Paragraph ${index}`, childCount: 0,
-      rect: { x: position * 30, y: order === 'diagonal' ? index * 30 : 0, width: 24, height: 24 },
+      rect: { x: position * 30, y: order === 'diagonal' || (order === 'cluster-outlier' && index === count - 1) ? index * 30 : 0, width: 24, height: 24 },
     };
   })];
 }

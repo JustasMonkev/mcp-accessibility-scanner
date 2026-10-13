@@ -143,7 +143,8 @@ function overlapRatio(a: Rect, b: Rect, axis: 'x' | 'y'): number {
 }
 
 function countBands(rects: Rect[], axis: 'x' | 'y'): number {
-  const band = rects.map((_, index) => index);
+  const ordered = [...rects].sort((first, second) => axis === 'x' ? first.x - second.x : first.y - second.y);
+  const band = ordered.map((_, index) => index);
   // Iterative find with write-back path compression, so a long union chain
   // costs O(1) per lookup instead of a walk each time.
   const rootOf = (index: number): number => {
@@ -158,17 +159,21 @@ function countBands(rects: Rect[], axis: 'x' | 'y'): number {
     return root;
   };
   let components = rects.length;
-  for (let i = 0; i < rects.length; i++) {
-    for (let j = i + 1; j < rects.length; j++) {
-      if (!(overlapRatio(rects[i], rects[j], axis) >= bandOverlapRatio))
-        continue;
-      const first = rootOf(i);
-      const second = rootOf(j);
-      if (first === second)
-        continue;
-      band[second] = first;
-      if (--components === 1)
-        return 1;
+  for (let i = 0; i < ordered.length; i++) {
+    const end = axis === 'x' ? ordered[i].x + ordered[i].width : ordered[i].y + ordered[i].height;
+    for (let j = i + 1; j < ordered.length; j++) {
+      const nextStart = axis === 'x' ? ordered[j].x : ordered[j].y;
+      if (nextStart >= end)
+        break;
+      if (overlapRatio(ordered[i], ordered[j], axis) >= bandOverlapRatio) {
+        const first = rootOf(i);
+        const second = rootOf(j);
+        if (first !== second) {
+          band[second] = first;
+          if (--components === 1)
+            return 1;
+        }
+      }
     }
   }
   return components;
