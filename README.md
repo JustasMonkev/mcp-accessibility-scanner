@@ -948,6 +948,10 @@ npm install
 
 `npm run knip` checks the server's sources, tests, benchmarks and tooling.
 
+Tests use Node or Playwright rather than `happy-dom`, and Chrome protocol types are
+defined locally. See the [dependency review](docs/dependency-review-2026-10.md) for
+the removal rationale and validation results.
+
 ### Playwright upgrade gate
 
 The September 16, 2026 review keeps `playwright` and `playwright-core` paired at
