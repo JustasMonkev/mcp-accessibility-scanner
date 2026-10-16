@@ -493,7 +493,7 @@ At most 50 elements are annotated per scan. The result text always reports how m
 
 The default set is the WCAG and Section 508 tags only, so a default report means "this fails a conformance criterion". Category tags are opt-in for that reason: Axe matches requested tags with OR, so asking for `cat.keyboard` also pulls in best-practice rules such as `region` and `skip-link` that carry both tags. No live conformance rule is lost by leaving them out: the only rules reachable *only* through a `cat.*` tag are `duplicate-id` and `duplicate-id-active`, which Axe marks deprecated because WCAG removed SC 4.1.1. Add `best-practice` (landmark structure, heading order, `tabindex` hygiene) or a `cat.*` tag when you want that broader review.
 
-The same OR semantics apply to `experimental`, with one deliberate exception: five experimental rules -- `css-orientation-lock` (SC 1.3.4), `label-content-name-mismatch` (SC 2.5.3), `p-as-heading`, `table-fake-caption` and `td-has-header` (SC 1.3.1) -- also carry a `wcag*` tag and so run in the default set. In Axe, `experimental` describes how settled the heuristic is, not whether the criterion is real, so these are kept rather than filtered out. Adding the `experimental` tag pulls in the remaining experimental rules, which have no conformance tag of their own.
+The same OR semantics apply to `experimental`, with one deliberate exception: four experimental rules -- `css-orientation-lock` (SC 1.3.4), `p-as-heading`, `table-fake-caption` and `td-has-header` (SC 1.3.1) -- also carry a `wcag*` tag and so run in the default set. In Axe, `experimental` describes how settled the heuristic is, not whether the criterion is real, so these are kept rather than filtered out. Adding the `experimental` tag pulls in the remaining experimental rules, which have no conformance tag of their own. Axe 4.14 no longer marks `label-content-name-mismatch` (SC 2.5.3) as experimental; it still runs by default.
 
 **Scan scoping:**
 `scan_page`, `audit_site`, and `scan_page_matrix` accept `includeSelectors` and `excludeSelectors` to limit what Axe looks at. Use `includeSelectors` to audit one component (`["#checkout-form"]`) and `excludeSelectors` to drop third-party noise that pollutes every report (`["#cookie-banner", "iframe.intercom-frame"]`). Exclusions are applied after inclusions, so you can carve a widget out of an included subtree.
@@ -945,6 +945,12 @@ git clone https://github.com/JustasMonkev/mcp-accessibility-scanner.git
 cd mcp-accessibility-scanner
 npm install
 ```
+
+After upgrading a native dependency, check `npm install-scripts list`. If an
+updated `re2` version is blocked by the pinned `allowScripts` approval, run
+`npm install-scripts approve re2` and then `npm rebuild re2`. Commit the updated
+approval with the dependency update. Rebuild `re2` after changing Node.js versions
+as well.
 
 `npm run knip` checks the server's sources, tests, benchmarks and tooling.
 

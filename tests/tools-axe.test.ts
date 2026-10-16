@@ -145,7 +145,6 @@ describe('axe helpers', () => {
 
     expect(experimental).toEqual([
       'css-orientation-lock',
-      'label-content-name-mismatch',
       'p-as-heading',
       'table-fake-caption',
       'td-has-header',

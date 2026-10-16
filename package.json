@@ -46,32 +46,32 @@
 		"knip": "knip --strict"
 	},
 	"dependencies": {
-		"@modelcontextprotocol/client": "^2.0.0",
-		"@modelcontextprotocol/node": "^2.0.0",
-		"@modelcontextprotocol/server": "^2.0.0",
-		"axe-core": "4.13.0",
+		"@modelcontextprotocol/client": "^2.3.1",
+		"@modelcontextprotocol/node": "^2.1.1",
+		"@modelcontextprotocol/server": "^2.3.1",
+		"axe-core": "4.14.0",
 		"commander": "^15.0.0",
 		"debug": "^4.4.3",
 		"playwright": "1.63.0",
 		"playwright-core": "1.63.0",
 		"re2": "^1.26.1",
-		"ws": "^8.21.3",
-		"zod": "^4.4.3"
+		"ws": "^8.22.0",
+		"zod": "^4.6.7"
 	},
 	"devDependencies": {
 		"@stylistic/eslint-plugin": "^5.10.0",
 		"@types/debug": "^4.1.13",
 		"@types/json-schema": "^7.0.15",
-		"@types/node": "^26.2.0",
-		"@types/ws": "^8.18.1",
-		"@vitest/coverage-v8": "^5.0.1",
-		"@vitest/ui": "^5.0.1",
-		"eslint": "^10.8.1",
+		"@types/node": "^26.6.5",
+		"@types/ws": "^8.18.2",
+		"@vitest/coverage-v8": "^5.0.5",
+		"@vitest/ui": "^5.0.5",
+		"eslint": "^10.13.0",
 		"eslint-plugin-notice": "^1.0.0",
-		"knip": "^6.32.2",
-		"oxlint": "^1.78.0",
+		"knip": "^6.41.0",
+		"oxlint": "^1.88.0",
 		"typescript": "^7.0.2",
-		"vitest": "^5.0.1"
+		"vitest": "^5.0.5"
 	},
 	"keywords": [
 		"mcp",
@@ -104,6 +104,6 @@
 	"allowScripts": {
 		"fsevents@2.3.2": true,
 		"fsevents@2.3.3": true,
-		"re2@1.26.1": true
+		"re2@1.27.0": true
 	}
 }
