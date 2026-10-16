@@ -963,6 +963,15 @@ the removal rationale and validation results.
 
 ### Playwright upgrade gate
 
+The Linux `test` and `webkit-regressions` CI jobs use the official
+`mcr.microsoft.com/playwright:v1.63.0-noble` image with its preinstalled browsers
+and system dependencies, rather than downloading browsers during each job.
+Keep both image tags in `.github/workflows/ci.yml` aligned with the pinned
+`playwright` and `playwright-core` versions. Native-runner browser matrices and
+the package's Docker smoke test remain separate; branded Chrome and Edge are
+not included in the Playwright image. See the
+[Playwright Docker guidance](https://playwright.dev/docs/docker).
+
 The September 16, 2026 review keeps `playwright` and `playwright-core` paired at
 **1.63.0**, the [latest stable release](https://github.com/microsoft/playwright/releases/tag/v1.63.0)
 on that date. Keep the local `InputRecorder` hub and the existing factory reference
