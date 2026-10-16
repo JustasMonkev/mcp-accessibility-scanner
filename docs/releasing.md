@@ -113,7 +113,7 @@ npm 12 no longer runs dependency `preinstall`, `install`, or `postinstall` scrip
 "allowScripts": {
   "fsevents@2.3.2": true,
   "fsevents@2.3.3": true,
-  "re2@1.26.1": true
+  "re2@1.27.0": true
 }
 ```
 
@@ -137,7 +137,7 @@ npm install -g mcp-accessibility-scanner --allow-scripts=re2
 npx -y --allow-scripts=re2 mcp-accessibility-scanner
 ```
 
-Older npm versions accept the flag and ignore it. For a project dependency, users run `npm install-scripts approve re2` and then `npm rebuild re2` in their project instead. Approving records the decision but does not run the script that was already skipped. The README installation section documents this for users.
+Older npm versions accept the flag and ignore it. For a project dependency on npm 12 or later, users run `npm install-scripts approve re2` and then `npm rebuild re2` in their project instead. Approving records the decision but does not run the script that was already skipped. npm 11 and earlier do not provide `install-scripts`; their install scripts run by default, so `npm rebuild re2` restores a missing binary unless scripts have been explicitly disabled. The README installation section documents both workflows for users.
 
 ### Git and remote-URL dependencies are blocked
 

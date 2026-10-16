@@ -92,7 +92,7 @@ Using npm:
 npm install -g mcp-accessibility-scanner --allow-scripts=re2
 ```
 
-npm 12 does not run dependency install scripts unless you allow them. The scanner depends on [`re2`](https://www.npmjs.com/package/re2), a native module whose install script downloads or builds `re2.node`; without it the server fails to start with `Cannot find module './build/Release/re2.node'`. Pass `--allow-scripts=re2` to `npm install -g` and `npx` (older npm versions accept and ignore the flag), or, when you add the package to a project, run `npm install-scripts approve re2` followed by `npm rebuild re2` (approving does not run the script that was already skipped). To allow it for every global install, run `npm config set allow-scripts=re2 --location=user`.
+npm 12 does not run dependency install scripts unless you allow them. The scanner depends on [`re2`](https://www.npmjs.com/package/re2), a native module whose install script downloads or builds `re2.node`; without it the server fails to start with `Cannot find module './build/Release/re2.node'`. Pass `--allow-scripts=re2` to `npm install -g` and `npx` (older npm versions accept and ignore the flag). For a project dependency on npm 12 or later, run `npm install-scripts approve re2` followed by `npm rebuild re2` (approving does not run the script that was already skipped). On npm 11 and earlier, install scripts run by default; use `npm rebuild re2` to restore a missing binary, provided scripts have not been explicitly disabled. To allow it for every global install on npm 12, run `npm config set allow-scripts=re2 --location=user`.
 
 ### Installation with Docker
 
@@ -946,10 +946,13 @@ cd mcp-accessibility-scanner
 npm install
 ```
 
-After upgrading a native dependency, check `npm install-scripts list`. If an
-updated `re2` version is blocked by the pinned `allowScripts` approval, run
-`npm install-scripts approve re2` and then `npm rebuild re2`. Commit the updated
-approval with the dependency update. Rebuild `re2` after changing Node.js versions
+On npm 12 or later, check `npm install-scripts list` after upgrading a native
+dependency. If an updated `re2` version is blocked by the pinned `allowScripts`
+approval, run `npm install-scripts approve re2` and then `npm rebuild re2`. Commit
+the updated approval with the dependency update. The `install-scripts` command
+is not available on npm 11 and earlier; those versions run install scripts by
+default, so use `npm rebuild re2` to restore a missing binary, provided scripts
+have not been explicitly disabled. Rebuild `re2` after changing Node.js versions
 as well.
 
 `npm run knip` checks the server's sources, tests, benchmarks and tooling.
