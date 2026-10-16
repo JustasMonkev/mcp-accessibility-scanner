@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 20
     container:
       image: mcr.microsoft.com/playwright:v1.63.0-noble
-      options: --init --ipc=host
+      options: --user pwuser --init --ipc=host
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
     defaults:
@@ -173,7 +173,7 @@ jobs:
     timeout-minutes: 15
     container:
       image: mcr.microsoft.com/playwright:v1.63.0-noble
-      options: --init --ipc=host
+      options: --user pwuser --init --ipc=host
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
     defaults:

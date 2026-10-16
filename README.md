@@ -966,6 +966,7 @@ the removal rationale and validation results.
 The Linux `test` and `webkit-regressions` CI jobs use the official
 `mcr.microsoft.com/playwright:v1.63.0-noble` image with its preinstalled browsers
 and system dependencies, rather than downloading browsers during each job.
+They run as `pwuser` so Firefox can use GitHub's user-owned home directory.
 Keep both image tags in `.github/workflows/ci.yml` aligned with the pinned
 `playwright` and `playwright-core` versions. Native-runner browser matrices and
 the package's Docker smoke test remain separate; branded Chrome and Edge are
