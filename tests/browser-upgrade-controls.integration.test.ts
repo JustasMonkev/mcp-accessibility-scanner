@@ -22,7 +22,7 @@ import { createRequire } from 'node:module';
 import { afterEach, expect, it } from 'vitest';
 import * as playwright from 'playwright';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
-import { resolveConfig } from '../src/config.js';
+import { resolveCLIConfig, resolveConfig } from '../src/config.js';
 
 const browserName = process.env.MCP_TEST_BROWSER_NAME || 'chromium';
 if (browserName !== 'chromium' && browserName !== 'firefox' && browserName !== 'webkit')
@@ -56,20 +56,145 @@ afterEach(async () => {
   }
 });
 
-async function setup() {
+/** Prints the pending phase as well as its duration, so a stalled WebKit setup is identifiable in CI. */
+async function setupStep<T>(phase: string, operation: () => Promise<T>): Promise<T> {
+  const started = Date.now();
+  const metadata = { browserName, channel: channel || 'bundled', platform: process.platform, arch: process.arch, phase, ...versions };
+  process.stdout.write(JSON.stringify({ ...metadata, status: 'started' }) + '\n');
+  try {
+    return await operation();
+  } finally {
+    process.stdout.write(JSON.stringify({ ...metadata, status: 'finished', elapsed: Date.now() - started }) + '\n');
+  }
+}
+
+async function setup(contextOptions: playwright.BrowserContextOptions = {}) {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-upgrade-controls-'));
-  browser = await browserType.launch({ channel });
-  const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
-  const page = await context.newPage();
+  browser = await setupStep('launch', () => browserType.launch({ channel }));
+  const context = await setupStep('newContext', () => browser!.newContext({ viewport: { width: 1280, height: 720 }, ...contextOptions }));
+  const page = await setupStep('newPage', () => context.newPage());
   backend = new BrowserServerBackend(await resolveConfig({
-    outputDir: directory, timeouts: { navigationTimeout: 3000, defaultTimeout: 3000, settle: 50 },
+    capabilities: ['verify'], outputDir: directory, timeouts: { navigationTimeout: 3000, defaultTimeout: 3000, settle: 50 },
   }), { createContext: async () => ({ browserContext: context, close: () => context.close() }) });
-  await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'upgrade-controls', version: '1' });
-  const snapshot = await backend.callTool('browser_snapshot', {});
+  await setupStep('initialize', () => backend!.initialize({ notifyToolListChanged: async () => {} }, { name: 'upgrade-controls', version: '1' }));
+  const snapshot = await setupStep('browser_snapshot', () => backend!.callTool('browser_snapshot', {}));
   expect(snapshot.isError, JSON.stringify(snapshot.content)).not.toBe(true);
   process.stdout.write(JSON.stringify({ browserName, channel: channel || 'bundled', browserVersion: browser.version(), platform: process.platform, arch: process.arch, ...versions }) + '\n');
   return { page, backend };
 }
+
+it('forwards device screen dimensions and preserves explicit screen overrides (#271)', async () => {
+  const device = browserName === 'webkit' ? 'Desktop Safari' : browserName === 'firefox' ? 'Desktop Firefox' : 'Desktop Chrome';
+  const config = await resolveCLIConfig({ device, browser: browserName });
+  const expectedScreen = playwright.devices[device].screen;
+  expect(config.browser.contextOptions.screen).toEqual(expectedScreen);
+  const { page } = await setup(config.browser.contextOptions);
+  const screen = () => page.evaluate(() => ({ width: window.screen.width, height: window.screen.height }));
+  expect(await screen()).toEqual(expectedScreen);
+  expect(await page.evaluate(size => matchMedia(`(device-width: ${size.width}px) and (device-height: ${size.height}px)`).matches, expectedScreen)).toBe(true);
+
+  const override = { width: 900, height: 1100 };
+  const overridden = await resolveConfig({ browser: { contextOptions: { ...playwright.devices[device], screen: override } } });
+  const context = await browser!.newContext(overridden.browser.contextOptions);
+  try {
+    const other = await context.newPage();
+    expect(await other.evaluate(() => ({ width: window.screen.width, height: window.screen.height }))).toEqual(override);
+  } finally {
+    await context.close();
+  }
+});
+
+it.skipIf(browserName === 'firefox')('preserves mobile touch properties after full-page/element screenshots and navigation (#42617)', async () => {
+  const config = await resolveCLIConfig({ mobile: true, browser: browserName });
+  expect(config.browser.contextOptions.hasTouch).toBe(true);
+  expect(config.browser.contextOptions.isMobile).toBe(true);
+  process.stdout.write(JSON.stringify({ mobileContextOptions: config.browser.contextOptions, browserName, ...versions }) + '\n');
+  const { page } = await setup(config.browser.contextOptions);
+  const html = 'data:text/html,<div style="width:2000px;height:3000px">Oversized element</div>';
+  await page.goto(html);
+  const properties = () => page.evaluate(() => ({
+    touch: navigator.maxTouchPoints,
+    coarse: matchMedia('(pointer: coarse)').matches,
+    screen: { width: window.screen.width, height: window.screen.height },
+  }));
+  const before = await properties();
+  process.stdout.write(JSON.stringify({ mobileProperties: before, browserName }) + '\n');
+  expect.soft(before.touch).toBeGreaterThan(0);
+  expect.soft(before.coarse).toBe(true);
+  expect.soft(before.screen).toEqual(config.browser.contextOptions.screen);
+  await page.screenshot({ fullPage: true, timeout: 15000 });
+  expect.soft(await properties(), 'after full-page screenshot').toEqual(before);
+  await page.locator('div').screenshot({ timeout: 15000 });
+  expect.soft(await properties(), 'after element screenshot').toEqual(before);
+  await page.reload();
+  expect.soft(await properties(), 'after navigation').toEqual(before);
+}, 60000);
+
+it('scrolls instantly on pointer retry with a fixed header and smooth scrolling (#42626)', async () => {
+  const { page } = await setup();
+  await page.setContent(`<style>
+    html { scroll-behavior: smooth; } body { margin: 0; }
+    .spacer { height: 2000px; }
+    #header { position: fixed; top: 0; left: 0; right: 0; height: calc(100vh - 50px); background: grey; }
+    button { height: 30px; }
+  </style><div id="header"></div><div class="spacer"></div>
+  <button onclick="this.textContent = 'Clicked'">Target</button><div class="spacer"></div>
+  <output>0</output><script>
+    let scrolls = 0;
+    addEventListener('scroll', () => document.querySelector('output').textContent = String(++scrolls));
+  </script>`);
+  await page.getByRole('button', { name: 'Target' }).click({ timeout: 5000 });
+  expect(await page.locator('button').textContent()).toBe('Clicked');
+  expect(Number(await page.locator('output').textContent())).toBeLessThanOrEqual(2);
+});
+
+it('excludes unrendered ARIA text and retains slotted/open-details controls (#257)', async () => {
+  const { page, backend } = await setup();
+  await page.setContent(`<div id="host" role="button">Light</div>
+    <div id="slotted" role="button">Slotted</div>
+    <details>Hidden direct text<summary>Summary</summary></details>
+    <details open>Visible direct text<summary>Open summary</summary></details>
+    <script>
+      document.querySelector('#host').attachShadow({ mode: 'open' }).textContent = 'Shadow';
+      document.querySelector('#slotted').attachShadow({ mode: 'open' }).innerHTML = '<slot></slot>';
+    </script>`);
+  const snapshot = await backend.callTool('browser_snapshot', {});
+  expect(snapshot.isError).not.toBe(true);
+  const text = snapshot.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+  expect.soft(text).toContain('button "Shadow"');
+  expect.soft(text).toContain('button "Slotted"');
+  expect.soft(text).toContain('Visible direct text');
+  expect.soft(text).not.toContain('Light');
+  expect.soft(text).not.toContain('Hidden direct text');
+  for (const name of ['Slotted', 'Shadow']) {
+    // A substring role match would incorrectly accept "LightShadow" for "Shadow".
+    expect.soft(await page.getByRole('button', { name, exact: true }).count(), name).toBe(1);
+    const verification = await backend.callTool('browser_verify_element_visible', { role: 'button', accessibleName: name });
+    expect.soft(verification.isError, JSON.stringify(verification.content)).not.toBe(true);
+  }
+  for (const query of ['button "Shadow"', 'button "Slotted"', 'Visible direct text']) {
+    const found = await backend.callTool('browser_find', { text: query });
+    expect.soft(found.isError, JSON.stringify(found.content)).not.toBe(true);
+    expect.soft(found.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain(`Found 1 match for "${query}":`);
+  }
+  for (const query of ['Light', 'Hidden direct text']) {
+    const found = await backend.callTool('browser_find', { text: query });
+    expect.soft(found.isError, JSON.stringify(found.content)).not.toBe(true);
+    expect.soft(found.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain(`No matches found for "${query}".`);
+  }
+});
+
+it.each([false, true])('retries a CSS-only overlay with JavaScript enabled: %s (#257)', async javaScriptEnabled => {
+  const { page } = await setup({ javaScriptEnabled });
+  await page.setContent(`<style>
+    @keyframes disappear { to { visibility: hidden; } }
+    #overlay { position: fixed; inset: 0; background: grey; animation: disappear 300ms forwards; }
+  </style><button>Target</button><div id="overlay"></div>`);
+  await page.getByRole('button', { name: 'Target' }).click({ timeout: 5000 });
+  expect(await page.locator('button').evaluate(element => element === document.activeElement)).toBe(true);
+  await page.locator('#overlay').evaluate(element => element.remove());
+  await page.getByRole('button', { name: 'Target' }).click({ timeout: 5000 });
+});
 
 async function fontMetrics(page: playwright.Page) {
   const cdp = await page.context().newCDPSession(page);

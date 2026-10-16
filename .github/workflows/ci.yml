@@ -256,7 +256,7 @@ jobs:
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
       - if: ${{ !cancelled() }}
-        run: npx vitest run tests/browser-upgrade-controls.integration.test.ts
+        run: npx vitest run tests/browser-upgrade-controls.integration.test.ts tests/recorder.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
 
