@@ -145,11 +145,17 @@ describe('axe helpers', () => {
 
     expect(experimental).toEqual([
       'css-orientation-lock',
-      'label-content-name-mismatch',
       'p-as-heading',
       'table-fake-caption',
       'td-has-header',
     ]);
+  });
+
+  it('keeps label-content-name-mismatch in the default conformance rule set', async () => {
+    const axeCore = (await import('axe-core')).default;
+    const selected = axeCore.getRules([...defaultAxeTags]).map(rule => rule.ruleId);
+
+    expect(selected).toContain('label-content-name-mismatch');
   });
 
   it('dedupes nodes by target and html', () => {

@@ -92,7 +92,7 @@ Using npm:
 npm install -g mcp-accessibility-scanner --allow-scripts=re2
 ```
 
-npm 12 does not run dependency install scripts unless you allow them. The scanner depends on [`re2`](https://www.npmjs.com/package/re2), a native module whose install script downloads or builds `re2.node`; without it the server fails to start with `Cannot find module './build/Release/re2.node'`. Pass `--allow-scripts=re2` to `npm install -g` and `npx` (older npm versions accept and ignore the flag), or, when you add the package to a project, run `npm install-scripts approve re2` followed by `npm rebuild re2` (approving does not run the script that was already skipped). To allow it for every global install, run `npm config set allow-scripts=re2 --location=user`.
+npm 12 does not run dependency install scripts unless you allow them. The scanner depends on [`re2`](https://www.npmjs.com/package/re2), a native module whose install script downloads or builds `re2.node`; without it the server fails to start with `Cannot find module './build/Release/re2.node'`. Pass `--allow-scripts=re2` to `npm install -g` and `npx` (older npm versions accept and ignore the flag). For a project dependency on npm 12 or later, run `npm install-scripts approve re2` followed by `npm rebuild re2` (approving does not run the script that was already skipped). On npm 11 and earlier, install scripts run by default; use `npm rebuild re2` to restore a missing binary, provided scripts have not been explicitly disabled. To allow it for every global install on npm 12, run `npm config set allow-scripts=re2 --location=user`.
 
 ### Installation with Docker
 
@@ -493,7 +493,7 @@ At most 50 elements are annotated per scan. The result text always reports how m
 
 The default set is the WCAG and Section 508 tags only, so a default report means "this fails a conformance criterion". Category tags are opt-in for that reason: Axe matches requested tags with OR, so asking for `cat.keyboard` also pulls in best-practice rules such as `region` and `skip-link` that carry both tags. No live conformance rule is lost by leaving them out: the only rules reachable *only* through a `cat.*` tag are `duplicate-id` and `duplicate-id-active`, which Axe marks deprecated because WCAG removed SC 4.1.1. Add `best-practice` (landmark structure, heading order, `tabindex` hygiene) or a `cat.*` tag when you want that broader review.
 
-The same OR semantics apply to `experimental`, with one deliberate exception: five experimental rules -- `css-orientation-lock` (SC 1.3.4), `label-content-name-mismatch` (SC 2.5.3), `p-as-heading`, `table-fake-caption` and `td-has-header` (SC 1.3.1) -- also carry a `wcag*` tag and so run in the default set. In Axe, `experimental` describes how settled the heuristic is, not whether the criterion is real, so these are kept rather than filtered out. Adding the `experimental` tag pulls in the remaining experimental rules, which have no conformance tag of their own.
+The same OR semantics apply to `experimental`, with one deliberate exception: four experimental rules -- `css-orientation-lock` (SC 1.3.4), `p-as-heading`, `table-fake-caption` and `td-has-header` (SC 1.3.1) -- also carry a `wcag*` tag and so run in the default set. In Axe, `experimental` describes how settled the heuristic is, not whether the criterion is real, so these are kept rather than filtered out. Adding the `experimental` tag pulls in the remaining experimental rules, which have no conformance tag of their own. Axe 4.14 no longer marks `label-content-name-mismatch` (SC 2.5.3) as experimental; it still runs by default.
 
 **Scan scoping:**
 `scan_page`, `audit_site`, and `scan_page_matrix` accept `includeSelectors` and `excludeSelectors` to limit what Axe looks at. Use `includeSelectors` to audit one component (`["#checkout-form"]`) and `excludeSelectors` to drop third-party noise that pollutes every report (`["#cookie-banner", "iframe.intercom-frame"]`). Exclusions are applied after inclusions, so you can carve a widget out of an included subtree.
@@ -946,6 +946,15 @@ cd mcp-accessibility-scanner
 npm install
 ```
 
+On npm 12 or later, check `npm install-scripts list` after upgrading a native
+dependency. If an updated `re2` version is blocked by the pinned `allowScripts`
+approval, run `npm install-scripts approve re2` and then `npm rebuild re2`. Commit
+the updated approval with the dependency update. The `install-scripts` command
+is not available on npm 11 and earlier; those versions run install scripts by
+default, so use `npm rebuild re2` to restore a missing binary, provided scripts
+have not been explicitly disabled. Rebuild `re2` after changing Node.js versions
+as well.
+
 `npm run knip` checks the server's sources, tests, benchmarks and tooling.
 
 Tests use Node or Playwright rather than `happy-dom`, and Chrome protocol types are
@@ -953,6 +962,16 @@ defined locally. See the [dependency review](docs/dependency-review-2026-10.md) 
 the removal rationale and validation results.
 
 ### Playwright upgrade gate
+
+The Linux `test` and `webkit-regressions` CI jobs use the official
+`mcr.microsoft.com/playwright:v1.63.0-noble` image with its preinstalled browsers
+and system dependencies, rather than downloading browsers during each job.
+They run as `pwuser` so Firefox can use GitHub's user-owned home directory.
+Keep both image tags in `.github/workflows/ci.yml` aligned with the pinned
+`playwright` and `playwright-core` versions. Native-runner browser matrices and
+the package's Docker smoke test remain separate; branded Chrome and Edge are
+not included in the Playwright image. See the
+[Playwright Docker guidance](https://playwright.dev/docs/docker).
 
 The September 16, 2026 review keeps `playwright` and `playwright-core` paired at
 **1.63.0**, the [latest stable release](https://github.com/microsoft/playwright/releases/tag/v1.63.0)

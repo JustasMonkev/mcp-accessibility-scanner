@@ -35,13 +35,11 @@ export type AxeTag = (typeof axeTagValues)[number];
 // lost: the only rules reachable solely through a `cat.*` tag are `duplicate-id`
 // and `duplicate-id-active`, both deprecated in Axe since WCAG dropped SC 4.1.1.
 //
-// Five rules tagged `experimental` also carry a real `wcag*` tag and therefore
-// still run by default: css-orientation-lock (SC 1.3.4),
-// label-content-name-mismatch (SC 2.5.3), p-as-heading, table-fake-caption and
-// td-has-header (SC 1.3.1). That is deliberate. `experimental` in Axe describes
-// how settled the heuristic is, not whether the criterion is real, so filtering
-// them out would drop genuine conformance coverage from the default scan — the
-// opposite of what this tag set is for.
+// Four rules tagged `experimental` also carry a real `wcag*` tag and therefore
+// still run by default: css-orientation-lock (SC 1.3.4), p-as-heading,
+// table-fake-caption and td-has-header (SC 1.3.1). That is deliberate.
+// `experimental` describes how settled the heuristic is, not whether the
+// criterion is real, so filtering them out would drop conformance coverage.
 export const defaultAxeTags: readonly AxeTag[] = axeTagValues.filter(
     tag => tag.startsWith('wcag') || tag === 'section508'
 );

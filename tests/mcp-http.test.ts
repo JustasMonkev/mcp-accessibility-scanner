@@ -1171,6 +1171,7 @@ describe('mcp http transport hardening', () => {
         headers: {
           'content-type': 'application/json',
           'accept': 'application/json, text/event-stream',
+          'MCP-Protocol-Version': '2026-07-28',
           ...headers,
         },
         body: JSON.stringify(body),
@@ -1251,7 +1252,7 @@ describe('mcp http transport hardening', () => {
       expect(json.result.cacheScope).toBe('private');
     });
 
-    it('rejects a modern POST whose Mcp-Method header disagrees with the body', async () => {
+    it('rejects modern POSTs with missing or mismatched standard headers', async () => {
       const { port } = await startServer(probeFactory);
 
       const mismatch = await modernPost(port,
@@ -1264,6 +1265,12 @@ describe('mcp http transport hardening', () => {
           { jsonrpc: '2.0', id: 3, method: 'tools/list', params: { _meta: envelope } });
       expect(missing.statusCode).toBe(400);
       expect(missing.json.error.code).toBe(-32020);
+
+      const emptyVersion = await modernPost(port,
+          { jsonrpc: '2.0', id: 4, method: 'tools/list', params: { _meta: envelope } },
+          { 'Mcp-Method': 'tools/list', 'MCP-Protocol-Version': '' });
+      expect(emptyVersion.statusCode).toBe(400);
+      expect(emptyVersion.json.error.code).toBe(-32020);
     });
   });
 

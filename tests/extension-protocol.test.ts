@@ -1082,7 +1082,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', userDataDir, undefined, 'Profile 1');
+    const relay = new CDPRelayServer(server, 'chromium', userDataDir, undefined, 'Profile 1');
     const controller = new AbortController();
     const abortTimer = setTimeout(() => controller.abort(new Error('test timeout')), 1000);
     try {
@@ -1173,7 +1173,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', userDataDir, undefined, 'Profile 1');
+    const relay = new CDPRelayServer(server, 'chromium', userDataDir, undefined, 'Profile 1');
     const controller = new AbortController();
     const abortTimer = setTimeout(() => controller.abort(new Error('test timeout')), 250);
     try {
