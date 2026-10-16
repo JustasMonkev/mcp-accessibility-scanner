@@ -412,10 +412,16 @@ const auditKeyboard = defineTabTool({
         }
 
         const role = current.getAttribute('role') || current.tagName.toLowerCase();
-        const labelledBy = current.getAttribute('aria-labelledby');
+        // aria-labelledby is a list of IDs separated by ASCII whitespace (not e.g. &nbsp;),
+        // resolved in the element's own tree so shadow-DOM references work.
+        const idRoot = current.getRootNode() as Document | ShadowRoot;
+        const labelledBy = (current.getAttribute('aria-labelledby') || '').split(/[ \t\n\f\r]+/)
+          .map(id => id && idRoot.getElementById(id)?.textContent?.trim())
+          .filter(Boolean)
+          .join(' ');
         const text = current.textContent?.trim().slice(0, maxTextLength) || null;
         const name = current.getAttribute('aria-label')
-          || labelledBy && document.getElementById(labelledBy)?.textContent?.trim()
+          || labelledBy
           || current.getAttribute('title')
           || (current instanceof HTMLInputElement || current instanceof HTMLTextAreaElement ? current.labels?.[0]?.textContent?.trim() : null)
           || text;

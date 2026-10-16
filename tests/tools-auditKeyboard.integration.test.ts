@@ -33,6 +33,11 @@ const canRun = !!process.env.MCP_TEST_BROWSER_NAME || existsSync(chromium.execut
 const server = http.createServer((request, response) => {
   const url = new URL(request.url || '/', 'http://localhost');
   response.writeHead(200, { 'content-type': 'text/html' });
+  if (url.pathname === '/labelledby') {
+    response.end(`<span id="verb">Save</span><span id="noun">draft</span>
+      <button id="labelled" aria-labelledby=" verb\tnoun missing ">Fallback text</button>`);
+    return;
+  }
   if (['/prior', '/target', '/forward'].includes(url.pathname)) {
     response.end(`<button id="${url.pathname.slice(1)}">Other document</button>`);
     return;
@@ -142,3 +147,24 @@ it.skipIf(!canRun).each(['replace', 'push', 'fragment', 'document', 'reload', 'l
     }
   }
 );
+
+it.skipIf(!canRun)('names stops from every aria-labelledby id reference', async () => {
+  directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-labelledby-'));
+  const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory });
+  client = new Client({ name: 'keyboard-labelledby-test', version: '1' });
+  await client.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
+  await ok('browser_navigate', { url: `${origin}/labelledby` });
+  await ok('audit_keyboard', {
+    maxTabs: 1,
+    activateSkipLink: false,
+    checkFocusTrap: false,
+    checkFocusVisibility: false,
+    checkFocusJumps: false,
+    checkTargetSize: false,
+    checkFocusObscured: false,
+    reportFile: 'keyboard.json',
+  });
+  const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
+  const stop = report.stops.find((s: { id: string | null }) => s.id === 'labelled');
+  expect(stop?.name).toBe('Save draft');
+});
