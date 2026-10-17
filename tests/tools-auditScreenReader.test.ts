@@ -237,6 +237,21 @@ describe('analyzeScreenReader accessible names', () => {
     ])).toEqual([]);
   });
 
+  it.each([
+    ['Café', 'Cafe\u0301'],
+    ['Cafe\u0301', 'Café'],
+  ])('matches canonically equivalent accessible name %s and visible label %s', (name, visibleText) => {
+    expect(checks([node({ role: 'button', name, visibleText })])).toEqual([]);
+  });
+
+  it('groups canonically equivalent sibling names when their destinations differ', () => {
+    expect(checks([
+      node({ ref: 'parent', childCount: 2 }),
+      node({ role: 'link', ref: 'e1', parent: 0, name: 'Café', href: '/a' }),
+      node({ role: 'link', ref: 'e2', parent: 0, name: 'Cafe\u0301', href: '/b' }),
+    ])).toEqual(['duplicate-accessible-name']);
+  });
+
   it('flags sibling controls that share a name but lead elsewhere', () => {
     const siblings = [
       node({ role: 'list', ref: 'e1' }),
@@ -416,6 +431,123 @@ describe('analyzeScreenReader reading order', () => {
 
     expect(result.countByCheck['reading-order-mismatch']).toBe(1);
     expect(result.findings[0].problem).toContain('visual order is [paragraph showing "First" (div) -> paragraph showing "Second" (div) -> paragraph showing "Fourth" (div) -> paragraph showing "Third" (div)]');
+  });
+
+  it.each(['ltr', 'rtl', 'vertical'] as const)('finds non-adjacent inversions among unequal overlapping %s boxes', layout => {
+    const boxes = [rect(100, 10, 20), rect(0, 10, 200), rect(50, 10, 20), rect(400, 10, 20)];
+    const nodes = [node({ direction: layout === 'rtl' ? 'rtl' : 'ltr' }), ...boxes.map((box, index) =>
+      block(`e${index + 2}`, `Paragraph ${index}`, 0, 0, {
+        direction: layout === 'rtl' ? 'rtl' : 'ltr',
+        rect: layout === 'rtl' ? rect(500 - box.x - box.width, box.y, box.width, box.height)
+          : layout === 'vertical' ? rect(box.y, box.x, box.height, box.width) : box,
+      }))];
+
+    expect(checks(nodes)).toEqual(['reading-order-mismatch']);
+  });
+
+  it.each(['ltr', 'rtl', 'vertical'] as const)('preserves the inclusive one-pixel inversion tolerance for %s boxes', layout => {
+    for (const overlap of [0.99, 1, 1.01]) {
+      const boxes = [rect(100, 10, 20), rect(90, 10, 10 + overlap)];
+      const nodes = [node({ direction: layout === 'rtl' ? 'rtl' : 'ltr' }), ...boxes.map((box, index) =>
+        block(`e${index + 2}`, `Paragraph ${index}`, 0, 0, {
+          direction: layout === 'rtl' ? 'rtl' : 'ltr',
+          rect: layout === 'rtl' ? rect(500 - box.x - box.width, box.y, box.width, box.height)
+            : layout === 'vertical' ? rect(box.y, box.x, box.height, box.width) : box,
+        }))];
+
+      expect(analyze(nodes).countByCheck['reading-order-mismatch']).toBe(overlap <= 1 ? 1 : 0);
+    }
+  });
+
+  it.each([49.9, 50, 50.1])('requires at least fifty percent interval overlap, including %s percent', overlapPercent => {
+    const nodes = [
+      node({}),
+      block('e2', 'First', 200, 0, { rect: rect(200, 0, 20, 10) }),
+      block('e3', 'Second', 0, 10 - overlapPercent / 10, { rect: rect(0, 10 - overlapPercent / 10, 20, 10) }),
+    ];
+
+    expect(analyze(nodes).countByCheck['reading-order-mismatch']).toBe(overlapPercent >= 50 ? 1 : 0);
+  });
+
+  it('keeps different-length intervals with the same start when a long interval bridges bands', () => {
+    expect(checks([
+      node({}),
+      block('e2', 'Short', 400, 0, { rect: rect(400, 0, 20, 10) }),
+      block('e3', 'Bridge', 200, 0, { rect: rect(200, 0, 20, 100) }),
+      block('e4', 'Later', 0, 60, { rect: rect(0, 60, 20, 20) }),
+    ])).toEqual(['reading-order-mismatch']);
+  });
+
+  it('keeps an exact-duplicate cluster separate from an isolated outlier', () => {
+    const nodes = [node({}), ...Array.from({ length: 80 }, (_, index) =>
+      block(`e${index + 2}`, `Paragraph ${index}`, 0, 0)), block('outlier', 'Isolated', 300, 300)];
+    const before = structuredClone(nodes);
+
+    expect(checks(nodes)).toEqual([]);
+    expect(nodes).toEqual(before);
+  });
+
+  it('matches a graph-connectivity oracle on seeded fractional geometry without mutating input', () => {
+    let seed = 617;
+    const random = (limit: number) => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed % limit;
+    };
+    const connected = (boxes: Rect[], axis: 'x' | 'y') => {
+      const reached = new Set([0]);
+      const pending = [0];
+      while (pending.length) {
+        const current = boxes[pending.pop()!];
+        for (let index = 0; index < boxes.length; index++) {
+          if (reached.has(index))
+            continue;
+          const next = boxes[index];
+          const overlap = axis === 'x'
+            ? Math.min(current.x + current.width, next.x + next.width) - Math.max(current.x, next.x)
+            : Math.min(current.y + current.height, next.y + next.height) - Math.max(current.y, next.y);
+          const smaller = axis === 'x' ? Math.min(current.width, next.width) : Math.min(current.height, next.height);
+          if (overlap >= smaller / 2) {
+            reached.add(index);
+            pending.push(index);
+          }
+        }
+      }
+      return reached.size === boxes.length;
+    };
+    for (let sample = 0; sample < 180; sample++) {
+      const direction = sample % 3 === 0 ? 'rtl' : 'ltr';
+      const boxes: Rect[] = [];
+      for (let index = 0, count = 2 + random(10); index < count; index++) {
+        boxes.push(index && random(4) === 0 ? { ...boxes[random(index)] }
+          : rect(random(400) / 4, sample % 3 === 2 ? random(400) / 4 : 10, 2 + random(400) / 4, 2 + random(160) / 4));
+      }
+      const horizontal = connected(boxes, 'y') && !connected(boxes, 'x');
+      const vertical = connected(boxes, 'x') && !connected(boxes, 'y');
+      const mismatch = boxes.some((first, index) => boxes.slice(index + 1).some(second =>
+        horizontal ? direction === 'rtl' ? first.x + first.width <= second.x + 1 : first.x >= second.x + second.width - 1
+          : vertical && first.y >= second.y + second.height - 1));
+      const nodes = [node({ direction }), ...boxes.map((box, index) =>
+        block(`e${index + 2}`, `Paragraph ${index}`, 0, 0, { rect: box, direction }))];
+      const before = structuredClone(nodes);
+
+      expect(analyze(nodes).countByCheck['reading-order-mismatch']).toBe(mismatch ? 1 : 0);
+      expect(nodes).toEqual(before);
+    }
+  });
+
+  it('keeps parent finding order and full counts when reading-order findings are capped', () => {
+    const nodes: ScreenReaderNode[] = [];
+    for (let group = 0; group < 3; group++) {
+      const parent = nodes.length;
+      nodes.push(node({ ref: `parent${group}` }),
+          block(`first${group}`, 'First', 200, 10, { parent }),
+          block(`second${group}`, 'Second', 0, 10, { parent }));
+    }
+    const result = analyze(nodes, 2);
+
+    expect(result.findings.map(finding => finding.ref)).toEqual(['parent0', 'parent1']);
+    expect(result.countByCheck['reading-order-mismatch']).toBe(3);
+    expect(result.truncatedChecks).toEqual(['reading-order-mismatch']);
   });
 
   it('ignores diagonal siblings with no overlapping row or column', () => {
@@ -786,6 +918,9 @@ describe('audit_screen_reader tool measurement', () => {
     expect(await run(createToolHarness({
       snapshot: snapshotOf(Array.from({ length: 120 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
     }), 5)).toContain('Elements analyzed: 5');
+    expect(await run(createToolHarness({
+      snapshot: snapshotOf(Array.from({ length: 460 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+    }), 201)).toContain('Elements analyzed: 201');
   });
 
   it('resolves refs in parallel batches so a stale snapshot cannot stall the audit', async () => {
@@ -901,17 +1036,17 @@ describe('audit_screen_reader tool measurement', () => {
     vi.useFakeTimers();
     try {
       const harness = createToolHarness({
-        snapshot: snapshotOf(Array.from({ length: 60 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        snapshot: snapshotOf(Array.from({ length: 460 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
         frameCount: 8,
         childFrames: true,
         frameReadDelayFor: frameIndex => frameIndex < 2 ? 0 : 1_500,
       });
 
-      const audit = run(harness, 60, false);
+      const audit = run(harness, 460, false);
       await vi.advanceTimersByTimeAsync(1_100);
       const result = await audit;
-      expect(result).toContain('stopped after 50 of 60: timed-out frame work reached the 4-operation limit');
-      expect(result).toContain('WARNING: 36 of these went stale before measurement');
+      expect(result).toContain('stopped after 200 of 460: timed-out frame work reached the 4-operation limit');
+      expect(result).toContain('WARNING: 150 of these went stale before measurement');
     } finally {
       vi.useRealTimers();
     }
@@ -921,19 +1056,19 @@ describe('audit_screen_reader tool measurement', () => {
     vi.useFakeTimers();
     try {
       const harness = createToolHarness({
-        snapshot: snapshotOf(Array.from({ length: 200 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        snapshot: snapshotOf(Array.from({ length: 401 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
         childFrames: true,
         frameReadDelayMs: 1_500,
       });
 
-      const outcome = run(harness, 200, false).then(() => 'resolved', () => 'rejected');
+      const outcome = run(harness, 401, false).then(() => 'resolved', () => 'rejected');
       await vi.advanceTimersByTimeAsync(1_100);
       expect(harness.frame.evaluate).toHaveBeenCalledTimes(1);
       expect(harness.frameConcurrency.current).toBe(1);
-      expect(harness.disposals.count).toBe(150);
+      expect(harness.disposals.count).toBe(201);
       expect(await outcome).toBe('rejected');
       await vi.advanceTimersByTimeAsync(500);
-      expect(harness.disposals.count).toBe(200);
+      expect(harness.disposals.count).toBe(401);
     } finally {
       vi.useRealTimers();
     }
@@ -948,7 +1083,7 @@ describe('audit_screen_reader tool measurement', () => {
     try {
       let slowCalls = 0;
       const harness = createToolHarness({
-        snapshot: snapshotOf(Array.from({ length: 100 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+        snapshot: snapshotOf(Array.from({ length: 401 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
         frameCount: 8,
         childFrames: true,
         installAxe,
@@ -956,12 +1091,12 @@ describe('audit_screen_reader tool measurement', () => {
         frameReadDelayFor: frameIndex => !checkNames && frameIndex === 0 && slowCalls++ === 0 ? 1_500 : frameIndex ? 900 : 0,
       });
 
-      const audit = run(harness, 100, checkNames);
+      const audit = run(harness, 401, checkNames);
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(await audit).toContain('Elements analyzed: 100');
+      expect(await audit).toContain('Elements analyzed: 401');
       const frameZeroReads = harness.frames[0].evaluate.mock.calls
           .filter(([collect]: [unknown]) => typeof collect !== 'string');
-      expect(frameZeroReads).toHaveLength(checkNames ? 1 : 2);
+      expect(frameZeroReads).toHaveLength(checkNames ? 2 : 3);
       const frameZeroInstalls = harness.frames[0].evaluate.mock.calls
           .filter(([collect]: [unknown]) => typeof collect === 'string');
       expect(frameZeroInstalls).toHaveLength(checkNames ? 1 : 0);
@@ -1011,15 +1146,15 @@ describe('audit_screen_reader tool measurement', () => {
   });
 
   it('installs axe once per frame for the name checks, and not at all without them', async () => {
-    const entries = Array.from({ length: 60 }, (_, index) => ({ role: 'button', ref: `b${index}` }));
+    const entries = Array.from({ length: 401 }, (_, index) => ({ role: 'button', ref: `b${index}` }));
 
     const withNames = createToolHarness({ snapshot: snapshotOf(entries) });
-    await run(withNames, 100);
-    // Two batches of the same frame, one installation.
+    await run(withNames, 401);
     expect(withNames.installs.count).toBe(1);
+    expect(withNames.frame.evaluate.mock.calls.filter(([collect]: [unknown]) => typeof collect !== 'string').length).toBeGreaterThan(1);
 
     const withoutNames = createToolHarness({ snapshot: snapshotOf(entries) });
-    const result = await run(withoutNames, 100, false);
+    const result = await run(withoutNames, 401, false);
     expect(withoutNames.installs.count).toBe(0);
     expect(result).not.toContain('accessible names could not be measured');
     // The collector is told not to measure, so a copy an earlier audit left
@@ -1057,15 +1192,15 @@ describe('audit_screen_reader tool measurement', () => {
     // Every batch of that frame is collected without names, not just the one
     // whose installation failed: the copy is not there to read from.
     const harness = createToolHarness({
-      snapshot: snapshotOf(Array.from({ length: 60 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
+      snapshot: snapshotOf(Array.from({ length: 401 }, (_, index) => ({ role: 'button', ref: `b${index}` }))),
       installAxe: 'reject',
     });
 
-    const result = await run(harness, 60);
+    const result = await run(harness, 401);
     const collects = harness.frame.evaluate.mock.calls.filter(([collect]: [unknown]) => typeof collect !== 'string');
     expect(collects.length).toBeGreaterThan(1);
     expect(collects.every(([, input]: [unknown, { measureNames: boolean }]) => input.measureNames === false)).toBe(true);
-    expect(result).toContain('WARNING: accessible names could not be measured for 60 of these');
+    expect(result).toContain('WARNING: accessible names could not be measured for 401 of these');
   });
 
   it('ends instead of hanging when a frame never answers anything', async () => {

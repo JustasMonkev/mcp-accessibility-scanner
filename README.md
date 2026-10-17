@@ -604,6 +604,9 @@ Inspects the browser's accessibility tree (`page.ariaSnapshot`), accessible name
 - `label-in-name-mismatch`: the accessible name does not contain the visible label, which breaks voice control (WCAG 2.5.3). The visible label of `<input type="submit|button|reset">` is read from its `value`, and a web component's label is read from its open shadow root.
 - `duplicate-accessible-name`: sibling links with the same name that lead to different URLs (WCAG 2.4.4)
 
+Name comparisons normalize canonically equivalent Unicode text, so composed and
+decomposed spellings such as `Café` are treated consistently.
+
 **Check (`checkReadingOrder`)**
 - `reading-order-mismatch`: accessibility tree order (what is read) versus visual position (WCAG 1.3.2), i.e. `order`, `flex-direction: row-reverse`, absolute positioning
 
@@ -1099,6 +1102,7 @@ npm run bench -- --out after.json --label after
 ```
 
 Useful flags: `--iterations <n>` and `--warmups <n>` (defaults 5 and 1),
+`--only audit_screen_reader` to select the screen-reader scenarios,
 `--browser`/`--executable-path` when the browser lives outside Playwright's own
 download directory, and `--server <path/to/cli.js>` plus `--lib <path/to/lib>`
 (supplied together) to point at a different build — that is how revisions compare:
@@ -1113,6 +1117,11 @@ npm run bench:compare -- before.json after.json
 The comparison total uses only end-to-end scenarios present in both reports,
 so adding or removing a scenario does not distort the reported speedup.
 
+The screen-reader scenarios cover a small page, 400 and 2,000 elements with
+name checks enabled and disabled, 30 shared ancestors, and three same-origin
+frames. Each sample verifies complete measurement, expected findings and the
+saved JSON report after timing; incomplete audits fail the benchmark.
+
 To time the reading-order analyzer alone, build both revisions and run:
 
 ```bash
@@ -1122,9 +1131,9 @@ node bench/reading-order-bench.mjs /tmp/baseline/lib/tools/auditScreenReader.js 
 This checks identical results on fixed 400- and 2,000-sibling sorted, reversed,
 late-inversion, diagonal, fully overlapping and dense-cluster-with-outlier layouts,
 then alternates revisions for 10 warmups and 20 timed samples per layout.
-Disconnected dense clusters and inversion searches without an early mismatch
-can still take quadratic work. These function timings exclude browser measurement
-and MCP latency.
+Inversion detection is linear; band counting deduplicates identical axis
+intervals but can still take quadratic work on dense, distinct intervals.
+These function timings exclude browser measurement and MCP latency.
 
 ### Releasing
 
