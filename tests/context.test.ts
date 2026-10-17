@@ -1007,6 +1007,57 @@ describe('Context', () => {
       }
     });
 
+    it.each(['before start', 'during start', 'between recordings'])('excludes delayed fills added %s while session logging stays active', async phase => {
+      vi.useFakeTimers();
+      try {
+        mockBrowserContext._startRecording = vi.fn().mockResolvedValue(undefined);
+        const sessionLog = { logUserAction: vi.fn() };
+        const context = new Context({
+          tools: [], config: defaultConfig, browserContextFactory: mockBrowserContextFactory,
+          sessionLog: async () => sessionLog, clientInfo: {},
+        });
+        await context.newTab();
+        const page = Object.assign(new EventEmitter(), {
+          setDefaultNavigationTimeout: vi.fn(), setDefaultTimeout: vi.fn(), url: () => 'about:blank',
+        });
+        mockBrowserContext.emit('page', page);
+        const sink = mockBrowserContext._startRecording.mock.calls[0][1];
+        const fill = { name: 'fill', selector: '#query', text: 'earlier' };
+        if (phase === 'between recordings') {
+          const firstStart = context.startRecording();
+          await vi.advanceTimersByTimeAsync(500);
+          await firstStart;
+          const firstStop = context.stopRecording();
+          await vi.advanceTimersByTimeAsync(500);
+          expect(await firstStop).toEqual([]);
+        }
+        if (phase !== 'during start')
+          sink.actionAdded(page, fill, 'earlier fill');
+        const starting = context.startRecording();
+        await vi.advanceTimersByTimeAsync(499);
+        if (phase === 'during start')
+          sink.actionAdded(page, fill, 'earlier fill');
+        await vi.advanceTimersByTimeAsync(1);
+        await starting;
+        sink.actionUpdated(page, fill, 'late earlier fill');
+        sink.actionUpdated(page, fill, 'final earlier fill');
+
+        sink.actionAdded(page, { ...fill, text: 'new' }, 'new fill');
+        sink.actionUpdated(page, { ...fill, text: 'newer' }, 'newer fill');
+        const stopping = context.stopRecording();
+        await vi.advanceTimersByTimeAsync(500);
+        expect(await stopping).toEqual(['newer fill']);
+        expect(sessionLog.logUserAction.mock.calls.map(call => [call[2], call[3]])).toEqual([
+          ['earlier fill', false], ['late earlier fill', true], ['final earlier fill', true],
+          ['new fill', false], ['newer fill', true],
+        ]);
+        expect(mockBrowserContext._startRecording).toHaveBeenCalledTimes(1);
+        expect(mockBrowserContext._stopRecording).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('records coalesced fills after restart and excludes fills delivered after stop begins', async () => {
       vi.useFakeTimers();
       try {

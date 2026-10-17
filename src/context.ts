@@ -1036,7 +1036,8 @@ export class InputRecorder {
     let actionSequence = 0;
     // Retain attribution until the next action, including updates delivered
     // after the tool's 500ms window has expired.
-    type Attribution = { suppressedLogs: boolean, suppressedRecordings: WeakSet<Context> };
+    // Owner identity also preserves coalesced fills when that owner restarts recording.
+    type Attribution = { suppressedLogs: boolean, recordingOwners: WeakSet<Context> };
     const lastActionSequence = new WeakMap<playwright.Page, Attribution & { sequence: number }>();
     let armed = false;
     let transition = Promise.resolve();
@@ -1061,14 +1062,14 @@ export class InputRecorder {
           log(recorder);
       }
       for (const [context, target] of recordings) {
-        if ((!target.state.stopping || flushable) && !attribution?.suppressedRecordings.has(context) && !running.some(runningContext => runningContext !== context)) {
+        if ((!target.state.stopping || flushable) && (!attribution || attribution.recordingOwners.has(context)) && !running.some(runningContext => runningContext !== context)) {
           record(target);
           context.markRecordingActivity();
         }
       }
       return {
         suppressedLogs: !!running.length,
-        suppressedRecordings: new WeakSet([...recordings.keys()].filter(context => running.some(runningContext => runningContext !== context))),
+        recordingOwners: new WeakSet([...recordings.keys()].filter(context => !running.some(runningContext => runningContext !== context))),
       };
     };
     const sink = {
