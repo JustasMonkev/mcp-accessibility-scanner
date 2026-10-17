@@ -63,9 +63,94 @@ function smallPage(index) {
   ].join('');
 }
 
+const pixel = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+function screenReaderPage(count, prefix, ancestorDepth = 0) {
+  const controls = Array.from({ length: count }, (_, index) => {
+    const id = `${prefix}-${index}`;
+    switch (index % 5) {
+      case 0: return `<button id="${id}"></button>`;
+      case 1: return `<a id="${id}" href="/target-${id}">More</a>`;
+      case 2: return `<img id="${id}" src="${pixel}" alt="camera.jpeg">`;
+      case 3: return `<button id="${id}"><span><span>Account ${id}</span></span></button>`;
+      default: return `<a id="${id}" href="/target-${id}">Product ${id}</a>`;
+    }
+  });
+  return '<!doctype html><html lang="en"><meta charset="utf-8"><title>Screen reader workload</title>'
+    + `<style>${ancestorDepth ? 'button,a,img' : 'main>*'}{display:block;width:240px;height:24px;margin:0;border:0;padding:0}</style>`
+    + `<body><main>${'<div role="presentation">'.repeat(ancestorDepth)}${controls.join('')}${'</div>'.repeat(ancestorDepth)}</main></body></html>`;
+}
+
+function screenReaderExpectation(groups, elements) {
+  const selectors = {
+    'missing-accessible-name': [],
+    'uninformative-accessible-name': [],
+    'filename-as-accessible-name': [],
+    'label-in-name-mismatch': [],
+    'duplicate-accessible-name': [],
+    'reading-order-mismatch': [],
+  };
+  for (const { count, prefix } of groups) {
+    for (let index = 0; index < count; index++) {
+      if (index % 5 === 0)
+        selectors['missing-accessible-name'].push(`button#${prefix}-${index}`);
+      if (index % 5 === 1)
+        selectors['uninformative-accessible-name'].push(`a#${prefix}-${index}`);
+      if (index % 5 === 2)
+        selectors['filename-as-accessible-name'].push(`img#${prefix}-${index}`);
+    }
+    selectors['duplicate-accessible-name'].push(`a#${prefix}-1`);
+  }
+  return { elements, selectors };
+}
+
+export const screenReaderCases = [{
+  name: 'audit_screen_reader',
+  path: '/page-0.html',
+  args: {},
+  options: { checkNames: true, checkReadingOrder: true, maxElements: 400, maxFindingsPerCheck: 20 },
+  expected: {
+    elements: 6,
+    selectors: {
+      'missing-accessible-name': ['button'],
+      'uninformative-accessible-name': [],
+      'filename-as-accessible-name': [],
+      'label-in-name-mismatch': [],
+      'duplicate-accessible-name': [],
+      'reading-order-mismatch': [],
+    },
+  },
+}, ...[400, 2000].flatMap(elements => [true, false].map(checkNames => ({
+  name: `audit_screen_reader (${elements} elements, names ${checkNames ? 'on' : 'off'})`,
+  path: `/screen-reader-${elements}.html`,
+  options: { checkNames, checkReadingOrder: true, maxElements: elements, maxFindingsPerCheck: 20 },
+  expected: screenReaderExpectation([{ count: elements - 1, prefix: `sr-${elements}` }], elements),
+})))];
+
+const frameGroups = Array.from({ length: 3 }, (_, index) => ({ count: 131, prefix: `sr-frame-${index}` }));
+screenReaderCases.push({
+  name: 'audit_screen_reader (400 elements, 30 ancestors, names off)',
+  path: '/screen-reader-nested.html',
+  options: { checkNames: false, checkReadingOrder: true, maxElements: 400, maxFindingsPerCheck: 20 },
+  expected: screenReaderExpectation([{ count: 399, prefix: 'sr-nested' }], 400),
+});
+screenReaderCases.push({
+  name: 'audit_screen_reader (400 elements, 3 frames, names on)',
+  path: '/screen-reader-frames.html',
+  options: { checkNames: true, checkReadingOrder: true, maxElements: 400, maxFindingsPerCheck: 20 },
+  expected: screenReaderExpectation(frameGroups, 400),
+});
+
 export const pages = new Map([
   ['/', heavyPage()],
   ['/heavy.html', heavyPage()],
+  ...[400, 2000].map(elements => [`/screen-reader-${elements}.html`, screenReaderPage(elements - 1, `sr-${elements}`)]),
+  ['/screen-reader-nested.html', screenReaderPage(399, 'sr-nested', 30)],
+  ['/screen-reader-frames.html', '<!doctype html><html lang="en"><title>Screen reader frames</title>'
+    + '<style>iframe{display:block;width:800px;height:250px;border:0}</style><body><main>'
+    + frameGroups.map(({ prefix }) => `<iframe title="${prefix}" src="/${prefix}.html"></iframe>`).join('')
+    + '</main></body></html>'],
+  ...frameGroups.map(({ count, prefix }) => [`/${prefix}.html`, screenReaderPage(count, prefix)]),
   ...Array.from({ length: 12 }, (_, index) => [`/page-${index}.html`, smallPage(index)]),
 ]);
 

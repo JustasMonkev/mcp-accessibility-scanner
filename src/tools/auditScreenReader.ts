@@ -88,7 +88,7 @@ const bandOverlapRatio = 0.5;
 function normalizeText(value: string | null): string {
   if (!value)
     return '';
-  return value.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/gu, ' ').trim();
+  return value.normalize('NFC').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/gu, ' ').trim();
 }
 
 /** @public */
@@ -143,7 +143,12 @@ function overlapRatio(a: Rect, b: Rect, axis: 'x' | 'y'): number {
 }
 
 function countBands(rects: Rect[], axis: 'x' | 'y'): number {
-  const ordered = [...rects].sort((first, second) => axis === 'x' ? first.x - second.x : first.y - second.y);
+  const sorted = [...rects].sort((first, second) => axis === 'x'
+    ? first.x - second.x || first.width - second.width
+    : first.y - second.y || first.height - second.height);
+  const ordered = sorted.filter((rect, index) => index === 0 || (axis === 'x'
+    ? rect.x !== sorted[index - 1].x || rect.width !== sorted[index - 1].width
+    : rect.y !== sorted[index - 1].y || rect.height !== sorted[index - 1].height));
   const band = ordered.map((_, index) => index);
   // Iterative find with write-back path compression, so a long union chain
   // costs O(1) per lookup instead of a walk each time.
@@ -158,7 +163,7 @@ function countBands(rects: Rect[], axis: 'x' | 'y'): number {
     }
     return root;
   };
-  let components = rects.length;
+  let components = ordered.length;
   for (let i = 0; i < ordered.length; i++) {
     const end = axis === 'x' ? ordered[i].x + ordered[i].width : ordered[i].y + ordered[i].height;
     for (let j = i + 1; j < ordered.length; j++) {
@@ -362,20 +367,22 @@ function checkReadingOrder(nodes: ScreenReaderNode[], push: (finding: ScreenRead
     const isInverted = (a: Rect, b: Rect) => horizontal
       ? (rtl ? a.x + a.width <= b.x + layoutTolerancePx : a.x >= b.x + b.width - layoutTolerancePx)
       : a.y >= b.y + b.height - layoutTolerancePx;
+    const sortKey = (rect: Rect) => horizontal ? (rtl ? -(rect.x + rect.width) : rect.x) : rect.y;
 
     let inverted = false;
-    for (let i = 0; i < siblings.length && !inverted; i++) {
-      for (let j = i + 1; j < siblings.length; j++) {
-        if (isInverted(rects[i], rects[j])) {
-          inverted = true;
-          break;
-        }
+    let furthest = rects[0];
+    for (let i = 1; i < rects.length; i++) {
+      const current = rects[i];
+      if (isInverted(furthest, current)) {
+        inverted = true;
+        break;
       }
+      if (sortKey(current) > sortKey(furthest))
+        furthest = current;
     }
     if (!inverted)
       continue;
 
-    const sortKey = (rect: Rect) => horizontal ? (rtl ? -(rect.x + rect.width) : rect.x) : rect.y;
     const visualOrder = [...siblings].sort((a, b) => sortKey(a.rect!) - sortKey(b.rect!));
     const label = (list: ScreenReaderNode[]) => list.slice(0, 6).map(node => describe(node)).join(' -> ')
         + (list.length > 6 ? ` -> ... (+${list.length - 6})` : '');

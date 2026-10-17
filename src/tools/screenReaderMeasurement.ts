@@ -51,7 +51,7 @@ type ScreenReaderMeasurement = {
 };
 
 // Refs are resolved and measured in chunks of this size.
-const measureChunkSize = 50;
+const measureChunkSize = 200;
 
 // A stale ref must not cost a full frame read per element.
 const refResolutionTimeoutMs = 1000;
@@ -66,6 +66,24 @@ export function collectElementFacts(
 ): ElementFacts[] {
   const elements = Array.isArray(input) ? input : input.elements;
   const measureNames = Array.isArray(input) ? true : input.measureNames;
+  const styleCache = new Map<Element, CSSStyleDeclaration>();
+  const rectCache = new Map<Element, DOMRect>();
+  const getStyle = (element: Element) => {
+    let style = styleCache.get(element);
+    if (!style) {
+      style = window.getComputedStyle(element);
+      styleCache.set(element, style);
+    }
+    return style;
+  };
+  const getRect = (element: Element) => {
+    let rect = rectCache.get(element);
+    if (!rect) {
+      rect = element.getBoundingClientRect();
+      rectCache.set(element, rect);
+    }
+    return rect;
+  };
   // innerText counts visually hidden (clipped) labels as visible, which makes
   // icon-only controls look like text. Walk the subtree instead and skip the
   // usual visually-hidden techniques; the cache keeps nested elements linear.
@@ -82,7 +100,7 @@ export function collectElementFacts(
   // remaining region is computed from the inset components instead of
   // pattern-matching the serialized prefix. Non-numeric components (calc())
   // parse to NaN and fail every comparison, erring on the visible side.
-  const insetClipsEverything = (clipPath: string, element: Element, rect: DOMRect, style: CSSStyleDeclaration): boolean => {
+  const insetClipsEverything = (clipPath: string, element: Element, style: CSSStyleDeclaration): boolean => {
     const match = /^inset\(([^)]*)\)(?:\s+([a-z-]+))?/.exec(clipPath);
     if (!match)
       return false;
@@ -99,6 +117,7 @@ export function collectElementFacts(
     // elements generally — the bounding rect is the closest stand-in here.
     const px = (value: string) => parseFloat(value) || 0;
     const box = match[2] ?? 'border-box';
+    const rect = getRect(element);
     let width = rect.width;
     let height = rect.height;
     if (element instanceof HTMLElement) {
@@ -167,7 +186,7 @@ export function collectElementFacts(
       // It can give an otherwise edge-on child positive painted area. A
       // preserve-3d ancestor can likewise let a descendant counter-rotate.
       for (let node = parentInComposedTree(element); node; node = parentInComposedTree(node)) {
-        const style = window.getComputedStyle(node);
+        const style = getStyle(node);
         if (style.perspective !== 'none' || style.transformStyle === 'preserve-3d')
           return false;
       }
@@ -197,27 +216,30 @@ export function collectElementFacts(
   // A collapsed box hides its subtree only when it also clips (the classic
   // sr-only pattern is 1x1 with overflow:hidden). With visible overflow the
   // content renders outside the box.
-  const collapsedClippingBox = (style: CSSStyleDeclaration, rect: DOMRect): boolean =>
-    (rect.width <= 1 || rect.height <= 1) && style.overflow !== 'visible';
+  const collapsedClippingBox = (style: CSSStyleDeclaration, element: Element): boolean => {
+    if (style.overflow === 'visible')
+      return false;
+    const rect = getRect(element);
+    return rect.width <= 1 || rect.height <= 1;
+  };
   const subtreeHidden = (element: Element) => {
-    const style = window.getComputedStyle(element);
+    const style = getStyle(element);
     const decided = nonGeometricHidden(element, style);
     if (decided !== null)
       return decided;
-    const rect = element.getBoundingClientRect();
-    if (insetClipsEverything(style.clipPath, element, rect, style))
+    if (insetClipsEverything(style.clipPath, element, style))
       return true;
     // Ceiling: during text descent a collapsed clipping box drops its whole
     // subtree, including an out-of-flow descendant whose containing block
     // lies outside the box and therefore escapes the clip. The measured
     // element itself — where the label checks read from — is protected by
     // the containing-block-aware ancestor walk below.
-    return collapsedClippingBox(style, rect);
+    return collapsedClippingBox(style, element);
   };
   // visibility: collapse renders exactly like hidden outside table
   // rows/columns (and hides the row either way), so both values count.
   const visibilityHidden = (element: Element) => {
-    const visibility = window.getComputedStyle(element).visibility;
+    const visibility = getStyle(element).visibility;
     return visibility === 'hidden' || visibility === 'collapse';
   };
   function parentInComposedTree(element: Element): Element | null {
@@ -255,20 +277,19 @@ export function collectElementFacts(
   const ancestorSubtreeHidden = (element: Element): boolean => {
     const outOfFlow = (style: CSSStyleDeclaration): 'absolute' | 'fixed' | null =>
       style.position === 'absolute' || style.position === 'fixed' ? style.position : null;
-    let escapingPosition = outOfFlow(window.getComputedStyle(element));
+    let escapingPosition = outOfFlow(getStyle(element));
     for (let node = parentInComposedTree(element); node; node = parentInComposedTree(node)) {
-      const style = window.getComputedStyle(node);
+      const style = getStyle(node);
       const decided = nonGeometricHidden(node, style);
       if (decided)
         return true;
       if (decided === null) {
-        const rect = node.getBoundingClientRect();
-        if (insetClipsEverything(style.clipPath, node, rect, style))
+        if (insetClipsEverything(style.clipPath, node, style))
           return true;
         const containingBlock = style.position !== 'static' || style.transform !== 'none';
         const fixedContainingBlock = style.transform !== 'none' || style.perspective !== 'none' || style.filter !== 'none';
         const bindsEscape = escapingPosition === 'fixed' ? fixedContainingBlock : containingBlock;
-        if (collapsedClippingBox(style, rect) && (!escapingPosition || bindsEscape))
+        if (collapsedClippingBox(style, node) && (!escapingPosition || bindsEscape))
           return true;
         // A boxless (display:contents) node neither carries nor anchors
         // positioning, so the escape state only moves on box-generating nodes.
@@ -318,14 +339,13 @@ export function collectElementFacts(
         continue;
       // SAFETY: ELEMENT_NODE was checked above; childNodes can also contain text and comments.
       const childElement = child as Element;
-      const style = window.getComputedStyle(childElement);
+      const style = getStyle(childElement);
       const decided = nonGeometricHidden(childElement, style);
       if (decided)
         continue;
       let childState = clipState;
       if (decided === null) {
-        const rect = childElement.getBoundingClientRect();
-        if (insetClipsEverything(style.clipPath, childElement, rect, style))
+        if (insetClipsEverything(style.clipPath, childElement, style))
           continue;
         const outOfFlow = style.position === 'absolute' || style.position === 'fixed';
         const containingBlock = style.position !== 'static' || style.transform !== 'none';
@@ -335,7 +355,7 @@ export function collectElementFacts(
           else if (containingBlock)
             continue;
         }
-        if (childState === 'none' && collapsedClippingBox(style, rect)) {
+        if (childState === 'none' && collapsedClippingBox(style, childElement)) {
           if (containingBlock)
             continue;
           childState = 'escapable';
@@ -362,12 +382,10 @@ export function collectElementFacts(
   // name its rendered children carry, and rebuilding one by hand from
   // textContent is not what a screen reader hears: hidden text is skipped,
   // alt text and aria-label on a referenced element count, an input
-  // contributes its value. axe's tree is built for the document once per
-  // batch and released after, so a page that changed since the last batch is
-  // read fresh; the build costs about 40 ms on a 3,600-node article page, a
-  // third of a second over the eight batches of a default audit. Without the
-  // copy (not installed, or the page removed it) every name is null and the
-  // snapshot's own stands.
+  // contributes its value. axe's tree is rebuilt once per batch and released
+  // after, so subsequent batches read page changes. Without the copy (not
+  // installed, or the page removed it) every name is null and the snapshot's
+  // own stands.
   const axe = measureNames ? window.__mcpAccessibilityScannerAxe : undefined;
   let measureName = (_element: Element): { accessibleName: string | null; nameMeasured: boolean } => ({ accessibleName: null, nameMeasured: false });
   let ownsAxeTree = false;
@@ -388,8 +406,8 @@ export function collectElementFacts(
   }
 
   const collect = (element: SVGElement | HTMLElement): ElementFacts => {
-    const rect = element.getBoundingClientRect();
-    const style = window.getComputedStyle(element);
+    const rect = getRect(element);
+    const style = getStyle(element);
     // The visibility predicate must include the element itself, not only its
     // descendants: a control hidden with opacity:0 shows no text at all, and
     // treating its child text as visible raises label-in-name mismatches

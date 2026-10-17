@@ -18,7 +18,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { afterEach, expect, it } from 'vitest';
+import { verifyScreenReader } from '../bench/screen-reader.mjs';
 
 const temporaryDirectories: string[] = [];
 
@@ -77,7 +79,7 @@ it.each(['--server', '--lib'])('rejects an unpaired %s override', flag => {
   expect(result.stderr).toContain('--server and --lib must be provided together.');
 });
 
-it.each(['--out', '--server', '--lib'])('rejects a blank %s value', flag => {
+it.each(['--out', '--server', '--lib', '--only'])('rejects a blank %s value', flag => {
   const result = spawnSync(process.execPath, ['bench/mcp-bench.mjs', flag, '  '], {
     cwd: path.resolve(import.meta.dirname, '..'),
     encoding: 'utf8',
@@ -115,4 +117,99 @@ it('rejects a report path whose parent is a file', () => {
 
   expect(result.status).not.toBe(0);
   expect(result.stderr).toContain('--out parent must be a directory');
+});
+
+it('rejects an unmatched scenario prefix without launching the MCP server', () => {
+  const result = spawnSync(process.execPath, [
+    'bench/mcp-bench.mjs', '--only', 'not-a-scenario',
+    '--server', '/missing/cli.js', '--lib', '/missing/lib',
+  ], {
+    cwd: path.resolve(import.meta.dirname, '..'),
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain('No scenarios match --only not-a-scenario');
+  expect(result.stderr).not.toContain('MODULE_NOT_FOUND');
+});
+
+function screenReaderRun(checkNames = true, check = 'missing-accessible-name') {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-bench-test-'));
+  temporaryDirectories.push(directory);
+  const reportPath = path.join(directory, 'screen-reader.json');
+  const reportUri = pathToFileURL(reportPath).href;
+  const fixture = {
+    path: '/screen-reader.html',
+    options: { checkNames, checkReadingOrder: true, maxElements: 4, maxFindingsPerCheck: 2 },
+    expected: { elements: 4, selectors: { [check]: ['button#a', 'button#b', 'button#c'] } },
+  };
+  const enabled = check === 'reading-order-mismatch' || checkNames;
+  const countByCheck = { [check]: enabled ? 3 : 0 };
+  const findings = enabled ? ['a', 'b'].map(id => ({
+    check, selector: `button#${id}`, ref: id,
+    role: 'button', name: null, problem: 'No accessible name', fix: 'Add a name', wcag: '4.1.2',
+  })) : [];
+  const truncatedChecks = enabled ? [check] : [];
+  const origin = 'http://127.0.0.1:1234';
+  const totalFindings = enabled ? 3 : 0;
+  const report = {
+    version: 'v1',
+    metadata: { url: `${origin}${fixture.path}`, options: fixture.options, generatedAt: '2026-01-01T00:00:00.000Z' },
+    elements: { total: 4, analyzed: 4, unresolved: 0, unmeasuredNames: 0, truncated: false },
+    countByCheck, totalFindings, truncatedChecks, findings,
+  };
+  fs.writeFileSync(reportPath, JSON.stringify(report));
+  const result = {
+    content: [{ type: 'resource_link', uri: reportUri }],
+    structuredContent: {
+      kind: 'audit_screen_reader',
+      page: { url: `${origin}${fixture.path}` },
+      report: { uri: reportUri, mimeType: 'application/json' },
+      reportUri,
+      summary: {
+        elementsTotal: 4, elementsAnalyzed: 4, elementsUnresolved: 0,
+        elementsWithoutMeasuredName: 0, elementsTruncated: 0,
+        totalFindings, countByCheck, truncatedChecks,
+      },
+      findings,
+    },
+  };
+  return { result, report, reportPath, fixture, origin };
+}
+
+it.each([true, false])('verifies full coverage, capped findings and persisted report with names %s', checkNames => {
+  const { result, fixture, origin } = screenReaderRun(checkNames);
+  expect(() => verifyScreenReader(result, fixture, origin)).not.toThrow();
+});
+
+it('verifies reading-order findings independently of name checks', () => {
+  const { result, fixture, origin } = screenReaderRun(false, 'reading-order-mismatch');
+  expect(() => verifyScreenReader(result, fixture, origin)).not.toThrow();
+});
+
+it.each([
+  ['dropped elements', (run: ReturnType<typeof screenReaderRun>) => { run.result.structuredContent.summary.elementsAnalyzed--; }],
+  ['unresolved elements', (run: ReturnType<typeof screenReaderRun>) => { run.result.structuredContent.summary.elementsUnresolved++; }],
+  ['unmeasured names', (run: ReturnType<typeof screenReaderRun>) => { run.result.structuredContent.summary.elementsWithoutMeasuredName++; }],
+  ['lost full finding count', (run: ReturnType<typeof screenReaderRun>) => { run.result.structuredContent.summary.countByCheck['missing-accessible-name']--; }],
+  ['dropped capped findings', (run: ReturnType<typeof screenReaderRun>) => { run.result.structuredContent.findings.pop(); }],
+  ['wrong finding target', (run: ReturnType<typeof screenReaderRun>) => { run.result.structuredContent.findings[0].selector = 'button#wrong'; }],
+  ['duplicate ref', (run: ReturnType<typeof screenReaderRun>) => { run.result.structuredContent.findings[1].ref = 'a'; }],
+])('rejects %s instead of recording an apparent speedup', (_, mutate) => {
+  const run = screenReaderRun();
+  mutate(run);
+  expect(() => verifyScreenReader(run.result, run.fixture, run.origin)).toThrow();
+});
+
+it('rejects persisted report contents that disagree with the MCP result', () => {
+  const { result, fixture, origin, report, reportPath } = screenReaderRun();
+  report.elements.analyzed = 3;
+  fs.writeFileSync(reportPath, JSON.stringify(report));
+  expect(() => verifyScreenReader(result, fixture, origin)).toThrow();
+});
+
+it('rejects missing report files', () => {
+  const { result, fixture, origin, reportPath } = screenReaderRun();
+  fs.unlinkSync(reportPath);
+  expect(() => verifyScreenReader(result, fixture, origin)).toThrow();
 });

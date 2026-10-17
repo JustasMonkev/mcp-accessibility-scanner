@@ -20,7 +20,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
-import { dataUrlHeavyText, pages, plainSnapshotText } from './fixture.mjs';
+import { dataUrlHeavyText, pages, plainSnapshotText, screenReaderCases } from './fixture.mjs';
+import { verifyScreenReader } from './screen-reader.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const options = parseArgs(process.argv.slice(2));
@@ -42,8 +43,8 @@ const reportPath = options.out ? writableReportPath(options.out) : undefined;
 const iterations = options.iterations ?? 5;
 const warmups = options.warmups ?? 1;
 
-const server = await startFixtureServer();
-const origin = `http://127.0.0.1:${server.address().port}`;
+let server;
+let origin;
 const outputDir = fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'mcp-bench-'));
 
 const transport = new StdioClientTransport({
@@ -143,27 +144,34 @@ const scenarios = [
     setup: () => call('browser_navigate', { url: `${origin}/page-0.html` }),
     run: () => call('audit_site', { startUrl: `${origin}/page-0.html`, maxPages: 6, maxDepth: 2 }),
   },
-  {
-    name: 'audit_screen_reader',
-    setup: () => call('browser_navigate', { url: `${origin}/page-0.html` }),
-    run: () => call('audit_screen_reader', {}),
-  },
+  ...screenReaderCases.map(fixture => ({
+    name: fixture.name,
+    setup: () => call('browser_navigate', { url: `${origin}${fixture.path}` }),
+    run: () => call('audit_screen_reader', fixture.args ?? fixture.options),
+    verify: result => verifyScreenReader(result, fixture, origin),
+  })),
 ];
 
 const results = [];
 try {
+  const selected = scenarios.filter(scenario => !options.only || scenario.name.startsWith(options.only));
+  if (!selected.length)
+    throw new Error(`No scenarios match --only ${options.only}`);
+  server = await startFixtureServer();
+  origin = `http://127.0.0.1:${server.address().port}`;
   // Inside the guard: a missing or unbuilt --server rejects here, and the temp
   // output directory has already been created.
   await client.connect(transport);
 
-  for (const scenario of scenarios) {
+  for (const scenario of selected) {
     const samples = [];
     let state;
     for (let index = 0; index < warmups + iterations; index++) {
       state = scenario.setup ? await scenario.setup() : undefined;
       const startedAt = performance.now();
-      await scenario.run(state);
+      const result = await scenario.run(state);
       const elapsed = performance.now() - startedAt;
+      scenario.verify?.(result);
       if (index >= warmups)
         samples.push(elapsed);
     }
@@ -172,13 +180,15 @@ try {
     process.stderr.write(`${scenario.name.padEnd(34)} median ${stats.median.toFixed(1).padStart(9)} ms   mean ${stats.mean.toFixed(1).padStart(9)} ms\n`);
   }
 
-  results.push(...await runMicroBenchmarks());
+  if (!options.only)
+    results.push(...await runMicroBenchmarks());
 } finally {
   // A scenario that throws must not leave the server process, the browser it
   // launched, or the temporary report directory behind: a few failed runs would
   // otherwise pile up orphaned Chromiums.
   await client.close().catch(() => {});
-  await new Promise(resolve => server.close(resolve));
+  if (server)
+    await new Promise(resolve => server.close(resolve));
   fs.rmSync(outputDir, { recursive: true, force: true });
 }
 
@@ -336,6 +346,8 @@ function parseArgs(argv) {
       parsed.out = value(++index, arg);
     else if (arg === '--label')
       parsed.label = value(++index, arg);
+    else if (arg === '--only')
+      parsed.only = value(++index, arg);
     else if (arg === '--server')
       parsed.server = value(++index, arg);
     else if (arg === '--lib')
