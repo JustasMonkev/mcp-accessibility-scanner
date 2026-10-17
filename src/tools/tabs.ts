@@ -29,10 +29,13 @@ const browserTabs = defineTool({
     inputSchema: z.object({
       action: z.enum(['list', 'new', 'close', 'select']).describe('Operation to perform'),
       index: z.number().optional().describe('Tab index, used for close/select. If omitted for close, current tab is closed.'),
+      isolatedContext: z.string().optional().describe('Accepted only for upstream @playwright/mcp compatibility. Only "default" (or omitting it) is supported; for a separate browser context use browser_session_open and pass its browserSessionId.'),
     }),
     type: 'destructive',
   },
   handle: async (context, params, response) => {
+    if (params.isolatedContext !== undefined && params.isolatedContext !== 'default')
+      throw new Error(`isolatedContext "${params.isolatedContext}" is not supported. Call browser_session_open and pass the returned browserSessionId to browser_tabs and every later browser tool call to use a separate browser context.`);
     switch (params.action) {
       case 'list': {
         await context.ensureTab();
