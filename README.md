@@ -762,7 +762,8 @@ Emulate CSS media features on the current page without resetting omitted feature
 
 #### `browser_tabs`
 Manage browser tabs in one tool.
-- Parameters: `action` (`list`, `new`, `close`, `select`) and optional `index` (for `close` and `select`).
+- Parameters: `action` (`list`, `new`, `close`, `select`), optional `index` (for `close` and `select`), and optional `isolatedContext` (upstream `@playwright/mcp` compatibility).
+- Only `"default"` (or omitting `isolatedContext`) is accepted; other names are rejected rather than ignored. For a separate browser context, use [Browser Session Tools](#browser-session-tools): call `browser_session_open` and pass the returned `browserSessionId`.
 - If the browser context closes during tab creation, the request fails. Late-created pages receive bounded close attempts that verify whether the target closed; an unresponsive target cannot hold shutdown indefinitely.
 
 ### Browser Session Tools

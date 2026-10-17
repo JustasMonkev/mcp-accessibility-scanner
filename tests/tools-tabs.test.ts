@@ -96,6 +96,20 @@ describe('Tabs Tools', () => {
       expect(mockContext.newTab).toHaveBeenCalled();
     });
 
+    it('should reject isolatedContext other than default without creating a tab', async () => {
+      const params = tabsTool.schema.inputSchema.parse({ action: 'new', isolatedContext: 'signed-in' });
+      await expect(
+          tabsTool.handle(mockContext, params, response)
+      ).rejects.toThrow('isolatedContext "signed-in" is not supported');
+      expect(mockContext.newTab).not.toHaveBeenCalled();
+    });
+
+    it('should accept isolatedContext default and create new tab', async () => {
+      await tabsTool.handle(mockContext, { action: 'new', isolatedContext: 'default' }, response);
+
+      expect(mockContext.newTab).toHaveBeenCalled();
+    });
+
     it('should select tab by index', async () => {
       await tabsTool.handle(mockContext, { action: 'select', index: 1 }, response);
 
