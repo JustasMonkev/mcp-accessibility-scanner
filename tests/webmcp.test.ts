@@ -530,6 +530,26 @@ describe('WebMCP discovery and identity', () => {
 });
 
 describe('WebMCP execution boundaries', () => {
+  it('keeps JSON-string input for unary page shims', async () => {
+    const h = harness([registration()]);
+    h.frames[0].sandbox.document.modelContext.executeTool = async (_tool: unknown, input = '') => JSON.parse(input);
+    const [tool] = await listWebMCPTools(h.tab);
+    const r = response();
+    await tool.handle({ value: 'shim' }, r.value);
+    assert.deepEqual(r.errors, []);
+    assert.match(r.results.join(''), /"value":"shim"/);
+  });
+
+  it('does not retry a page error that looks like an argument-format failure', async () => {
+    const h = harness([registration()]);
+    h.setExecute(() => { throw new Error('Failed to parse input arguments'); });
+    const [tool] = await listWebMCPTools(h.tab);
+    const r = response();
+    await tool.handle({ value: 'once' }, r.value);
+    assert.equal(h.calls(), 1);
+    assert.match(r.errors.join(''), /Failed to parse input arguments/);
+  });
+
   it('rechecks the selected tab after schema validation yields', async () => {
     const h = harness([registration()]);
     const [tool] = await listWebMCPTools(h.tab);
