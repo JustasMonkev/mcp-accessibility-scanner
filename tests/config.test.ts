@@ -135,6 +135,58 @@ describe('Config', () => {
     });
   });
 
+  describe('authenticated proxy warning', () => {
+    beforeEach(() => {
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', '');
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', '');
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+    });
+
+    const proxy = { server: 'http://private-proxy.test:3128', username: 'private-user', password: 'private-password' };
+
+    it.each(['launch', 'context', 'both'])('warns once without exposing %s proxy settings', async level => {
+      const warning = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const config = await resolveConfig({ browser: {
+        launchOptions: level === 'context' ? {} : { proxy },
+        contextOptions: level === 'launch' ? {} : { proxy },
+      } });
+      expect(warning).toHaveBeenCalledTimes(1);
+      const message = warning.mock.calls.flat().join('\n');
+      expect(message).toContain('Playwright 1.63.0');
+      expect(message).toContain('website');
+      expect(message).toContain('401');
+      expect(message).toContain('does not prevent');
+      expect(message).not.toMatch(/private-proxy|private-user|private-password/);
+      expect(level === 'context' ? config.browser.contextOptions.proxy : config.browser.launchOptions.proxy).toEqual(proxy);
+    });
+
+    it.each(['cli', 'env', 'file-launch', 'file-context'])('warns for credentials from %s', async source => {
+      const warning = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const config = await writeConfigFile({ browser: {
+        launchOptions: source === 'file-launch' ? { proxy } : {},
+        contextOptions: source === 'file-context' ? { proxy } : {},
+      } });
+      if (source === 'env')
+        vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', 'http://private-user:private-password@private-proxy.test:3128');
+      await resolveCLIConfig({ config, proxyServer: source === 'cli' ? 'http://private-user:private-password@private-proxy.test:3128' : undefined });
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(warning.mock.calls.flat().join('\n')).not.toContain('private-');
+    });
+
+    it('stays silent without credentials, including credentials replaced by a CLI override', async () => {
+      const warning = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      await resolveConfig({});
+      await resolveConfig({ browser: { launchOptions: { proxy: { server: proxy.server } }, contextOptions: { proxy: { server: proxy.server, username: '', password: '' } } } });
+      const config = await writeConfigFile({ browser: { launchOptions: { proxy } } });
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', 'http://private-user:private-password@private-proxy.test:3128');
+      await resolveCLIConfig({ config, proxyServer: 'http://unauthenticated.test:3128' });
+      expect(warning).not.toHaveBeenCalled();
+    });
+  });
+
   describe('file paths', () => {
     beforeEach(() => vi.stubEnv('PLAYWRIGHT_MCP_FILE_PATHS', ''));
     afterEach(() => vi.unstubAllEnvs());

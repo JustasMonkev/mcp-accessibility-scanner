@@ -177,6 +177,8 @@ async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
       || (channel !== undefined && channel !== 'chromium' && channel !== 'chrome-for-testing');
     config.browser.chromiumSandboxDefaulted = true;
   }
+  if ([launchOptions.proxy, contextOptions.proxy].some(proxy => proxy?.username || proxy?.password))
+    process.stderr.write('WARNING: Playwright 1.63.0 may send authenticated proxy credentials to a website\'s 401 authentication challenge. This warning does not prevent the leak. Avoid authenticated proxies until a Playwright release containing https://github.com/microsoft/playwright/pull/43482 is adopted.\n');
   return config;
 }
 
