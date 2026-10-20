@@ -17,6 +17,7 @@
 import assert from 'node:assert';
 import net from 'node:net';
 import http from 'node:http';
+import { domainToASCII } from 'node:url';
 import crypto from 'node:crypto';
 import { validateAuthToken } from '../config.js';
 
@@ -32,11 +33,13 @@ import type { ServerBackendFactory } from './server.js';
 
 const testDebug = debug('pw:mcp:test');
 const allowedLoopbackHostnamePattern = /^127(?:\.\d{1,3}){3}$/;
+const configuredHostnames = new WeakMap<http.Server, string>();
 
 export async function startHttpServer(config: { host?: string, port?: number }, abortSignal?: AbortSignal): Promise<http.Server> {
   const host = config.host ?? 'localhost';
   const { port } = config;
   const httpServer = http.createServer();
+  configuredHostnames.set(httpServer, normalizeHostname(host));
   decorateServer(httpServer);
   await new Promise<void>((resolve, reject) => {
     httpServer.on('error', reject);
@@ -486,6 +489,9 @@ function validateRequestHeaders(httpServer: http.Server, req: http.IncomingMessa
 
 function allowedHostnamesForServer(httpServer: http.Server): Set<string> {
   const allowed = new Set<string>(['localhost', '::1', '127.0.0.1']);
+  const configuredHostname = configuredHostnames.get(httpServer);
+  if (configuredHostname && !isWildcardAddress(configuredHostname))
+    allowed.add(configuredHostname);
   const address = httpServer.address();
   if (!address || typeof address === 'string')
     return allowed;
@@ -554,7 +560,8 @@ function formatAuthority(hostname: string, port: string): string {
 }
 
 function normalizeHostname(hostname: string): string {
-  const lowerCase = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  const unbracketed = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  const lowerCase = unbracketed.includes(':') ? unbracketed : domainToASCII(unbracketed);
   if (lowerCase.startsWith('::ffff:'))
     return lowerCase.slice('::ffff:'.length);
   if (allowedLoopbackHostnamePattern.test(lowerCase))
