@@ -16,6 +16,7 @@
 
 import { EventEmitter } from 'events';
 import crypto from 'crypto';
+import dns from 'dns';
 import http from 'http';
 import net, { type Socket } from 'net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -83,8 +84,8 @@ describe('mcp http transport hardening', () => {
     create: () => { throw new Error('private backend construction details'); },
   };
 
-  async function startServer(serverBackendFactory = testBackendFactory, authToken?: string) {
-    const server = await startHttpServer({ host: '127.0.0.1', port: 0 });
+  async function startServer(serverBackendFactory = testBackendFactory, authToken?: string, host = '127.0.0.1') {
+    const server = await startHttpServer({ host, port: 0 });
     servers.add(server);
     await installHttpTransport(server, serverBackendFactory, { authToken });
     const address = server.address();
@@ -447,6 +448,76 @@ describe('mcp http transport hardening', () => {
 
     expect(response.statusCode).toBe(405);
     expect(JSON.parse(response.body)).toEqual(methodNotAllowedBody);
+  });
+
+  describe('configured listener hostname', () => {
+    async function startNamedServer(authToken?: string) {
+      const lookup = dns.lookup;
+      const lookupOverride = vi.spyOn(dns, 'lookup').mockImplementationOnce((_hostname, ...args) => lookup('127.0.0.1', ...args));
+      try {
+        return await startServer(probeFactory, authToken, 'MCP.EXAMPLE.TEST');
+      } finally {
+        lookupOverride.mockRestore();
+      }
+    }
+
+    it('serves the configured hostname with absent or matching HTTP origin', async () => {
+      const { port } = await startNamedServer();
+      for (const origin of [undefined, `http://mcp.example.test:${port}`]) {
+        const response = await sendRequest(port, {
+          method: 'POST',
+          hostHeader: `mcp.example.test:${port}`,
+          origin,
+          accept: 'application/json, text/event-stream',
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+        });
+        expect(response.statusCode, JSON.stringify({ origin, response })).toBe(200);
+        expect(response.body).toContain('probe');
+      }
+      const otherListener = await startServer();
+      expect((await sendRequest(otherListener.port, { hostHeader: `mcp.example.test:${otherListener.port}` })).statusCode).toBe(403);
+    });
+
+    it('does not trust other hosts or mismatched origins for a named listener', async () => {
+      const { port } = await startNamedServer();
+      const cases = [
+        { hostHeader: `other.example.test:${port}` },
+        { hostHeader: `mcp.example.test:${port}`, origin: `http://other.example.test:${port}` },
+        { hostHeader: `mcp.example.test:${port}`, origin: `http://127.0.0.1:${port}` },
+        { hostHeader: `mcp.example.test:${port}`, origin: `http://mcp.example.test:${port + 1}` },
+        { hostHeader: `mcp.example.test:${port}`, origin: `https://mcp.example.test:${port}` },
+      ];
+      for (const headers of cases) {
+        const response = await sendRequest(port, headers);
+        expect(response.statusCode, JSON.stringify(headers)).toBe(403);
+      }
+    });
+
+    it('still requires a Host header', async () => {
+      const { port } = await startNamedServer();
+      const statusCode = await new Promise<number | undefined>((resolve, reject) => {
+        const request = http.get({ host: '127.0.0.1', port, path: '/mcp', setHost: false }, response => {
+          response.resume();
+          resolve(response.statusCode);
+        });
+        request.on('error', reject);
+      });
+      expect(statusCode).toBe(400);
+    });
+
+    it('keeps bearer authentication on a named loopback listener', async () => {
+      const { port } = await startNamedServer('secret-token');
+      const headers = { hostHeader: `mcp.example.test:${port}`, origin: `http://mcp.example.test:${port}` };
+      expect((await sendRequest(port, headers)).statusCode).toBe(401);
+      expect((await sendRequest(port, { ...headers, authorization: 'Bearer secret-token' })).statusCode).toBe(405);
+    });
+  });
+
+  it.each(['0.0.0.0', '::'])('keeps wildcard listener %s restricted to loopback hosts', async host => {
+    const { port } = await startServer(testBackendFactory, undefined, host);
+    expect((await sendRequest(port)).statusCode).toBe(405);
+    for (const hostHeader of [`evil.example:${port}`, host === '::' ? `[::]:${port}` : `${host}:${port}`])
+      expect((await sendRequest(port, { hostHeader })).statusCode).toBe(403);
   });
 
   describe('bearer token authentication', () => {

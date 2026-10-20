@@ -32,11 +32,13 @@ import type { ServerBackendFactory } from './server.js';
 
 const testDebug = debug('pw:mcp:test');
 const allowedLoopbackHostnamePattern = /^127(?:\.\d{1,3}){3}$/;
+const configuredHostnames = new WeakMap<http.Server, string>();
 
 export async function startHttpServer(config: { host?: string, port?: number }, abortSignal?: AbortSignal): Promise<http.Server> {
   const host = config.host ?? 'localhost';
   const { port } = config;
   const httpServer = http.createServer();
+  configuredHostnames.set(httpServer, normalizeHostname(host));
   decorateServer(httpServer);
   await new Promise<void>((resolve, reject) => {
     httpServer.on('error', reject);
@@ -486,6 +488,9 @@ function validateRequestHeaders(httpServer: http.Server, req: http.IncomingMessa
 
 function allowedHostnamesForServer(httpServer: http.Server): Set<string> {
   const allowed = new Set<string>(['localhost', '::1', '127.0.0.1']);
+  const configuredHostname = configuredHostnames.get(httpServer);
+  if (configuredHostname && !isWildcardAddress(configuredHostname))
+    allowed.add(configuredHostname);
   const address = httpServer.address();
   if (!address || typeof address === 'string')
     return allowed;
