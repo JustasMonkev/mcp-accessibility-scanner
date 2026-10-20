@@ -118,9 +118,13 @@ browserTests('Native WebMCP over MCP', () => {
           type NativeContext = { registerTool: (tool: { name: string, description: string, inputSchema: { type: 'object', properties: Record<string, { type: 'number' | 'string' }>, required: string[] }, execute: (input: unknown) => Promise<unknown> }) => void };
           // SAFETY: these are the native experimental members absent from TypeScript's DOM declarations.
           const modelContext = (document as Document & { modelContext: NativeContext }).modelContext;
+          let calls = 0;
           modelContext.registerTool({ name: 'native_echo', description: `native-frame-${index}`,
             inputSchema: { type: 'object', properties: { browserSessionId: { type: 'number' }, _meta: { type: 'string' } }, required: ['browserSessionId', '_meta'] },
-            execute: async input => ({ content: [{ type: 'text', text: `frame=${index};${JSON.stringify(input)}` }] }),
+            execute: async input => {
+              ++calls;
+              return { content: [{ type: 'text', text: `frame=${index};calls=${calls};type=${typeof input};${JSON.stringify(input)}` }] };
+            },
           });
         }, index);
       }
@@ -133,6 +137,10 @@ browserTests('Native WebMCP over MCP', () => {
       assert.ok(text.includes('page input'));
       assert.ok(text.includes('frame=1;'));
       assert.ok(text.includes('42'));
+      assert.ok(text.includes('calls=1;type=object;'));
+      const repeated = await client.callTool({ name: child.name, arguments: { browserSessionId: 43, _meta: 'second call' } });
+      assert.notEqual(repeated.isError, true);
+      assert.match(JSON.stringify(repeated.content), /calls=2;type=object;/);
       await page.goto('http://localhost/next');
       const stale = await client.callTool({ name: child.name, arguments: { browserSessionId: 42, _meta: 'page input' } });
       assert.equal(stale.isError, true);

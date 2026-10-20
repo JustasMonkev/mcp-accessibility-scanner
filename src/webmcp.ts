@@ -53,7 +53,7 @@ const compiledSchemas = new Map<string, StandardSchemaWithJSON<Record<string, un
 type PageTool = { name: string, title?: string, description?: string, inputSchema?: unknown, window?: Window };
 type ModelContext = {
   getTools?: () => Promise<PageTool[]>;
-  executeTool?: (tool: PageTool, inputJson: string) => Promise<unknown>;
+  executeTool?: (tool: PageTool, input: unknown) => Promise<unknown>;
   invokeTool?: (name: string, input: unknown) => Promise<unknown>;
 };
 type CollectedTool = { name: string, title: string, description: string, inputSchema: Tool['inputSchema'] };
@@ -458,8 +458,10 @@ async function callInPage(params: { name: string, inputJson: string, timeOrigin:
     running.add(params.name);
     let result: unknown;
     try {
-      result = modelContext.executeTool
-        ? await modelContext.executeTool(tool, params.inputJson)
+      const executeTool = modelContext.executeTool;
+      const objectInput = executeTool?.length === 1 && Function.prototype.toString.call(executeTool) === 'function executeTool() { [native code] }';
+      result = executeTool
+        ? await executeTool.call(modelContext, tool, objectInput ? JSON.parse(params.inputJson) : params.inputJson)
         : JSON.stringify((await modelContext.invokeTool?.(params.name, JSON.parse(params.inputJson))) ?? null);
     } finally {
       running.delete(params.name);
