@@ -17,6 +17,7 @@
 import assert from 'node:assert';
 import net from 'node:net';
 import http from 'node:http';
+import { domainToASCII } from 'node:url';
 import crypto from 'node:crypto';
 import { validateAuthToken } from '../config.js';
 
@@ -559,7 +560,8 @@ function formatAuthority(hostname: string, port: string): string {
 }
 
 function normalizeHostname(hostname: string): string {
-  const lowerCase = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  const unbracketed = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  const lowerCase = unbracketed.includes(':') ? unbracketed : domainToASCII(unbracketed);
   if (lowerCase.startsWith('::ffff:'))
     return lowerCase.slice('::ffff:'.length);
   if (allowedLoopbackHostnamePattern.test(lowerCase))

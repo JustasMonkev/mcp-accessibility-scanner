@@ -451,11 +451,11 @@ describe('mcp http transport hardening', () => {
   });
 
   describe('configured listener hostname', () => {
-    async function startNamedServer(authToken?: string) {
+    async function startNamedServer(authToken?: string, host = 'MCP.EXAMPLE.TEST') {
       const lookup = dns.lookup;
       const lookupOverride = vi.spyOn(dns, 'lookup').mockImplementationOnce((_hostname, ...args) => lookup('127.0.0.1', ...args));
       try {
-        return await startServer(probeFactory, authToken, 'MCP.EXAMPLE.TEST');
+        return await startServer(probeFactory, authToken, host);
       } finally {
         lookupOverride.mockRestore();
       }
@@ -476,6 +476,22 @@ describe('mcp http transport hardening', () => {
       }
       const otherListener = await startServer();
       expect((await sendRequest(otherListener.port, { hostHeader: `mcp.example.test:${otherListener.port}` })).statusCode).toBe(403);
+    });
+
+    it('serves a configured Unicode hostname as its browser-serialized ASCII authority', async () => {
+      const { port } = await startNamedServer(undefined, 'MÜNCHEN.example');
+      const hostHeader = `xn--mnchen-3ya.example:${port}`;
+      for (const origin of [undefined, `http://${hostHeader}`]) {
+        const response = await sendRequest(port, {
+          method: 'POST', hostHeader, origin,
+          accept: 'application/json, text/event-stream',
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+        });
+        expect(response.statusCode, JSON.stringify({ origin, response })).toBe(200);
+        expect(response.body).toContain('probe');
+      }
+      expect((await sendRequest(port, { hostHeader: `unrelated.example:${port}` })).statusCode).toBe(403);
+      expect((await sendRequest(port, { hostHeader, origin: `http://unrelated.example:${port}` })).statusCode).toBe(403);
     });
 
     it('does not trust other hosts or mismatched origins for a named listener', async () => {
@@ -511,6 +527,13 @@ describe('mcp http transport hardening', () => {
       expect((await sendRequest(port, headers)).statusCode).toBe(401);
       expect((await sendRequest(port, { ...headers, authorization: 'Bearer secret-token' })).statusCode).toBe(405);
     });
+  });
+
+  it('preserves bracketed IPv6 loopback Host and Origin authorities', async () => {
+    const { port } = await startServer();
+    const response = await sendRequest(port, { hostHeader: `[::1]:${port}`, origin: `http://[::1]:${port}` });
+    expect(response.statusCode).toBe(405);
+    expect(JSON.parse(response.body)).toEqual(methodNotAllowedBody);
   });
 
   it.each(['0.0.0.0', '::'])('keeps wildcard listener %s restricted to loopback hosts', async host => {
