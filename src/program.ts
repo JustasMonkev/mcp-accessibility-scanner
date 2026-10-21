@@ -18,7 +18,7 @@ import readline from 'node:readline';
 
 import { program, Option } from 'commander';
 import * as mcpServer from './mcp/server.js';
-import { commaSeparatedList, resolveCLIConfig, semicolonSeparatedList, uploadDirectoryList } from './config.js';
+import { commaSeparatedList, resolveCLIConfig, semicolonSeparatedList, uploadDirectoryList, urlParamList } from './config.js';
 import { packageJSON } from './utils/package.js';
 import { Context } from './context.js';
 import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported, contextFactory, PersistentContextFactory, persistentProfileConflictRemedy } from './browserContextFactory.js';
@@ -90,6 +90,7 @@ async function startMCPServer(config: FullConfig, browserContextFactory: Browser
     nameInConfig: 'playwright',
     version: packageJSON.version,
     instructions: serverInstructions(config),
+    redactUrlParams: config.redactUrlParams,
     // The tool list is fixed per process (filteredTools(config) never changes
     // at runtime), so 2026-07-28 clients may cache it for an hour. Scope is
     // `private`: the list depends on this server's local configuration
@@ -150,6 +151,7 @@ function configureBaseProgram() {
       .option('--profile-dir-name <name>', 'name of the Chrome profile directory to connect to with --extension, for example "Profile 1". Requires --user-data-dir. Defaults to the last-used profile that has the extension installed.')
       .option('--proxy-bypass <bypass>', 'comma-separated domains to bypass proxy, for example ".com,chromium.org,.domain.com"')
       .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128", "http://user:password@myproxy:3128" or "socks5://myproxy:8080". WARNING: Playwright 1.63.0 may leak proxy credentials to website 401 challenges; avoid authenticated proxies until the upstream fix is released and adopted')
+      .option('--redact-url-params <names>', 'comma-separated URL parameter names to mask in response and saved session text (case-insensitive); an empty value clears the list. Does not change browser requests or binary artifacts.', urlParamList)
       .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')
       .option('--save-trace', 'Whether to save the Playwright Trace of the session into the output directory.')
       .option('--snapshot-boxes', 'include each element\'s bounding box as [box=x,y,width,height] in snapshots. Coordinates are viewport-relative, in CSS pixels.')
@@ -193,6 +195,7 @@ configureBaseProgram()
           nameInConfig: 'playwright-extension',
           version: packageJSON.version,
           instructions: serverInstructions(config),
+          redactUrlParams: config.redactUrlParams,
           // Static per process, same rationale as in startMCPServer above.
           toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
           create: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry),
@@ -253,6 +256,7 @@ configureBaseProgram()
           name: 'Playwright w/ switch',
           nameInConfig: 'playwright-switch',
           version: packageJSON.version,
+          redactUrlParams: config.redactUrlParams,
           create: () => new ProxyBackend(makeProviders(false), undefined, config),
           createStateless: () => new ProxyBackend(makeProviders(true), sharedSelection, config),
         };

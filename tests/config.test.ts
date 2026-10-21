@@ -30,6 +30,45 @@ async function writeConfigFile(config: Config): Promise<string> {
 }
 
 describe('Config', () => {
+  describe('URL parameter redaction configuration', () => {
+    beforeEach(() => vi.stubEnv('PLAYWRIGHT_MCP_REDACT_URL_PARAMS', undefined));
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('defaults to unchanged output and accepts trimmed programmatic names', async () => {
+      expect((await resolveConfig({})).redactUrlParams).toBeUndefined();
+      expect((await resolveConfig({ redactUrlParams: [' token ', 'API Key'] })).redactUrlParams).toEqual(['token', 'API Key']);
+      expect((await resolveConfig({ redactUrlParams: [] })).redactUrlParams).toEqual([]);
+    });
+
+    it('uses file < environment < CLI precedence and lets empty values clear the list', async () => {
+      const config = await writeConfigFile({ redactUrlParams: ['file-secret'] });
+      expect((await resolveCLIConfig({ config })).redactUrlParams).toEqual(['file-secret']);
+      vi.stubEnv('PLAYWRIGHT_MCP_REDACT_URL_PARAMS', ' token , code ');
+      expect((await resolveCLIConfig({ config })).redactUrlParams).toEqual(['token', 'code']);
+      expect((await resolveCLIConfig({ config, redactUrlParams: ['cli-secret'] })).redactUrlParams).toEqual(['cli-secret']);
+      expect((await resolveCLIConfig({ config, redactUrlParams: [] })).redactUrlParams).toEqual([]);
+      vi.stubEnv('PLAYWRIGHT_MCP_REDACT_URL_PARAMS', '');
+      expect((await resolveCLIConfig({ config })).redactUrlParams).toEqual([]);
+      vi.stubEnv('PLAYWRIGHT_MCP_REDACT_URL_PARAMS', ' ');
+      expect((await resolveCLIConfig({ config })).redactUrlParams).toEqual([]);
+    });
+
+    it.each(['null', '"token"', '1', 'false', '{}', '[1]', '[""]', '["token", " "]', '[[]]'])('rejects malformed programmatic/file lists: %s', async value => {
+      const malformed = JSON.parse(`{"redactUrlParams":${value}}`);
+      await expect(resolveConfig(malformed)).rejects.toThrow('redactUrlParams');
+      const config = await writeConfigFile(malformed);
+      await expect(resolveCLIConfig({ config })).rejects.toThrow('redactUrlParams');
+      expect((await resolveCLIConfig({ config, redactUrlParams: [] })).redactUrlParams).toEqual([]);
+    });
+
+    it('rejects empty CSV entries only in the winning merged list', async () => {
+      vi.stubEnv('PLAYWRIGHT_MCP_REDACT_URL_PARAMS', 'token,,code');
+      await expect(resolveCLIConfig({})).rejects.toThrow('non-blank');
+      expect((await resolveCLIConfig({ redactUrlParams: [] })).redactUrlParams).toEqual([]);
+      await expect(resolveCLIConfig({ redactUrlParams: ['token', ''] })).rejects.toThrow('non-blank');
+    });
+  });
+
   describe('tool policy precedence', () => {
     beforeEach(() => {
       vi.stubEnv('PLAYWRIGHT_MCP_ALLOWED_TOOLS', undefined);

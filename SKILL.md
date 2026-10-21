@@ -233,8 +233,8 @@ These tools are always available and work in the interactive REPL.
 | Tool | Description |
 |------|-------------|
 | `browser_console_messages` | Get all console messages |
-| `browser_network_requests` | Get all network requests, numbered |
-| `browser_network_request` | Get credential-redacted headers and body metadata for one request: `{"index": 3}` |
+| `browser_network_requests` | List requests since explicit navigation with stable tab-local IDs; `{"all": true}` also includes up to 200 earlier requests |
+| `browser_network_request` | Get credential-redacted headers and body metadata using a retained request ID: `{"index": 3}` |
 
 ### Optional Tools (require `--caps`)
 

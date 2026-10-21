@@ -20,6 +20,10 @@ import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
 import type { Tab } from '../src/tab.js';
 
+function indexedRequests(entries: Map<unknown, unknown>) {
+  return new Map([...entries].map(([request, response], index) => [index + 1, { request, response }]));
+}
+
 describe('Network Tools', () => {
   let mockContext: Context;
   let mockTab: Tab;
@@ -39,7 +43,7 @@ describe('Network Tools', () => {
     mockRequests.set(req3, null);
 
     mockTab = {
-      requests: vi.fn().mockReturnValue(mockRequests),
+      requests: vi.fn().mockReturnValue(indexedRequests(mockRequests)),
       modalStates: vi.fn().mockReturnValue([]),
       withPageStateTimeout: async (promise: Promise<unknown>) => promise,
     } as any;
@@ -63,6 +67,8 @@ describe('Network Tools', () => {
     it('should have correct schema', () => {
       expect(networkTool.schema.title).toBe('List network requests');
       expect(networkTool.schema.type).toBe('readOnly');
+      expect(networkTool.schema.inputSchema.safeParse({ all: true }).success).toBe(true);
+      expect(networkTool.schema.inputSchema.safeParse({ all: 'true' }).success).toBe(false);
     });
 
     it('should retrieve all network requests', async () => {
@@ -109,7 +115,7 @@ describe('Network Tools', () => {
       const payload = Buffer.from('<p>hello</p>').toString('base64');
       const mockRequests = new Map();
       mockRequests.set({ url: () => `data:text/html;base64,${payload}`, method: () => 'GET' }, null);
-      mockTab.requests = vi.fn().mockReturnValue(mockRequests);
+      mockTab.requests = vi.fn().mockReturnValue(indexedRequests(mockRequests));
 
       await networkTool.handle(mockContext, {}, response);
 
@@ -121,7 +127,7 @@ describe('Network Tools', () => {
       const payload = Buffer.from('<p>hello</p>').toString('base64');
       const mockRequests = new Map();
       mockRequests.set({ url: () => `https://api.example/upload?src=data:text/html;base64,${payload}&id=123`, method: () => 'POST' }, null);
-      mockTab.requests = vi.fn().mockReturnValue(mockRequests);
+      mockTab.requests = vi.fn().mockReturnValue(indexedRequests(mockRequests));
 
       await networkTool.handle(mockContext, {}, response);
 
@@ -133,7 +139,7 @@ describe('Network Tools', () => {
       const payload = encodeURIComponent(Buffer.from('<p>hello</p>').toString('base64'));
       const mockRequests = new Map();
       mockRequests.set({ url: () => `https://api.example/upload?src=data:text/html;base64%2C${payload}&id=123`, method: () => 'POST' }, null);
-      mockTab.requests = vi.fn().mockReturnValue(mockRequests);
+      mockTab.requests = vi.fn().mockReturnValue(indexedRequests(mockRequests));
 
       await networkTool.handle(mockContext, {}, response);
 
@@ -145,7 +151,7 @@ describe('Network Tools', () => {
       const payload = '<svg><text>Hello</text></svg>';
       const mockRequests = new Map();
       mockRequests.set({ url: () => `https://api.example/upload?src=data:image/svg+xml,${payload}&id=123`, method: () => 'POST' }, null);
-      mockTab.requests = vi.fn().mockReturnValue(mockRequests);
+      mockTab.requests = vi.fn().mockReturnValue(indexedRequests(mockRequests));
 
       await networkTool.handle(mockContext, {}, response);
 
@@ -157,7 +163,7 @@ describe('Network Tools', () => {
       const payload = encodeURIComponent(Buffer.from('<p>hello</p>').toString('base64'));
       const mockRequests = new Map();
       mockRequests.set({ url: () => `https://api.example/upload?src=data%3Atext%2Fhtml%3Bbase64%2C${payload}&id=123`, method: () => 'POST' }, null);
-      mockTab.requests = vi.fn().mockReturnValue(mockRequests);
+      mockTab.requests = vi.fn().mockReturnValue(indexedRequests(mockRequests));
 
       await networkTool.handle(mockContext, {}, response);
 
@@ -206,7 +212,7 @@ describe('Network Tools', () => {
         body: async () => Buffer.from('{"ok":true}'),
         ...overrides.response,
       };
-      return new Map([[request, res]]);
+      return indexedRequests(new Map([[request, res]]));
     }
 
     // Setup, call and read-back in one step: every detail test needs all three,
@@ -328,7 +334,7 @@ describe('Network Tools', () => {
           failure: () => null,
         }, null);
       }
-      mockTab.requests = vi.fn().mockReturnValue(entries);
+      mockTab.requests = vi.fn().mockReturnValue(indexedRequests(entries));
 
       await detailTool.handle(mockContext, { index: 2 }, response);
 
@@ -415,7 +421,7 @@ describe('Network Tools', () => {
       response = await detail({}, 4);
 
       expect(response.isError()).toBe(true);
-      expect(response.result()).toContain('numbered 1 to 1');
+      expect(response.result()).toContain('No retained network request with index 4');
     });
 
     it('should error when nothing has been recorded', async () => {

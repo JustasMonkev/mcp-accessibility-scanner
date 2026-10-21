@@ -165,6 +165,8 @@ export type Config = {
   /** Exact tool names hidden and rejected on invocation. Takes precedence over allowedTools. */
   blockedTools?: string[];
 
+  redactUrlParams?: string[];
+
   /**
    * Run server that uses screenshots (Aria snapshots are used by default).
    */

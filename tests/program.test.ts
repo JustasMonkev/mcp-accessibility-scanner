@@ -111,6 +111,20 @@ describe('authenticated proxy disclosure', () => {
   });
 });
 
+describe('URL parameter redaction CLI option', () => {
+  it('advertises and accepts a comma-separated list and an explicit empty list', () => {
+    expect(runCLI('--help')).toContain('--redact-url-params <names>');
+    expect(runCLI('--redact-url-params token,code list-tools')).toContain('browser_navigate');
+    expect(runCLI('--redact-url-params= list-tools')).toContain('browser_navigate');
+  });
+
+  it.each([{ mode: [] }, { mode: ['--extension'] }, { mode: ['--connect-tool'] }, { mode: ['--vscode'] }])('rejects blank list entries before starting $mode', async ({ mode }) => {
+    const result = await collectOutput([...mode, '--port', '0', '--redact-url-params', 'token,,code']);
+    expect(result.stderr).toContain('redactUrlParams must be an array of non-blank parameter names');
+    expect(result.stderr).not.toContain('Listening on');
+  });
+});
+
 describe('file path CLI option', () => {
   it('advertises the accepted modes', () => {
     expect(runCLI('--help')).toContain('--file-paths <relative|absolute>');

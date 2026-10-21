@@ -1108,6 +1108,77 @@ describe('Tab', () => {
   });
 
   describe('requests', () => {
+    it('retains stable IDs across explicit navigation and repeated listings', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      const first = { url: () => 'https://example.com/first', isNavigationRequest: () => false };
+      const second = { url: () => 'https://example.com/second', isNavigationRequest: () => false };
+      mockPage.emit('request', first);
+      expect([...tab.requests().keys()]).toEqual([1]);
+      expect([...tab.requests().keys()]).toEqual([1]);
+      await tab.navigate('https://example.com/second');
+      mockPage.emit('request', second);
+      expect([...tab.requests().keys()]).toEqual([2]);
+      expect([...tab.requests(true).keys()]).toEqual([1, 2]);
+      expect(tab.requests(true).get(1)?.request).toBe(first);
+      expect(tab.requests(true).get(2)?.request).toBe(second);
+    });
+
+    it('caps earlier-navigation requests at 200 without reusing evicted IDs', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      const requests = Array.from({ length: 201 }, (_, index) => ({ url: () => `https://example.com/${index}`, isNavigationRequest: () => false }));
+      for (const request of requests)
+        mockPage.emit('request', request);
+      expect(tab.requests().size).toBe(201);
+      await tab.navigate('https://example.com/new');
+      expect(tab.requests(true).size).toBe(200);
+      expect(tab.requests(true).has(1)).toBe(false);
+      expect(tab.requests(true).get(2)?.request).toBe(requests[1]);
+      mockPage.emit('response', { request: () => requests[0] });
+      expect(tab.requests(true).size).toBe(200);
+      expect(tab.requests(true).has(1)).toBe(false);
+      const response = { request: () => requests[200] };
+      mockPage.emit('response', response);
+      expect(tab.requests().size).toBe(0);
+      expect(tab.requests(true).get(201)?.response).toBe(response);
+      mockPage.emit('request', { url: () => 'https://example.com/new' });
+      expect([...tab.requests().keys()]).toEqual([202]);
+      await tab.navigate('https://example.com/another');
+      expect(tab.requests(true).size).toBe(200);
+      expect(tab.requests(true).has(2)).toBe(false);
+      expect(tab.requests(true).has(202)).toBe(true);
+    });
+
+    it('keeps failed requests in history and archives even when navigation fails', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockPage.goto = vi.fn().mockRejectedValue(new Error('net::ERR_CONNECTION_REFUSED'));
+      const failed = { url: () => 'https://example.com/failed', failure: () => ({ errorText: 'net::ERR_FAILED' }) };
+      mockPage.emit('request', failed);
+      mockPage.emit('requestfailed', failed);
+      await expect(tab.navigate('https://example.com/unreachable')).rejects.toThrow('ERR_CONNECTION_REFUSED');
+      expect(tab.requests().size).toBe(0);
+      expect(tab.requests(true).get(1)?.request.failure()).toEqual({ errorText: 'net::ERR_FAILED' });
+    });
+
+    it.each(['close', 'dispose'])('releases all request history on %s', async action => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      const old = { url: () => 'https://example.com/old', isNavigationRequest: () => false };
+      mockPage.emit('request', old);
+      await tab.navigate('https://example.com/new');
+      mockPage.emit('request', { url: () => 'https://example.com/new' });
+      if (action === 'dispose')
+        tab.dispose();
+      else
+        mockPage.emit('close');
+      mockPage.emit('response', { request: () => old });
+      expect(tab.requests(true).size).toBe(0);
+    });
+
     it('should track network requests', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
@@ -1118,7 +1189,7 @@ describe('Tab', () => {
       mockPage.emit('response', mockResponse);
 
       expect(tab.requests().size).toBe(1);
-      expect(tab.requests().get(mockRequest)).toBe(mockResponse);
+      expect(tab.requests().get(1)).toEqual({ request: mockRequest, response: mockResponse });
     });
 
     it('tracks only the final main-document HTTP status', async () => {
@@ -1132,6 +1203,8 @@ describe('Tab', () => {
         redirectedTo: () => null,
       } as any;
 
+      mockPage.emit('request', redirectedRequest);
+      mockPage.emit('request', finalRequest);
       mockPage.emit('response', {
         request: () => redirectedRequest,
         frame: () => mockPage.mainFrame(),

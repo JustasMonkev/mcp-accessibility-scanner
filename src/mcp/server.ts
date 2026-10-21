@@ -20,6 +20,7 @@ import { ProtocolError, ProtocolErrorCode, Server } from '@modelcontextprotocol/
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
 import { InProcessTransport } from './inProcessTransport.js';
+import { redactToolResult, redactUrlParams } from '../utils/urlRedaction.js';
 
 import type { CacheHint, Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
 export type { Server } from '@modelcontextprotocol/server';
@@ -55,6 +56,7 @@ export interface ServerBackend {
 export type ServerMetadata = {
   title?: string;
   instructions?: string;
+  redactUrlParams?: readonly string[];
   /**
    * Cache hint stamped on `tools/list` results served to MCP 2026-07-28
    * clients (SEP-2549 `ttlMs`/`cacheScope`). Set it only for backends whose
@@ -147,7 +149,18 @@ export function createServer(name: string, version: string, backend: ServerBacke
     serverDebug('listTools');
     await ensureInitialized();
     const tools = await backend.listTools({ _meta: ctx.mcpReq._meta, signal: ctx.mcpReq.signal });
-    return { tools };
+    if (!metadata?.redactUrlParams?.length)
+      return { tools };
+    return { tools: tools.map(tool => {
+      const rendered = { ...tool };
+      if (typeof tool.title === 'string')
+        rendered.title = redactUrlParams(tool.title, metadata.redactUrlParams);
+      if (typeof tool.description === 'string')
+        rendered.description = redactUrlParams(tool.description, metadata.redactUrlParams);
+      if (typeof tool.annotations?.title === 'string')
+        rendered.annotations = { ...tool.annotations, title: redactUrlParams(tool.annotations.title, metadata.redactUrlParams) };
+      return rendered;
+    }) };
   });
 
   let heartbeatRunning = false;
@@ -163,11 +176,15 @@ export function createServer(name: string, version: string, backend: ServerBacke
     const requestContext: CallToolRequestContext = {
       signal: ctx.mcpReq.signal,
       requestId: ctx.mcpReq.id,
-      sendNotification: notification => ctx.mcpReq.notify(notification),
+      sendNotification: notification => {
+        if (notification.method === 'notifications/progress' && typeof notification.params?.message === 'string')
+          return ctx.mcpReq.notify({ ...notification, params: { ...notification.params, message: redactUrlParams(notification.params.message, metadata?.redactUrlParams) } });
+        return ctx.mcpReq.notify(notification);
+      },
       _meta: ctx.mcpReq._meta,
     };
     try {
-      return await backend.callTool(request.params.name, request.params.arguments || {}, requestContext);
+      return redactToolResult(await backend.callTool(request.params.name, request.params.arguments || {}, requestContext), metadata?.redactUrlParams);
     } catch (error) {
       // Protocol-level failures (e.g. unknown tool) surface as JSON-RPC
       // errors; only tool execution failures become isError results.
@@ -176,10 +193,10 @@ export function createServer(name: string, version: string, backend: ServerBacke
       // recognized too.
       if (ProtocolError.isInstance(error))
         throw error;
-      return {
+      return redactToolResult({
         content: [{ type: 'text', text: '### Result\n' + String(error) }],
         isError: true,
-      };
+      }, metadata?.redactUrlParams);
     }
   });
   addServerListener(server, 'initialized', () => {

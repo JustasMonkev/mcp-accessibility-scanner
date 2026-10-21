@@ -257,7 +257,7 @@ describe('session log folders', () => {
         result: () => '',
         isError: () => false,
         code: () => "await page.goto('https://b.example/');",
-        tabSnapshot: () => ({ url: 'https://b.example/' }),
+        tabSnapshot: () => ({ url: 'https://b.example/', ariaSnapshot: '' }),
       } as any);
       log.logUserAction(navigate, tab, "await page.goto('https://a.example/');", false);
       log.logUserAction({ name: 'click' } as any, tab, "await page.getByText('Ready').click();", false);

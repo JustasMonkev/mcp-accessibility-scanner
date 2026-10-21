@@ -22,6 +22,7 @@ import debug from 'debug';
 import { renderModalStates } from './tab.js';
 import { compressAriaSnapshot } from './utils/ariaCompression.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
+import { redactToolResult, redactUrlParams } from './utils/urlRedaction.js';
 
 import type { Tab, TabSnapshot } from './tab.js';
 import type { CallToolResult, ResourceLink } from '@modelcontextprotocol/server';
@@ -182,7 +183,7 @@ export class Response {
           progressToken,
           progress: update.progress,
           total: update.total,
-          message: update.message,
+          message: update.message === undefined ? undefined : redactUrlParams(update.message, this._context.config.redactUrlParams),
         },
       });
     } catch (error) {
@@ -262,11 +263,11 @@ ${this._code.join('\n')}
         content.push({ type: 'image', data: image.data.toString('base64'), mimeType: image.contentType });
     }
 
-    return {
+    return redactToolResult({
       content,
       structuredContent: this._structuredContent,
       isError: this._isError,
-    };
+    }, this._context.config.redactUrlParams);
   }
 }
 
