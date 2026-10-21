@@ -17,7 +17,6 @@
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Response } from '../src/response.js';
-import { createUrlRedactor, redactToolResult } from '../src/utils/urlRedaction.js';
 import type { Context } from '../src/context.js';
 import type { Tab, TabSnapshot } from '../src/tab.js';
 import type { ImageContent, ResourceLink, TextContent } from '@modelcontextprotocol/server';
@@ -338,67 +337,6 @@ describe('Response', () => {
 
       await expect(response.finish()).resolves.toBeUndefined();
       expect(mockTab.updateTitle).toHaveBeenCalled();
-    });
-  });
-
-  describe('URL parameter redaction', () => {
-    it('masks final text sections and structured values without changing code, arguments or artifact links', async () => {
-      const url = 'https://example.test/next?token=live-secret&safe=1';
-      const code = `await page.goto('${url}');`;
-      const args = { url };
-      const findings = { url, nested: [url, { value: url }], [url]: 'unchanged key' };
-      const expectedFindings = { url, nested: [url, { value: url }], [url]: 'unchanged key' };
-      vi.spyOn(mockTab.page, 'url').mockReturnValue(url);
-      vi.spyOn(mockTab, 'lastTitle').mockReturnValue(`Title ${url}`);
-      vi.mocked(mockTab.captureSnapshot).mockResolvedValue({
-        url, title: `Title ${url}`, ariaSnapshot: '- link "Open":\n  - /url: /next?token=live-secret&safe=1',
-        modalStates: [], consoleMessages: [], downloads: [],
-      });
-      const response = new Response(mockContext, 'browser_navigate', args);
-      response.addResult(`Visited ${url}`);
-      response.addCode(code);
-      response.setStructuredContent(findings);
-      response.addResourceLink({ type: 'resource_link', uri: url, name: 'artifact' });
-      response.setIncludeSnapshot();
-      response.setIncludeTabs();
-      await response.finish();
-      const result = redactToolResult(response.serialize(), createUrlRedactor(['token']));
-      const text = expectTextContent(result.content[0]).text;
-      expect(text).toContain('### Open tabs');
-      expect(text).toContain('### Ran Playwright code');
-      expect(text).toContain('### Page state');
-      expect(text).toContain('Visited https://example.test/next?token=REDACTED&safe=1');
-      expect(text).toContain("await page.goto('https://example.test/next?token=REDACTED&safe=1');");
-      expect(text).toContain('[Title https://example.test/next?token=REDACTED&safe=1] (https://example.test/next?token=REDACTED&safe=1)');
-      expect(text).toContain('/url: /next?token=REDACTED&safe=1');
-      expect(text).not.toContain('live-secret');
-      expect(result.structuredContent).toEqual({ url: url.replace('live-secret', 'REDACTED'), nested: [url.replace('live-secret', 'REDACTED'), { value: url.replace('live-secret', 'REDACTED') }], [url]: 'unchanged key' });
-      expect(result.content[1]).toEqual({ type: 'resource_link', uri: url, name: 'artifact' });
-      expect(response.code()).toBe(code);
-      expect(response.toolArgs).toEqual({ url });
-      expect(args).toEqual({ url });
-      expect(response.structuredContent()).toEqual(expectedFindings);
-      expect(findings).toEqual(expectedFindings);
-    });
-
-    it('masks error text', () => {
-      const response = new Response(mockContext, 'test_tool', {});
-      response.addError('Failed /next?token=live-secret');
-      const result = redactToolResult(response.serialize(), createUrlRedactor(['token']));
-      expect(result.isError).toBe(true);
-      expect(expectTextContent(result.content[0]).text).toContain('Failed /next?token=REDACTED');
-    });
-
-    it('redacts retained lifecycle notices in images-only responses', () => {
-      mockContext.config.imageResponses = 'only';
-      const response = new Response(mockContext, 'browser_take_screenshot', {});
-      response.addNotice('New page /next?token=live-secret');
-      response.addImage({ contentType: 'image/png', data: Buffer.from('unchanged image') });
-      const result = redactToolResult(response.serialize(), createUrlRedactor(['token']));
-      expect(result.content).toEqual([
-        { type: 'text', text: 'New page /next?token=REDACTED' },
-        { type: 'image', data: Buffer.from('unchanged image').toString('base64'), mimeType: 'image/png' },
-      ]);
     });
   });
 

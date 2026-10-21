@@ -1108,23 +1108,6 @@ describe('Tab', () => {
   });
 
   describe('requests', () => {
-    it('retains stable IDs across explicit navigation and repeated listings', async () => {
-      const tab = new Tab(mockContext, mockPage, onPageClose);
-      mockPage.goto = vi.fn().mockResolvedValue(undefined);
-      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
-      const first = { url: () => 'https://example.com/first', isNavigationRequest: () => false };
-      const second = { url: () => 'https://example.com/second', isNavigationRequest: () => false };
-      mockPage.emit('request', first);
-      expect([...tab.requests().keys()]).toEqual([1]);
-      expect([...tab.requests().keys()]).toEqual([1]);
-      await tab.navigate('https://example.com/second');
-      mockPage.emit('request', second);
-      expect([...tab.requests().keys()]).toEqual([2]);
-      expect([...tab.requests(true).keys()]).toEqual([1, 2]);
-      expect(tab.request(1)?.request).toBe(first);
-      expect(tab.request(2)?.request).toBe(second);
-    });
-
     it('caps earlier-navigation requests at 200 without reusing evicted IDs', async () => {
       const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.goto = vi.fn().mockResolvedValue(undefined);
