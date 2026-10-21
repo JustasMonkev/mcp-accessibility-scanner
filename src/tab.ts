@@ -16,6 +16,7 @@
 
 import { EventEmitter } from 'node:events';
 import type * as playwright from 'playwright';
+import type { Request, Response } from 'playwright';
 import { callOnPageNoTrace, waitForCompletion } from './tools/utils.js';
 import { logUnhandledError } from './utils/log.js';
 import { ManualPromise } from './mcp/manualPromise.js';
@@ -53,8 +54,8 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _lastTitle = 'about:blank';
   private _consoleMessages: ConsoleMessage[] = [];
   private _recentConsoleMessages: ConsoleMessage[] = [];
-  private _requests = new Map<number, playwright.Request>();
-  private _requestIds = new WeakMap<playwright.Request, number>();
+  private _requests = new Map<number, Request>();
+  private _requestIds = new WeakMap<Request, number>();
   private _nextRequestId = 0;
   private _navigationRequestId = 0;
   private _mainDocumentStatus: { status: number, statusText: string } | undefined;
@@ -237,7 +238,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this._recentConsoleMessages.push(message);
   }
 
-  private _handleResponse(response: playwright.Response) {
+  private _handleResponse(response: Response) {
     const request = response.request();
     const id = this._requestIds.get(request);
     if (id === undefined || !this._requests.has(id))
@@ -369,11 +370,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this._consoleMessages;
   }
 
-  requests(all = false): Map<number, playwright.Request> {
+  requests(all = false): Map<number, Request> {
     return all ? this._requests : new Map([...this._requests].filter(([id]) => id > this._navigationRequestId));
   }
 
-  request(id: number): playwright.Request | undefined {
+  request(id: number): Request | undefined {
     return this._requests.get(id);
   }
 

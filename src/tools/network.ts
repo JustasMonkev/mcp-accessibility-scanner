@@ -18,7 +18,7 @@ import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 
-import type * as playwright from 'playwright';
+import type { Request, Response } from 'playwright';
 import type { Tab } from '../tab.js';
 
 const requests = defineTabTool({
@@ -79,11 +79,11 @@ const requestDetails = defineTabTool({
   },
 });
 
-function requestLine(index: number, request: playwright.Request): string {
+function requestLine(index: number, request: Request): string {
   return `[${index}] [${request.method().toUpperCase()}] ${truncateDataUrls(request.url())}`;
 }
 
-function renderRequest(index: number, request: playwright.Request, response: playwright.Response | null) {
+function renderRequest(index: number, request: Request, response: Response | null) {
   const line = requestLine(index, request);
   return response ? `${line} => [${response.status()}] ${response.statusText()}` : line;
 }
@@ -96,9 +96,9 @@ type Read<T> = { value: T } | { error: string };
 
 type RequestDetails = {
   index: number,
-  request: playwright.Request,
+  request: Request,
   requestHeaders: Read<Record<string, string>>,
-  response: playwright.Response | null,
+  response: Response | null,
   responseHeaders?: Read<Record<string, string>>,
   responseBody?: Read<Buffer>,
 };
