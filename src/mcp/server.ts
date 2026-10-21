@@ -178,8 +178,8 @@ export function createServer(name: string, version: string, backend: ServerBacke
       signal: ctx.mcpReq.signal,
       requestId: ctx.mcpReq.id,
       sendNotification: notification => {
-        if (notification.method === 'notifications/progress' && typeof notification.params?.message === 'string')
-          return ctx.mcpReq.notify({ ...notification, params: { ...notification.params, message: redactSecrets?.(notification.params.message) ?? notification.params.message } });
+        if (redactSecrets && notification.method === 'notifications/progress' && typeof notification.params?.message === 'string')
+          return ctx.mcpReq.notify({ ...notification, params: { ...notification.params, message: redactSecrets(notification.params.message) } });
         return ctx.mcpReq.notify(notification);
       },
       _meta: ctx.mcpReq._meta,

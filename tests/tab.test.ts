@@ -1121,8 +1121,8 @@ describe('Tab', () => {
       mockPage.emit('request', second);
       expect([...tab.requests().keys()]).toEqual([2]);
       expect([...tab.requests(true).keys()]).toEqual([1, 2]);
-      expect(tab.requests(true).get(1)?.request).toBe(first);
-      expect(tab.requests(true).get(2)?.request).toBe(second);
+      expect(tab.request(1)?.request).toBe(first);
+      expect(tab.request(2)?.request).toBe(second);
     });
 
     it('caps earlier-navigation requests at 200 without reusing evicted IDs', async () => {
@@ -1134,9 +1134,9 @@ describe('Tab', () => {
         mockPage.emit('request', request);
       expect(tab.requests().size).toBe(201);
       await tab.navigate('https://example.com/new');
-      expect(tab.requests(true).size).toBe(200);
-      expect(tab.requests(true).has(1)).toBe(false);
-      expect(tab.requests(true).get(2)?.request).toBe(requests[1]);
+      expect([...tab.requests(true).keys()]).toEqual(Array.from({ length: 200 }, (_, index) => index + 2));
+      expect(tab.request(1)).toBeUndefined();
+      expect(tab.request(2)?.request).toBe(requests[1]);
       mockPage.emit('response', { request: () => requests[0] });
       expect(tab.requests(true).size).toBe(200);
       expect(tab.requests(true).has(1)).toBe(false);
@@ -1150,6 +1150,35 @@ describe('Tab', () => {
       expect(tab.requests(true).size).toBe(200);
       expect(tab.requests(true).has(2)).toBe(false);
       expect(tab.requests(true).has(202)).toBe(true);
+    });
+
+    it('updates retained late responses without overwriting the current document status', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      const old = { isNavigationRequest: () => true, redirectedTo: () => null };
+      const current = { isNavigationRequest: () => true, redirectedTo: () => null };
+      const currentResponse = {
+        request: () => current,
+        frame: () => mockPage.mainFrame(),
+        status: () => 200,
+        statusText: () => 'OK',
+      };
+      const lateResponse = {
+        ...currentResponse,
+        request: () => old,
+        status: () => 500,
+        statusText: () => 'Internal Server Error',
+      };
+      mockPage.emit('request', old);
+      await tab.navigate('https://example.com/new');
+      mockPage.emit('request', current);
+      mockPage.emit('response', currentResponse);
+      expect((await tab.captureSnapshot()).mainDocumentStatus).toEqual({ status: 200, statusText: 'OK' });
+      mockPage.emit('response', lateResponse);
+      expect(tab.request(1)?.response).toBe(lateResponse);
+      expect([...tab.requests().keys()]).toEqual([2]);
+      expect((await tab.captureSnapshot()).mainDocumentStatus).toEqual({ status: 200, statusText: 'OK' });
     });
 
     it('keeps failed requests in history and archives even when navigation fails', async () => {

@@ -56,9 +56,9 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _consoleMessages: ConsoleMessage[] = [];
   private _recentConsoleMessages: ConsoleMessage[] = [];
   private _requests = new Map<number, NetworkRequest>();
-  private _requestHistory = new Map<number, NetworkRequest>();
   private _requestIds = new WeakMap<playwright.Request, number>();
   private _nextRequestId = 0;
+  private _navigationRequestId = 0;
   private _mainDocumentStatus: { status: number, statusText: string } | undefined;
   private _onPageClose: (tab: Tab) => void;
   private _modalStates: ModalState[] = [];
@@ -135,7 +135,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     for (const { event, listener } of this._pageListeners)
       this.page.off(event as any, listener);
     this._pageListeners = [];
-    this._clearRequests();
+    this._requests.clear();
   }
 
   modalStates(): ModalState[] {
@@ -220,20 +220,13 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this._invalidateAriaSnapshot();
   }
 
-  private _archiveRequests() {
-    for (const [id, entry] of this._requests)
-      this._requestHistory.set(id, entry);
-    this._requests.clear();
-    for (const id of this._requestHistory.keys()) {
-      if (this._requestHistory.size <= 200)
+  private _markRequestsNavigation() {
+    for (const id of this._requests.keys()) {
+      if (this._requests.size <= 200)
         break;
-      this._requestHistory.delete(id);
+      this._requests.delete(id);
     }
-  }
-
-  private _clearRequests() {
-    this._requests.clear();
-    this._requestHistory.clear();
+    this._navigationRequestId = this._nextRequestId;
   }
 
   private _invalidateAriaSnapshot() {
@@ -251,16 +244,16 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     const id = this._requestIds.get(request);
     if (id === undefined)
       return;
-    const current = this._requests.get(id);
-    const entry = current ?? this._requestHistory.get(id);
-    if (entry)
-      entry.response = response;
-    if (current && request.isNavigationRequest() && response.frame() === this.page.mainFrame() && !request.redirectedTo())
+    const entry = this._requests.get(id);
+    if (!entry)
+      return;
+    entry.response = response;
+    if (id > this._navigationRequestId && request.isNavigationRequest() && response.frame() === this.page.mainFrame() && !request.redirectedTo())
       this._mainDocumentStatus = { status: response.status(), statusText: response.statusText() };
   }
 
   private _onClose() {
-    this._clearRequests();
+    this._requests.clear();
     this._clearCollectedArtifacts();
     this._onPageClose(this);
   }
@@ -303,7 +296,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   async navigate(url: string, options?: { returnOnDialog?: boolean }) {
     if (options?.returnOnDialog && this.modalStates().length)
       throw new Error(`Cannot navigate while a modal state is present.\n${this.modalStatesMarkdown().join('\n')}`);
-    this._archiveRequests();
+    this._markRequestsNavigation();
     this._clearCollectedArtifacts();
     // Crawlers need the document ready before evaluating it, and cannot hand
     // an open dialog back to the user between their internal navigations.
@@ -383,11 +376,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   requests(all = false): Map<number, NetworkRequest> {
-    return all ? new Map([...this._requestHistory, ...this._requests]) : this._requests;
+    return all ? this._requests : new Map([...this._requests].filter(([id]) => id > this._navigationRequestId));
   }
 
   request(id: number): NetworkRequest | undefined {
-    return this._requests.get(id) ?? this._requestHistory.get(id);
+    return this._requests.get(id);
   }
 
   // Playwright resolves `Request.allHeaders()` and `Response.body()` with no
