@@ -49,8 +49,10 @@ it.each(['result', 'error'])('redacts final %s output and forwarded progress out
     expect(JSON.stringify(result)).not.toContain('synthetic-proxy-secret');
     expect(JSON.stringify(result)).toContain('?code=REDACTED&keep=visible');
     expect(progress).toContainEqual(expect.objectContaining({ progress: 1, total: 2, message: 'Opening https://fixture.test/?code=REDACTED&keep=visible' }));
-    if (mode === 'result')
+    if (mode === 'result') {
+      expect(result.content).toEqual([{ type: 'text', text: 'https://fixture.test/?code=REDACTED&keep=visible' }]);
       expect(result.structuredContent).toEqual({ page: { url: 'https://fixture.test/?code=REDACTED&keep=visible' }, count: 2 });
+    }
   } finally {
     await client.close();
   }
@@ -58,6 +60,7 @@ it.each(['result', 'error'])('redacts final %s output and forwarded progress out
 
 it('redacts tool display fields without changing names or input schema contracts', async () => {
   const url = 'https://fixture.test/?code=synthetic-description-secret';
+  const expectedInputSchema = { type: 'object', properties: { url: { type: 'string', default: url } } };
   const tool = { name: 'fixture', title: url, description: url, annotations: { title: url }, inputSchema: { type: 'object', properties: { url: { type: 'string', default: url } } } };
   const backend: ServerBackend = {
     listTools: async () => [tool],
@@ -69,7 +72,8 @@ it('redacts tool display fields without changing names or input schema contracts
   try {
     const listed = (await client.listTools()).tools[0];
     expect(listed).toMatchObject({ name: 'fixture', title: 'https://fixture.test/?code=REDACTED', description: 'https://fixture.test/?code=REDACTED', annotations: { title: 'https://fixture.test/?code=REDACTED' } });
-    expect(listed.inputSchema).toEqual(tool.inputSchema);
+    expect(listed.inputSchema).toEqual(expectedInputSchema);
+    expect(tool.inputSchema).toEqual(expectedInputSchema);
     expect(tool.description).toBe(url);
   } finally {
     await client.close();

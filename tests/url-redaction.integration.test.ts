@@ -135,9 +135,14 @@ it.each([false, true])('renders snapshots and coalesced recorder rewrites withou
   };
   const log = new SessionLog('/unused', storage, enabled ? ['code'] : []);
   const initial = { name: 'fill', selector: 'input', signals: [], text: 'https://fixture.test/?code=synthetic-recorded-secret&state=old', ariaSnapshot: '- link "Next":\n  - /url: /next?code=synthetic-snapshot-secret\n- text: bs_00000001-0000-4000-8000-000000000000' } as const;
+  const initialAction = { ...initial, signals: [] };
   try {
-    log.logUserAction({ ...initial, signals: [] }, tab, `await page.fill('input', '${initial.text}');`, false);
+    log.logUserAction(initialAction, tab, `await page.fill('input', '${initialAction.text}');`, false);
     await vi.waitFor(() => expect(files.get('/unused/session.md')).toContain('state=old'), { timeout: 3000 });
+    const initialMarkdown = files.get('/unused/session.md');
+    expect(initialMarkdown).toContain(enabled ? 'https://fixture.test/?code=REDACTED&state=old' : initialAction.text);
+    if (enabled)
+      expect(initialMarkdown).not.toContain('synthetic-recorded-secret');
     const updated = { ...initial, signals: [], text: 'https://fixture.test/?code=synthetic-updated-secret&state=new' };
     log.logUserAction(updated, tab, `await page.fill('input', '${updated.text}');`, true);
     await vi.waitFor(() => expect(files.get('/unused/session.md')).toContain('state=new'));
@@ -153,7 +158,7 @@ it.each([false, true])('renders snapshots and coalesced recorder rewrites withou
     }
     expect(files.get('/unused/001.snapshot.yml')).toBe(enabled ? initial.ariaSnapshot.replace('code=synthetic-snapshot-secret', 'code=REDACTED') : initial.ariaSnapshot);
     expect(rendered).not.toContain('state=old');
-    expect(initial.text).toContain('synthetic-recorded-secret');
+    expect(initialAction.text).toBe('https://fixture.test/?code=synthetic-recorded-secret&state=old');
     expect(updated.text).toContain('synthetic-updated-secret');
   } finally {
     tab.dispose();

@@ -347,6 +347,7 @@ describe('Response', () => {
       const code = `await page.goto('${url}');`;
       const args = { url };
       const findings = { url, nested: [url, { value: url }], [url]: 'unchanged key' };
+      const expectedFindings = { url, nested: [url, { value: url }], [url]: 'unchanged key' };
       vi.spyOn(mockTab.page, 'url').mockReturnValue(url);
       vi.spyOn(mockTab, 'lastTitle').mockReturnValue(`Title ${url}`);
       vi.mocked(mockTab.captureSnapshot).mockResolvedValue({
@@ -366,6 +367,9 @@ describe('Response', () => {
       expect(text).toContain('### Open tabs');
       expect(text).toContain('### Ran Playwright code');
       expect(text).toContain('### Page state');
+      expect(text).toContain('Visited https://example.test/next?token=REDACTED&safe=1');
+      expect(text).toContain("await page.goto('https://example.test/next?token=REDACTED&safe=1');");
+      expect(text).toContain('[Title https://example.test/next?token=REDACTED&safe=1] (https://example.test/next?token=REDACTED&safe=1)');
       expect(text).toContain('/url: /next?token=REDACTED&safe=1');
       expect(text).not.toContain('live-secret');
       expect(result.structuredContent).toEqual({ url: url.replace('live-secret', 'REDACTED'), nested: [url.replace('live-secret', 'REDACTED'), { value: url.replace('live-secret', 'REDACTED') }], [url]: 'unchanged key' });
@@ -373,8 +377,8 @@ describe('Response', () => {
       expect(response.code()).toBe(code);
       expect(response.toolArgs).toEqual({ url });
       expect(args).toEqual({ url });
-      expect(response.structuredContent()).toBe(findings);
-      expect(mockTab.page.url()).toBe(url);
+      expect(response.structuredContent()).toEqual(expectedFindings);
+      expect(findings).toEqual(expectedFindings);
     });
 
     it('redacts errors and progress messages without altering progress metadata or input', async () => {

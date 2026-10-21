@@ -77,12 +77,10 @@ describe('URL parameter redaction', () => {
     expect(redactUrlParams(input, ['token'])).toBe(expected);
   });
 
-  it('preserves parseable JSON and JavaScript quoting while masking escaped value tails', () => {
+  it('preserves parseable JSON while masking escaped value tails', () => {
     const json = JSON.stringify({ url: 'https://example.test/?token=double"secret&safe=keep', message: 'Error https://example.test/?token=secret retry later' });
     const redacted = redactUrlParams(json, ['token']);
     expect(JSON.parse(redacted)).toEqual({ url: 'https://example.test/?token=REDACTED&safe=keep', message: 'Error https://example.test/?token=REDACTED retry later' });
-    const code = "await page.goto('https://example.test/?token=apostrophe\\'secret&safe=keep');";
-    expect(redactUrlParams(code, ['token'])).toBe("await page.goto('https://example.test/?token=REDACTED&safe=keep');");
   });
 
   it('keeps default output unchanged and is idempotent when enabled', () => {

@@ -1230,12 +1230,14 @@ describe('Tab', () => {
         redirectedTo: () => null,
       } as any;
 
+      mockPage.emit('request', request);
       mockPage.emit('response', {
         request: () => request,
         frame: () => mockPage.mainFrame(),
         status: () => 402,
         statusText: () => 'Payment Required',
       });
+      expect((await tab.captureSnapshot()).mainDocumentStatus).toEqual({ status: 402, statusText: 'Payment Required' });
 
       await tab.goBack({ waitUntil: 'commit' });
       const snapshot = await tab.captureSnapshot();
