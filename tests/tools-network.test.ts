@@ -20,8 +20,8 @@ import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
 import type { Tab } from '../src/tab.js';
 
-function indexedRequests(entries: Map<unknown, unknown>) {
-  return new Map([...entries].map(([request, response], index) => [index + 1, { request, response }]));
+function indexedRequests<T extends object>(entries: Map<T, unknown>) {
+  return new Map([...entries].map(([request, response], index) => [index + 1, { ...request, existingResponse: () => response }]));
 }
 
 describe('Network Tools', () => {

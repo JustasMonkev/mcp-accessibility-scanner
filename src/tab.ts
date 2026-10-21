@@ -47,15 +47,13 @@ export type TabSnapshot = {
 
 class StaleAriaSnapshotError extends Error {}
 
-type NetworkRequest = { request: playwright.Request, response: playwright.Response | null };
-
 export class Tab extends EventEmitter<TabEventsInterface> {
   readonly context: Context;
   readonly page: playwright.Page;
   private _lastTitle = 'about:blank';
   private _consoleMessages: ConsoleMessage[] = [];
   private _recentConsoleMessages: ConsoleMessage[] = [];
-  private _requests = new Map<number, NetworkRequest>();
+  private _requests = new Map<number, playwright.Request>();
   private _requestIds = new WeakMap<playwright.Request, number>();
   private _nextRequestId = 0;
   private _navigationRequestId = 0;
@@ -101,7 +99,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     listen('request', request => {
       const id = ++this._nextRequestId;
       this._requestIds.set(request, id);
-      this._requests.set(id, { request, response: null });
+      this._requests.set(id, request);
     });
     listen('response', response => this._handleResponse(response));
     listen('close', () => this._onClose());
@@ -242,12 +240,8 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _handleResponse(response: playwright.Response) {
     const request = response.request();
     const id = this._requestIds.get(request);
-    if (id === undefined)
+    if (id === undefined || !this._requests.has(id))
       return;
-    const entry = this._requests.get(id);
-    if (!entry)
-      return;
-    entry.response = response;
     if (id > this._navigationRequestId && request.isNavigationRequest() && response.frame() === this.page.mainFrame() && !request.redirectedTo())
       this._mainDocumentStatus = { status: response.status(), statusText: response.statusText() };
   }
@@ -375,11 +369,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this._consoleMessages;
   }
 
-  requests(all = false): Map<number, NetworkRequest> {
+  requests(all = false): Map<number, playwright.Request> {
     return all ? this._requests : new Map([...this._requests].filter(([id]) => id > this._navigationRequestId));
   }
 
-  request(id: number): NetworkRequest | undefined {
+  request(id: number): playwright.Request | undefined {
     return this._requests.get(id);
   }
 

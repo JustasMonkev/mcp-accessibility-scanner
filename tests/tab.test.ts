@@ -1119,14 +1119,14 @@ describe('Tab', () => {
       await tab.navigate('https://example.com/new');
       expect([...tab.requests(true).keys()]).toEqual(Array.from({ length: 200 }, (_, index) => index + 2));
       expect(tab.request(1)).toBeUndefined();
-      expect(tab.request(2)?.request).toBe(requests[1]);
+      expect(tab.request(2)).toBe(requests[1]);
       mockPage.emit('response', { request: () => requests[0] });
       expect(tab.requests(true).size).toBe(200);
       expect(tab.requests(true).has(1)).toBe(false);
       const response = { request: () => requests[200] };
       mockPage.emit('response', response);
       expect(tab.requests().size).toBe(0);
-      expect(tab.requests(true).get(201)?.response).toBe(response);
+      expect(tab.requests(true).get(201)).toBe(requests[200]);
       mockPage.emit('request', { url: () => 'https://example.com/new' });
       expect([...tab.requests().keys()]).toEqual([202]);
       await tab.navigate('https://example.com/another');
@@ -1135,7 +1135,7 @@ describe('Tab', () => {
       expect(tab.requests(true).has(202)).toBe(true);
     });
 
-    it('updates retained late responses without overwriting the current document status', async () => {
+    it('ignores retained late responses when updating the current document status', async () => {
       const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.goto = vi.fn().mockResolvedValue(undefined);
       mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
@@ -1159,7 +1159,7 @@ describe('Tab', () => {
       mockPage.emit('response', currentResponse);
       expect((await tab.captureSnapshot()).mainDocumentStatus).toEqual({ status: 200, statusText: 'OK' });
       mockPage.emit('response', lateResponse);
-      expect(tab.request(1)?.response).toBe(lateResponse);
+      expect(tab.request(1)).toBe(old);
       expect([...tab.requests().keys()]).toEqual([2]);
       expect((await tab.captureSnapshot()).mainDocumentStatus).toEqual({ status: 200, statusText: 'OK' });
     });
@@ -1172,7 +1172,7 @@ describe('Tab', () => {
       mockPage.emit('requestfailed', failed);
       await expect(tab.navigate('https://example.com/unreachable')).rejects.toThrow('ERR_CONNECTION_REFUSED');
       expect(tab.requests().size).toBe(0);
-      expect(tab.requests(true).get(1)?.request.failure()).toEqual({ errorText: 'net::ERR_FAILED' });
+      expect(tab.requests(true).get(1)?.failure()).toEqual({ errorText: 'net::ERR_FAILED' });
     });
 
     it.each(['close', 'dispose'])('releases all request history on %s', async action => {
@@ -1201,7 +1201,7 @@ describe('Tab', () => {
       mockPage.emit('response', mockResponse);
 
       expect(tab.requests().size).toBe(1);
-      expect(tab.requests().get(1)).toEqual({ request: mockRequest, response: mockResponse });
+      expect(tab.requests().get(1)).toBe(mockRequest);
     });
 
     it('tracks only the final main-document HTTP status', async () => {

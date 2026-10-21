@@ -36,8 +36,8 @@ const requests = defineTabTool({
 
   handle: async (tab, params, response) => {
     const entries = tab.requests(params.all);
-    for (const [index, { request, response: res }] of entries)
-      response.addResult(renderRequest(index, request, res));
+    for (const [index, request] of entries)
+      response.addResult(renderRequest(index, request, request.existingResponse()));
     if (entries.size)
       response.addResult('\nCall browser_network_request with one of the indexes above to see its headers and body metadata.');
   },
@@ -57,17 +57,15 @@ const requestDetails = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    const entry = tab.request(params.index);
-    if (!entry) {
+    const request = tab.request(params.index);
+    if (!request) {
       response.addError(tab.requests(true).size
         ? `Error: No retained network request with index ${params.index}. It may have been evicted; run browser_network_requests with all: true for the retained IDs.`
         : 'Error: No network requests have been recorded since the page was loaded.');
       return;
     }
 
-    // Every read that can block lives here, bounded by the tab's page-state
-    // timeout; the rendering below is pure so it can be tested with plain data.
-    const { request, response: res } = entry;
+    const res = request.existingResponse();
     const details: RequestDetails = {
       index: params.index,
       request,
