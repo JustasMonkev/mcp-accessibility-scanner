@@ -16,6 +16,7 @@
 
 import { EventEmitter } from 'node:events';
 import type * as playwright from 'playwright';
+import type { Request, Response } from 'playwright';
 import { callOnPageNoTrace, waitForCompletion } from './tools/utils.js';
 import { logUnhandledError } from './utils/log.js';
 import { ManualPromise } from './mcp/manualPromise.js';
@@ -53,7 +54,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _lastTitle = 'about:blank';
   private _consoleMessages: ConsoleMessage[] = [];
   private _recentConsoleMessages: ConsoleMessage[] = [];
-  private _requests: Map<playwright.Request, playwright.Response | null> = new Map();
+  private _requests = new Map<number, Request>();
+  private _requestIds = new WeakMap<Request, number>();
+  private _nextRequestId = 0;
+  private _navigationRequestId = 0;
   private _mainDocumentStatus: { status: number, statusText: string } | undefined;
   private _onPageClose: (tab: Tab) => void;
   private _modalStates: ModalState[] = [];
@@ -93,7 +97,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     });
     listen('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
     listen('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
-    listen('request', request => this._requests.set(request, null));
+    listen('request', request => this._addRequest(request));
     listen('response', response => this._handleResponse(response));
     listen('close', () => this._onClose());
     listen('filechooser', chooser => {
@@ -126,6 +130,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     for (const { event, listener } of this._pageListeners)
       this.page.off(event as any, listener);
     this._pageListeners = [];
+    this._requests.clear();
   }
 
   modalStates(): ModalState[] {
@@ -205,10 +210,18 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _clearCollectedArtifacts() {
     this._consoleMessages.length = 0;
     this._recentConsoleMessages.length = 0;
-    this._requests.clear();
     this._mainDocumentStatus = undefined;
     ++this._pageGeneration;
     this._invalidateAriaSnapshot();
+  }
+
+  private _markRequestsNavigation() {
+    for (const id of this._requests.keys()) {
+      if (this._requests.size <= 200)
+        break;
+      this._requests.delete(id);
+    }
+    this._navigationRequestId = this._nextRequestId;
   }
 
   private _invalidateAriaSnapshot() {
@@ -221,14 +234,26 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this._recentConsoleMessages.push(message);
   }
 
-  private _handleResponse(response: playwright.Response) {
+  private _addRequest(request: Request) {
+    const id = ++this._nextRequestId;
+    this._requestIds.set(request, id);
+    this._requests.set(id, request);
+    return id;
+  }
+
+  private _handleResponse(response: Response) {
+    if (this.page.isClosed())
+      return;
     const request = response.request();
-    this._requests.set(request, response);
-    if (request.isNavigationRequest() && response.frame() === this.page.mainFrame() && !request.redirectedTo())
+    const id = this._requestIds.get(request) ?? this._addRequest(request);
+    if (!this._requests.has(id))
+      return;
+    if (id > this._navigationRequestId && request.isNavigationRequest() && response.frame() === this.page.mainFrame() && !request.redirectedTo())
       this._mainDocumentStatus = { status: response.status(), statusText: response.statusText() };
   }
 
   private _onClose() {
+    this._requests.clear();
     this._clearCollectedArtifacts();
     this._onPageClose(this);
   }
@@ -271,6 +296,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   async navigate(url: string, options?: { returnOnDialog?: boolean }) {
     if (options?.returnOnDialog && this.modalStates().length)
       throw new Error(`Cannot navigate while a modal state is present.\n${this.modalStatesMarkdown().join('\n')}`);
+    this._markRequestsNavigation();
     this._clearCollectedArtifacts();
     // Crawlers need the document ready before evaluating it, and cannot hand
     // an open dialog back to the user between their internal navigations.
@@ -349,8 +375,12 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this._consoleMessages;
   }
 
-  requests(): Map<playwright.Request, playwright.Response | null> {
-    return this._requests;
+  requests(all = false): Map<number, Request> {
+    return all ? this._requests : new Map([...this._requests].filter(([id]) => id > this._navigationRequestId));
+  }
+
+  request(id: number): Request | undefined {
+    return this._requests.get(id);
   }
 
   // Playwright resolves `Request.allHeaders()` and `Response.body()` with no

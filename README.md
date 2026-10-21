@@ -329,6 +329,7 @@ Create a `config.json` file with the following options:
 - `server.authToken`: When set, Streamable HTTP requests (`--port`) require `Authorization: Bearer <token>` or return `401` (env: `PLAYWRIGHT_MCP_AUTH_TOKEN`). Blank or malformed tokens fail at startup. The scheme is case-insensitive; the token is exact. Bearer auth does not encrypt traffic: authenticated listeners must bind to loopback, such as `--host 127.0.0.1`; use a TLS reverse proxy for remote access. The printed client config includes a header placeholder to replace locally, without logging the secret. Unset keeps unauthenticated access.
 - `filePaths`: Optional `relative` or `absolute` rendering for output paths in screenshot/PDF results and generated code, report metadata, annotated/keyboard screenshots, and download summaries. Relative paths are based on the **server working directory**, not the client workspace or output directory. File writes, stored report contents, and absolute `file://` resource URIs are unchanged. Omitted preserves legacy rendering: configured relative output directories produce relative paths, while default temp output paths are absolute (unlike upstream Playwright’s relative default). CLI: `--file-paths absolute`; env: `PLAYWRIGHT_MCP_FILE_PATHS=absolute`. Precedence: CLI, then environment, then config file.
 - `outputDir`: Directory for output files — reports, screenshots, traces, and session logs (CLI: `--output-dir`, env: `PLAYWRIGHT_MCP_OUTPUT_DIR`). Defaults to a fresh directory under the system temp folder, resolved once per server run so all of a run's artifacts land together. The output location is always server configuration; the deprecated MCP roots capability (client workspace folders) is no longer consulted.
+- `redactUrlParams`: Optional array of URL query/fragment parameter names whose nonempty values are rendered as `REDACTED` (CLI: `--redact-url-params code,access_token`; env: `PLAYWRIGHT_MCP_REDACT_URL_PARAMS=code,access_token`). Defaults to no URL-parameter redaction. Names match literally and case-insensitively, without decoding keys; repeated matches, relative links and hash-route query parameters are included. Empty values and unselected parameters are preserved. CLI overrides environment, which overrides the config file; lists replace rather than merge. `[]` in JSON or an empty CLI/environment value clears a lower-precedence list. Non-array config values, non-string entries and blank names fail before browser startup. See [URL redaction coverage](#url-redaction-coverage) before sharing output or artifacts.
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
@@ -807,18 +808,38 @@ Returns all console messages from the page.
 Large `data:` URL payloads in console messages are truncated to their media type prefix.
 
 #### `browser_network_requests`
-Returns all network requests since loading the page, numbered so a single one can be inspected with `browser_network_request`.
+Returns the current request list, numbered so a single request can be inspected with `browser_network_request`. Set `all: true` to include up to 200 retained requests from earlier explicit `browser_navigate` calls, alongside all current requests.
 Large `data:` URL payloads in request URLs are truncated to their media type prefix.
 When there is at least one request, a closing line points at `browser_network_request`.
 
 #### `browser_network_request`
 Returns credential-redacted request/response headers and body metadata for one request from the `browser_network_requests` listing.
-- Parameters: `index` (the number shown in the listing, starting at 1)
-- The listing is cleared by `browser_navigate` and when the tab closes; other navigations (link clicks, form submits, `history` calls) leave it in place and keep appending. Re-run `browser_network_requests` to get current indexes.
+- Parameters: `index` (the request ID shown in either listing). IDs start at 1 for each tab and increase for its lifetime; they are never renumbered or reused after navigation or eviction. Current lists can therefore start above 1 and contain gaps.
+- By default, the listing still resets on explicit `browser_navigate`; link clicks, form submits and `history` calls keep appending, as before. `all: true` adds retained earlier requests. Detail lookup accepts any retained ID even when it is absent from the default list. After the oldest historical request is evicted, its ID returns an error rather than identifying another request. Closing or disposing the tab clears both lists. Each tab and browser session owns its own history and IDs; use an ID with its originating tab/session.
+- IDs do not survive server restarts or recreated browser-session contexts. Stateless clients should use an explicit browser session when they need retained browser state across requests.
 - Credential-bearing headers (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`) are reported as `<redacted, N characters>`, so their presence and size stay visible but the secret never reaches the transcript. All other headers are reported in full, one line each.
 - Request and response body contents are never returned because they can contain submitted credentials or private API data. Non-empty bodies are reported as `<redacted, N bytes, mime/type>`; empty bodies remain `<empty>`.
 - A request that failed after its response arrived reports both the status and the failure.
 - Sections that could not be read are reported in place (`<headers unavailable: ...>`, `<body unavailable: ...>`) rather than failing the whole call; reads are bounded by the default timeout, so a still-streaming response cannot hang the tool.
+
+### URL redaction coverage
+
+`--redact-url-params code,access_token` is an opt-in output convenience, not a security boundary. It follows the [upstream Playwright text-matching policy](UPSTREAM.md): a literal configured name after `?`, `&` or `#`, followed by `=`, starts a match anywhere in text, including prose. Keys are not decoded, so `code` does not match `c%6Fde`. Values stop at `&`, `#`, whitespace, quotes, angle brackets, parentheses, square brackets, backticks or backslashes. Suffixes after these delimiters remain visible; for example, `?code=first'tail` becomes `?code=REDACTED'tail`. Percent-encoded value characters are masked as ordinary text. This does not find arbitrary secrets or decode whole percent-encoded URL blobs.
+
+The `REDACTED` marker is URL-safe, including in Markdown links and generated code. A displayed code snippet with masked parameters no longer reproduces the original credentials, even though the code actually executed and the browser URL are unchanged.
+
+| Surface | Policy when enabled |
+| --- | --- |
+| MCP tool-result text, including page/tab URLs, snapshots, network history/details, errors and displayed code | Selected URL values masked |
+| Structured result content | String values masked recursively; property keys, numbers and booleans unchanged |
+| MCP progress messages and tool-list titles/descriptions | Display text masked; request tokens, tool names and input schemas unchanged |
+| `--save-session` Markdown and associated snapshot YAML, including recorder updates | Selected URL values masked |
+| Raw accessibility JSON/HTML reports, `browser_find` file exports and separately saved code | Unchanged |
+| Screenshots, PDFs, video, traces, downloads, storage state and embedded resources | Unchanged |
+| Resource-link objects/URIs and file locations | Unchanged so links remain usable |
+| Navigation arguments, live browser URLs/requests, extension connection handoff/Chrome arguments, startup/debug logs, initialization and JSON-RPC protocol errors | Unchanged |
+
+The output policy applies to standalone, CDP, extension, provider-switching and VS Code MCP serving. Existing credential-header and request/response-body redaction is independent and remains enabled without this option. Do not share excluded artifacts as though they were sanitized. The separately installed browser extension owns its connection page; this server does not remove its token from that external UI or change its authenticated handoff.
 
 ### Utility Tools
 

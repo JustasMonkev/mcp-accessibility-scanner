@@ -19,6 +19,7 @@ import coreBundle from 'playwright-core/lib/coreBundle';
 const { asLocator } = coreBundle.iso;
 
 import type * as playwright from 'playwright';
+import type { Request } from 'playwright';
 import type { Tab } from '../tab.js';
 
 // How long an action that finished quietly is watched for work it scheduled
@@ -29,7 +30,7 @@ const quietWindowMs = 100;
 
 export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>): Promise<R> {
   const settleMs = tab.context.config.timeouts.settle ?? 500;
-  const requests = new Set<playwright.Request>();
+  const requests = new Set<Request>();
   let requestSeen = false;
   let frameNavigated = false;
   let waitCallback: () => void = () => {};
@@ -38,7 +39,7 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
   let signalCallback: () => void = () => {};
   const firstSignal = new Promise<void>(f => { signalCallback = f; });
 
-  const requestListener = (request: playwright.Request) => {
+  const requestListener = (request: Request) => {
     requestSeen = true;
     requests.add(request);
     signalCallback();
@@ -47,7 +48,7 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
   // `requestfailed` and never `requestfinished`. Without the same removal path
   // it would sit in the set until the 10s timeout below, turning a click that
   // fired one doomed fetch into a ten-second tool call.
-  const requestSettledListener = (request: playwright.Request) => {
+  const requestSettledListener = (request: Request) => {
     requests.delete(request);
     if (!requests.size)
       waitCallback();

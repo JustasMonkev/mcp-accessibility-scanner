@@ -18,7 +18,7 @@ import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 
-import type * as playwright from 'playwright';
+import type { Request, Response } from 'playwright';
 import type { Tab } from '../tab.js';
 
 const requests = defineTabTool({
@@ -27,15 +27,18 @@ const requests = defineTabTool({
   schema: {
     name: 'browser_network_requests',
     title: 'List network requests',
-    description: 'Returns all network requests since loading the page',
-    inputSchema: z.object({}),
+    description: 'Returns network requests since the last explicit navigation, optionally including up to 200 requests from earlier navigations in this tab',
+    inputSchema: z.object({
+      all: z.boolean().optional().describe('Include up to 200 requests from earlier explicit navigations in this tab'),
+    }),
     type: 'readOnly',
   },
 
   handle: async (tab, params, response) => {
-    const entries = [...tab.requests().entries()];
-    entries.forEach(([req, res], index) => response.addResult(renderRequest(index + 1, req, res)));
-    if (entries.length)
+    const entries = tab.requests(params.all);
+    for (const [index, request] of entries)
+      response.addResult(renderRequest(index, request, request.existingResponse()));
+    if (entries.size)
       response.addResult('\nCall browser_network_request with one of the indexes above to see its headers and body metadata.');
   },
 });
@@ -48,24 +51,21 @@ const requestDetails = defineTabTool({
     title: 'Get network request details',
     description: 'Returns credential-redacted headers and body metadata for a single network request listed by browser_network_requests',
     inputSchema: z.object({
-      index: z.number().int().min(1).describe('Index of the request in the browser_network_requests listing, starting at 1'),
+      index: z.number().int().min(1).describe('Stable request ID from browser_network_requests; IDs are not reused in this tab'),
     }),
     type: 'readOnly',
   },
 
   handle: async (tab, params, response) => {
-    const entries = [...tab.requests().entries()];
-    const entry = entries[params.index - 1];
-    if (!entry) {
-      response.addError(entries.length
-        ? `Error: No network request with index ${params.index}. The current list is numbered 1 to ${entries.length}; run browser_network_requests for the up-to-date list.`
+    const request = tab.request(params.index);
+    if (!request) {
+      response.addError(tab.requests(true).size
+        ? `Error: No retained network request with index ${params.index}. It may have been evicted; run browser_network_requests with all: true for the retained IDs.`
         : 'Error: No network requests have been recorded since the page was loaded.');
       return;
     }
 
-    // Every read that can block lives here, bounded by the tab's page-state
-    // timeout; the rendering below is pure so it can be tested with plain data.
-    const [request, res] = entry;
+    const res = request.existingResponse();
     const details: RequestDetails = {
       index: params.index,
       request,
@@ -79,11 +79,11 @@ const requestDetails = defineTabTool({
   },
 });
 
-function requestLine(index: number, request: playwright.Request): string {
+function requestLine(index: number, request: Request): string {
   return `[${index}] [${request.method().toUpperCase()}] ${truncateDataUrls(request.url())}`;
 }
 
-function renderRequest(index: number, request: playwright.Request, response: playwright.Response | null) {
+function renderRequest(index: number, request: Request, response: Response | null) {
   const line = requestLine(index, request);
   return response ? `${line} => [${response.status()}] ${response.statusText()}` : line;
 }
@@ -96,9 +96,9 @@ type Read<T> = { value: T } | { error: string };
 
 type RequestDetails = {
   index: number,
-  request: playwright.Request,
+  request: Request,
   requestHeaders: Read<Record<string, string>>,
-  response: playwright.Response | null,
+  response: Response | null,
   responseHeaders?: Read<Record<string, string>>,
   responseBody?: Read<Buffer>,
 };

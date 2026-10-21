@@ -34,6 +34,7 @@ describe('Tab', () => {
     mockPage.url = vi.fn().mockReturnValue('https://example.com');
     mockPage.title = vi.fn().mockResolvedValue('Example Page');
     mockPage.mainFrame = vi.fn().mockReturnValue('main-frame');
+    mockPage.isClosed = vi.fn().mockReturnValue(false);
     mockPage.waitForTimeout = vi.fn().mockResolvedValue(undefined);
     mockPage._wrapApiCall = vi.fn(async (callback: () => Promise<unknown>) => await callback());
     mockPage.setDefaultNavigationTimeout = vi.fn();
@@ -1108,6 +1109,113 @@ describe('Tab', () => {
   });
 
   describe('requests', () => {
+    it('caps earlier-navigation requests at 200 without reusing evicted IDs', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      const requests = Array.from({ length: 201 }, (_, index) => ({ url: () => `https://example.com/${index}`, isNavigationRequest: () => false }));
+      for (const request of requests)
+        mockPage.emit('request', request);
+      expect(tab.requests().size).toBe(201);
+      await tab.navigate('https://example.com/new');
+      expect([...tab.requests(true).keys()]).toEqual(Array.from({ length: 200 }, (_, index) => index + 2));
+      expect(tab.request(1)).toBeUndefined();
+      expect(tab.request(2)).toBe(requests[1]);
+      mockPage.emit('response', { request: () => requests[0] });
+      expect(tab.requests(true).size).toBe(200);
+      expect(tab.requests(true).has(1)).toBe(false);
+      const response = { request: () => requests[200] };
+      mockPage.emit('response', response);
+      expect(tab.requests().size).toBe(0);
+      expect(tab.requests(true).get(201)).toBe(requests[200]);
+      mockPage.emit('request', { url: () => 'https://example.com/new' });
+      expect([...tab.requests().keys()]).toEqual([202]);
+      await tab.navigate('https://example.com/another');
+      expect(tab.requests(true).size).toBe(200);
+      expect(tab.requests(true).has(2)).toBe(false);
+      expect(tab.requests(true).has(202)).toBe(true);
+    });
+
+    it('ignores retained late responses when updating the current document status', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      const old = { isNavigationRequest: () => true, redirectedTo: () => null };
+      const current = { isNavigationRequest: () => true, redirectedTo: () => null };
+      const currentResponse = {
+        request: () => current,
+        frame: () => mockPage.mainFrame(),
+        status: () => 200,
+        statusText: () => 'OK',
+      };
+      const lateResponse = {
+        ...currentResponse,
+        request: () => old,
+        status: () => 500,
+        statusText: () => 'Internal Server Error',
+      };
+      mockPage.emit('request', old);
+      await tab.navigate('https://example.com/new');
+      mockPage.emit('request', current);
+      mockPage.emit('response', currentResponse);
+      expect((await tab.captureSnapshot()).mainDocumentStatus).toEqual({ status: 200, statusText: 'OK' });
+      mockPage.emit('response', lateResponse);
+      expect(tab.request(1)).toBe(old);
+      expect([...tab.requests().keys()]).toEqual([2]);
+      expect((await tab.captureSnapshot()).mainDocumentStatus).toEqual({ status: 200, statusText: 'OK' });
+    });
+
+    it('keeps failed requests in history and archives even when navigation fails', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockPage.goto = vi.fn().mockRejectedValue(new Error('net::ERR_CONNECTION_REFUSED'));
+      const failed = { url: () => 'https://example.com/failed', failure: () => ({ errorText: 'net::ERR_FAILED' }) };
+      mockPage.emit('request', failed);
+      mockPage.emit('requestfailed', failed);
+      await expect(tab.navigate('https://example.com/unreachable')).rejects.toThrow('ERR_CONNECTION_REFUSED');
+      expect(tab.requests().size).toBe(0);
+      expect(tab.requests(true).get(1)?.failure()).toEqual({ errorText: 'net::ERR_FAILED' });
+    });
+
+    it.each(['close', 'dispose'])('releases all request history on %s', async action => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      const old = { url: () => 'https://example.com/old', isNavigationRequest: () => false };
+      mockPage.emit('request', old);
+      await tab.navigate('https://example.com/new');
+      mockPage.emit('request', { url: () => 'https://example.com/new' });
+      if (action === 'dispose') {
+        tab.dispose();
+      } else {
+        mockPage.isClosed.mockReturnValue(true);
+        mockPage.emit('close');
+      }
+      mockPage.emit('response', { request: () => old });
+      mockPage.emit('response', { request: () => ({ isNavigationRequest: () => false }) });
+      expect(tab.requests(true).size).toBe(0);
+    });
+
+    it('retains responses for requests that started before the tab was attached', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const request = { isNavigationRequest: () => true, redirectedTo: () => null };
+      const response = {
+        request: () => request,
+        frame: () => mockPage.mainFrame(),
+        status: () => 402,
+        statusText: () => 'Payment Required',
+      };
+
+      mockPage.emit('response', response);
+      expect([...tab.requests().keys()]).toEqual([1]);
+      expect(tab.request(1)).toBe(request);
+      expect((await tab.captureSnapshot()).mainDocumentStatus).toEqual({ status: 402, statusText: 'Payment Required' });
+      mockPage.emit('response', response);
+      expect([...tab.requests(true).keys()]).toEqual([1]);
+      expect(tab.requests().get(1)).toBe(request);
+      mockPage.emit('request', { isNavigationRequest: () => false });
+      expect([...tab.requests().keys()]).toEqual([1, 2]);
+    });
+
     it('should track network requests', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
 
@@ -1118,7 +1226,7 @@ describe('Tab', () => {
       mockPage.emit('response', mockResponse);
 
       expect(tab.requests().size).toBe(1);
-      expect(tab.requests().get(mockRequest)).toBe(mockResponse);
+      expect(tab.requests().get(1)).toBe(mockRequest);
     });
 
     it('tracks only the final main-document HTTP status', async () => {
@@ -1132,6 +1240,8 @@ describe('Tab', () => {
         redirectedTo: () => null,
       } as any;
 
+      mockPage.emit('request', redirectedRequest);
+      mockPage.emit('request', finalRequest);
       mockPage.emit('response', {
         request: () => redirectedRequest,
         frame: () => mockPage.mainFrame(),
@@ -1157,12 +1267,14 @@ describe('Tab', () => {
         redirectedTo: () => null,
       } as any;
 
+      mockPage.emit('request', request);
       mockPage.emit('response', {
         request: () => request,
         frame: () => mockPage.mainFrame(),
         status: () => 402,
         statusText: () => 'Payment Required',
       });
+      expect((await tab.captureSnapshot()).mainDocumentStatus).toEqual({ status: 402, statusText: 'Payment Required' });
 
       await tab.goBack({ waitUntil: 'commit' });
       const snapshot = await tab.captureSnapshot();

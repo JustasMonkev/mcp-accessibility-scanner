@@ -350,6 +350,7 @@ export async function runVSCodeTools(config: FullConfig, registerExitCleanup?: (
     name: 'Playwright w/ vscode',
     nameInConfig: 'playwright-vscode',
     version: packageJSON.version,
+    redactUrlParams: config.redactUrlParams,
     create: () => createBackend(false),
     createStateless: () => createBackend(true, sharedSlot),
   };

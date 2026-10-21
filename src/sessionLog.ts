@@ -22,6 +22,7 @@ import { Response } from './response.js';
 import { createShortGuid } from './utils/guid.js';
 import { logUnhandledError } from './utils/log.js';
 import { outputFile } from './config.js';
+import { createUrlRedactor } from './utils/urlRedaction.js';
 
 import type { FullConfig } from './config.js';
 import type * as actions from './actions.js';
@@ -116,10 +117,13 @@ export class SessionLog {
   private _storage: IFileStorage;
   private _lastFlushedAction = new WeakMap<Tab, { action: actions.Action; browserSessionId?: string; code: string; marker: string }>();
 
-  constructor(sessionFolder: string, storage: IFileStorage = new NodeFileStorage()) {
+  private _redactSecrets: ((text: string) => string) | undefined;
+
+  constructor(sessionFolder: string, storage: IFileStorage = new NodeFileStorage(), redactUrlParams?: readonly string[]) {
     this._folder = sessionFolder;
     this._file = path.join(this._folder, 'session.md');
     this._storage = storage;
+    this._redactSecrets = createUrlRedactor(redactUrlParams);
   }
 
   static async create(config: FullConfig): Promise<SessionLog> {
@@ -131,7 +135,7 @@ export class SessionLog {
     await fs.promises.mkdir(sessionFolder, { recursive: true });
     // eslint-disable-next-line no-console
     console.error(`Session: ${sessionFolder}`);
-    return new SessionLog(sessionFolder);
+    return new SessionLog(sessionFolder, new NodeFileStorage(), config.redactUrlParams);
   }
 
   /**
@@ -182,8 +186,8 @@ export class SessionLog {
           .catch(logUnhandledError)
           .then(async () => {
             const content = await this._storage.readFile(this._file);
-            const oldBlock = redactSessionHandles(renderUserAction(previousAction, flushed.browserSessionId, previousCode).join('\n'));
-            const newBlock = redactSessionHandles(renderUserAction(flushed.action, flushed.browserSessionId, flushed.code).join('\n'));
+            const oldBlock = this._redact(renderUserAction(previousAction, flushed.browserSessionId, previousCode).join('\n'));
+            const newBlock = this._redact(renderUserAction(flushed.action, flushed.browserSessionId, flushed.code).join('\n'));
             const markerIndex = content.indexOf(flushed.marker);
             if (markerIndex === -1)
               return;
@@ -275,7 +279,7 @@ export class SessionLog {
 
       if (entry.tabSnapshot) {
         const fileName = `${ordinal}.snapshot.yml`;
-        this._storage.writeFile(path.join(this._folder, fileName), entry.tabSnapshot.ariaSnapshot).catch(logUnhandledError);
+        this._storage.writeFile(path.join(this._folder, fileName), this._redactSecrets?.(entry.tabSnapshot.ariaSnapshot) ?? entry.tabSnapshot.ariaSnapshot).catch(logUnhandledError);
         const marker = `- Snapshot: ${fileName}`;
         lines.push(marker);
         if (entry.userAction && entry.tab) {
@@ -293,7 +297,12 @@ export class SessionLog {
 
     this._sessionFileQueue = this._sessionFileQueue
         .catch(logUnhandledError)
-        .then(() => this._storage.appendFile(this._file, redactSessionHandles(lines.join('\n'))))
+        .then(() => this._storage.appendFile(this._file, this._redact(lines.join('\n'))))
         .catch(logUnhandledError);
+  }
+
+  private _redact(text: string): string {
+    const redacted = redactSessionHandles(text);
+    return this._redactSecrets?.(redacted) ?? redacted;
   }
 }

@@ -43,6 +43,7 @@ async function main(config: FullConfig, connectionString: string, lib: string) {
         name: 'Playwright MCP',
         nameInConfig: 'playwright-vscode',
         create: () => new BrowserServerBackend(config, factory),
+        redactUrlParams: config.redactUrlParams,
         version: 'unused'
       },
       new StdioServerTransport(),

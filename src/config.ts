@@ -59,6 +59,7 @@ export type CLIOptions = {
     profileDirName?: string;
     proxyBypass?: string;
     proxyServer?: string;
+    redactUrlParams?: string[];
     saveSession?: boolean;
     saveTrace?: boolean;
     snapshotBoxes?: boolean;
@@ -137,6 +138,11 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
 // env, CLI, programmatic Config) is covered. Only undefined/null count as
 // omitted — the nullish semantics the fallback historically used.
 async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
+  if (config.redactUrlParams !== undefined) {
+    if (!Array.isArray(config.redactUrlParams) || config.redactUrlParams.some(name => typeof name !== 'string' || !name.trim()))
+      throw new Error('redactUrlParams must be an array of non-blank parameter names. Use [] to disable URL parameter redaction.');
+    config.redactUrlParams = config.redactUrlParams.map(name => name.trim());
+  }
   if (config.allowedTools !== undefined || config.blockedTools !== undefined) {
     const { validateToolPolicy } = await import('./tools.js');
     validateToolPolicy(config);
@@ -322,6 +328,7 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
     capabilities: cliOptions.caps as ToolCapability[],
     allowedTools: cliOptions.allowedTools,
     blockedTools: cliOptions.blockedTools,
+    redactUrlParams: cliOptions.redactUrlParams,
     network: {
       allowedOrigins: cliOptions.allowedOrigins,
       blockedOrigins: cliOptions.blockedOrigins,
@@ -353,6 +360,7 @@ function cliOptionsFromEnv(): CLIOptions {
   options.caps = commaSeparatedList(process.env.PLAYWRIGHT_MCP_CAPS);
   options.allowedTools = toolNameList(process.env.PLAYWRIGHT_MCP_ALLOWED_TOOLS);
   options.blockedTools = toolNameList(process.env.PLAYWRIGHT_MCP_BLOCKED_TOOLS);
+  options.redactUrlParams = toolNameList(process.env.PLAYWRIGHT_MCP_REDACT_URL_PARAMS);
   options.cdpLaunchArgs = commaSeparatedList(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_ARGS);
   options.cdpLaunchCommand = envToString(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND);
   options.cdpLaunchCwd = envToString(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_CWD);

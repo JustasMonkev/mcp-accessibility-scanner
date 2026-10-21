@@ -154,6 +154,52 @@ describe('session log folders', () => {
     }
   });
 
+  it.each([false, true])('renders snapshots and coalesced recorder rewrites without changing the recorded action (enabled: %s)', async enabled => {
+    vi.useFakeTimers();
+    try {
+      const tab = { context: { options: {} }, page: { url: () => 'https://fixture.test/' } } as Parameters<SessionLog['logUserAction']>[1];
+      const files = new Map<string, string>();
+      const storage = {
+        readFile: async (file: string) => files.get(file) ?? '',
+        writeFile: async (file: string, content: string) => { files.set(file, content); },
+        appendFile: async (file: string, content: string) => { files.set(file, (files.get(file) ?? '') + content); },
+      };
+      const log = new SessionLog('/unused', storage, enabled ? ['code'] : []);
+      const initial = { name: 'fill', selector: 'input', signals: [], text: 'https://fixture.test/?code=synthetic-recorded-secret&state=old', ariaSnapshot: '- link "Next":\n  - /url: /next?code=synthetic-snapshot-secret\n- text: bs_00000001-0000-4000-8000-000000000000' } as const;
+      const initialAction = { ...initial, signals: [] };
+      log.logUserAction(initialAction, tab, `await page.fill('input', '${initialAction.text}');`, false);
+      await vi.advanceTimersByTimeAsync(1000);
+      const initialMarkdown = files.get('/unused/session.md');
+      expect(initialMarkdown).toContain(enabled ? 'https://fixture.test/?code=REDACTED&state=old' : initialAction.text);
+      if (enabled)
+        expect(initialMarkdown).not.toContain('synthetic-recorded-secret');
+      const updated = { ...initial, signals: [], text: 'https://fixture.test/?code=synthetic-updated-secret&state=new' };
+      log.logUserAction(updated, tab, `await page.fill('input', '${updated.text}');`, true);
+      await vi.advanceTimersByTimeAsync(0);
+      const rendered = [...files.values()].join('\n');
+      const expectedText = enabled ? 'https://fixture.test/?code=REDACTED&state=new' : updated.text;
+      expect(files.get('/unused/session.md')).toContain(`"text": "${expectedText}"`);
+      expect(files.get('/unused/session.md')).toContain(`await page.fill('input', '${expectedText}');`);
+      if (enabled) {
+        expect(rendered).not.toContain('synthetic-recorded-secret');
+        expect(rendered).not.toContain('synthetic-snapshot-secret');
+        expect(rendered).not.toContain('synthetic-updated-secret');
+        expect(rendered).toContain('REDACTED');
+      } else {
+        expect(rendered).toContain('synthetic-snapshot-secret');
+        expect(rendered).toContain('synthetic-updated-secret');
+      }
+      expect(files.get('/unused/001.snapshot.yml')).toBe(enabled ? initial.ariaSnapshot.replace('code=synthetic-snapshot-secret', 'code=REDACTED') : initial.ariaSnapshot);
+      expect(rendered).not.toContain('state=old');
+      expect(initialAction.text).toBe('https://fixture.test/?code=synthetic-recorded-secret&state=old');
+      expect(initialAction.ariaSnapshot).toBe(initial.ariaSnapshot);
+      expect(updated.text).toBe('https://fixture.test/?code=synthetic-updated-secret&state=new');
+      expect(updated.ariaSnapshot).toBe(initial.ariaSnapshot);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('never writes a live session handle, keeping sessions distinguishable by label', async () => {
     vi.useFakeTimers();
     try {
@@ -257,7 +303,7 @@ describe('session log folders', () => {
         result: () => '',
         isError: () => false,
         code: () => "await page.goto('https://b.example/');",
-        tabSnapshot: () => ({ url: 'https://b.example/' }),
+        tabSnapshot: () => ({ url: 'https://b.example/', ariaSnapshot: '' }),
       } as any);
       log.logUserAction(navigate, tab, "await page.goto('https://a.example/');", false);
       log.logUserAction({ name: 'click' } as any, tab, "await page.getByText('Ready').click();", false);

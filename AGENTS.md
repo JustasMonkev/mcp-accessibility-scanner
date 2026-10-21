@@ -3,6 +3,7 @@
 - Built output lives in `lib/` and should be treated as generated artifacts.
 - Keep changes focused and minimal; fix root causes instead of layering workarounds.
 - Match the existing TypeScript and ESM style already used in `src/`.
+- Use named Playwright type imports for `Request` and `Response`; never use `playwright.Request` or `playwright.Response`.
 - Do not rename the published package, binary name, or exported tool names unless explicitly requested.
 - Update `README.md` when user-facing behavior, commands, configuration, or tool surfaces change.
 - Prefer editing source files in `src/`; do not hand-edit generated files in `lib/`.
