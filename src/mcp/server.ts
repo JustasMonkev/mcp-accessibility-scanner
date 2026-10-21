@@ -20,7 +20,7 @@ import { ProtocolError, ProtocolErrorCode, Server } from '@modelcontextprotocol/
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
 import { InProcessTransport } from './inProcessTransport.js';
-import { redactToolResult, redactUrlParams } from '../utils/urlRedaction.js';
+import { createUrlRedactor, redactToolResult } from '../utils/urlRedaction.js';
 
 import type { CacheHint, Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
 export type { Server } from '@modelcontextprotocol/server';
@@ -97,6 +97,7 @@ export async function wrapInProcess(backend: ServerBackend): Promise<Transport> 
 }
 
 export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean, metadata?: ServerMetadata, heartbeatReady: Promise<void> = Promise.resolve()): Server {
+  const redactSecrets = createUrlRedactor(metadata?.redactUrlParams);
   const server = new Server({ name, version, title: metadata?.title }, {
     capabilities: {
       tools: {
@@ -149,16 +150,16 @@ export function createServer(name: string, version: string, backend: ServerBacke
     serverDebug('listTools');
     await ensureInitialized();
     const tools = await backend.listTools({ _meta: ctx.mcpReq._meta, signal: ctx.mcpReq.signal });
-    if (!metadata?.redactUrlParams?.length)
+    if (!redactSecrets)
       return { tools };
     return { tools: tools.map(tool => {
       const rendered = { ...tool };
       if (typeof tool.title === 'string')
-        rendered.title = redactUrlParams(tool.title, metadata.redactUrlParams);
+        rendered.title = redactSecrets(tool.title);
       if (typeof tool.description === 'string')
-        rendered.description = redactUrlParams(tool.description, metadata.redactUrlParams);
+        rendered.description = redactSecrets(tool.description);
       if (typeof tool.annotations?.title === 'string')
-        rendered.annotations = { ...tool.annotations, title: redactUrlParams(tool.annotations.title, metadata.redactUrlParams) };
+        rendered.annotations = { ...tool.annotations, title: redactSecrets(tool.annotations.title) };
       return rendered;
     }) };
   });
@@ -178,13 +179,13 @@ export function createServer(name: string, version: string, backend: ServerBacke
       requestId: ctx.mcpReq.id,
       sendNotification: notification => {
         if (notification.method === 'notifications/progress' && typeof notification.params?.message === 'string')
-          return ctx.mcpReq.notify({ ...notification, params: { ...notification.params, message: redactUrlParams(notification.params.message, metadata?.redactUrlParams) } });
+          return ctx.mcpReq.notify({ ...notification, params: { ...notification.params, message: redactSecrets?.(notification.params.message) ?? notification.params.message } });
         return ctx.mcpReq.notify(notification);
       },
       _meta: ctx.mcpReq._meta,
     };
     try {
-      return redactToolResult(await backend.callTool(request.params.name, request.params.arguments || {}, requestContext), metadata?.redactUrlParams);
+      return redactToolResult(await backend.callTool(request.params.name, request.params.arguments || {}, requestContext), redactSecrets);
     } catch (error) {
       // Protocol-level failures (e.g. unknown tool) surface as JSON-RPC
       // errors; only tool execution failures become isError results.
@@ -196,7 +197,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
       return redactToolResult({
         content: [{ type: 'text', text: '### Result\n' + String(error) }],
         isError: true,
-      }, metadata?.redactUrlParams);
+      }, redactSecrets);
     }
   });
   addServerListener(server, 'initialized', () => {

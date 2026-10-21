@@ -22,7 +22,7 @@ import { Response } from './response.js';
 import { createShortGuid } from './utils/guid.js';
 import { logUnhandledError } from './utils/log.js';
 import { outputFile } from './config.js';
-import { redactUrlParams } from './utils/urlRedaction.js';
+import { createUrlRedactor } from './utils/urlRedaction.js';
 
 import type { FullConfig } from './config.js';
 import type * as actions from './actions.js';
@@ -117,10 +117,13 @@ export class SessionLog {
   private _storage: IFileStorage;
   private _lastFlushedAction = new WeakMap<Tab, { action: actions.Action; browserSessionId?: string; code: string; marker: string }>();
 
-  constructor(sessionFolder: string, storage: IFileStorage = new NodeFileStorage(), private readonly _redactUrlParams: readonly string[] = []) {
+  private _redactSecrets: ((text: string) => string) | undefined;
+
+  constructor(sessionFolder: string, storage: IFileStorage = new NodeFileStorage(), redactUrlParams?: readonly string[]) {
     this._folder = sessionFolder;
     this._file = path.join(this._folder, 'session.md');
     this._storage = storage;
+    this._redactSecrets = createUrlRedactor(redactUrlParams);
   }
 
   static async create(config: FullConfig): Promise<SessionLog> {
@@ -276,7 +279,7 @@ export class SessionLog {
 
       if (entry.tabSnapshot) {
         const fileName = `${ordinal}.snapshot.yml`;
-        this._storage.writeFile(path.join(this._folder, fileName), redactUrlParams(entry.tabSnapshot.ariaSnapshot, this._redactUrlParams)).catch(logUnhandledError);
+        this._storage.writeFile(path.join(this._folder, fileName), this._redactSecrets?.(entry.tabSnapshot.ariaSnapshot) ?? entry.tabSnapshot.ariaSnapshot).catch(logUnhandledError);
         const marker = `- Snapshot: ${fileName}`;
         lines.push(marker);
         if (entry.userAction && entry.tab) {
@@ -299,6 +302,7 @@ export class SessionLog {
   }
 
   private _redact(text: string): string {
-    return redactUrlParams(redactSessionHandles(text), this._redactUrlParams);
+    const redacted = redactSessionHandles(text);
+    return this._redactSecrets?.(redacted) ?? redacted;
   }
 }

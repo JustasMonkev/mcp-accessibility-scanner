@@ -30,7 +30,7 @@ import { BrowserSessionRegistry } from './browserSessions.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
 import { filteredTools, serverInstructions } from './tools.js';
 import { logUnhandledError } from './utils/log.js';
-import { redactToolResult } from './utils/urlRedaction.js';
+import { createUrlRedactor, redactToolResult } from './utils/urlRedaction.js';
 
 import { runVSCodeTools } from './vscode/host.js';
 import type { MCPProvider, SharedProxySelection } from './mcp/proxyBackend.js';
@@ -290,6 +290,7 @@ program
       if (config.imageResponses === 'only')
         throw new Error('Interactive mode prints text only. Use --image-responses allow or omit instead of only.');
       const backend = new BrowserServerBackend(config, parentOptions.extension ? extensionContextFactory : browserContextFactory);
+      const redactSecrets = createUrlRedactor(config.redactUrlParams);
       const handleExit = setupExitWatchdog();
       await backend.initialize(
           { notifyToolListChanged: async () => {} },
@@ -330,7 +331,7 @@ program
         }
 
         try {
-          const result = redactToolResult(await backend.callTool(toolName, args), config.redactUrlParams);
+          const result = redactToolResult(await backend.callTool(toolName, args), redactSecrets);
           if (result.content) {
             for (const item of result.content) {
               if (item.type === 'text')

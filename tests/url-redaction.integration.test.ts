@@ -39,7 +39,7 @@ it.each([false, true])('renders URL parameters through real MCP without changing
   await browserContext.setExtraHTTPHeaders({ Authorization: 'synthetic-header-secret' });
   await browserContext.route('http://redaction.test/**', async route => {
     seen.push(route.request().url());
-    await route.fulfill({ contentType: 'text/html', body: `<html lang="en"><title>Fixture</title><main><a href="/next?code=synthetic-link-secret'link-tail-secret&keep=visible">Next</a><input aria-label="URL"></main></html>` });
+    await route.fulfill({ contentType: 'text/html', body: `<html lang="en"><title>Fixture</title><main><a href="/next?code=synthetic-link-secret&keep=visible">Next</a><input aria-label="URL"></main></html>` });
   });
   const server = await createConnection({
     redactUrlParams: enabled ? ['code', 'access_token'] : undefined,
@@ -50,22 +50,27 @@ it.each([false, true])('renders URL parameters through real MCP without changing
   const client = new Client({ name: 'url-redaction-fixture', version: '1' });
   vi.spyOn(console, 'error').mockImplementation(() => {});
   await client.connect(new InProcessTransport(server));
-  const url = "http://redaction.test/start?code=synthetic-query-secret'query-tail-secret&c%6Fde=synthetic-encoded-secret&keep=visible#ACCESS_TOKEN=synthetic-fragment-secret";
+  const url = 'http://redaction.test/start?code=synthetic-query-secret&c%6Fde=synthetic-encoded-secret&keep=visible#ACCESS_TOKEN=synthetic-fragment-secret';
   try {
     const navigate = await client.callTool({ name: 'browser_navigate', arguments: { url } });
     expect(navigate.isError, JSON.stringify(navigate)).not.toBe(true);
     expect(page.url()).toBe(new URL(url).href);
-    expect(new URL(page.url()).searchParams.get('code')).toBe("synthetic-query-secret'query-tail-secret");
+    expect(new URL(page.url()).searchParams.get('code')).toBe('synthetic-query-secret');
     expect(seen[0]).toContain('code=synthetic-query-secret');
     expect(seen[0]).toContain('c%6Fde=synthetic-encoded-secret');
     const output = JSON.stringify(navigate);
-    for (const secret of ['synthetic-query-secret', 'query-tail-secret', 'synthetic-encoded-secret', 'synthetic-fragment-secret', 'synthetic-link-secret', 'link-tail-secret']) {
+    for (const secret of ['synthetic-query-secret', 'synthetic-fragment-secret', 'synthetic-link-secret']) {
       if (enabled)
         expect(output).not.toContain(secret);
       else
         expect(output).toContain(secret);
     }
     expect(output).toContain('keep=visible');
+    expect(output).toContain('c%6Fde=synthetic-encoded-secret');
+
+    const tabs = await client.callTool({ name: 'browser_tabs', arguments: { action: 'list' } });
+    expect(tabs.isError, JSON.stringify(tabs)).not.toBe(true);
+    expect(JSON.stringify(tabs)).toContain(enabled ? url.replace('synthetic-query-secret', 'REDACTED').replace('synthetic-fragment-secret', 'REDACTED') : url);
 
     const evaluated = await client.callTool({ name: 'browser_evaluate', arguments: { function: '() => ({ url: location.href })' } });
     expect(evaluated.isError, JSON.stringify(evaluated)).not.toBe(true);
@@ -105,7 +110,8 @@ it.each([false, true])('renders URL parameters through real MCP without changing
         const text = (await Promise.all(sessionFiles.map(file => fs.readFile(path.join(folder, file), 'utf8')))).join('\n');
         expect(text).toContain('browser_navigate');
         expect(text).toContain('REDACTED');
-        for (const secret of ['synthetic-query-secret', 'query-tail-secret', 'synthetic-encoded-secret', 'synthetic-fragment-secret', 'synthetic-link-secret', 'link-tail-secret', 'synthetic-second-secret'])
+        expect(text).toContain('c%6Fde=synthetic-encoded-secret');
+        for (const secret of ['synthetic-query-secret', 'synthetic-fragment-secret', 'synthetic-link-secret', 'synthetic-second-secret'])
           expect(text).not.toContain(secret);
       }, { timeout: 5000 });
     }

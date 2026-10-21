@@ -17,7 +17,7 @@
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Response } from '../src/response.js';
-import { redactToolResult } from '../src/utils/urlRedaction.js';
+import { createUrlRedactor, redactToolResult } from '../src/utils/urlRedaction.js';
 import type { Context } from '../src/context.js';
 import type { Tab, TabSnapshot } from '../src/tab.js';
 import type { ImageContent, ResourceLink, TextContent } from '@modelcontextprotocol/server';
@@ -362,7 +362,7 @@ describe('Response', () => {
       response.setIncludeSnapshot();
       response.setIncludeTabs();
       await response.finish();
-      const result = redactToolResult(response.serialize(), ['token']);
+      const result = redactToolResult(response.serialize(), createUrlRedactor(['token']));
       const text = expectTextContent(result.content[0]).text;
       expect(text).toContain('### Open tabs');
       expect(text).toContain('### Ran Playwright code');
@@ -384,7 +384,7 @@ describe('Response', () => {
     it('masks error text', () => {
       const response = new Response(mockContext, 'test_tool', {});
       response.addError('Failed /next?token=live-secret');
-      const result = redactToolResult(response.serialize(), ['token']);
+      const result = redactToolResult(response.serialize(), createUrlRedactor(['token']));
       expect(result.isError).toBe(true);
       expect(expectTextContent(result.content[0]).text).toContain('Failed /next?token=REDACTED');
     });
@@ -394,7 +394,7 @@ describe('Response', () => {
       const response = new Response(mockContext, 'browser_take_screenshot', {});
       response.addNotice('New page /next?token=live-secret');
       response.addImage({ contentType: 'image/png', data: Buffer.from('unchanged image') });
-      const result = redactToolResult(response.serialize(), ['token']);
+      const result = redactToolResult(response.serialize(), createUrlRedactor(['token']));
       expect(result.content).toEqual([
         { type: 'text', text: 'New page /next?token=REDACTED' },
         { type: 'image', data: Buffer.from('unchanged image').toString('base64'), mimeType: 'image/png' },
