@@ -16,14 +16,19 @@
 
 import http from 'node:http';
 import { expect, it } from 'vitest';
-import { chromium } from 'playwright';
+import { chromium, type BrowserContext } from 'playwright';
 import { Client } from '@modelcontextprotocol/client';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { resolveConfig } from '../src/config.js';
 import { wrapInProcess } from '../src/mcp/server.js';
 
 it('retains bounded request history with stable IDs across real MCP navigation, tabs, and sessions', async () => {
+  const heldResponse = Promise.withResolvers<http.ServerResponse>();
   const server = http.createServer((request, response) => {
+    if (request.url === '/preexisting') {
+      heldResponse.resolve(response);
+      return;
+    }
     if (request.url === '/abort') {
       response.destroy();
       return;
@@ -46,10 +51,15 @@ it('retains bounded request history with stable IDs across real MCP navigation, 
     const browser = await chromium.launch();
     const client = new Client({ name: 'network-history-test', version: '1' });
     try {
+      let providedContext: BrowserContext | undefined = await browser.newContext();
+      const existingPage = await providedContext.newPage();
+      await existingPage.evaluate(url => { location.href = url; }, `${origin}/preexisting`);
+      const pendingResponse = await heldResponse.promise;
       const config = await resolveConfig({ timeouts: { settle: 20 } });
       await client.connect(await wrapInProcess(new BrowserServerBackend(config, {
         createContext: async () => {
-          const browserContext = await browser.newContext();
+          const browserContext = providedContext ?? await browser.newContext();
+          providedContext = undefined;
           return { browserContext, close: () => browserContext.close() };
         },
       })));
@@ -66,6 +76,17 @@ it('retains bounded request history with stable IDs across real MCP navigation, 
           throw new Error(`Missing request ${url} in ${listing}`);
         return Number(id);
       };
+
+      await call('browser_tabs', { action: 'list' });
+      expect(await call('browser_network_requests')).not.toContain('/preexisting');
+      pendingResponse.writeHead(402, { 'content-type': 'text/html' });
+      pendingResponse.end('<link rel="icon" href="data:,"><h1>Preexisting navigation</h1>');
+      await existingPage.waitForURL(`${origin}/preexisting`);
+      const preexisting = await call('browser_network_requests');
+      const preexistingId = requestId(preexisting, `${origin}/preexisting`);
+      expect(preexisting).toContain(`${origin}/preexisting => [402] Payment Required`);
+      expect(await call('browser_network_request', { index: preexistingId })).toContain(`[402] Payment Required`);
+      expect(await call('browser_snapshot')).toContain('- HTTP status: 402 Payment Required');
 
       await call('browser_navigate', { url: `${origin}/first` });
       await expect.poll(() => call('browser_network_requests')).toContain(`${origin}/api/first => [200]`);

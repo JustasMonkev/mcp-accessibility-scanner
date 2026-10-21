@@ -97,11 +97,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     });
     listen('console', event => this._handleConsoleMessage(messageToConsoleMessage(event)));
     listen('pageerror', error => this._handleConsoleMessage(pageErrorToConsoleMessage(error)));
-    listen('request', request => {
-      const id = ++this._nextRequestId;
-      this._requestIds.set(request, id);
-      this._requests.set(id, request);
-    });
+    listen('request', request => this._addRequest(request));
     listen('response', response => this._handleResponse(response));
     listen('close', () => this._onClose());
     listen('filechooser', chooser => {
@@ -238,10 +234,19 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this._recentConsoleMessages.push(message);
   }
 
+  private _addRequest(request: Request) {
+    const id = ++this._nextRequestId;
+    this._requestIds.set(request, id);
+    this._requests.set(id, request);
+    return id;
+  }
+
   private _handleResponse(response: Response) {
+    if (this.page.isClosed())
+      return;
     const request = response.request();
-    const id = this._requestIds.get(request);
-    if (id === undefined || !this._requests.has(id))
+    const id = this._requestIds.get(request) ?? this._addRequest(request);
+    if (!this._requests.has(id))
       return;
     if (id > this._navigationRequestId && request.isNavigationRequest() && response.frame() === this.page.mainFrame() && !request.redirectedTo())
       this._mainDocumentStatus = { status: response.status(), statusText: response.statusText() };

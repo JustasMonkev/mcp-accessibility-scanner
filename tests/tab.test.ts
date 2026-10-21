@@ -34,6 +34,7 @@ describe('Tab', () => {
     mockPage.url = vi.fn().mockReturnValue('https://example.com');
     mockPage.title = vi.fn().mockResolvedValue('Example Page');
     mockPage.mainFrame = vi.fn().mockReturnValue('main-frame');
+    mockPage.isClosed = vi.fn().mockReturnValue(false);
     mockPage.waitForTimeout = vi.fn().mockResolvedValue(undefined);
     mockPage._wrapApiCall = vi.fn(async (callback: () => Promise<unknown>) => await callback());
     mockPage.setDefaultNavigationTimeout = vi.fn();
@@ -1183,12 +1184,36 @@ describe('Tab', () => {
       mockPage.emit('request', old);
       await tab.navigate('https://example.com/new');
       mockPage.emit('request', { url: () => 'https://example.com/new' });
-      if (action === 'dispose')
+      if (action === 'dispose') {
         tab.dispose();
-      else
+      } else {
+        mockPage.isClosed.mockReturnValue(true);
         mockPage.emit('close');
+      }
       mockPage.emit('response', { request: () => old });
+      mockPage.emit('response', { request: () => ({ isNavigationRequest: () => false }) });
       expect(tab.requests(true).size).toBe(0);
+    });
+
+    it('retains responses for requests that started before the tab was attached', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const request = { isNavigationRequest: () => true, redirectedTo: () => null };
+      const response = {
+        request: () => request,
+        frame: () => mockPage.mainFrame(),
+        status: () => 402,
+        statusText: () => 'Payment Required',
+      };
+
+      mockPage.emit('response', response);
+      expect([...tab.requests().keys()]).toEqual([1]);
+      expect(tab.request(1)).toBe(request);
+      expect((await tab.captureSnapshot()).mainDocumentStatus).toEqual({ status: 402, statusText: 'Payment Required' });
+      mockPage.emit('response', response);
+      expect([...tab.requests(true).keys()]).toEqual([1]);
+      expect(tab.requests().get(1)).toBe(request);
+      mockPage.emit('request', { isNavigationRequest: () => false });
+      expect([...tab.requests().keys()]).toEqual([1, 2]);
     });
 
     it('should track network requests', () => {
