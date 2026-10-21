@@ -44,6 +44,9 @@ describe('Network Tools', () => {
 
     mockTab = {
       requests: vi.fn().mockReturnValue(indexedRequests(mockRequests)),
+      request(id: number) {
+        return this.requests(true).get(id);
+      },
       modalStates: vi.fn().mockReturnValue([]),
       withPageStateTimeout: async (promise: Promise<unknown>) => promise,
     } as any;

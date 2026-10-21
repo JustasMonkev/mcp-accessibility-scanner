@@ -360,7 +360,7 @@ function cliOptionsFromEnv(): CLIOptions {
   options.caps = commaSeparatedList(process.env.PLAYWRIGHT_MCP_CAPS);
   options.allowedTools = toolNameList(process.env.PLAYWRIGHT_MCP_ALLOWED_TOOLS);
   options.blockedTools = toolNameList(process.env.PLAYWRIGHT_MCP_BLOCKED_TOOLS);
-  options.redactUrlParams = urlParamList(process.env.PLAYWRIGHT_MCP_REDACT_URL_PARAMS);
+  options.redactUrlParams = toolNameList(process.env.PLAYWRIGHT_MCP_REDACT_URL_PARAMS);
   options.cdpLaunchArgs = commaSeparatedList(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_ARGS);
   options.cdpLaunchCommand = envToString(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND);
   options.cdpLaunchCwd = envToString(process.env.PLAYWRIGHT_MCP_CDP_LAUNCH_CWD);
@@ -524,12 +524,6 @@ export function uploadDirectoryList(value: string | undefined): string[] | undef
 export function validateAuthToken(token: string | undefined): void {
   if (token !== undefined && (typeof token !== 'string' || !/^[A-Za-z0-9._~+/-]+=*$/.test(token)))
     throw new Error('server.authToken must be a non-blank Bearer token without whitespace.');
-}
-
-export function urlParamList(value: string | undefined): string[] | undefined {
-  if (value === undefined)
-    return undefined;
-  return value.trim() ? value.split(',').map(name => name.trim()) : [];
 }
 
 export function commaSeparatedList(value: string | undefined): string[] | undefined {

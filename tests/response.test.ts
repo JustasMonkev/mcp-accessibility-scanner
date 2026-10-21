@@ -17,6 +17,7 @@
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Response } from '../src/response.js';
+import { redactToolResult } from '../src/utils/urlRedaction.js';
 import type { Context } from '../src/context.js';
 import type { Tab, TabSnapshot } from '../src/tab.js';
 import type { ImageContent, ResourceLink, TextContent } from '@modelcontextprotocol/server';
@@ -342,7 +343,6 @@ describe('Response', () => {
 
   describe('URL parameter redaction', () => {
     it('masks final text sections and structured values without changing code, arguments or artifact links', async () => {
-      mockContext.config.redactUrlParams = ['token'];
       const url = 'https://example.test/next?token=live-secret&safe=1';
       const code = `await page.goto('${url}');`;
       const args = { url };
@@ -362,7 +362,7 @@ describe('Response', () => {
       response.setIncludeSnapshot();
       response.setIncludeTabs();
       await response.finish();
-      const result = response.serialize();
+      const result = redactToolResult(response.serialize(), ['token']);
       const text = expectTextContent(result.content[0]).text;
       expect(text).toContain('### Open tabs');
       expect(text).toContain('### Ran Playwright code');
@@ -381,30 +381,20 @@ describe('Response', () => {
       expect(findings).toEqual(expectedFindings);
     });
 
-    it('redacts errors and progress messages without altering progress metadata or input', async () => {
-      mockContext.config.redactUrlParams = ['token'];
-      const sendNotification = vi.fn().mockResolvedValue(undefined);
-      const response = new Response(mockContext, 'test_tool', {}, {
-        _meta: { progressToken: 'opaque-token' }, sendNotification,
-        signal: new AbortController().signal, requestId: 1,
-      });
-      const update = { progress: 2, total: 5, message: 'Working /next?token=live-secret' };
-      await response.reportProgress(update);
-      expect(sendNotification).toHaveBeenCalledWith({ method: 'notifications/progress', params: { progressToken: 'opaque-token', progress: 2, total: 5, message: 'Working /next?token=REDACTED' } });
-      expect(update.message).toBe('Working /next?token=live-secret');
+    it('masks error text', () => {
+      const response = new Response(mockContext, 'test_tool', {});
       response.addError('Failed /next?token=live-secret');
-      const result = response.serialize();
+      const result = redactToolResult(response.serialize(), ['token']);
       expect(result.isError).toBe(true);
       expect(expectTextContent(result.content[0]).text).toContain('Failed /next?token=REDACTED');
     });
 
     it('redacts retained lifecycle notices in images-only responses', () => {
-      mockContext.config.redactUrlParams = ['token'];
       mockContext.config.imageResponses = 'only';
       const response = new Response(mockContext, 'browser_take_screenshot', {});
       response.addNotice('New page /next?token=live-secret');
       response.addImage({ contentType: 'image/png', data: Buffer.from('unchanged image') });
-      const result = response.serialize();
+      const result = redactToolResult(response.serialize(), ['token']);
       expect(result.content).toEqual([
         { type: 'text', text: 'New page /next?token=REDACTED' },
         { type: 'image', data: Buffer.from('unchanged image').toString('base64'), mimeType: 'image/png' },

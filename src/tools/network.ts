@@ -57,10 +57,9 @@ const requestDetails = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    const entries = tab.requests(true);
-    const entry = entries.get(params.index);
+    const entry = tab.request(params.index);
     if (!entry) {
-      response.addError(entries.size
+      response.addError(tab.requests(true).size
         ? `Error: No retained network request with index ${params.index}. It may have been evicted; run browser_network_requests with all: true for the retained IDs.`
         : 'Error: No network requests have been recorded since the page was loaded.');
       return;

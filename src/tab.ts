@@ -234,7 +234,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _clearRequests() {
     this._requests.clear();
     this._requestHistory.clear();
-    this._requestIds = new WeakMap();
   }
 
   private _invalidateAriaSnapshot() {
@@ -385,6 +384,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   requests(all = false): Map<number, NetworkRequest> {
     return all ? new Map([...this._requestHistory, ...this._requests]) : this._requests;
+  }
+
+  request(id: number): NetworkRequest | undefined {
+    return this._requests.get(id) ?? this._requestHistory.get(id);
   }
 
   // Playwright resolves `Request.allHeaders()` and `Response.body()` with no

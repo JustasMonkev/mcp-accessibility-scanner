@@ -28,21 +28,21 @@ export function redactToolResult(result: ToolResult, names?: readonly string[]):
   if (!names?.length)
     return result;
   const selected = new Set(names.map(name => name.toLowerCase()));
-  const redactEntries = (entries: [string, unknown][]): Record<string, unknown> => Object.fromEntries(entries.map(([key, item]) => [key, redactValue(item)]));
-  const redactValue = (value: unknown): unknown => {
-    if (typeof value === 'string')
-      return redactText(value, selected);
-    if (Array.isArray(value))
-      return value.map(redactValue);
-    if (value && typeof value === 'object')
-      return redactEntries(Object.entries(value));
-    return value;
-  };
   return {
     ...result,
     content: result.content.map(item => item.type === 'text' ? { ...item, text: redactText(item.text, selected) } : item),
-    structuredContent: result.structuredContent ? redactEntries(Object.entries(result.structuredContent)) : result.structuredContent,
+    structuredContent: redactValue(result.structuredContent, selected) as ToolResult['structuredContent'],
   };
+}
+
+function redactValue(value: unknown, names: ReadonlySet<string>): unknown {
+  if (typeof value === 'string')
+    return redactText(value, names);
+  if (Array.isArray(value))
+    return value.map(item => redactValue(item, names));
+  if (value && typeof value === 'object')
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValue(item, names)]));
+  return value;
 }
 
 function redactText(text: string, names: ReadonlySet<string>): string {
