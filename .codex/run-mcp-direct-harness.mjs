@@ -200,8 +200,7 @@ const tests = [
     assertText(result, /<redacted, 11 bytes, application\/json>/);
     assertNoText(result, /\{"ok":true\}/);
 
-    // An out-of-range index reports the usable range instead of a stack trace.
-    await assertToolError('browser_network_request', { index: 999 }, /No network request with index 999/);
+    await assertToolError('browser_network_request', { index: 999 }, /No retained network request with index 999/);
 
     // Real Chromium header names must hit the redaction set: sign in so the
     // next request carries a session cookie, then prove it is not echoed back.

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { assertRuleOptionsValid, axeRuleSchemaShape, axeTagValues, defaultAxeTags, dedupeAxeNodes, prepareAxeResults, runAxeScan, summarizeAxeViolations, trimAxeResults } from '../src/tools/axe.js';
@@ -373,6 +373,102 @@ describe('axe helpers', () => {
     const result = await runAxeScan(pageWithSelectorCounts({}, [healthy]));
 
     expect(result.unscannedFrames).toEqual([]);
+  });
+
+  describe.each(['reachability', 'scope'] as const)('%s frame-element reads', probe => {
+    it('disposes handles after successful reads', async () => {
+      resetScan();
+      const frame = makeFrame({}, 'https://example.com/widget', probe === 'reachability');
+      const frameElement = frame.frameElement;
+      const handles: Awaited<ReturnType<typeof frameElement>>[] = [];
+      frame.frameElement = async () => {
+        const handle = await frameElement();
+        handle.dispose = vi.fn(handle.dispose);
+        handles.push(handle);
+        return handle;
+      };
+
+      const result = await runAxeScan(pageWithSelectorCounts({}, [frame]));
+
+      expect(result.unscannedFrames).toEqual(probe === 'reachability' ? [] : ['https://example.com/widget']);
+      expect(handles.length).toBeGreaterThan(0);
+      for (const handle of handles)
+        expect(handle.dispose).toHaveBeenCalledExactlyOnceWith();
+    });
+
+    it.each(['lookup rejection', 'evaluation rejection', 'evaluation timeout'] as const)(
+        'reports missing coverage after %s', async failure => {
+          resetScan();
+          vi.useFakeTimers();
+          try {
+            const frame = makeFrame({}, 'https://example.com/widget', probe === 'reachability');
+            const frameElement = frame.frameElement;
+            const handles: Awaited<ReturnType<typeof frameElement>>[] = [];
+            frame.frameElement = async () => {
+              if (failure === 'lookup rejection')
+                throw new Error('Frame detached');
+              const handle = await frameElement();
+              handle.evaluate = async () => {
+                if (failure === 'evaluation rejection')
+                  throw new Error('Execution context was destroyed');
+                return new Promise(() => {});
+              };
+              handle.dispose = vi.fn(handle.dispose);
+              handles.push(handle);
+              return handle;
+            };
+
+            const scan = runAxeScan(pageWithSelectorCounts({}, [frame]));
+            await vi.runAllTimersAsync();
+
+            expect((await scan).unscannedFrames).toEqual(['https://example.com/widget']);
+            if (failure !== 'lookup rejection')
+              expect(handles.length).toBeGreaterThan(0);
+            for (const handle of handles)
+              expect(handle.dispose).toHaveBeenCalledExactlyOnceWith();
+            expect(vi.getTimerCount()).toBe(0);
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+    );
+
+    it('reports timed-out lookups and disposes their late handles without evaluating them', async () => {
+      resetScan();
+      vi.useFakeTimers();
+      try {
+        const frame = makeFrame({}, 'https://example.com/widget', probe === 'reachability');
+        const frameElement = frame.frameElement;
+        const handles: Awaited<ReturnType<typeof frameElement>>[] = [];
+        const completeLookups: (() => void)[] = [];
+        frame.frameElement = async () => {
+          const handle = await frameElement();
+          handle.evaluate = vi.fn(handle.evaluate);
+          handle.dispose = vi.fn(handle.dispose);
+          handles.push(handle);
+          return new Promise(resolve => completeLookups.push(() => resolve(handle)));
+        };
+
+        const scan = runAxeScan(pageWithSelectorCounts({}, [frame]));
+        await vi.runAllTimersAsync();
+
+        expect((await scan).unscannedFrames).toEqual(['https://example.com/widget']);
+        expect(handles.length).toBeGreaterThan(0);
+        for (const handle of handles)
+          expect(handle.dispose).not.toHaveBeenCalled();
+        for (const complete of completeLookups)
+          complete();
+        await vi.runAllTimersAsync();
+
+        for (const handle of handles) {
+          expect(handle.evaluate).not.toHaveBeenCalled();
+          expect(handle.dispose).toHaveBeenCalledExactlyOnceWith();
+        }
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it('reports an injected frame that Axe cannot reach through a closed shadow root', async () => {
