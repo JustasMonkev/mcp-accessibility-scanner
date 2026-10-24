@@ -529,11 +529,9 @@ async function injectAxeIntoFrames(
     const covered = await withConcurrency(frames, frame => hasReachableAxe(frame, token));
     const missed = findFramesMissedByAxe(frames, covered, mainFrame);
     const scopeResults = await withConcurrency(missed, frame => isFrameInScope(frame, mainFrame, include, exclude));
-    const inScope = new Map(missed.map((frame, index) => [frame, scopeResults[index]]));
+    const inScope = new Set(missed.filter((_, index) => scopeResults[index]));
     const latestFrames = page.frames().filter(frame => frame !== mainFrame);
-    const attached = new Set(latestFrames);
-    const signature = `${frames.map((frame, index) => `${frameId(frame)}:${covered[index] ? 1 : 0}:${inScope.get(frame) ? 1 : 0}`).join(',')}>${latestFrames.map(frameId).join(',')}`;
-    const unscannedFrames = missed.filter(frame => attached.has(frame) && inScope.get(frame)).map(describeFrame);
+    const signature = `${frames.map((frame, index) => `${frameId(frame)}:${covered[index] ? 1 : 0}:${inScope.has(frame) ? 1 : 0}`).join(',')}>${latestFrames.map(frameId).join(',')}`;
 
     if (!haveSameFrames(frames, latestFrames)) {
       previousSignature = undefined;
@@ -542,7 +540,7 @@ async function injectAxeIntoFrames(
     if (!missed.length)
       return [];
     if (signature === previousSignature)
-      return unscannedFrames;
+      return missed.filter(frame => inScope.has(frame)).map(describeFrame);
     previousSignature = signature;
   }
   throw new Error('The frame tree kept changing while Axe coverage was checked. Retry the scan once the page settles.');
