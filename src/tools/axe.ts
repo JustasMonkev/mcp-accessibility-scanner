@@ -4,7 +4,7 @@ import { z } from 'zod';
 
 import { truncateDataUrls } from '../utils/dataUrl.js';
 
-import type * as playwright from 'playwright';
+import type { ElementHandle, Frame, Page } from 'playwright';
 
 declare global {
   interface Window {
@@ -174,7 +174,7 @@ export function assertRuleOptionsValid(options: Pick<AxeScanOptions, 'rules' | '
 // report still looks clean. Resolve every selector ourselves first: a scan that
 // quietly covers less than asked is worse than one that fails loudly.
 async function assertScopeSelectorsResolve(
-  page: playwright.Page,
+  page: Page,
   include: readonly string[],
   exclude: readonly string[]
 ) {
@@ -229,7 +229,7 @@ const axeConfigureSource = `;axe.configure({ allowedOrigins: ['<unsafe_all_origi
 // looks right: that global belongs to the page, which may have installed its own
 // axe or reconfigured ours since, and a scan must run this server's build and
 // configuration. Re-injection costs ~70ms per frame against a multi-second scan.
-async function injectAxe(frame: playwright.Frame, source: string): Promise<void> {
+async function injectAxe(frame: Frame, source: string): Promise<void> {
   await frame.evaluate(source);
 }
 
@@ -275,7 +275,7 @@ export const frameConcurrency = 4;
  * read with it, not only the installation, because a timed-out evaluation is
  * still running in the frame and every later read queues behind it.
  */
-export function frameReadTimeoutMs(frame: playwright.Frame): number {
+export function frameReadTimeoutMs(frame: Frame): number {
   return frame.parentFrame() === null ? mainFrameInjectionTimeoutMs : childFrameInjectionTimeoutMs;
 }
 
@@ -286,7 +286,7 @@ export function frameReadTimeoutMs(frame: playwright.Frame): number {
  * it through the frame-work pool, which owns the budget and needs to see the
  * install actually settle, not a timeout resolving in its place.
  */
-export async function injectAxeForNames(frame: playwright.Frame): Promise<boolean> {
+export async function injectAxeForNames(frame: Frame): Promise<boolean> {
   return injectAxe(frame, axeForNamesSource).then(() => true, () => false);
 }
 
@@ -356,7 +356,7 @@ const maxFrameUrlLength = 2048;
 // Both are truncated: a data: frame's URL is its document, a name can carry one
 // too, and this string ends up in tool text, structured content and JSON
 // reports alike.
-function describeFrame(frame: playwright.Frame): string {
+function describeFrame(frame: Frame): string {
   const rawUrl = truncateDataUrls(frame.url()) || 'about:blank';
   const url = rawUrl.length > maxFrameUrlLength ? `${rawUrl.slice(0, maxFrameUrlLength - 3)}...` : rawUrl;
   const name = truncateDataUrls(frame.name().replace(/\s+/g, ' ').trim()).slice(0, maxFrameNameLength);
@@ -366,132 +366,115 @@ function describeFrame(frame: playwright.Frame): string {
 // Whether this frame currently holds the Axe this server injected and
 // configured. A frame that navigated after its injection - or that appeared
 // since, or that carries only the page's own axe - answers no.
-async function hasAxe(frame: playwright.Frame, token: string): Promise<boolean> {
+async function hasAxe(frame: Frame, token: string): Promise<boolean> {
   return withFrameTimeout(
       frame.evaluate(({ marker, token }) => window[marker] === token, { marker: axeReadyMarker, token } as const),
       false,
   );
 }
 
-// A frame the caller scoped out of the scan is not a coverage gap: its contents
-// were never going to be reported. Answered from the iframe element in its
-// parent document, so an `excludeSelectors: ["iframe.chat-widget"]` entry - the
-// documented recipe for dropping a flaky third-party widget - does not produce a
-// warning about the very frame it removed.
-//
-// The whole ancestor chain is walked, not just the immediate parent document,
-// because `closest()` stops at a frame boundary while an Axe context does not:
-// `includeSelectors: ["#main"]` covers an iframe nested inside an iframe inside
-// `#main`, and an exclude naming an outer frame drops everything below it.
-//
-// Only a positive determination suppresses the warning. An unreachable frame
-// element or a probe that cannot answer in time falls through to reporting, so
-// no genuine gap is hidden by a check that failed to resolve.
+type FrameScope = {
+  included: boolean;
+  excluded: boolean;
+  hidden: boolean;
+};
+
+// Runs in the frame's parent document through ElementHandle.evaluate. Keep this
+// function self-contained: Playwright serializes it without the module scope.
+function inspectFrameScope(frameElement: Element, scope: { include: string[], exclude: string[] }): FrameScope {
+  const ancestors: Element[] = [];
+  let current: Element | null = frameElement;
+  while (current) {
+    ancestors.push(current);
+    const element: Element = current.assignedSlot ?? current;
+    const root = element.getRootNode();
+    current = element.parentElement;
+    if (!current && root instanceof ShadowRoot)
+      current = root.host;
+  }
+  const matchesSelector = (selector: string) => ancestors.some(element => element.matches(selector));
+
+  const roots: (Document | ShadowRoot)[] = [document];
+  const modals: Element[] = [];
+  for (const root of roots) {
+    modals.push(...[...root.querySelectorAll('dialog:modal')].filter(modal => {
+      const style = getComputedStyle(modal);
+      const rect = modal.getBoundingClientRect();
+      const visible = modal.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) ??
+        (style.display !== 'none' && !['hidden', 'collapse'].includes(style.visibility) && style.opacity !== '0');
+      return visible &&
+        rect.width > 0 && rect.height > 0 &&
+        root.elementsFromPoint(rect.left + 1, rect.top + 1).includes(modal);
+    }));
+    for (const element of root.querySelectorAll('*')) {
+      if (element.shadowRoot)
+        roots.push(element.shadowRoot);
+    }
+  }
+  const insideModal = modals.some(modal => ancestors.includes(modal));
+
+  let hidden = !!modals.length && !insideModal;
+  for (const current of ancestors) {
+    const parent = current.assignedSlot?.parentElement ?? current.parentElement;
+    const style = getComputedStyle(current);
+    const ariaHidden = current.getAttribute('aria-hidden') === 'true';
+    const flattenedChildren = parent ? [...parent.children].flatMap(child => {
+      if (child.localName !== 'slot')
+        return [child];
+      const assigned = (child as HTMLSlotElement).assignedElements({ flatten: true });
+      return assigned.length ? assigned : [...child.children];
+    }) : [];
+    const closedDetails = parent?.localName === 'details' && !parent.hasAttribute('open') &&
+      (current.localName !== 'summary' || flattenedChildren.find(child => child.localName === 'summary') !== current);
+    const contentHidden = current !== frameElement && style.getPropertyValue('content-visibility') === 'hidden';
+    if (ariaHidden || style.display === 'none' || current.hasAttribute('inert') || closedDetails || contentHidden) {
+      hidden = true;
+      break;
+    }
+  }
+  const visibility = getComputedStyle(frameElement).visibility;
+  hidden ||= visibility === 'hidden' || visibility === 'collapse';
+  return { included: scope.include.some(matchesSelector), excluded: scope.exclude.some(matchesSelector), hidden };
+}
+
+// Bounds every frame-element read and owns the handle until disposal. A lookup
+// that resolves after its timeout still needs its late handle disposed.
+async function readFrameElement<T>(
+  frame: Frame,
+  fallback: T,
+  read: (element: ElementHandle) => Promise<T>
+): Promise<T> {
+  const elementPromise = frame.frameElement().catch(() => null);
+  const element = await withFrameTimeout(elementPromise, null);
+  if (!element) {
+    void elementPromise.then(late => late?.dispose().catch(() => {}));
+    return fallback;
+  }
+  try {
+    return await withFrameTimeout(read(element), fallback);
+  } finally {
+    await element.dispose().catch(() => {});
+  }
+}
+
 async function isFrameInScope(
-  frame: playwright.Frame,
-  mainFrame: playwright.Frame,
+  frame: Frame,
+  mainFrame: Frame,
   include: readonly string[],
   exclude: readonly string[]
 ): Promise<boolean> {
   let includeMatched = !include.length;
   for (let current = frame; current.parentFrame(); current = current.parentFrame()!) {
-    // Bounded like every other child-frame read: `frameElement()` takes no
-    // timeout of its own, so an unresponsive parent renderer would hang the
-    // scan here - on the very check that exists to report unresponsive frames.
-    const elementPromise = current.frameElement().catch(() => null);
-    const element = await withFrameTimeout(elementPromise, null);
-    if (!element) {
-      // The lookup may still land after the bound; do not leak that handle.
-      void elementPromise.then(late => late?.dispose().catch(() => {}));
-      return true;
-    }
-    let matches: { included: boolean, excluded: boolean, hidden: boolean } | null;
-    try {
-      matches = await withFrameTimeout(element.evaluate((node, scope) => {
-        // SAFETY: Frame.frameElement() returns the embedding element, despite its generic Node typing.
-        const frameElement = node as Element;
-        const composedParent = (element: Element) => {
-          const root = element.getRootNode();
-          if (element.assignedSlot) {
-            const slotRoot = element.assignedSlot.getRootNode();
-            return element.assignedSlot.parentElement ?? (slotRoot instanceof ShadowRoot ? slotRoot.host : null);
-          }
-          return element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
-        };
-        const matchesAny = (selectors: string[]) => selectors.some(selector => {
-          try {
-            for (let current: Element | null = frameElement; current;) {
-              if (current.matches(selector))
-                return true;
-              current = composedParent(current);
-            }
-            return false;
-          } catch {
-            return false;
-          }
-        });
-        const roots: (Document | ShadowRoot)[] = [document];
-        const modals: Element[] = [];
-        for (const root of roots) {
-          modals.push(...[...root.querySelectorAll('dialog:modal')].filter(modal => {
-            const style = getComputedStyle(modal);
-            const rect = modal.getBoundingClientRect();
-            const visible = modal.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) ??
-              (style.display !== 'none' && !['hidden', 'collapse'].includes(style.visibility) && style.opacity !== '0');
-            return visible &&
-              rect.width > 0 && rect.height > 0 &&
-              root.elementsFromPoint(rect.left + 1, rect.top + 1).includes(modal);
-          }));
-          for (const element of root.querySelectorAll('*')) {
-            if (element.shadowRoot)
-              roots.push(element.shadowRoot);
-          }
-        }
-        const insideModal = modals.some(modal => {
-          for (let current: Element | null = frameElement; current;) {
-            if (current === modal)
-              return true;
-            current = composedParent(current);
-          }
-          return false;
-        });
-        let hidden = !!modals.length && !insideModal;
-        for (let current: Element | null = frameElement; current;) {
-          const parent = current.assignedSlot?.parentElement ?? current.parentElement;
-          const style = getComputedStyle(current);
-          const ariaHidden = current.getAttribute('aria-hidden') === 'true';
-          const flattenedChildren = parent ? [...parent.children].flatMap(child => {
-            if (child.localName !== 'slot')
-              return [child];
-            // SAFETY: the localName check above identifies the slot before calling its DOM API.
-            const assigned = (child as HTMLSlotElement).assignedElements({ flatten: true });
-            return assigned.length ? assigned : [...child.children];
-          }) : [];
-          const closedDetails = parent?.localName === 'details' && !parent.hasAttribute('open') &&
-            (current.localName !== 'summary' || flattenedChildren.find(child => child.localName === 'summary') !== current);
-          const contentHidden = current !== frameElement && style.getPropertyValue('content-visibility') === 'hidden';
-          if (ariaHidden || style.display === 'none' || current.hasAttribute('inert') || closedDetails || contentHidden) {
-            hidden = true;
-            break;
-          }
-          current = composedParent(current);
-        }
-        const visibility = getComputedStyle(frameElement).visibility;
-        hidden ||= visibility === 'hidden' || visibility === 'collapse';
-        return { included: matchesAny(scope.include), excluded: matchesAny(scope.exclude), hidden };
-      }, current.parentFrame() === mainFrame
-        ? { include: [...include], exclude: [...exclude] }
-        : { include: [], exclude: [] }), null);
-    } finally {
-      await element.dispose().catch(() => {});
-    }
+    const matches = await readFrameElement<FrameScope | null>(current, null, element => element.evaluate(
+        inspectFrameScope,
+        current.parentFrame() === mainFrame
+          ? { include: [...include], exclude: [...exclude] }
+          : { include: [], exclude: [] },
+    ));
     if (!matches)
       return true;
-    // Axe does not traverse a frame hidden from the accessibility tree, so a
-    // failed injection there is not missing coverage.
     if (matches.hidden)
       return false;
-    // Exclude wins wherever it matches: it drops the whole subtree under it.
     if (matches.excluded)
       return false;
     includeMatched ||= matches.included;
@@ -499,15 +482,29 @@ async function isFrameInScope(
   return includeMatched;
 }
 
-// Returns an identifier for every child frame Axe could not be installed in, so
-// the caller can say what the scan did not cover. Every failure is reported
-// whatever the URL scheme: injection into an empty about:blank frame succeeds,
-// so a frame that reaches here failed for a reason worth knowing about.
-//
-// Duplicates are kept: two unnamed about:blank frames that both fail are two
-// documents that went unscanned, and collapsing them would under-count.
+function findFramesMissedByAxe(
+  frames: readonly Frame[],
+  covered: readonly boolean[],
+  mainFrame: Frame
+): Frame[] {
+  const withoutAxe = new Set(frames.filter((_, index) => !covered[index]));
+  return frames.filter(frame => {
+    // A frame whose own injection succeeded is still unreachable when an
+    // ancestor has no Axe: the top-level run relays through every ancestor.
+    for (let current: Frame | null = frame; current && current !== mainFrame; current = current.parentFrame()) {
+      if (withoutAxe.has(current))
+        return true;
+    }
+    return false;
+  });
+}
+
+function haveSameFrames(left: readonly Frame[], right: readonly Frame[]): boolean {
+  return left.length === right.length && left.every((frame, index) => frame === right[index]);
+}
+
 async function injectAxeIntoFrames(
-  page: playwright.Page,
+  page: Page,
   include: readonly string[],
   exclude: readonly string[]
 ): Promise<string[]> {
@@ -520,84 +517,51 @@ async function injectAxeIntoFrames(
       frame => withFrameTimeout(injectAxe(frame, source), undefined),
   );
 
-  // Coverage is decided here rather than from the injection results: a frame
-  // that navigated while a slower sibling was still injecting has a new document
-  // without Axe, and one that appeared since was never injected at all. Both
-  // would otherwise contribute nothing to a report that still looked complete.
-  // The frame list is re-read for the same reason.
-  //
-  // Ceiling: a frame that navigates between this check and the run below is
-  // still missed. The window is microseconds rather than the length of the
-  // slowest injection, but it cannot be closed from outside the page.
-  const frameIds = new Map<playwright.Frame, number>();
-  const frameId = (frame: playwright.Frame) => {
+  const frameIds = new Map<Frame, number>();
+  const frameId = (frame: Frame) => {
     if (!frameIds.has(frame))
       frameIds.set(frame, frameIds.size);
     return frameIds.get(frame)!;
   };
   let previousSignature: string | undefined;
   for (let round = 0; round < 4; round++) {
-    const children = page.frames().filter(frame => frame !== mainFrame);
-    const covered = await withConcurrency(children, frame => hasReachableAxe(frame, token));
-    const withoutAxe = new Set(children.filter((_, index) => !covered[index]));
+    const frames = page.frames().filter(frame => frame !== mainFrame);
+    const covered = await withConcurrency(frames, frame => hasReachableAxe(frame, token));
+    const missed = findFramesMissedByAxe(frames, covered, mainFrame);
+    const scopeResults = await withConcurrency(missed, frame => isFrameInScope(frame, mainFrame, include, exclude));
+    const inScope = new Set(missed.filter((_, index) => scopeResults[index]));
+    const latestFrames = page.frames().filter(frame => frame !== mainFrame);
+    const signature = `${frames.map((frame, index) => `${frameId(frame)}:${covered[index] ? 1 : 0}:${inScope.has(frame) ? 1 : 0}`).join(',')}>${latestFrames.map(frameId).join(',')}`;
 
-    // A frame whose own injection succeeded is still unreachable when an ancestor
-    // has no Axe: the top-level run reaches a nested document only by relaying
-    // through the frames above it, and a frame without Axe relays nothing.
-    const missed = children.filter(frame => {
-      for (let current: playwright.Frame | null = frame; current && current !== mainFrame; current = current.parentFrame()) {
-        if (withoutAxe.has(current))
-          return true;
-      }
-      return false;
-    });
-    const matches = await withConcurrency(missed, frame => isFrameInScope(frame, mainFrame, include, exclude));
-    const inScope = new Map(missed.map((frame, index) => [frame, matches[index]]));
-    const latest = page.frames().filter(frame => frame !== mainFrame);
-    const attached = new Set(latest);
-    const signature = `${children.map((frame, index) => `${frameId(frame)}:${covered[index] ? 1 : 0}:${inScope.get(frame) ? 1 : 0}`).join(',')}>${latest.map(frameId).join(',')}`;
-    const reported = missed.filter(frame => attached.has(frame) && inScope.get(frame)).map(describeFrame);
-
-    const unchanged = children.length === latest.length && children.every((frame, index) => frame === latest[index]);
-    if (!unchanged) {
+    if (!haveSameFrames(frames, latestFrames)) {
       previousSignature = undefined;
       continue;
     }
-    // A healthy, unchanged frame tree had no slow scope probes to race with.
     if (!missed.length)
       return [];
     if (signature === previousSignature)
-      return reported;
+      return missed.filter(frame => inScope.has(frame)).map(describeFrame);
     previousSignature = signature;
   }
   throw new Error('The frame tree kept changing while Axe coverage was checked. Retry the scan once the page settles.');
 }
 
-async function hasReachableAxe(frame: playwright.Frame, token: string): Promise<boolean> {
+function isFrameElementReachable(element: Element): boolean {
+  for (let current = element; ;) {
+    const root = current.getRootNode();
+    if (!(root instanceof ShadowRoot))
+      return true;
+    if (root.host.shadowRoot !== root)
+      return false;
+    current = root.host;
+  }
+}
+
+async function hasReachableAxe(frame: Frame, token: string): Promise<boolean> {
   if (!await hasAxe(frame, token))
     return false;
-  const elementPromise = frame.frameElement().catch(() => null);
-  const element = await withFrameTimeout(elementPromise, null);
-  if (!element) {
-    void elementPromise.then(late => late?.dispose().catch(() => {}));
-    return false;
-  }
-  let reachable: boolean;
-  try {
-    reachable = await withFrameTimeout(element.evaluate(node => {
-      // SAFETY: Frame.frameElement() returns the embedding element, despite its generic Node typing.
-      for (let current = node as Element; ;) {
-        const root = current.getRootNode();
-        if (!(root instanceof ShadowRoot))
-          return true;
-        if (root.host.shadowRoot !== root)
-          return false;
-        current = root.host;
-      }
-    }), false);
-  } finally {
-    await element.dispose().catch(() => {});
-  }
+  const reachable = await readFrameElement(frame, false, element => element.evaluate(isFrameElementReachable));
+  // Navigation during the reachability probe replaces the document and its Axe.
   return reachable && await hasAxe(frame, token);
 }
 
@@ -627,7 +591,7 @@ async function runAxeInPage({ context, options }: { context: axe.ElementContext 
   };
 }
 
-export async function runAxeScan(page: playwright.Page, options: AxeScanOptions = {}): Promise<AxeScanResult> {
+export async function runAxeScan(page: Page, options: AxeScanOptions = {}): Promise<AxeScanResult> {
   const rules = assertRuleOptionsValid(options);
   const include = options.include ?? [];
   const exclude = options.exclude ?? [];
