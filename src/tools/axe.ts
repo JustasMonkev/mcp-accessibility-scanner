@@ -381,8 +381,7 @@ type FrameScope = {
 
 // Runs in the frame's parent document through ElementHandle.evaluate. Keep this
 // function self-contained: Playwright serializes it without the module scope.
-function inspectFrameScope(node: Node, scope: { include: string[], exclude: string[] }): FrameScope {
-  const frameElement = node as Element;
+function inspectFrameScope(frameElement: Element, scope: { include: string[], exclude: string[] }): FrameScope {
   const ancestors: Element[] = [];
   let current: Element | null = frameElement;
   while (current) {
@@ -393,13 +392,7 @@ function inspectFrameScope(node: Node, scope: { include: string[], exclude: stri
     if (!current && root instanceof ShadowRoot)
       current = root.host;
   }
-  const matchesSelector = (selector: string) => {
-    try {
-      return ancestors.some(element => element.matches(selector));
-    } catch {
-      return false;
-    }
-  };
+  const matchesSelector = (selector: string) => ancestors.some(element => element.matches(selector));
 
   const roots: (Document | ShadowRoot)[] = [document];
   const modals: Element[] = [];
@@ -555,8 +548,8 @@ async function injectAxeIntoFrames(
   throw new Error('The frame tree kept changing while Axe coverage was checked. Retry the scan once the page settles.');
 }
 
-function isFrameElementReachable(node: Node): boolean {
-  for (let current = node as Element; ;) {
+function isFrameElementReachable(element: Element): boolean {
+  for (let current = element; ;) {
     const root = current.getRootNode();
     if (!(root instanceof ShadowRoot))
       return true;
