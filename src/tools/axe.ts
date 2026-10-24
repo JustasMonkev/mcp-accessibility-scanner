@@ -383,29 +383,23 @@ type FrameScope = {
 // function self-contained: Playwright serializes it without the module scope.
 function inspectFrameScope(node: Node, scope: { include: string[], exclude: string[] }): FrameScope {
   const frameElement = node as Element;
-  const composedParent = (element: Element) => {
+  const ancestors: Element[] = [];
+  let current: Element | null = frameElement;
+  while (current) {
+    ancestors.push(current);
+    const element: Element = current.assignedSlot ?? current;
     const root = element.getRootNode();
-    if (element.assignedSlot) {
-      const slotRoot = element.assignedSlot.getRootNode();
-      return element.assignedSlot.parentElement ?? (slotRoot instanceof ShadowRoot ? slotRoot.host : null);
-    }
-    return element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
-  };
-  function* composedAncestors(element: Element): Generator<Element> {
-    for (let current: Element | null = element; current; current = composedParent(current))
-      yield current;
+    current = element.parentElement;
+    if (!current && root instanceof ShadowRoot)
+      current = root.host;
   }
-  const matchesAny = (selectors: string[]) => selectors.some(selector => {
+  const matchesSelector = (selector: string) => {
     try {
-      for (const current of composedAncestors(frameElement)) {
-        if (current.matches(selector))
-          return true;
-      }
-      return false;
+      return ancestors.some(element => element.matches(selector));
     } catch {
       return false;
     }
-  });
+  };
 
   const roots: (Document | ShadowRoot)[] = [document];
   const modals: Element[] = [];
@@ -424,16 +418,10 @@ function inspectFrameScope(node: Node, scope: { include: string[], exclude: stri
         roots.push(element.shadowRoot);
     }
   }
-  const insideModal = modals.some(modal => {
-    for (const current of composedAncestors(frameElement)) {
-      if (current === modal)
-        return true;
-    }
-    return false;
-  });
+  const insideModal = modals.some(modal => ancestors.includes(modal));
 
   let hidden = !!modals.length && !insideModal;
-  for (const current of composedAncestors(frameElement)) {
+  for (const current of ancestors) {
     const parent = current.assignedSlot?.parentElement ?? current.parentElement;
     const style = getComputedStyle(current);
     const ariaHidden = current.getAttribute('aria-hidden') === 'true';
@@ -453,7 +441,7 @@ function inspectFrameScope(node: Node, scope: { include: string[], exclude: stri
   }
   const visibility = getComputedStyle(frameElement).visibility;
   hidden ||= visibility === 'hidden' || visibility === 'collapse';
-  return { included: matchesAny(scope.include), excluded: matchesAny(scope.exclude), hidden };
+  return { included: scope.include.some(matchesSelector), excluded: scope.exclude.some(matchesSelector), hidden };
 }
 
 // Bounds every frame-element read and owns the handle until disposal. A lookup
