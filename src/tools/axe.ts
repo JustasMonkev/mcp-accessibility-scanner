@@ -4,7 +4,7 @@ import { z } from 'zod';
 
 import { truncateDataUrls } from '../utils/dataUrl.js';
 
-import type * as playwright from 'playwright';
+import type { ElementHandle, Frame, Page } from 'playwright';
 
 declare global {
   interface Window {
@@ -174,7 +174,7 @@ export function assertRuleOptionsValid(options: Pick<AxeScanOptions, 'rules' | '
 // report still looks clean. Resolve every selector ourselves first: a scan that
 // quietly covers less than asked is worse than one that fails loudly.
 async function assertScopeSelectorsResolve(
-  page: playwright.Page,
+  page: Page,
   include: readonly string[],
   exclude: readonly string[]
 ) {
@@ -229,7 +229,7 @@ const axeConfigureSource = `;axe.configure({ allowedOrigins: ['<unsafe_all_origi
 // looks right: that global belongs to the page, which may have installed its own
 // axe or reconfigured ours since, and a scan must run this server's build and
 // configuration. Re-injection costs ~70ms per frame against a multi-second scan.
-async function injectAxe(frame: playwright.Frame, source: string): Promise<void> {
+async function injectAxe(frame: Frame, source: string): Promise<void> {
   await frame.evaluate(source);
 }
 
@@ -275,7 +275,7 @@ export const frameConcurrency = 4;
  * read with it, not only the installation, because a timed-out evaluation is
  * still running in the frame and every later read queues behind it.
  */
-export function frameReadTimeoutMs(frame: playwright.Frame): number {
+export function frameReadTimeoutMs(frame: Frame): number {
   return frame.parentFrame() === null ? mainFrameInjectionTimeoutMs : childFrameInjectionTimeoutMs;
 }
 
@@ -286,7 +286,7 @@ export function frameReadTimeoutMs(frame: playwright.Frame): number {
  * it through the frame-work pool, which owns the budget and needs to see the
  * install actually settle, not a timeout resolving in its place.
  */
-export async function injectAxeForNames(frame: playwright.Frame): Promise<boolean> {
+export async function injectAxeForNames(frame: Frame): Promise<boolean> {
   return injectAxe(frame, axeForNamesSource).then(() => true, () => false);
 }
 
@@ -356,7 +356,7 @@ const maxFrameUrlLength = 2048;
 // Both are truncated: a data: frame's URL is its document, a name can carry one
 // too, and this string ends up in tool text, structured content and JSON
 // reports alike.
-function describeFrame(frame: playwright.Frame): string {
+function describeFrame(frame: Frame): string {
   const rawUrl = truncateDataUrls(frame.url()) || 'about:blank';
   const url = rawUrl.length > maxFrameUrlLength ? `${rawUrl.slice(0, maxFrameUrlLength - 3)}...` : rawUrl;
   const name = truncateDataUrls(frame.name().replace(/\s+/g, ' ').trim()).slice(0, maxFrameNameLength);
@@ -366,7 +366,7 @@ function describeFrame(frame: playwright.Frame): string {
 // Whether this frame currently holds the Axe this server injected and
 // configured. A frame that navigated after its injection - or that appeared
 // since, or that carries only the page's own axe - answers no.
-async function hasAxe(frame: playwright.Frame, token: string): Promise<boolean> {
+async function hasAxe(frame: Frame, token: string): Promise<boolean> {
   return withFrameTimeout(
       frame.evaluate(({ marker, token }) => window[marker] === token, { marker: axeReadyMarker, token } as const),
       false,
@@ -382,7 +382,6 @@ type FrameScope = {
 // Runs in the frame's parent document through ElementHandle.evaluate. Keep this
 // function self-contained: Playwright serializes it without the module scope.
 function inspectFrameScope(node: Node, scope: { include: string[], exclude: string[] }): FrameScope {
-  // SAFETY: Frame.frameElement() returns the embedding element, despite its generic Node typing.
   const frameElement = node as Element;
   const composedParent = (element: Element) => {
     const root = element.getRootNode();
@@ -441,7 +440,6 @@ function inspectFrameScope(node: Node, scope: { include: string[], exclude: stri
     const flattenedChildren = parent ? [...parent.children].flatMap(child => {
       if (child.localName !== 'slot')
         return [child];
-      // SAFETY: the localName check above identifies the slot before calling its DOM API.
       const assigned = (child as HTMLSlotElement).assignedElements({ flatten: true });
       return assigned.length ? assigned : [...child.children];
     }) : [];
@@ -461,9 +459,9 @@ function inspectFrameScope(node: Node, scope: { include: string[], exclude: stri
 // Bounds every frame-element read and owns the handle until disposal. A lookup
 // that resolves after its timeout still needs its late handle disposed.
 async function readFrameElement<T>(
-  frame: playwright.Frame,
+  frame: Frame,
   fallback: T,
-  read: (element: playwright.ElementHandle) => Promise<T>
+  read: (element: ElementHandle) => Promise<T>
 ): Promise<T> {
   const elementPromise = frame.frameElement().catch(() => null);
   const element = await withFrameTimeout(elementPromise, null);
@@ -478,23 +476,9 @@ async function readFrameElement<T>(
   }
 }
 
-// A frame the caller scoped out of the scan is not a coverage gap: its contents
-// were never going to be reported. Answered from the iframe element in its
-// parent document, so an `excludeSelectors: ["iframe.chat-widget"]` entry - the
-// documented recipe for dropping a flaky third-party widget - does not produce a
-// warning about the very frame it removed.
-//
-// The whole ancestor chain is walked, not just the immediate parent document,
-// because `closest()` stops at a frame boundary while an Axe context does not:
-// `includeSelectors: ["#main"]` covers an iframe nested inside an iframe inside
-// `#main`, and an exclude naming an outer frame drops everything below it.
-//
-// Only a positive determination suppresses the warning. An unreachable frame
-// element or a probe that cannot answer in time falls through to reporting, so
-// no genuine gap is hidden by a check that failed to resolve.
 async function isFrameInScope(
-  frame: playwright.Frame,
-  mainFrame: playwright.Frame,
+  frame: Frame,
+  mainFrame: Frame,
   include: readonly string[],
   exclude: readonly string[]
 ): Promise<boolean> {
@@ -508,11 +492,8 @@ async function isFrameInScope(
     ));
     if (!matches)
       return true;
-    // Axe does not traverse a frame hidden from the accessibility tree, so a
-    // failed injection there is not missing coverage.
     if (matches.hidden)
       return false;
-    // Exclude wins wherever it matches: it drops the whole subtree under it.
     if (matches.excluded)
       return false;
     includeMatched ||= matches.included;
@@ -521,15 +502,15 @@ async function isFrameInScope(
 }
 
 function findFramesMissedByAxe(
-  frames: readonly playwright.Frame[],
+  frames: readonly Frame[],
   covered: readonly boolean[],
-  mainFrame: playwright.Frame
-): playwright.Frame[] {
+  mainFrame: Frame
+): Frame[] {
   const withoutAxe = new Set(frames.filter((_, index) => !covered[index]));
   return frames.filter(frame => {
     // A frame whose own injection succeeded is still unreachable when an
     // ancestor has no Axe: the top-level run relays through every ancestor.
-    for (let current: playwright.Frame | null = frame; current && current !== mainFrame; current = current.parentFrame()) {
+    for (let current: Frame | null = frame; current && current !== mainFrame; current = current.parentFrame()) {
       if (withoutAxe.has(current))
         return true;
     }
@@ -537,19 +518,12 @@ function findFramesMissedByAxe(
   });
 }
 
-function haveSameFrames(left: readonly playwright.Frame[], right: readonly playwright.Frame[]): boolean {
+function haveSameFrames(left: readonly Frame[], right: readonly Frame[]): boolean {
   return left.length === right.length && left.every((frame, index) => frame === right[index]);
 }
 
-// Returns an identifier for every child frame Axe could not be installed in, so
-// the caller can say what the scan did not cover. Every failure is reported
-// whatever the URL scheme: injection into an empty about:blank frame succeeds,
-// so a frame that reaches here failed for a reason worth knowing about.
-//
-// Duplicates are kept: two unnamed about:blank frames that both fail are two
-// documents that went unscanned, and collapsing them would under-count.
 async function injectAxeIntoFrames(
-  page: playwright.Page,
+  page: Page,
   include: readonly string[],
   exclude: readonly string[]
 ): Promise<string[]> {
@@ -562,17 +536,8 @@ async function injectAxeIntoFrames(
       frame => withFrameTimeout(injectAxe(frame, source), undefined),
   );
 
-  // Coverage is decided here rather than from the injection results: a frame
-  // that navigated while a slower sibling was still injecting has a new document
-  // without Axe, and one that appeared since was never injected at all. Both
-  // would otherwise contribute nothing to a report that still looked complete.
-  // The frame list is re-read for the same reason.
-  //
-  // Ceiling: a frame that navigates between this check and the run below is
-  // still missed. The window is microseconds rather than the length of the
-  // slowest injection, but it cannot be closed from outside the page.
-  const frameIds = new Map<playwright.Frame, number>();
-  const frameId = (frame: playwright.Frame) => {
+  const frameIds = new Map<Frame, number>();
+  const frameId = (frame: Frame) => {
     if (!frameIds.has(frame))
       frameIds.set(frame, frameIds.size);
     return frameIds.get(frame)!;
@@ -593,7 +558,6 @@ async function injectAxeIntoFrames(
       previousSignature = undefined;
       continue;
     }
-    // A healthy, unchanged frame tree had no slow scope probes to race with.
     if (!missed.length)
       return [];
     if (signature === previousSignature)
@@ -603,9 +567,7 @@ async function injectAxeIntoFrames(
   throw new Error('The frame tree kept changing while Axe coverage was checked. Retry the scan once the page settles.');
 }
 
-// Runs in the parent document through ElementHandle.evaluate.
 function isFrameElementReachable(node: Node): boolean {
-  // SAFETY: Frame.frameElement() returns the embedding element, despite its generic Node typing.
   for (let current = node as Element; ;) {
     const root = current.getRootNode();
     if (!(root instanceof ShadowRoot))
@@ -616,7 +578,7 @@ function isFrameElementReachable(node: Node): boolean {
   }
 }
 
-async function hasReachableAxe(frame: playwright.Frame, token: string): Promise<boolean> {
+async function hasReachableAxe(frame: Frame, token: string): Promise<boolean> {
   if (!await hasAxe(frame, token))
     return false;
   const reachable = await readFrameElement(frame, false, element => element.evaluate(isFrameElementReachable));
@@ -650,7 +612,7 @@ async function runAxeInPage({ context, options }: { context: axe.ElementContext 
   };
 }
 
-export async function runAxeScan(page: playwright.Page, options: AxeScanOptions = {}): Promise<AxeScanResult> {
+export async function runAxeScan(page: Page, options: AxeScanOptions = {}): Promise<AxeScanResult> {
   const rules = assertRuleOptionsValid(options);
   const include = options.include ?? [];
   const exclude = options.exclude ?? [];

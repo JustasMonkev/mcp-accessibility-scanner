@@ -53,7 +53,10 @@ it('retains bounded request history with stable IDs across real MCP navigation, 
     try {
       let providedContext: BrowserContext | undefined = await browser.newContext();
       const existingPage = await providedContext.newPage();
-      await existingPage.evaluate(url => { location.href = url; }, `${origin}/preexisting`);
+      await Promise.all([
+        existingPage.waitForEvent('request', request => request.url() === `${origin}/preexisting`),
+        existingPage.evaluate(url => { location.href = url; }, `${origin}/preexisting`),
+      ]);
       const pendingResponse = await heldResponse.promise;
       const config = await resolveConfig({ timeouts: { settle: 20 } });
       await client.connect(await wrapInProcess(new BrowserServerBackend(config, {
