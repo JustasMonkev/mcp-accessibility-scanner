@@ -932,6 +932,136 @@ describe('audit_site tool', () => {
     expect(summaryViolation.uniqueOccurrences).toBe(1);
   });
 
+  it.each([1, 2, 10])('keeps full deduplicated counts when node details are capped at %i', async maxNodesPerViolation => {
+    const { response } = createHarness({ 'https://example.com/': [] });
+    const imageNodes = ['first', 'second', 'third'].map(id => createViolation('image-alt', `<img id="${id}">`, [`#${id}`]).nodes[0]);
+    const contrastNodes = ['light', 'dark'].map(id => createViolation('color-contrast', `<span id="${id}">Text</span>`, [`#${id}`]).nodes[0]);
+    const incompleteNodes = ['name', 'email', 'phone'].map(id => createViolation('label', `<input id="${id}">`, [`#${id}`]).nodes[0]);
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/', [
+      { ...createViolation('image-alt', ''), nodes: [...imageNodes, imageNodes[0]] },
+      { ...createViolation('color-contrast', ''), impact: 'moderate', nodes: [...contrastNodes, contrastNodes[0]] },
+    ], [
+      { ...createViolation('label', ''), nodes: [...incompleteNodes, incompleteNodes[0]] },
+    ]));
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ maxPages: 1, maxNodesPerViolation, waitAfterNavigationMs: 0 }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages[0].summary).toEqual({
+      totalRules: 2,
+      totalNodes: 5,
+      byImpact: { serious: 3, moderate: 2 },
+      byRuleId: { 'image-alt': 3, 'color-contrast': 2 },
+    });
+    expect(report.pages[0].violations.map((violation: axe.AxeViolation) => violation.nodes.length))
+        .toEqual([Math.min(maxNodesPerViolation, 3), Math.min(maxNodesPerViolation, 2)]);
+    expect(report.pages[0].incomplete[0].nodes).toHaveLength(Math.min(maxNodesPerViolation, 3));
+    expect(report.summary.violations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'image-alt', totalOccurrences: 3, uniqueOccurrences: 3 }),
+      expect.objectContaining({ id: 'color-contrast', totalOccurrences: 2, uniqueOccurrences: 2 }),
+    ]));
+    expect(report.summary.incomplete).toEqual([
+      expect.objectContaining({ id: 'label', totalOccurrences: 3, uniqueOccurrences: 3 }),
+    ]);
+    expect(response.structuredContent()).toMatchObject({
+      topPages: [{ url: 'https://example.com/', totalViolations: 2, totalNodes: 5 }],
+      topViolations: expect.arrayContaining([
+        expect.objectContaining({ id: 'image-alt', totalOccurrences: 3 }),
+        expect.objectContaining({ id: 'color-contrast', totalOccurrences: 2 }),
+      ]),
+      topIncomplete: [expect.objectContaining({ id: 'label', totalOccurrences: 3 })],
+    });
+    expect(response.result()).toContain('https://example.com/: 2 violations, 5 nodes');
+  });
+
+  it.each([
+    { reachedUrl: 'https://outside.example/landing', includeSubdomains: false },
+    { reachedUrl: 'https://sub.example.com/landing', includeSubdomains: false },
+    { reachedUrl: 'http://sub.example.com/landing', includeSubdomains: true },
+    { reachedUrl: 'https://example.com/logout', includeSubdomains: false },
+    { reachedUrl: 'https://example.com/landing?signout=1', includeSubdomains: false },
+    { reachedUrl: 'about:blank', includeSubdomains: false },
+    { reachedUrl: 'https://outside.example/after-settling', includeSubdomains: false, duringSettling: true },
+  ])('does not audit or discover links after reaching $reachedUrl outside the crawl scope', async ({ reachedUrl, includeSubdomains, duringSettling }) => {
+    const { context, response, crawlTab, setCurrentUrl } = createHarness({
+      'https://example.com/': ['https://example.com/redirect', 'https://example.com/after'],
+      [reachedUrl]: ['https://example.com/should-not-be-discovered'],
+      'https://example.com/after': [],
+    }, { redirectMap: duringSettling ? {} : { 'https://example.com/redirect': reachedUrl } });
+    if (duringSettling) {
+      crawlTab.waitForTimeout.mockImplementation(async () => {
+        if (crawlTab.page.url() === 'https://example.com/redirect')
+          setCurrentUrl(reachedUrl);
+      });
+    }
+    const scannedUrls: string[] = [];
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => {
+      scannedUrls.push(page.url());
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ maxPages: 5, maxDepth: 2, includeSubdomains, waitAfterNavigationMs: duringSettling ? 100 : 0 }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { url: string, status: string }) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/redirect', 'error'],
+      ['https://example.com/after', 'scanned'],
+    ]);
+    expect(report.pages[1].error).toContain('https://example.com/redirect');
+    expect(report.pages[1].error).toContain(reachedUrl);
+    expect(report.pages[1].summary).toBeNull();
+    expect(report.summary.totals).toMatchObject({ scannedPages: 2, erroredPages: 1 });
+    expect(response.structuredContent()!.totals).toMatchObject({ scannedPages: 2, erroredPages: 1 });
+    expect(scannedUrls).toEqual(['https://example.com/', 'https://example.com/after']);
+    expect(crawlTab.page.evaluate).toHaveBeenCalledTimes(2);
+    expect(crawlTab.navigate).not.toHaveBeenCalledWith('https://example.com/should-not-be-discovered');
+    expect(context.tabs()).toHaveLength(1);
+    expect(context.selectTab).toHaveBeenLastCalledWith(0);
+  });
+
+  it.each([
+    { reachedUrl: 'https://example.com/landing', sameOriginOnly: true, includeSubdomains: false },
+    { reachedUrl: 'https://sub.example.com/landing', sameOriginOnly: true, includeSubdomains: true },
+    { reachedUrl: 'https://outside.example/landing', sameOriginOnly: false, includeSubdomains: false },
+  ])('audits an allowed redirect to $reachedUrl', async ({ reachedUrl, sameOriginOnly, includeSubdomains }) => {
+    const { response } = createHarness({
+      [reachedUrl]: ['https://example.com/child'],
+    }, { redirectMap: { 'https://example.com/': reachedUrl } });
+    const scannedUrls: string[] = [];
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => {
+      scannedUrls.push(page.url());
+      return createAxeResult(page.url(), []);
+    });
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ maxPages: 2, maxDepth: 1, sameOriginOnly, includeSubdomains, waitAfterNavigationMs: 0 }), response);
+
+    expect(scannedUrls).toEqual([reachedUrl, 'https://example.com/child']);
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { url: string, status: string }) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/child', 'scanned'],
+    ]);
+  });
+
+  it('still records cookie loss at a redirect destination rejected by crawl scope', async () => {
+    const reachedUrl = 'https://example.com/logout';
+    const { response } = createHarness({
+      'https://example.com/': ['https://example.com/redirect', 'https://example.com/after'],
+    }, {
+      redirectMap: { 'https://example.com/redirect': reachedUrl },
+      cookiesForUrl: url => url === reachedUrl || url === 'https://example.com/after' ? [] : [{ name: 'sid' }],
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ maxPages: 3, maxDepth: 1, waitAfterNavigationMs: 0 }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages[1].status).toBe('error');
+    expect(report.sessionLosses).toEqual([{ url: reachedUrl, cookies: ['sid'] }]);
+    expect(response.structuredContent()!.sessionLosses).toEqual(report.sessionLosses);
+  });
+
   it('emits progress notifications during crawl execution', async () => {
     const sendNotification = vi.fn(async () => undefined);
     const { context, response } = createHarness({

@@ -765,6 +765,12 @@ const auditSite = defineTabTool({
           await dialogWatch.guard(crawlTab.navigate(item.url));
           await dialogWatch.guard(crawlTab.waitForTimeout(params.waitAfterNavigationMs));
 
+          const reachedUrl = crawlTab.page.url();
+          const normalizedReachedUrl = normalizeUrl(reachedUrl, startUrl, ignoredParams);
+          if (!normalizedReachedUrl || !isAllowedByOrigin(normalizedReachedUrl, startUrl, params.sameOriginOnly, params.includeSubdomains)
+            || isExcludedByPath(normalizedReachedUrl, excludePatterns))
+            throw new Error(`Requested URL "${item.url}" reached "${truncateDataUrls(reachedUrl)}", which is outside the allowed crawl scope or matches excludePathPatterns. The destination was not audited.`);
+
           // Discover before scanning. A scoped scan throws when an
           // includeSelectors entry is absent from this page, and that must not
           // silently drop every descendant reachable only through it.
@@ -785,7 +791,7 @@ const auditSite = defineTabTool({
           pageReport.status = 'scanned';
           pageReport.unscannedFrames = axeResult.unscannedFrames;
           pageReport.violations = violations.trimmed;
-          pageReport.summary = summarizeAxeViolations(violations.trimmed);
+          pageReport.summary = summarizeAxeViolations(violations.deduped);
           aggregateIntoSummary(summaryByViolation, violations.deduped, item.url);
 
           if (params.includeIncomplete) {

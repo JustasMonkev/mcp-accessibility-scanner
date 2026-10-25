@@ -15,10 +15,11 @@
  */
 
 import { beforeAll, describe, it, expect } from 'vitest';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createConnection } from '../src/index.js';
 
 const rootDir = path.resolve(__dirname, '..');
@@ -56,6 +57,23 @@ function runCLI(args: string): string {
   });
 }
 
+function collectFailure(args: string[], environment?: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(process.execPath, [...cliArgs, ...args], {
+      encoding: 'utf-8',
+      timeout: 15_000,
+      killSignal: 'SIGKILL',
+      env: environment ? { ...process.env, ...environment } : undefined,
+    }, (error, stdout, stderr) => {
+      if (error?.code !== 1) {
+        reject(error ?? new Error('Expected CLI to exit with code 1'));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
 function collectOutput(args: string[], timeoutMs = 3000, environment?: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
   return new Promise(resolve => {
     const child = spawn(process.execPath, [...cliArgs, ...args], { stdio: 'pipe', env: environment ? { ...process.env, ...environment } : undefined });
@@ -90,7 +108,7 @@ describe('tool policy CLI options', () => {
   });
 
   it.each([{ mode: [] }, { mode: ['--connect-tool'] }, { mode: ['--extension'] }, { mode: ['--vscode'] }])('rejects unknown names before starting $mode', async ({ mode }) => {
-    const result = await collectOutput([...mode, '--port', '0', '--blocked-tools', 'browser_nav']);
+    const result = await collectFailure([...mode, '--port', '0', '--blocked-tools', 'browser_nav']);
     expect(result.stderr).toContain('Unknown tool in blockedTools: browser_nav');
     expect(result.stderr).not.toContain('Listening on');
   });
@@ -119,9 +137,25 @@ describe('URL parameter redaction CLI option', () => {
   });
 
   it.each([{ mode: [] }, { mode: ['--extension'] }, { mode: ['--connect-tool'] }, { mode: ['--vscode'] }])('rejects blank list entries before starting $mode', async ({ mode }) => {
-    const result = await collectOutput([...mode, '--port', '0', '--redact-url-params', 'token,,code']);
+    const result = await collectFailure([...mode, '--port', '0', '--redact-url-params', 'token,,code']);
     expect(result.stderr).toContain('redactUrlParams must be an array of non-blank parameter names');
     expect(result.stderr).not.toContain('Listening on');
+  });
+});
+
+describe('slow CLI startup', () => {
+  it('waits for invalid VS Code configuration to exit after startup exceeds three seconds', async () => {
+    const startupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-slow-startup-'));
+    const preload = path.join(startupDir, 'delay.mjs');
+    fs.writeFileSync(preload, 'await new Promise(resolve => setTimeout(resolve, 3100));');
+    try {
+      const result = await collectFailure(['--vscode', '--port', '0', '--redact-url-params', 'token,,code'],
+          { NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` });
+      expect(result.stderr).toContain('redactUrlParams must be an array of non-blank parameter names');
+      expect(result.stderr).not.toContain('Listening on');
+    } finally {
+      fs.rmSync(startupDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -188,7 +222,7 @@ describe('CLI command dispatch contract', () => {
     fs.writeFileSync(configFile, JSON.stringify({ imageResponses: 'only' }));
     const args = source === 'cli' ? ['--image-responses', 'only'] : source === 'config' ? ['--config', configFile] : [];
     try {
-      const { stdout, stderr } = await collectOutput([...args, 'interactive'], 3000,
+      const { stdout, stderr } = await collectFailure([...args, 'interactive'],
           { PLAYWRIGHT_MCP_IMAGE_RESPONSES: source === 'environment' ? 'only' : '' });
       expect(stderr).toContain('Interactive mode prints text only');
       expect(stderr).toContain('--image-responses allow or omit');
@@ -237,31 +271,31 @@ describe('CLI command dispatch contract', () => {
       const stateFile = path.join(stateDir, 'auth.json');
       fs.writeFileSync(stateFile, JSON.stringify({ cookies: [], origins: [] }));
       const profileDir = path.join(stateDir, 'profile');
-      const { stderr } = await collectOutput(['--connect-tool', '--storage-state', stateFile, '--user-data-dir', profileDir]);
+      const { stderr } = await collectFailure(['--connect-tool', '--storage-state', stateFile, '--user-data-dir', profileDir]);
       expect(stderr).toContain('--storage-state and --user-data-dir contradict each other');
     });
   });
 
   describe('--profile-dir-name outside extension mode', () => {
     it('rejects at startup instead of ignoring the option', async () => {
-      const { stderr } = await collectOutput(['--profile-dir-name', 'Profile 1']);
+      const { stderr } = await collectFailure(['--profile-dir-name', 'Profile 1']);
       expect(stderr).toContain('--profile-dir-name is only supported in extension mode');
     });
 
     it('rejects at startup without --user-data-dir', async () => {
-      const { stderr } = await collectOutput(['--extension', '--profile-dir-name', 'Profile 1']);
+      const { stderr } = await collectFailure(['--extension', '--profile-dir-name', 'Profile 1']);
       expect(stderr).toContain('--profile-dir-name requires --user-data-dir');
     });
 
     it('rejects --connect-tool interactive without --extension instead of starting a REPL', async () => {
       const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-connect-tool-'));
-      const { stderr } = await collectOutput(['--connect-tool', '--profile-dir-name', 'Profile 1', '--user-data-dir', profileDir, 'interactive']);
+      const { stderr } = await collectFailure(['--connect-tool', '--profile-dir-name', 'Profile 1', '--user-data-dir', profileDir, 'interactive']);
       expect(stderr).toContain('--profile-dir-name is only supported in extension mode');
     });
 
     it('rejects --connect-tool --vscode instead of starting the VS Code host', async () => {
       const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-vscode-'));
-      const { stderr } = await collectOutput(['--connect-tool', '--vscode', '--profile-dir-name', 'Profile 1', '--user-data-dir', profileDir]);
+      const { stderr } = await collectFailure(['--connect-tool', '--vscode', '--profile-dir-name', 'Profile 1', '--user-data-dir', profileDir]);
       expect(stderr).toContain('--profile-dir-name is only supported in extension mode');
     });
 
@@ -269,7 +303,7 @@ describe('CLI command dispatch contract', () => {
       const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-connect-tool-'));
       const stateFile = path.join(stateDir, 'auth.json');
       fs.writeFileSync(stateFile, JSON.stringify({}));
-      const { stderr } = await collectOutput(['--connect-tool', '--storage-state', stateFile, '--profile-dir-name', 'Profile 1', '--user-data-dir', path.join(stateDir, 'profile')]);
+      const { stderr } = await collectFailure(['--connect-tool', '--storage-state', stateFile, '--profile-dir-name', 'Profile 1', '--user-data-dir', path.join(stateDir, 'profile')]);
       expect(stderr).toContain('--profile-dir-name cannot reach the extension provider with a storage state');
     });
   });
@@ -292,7 +326,7 @@ describe('CLI command dispatch contract', () => {
       const stateFile = path.join(stateDir, 'auth.json');
       fs.writeFileSync(stateFile, JSON.stringify({ cookies: [], origins: [] }));
       const profileDir = path.join(stateDir, 'profile');
-      const { stderr } = await collectOutput(['--vscode', '--storage-state', stateFile, '--user-data-dir', profileDir]);
+      const { stderr } = await collectFailure(['--vscode', '--storage-state', stateFile, '--user-data-dir', profileDir]);
       expect(stderr).toContain('--storage-state and --user-data-dir contradict each other');
     });
   });
