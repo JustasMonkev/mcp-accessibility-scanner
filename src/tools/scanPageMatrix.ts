@@ -35,9 +35,7 @@ type VariantResult = {
   // distinguishable from one that was only partly scanned.
   unscannedFrames: string[];
   nodeCountByRuleId: Record<string, number>;
-  // null when this variant or the baseline left frames unscanned: the two runs
-  // then covered different documents, and a delta between them would report a
-  // coverage artefact as a fixed or newly introduced violation.
+  comparisonIncompleteRuleIds: string[];
   diffFromBaseline: {
     newViolationIds: string[];
     resolvedViolationIds: string[];
@@ -88,7 +86,7 @@ const defaultVariants: z.output<typeof variantSchema>[] = [
 
 const scanPageMatrixSchema = z.object({
   variants: z.array(variantSchema).min(1).optional().describe('Variant list to run. Defaults to baseline/mobile/desktop/forced-colors/reduced-motion/zoom-200.'),
-  includeIncomplete: z.boolean().default(true).describe('Also collect Axe "incomplete" results per variant — checks Axe could not decide automatically.'),
+  includeIncomplete: z.boolean().default(true).describe('Also report Axe "incomplete" results per variant — checks Axe could not decide automatically.'),
   waitAfterApplyMs: z.number().int().min(0).max(5000).default(250).describe('Wait after applying each variant before scanning.'),
   reloadBetweenVariants: z.boolean().default(false).describe('Reload page between variants.'),
   ...axeScanSchemaShape,
@@ -193,6 +191,7 @@ const scanPageMatrix = defineTabTool({
     const { zoom: originalZoom, media: originalMedia } = await readPageState(tab.page);
 
     const variantResults: VariantResult[] = [];
+    const incompleteRuleIdsByVariant: string[][] = [];
     try {
       for (const variant of variants) {
         // Apply each property once per variant: the variant value when set,
@@ -223,6 +222,7 @@ const scanPageMatrix = defineTabTool({
         const axeResult = await runAxeScan(tab.page, axeScanOptions(params));
         const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
         const nodeCountByRuleId = countNodesByRule(violations.deduped);
+        incompleteRuleIdsByVariant.push(axeResult.incomplete.map(result => result.id));
 
         variantResults.push({
           name: variant.name,
@@ -231,13 +231,14 @@ const scanPageMatrix = defineTabTool({
             media,
             zoomPercent: variant.zoomPercent ?? null,
           },
-          summary: summarizeAxeViolations(violations.trimmed),
+          summary: summarizeAxeViolations(violations.deduped),
           unscannedFrames: axeResult.unscannedFrames,
           violations: violations.trimmed,
           incomplete: params.includeIncomplete
             ? prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation).trimmed
             : [],
           nodeCountByRuleId,
+          comparisonIncompleteRuleIds: [],
           diffFromBaseline: null,
         });
 
@@ -250,14 +251,13 @@ const scanPageMatrix = defineTabTool({
 
       const baseline = variantResults[0];
       const baselineCounts = baseline?.nodeCountByRuleId ?? {};
-      for (const result of variantResults) {
-        // Only comparable when both sides scanned the same documents. With a
-        // frame missed on either side, a rule absent from one run may simply
-        // live in the document that went unscanned, and calling that "resolved"
-        // - or its reappearance "new" - states an accessibility outcome the run
-        // cannot support. The warning already says coverage differs; the
-        // numbers must not quietly contradict it.
-        const comparable = !result.unscannedFrames.length && !baseline?.unscannedFrames.length;
+      for (const [index, result] of variantResults.entries()) {
+        const violatedRuleIds = new Set([...Object.keys(baselineCounts), ...Object.keys(result.nodeCountByRuleId)]);
+        result.comparisonIncompleteRuleIds = [...new Set([
+          ...incompleteRuleIdsByVariant[0],
+          ...incompleteRuleIdsByVariant[index],
+        ])].filter(id => violatedRuleIds.has(id)).sort();
+        const comparable = !result.unscannedFrames.length && !baseline?.unscannedFrames.length && !result.comparisonIncompleteRuleIds.length;
         result.diffFromBaseline = comparable
           ? computeDiffFromBaseline(baselineCounts, result.nodeCountByRuleId)
           : null;
@@ -272,7 +272,6 @@ const scanPageMatrix = defineTabTool({
     }
 
     const report = {
-      // v2 allows diffFromBaseline to be null when scan coverage differs.
       version: 'v2',
       metadata: {
         url: tab.page.url(),
@@ -317,9 +316,7 @@ const scanPageMatrix = defineTabTool({
         // Without this a client reading only structured output cannot tell a
         // partly-scanned variant from a clean one.
         unscannedFrames: result.unscannedFrames,
-        // null, not [], when the coverage differs from the baseline's: an empty
-        // list reads as "nothing changed", which is the one thing an incomplete
-        // pair of scans cannot establish.
+        comparisonIncompleteRuleIds: result.comparisonIncompleteRuleIds,
         newViolationIds: result.diffFromBaseline?.newViolationIds ?? null,
         resolvedViolationIds: result.diffFromBaseline?.resolvedViolationIds ?? null,
         changedRuleIds: result.diffFromBaseline ? Object.keys(result.diffFromBaseline.changedCounts) : null,
@@ -342,13 +339,14 @@ const scanPageMatrix = defineTabTool({
       'Variant | Violations | Nodes | Incomplete | Top new vs baseline',
       '--- | --- | --- | --- | ---',
       ...variantResults.map(result => {
-        // "n/a" rather than "-": "-" means "compared, nothing new", which is a
-        // claim a pair of scans with differing coverage cannot make. The reason
-        // names neither side, because the gap may be in the baseline - in which
-        // case every other row is uncomparable through no fault of its own.
+        const comparisonReasons: string[] = [];
+        if (result.unscannedFrames.length || variantResults[0]?.unscannedFrames.length)
+          comparisonReasons.push('coverage differs');
+        if (result.comparisonIncompleteRuleIds.length)
+          comparisonReasons.push(`incomplete checks: ${result.comparisonIncompleteRuleIds.join(', ')}`);
         const topNew = result.diffFromBaseline
           ? result.diffFromBaseline.newViolationIds.slice(0, 5).join(', ') || '-'
-          : 'n/a (coverage differs)';
+          : `n/a (${comparisonReasons.join('; ')})`;
         // "-" rather than 0: with collection off, 0 is indistinguishable from
         // "no needs-review findings". audit_site omits its section for the same
         // reason.

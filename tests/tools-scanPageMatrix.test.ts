@@ -179,6 +179,160 @@ describe('scan_page_matrix tool', () => {
     expect((excluded.response.structuredContent() as any).variants[0].totalIncomplete).toBeNull();
   });
 
+  it.each([1, 2, 50])('keeps full deduplicated totals and deltas when the node detail cap is %i', async maxNodesPerViolation => {
+    const baseline = createAxeResult('https://example.com/page', ['image-alt']);
+    const mobile = createAxeResult('https://example.com/page', ['image-alt', 'label']);
+    for (const [result, count] of [[baseline, 3], [mobile, 4]] as const) {
+      const violation = result.violations[0];
+      violation.nodes = Array.from({ length: count }, (_, index) => ({
+        ...violation.nodes[0], target: [`#image-${index}`],
+      }));
+      violation.nodes.push({ ...violation.nodes[0] });
+    }
+    mobile.violations[1].nodes.push({ ...mobile.violations[1].nodes[0], target: ['#second-label'] });
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValueOnce(baseline).mockResolvedValueOnce(mobile);
+    const { response } = createMatrixHarness('/tmp/scan-counts.json');
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({
+      variants: [{ name: 'baseline' }, { name: 'mobile' }],
+      maxNodesPerViolation,
+      waitAfterApplyMs: 0,
+    }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.variants[0].summary).toEqual({
+      totalRules: 1, totalNodes: 3, byImpact: { moderate: 3 }, byRuleId: { 'image-alt': 3 },
+    });
+    expect(report.variants[1].summary).toEqual({
+      totalRules: 2, totalNodes: 6, byImpact: { moderate: 6 }, byRuleId: { 'image-alt': 4, 'label': 2 },
+    });
+    expect(report.variants[0].violations[0].nodes).toHaveLength(Math.min(maxNodesPerViolation, 3));
+    expect(report.variants[1].violations[0].nodes).toHaveLength(Math.min(maxNodesPerViolation, 4));
+    expect(report.variants[1].violations[1].nodes).toHaveLength(Math.min(maxNodesPerViolation, 2));
+    expect(report.variants[1].nodeCountByRuleId).toEqual({ 'image-alt': 4, 'label': 2 });
+    expect(report.variants[1].diffFromBaseline).toEqual({
+      newViolationIds: ['label'], resolvedViolationIds: [],
+      changedCounts: { 'image-alt': { baseline: 3, variant: 4 }, 'label': { baseline: 0, variant: 2 } },
+    });
+    expect(response.structuredContent()).toMatchObject({ variants: [{ totalNodes: 3 }, { totalNodes: 6 }] });
+    expect(response.result()).toContain('baseline | 1 | 3 | 0 | -');
+    expect(response.result()).toContain('mobile | 2 | 6 | 0 | label');
+  });
+
+  it.each([
+    { name: 'resolution', baselineViolations: ['image-alt'], baselineIncomplete: [], variantViolations: [], variantIncomplete: ['image-alt'] },
+    { name: 'introduction', baselineViolations: [], baselineIncomplete: ['image-alt'], variantViolations: ['image-alt'], variantIncomplete: [] },
+    { name: 'baseline count', baselineViolations: ['image-alt'], baselineIncomplete: ['image-alt'], variantViolations: ['image-alt'], variantIncomplete: [] },
+    { name: 'variant count', baselineViolations: ['image-alt'], baselineIncomplete: [], variantViolations: ['image-alt'], variantIncomplete: ['image-alt'] },
+  ])('withholds unsupported $name deltas even when incomplete details are hidden', async testCase => {
+    const baseline = createAxeResult('https://example.com/page', testCase.baselineViolations, testCase.baselineIncomplete);
+    const variant = createAxeResult('https://example.com/page', testCase.variantViolations, testCase.variantIncomplete);
+    if (variant.violations.length)
+      variant.violations[0].nodes.push({ ...variant.violations[0].nodes[0], target: ['#second-image'] });
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValueOnce(baseline).mockResolvedValueOnce(variant);
+    const { response } = createMatrixHarness('/tmp/scan-incomplete-delta.json');
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({
+      variants: [{ name: 'baseline' }, { name: 'mobile' }],
+      includeIncomplete: false,
+      waitAfterApplyMs: 0,
+    }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.version).toBe('v2');
+    expect(report.variants[1].diffFromBaseline).toBeNull();
+    expect(report.variants[1].comparisonIncompleteRuleIds).toEqual(['image-alt']);
+    expect(report.variants[0].comparisonIncompleteRuleIds).toEqual(
+        testCase.baselineViolations.length && testCase.baselineIncomplete.length ? ['image-alt'] : []
+    );
+    if (testCase.baselineViolations.length && testCase.baselineIncomplete.length)
+      expect(report.variants[0].diffFromBaseline).toBeNull();
+    else
+      expect(report.variants[0].diffFromBaseline).not.toBeNull();
+    expect(report.variants[0].incomplete).toEqual([]);
+    expect(report.variants[1].incomplete).toEqual([]);
+    expect(response.structuredContent()).toMatchObject({
+      version: 'v2',
+      variants: [{}, {
+        totalIncomplete: null,
+        comparisonIncompleteRuleIds: ['image-alt'],
+        newViolationIds: null, resolvedViolationIds: null, changedRuleIds: null,
+      }],
+    });
+    expect(response.result()).toContain('n/a (incomplete checks: image-alt)');
+    expect(response.result()).not.toContain('coverage differs');
+  });
+
+  it('withholds default-mode comparisons for incomplete rules despite complete frame coverage', async () => {
+    vi.spyOn(axe, 'runAxeScan')
+        .mockResolvedValueOnce(createAxeResult('https://example.com/page', ['image-alt']))
+        .mockResolvedValueOnce(createAxeResult('https://example.com/page', [], ['image-alt']));
+    const { response } = createMatrixHarness('/tmp/scan-default-incomplete-delta.json');
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({
+      variants: [{ name: 'baseline' }, { name: 'mobile' }],
+      waitAfterApplyMs: 0,
+    }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.variants.map((variant: { unscannedFrames: string[] }) => variant.unscannedFrames)).toEqual([[], []]);
+    expect(report.variants[1].diffFromBaseline).toBeNull();
+    expect(report.variants[1].comparisonIncompleteRuleIds).toEqual(['image-alt']);
+    expect(report.variants[1].incomplete.map((entry: axe.AxeViolation) => entry.id)).toEqual(['image-alt']);
+    expect(response.structuredContent()).toMatchObject({ variants: [{}, {
+      totalIncomplete: 1,
+      comparisonIncompleteRuleIds: ['image-alt'],
+      newViolationIds: null, resolvedViolationIds: null, changedRuleIds: null,
+    }] });
+    expect(response.result()).toContain('n/a (incomplete checks: image-alt)');
+    expect(response.result()).not.toContain('coverage differs');
+  });
+
+  it('compares confirmed violations despite unrelated incomplete rules', async () => {
+    vi.spyOn(axe, 'runAxeScan')
+        .mockResolvedValueOnce(createAxeResult('https://example.com/page', ['image-alt'], ['color-contrast']))
+        .mockResolvedValueOnce(createAxeResult('https://example.com/page', ['label'], ['aria-hidden-focus']));
+    const { response } = createMatrixHarness('/tmp/scan-unrelated-incomplete.json');
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({
+      variants: [{ name: 'baseline' }, { name: 'mobile' }],
+      waitAfterApplyMs: 0,
+    }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.variants[1].comparisonIncompleteRuleIds).toEqual([]);
+    expect(report.variants[1].diffFromBaseline).toEqual({
+      newViolationIds: ['label'], resolvedViolationIds: ['image-alt'],
+      changedCounts: { 'image-alt': { baseline: 1, variant: 0 }, 'label': { baseline: 0, variant: 1 } },
+    });
+    expect(response.structuredContent()).toMatchObject({ variants: [{ comparisonIncompleteRuleIds: [] }, { comparisonIncompleteRuleIds: [] }] });
+  });
+
+  it('reports both missing coverage and incomplete comparisons without hiding incomplete details', async () => {
+    vi.spyOn(axe, 'runAxeScan')
+        .mockResolvedValueOnce(createAxeResult('https://example.com/page', ['label', 'image-alt']))
+        .mockResolvedValueOnce({
+          ...createAxeResult('https://example.com/page', [], ['label', 'image-alt', 'label']),
+          unscannedFrames: ['https://widget.example/'],
+        });
+    const { response } = createMatrixHarness('/tmp/scan-two-comparison-reasons.json');
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({
+      variants: [{ name: 'baseline' }, { name: 'mobile' }],
+      waitAfterApplyMs: 0,
+    }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.variants[1].diffFromBaseline).toBeNull();
+    expect(report.variants[1].comparisonIncompleteRuleIds).toEqual(['image-alt', 'label']);
+    expect(report.variants[1].incomplete).toHaveLength(3);
+    expect(response.structuredContent()).toMatchObject({ variants: [{}, {
+      unscannedFrames: ['https://widget.example/'], comparisonIncompleteRuleIds: ['image-alt', 'label'],
+      newViolationIds: null, resolvedViolationIds: null, changedRuleIds: null,
+    }] });
+    expect(response.result()).toContain('n/a (coverage differs; incomplete checks: image-alt, label)');
+  });
+
   it('runs variants in baseline-first order and computes baseline diffs', async () => {
     const evaluateMock = vi.fn()
         .mockResolvedValueOnce(pageState(''))

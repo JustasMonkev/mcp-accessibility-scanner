@@ -482,7 +482,7 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 **Parameters:**
 - `violationsTag`: Array of WCAG/violation tags to check
 - `includeIncomplete` (default `true`): also report Axe "incomplete" results
-- `maxNodesPerViolation` (default `10`): cap on nodes reported per rule
+- `maxNodesPerViolation` (default `10`): cap on node details reported per rule; occurrence totals use all deduplicated findings, not the capped sample
 - `includeSelectors` / `excludeSelectors`: CSS selectors that scope the scan
 - `withRules` / `disableRules`: Axe rule ids that narrow which rules run
 - `annotateScreenshot` (default `false`): capture an annotated screenshot of the violations
@@ -524,7 +524,7 @@ In `audit_site`, selectors apply to every crawled page, so an `includeSelectors`
 `audit_site` and `scan_page_matrix` record both values in their JSON report metadata, so a stored report can be told apart from a full scan.
 
 **Incomplete ("needs review") results:**
-Axe returns `incomplete` for checks it cannot decide on its own -- contrast over a background image or gradient, ambiguous labels, elements it could not fully evaluate. `scan_page`, `audit_site`, and `scan_page_matrix` report these in a section separate from violations so you can resolve them by inspecting the page (screenshot, snapshot, `browser_evaluate`). Set `includeIncomplete: false` to suppress them.
+Axe returns `incomplete` for checks it cannot decide on its own -- contrast over a background image or gradient, ambiguous labels, elements it could not fully evaluate. `scan_page`, `audit_site`, and `scan_page_matrix` report these in a section separate from violations so you can resolve them by inspecting the page (screenshot, snapshot, `browser_evaluate`). Set `includeIncomplete: false` to suppress their detailed findings. In matrix scans, this does not disable the comparison-validity checks described below.
 
 **Frames that could not be scanned:**
 Axe is installed into every frame of the page before the scan runs. A frame that navigates mid-injection, or whose renderer does not answer within a second, is left out -- and its contents then contribute no findings. Rather than let that pass as a clean result, all three scan tools print a `WARNING: Axe could not be installed in N frame(s)` block listing the frame URLs, and `audit_site` and `scan_page_matrix` also record them per page and per variant in their JSON reports (`unscannedFrames`) and in `structuredContent`. A frame that was still loading usually succeeds on a re-run; one that fails consistently has to be audited on its own.
@@ -540,7 +540,8 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 - Default strategy: link-based BFS from the current URL
 - Supports `links`, `nav`, `sitemap`, and `provided` URL strategies
 - Sitemap URLs and every redirect must pass the server network policy and crawl scope. Fetches run on the MCP host, use HTTP(S) without browser cookies or auth headers, and have a 15-second total timeout, 20-redirect cap, and 10 MiB response limit. Browser proxy settings, `browser.remoteEndpoint`, `browser.cdpEndpoint` (including loopback endpoints, which may tunnel to remote browsers), and switched `browser_connect` providers are rejected for this strategy; use `provided` URLs in these modes. Sitemap TLS certificates must be valid even when browser HTTPS errors are ignored.
-- Always writes a JSON report (default filename: `audit-site-{timestamp}-{token}.json`)
+- Always writes a JSON report (default filename: `audit-site-{timestamp}-{token}.json`). Per-page `summary.totalNodes`, `byImpact`, and `byRuleId` count all deduplicated violation nodes; `maxNodesPerViolation` only limits the saved node details.
+- After browser navigation settles, the reached URL is checked again against HTTP(S), `sameOriginOnly`, `includeSubdomains`, and `excludePathPatterns`. A destination outside that scope is recorded as a page error naming the requested and reached URLs; it is not scanned or used for link discovery, and the crawl continues. This is a post-navigation check, not a network-request blocker: redirect destinations may already have been contacted and changed session state.
 - A page that opens an `alert`, `confirm` or `prompt` while it is being audited is reported as an errored page as soon as the dialog opens, with the dialog named in its `error`. This includes terminal HTTP 3xx pages (for example, `300` or `302` without a `Location`) that commit a document instead of redirecting. The crawl never answers a dialog: it closes that page's tab and continues with the next URL in a fresh one, so one such page does not fail or hang the pages after it. A dialog the previous page raises while the crawl is already navigating away is not blamed on the next page, which is audited again in the fresh tab. Same-document history updates, even ones that keep the exact URL unchanged, do not count as the next page loading. A fresh tab starts without the old tab's `sessionStorage`, so the result then starts with a `WARNING: … continued in a fresh tab from <url>` line and both the JSON report and the structured content carry a `crawlTabRestarts` list; if the site keeps its session in `sessionStorage`, pages from that URL on may have been audited in a different session. The tab the tool was called from is not touched.
 - Warns and records `sessionLosses` if the crawl loses cookies it started with — see [Auditing pages behind a login](#auditing-pages-behind-a-login). If navigation fails on a browser-internal error page, the warning names the requested URL instead.
 
@@ -556,7 +557,10 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 - Default variants: baseline, mobile, desktop, forced-colors, reduced-motion, zoom-200
 - Supports custom variants and optional reload between variants
 - Always writes a JSON report (default filename: `scan-matrix-{timestamp}-{token}.json`)
-- JSON report and structured result schema `v2` set baseline deltas to `null` when either scan left frames unscanned, because their coverage is not comparable
+- JSON report and structured result schema `v2` set baseline deltas to `null` when either scan left frames unscanned, or when a rule recorded as a violation on either side also has incomplete results on either side. An undecidable result is not evidence that a violation was fixed, introduced, or changed in count.
+- Each variant includes `comparisonIncompleteRuleIds` in JSON and structured output: the sorted rule IDs making its comparison uncertain, or `[]` when none do. The text table distinguishes missing-frame coverage from incomplete checks. These safeguards still apply with `includeIncomplete: false`; that option hides detailed findings, not comparison validity.
+- Unrelated incomplete-only rules do not suppress comparisons of confirmed violations. The baseline self-comparison is also unavailable if the same rule has both violating and incomplete nodes.
+- Summary totals and baseline count deltas use all deduplicated violation nodes, while saved node details remain capped by `maxNodesPerViolation`. Changing that cap does not change occurrence totals.
 
 **Example flow:**
 ```text
