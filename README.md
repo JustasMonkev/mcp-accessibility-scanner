@@ -1049,14 +1049,13 @@ on the tested macOS 26 arm64 host. Remaining limitations:
   these after layout-sensitive checks, or disable those captures with
   `screenshotOnIssue: false` and `annotateScreenshot: false`. The server does
   not reset fonts or reload pages.
-- **WebKit on macOS 14:** the alpha manifest still selects frozen r2251, which
-  previously failed page creation with `Unknown setting: PushAPIEnabled`.
-  This OS was not rerun locally. Passing macOS 26/WebKit r2380 results do not
-  establish macOS 14 compatibility.
-- **Linux-only controls:** the previous WebKit provisional-load event-order
-  race and Firefox crash-cycle memory behavior need their Linux CI runs.
-  The local WebKit alpha passed 350 navigations, but that does not establish
-  the Linux result. Keep a finite navigation timeout.
+- **WebKit on macOS 14:** unsupported by this Playwright version. Its frozen
+  r2251 build stalls during page setup in CI. Use macOS 15 or newer; the WebKit
+  CI job now targets macOS 15. See [upstream support guidance](https://github.com/microsoft/playwright/issues/42964#issuecomment-5873994261).
+- **Linux-only controls:** the WebKit network probe completed 200 navigations
+  and cancelled 251 subresources without a crash in CI. Firefox's crash-cycle
+  probe also passed. These bounded probes do not rule out a native race or prove
+  that all native memory is reclaimed. Keep a finite navigation timeout.
 
 No engine patches or browser-default changes are applied. BFCache and
 existing-context storage import restrictions remain documented above.

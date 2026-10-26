@@ -83,10 +83,14 @@ branded browsers or older operating systems.
    (registration count changes from one to zero). A storage-state snapshot
    cannot restore it. The server still rejects existing-context imports
    before snapshot/reset and supports fresh contexts instead.
-4. **macOS 14 WebKit is not locally verified.** The alpha browser manifest
-   still selects the frozen r2251 build for macOS 14. The previous
-   `Unknown setting: PushAPIEnabled` failure must be checked on that OS; a
-   passing macOS 26 test does not settle it.
+4. **macOS 14 WebKit is unsupported.** Hosted CI selected frozen r2251 and
+   stalled during page setup (three failures). The installed driver sends
+   `PushAPIEnabled`, which that frozen build does not implement; the CI log
+   itself reports stalls rather than this protocol error. [Upstream confirms
+   macOS 14 is unsupported](https://github.com/microsoft/playwright/issues/42964#issuecomment-5873994261).
+   The WebKit job now uses macOS 15, including the numpad check previously
+   excluded on macOS 14. This is a supported-runner migration, not a fix for
+   macOS 14 users.
 5. **Browser installer integrity behavior is unchanged.** The installed
    downloader checks response length and extracts the archive without an
    independent checksum/signature check. Existing download-source guidance
@@ -97,18 +101,39 @@ branded browsers or older operating systems.
 This validation is not a claim that all open GitHub issues are resolved.
 
 - #284: proxy credential isolation verified on the tested Chromium paths.
-- #230: bundled Chromium persistent-profile downloads verified locally; branded
-  Windows/Edge and hosted CI results remain outstanding.
+- #230: bundled Chromium persistent-profile downloads verified locally and on
+  Linux CI; Windows Chromium, Chrome and Edge regression jobs also pass.
 - #244: crashed-renderer attachment and three-engine numpad checks pass;
   genuine Memory Saver-discarded tabs still need a headed-browser check.
 - #271: recorder migration and touch/scroll gates pass; the full-page screenshot
   failure remains, and the device-descriptor `screen` change needs explicit
   validation/documentation before this upgrade gate is complete.
-- #235: certificate/proxy routing passes; Linux WebKit bundle validation remains.
+- #235: certificate/proxy routing passes locally; Linux WebKit network/details
+  checks pass in CI. The full Linux test job did not reach its tests.
 - #257, #292, #293, #295, #296 and #298 were not specifically validated in this
   upgrade pass. No issue is automatically closed by the proposed change.
 
 ## Repository checks
+
+### First hosted CI run
+
+[Run 40354135238](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/40354135238)
+finished with **8 passed, 2 failed and 2 timed out**:
+
+- macOS 14 Chromium reproduces the strict screenshot font/layout failure.
+- macOS 14 WebKit stalls during page setup on unsupported frozen r2251.
+- The main test and Ubuntu WebKit controls jobs timed out after 20 and 15
+  minutes respectively while `apt` downloaded dependencies from
+  `azure.archive.ubuntu.com` on Ubuntu 26.04. Neither reached its tests.
+  These two jobs now pin Ubuntu 24.04 rather than the moving `ubuntu-latest`
+  label; browser revisions still come from the exact locked alpha.
+- Docker smoke, all four Linux/Windows download jobs, macOS/Linux Firefox
+  controls and Linux WebKit network/details checks passed.
+- The Linux WebKit probe completed 200 navigations and cancelled 251
+  subresources without a crash. The Firefox crash-cycle probe passed its
+  survivor-context checks; neither result proves absence of native races/leaks.
+
+### Local checks
 
 - Final full Vitest run: **1,805 passed, 1 failed, 5 skipped** (76 files).
   The only failure is the macOS full-page screenshot font/layout regression
