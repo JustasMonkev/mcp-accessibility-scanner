@@ -117,21 +117,22 @@ describe('Config', () => {
       expect(config.browser.contextOptions.proxy).toEqual(contextProxy);
     });
 
-    it.each(['launch', 'context'])('rejects an effective %s proxy bypass with certificates', async level => {
+    it.each(['launch', 'context'])('preserves an effective %s proxy bypass with certificates', async level => {
       const options = { proxy: { ...proxy, bypass: 'private.test' } };
-      await expect(resolveConfig({ browser: {
+      const config = await resolveConfig({ browser: {
         launchOptions: level === 'launch' ? options : {},
         contextOptions: { clientCertificates, ...(level === 'context' ? options : {}) },
-      } })).rejects.toThrow('clientCertificates with proxy.bypass is unsupported');
+      } });
+      expect(config.browser.contextOptions.proxy).toEqual(options.proxy);
     });
 
     it('validates the merged CLI, environment and file proxy settings', async () => {
       const config = await writeConfigFile({ browser: { contextOptions: { clientCertificates } } });
       expect((await resolveCLIConfig({ config, proxyServer: proxy.server })).browser.contextOptions.proxy).toEqual({ server: proxy.server });
-      await expect(resolveCLIConfig({ config, proxyServer: proxy.server, proxyBypass: 'private.test' })).rejects.toThrow('proxy.bypass');
+      expect((await resolveCLIConfig({ config, proxyServer: proxy.server, proxyBypass: 'private.test' })).browser.contextOptions.proxy).toEqual({ server: proxy.server, bypass: 'private.test' });
       vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', proxy.server);
       vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', 'private.test');
-      await expect(resolveCLIConfig({ config })).rejects.toThrow('proxy.bypass');
+      expect((await resolveCLIConfig({ config })).browser.contextOptions.proxy).toEqual({ server: proxy.server, bypass: 'private.test' });
       vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', '');
       expect((await resolveCLIConfig({ config })).browser.contextOptions.proxy).toEqual({ server: proxy.server });
     });
@@ -174,7 +175,7 @@ describe('Config', () => {
     });
   });
 
-  describe('authenticated proxy warning', () => {
+  describe('authenticated proxy configuration', () => {
     beforeEach(() => {
       vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', '');
       vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', '');
@@ -186,23 +187,17 @@ describe('Config', () => {
 
     const proxy = { server: 'http://private-proxy.test:3128', username: 'private-user', password: 'private-password' };
 
-    it.each(['launch', 'context', 'both'])('warns once without exposing %s proxy settings', async level => {
+    it.each(['launch', 'context', 'both'])('accepts %s proxy settings without stale warnings or credential output', async level => {
       const warning = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       const config = await resolveConfig({ browser: {
         launchOptions: level === 'context' ? {} : { proxy },
         contextOptions: level === 'launch' ? {} : { proxy },
       } });
-      expect(warning).toHaveBeenCalledTimes(1);
-      const message = warning.mock.calls.flat().join('\n');
-      expect(message).toContain('Playwright 1.63.0');
-      expect(message).toContain('website');
-      expect(message).toContain('401');
-      expect(message).toContain('does not prevent');
-      expect(message).not.toMatch(/private-proxy|private-user|private-password/);
+      expect(warning).not.toHaveBeenCalled();
       expect(level === 'context' ? config.browser.contextOptions.proxy : config.browser.launchOptions.proxy).toEqual(proxy);
     });
 
-    it.each(['cli', 'env', 'file-launch', 'file-context'])('warns for credentials from %s', async source => {
+    it.each(['cli', 'env', 'file-launch', 'file-context'])('accepts credentials from %s without stale warnings or credential output', async source => {
       const warning = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       const config = await writeConfigFile({ browser: {
         launchOptions: source === 'file-launch' ? { proxy } : {},
@@ -211,8 +206,7 @@ describe('Config', () => {
       if (source === 'env')
         vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', 'http://private-user:private-password@private-proxy.test:3128');
       await resolveCLIConfig({ config, proxyServer: source === 'cli' ? 'http://private-user:private-password@private-proxy.test:3128' : undefined });
-      expect(warning).toHaveBeenCalledTimes(1);
-      expect(warning.mock.calls.flat().join('\n')).not.toContain('private-');
+      expect(warning).not.toHaveBeenCalled();
     });
 
     it('stays silent without credentials, including credentials replaced by a CLI override', async () => {

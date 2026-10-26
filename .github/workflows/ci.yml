@@ -11,9 +11,6 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    container:
-      image: mcr.microsoft.com/playwright:v1.63.0-noble
-      options: --user pwuser --init --ipc=host
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
     defaults:
@@ -62,7 +59,10 @@ jobs:
           npm --version
           npm ci
 
-      - name: Verify preinstalled browsers
+      - name: Install matching browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Verify installed browsers
         run: |
           node --input-type=module <<'NODE'
           import { chromium, firefox, webkit } from 'playwright';
@@ -93,6 +93,9 @@ jobs:
 
       - name: Verify client-certificate proxy routing
         run: node tests/client-certificate-proxy-probe.mjs
+
+      - name: Verify authenticated proxy routing
+        run: node tests/authenticated-proxy-probe.mjs
 
   docker-smoke:
     runs-on: ubuntu-latest
@@ -171,9 +174,6 @@ jobs:
   webkit-regressions:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    container:
-      image: mcr.microsoft.com/playwright:v1.63.0-noble
-      options: --user pwuser --init --ipc=host
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
     defaults:
@@ -216,6 +216,7 @@ jobs:
           NODE
 
       - run: npm ci
+      - run: npx playwright install --with-deps firefox webkit
       - run: node tests/webkit-network-probe.mjs
       # Independent checks: a probe or WebKit failure must not hide the others.
       - if: ${{ !cancelled() }}

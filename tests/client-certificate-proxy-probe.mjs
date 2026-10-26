@@ -104,11 +104,6 @@ try {
           contextOptions: { ignoreHTTPSErrors: true, ...(certificates && { clientCertificates }) },
         } };
         const scenario = { isolated, certificates, bypass };
-        if (certificates && bypass) {
-          await assert.rejects(resolveConfig(options), /clientCertificates with proxy.bypass is unsupported/);
-          results.push({ ...scenario, rejectedBeforeLaunch: true });
-          continue;
-        }
         const config = await resolveConfig(options);
         const result = await contextFactory(config).createContext({}, new AbortController().signal, undefined);
         try {
