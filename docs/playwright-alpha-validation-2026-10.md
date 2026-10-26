@@ -65,13 +65,26 @@ branded browsers or older operating systems.
 
 ## Unresolved issues and restrictions
 
-1. **Chromium full-page screenshots still change fonts/layout on macOS
+1. **Chromium full-page screenshots still change fonts/layout
    (#42962).** All five generic font families changed in the headless-shell
-   fixture; some changed geometry. Viewport capture is the passing control.
+   macOS fixture; some changed geometry. Linux CI also detects a changed
+   monospace font. Viewport capture is the passing control.
    `tests/browser-upgrade-controls.integration.test.ts` keeps its strict
    assertion and fails on this alpha. No new expected-failure exception or
    browser patch hides the failure. This affects screenshot-producing tools,
    including keyboard audit and annotated scans.
+   Raw CDP controls on the same 1280×720, 40-paragraph fixture reproduce the
+   problem: `captureBeyondViewport: true` moves the last paragraph from
+   y=1960.46875 to y=1999.46875. Setting it to `false` preserves geometry but
+   leaves below-viewport pixels white instead of capturing the red final
+   paragraph; `fromSurface: false` fails with `Unable to capture screenshot`.
+   `PLAYWRIGHT_LEGACY_SCREENSHOT=1` gives the same results. Restoring fonts
+   afterward cannot repair the captured image, and resizing changes responsive
+   layout. The [upstream maintainer expects the fix with Chromium 158](https://github.com/microsoft/playwright/issues/42962#issuecomment-6216436447).
+   As of 2026-10-26, npm's newest alpha is `1.65.0-alpha-2026-10-26`; its
+   [browser manifest](https://github.com/microsoft/playwright/blob/a2b65a057a78204d8411b068e1e28d0db23db44b/packages/playwright-core/browsers.json)
+   still specifies Chromium 157.0.8103.15 r1252, matching the requested alpha.
+   No tested capture alternative preserves full-page semantics on this build.
 2. **Explicitly enabled BFCache remains unsupported (#231).** Six CDP history
    cases fail with missing iframe contents or invalid frame references after
    confirmed cache restoration; six normal launched controls pass. Normal
@@ -109,7 +122,8 @@ This validation is not a claim that all open GitHub issues are resolved.
   failure remains, and the device-descriptor `screen` change needs explicit
   validation/documentation before this upgrade gate is complete.
 - #235: certificate/proxy routing passes locally; Linux WebKit network/details
-  checks pass in CI. The full Linux test job did not reach its tests.
+  checks pass in CI. The follow-up full Linux suite completes with only the
+  screenshot font regression failing.
 - #257, #292, #293, #295, #296 and #298 were not specifically validated in this
   upgrade pass. No issue is automatically closed by the proposed change.
 
@@ -132,6 +146,26 @@ finished with **8 passed, 2 failed and 2 timed out**:
 - The Linux WebKit probe completed 200 navigations and cancelled 251
   subresources without a crash. The Firefox crash-cycle probe passed its
   survivor-context checks; neither result proves absence of native races/leaks.
+
+### Runner-fix validation
+
+[Run 40358487721](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/40358487721)
+validates commit `cd04443`. At 16:27 UTC it has **9 passed, 2 failed and
+1 queued**:
+
+- Ubuntu 24.04 WebKit passes numpad input, focus/Option-key checks, bounded
+  navigation errors and all 350 fresh navigations (zero lost/delivered aborts).
+- The main Ubuntu 24.04 job finishes browser installation, typecheck and lint,
+  then runs the full suite: **1,805 passed, 1 failed, 5 skipped**. Its only
+  failure is the same Chromium screenshot defect, observed as a changed
+  monospace font on Linux. The dependency-install timeout is resolved in this
+  run; later build/proxy steps are skipped after the test failure.
+- macOS 14 Chromium still fails the strict screenshot test. Together with
+  the main job, these are two failed jobs caused by one remaining browser bug.
+- The macOS 15 WebKit replacement is queued and has not yet validated the
+  supported-runner migration. Do not count it as passing.
+- Docker smoke, all four download jobs, both Firefox control jobs and the
+  Linux WebKit network/details job pass again.
 
 ### Local checks
 

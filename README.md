@@ -1042,9 +1042,10 @@ are superseded where measured by the [alpha validation](docs/playwright-alpha-va
 The alpha fixes preloaded CDP frame selection and Firefox Option-key/focus behavior
 on the tested macOS 26 arm64 host. Remaining limitations:
 
-- **Full-page screenshots on macOS:** bundled Chromium headless shell still
-  changes fonts and layout after capture. The strict regression test remains
-  failing; viewport screenshots pass. Keyboard-audit issue screenshots and
+- **Full-page Chromium screenshots:** bundled headless shell changes fonts
+  and layout after capture on macOS; Linux CI also detects a changed monospace
+  font. The strict regression test remains failing; viewport screenshots pass.
+  Keyboard-audit issue screenshots and
   `scan_page` with `annotateScreenshot: true` also use full-page capture. Run
   these after layout-sensitive checks, or disable those captures with
   `screenshotOnIssue: false` and `annotateScreenshot: false`. The server does
