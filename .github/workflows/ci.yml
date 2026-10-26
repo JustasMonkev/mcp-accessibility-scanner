@@ -223,7 +223,7 @@ jobs:
         env:
           MCP_TEST_BROWSER_NAME: webkit
       - if: ${{ !cancelled() }}
-        run: npx vitest run tests/details-visibility.integration.test.ts
+        run: npx vitest run tests/details-visibility.integration.test.ts tests/iframe-fallback.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: firefox
 

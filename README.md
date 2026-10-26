@@ -999,6 +999,16 @@ the removal rationale and validation results.
 
 ### Playwright upgrade gate
 
+On the pinned Playwright **1.63.0**, fallback text inside an `<iframe>` replaces
+its child controls in `browser_snapshot` and `browser_find`. A previously cached
+child ref can work until a tool response refreshes the snapshot; it is then
+rejected even though Playwright can still resolve the element. Fallback text
+must not change the child snapshot or prevent ref actions. The regression in
+`tests/iframe-fallback.integration.test.ts` records this defect only for the
+paired 1.63.0 pins and requires the intended behavior on an upgrade. See
+[#298](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/298) and
+the [upstream fix](https://github.com/microsoft/playwright/pull/43635).
+
 The Linux `test` and `webkit-regressions` CI jobs use the official
 `mcr.microsoft.com/playwright:v1.63.0-noble` image with its preinstalled browsers
 and system dependencies, rather than downloading browsers during each job.
