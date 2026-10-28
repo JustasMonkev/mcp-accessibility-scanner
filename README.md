@@ -354,7 +354,7 @@ Caller-supplied screenshot, PDF, find-result, scan-page-matrix, and audit report
 
 Failed download saves are reported as tool errors in the current or next response, including after the tab closes; failed entries do not advertise a saved file or an ongoing download. The server retains up to 20 bounded error messages between responses and reports any omitted count. Full Chromium-family browsers on Playwright 1.63.0 have [verified native crashes after persistent-profile relaunch](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#persistent-profile-downloads-230). Error reporting does not fix that native crash. The explicit `--isolated` control passed, but does not preserve a profile between launches; use recorded storage state when needed for authentication. Existing profiles and browser defaults are preserved.
 
-Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. It applies after every action so delayed DOM-only updates are included in the response; a short observation window also catches scheduled requests and waits for them before that delay.
+Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. CLI values take precedence over environment and file configuration, including `0`. Zero disables settling and can return before delayed page updates; the default remains `500` ms. It applies after every action so delayed DOM-only updates are included in the response; a short observation window also catches scheduled requests and waits for them before that delay.
 
 Use `--timeout-idle 300000`, `timeouts.idle`, or `PLAYWRIGHT_MCP_TIMEOUT_IDLE` to release the default browser after five idle minutes. Shared contexts stay open while any client is working; the idle window starts after the last tool call or download finishes. Explicit recordings prevent idle release until `browser_stop_recording` finishes; passive `--save-session` capture does not. Cleanup finalizes traces. The next browser tool call reopens the connection and includes a note to navigate again and refresh element references. Attached CDP, extension, and VS Code browsers are disconnected; their external pages remain open. Close and session-management tools do not relaunch an idle browser. Explicit `browser_session_open` handles keep their separate `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` behavior. Zero disables this feature; blank environment values leave the existing configuration unchanged.
 
@@ -1136,7 +1136,6 @@ npm run bench -- --out after.json --label after
 
 Useful flags: `--iterations <n>` and `--warmups <n>` (defaults 5 and 1),
 `--only audit_screen_reader` to select the screen-reader scenarios,
-`--settle-ms <n>` to override the server's post-action wait (default 500),
 `--browser`/`--executable-path` when the browser lives outside Playwright's own
 download directory, and `--server <path/to/cli.js>` plus `--lib <path/to/lib>`
 (supplied together) to point at a different build — that is how revisions compare:
@@ -1153,29 +1152,6 @@ so adding or removing a scenario does not distort the reported speedup.
 Reports retain individual timing samples, warmup counts, browser inputs and
 runtime/machine metadata. The total is a sum of scenario medians, not a measured
 user workflow.
-
-The suite also covers cold browser navigation, session open/navigate/close,
-forms, selection, back navigation, evaluation, viewport/full-page screenshots,
-console/network listing, an already-satisfied text wait, resizing and media
-emulation. The session scenario times the entire flow; other scenarios time
-one call, excluding setup. Reports also include a single MCP connection/startup
-timing (not a repeated cold-start statistic).
-
-Site and matrix audits verify completed page/variant counts and saved findings.
-The six-page crawl uses depth 3; its renamed scenarios intentionally do not
-compare with older depth-2 runs, which only reached five pages.
-Both audits include zero-extra-wait variants to isolate their
-configurable delays on static fixtures. For example, measure keyboard wait cost
-with `npm run bench -- --only audit_keyboard --settle-ms 0 --out keyboard-zero.json`.
-This is a diagnostic experiment, not a safe default for dynamic pages. The click
-fixtures verify delayed DOM updates and failed-request recovery; a zero-wait run
-can deliberately fail the delayed-DOM check instead of reporting a false speedup.
-
-These are local Chromium/stdio measurements, not exhaustive flow coverage or
-production latency percentiles. Upload/download/dialog flows, recording/PDF,
-coordinate/drag actions, verification tools, CDP/extension attachment, other
-browsers, concurrent sessions, large network histories and slow remote resources
-still require separate workloads. Compare identical settings and fixtures.
 
 The screen-reader scenarios cover a small page, 400 and 2,000 elements with
 name checks enabled and disabled, 30 shared ancestors, and three same-origin
