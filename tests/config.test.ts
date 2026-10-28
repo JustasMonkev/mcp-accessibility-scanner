@@ -482,7 +482,7 @@ describe('Config', () => {
     process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE = '250';
     try {
       expect((await resolveCLIConfig({})).timeouts.settle).toBe(250);
-      expect((await resolveCLIConfig({ settleTimeout: 100 })).timeouts.settle).toBe(100);
+      expect((await resolveCLIConfig({ timeoutSettle: 100 })).timeouts.settle).toBe(100);
     } finally {
       if (previous === undefined)
         delete process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE;
