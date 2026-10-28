@@ -137,6 +137,23 @@ describe('Utils', () => {
       expect(truncateDataUrl('data: total, average')).toBe('data: total, average');
     });
 
+    it.each([' ', '\t', '\n', '\r', '\v', '\f', '\u00a0', '\u1680', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200a', '\u2028', '\u2029', '\u202f', '\u205f', '\u3000', '\ufeff', '"', "'", '<', '>', '(', ')', '[', ']', '{', '}'])('preserves invalid metadata containing %j and still finds later URLs', character => {
+      const malformed = `data:text/plain;name=bad${character}value`;
+      expect(truncateDataUrl(`${malformed},payload`)).toBe(`${malformed},payload`);
+      expect(truncateDataUrls(`${malformed} data:text/plain;base64,eA==`)).toBe(`${malformed} data:text/plain;base64,...`);
+    });
+
+    it.each(['%20', '%09', '%22', '%27', '%3C', '%3E', '%28', '%29', '%5B', '%5D', '%7B', '%7D'])('accepts encoded metadata characters %s', character => {
+      const prefix = `data:text/plain;name=before${character}after;base64%2C`;
+      expect(truncateDataUrls(`${prefix}eA==`)).toBe(`${prefix}...`);
+    });
+
+    it('preserves delimiter-free prose with many malformed data prefixes', () => {
+      const prose = 'data: missing delimiter '.repeat(2000);
+      expect(truncateDataUrls(prose)).toBe(prose);
+      expect(truncateDataUrls(`${prose}data:text/plain,hello`)).toBe(`${prose}data:text/plain,...`);
+    });
+
     it('should not truncate direct strings without a data URL prefix', () => {
       expect(truncateDataUrl('12345image/png,payload')).toBe('12345image/png,payload');
     });

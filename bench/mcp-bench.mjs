@@ -14,6 +14,7 @@
 
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -42,6 +43,7 @@ const libRoot = options.lib ? path.resolve(options.lib) : path.join(projectRoot,
 const reportPath = options.out ? writableReportPath(options.out) : undefined;
 const iterations = options.iterations ?? 5;
 const warmups = options.warmups ?? 1;
+const startedAt = new Date().toISOString();
 
 let server;
 let origin;
@@ -196,7 +198,16 @@ const report = {
   label: options.label ?? 'run',
   server: serverEntry,
   node: process.version,
+  startedAt,
+  platform: process.platform,
+  architecture: process.arch,
+  osRelease: os.release(),
+  cpu: os.cpus()[0]?.model,
+  availableParallelism: os.availableParallelism(),
+  browser: options.browser ?? 'chromium',
+  executablePath: options.executablePath,
   iterations,
+  warmups,
   scenarios: results,
   totalMedianMs: results.filter(entry => !entry.micro).reduce((sum, entry) => sum + entry.median, 0),
 };
@@ -244,6 +255,7 @@ function summarize(samples) {
   const middle = Math.floor(sorted.length / 2);
   return {
     samples: samples.length,
+    samplesMs: samples,
     median: sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2,
     mean: samples.reduce((sum, value) => sum + value, 0) / samples.length,
     min: sorted[0],

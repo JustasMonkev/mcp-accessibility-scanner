@@ -103,19 +103,17 @@ function parseDataUrl(text: string, start: number): DataUrlMatch | undefined {
   };
 }
 
+// Raw whitespace and wrappers already invalidate metadata. Stop there rather
+// than rescanning the rest of a long line for each malformed data: prefix.
+const dataUrlDelimiterPattern = /[,\s"'<>()[\]{}&]|%2c/gi;
+
 function findDataUrlDelimiter(text: string, offset: number): { start: number; end: number } | undefined {
-  let position = offset;
-  while (position < text.length) {
-    const char = text[position];
-    if (isLineBreak(char))
+  dataUrlDelimiterPattern.lastIndex = offset;
+  for (let match = dataUrlDelimiterPattern.exec(text); match; match = dataUrlDelimiterPattern.exec(text)) {
+    if (match[0] === ',' || match[0].length === 3)
+      return { start: match.index, end: match.index + match[0].length };
+    if (match[0] !== '&' || looksLikeQueryParam(text, match.index + 1))
       return;
-    if (char === '&' && looksLikeQueryParam(text, position + 1))
-      return;
-    if (char === ',')
-      return { start: position, end: position + 1 };
-    if (startsWithEncodedComma(text, position))
-      return { start: position, end: position + 3 };
-    position++;
   }
 }
 
@@ -267,10 +265,6 @@ function looksLikeQueryParam(text: string, offset: number): boolean {
       return false;
   }
   return false;
-}
-
-function startsWithEncodedComma(text: string, position: number): boolean {
-  return startsWithIgnoreCase(text, position, '%2c');
 }
 
 function containsPercentEncoding(text: string): boolean {
