@@ -69,7 +69,7 @@ export type CLIOptions = {
     viewportSize?: string;
     navigationTimeout?: number;
     defaultTimeout?: number;
-    settleTimeout?: number;
+    timeoutSettle?: number;
     timeoutIdle?: number;
 };
 
@@ -343,7 +343,7 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
     timeouts: {
       navigationTimeout: cliOptions.navigationTimeout,
       defaultTimeout: cliOptions.defaultTimeout,
-      settle: cliOptions.settleTimeout,
+      settle: cliOptions.timeoutSettle,
       idle: cliOptions.timeoutIdle,
     }
   };
@@ -395,7 +395,7 @@ function cliOptionsFromEnv(): CLIOptions {
   options.viewportSize = envToString(process.env.PLAYWRIGHT_MCP_VIEWPORT_SIZE);
   options.navigationTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT);
   options.defaultTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_DEFAULT_TIMEOUT);
-  options.settleTimeout = envToNumber(process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE);
+  options.timeoutSettle = envToNumber(process.env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE);
   options.timeoutIdle = envToNumber(process.env.PLAYWRIGHT_MCP_TIMEOUT_IDLE?.trim());
   return options;
 }

@@ -12,6 +12,7 @@
  *   node bench/mcp-bench.mjs --compare before.json after.json
  */
 
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -58,6 +59,7 @@ const transport = new StdioClientTransport({
     '--isolated',
     '--browser', options.browser ?? 'chromium',
     '--output-dir', outputDir,
+    '--timeout-settle', String(options.settleMs ?? 500),
     // Sandboxes and CI images often ship a browser outside Playwright's own
     // download directory; point at it explicitly when asked.
     ...(options.executablePath ? ['--executable-path', options.executablePath] : []),
@@ -66,10 +68,6 @@ const transport = new StdioClientTransport({
 });
 const client = new Client({ name: 'mcp-bench', version: '1.0.0' });
 
-/**
- * Scenarios run in declaration order; `setup` is excluded from the timing so a
- * scenario measures one tool call and nothing else.
- */
 const scenarios = [
   {
     name: 'tools/list',
@@ -132,6 +130,7 @@ const scenarios = [
   },
   {
     name: 'scan_page_matrix (3 variants)',
+    verify: verifyMatrix,
     setup: () => call('browser_navigate', { url: `${origin}/heavy.html` }),
     run: () => call('scan_page_matrix', {
       variants: [
@@ -142,9 +141,105 @@ const scenarios = [
     }),
   },
   {
-    name: 'audit_site (6 pages)',
+    name: 'audit_site (6 pages, depth 3)',
+    verify: verifySite,
     setup: () => call('browser_navigate', { url: `${origin}/page-0.html` }),
-    run: () => call('audit_site', { startUrl: `${origin}/page-0.html`, maxPages: 6, maxDepth: 2 }),
+    run: () => call('audit_site', { startUrl: `${origin}/page-0.html`, maxPages: 6, maxDepth: 3 }),
+  },
+  {
+    name: 'audit_site (6 pages, depth 3, no extra wait)',
+    verify: verifySite,
+    setup: () => call('browser_navigate', { url: `${origin}/page-0.html` }),
+    run: () => call('audit_site', { startUrl: `${origin}/page-0.html`, maxPages: 6, maxDepth: 3, waitAfterNavigationMs: 0 }),
+  },
+  {
+    name: 'scan_page_matrix (3 variants, no extra wait)',
+    verify: verifyMatrix,
+    setup: () => call('browser_navigate', { url: `${origin}/heavy.html` }),
+    run: () => call('scan_page_matrix', {
+      variants: [{ name: 'baseline' }, { name: 'mobile', viewport: { width: 375, height: 812 } }, { name: 'zoom-200', zoomPercent: 200 }],
+      waitAfterApplyMs: 0,
+    }),
+  },
+  ...[
+    ['browser_evaluate', { function: 'document.title' }],
+    ['browser_take_screenshot', {}],
+    ['browser_take_screenshot (full page)', { fullPage: true }],
+    ['browser_console_messages', {}],
+    ['browser_network_requests', {}],
+    ['browser_wait_for (already visible)', { text: 'Benchmark heavy page' }],
+    ['browser_resize', { width: 800, height: 600 }],
+    ['browser_emulate_media', { reducedMotion: 'reduce' }],
+    ['browser_tabs (list)', { action: 'list' }],
+  ].map(([name, args]) => ({
+    name,
+    setup: async () => {
+      await call('browser_close', {});
+      await call('browser_navigate', { url: `${origin}/heavy.html` });
+    },
+    run: () => call(name.split(' ')[0], args),
+  })),
+  {
+    name: 'browser_fill_form (2 fields)',
+    setup: async () => {
+      const snapshot = await call('browser_navigate', { url: `${origin}/heavy.html` });
+      return { search: refFor(snapshot, 'textbox "Search"'), sort: refFor(snapshot, 'combobox "Sort"') };
+    },
+    run: state => call('browser_fill_form', { fields: [
+      { name: 'Search', type: 'textbox', ref: state.search, value: 'benchmark' },
+      { name: 'Sort', type: 'combobox', ref: state.sort, value: 'Oldest' },
+    ] }),
+  },
+  {
+    name: 'browser_select_option',
+    setup: async () => {
+      const snapshot = await call('browser_navigate', { url: `${origin}/heavy.html` });
+      return { ref: refFor(snapshot, 'combobox "Sort"') };
+    },
+    run: state => call('browser_select_option', { element: 'Sort', ref: state.ref, values: ['Oldest'] }),
+  },
+  ...['delayed DOM', 'failed request'].map(kind => ({
+    name: `browser_click (${kind})`,
+    setup: async () => {
+      await call('browser_navigate', { url: `${origin}/heavy.html` });
+      const handler = kind === 'delayed DOM'
+        ? "() => setTimeout(() => document.querySelector('h1').textContent = 'Update complete', 150)"
+        : "() => fetch('/abort').catch(() => document.querySelector('h1').textContent = 'Update complete')";
+      const snapshot = await call('browser_evaluate', { function: `() => { document.querySelector('#submit').onclick = ${handler}; }` });
+      return { ref: refFor(snapshot, 'Submit search') };
+    },
+    run: state => call('browser_click', { element: 'Submit search', ref: state.ref }),
+    verify: result => {
+      if (!textOf(result).includes('Update complete'))
+        throw new Error(`${kind} result returned before the DOM update`);
+    },
+  })),
+  {
+    name: 'browser_navigate_back',
+    setup: async () => {
+      await call('browser_navigate', { url: `${origin}/page-0.html` });
+      await call('browser_navigate', { url: `${origin}/heavy.html` });
+    },
+    run: () => call('browser_navigate_back', {}),
+  },
+  {
+    name: 'browser_navigate (cold browser)',
+    setup: () => call('browser_close', {}),
+    run: () => call('browser_navigate', { url: `${origin}/heavy.html` }),
+  },
+  {
+    name: 'browser_session (open, navigate, close)',
+    run: async () => {
+      const opened = await call('browser_session_open', {});
+      const browserSessionId = opened.structuredContent?.browserSessionId;
+      if (!browserSessionId)
+        throw new Error('Session open did not return a browserSessionId');
+      try {
+        return await call('browser_navigate', { url: `${origin}/heavy.html`, browserSessionId });
+      } finally {
+        await call('browser_session_close', { browserSessionId });
+      }
+    },
   },
   ...screenReaderCases.map(fixture => ({
     name: fixture.name,
@@ -155,6 +250,7 @@ const scenarios = [
 ];
 
 const results = [];
+let startupMs;
 try {
   const selected = scenarios.filter(scenario => !options.only || scenario.name.startsWith(options.only));
   if (!selected.length)
@@ -163,7 +259,9 @@ try {
   origin = `http://127.0.0.1:${server.address().port}`;
   // Inside the guard: a missing or unbuilt --server rejects here, and the temp
   // output directory has already been created.
+  const startupAt = performance.now();
   await client.connect(transport);
+  startupMs = performance.now() - startupAt;
 
   for (const scenario of selected) {
     const samples = [];
@@ -206,6 +304,8 @@ const report = {
   availableParallelism: os.availableParallelism(),
   browser: options.browser ?? 'chromium',
   executablePath: options.executablePath,
+  settleMs: options.settleMs ?? 500,
+  startupMs,
   iterations,
   warmups,
   scenarios: results,
@@ -219,6 +319,20 @@ if (reportPath) {
 process.stderr.write(`\nTotal median tool latency: ${report.totalMedianMs.toFixed(1)} ms\n`);
 
 // --- helpers -------------------------------------------------------------
+
+function verifySite(result) {
+  const report = JSON.parse(fs.readFileSync(new URL(result.structuredContent.report.uri), 'utf8'));
+  assert.equal(report.summary.totals.scannedPages, 6);
+  assert.equal(report.summary.totals.erroredPages, 0);
+  assert.equal(report.pages.length, 6);
+  assert.ok(report.pages.every(page => !page.error && page.unscannedFrames.length === 0 && page.violations.length > 0));
+}
+
+function verifyMatrix(result) {
+  const report = JSON.parse(fs.readFileSync(new URL(result.structuredContent.report.uri), 'utf8'));
+  assert.deepEqual(report.variants.map(variant => variant.name), ['baseline', 'mobile', 'zoom-200']);
+  assert.ok(report.variants.every(variant => variant.unscannedFrames.length === 0 && variant.violations.length > 0));
+}
 
 async function runMicroBenchmarks() {
   const { truncateDataUrls } = await import(pathToFileURL(path.join(libRoot, 'utils/dataUrl.js')));
@@ -284,7 +398,12 @@ function refFor(result, needle) {
 
 function startFixtureServer() {
   const httpServer = http.createServer((request, response) => {
-    const body = pages.get(new URL(request.url, 'http://localhost').pathname);
+    const pathname = new URL(request.url, 'http://localhost').pathname;
+    if (pathname === '/abort') {
+      request.destroy();
+      return;
+    }
+    const body = pages.get(pathname);
     if (body === undefined) {
       response.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
       return;
@@ -368,6 +487,8 @@ function parseArgs(argv) {
       parsed.browser = value(++index, arg);
     else if (arg === '--executable-path')
       parsed.executablePath = value(++index, arg);
+    else if (arg === '--settle-ms')
+      parsed.settleMs = wholeNumber(value(++index, arg), arg, 0);
     else if (arg === '--iterations')
       parsed.iterations = wholeNumber(value(++index, arg), arg, 1);
     else if (arg === '--warmups')
@@ -375,6 +496,8 @@ function parseArgs(argv) {
     else
       throw new Error(`Unknown argument: ${arg}`);
   }
+  if (parsed.settleMs > 2147483647)
+    throw new Error('--settle-ms needs an integer >= 0 and <= 2147483647');
   return parsed;
 }
 
@@ -385,6 +508,8 @@ function wholeNumber(value, flag, minimum) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < minimum)
     throw new Error(`${flag} needs an integer >= ${minimum}, got: ${value ?? '(nothing)'}`);
+  if (parsed.settleMs > 2147483647)
+    throw new Error('--settle-ms needs an integer >= 0 and <= 2147483647');
   return parsed;
 }
 

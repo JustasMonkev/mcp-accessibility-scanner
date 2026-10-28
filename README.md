@@ -1136,6 +1136,7 @@ npm run bench -- --out after.json --label after
 
 Useful flags: `--iterations <n>` and `--warmups <n>` (defaults 5 and 1),
 `--only audit_screen_reader` to select the screen-reader scenarios,
+`--settle-ms <n>` to override the server's post-action wait (default 500),
 `--browser`/`--executable-path` when the browser lives outside Playwright's own
 download directory, and `--server <path/to/cli.js>` plus `--lib <path/to/lib>`
 (supplied together) to point at a different build — that is how revisions compare:
@@ -1152,6 +1153,29 @@ so adding or removing a scenario does not distort the reported speedup.
 Reports retain individual timing samples, warmup counts, browser inputs and
 runtime/machine metadata. The total is a sum of scenario medians, not a measured
 user workflow.
+
+The suite also covers cold browser navigation, session open/navigate/close,
+forms, selection, back navigation, evaluation, viewport/full-page screenshots,
+console/network listing, an already-satisfied text wait, resizing and media
+emulation. The session scenario times the entire flow; other scenarios time
+one call, excluding setup. Reports also include a single MCP connection/startup
+timing (not a repeated cold-start statistic).
+
+Site and matrix audits verify completed page/variant counts and saved findings.
+The six-page crawl uses depth 3; its renamed scenarios intentionally do not
+compare with older depth-2 runs, which only reached five pages.
+Both audits include zero-extra-wait variants to isolate their
+configurable delays on static fixtures. For example, measure keyboard wait cost
+with `npm run bench -- --only audit_keyboard --settle-ms 0 --out keyboard-zero.json`.
+This is a diagnostic experiment, not a safe default for dynamic pages. The click
+fixtures verify delayed DOM updates and failed-request recovery; a zero-wait run
+can deliberately fail the delayed-DOM check instead of reporting a false speedup.
+
+These are local Chromium/stdio measurements, not exhaustive flow coverage or
+production latency percentiles. Upload/download/dialog flows, recording/PDF,
+coordinate/drag actions, verification tools, CDP/extension attachment, other
+browsers, concurrent sessions, large network histories and slow remote resources
+still require separate workloads. Compare identical settings and fixtures.
 
 The screen-reader scenarios cover a small page, 400 and 2,000 elements with
 name checks enabled and disabled, 30 shared ancestors, and three same-origin

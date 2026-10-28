@@ -213,3 +213,12 @@ it('rejects missing report files', () => {
   fs.unlinkSync(reportPath);
   expect(() => verifyScreenReader(result, fixture, origin)).toThrow();
 });
+
+it.each(['-1', '1.5', 'NaN', '2147483648', '1e21'])('rejects invalid settle delay %s before launching a browser', value => {
+  const result = spawnSync(process.execPath, ['bench/mcp-bench.mjs', '--settle-ms', value], {
+    cwd: path.resolve(import.meta.dirname, '..'),
+    encoding: 'utf8',
+  });
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain('--settle-ms needs an integer >= 0');
+});
