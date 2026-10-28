@@ -1149,6 +1149,9 @@ npm run bench:compare -- before.json after.json
 
 The comparison total uses only end-to-end scenarios present in both reports,
 so adding or removing a scenario does not distort the reported speedup.
+Reports retain individual timing samples, warmup counts, browser inputs and
+runtime/machine metadata. The total is a sum of scenario medians, not a measured
+user workflow.
 
 The screen-reader scenarios cover a small page, 400 and 2,000 elements with
 name checks enabled and disabled, 30 shared ancestors, and three same-origin
@@ -1167,6 +1170,18 @@ then alternates revisions for 10 warmups and 20 timed samples per layout.
 Inversion detection is linear; band counting deduplicates identical axis
 intervals but can still take quadratic work on dense, distinct intervals.
 These function timings exclude browser measurement and MCP latency.
+
+To compare data-URL text processing, including malformed prefixes and long valid
+metadata, run:
+
+```bash
+node bench/data-url-bench.mjs /tmp/baseline/lib/utils/dataUrl.js lib/utils/dataUrl.js
+```
+
+This asserts identical expected output and alternates builds for 5 warmups and
+20 samples. Its synthetic parser timings do not measure accessibility scans.
+See the [October 28 measurements and raw samples](docs/performance/2026-10-28.md)
+for the measured gains, normal-workload results and validation limits.
 
 ### Releasing
 

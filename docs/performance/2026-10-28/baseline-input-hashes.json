@@ -1,0 +1,6 @@
+{
+  "package-lock.json": "0b6161d852a7fe9e707487677d410aff26779af77dcf5d41ea09a4b9e31b9ff5",
+  "bench/mcp-bench.mjs": "c997f7c34eed12880a31c3080a7bc8b55633ed0f627c430b025b2bcfd7e75ec2",
+  "bench/fixture.mjs": "e0ce7a49b9841a0a8ec1472ae680d141f0194a6a31cdf4e3ea03a6e640f59841",
+  "bench/screen-reader.mjs": "5262f1676c8fa7c10d8b5d99463225c3ede5161ef2c56a3812568dd9968c03c0"
+}
