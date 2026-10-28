@@ -508,8 +508,6 @@ function wholeNumber(value, flag, minimum) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < minimum)
     throw new Error(`${flag} needs an integer >= ${minimum}, got: ${value ?? '(nothing)'}`);
-  if (parsed.settleMs > 2147483647)
-    throw new Error('--settle-ms needs an integer >= 0 and <= 2147483647');
   return parsed;
 }
 
