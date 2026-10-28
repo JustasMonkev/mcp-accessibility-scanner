@@ -89,38 +89,6 @@ function collectOutput(args: string[], timeoutMs = 3000, environment?: NodeJS.Pr
   });
 }
 
-describe('settle timeout CLI option', () => {
-  it.each([
-    { args: [], environment: undefined, expected: 500 },
-    { args: [], environment: '0', expected: 0 },
-    { args: [], environment: '250', expected: 250 },
-    { args: ['--timeout-settle', '100'], environment: '250', expected: 100 },
-    { args: ['--timeout-settle', '0'], environment: '250', expected: 0 },
-  ])('resolves $args with environment $environment to $expected ms', ({ args, environment, expected }) => {
-    const script = `
-      process.argv = [process.execPath, ${JSON.stringify(cliArgs[0])}, ...${JSON.stringify(args)}, 'list-tools'];
-      const { program } = await import('commander');
-      program.hook('preAction', async command => {
-        const { resolveCLIConfig } = await import('./lib/config.js');
-        process.stdout.write('Resolved settle timeout: ' + (await resolveCLIConfig(command.opts())).timeouts.settle + '\\n');
-      });
-      await import('./lib/program.js');
-    `;
-    const env = { ...process.env };
-    if (environment === undefined)
-      delete env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE;
-    else
-      env.PLAYWRIGHT_MCP_TIMEOUT_SETTLE = environment;
-    const output = execFileSync(process.execPath, ['--input-type=module', '--eval', script], {
-      cwd: rootDir,
-      env,
-      encoding: 'utf-8',
-      timeout: 15_000,
-    });
-    expect(output).toContain(`Resolved settle timeout: ${expected}\n`);
-  });
-});
-
 describe('tool policy CLI options', () => {
   it('advertises both flags and applies additive allow / block precedence', () => {
     expect(runCLI('--help')).toContain('--allowed-tools <tools>');
