@@ -317,6 +317,22 @@ async function readPage(page: Page, linkSelector: string): Promise<{ title: stri
 const allLinksSelector = 'a[href]';
 const navLinksSelector = 'nav a[href], header a[href], [role="navigation"] a[href]';
 
+function decodeSitemapLocation(value: string): string {
+  const entities: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+  return value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>|&([^;]+);/g, (_match, cdata: string | undefined, entity: string) => {
+    if (cdata !== undefined)
+      return cdata;
+    if (Object.hasOwn(entities, entity))
+      return entities[entity];
+    if (/^#(?:[0-9]+|x[0-9a-fA-F]+)$/.test(entity)) {
+      const code = entity.startsWith('#x') ? Number.parseInt(entity.slice(2), 16) : Number(entity.slice(1));
+      if (code === 9 || code === 10 || code === 13 || (code >= 0x20 && code <= 0xD7FF) || (code >= 0xE000 && code <= 0xFFFD) || (code >= 0x10000 && code <= 0x10FFFF))
+        return String.fromCodePoint(code);
+    }
+    throw new Error(`Invalid XML entity in sitemap location: &${entity};`);
+  });
+}
+
 async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: string, base: URL) => string): Promise<string[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
@@ -347,7 +363,7 @@ async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: strin
       }
       const xmlText = Buffer.concat(chunks).toString('utf8');
       return [...xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)]
-          .map(match => match[1].replace('<![CDATA[', '').replace(']]>', '').trim()).filter(Boolean);
+          .map(match => decodeSitemapLocation(match[1]).trim()).filter(Boolean);
     }
   } finally {
     clearTimeout(timer);
@@ -611,12 +627,6 @@ const auditSite = defineTabTool({
         return;
       }
 
-      // Cookie matching is path-boundary aware, so the cookie scope URL keeps
-      // the trailing slash that crawl-key normalization strips below.
-      const cookieUrl = normalizedUrl.toString();
-      if (normalizedUrl.pathname !== '/' && normalizedUrl.pathname.endsWith('/'))
-        normalizedUrl.pathname = normalizedUrl.pathname.slice(0, -1);
-
       if (!isAllowedByOrigin(normalizedUrl, startUrl, params.sameOriginOnly, params.includeSubdomains)) {
         skippedUrls++;
         return;
@@ -640,7 +650,7 @@ const auditSite = defineTabTool({
 
       queue.push({
         url: normalizedUrlString,
-        cookieUrl,
+        cookieUrl: normalizedUrlString,
         depth,
         discoveredFrom,
       });

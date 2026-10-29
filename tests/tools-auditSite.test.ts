@@ -870,7 +870,7 @@ describe('audit_site tool', () => {
         'https://example.com/logout',
         'https://external.example.org/path',
       ],
-      'https://example.com/keep': [],
+      'https://example.com/keep/': [],
     });
     vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
       return createAxeResult(page.url(), []);
@@ -894,8 +894,8 @@ describe('audit_site tool', () => {
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     const crawledUrls = report.pages.map((page: any) => page.url);
-    expect(crawledUrls).toContain('https://example.com/keep');
-    expect(crawledUrls.filter((url: string) => url === 'https://example.com/keep')).toHaveLength(1);
+    expect(crawledUrls).toContain('https://example.com/keep/');
+    expect(crawledUrls.filter((url: string) => url === 'https://example.com/keep/')).toHaveLength(1);
     expect(crawledUrls).not.toContain('https://example.com/logout');
     expect(crawledUrls).not.toContain('https://external.example.org/path');
   });
@@ -1422,6 +1422,34 @@ describe('audit_site tool', () => {
     expect(fetchMock).toHaveBeenCalledWith(sitemapUrl, expect.objectContaining({ redirect: 'manual', credentials: 'omit' }));
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     expect(report.pages.map((page: any) => page.url)).toEqual(['https://example.com/one', 'https://example.com/two']);
+  });
+
+  it('preserves trailing-slash URLs and decodes sitemap XML references exactly once', async () => {
+    const urls = ['https://example.com/dir/', 'https://example.com/dir', 'https://example.com/search?a=1&b=2', 'https://example.com/amp/&amp;', 'https://example.com/quotes?x=%3C%3E%22%27', 'https://example.com/cdata/&amp;', 'https://example.com/numeric/2'];
+    const { response } = createHarness(Object.fromEntries(urls.map(url => [url, []])), {
+      sitemapXmlByUrl: { 'https://example.com/sitemap.xml': `<urlset>
+        <url><loc>https://example.com/dir/</loc></url><url><loc>https://example.com/dir</loc></url>
+        <url><loc>https://example.com/search?a=1&amp;b=&#x32;</loc></url>
+        <url><loc>https://example.com/amp/&amp;amp;</loc></url>
+        <url><loc>https://example.com/quotes?x=&lt;&gt;&quot;&apos;</loc></url>
+        <url><loc><![CDATA[https://example.com/cdata/&amp;]]></loc></url><url><loc>https://example.com/numeric/&#50;</loc></url></urlset>` },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+    await tool.handle(response.context, tool.schema.inputSchema.parse({
+      strategy: 'sitemap', maxPages: 10, maxDepth: 0, sameOriginOnly: true, includeSubdomains: false,
+      excludePathPatterns: [], ignoreQueryParams: [], violationsTag: ['wcag2aa'], maxNodesPerViolation: 10, waitAfterNavigationMs: 0,
+    }), response);
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { url: string }) => page.url)).toEqual(urls);
+  });
+
+  it.each(['&unknown;', '&#0;', '&#xD800;', '&#1114112;'])('rejects invalid sitemap character reference %s before crawling', async entity => {
+    const { response, crawlTab } = createHarness({}, {
+      sitemapXmlByUrl: { 'https://example.com/sitemap.xml': `<urlset><url><loc>https://example.com/${entity}</loc></url></urlset>` },
+    });
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap' }), response))
+        .rejects.toThrow('Invalid XML entity');
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
   });
 
   it.each([
