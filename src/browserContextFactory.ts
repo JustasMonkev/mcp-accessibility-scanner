@@ -181,6 +181,7 @@ export type CreateContextOptions = {
 };
 
 export interface BrowserContextFactory {
+  readonly ownsBrowser?: boolean;
   /** Attaches to one shared browser context across stateless requests. */
   readonly sharedContext?: boolean;
   /**
@@ -351,6 +352,7 @@ abstract class BaseContextFactory implements BrowserContextFactory {
 }
 
 class IsolatedContextFactory extends BaseContextFactory {
+  readonly ownsBrowser = true;
   readonly appliesStorageState = true;
 
   constructor(config: FullConfig) {
@@ -707,6 +709,7 @@ class StorageStateError extends Error {}
 export const persistentProfileConflictRemedy = 'Drop --user-data-dir (a managed, disposable profile is used for storage-state sessions), or drop the storage state and sign in in that profile instead.';
 
 export class PersistentContextFactory implements BrowserContextFactory {
+  readonly ownsBrowser = true;
   readonly config: FullConfig;
   // launchPersistentContext() silently ignores a storageState option, so the
   // state is applied to the launched context with setStorageState() instead.

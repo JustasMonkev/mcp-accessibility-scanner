@@ -195,12 +195,15 @@ export type Config = {
 
   network?: {
     /**
-     * List of origins to allow the browser to request. Default is to allow all. Origins matching both `allowedOrigins` and `blockedOrigins` will be blocked.
+     * Host patterns to allow for locally launched Chromium HTTP(S) requests and page WebSockets.
+     * Default is to allow all; blockedOrigins takes precedence. Worker WebSockets are not filtered.
+     * Nonempty restrictions reject Firefox/WebKit and external or custom-context connections.
      */
     allowedOrigins?: string[];
 
     /**
-     * List of origins to block the browser to request. Origins matching both `allowedOrigins` and `blockedOrigins` will be blocked.
+     * Host patterns to block, including HTTP redirect destinations; takes precedence over allowedOrigins.
+     * Same connection and worker-WebSocket limitations as allowedOrigins.
      */
     blockedOrigins?: string[];
   };

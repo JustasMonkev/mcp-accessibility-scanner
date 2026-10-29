@@ -20,6 +20,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { createConnection } from '../src/index.js';
 
 const rootDir = path.resolve(__dirname, '..');
@@ -27,6 +29,35 @@ const cliArgs = [path.join(rootDir, 'cli.js')];
 
 beforeAll(() => {
   execFileSync(process.execPath, [path.join(rootDir, 'node_modules/typescript/bin/tsc'), '--project', path.join(rootDir, 'tsconfig.json')]);
+});
+
+describe('origin restriction connection compatibility', () => {
+  it.each([
+    ['--extension'],
+    ['--browser', 'firefox'],
+    ['--browser', 'webkit'],
+    ['--cdp-endpoint', 'http://127.0.0.1:9'],
+  ])('rejects an unsupported connection before starting it: %j', async (...args) => {
+    const { stderr } = await collectFailure(['--blocked-origins', 'example.com', ...args]);
+    expect(stderr).toContain('Origin restrictions require a locally launched Chromium browser');
+  });
+});
+
+describe('restricted external provider switches', () => {
+  it.each(['--connect-tool', '--vscode'])('rejects %s switches before replacing the default provider', async mode => {
+    const client = new Client({ name: 'network-provider-test', version: '1' });
+    const transport = new StdioClientTransport({ command: process.execPath, args: [...cliArgs, mode, '--blocked-origins', 'example.com'] });
+    try {
+      await client.connect(transport);
+      const before = await client.listTools();
+      const result = await client.callTool({ name: 'browser_connect', arguments: mode === '--connect-tool' ? { name: 'extension' } : { connectionString: 'ws://127.0.0.1:9/', lib: 'playwright' } });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain('Origin restrictions require a locally launched Chromium browser');
+      expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(before.tools.map(tool => tool.name));
+    } finally {
+      await client.close();
+    }
+  });
 });
 
 describe('direct MCP harness install coverage', () => {

@@ -27,6 +27,7 @@ import { toolNameList } from './mcp/toolPolicy.js';
 import { SharedClientSlot } from './mcp/sharedClientSlot.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
 import { BrowserSessionRegistry } from './browserSessions.js';
+import { assertNetworkPolicySupported } from './networkPolicy.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
 import { filteredTools, serverInstructions } from './tools.js';
 import { logUnhandledError } from './utils/log.js';
@@ -45,6 +46,7 @@ type ProgramContext = {
 
 async function resolveProgramContext(options: Record<string, unknown>, extensionProviderReachable?: boolean): Promise<ProgramContext> {
   const config = await resolveCLIConfig(options);
+  assertNetworkPolicySupported(config, !options.extension);
   // The extension factory — the only profileDirName consumer — is selected by
   // --extension, or reachable via the --connect-tool 'extension' provider; VS
   // Code branches before that provider and the interactive subcommand picks
@@ -119,9 +121,9 @@ function configureBaseProgram() {
   program
       .version('Version ' + packageJSON.version)
       .name(packageJSON.name)
-      .option('--allowed-origins <origins>', 'semicolon-separated list of origins to allow the browser to request. Default is to allow all.', semicolonSeparatedList)
+      .option('--allowed-origins <origins>', 'semicolon-separated host patterns to allow for locally launched Chromium HTTP(S) requests and page WebSockets. Worker sockets are not filtered. Default is to allow all.', semicolonSeparatedList)
       .option('--allowed-upload-dirs <dirs>', 'semicolon-separated list of directories that browser_file_upload and browser_drop may read files from. An empty list denies all file uploads and drops.', uploadDirectoryList)
-      .option('--blocked-origins <origins>', 'semicolon-separated list of origins to block the browser from requesting. Blocklist is evaluated before allowlist. If used without the allowlist, requests not matching the blocklist are still allowed.', semicolonSeparatedList)
+      .option('--blocked-origins <origins>', 'semicolon-separated host patterns to block for locally launched Chromium HTTP(S) requests and page WebSockets. Blocklist takes precedence over allowlist. Worker sockets are not filtered.', semicolonSeparatedList)
       .option('--block-service-workers', 'block service workers')
       .option('--browser <browser>', 'browser or chrome channel to use, possible values: chrome, firefox, webkit, msedge.')
       .option('--allowed-tools <tools>', 'comma-separated exact tool names to enable in addition to core and capability tools (not a whitelist).', toolNameList)
@@ -234,7 +236,10 @@ configureBaseProgram()
             description: 'Connect to a browser using the Playwright MCP extension',
             // Runs before the default provider is torn down, so a rejected
             // switch keeps the session on the provider that works.
-            validate: () => assertStorageStateSupported(config, extensionContextFactory, 'The "extension" method works through the browser you are already running and uses the context it already has. Stay on the "default" method, or restart without the storage state and sign in in that browser.'),
+            validate: () => {
+              assertNetworkPolicySupported(config, false);
+              assertStorageStateSupported(config, extensionContextFactory, 'The "extension" method works through the browser you are already running and uses the context it already has. Stay on the "default" method, or restart without the storage state and sign in in that browser.');
+            },
             connect: () => mcpServer.wrapInProcess(new BrowserServerBackend(config, extensionContextFactory, sessionRegistry, { ephemeralDefaultContext })),
           },
         ];

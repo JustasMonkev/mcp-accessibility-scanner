@@ -15,6 +15,7 @@
  */
 
 import fs from 'node:fs';
+import { assertNetworkPolicySupported } from './networkPolicy.js';
 import os from 'node:os';
 import path from 'node:path';
 import type { BrowserContextOptions, LaunchOptions } from 'playwright';
@@ -138,6 +139,7 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
 // env, CLI, programmatic Config) is covered. Only undefined/null count as
 // omitted — the nullish semantics the fallback historically used.
 async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
+  assertNetworkPolicySupported(config);
   if (config.redactUrlParams !== undefined) {
     if (!Array.isArray(config.redactUrlParams) || config.redactUrlParams.some(name => typeof name !== 'string' || !name.trim()))
       throw new Error('redactUrlParams must be an array of non-blank parameter names. Use [] to disable URL parameter redaction.');

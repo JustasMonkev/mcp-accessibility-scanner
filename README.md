@@ -336,14 +336,30 @@ Create a `config.json` file with the following options:
 - `timeouts.defaultTimeout`: Default timeout for Playwright operations in milliseconds (default: `5000`)
 - `timeouts.settle`: How long to wait after every action for triggered work to settle before responding (default: `500`). An action that finishes quietly is first watched for up to 100ms (or the settle delay, whichever is shorter) so scheduled network work can still be awaited before the settle delay.
 - `timeouts.idle`: Release the default browser context after this many idle milliseconds (default: `0`, disabled). Accepts integers from `0` to `2147483647`.
-- `network.allowedOrigins`: List of origins to allow (blocks all others if specified)
-- `network.blockedOrigins`: List of origins to block
+- `network.allowedOrigins`: List of host patterns to allow (blocks other HTTP(S) requests and page WebSockets when nonempty), for example `example.com` or `*.example.com`. Include the port for nondefault ports.
+- `network.blockedOrigins`: List of host patterns to block; blocklist matches take precedence over the allowlist.
+
 - `snapshot.boxes`: Include each element's viewport-relative bounding box as `[box=x,y,width,height]` in snapshots (default: `false`; CLI: `--snapshot-boxes`, env: `PLAYWRIGHT_MCP_SNAPSHOT_BOXES=1`)
 - `imageResponses`: `allow` (default) returns text and images; `omit` excludes images; `only` omits text from successful responses containing images. Errors, browser lifecycle notices, and responses without images (including full-page screenshots) keep their text. Structured results and resource links are always preserved. In `only` mode, screenshot save-path text, generated code and any accompanying text-only findings are omitted; use `allow` if you need them. Interactive mode rejects `only` because its REPL prints text only; use `allow` or `omit` there. `auto` remains a legacy alias for `allow`. CLI: `--image-responses only`; env: `PLAYWRIGHT_MCP_IMAGE_RESPONSES=only`. Precedence: CLI, then environment, then config file.
 - `server.authToken`: When set, Streamable HTTP requests (`--port`) require `Authorization: Bearer <token>` or return `401` (env: `PLAYWRIGHT_MCP_AUTH_TOKEN`). Blank or malformed tokens fail at startup. The scheme is case-insensitive; the token is exact. Bearer auth does not encrypt traffic: authenticated listeners must bind to loopback, such as `--host 127.0.0.1`; use a TLS reverse proxy for remote access. The printed client config includes a header placeholder to replace locally, without logging the secret. Unset keeps unauthenticated access.
 - `filePaths`: Optional `relative` or `absolute` rendering for output paths in screenshot/PDF results and generated code, report metadata, annotated/keyboard screenshots, and download summaries. Relative paths are based on the **server working directory**, not the client workspace or output directory. File writes, stored report contents, and absolute `file://` resource URIs are unchanged. Omitted preserves legacy rendering: configured relative output directories produce relative paths, while default temp output paths are absolute (unlike upstream Playwright’s relative default). CLI: `--file-paths absolute`; env: `PLAYWRIGHT_MCP_FILE_PATHS=absolute`. Precedence: CLI, then environment, then config file.
 - `outputDir`: Directory for output files — reports, screenshots, traces, and session logs (CLI: `--output-dir`, env: `PLAYWRIGHT_MCP_OUTPUT_DIR`). Defaults to a fresh directory under the system temp folder, resolved once per server run so all of a run's artifacts land together. The output location is always server configuration; the deprecated MCP roots capability (client workspace folders) is no longer consulted.
 - `redactUrlParams`: Optional array of URL query/fragment parameter names whose nonempty values are rendered as `REDACTED` (CLI: `--redact-url-params code,access_token`; env: `PLAYWRIGHT_MCP_REDACT_URL_PARAMS=code,access_token`). Defaults to no URL-parameter redaction. Names match literally and case-insensitively, without decoding keys; repeated matches, relative links and hash-route query parameters are included. Empty values and unselected parameters are preserved. CLI overrides environment, which overrides the config file; lists replace rather than merge. `[]` in JSON or an empty CLI/environment value clears a lower-precedence list. Non-array config values, non-string entries and blank names fail before browser startup. See [URL redaction coverage](#url-redaction-coverage) before sharing output or artifacts.
+
+Origin restrictions require locally launched Chromium (isolated or persistent).
+Firefox/WebKit and CDP, remote, extension, VS Code or custom-context connections
+reject restrictions instead of silently applying a partial policy or affecting
+unrelated browser contexts. Without origin restrictions those modes are unchanged.
+Enforcement begins when the browser context is acquired and the policy is
+installed; it does not retroactively filter startup traffic or existing connections
+(for example, during persistent-profile restoration). HTTP(S) filtering then
+covers each redirect hop, including subresources, frames and popups, while
+preserving browser redirect URLs, methods and cookies. Page
+WebSockets are checked before connecting to a server. **Worker-created WebSockets
+are not filtered by Playwright's page WebSocket routing.** These options are not
+a complete network security sandbox; use external network isolation when worker
+sockets or other browser traffic must be restricted.
+
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 

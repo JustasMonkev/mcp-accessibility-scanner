@@ -14,66 +14,74 @@
  * limitations under the License.
  */
 
-import type * as playwright from 'playwright';
+import coreBundle from 'playwright-core/lib/coreBundle';
+import type { Browser, BrowserContext, CDPSession } from 'playwright';
 import type { FullConfig } from './config.js';
 
-type RouteHandler = (route: playwright.Route) => void;
+const policyInstallations = new WeakMap<BrowserContext, Promise<void>>();
+const browserPolicies = new WeakMap<Browser, Promise<CDPSession>>();
 
-// One installation per context, shared by every caller: the storage-state
-// reuse path installs the policy before it reloads pages (Context has not run
-// yet), Context ensures it afterwards, and sibling sessions sharing a reused
-// context must not stack duplicate handlers. Keyed weakly on the context
-// object, and by promise so concurrent callers await one installation instead
-// of racing two; a failed installation is forgotten so the next caller
-// retries. The policy is identical for every caller — it comes from the
-// server-wide config — so "already installed" can never mean "installed with
-// different rules".
-const policyInstallations = new WeakMap<playwright.BrowserContext, Promise<void>>();
+export function assertNetworkPolicySupported(config: FullConfig, ownsBrowser = true): void {
+  if (!hasNetworkPolicy(config))
+    return;
+  if (config.browser.browserName !== 'chromium' || !ownsBrowser || config.browser.cdpEndpoint || config.browser.cdpLaunch || config.browser.remoteEndpoint)
+    throw new Error('Origin restrictions require a locally launched Chromium browser. Restricted Firefox/WebKit, CDP, remote, extension, VS Code and custom-context connections are unsupported; no network policy was installed on the external browser.');
+}
 
-/**
- * Installs the configured origin allowlist/blocklist as routes on the
- * context, once — later calls (and concurrent ones) join the first. The
- * handlers stay for the context's lifetime: they are never uninstalled, so
- * there is no window between a temporary installation coming off and the
- * permanent one going in during which a queued request could reach a blocked
- * origin, and a sibling session's view of the shared context never loses its
- * protection.
- */
-export function ensureNetworkPolicyRoutes(config: FullConfig, context: playwright.BrowserContext): Promise<void> {
+function hasNetworkPolicy(config: FullConfig): boolean {
+  return !!(config.network?.allowedOrigins?.length || config.network?.blockedOrigins?.length);
+}
+
+function isAllowed(config: FullConfig, url: string): boolean {
+  const matches = (origin: string) => coreBundle.iso.urlMatches(undefined, url, `*://${origin}/**`);
+  return !config.network.blockedOrigins?.some(matches) && (!config.network.allowedOrigins?.length || config.network.allowedOrigins.some(matches));
+}
+
+export function ensureNetworkPolicyRoutes(config: FullConfig, context: BrowserContext): Promise<void> {
+  if (!hasNetworkPolicy(config))
+    return Promise.resolve();
   let installation = policyInstallations.get(context);
   if (!installation) {
-    installation = installRoutes(config, context);
+    installation = installPolicy(config, context);
     policyInstallations.set(context, installation);
     installation.catch(() => policyInstallations.delete(context));
   }
   return installation;
 }
 
-async function installRoutes(config: FullConfig, context: playwright.BrowserContext): Promise<void> {
-  const installed: { pattern: string, handler: RouteHandler }[] = [];
-  const register = async (pattern: string, handler: RouteHandler) => {
-    await context.route(pattern, handler);
-    installed.push({ pattern, handler });
-  };
+async function installPolicy(config: FullConfig, context: BrowserContext): Promise<void> {
+  assertNetworkPolicySupported(config);
+  const browser = context.browser();
+  if (!browser || browser.browserType().name() !== 'chromium')
+    throw new Error('Origin restrictions require a locally launched Chromium browser.');
+  let installation = browserPolicies.get(browser);
+  if (!installation) {
+    installation = installBrowserPolicy(config, browser);
+    browserPolicies.set(browser, installation);
+    installation.catch(() => browserPolicies.delete(browser));
+  }
+  await installation;
+  await context.routeWebSocket('**', async socket => {
+    if (isAllowed(config, socket.url()))
+      socket.connectToServer();
+    else
+      await socket.close({ code: 1008, reason: 'Blocked by origin policy' });
+  });
+}
+
+async function installBrowserPolicy(config: FullConfig, browser: Browser): Promise<CDPSession> {
+  const session = await browser.newBrowserCDPSession();
+  session.on('Fetch.requestPaused', event => {
+    const command = isAllowed(config, event.request.url)
+      ? session.send('Fetch.continueRequest', { requestId: event.requestId })
+      : session.send('Fetch.failRequest', { requestId: event.requestId, errorReason: 'BlockedByClient' });
+    void command.catch(() => {});
+  });
   try {
-    if (config.network?.allowedOrigins?.length) {
-      await register('**', route => route.abort('blockedbyclient'));
-      for (const origin of config.network.allowedOrigins)
-        await register(`*://${origin}/**`, route => route.continue());
-    }
-    if (config.network?.blockedOrigins?.length) {
-      for (const origin of config.network.blockedOrigins)
-        await register(`*://${origin}/**`, route => route.abort('blockedbyclient'));
-    }
+    await session.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
+    return session;
   } catch (error) {
-    // A partial policy is worse than none: with the allowlist's abort-all
-    // route in but its continue routes missing, everything is blocked — and
-    // on a reused context the fragment would linger for whoever uses the
-    // context next. Unwind exactly what was registered (never more — a
-    // sibling session may have its own handlers) before surfacing the
-    // failure.
-    for (const { pattern, handler } of installed)
-      await context.unroute(pattern, handler).catch(() => {});
+    await session.detach().catch(() => {});
     throw error;
   }
 }
