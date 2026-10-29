@@ -62,13 +62,12 @@ export default defineConfig({
         'src/utils/fileUtils.ts', // File system operations
       ],
       include: ['src/**/*.ts'],
-      all: true,
-      // Adjusted thresholds based on testable code without modifying source
-      // Focused on: response, tool definitions, config, context basics, tested tools, utils
-      lines: 90,
-      functions: 90,
-      branches: 90,
-      statements: 90,
+      thresholds: {
+        lines: 90,
+        functions: 90,
+        branches: 90,
+        statements: 90,
+      },
     },
     testTimeout: 30000,
     hookTimeout: 30000,

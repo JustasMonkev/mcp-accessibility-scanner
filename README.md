@@ -993,6 +993,13 @@ as well.
 
 `npm run knip` checks the server's sources, tests, benchmarks and tooling.
 
+`npm run test:coverage` enforces 90% statements, branches, functions and lines
+using Vitest's `coverage.thresholds`. It exits nonzero when any target is missed,
+even if every test passes. The current suite is below these targets; this command
+reports that coverage debt rather than silently succeeding. The exclusions in
+`vitest.config.ts` mean the percentages describe only the included source files,
+not the entire package. `npm test` runs the tests without enforcing coverage.
+
 Tests use Node or Playwright rather than `happy-dom`, and Chrome protocol types are
 defined locally. See the [dependency review](docs/dependency-review-2026-10.md) for
 the removal rationale and validation results.
