@@ -18,10 +18,7 @@ import type { Server } from '@modelcontextprotocol/server';
 import type { Config } from './config.js';
 import type { BrowserContext } from 'playwright';
 
-export type Connection = {
-  server: Server;
-  close(): Promise<void>;
-};
+export type Connection = Server;
 
 export declare function createConnection(config?: Config, contextGetter?: () => Promise<BrowserContext>): Promise<Connection>;
 export {};
