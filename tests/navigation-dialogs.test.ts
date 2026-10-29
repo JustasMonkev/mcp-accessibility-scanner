@@ -286,20 +286,33 @@ describe('navigation interrupted by a load-time dialog', () => {
     }
   });
 
-  it('does not hang the crawl on a dialog that opens after the navigation succeeded', async () => {
+  async function prepareCrawl() {
     const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
     config.outputDir = outputDir;
     await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
-    const urls = ['first', 'late', 'second'].map(name => `http://fixture.local/${name}`);
+    return outputDir;
+  }
+
+  async function checkCrawl(outputDir: string, urls: string[], timeout: number, check: (result: Awaited<ReturnType<BrowserServerBackend['callTool']>>) => Promise<void>) {
     const audit = backend.callTool('audit_site', {
       startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0,
     });
     let auditReturned = false;
     void audit.then(() => { auditReturned = true; });
     try {
-      // Without the fix the page's evaluate never returns: the audit waits forever.
-      await vi.waitFor(() => expect(auditReturned).toBe(true), { timeout: 8000 });
-      const result = await audit;
+      await vi.waitFor(() => expect(auditReturned).toBe(true), { timeout });
+      await check(await audit);
+    } finally {
+      await browserContext.close();
+      await audit;
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  }
+
+  it('does not hang the crawl on a dialog that opens after the navigation succeeded', async () => {
+    const outputDir = await prepareCrawl();
+    const urls = ['first', 'late', 'second'].map(name => `http://fixture.local/${name}`);
+    await checkCrawl(outputDir, urls, 8000, async result => {
       expect(result.structuredContent).toMatchObject({ totals: { scannedPages: 2, erroredPages: 1 } });
       const files = await readdir(outputDir);
       const report = JSON.parse(await readFile(path.join(outputDir, files[0]), 'utf8'));
@@ -308,51 +321,24 @@ describe('navigation interrupted by a load-time dialog', () => {
       ]);
       expect(report.pages[1].error).toContain('"alert" dialog with message "After load"');
       expect(browserContext.pages()).toHaveLength(1);
-    } finally {
-      // Settles a hung audit so a regression fails here instead of leaking the crawl.
-      await browserContext.close();
-      await audit;
-      await rm(outputDir, { recursive: true, force: true });
-    }
+    });
   });
 
   it('does not take a same-document navigation by the previous page for the next page committing', async () => {
-    const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
-    config.outputDir = outputDir;
-    await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
+    const outputDir = await prepareCrawl();
     const urls = ['outgoing-pushstate', 'delayed', 'second'].map(name => `http://fixture.local/${name}`);
-    const audit = backend.callTool('audit_site', {
-      startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0,
-    });
-    let auditReturned = false;
-    void audit.then(() => { auditReturned = true; });
-    try {
-      await vi.waitFor(() => expect(auditReturned).toBe(true), { timeout: 10000 });
-      const result = await audit;
+    await checkCrawl(outputDir, urls, 10000, async result => {
       // Without telling the two apart, the pushState counts as 'delayed' committing and it fails.
       expect(result.structuredContent).toMatchObject({ totals: { scannedPages: 3, erroredPages: 0 } });
       expect(browserContext.pages()).toHaveLength(1);
-    } finally {
-      await browserContext.close();
-      await audit;
-      await rm(outputDir, { recursive: true, force: true });
-    }
+    });
   });
 
   it('audits a page again when the previous page raised its dialog during the navigation to it', async () => {
-    const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
-    config.outputDir = outputDir;
-    await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
+    const outputDir = await prepareCrawl();
     const urls = ['outgoing', 'delayed', 'second'].map(name => `http://fixture.local/${name}`);
     await browserContext.addCookies([{ name: 'sid', value: 'signed-in', url: 'http://fixture.local/' }]);
-    const audit = backend.callTool('audit_site', {
-      startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0,
-    });
-    let auditReturned = false;
-    void audit.then(() => { auditReturned = true; });
-    try {
-      await vi.waitFor(() => expect(auditReturned).toBe(true), { timeout: 10000 });
-      const result = await audit;
+    await checkCrawl(outputDir, urls, 10000, async result => {
       // Without the retry, 'delayed' is reported as failed for the previous page's dialog.
       expect(result.structuredContent).toMatchObject({ totals: { scannedPages: 3, erroredPages: 0 } });
       const files = await readdir(outputDir);
@@ -363,11 +349,7 @@ describe('navigation interrupted by a load-time dialog', () => {
       // The cookie went while the outgoing page was still the one running.
       expect(report.sessionLosses).toEqual([{ url: urls[0], cookies: ['sid'] }]);
       expect(browserContext.pages()).toHaveLength(1);
-    } finally {
-      await browserContext.close();
-      await audit;
-      await rm(outputDir, { recursive: true, force: true });
-    }
+    });
   });
 
   it('keeps the back-navigation replay code when the dialog is closed outside MCP before the response', async () => {

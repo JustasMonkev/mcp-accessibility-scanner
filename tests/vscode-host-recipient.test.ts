@@ -15,6 +15,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { forwardTransport } from './transportFixture.js';
 import { describe, it, vi } from 'vitest';
 import type { Transport } from '@modelcontextprotocol/client';
 import { resolveConfig } from '../src/config.js';
@@ -143,23 +144,12 @@ describe('host-session discovery recipient survives provider generation changes'
         },
         callTool: async () => ({ content: [] }),
       });
-      const transport: Transport = {
-        start: async () => {
-          inner.onmessage = (message, extra) => {
-            transport.onmessage?.(message, extra);
-            if (provider === 1 && switchAfterResponse && 'result' in message && 'tools' in message.result) {
-              switchAfterResponse = false;
-              switched = backend.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:5678/', lib: 'playwright' });
-            }
-          };
-          inner.onclose = () => transport.onclose?.();
-          inner.onerror = error => transport.onerror?.(error);
-          await inner.start();
-        },
-        send: (message, options) => inner.send(message, options),
-        close: () => inner.close(),
-      };
-      return transport;
+      return forwardTransport(inner, message => {
+        if (provider === 1 && switchAfterResponse && 'result' in message && 'tools' in message.result) {
+          switchAfterResponse = false;
+          switched = backend.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:5678/', lib: 'playwright' });
+        }
+      });
     };
     const backend = new VSCodeProxyBackend(await resolveConfig({}), connectDefault);
     stdio.transport = await wrapInProcess({

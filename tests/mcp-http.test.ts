@@ -44,6 +44,17 @@ const testBackendFactory: ServerBackendFactory = {
   }),
 };
 
+const noStreamFetch: typeof fetch = async (input, init) => {
+  const request = input instanceof Request ? input : undefined;
+  const method = init?.method ?? request?.method;
+  if (method === 'GET') {
+    return await new Promise<Response>((_resolve, reject) => {
+      (init?.signal ?? request?.signal)?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    });
+  }
+  return fetch(input, init);
+};
+
 describe('mcp http transport hardening', () => {
   const servers = new Set<http.Server>();
 
@@ -1390,16 +1401,6 @@ describe('mcp http transport hardening', () => {
     // Never open the standalone GET stream: server-to-client requests such as
     // listRoots could not be delivered, so a tool call only succeeds if the
     // server no longer performs any.
-    const noStreamFetch: typeof fetch = async (input, init) => {
-      const request = input instanceof Request ? input : undefined;
-      const method = init?.method ?? request?.method;
-      if (method === 'GET') {
-        return await new Promise<Response>((_resolve, reject) => {
-          (init?.signal ?? request?.signal)?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
-        });
-      }
-      return fetch(input, init);
-    };
     const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: { roots: {} } });
     client.setRequestHandler('roots/list', listRoots);
     client.setRequestHandler('ping', () => ({}));
@@ -1443,16 +1444,6 @@ describe('mcp http transport hardening', () => {
       }),
     });
 
-    const noStreamFetch: typeof fetch = async (input, init) => {
-      const request = input instanceof Request ? input : undefined;
-      const method = init?.method ?? request?.method;
-      if (method === 'GET') {
-        return await new Promise<Response>((_resolve, reject) => {
-          (init?.signal ?? request?.signal)?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
-        });
-      }
-      return fetch(input, init);
-    };
     const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: {} });
     client.setRequestHandler('ping', () => ({}));
     const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { fetch: noStreamFetch });

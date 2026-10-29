@@ -43,6 +43,18 @@ async function canLaunchBundledChromium(): Promise<boolean> {
 
 const canRunAriaSnapshotIntegration = await canLaunchBundledChromium();
 
+async function compressHtml(html: string) {
+  const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(html);
+    const snapshot = await page.ariaSnapshot({ mode: 'ai' });
+    return { snapshot, result: compressAriaSnapshot(snapshot) };
+  } finally {
+    await browser.close().catch(() => undefined);
+  }
+}
+
 describe('Utils', () => {
   describe('createGuid', () => {
     it('should generate unique identifiers', () => {
@@ -504,195 +516,104 @@ describe('Utils', () => {
     });
 
     it.skipIf(!canRunAriaSnapshotIntegration)('should compress real Playwright list snapshots with non-actionable refs', async () => {
-      let browser: Browser | undefined;
-      try {
-        browser = await chromium.launch({
-          headless: true,
-          chromiumSandbox: false,
-        });
-        const page = await browser.newPage();
-        const items = Array.from({ length: 150 }, (_, index) => `<li>Item ${index + 1}</li>`).join('');
-        await page.setContent(`<ul>${items}</ul>`);
+      const items = Array.from({ length: 150 }, (_, index) => `<li>Item ${index + 1}</li>`).join('');
+      const { snapshot, result } = await compressHtml(`<ul>${items}</ul>`);
 
-        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
-        const result = compressAriaSnapshot(snapshot);
-
-        expect(snapshot).toContain('[ref=');
-        expect(snapshot).toContain('Item 150');
-        expect(result.removed).toBeGreaterThan(0);
-        expect(result.output).toContain('Item 10');
-        expect(result.output).not.toContain('Item 11');
-        expect(result.output).not.toContain('Item 150');
-        expect(result.output).toContain('playwright-compress:');
-      } finally {
-        await browser?.close().catch(() => undefined);
-      }
+      expect(snapshot).toContain('[ref=');
+      expect(snapshot).toContain('Item 150');
+      expect(result.removed).toBeGreaterThan(0);
+      expect(result.output).toContain('Item 10');
+      expect(result.output).not.toContain('Item 11');
+      expect(result.output).not.toContain('Item 150');
+      expect(result.output).toContain('playwright-compress:');
     });
 
     it.skipIf(!canRunAriaSnapshotIntegration)('should compress real Playwright lists inside landmarks', async () => {
-      let browser: Browser | undefined;
-      try {
-        browser = await chromium.launch({
-          headless: true,
-          chromiumSandbox: false,
-        });
-        const page = await browser.newPage();
-        const items = Array.from({ length: 150 }, (_, index) => `<li>Item ${index + 1}</li>`).join('');
-        await page.setContent(`<main><ul>${items}</ul></main>`);
+      const items = Array.from({ length: 150 }, (_, index) => `<li>Item ${index + 1}</li>`).join('');
+      const { snapshot, result } = await compressHtml(`<main><ul>${items}</ul></main>`);
 
-        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
-        const result = compressAriaSnapshot(snapshot);
-
-        expect(snapshot).toContain('main');
-        expect(snapshot).toContain('Item 150');
-        expect(result.removed).toBeGreaterThan(0);
-        expect(result.output).toContain('main');
-        expect(result.output).toContain('Item 10');
-        expect(result.output).not.toContain('Item 11');
-        expect(result.output).not.toContain('Item 150');
-        expect(result.output).toContain('playwright-compress:');
-      } finally {
-        await browser?.close().catch(() => undefined);
-      }
+      expect(snapshot).toContain('main');
+      expect(snapshot).toContain('Item 150');
+      expect(result.removed).toBeGreaterThan(0);
+      expect(result.output).toContain('main');
+      expect(result.output).toContain('Item 10');
+      expect(result.output).not.toContain('Item 11');
+      expect(result.output).not.toContain('Item 150');
+      expect(result.output).toContain('playwright-compress:');
     });
 
     it.skipIf(!canRunAriaSnapshotIntegration)('should compress real Playwright repeated cards with headings', async () => {
-      let browser: Browser | undefined;
-      try {
-        browser = await chromium.launch({
-          headless: true,
-          chromiumSandbox: false,
-        });
-        const page = await browser.newPage();
-        const cards = Array.from({ length: 150 }, (_, index) => [
-          '<article>',
-          `<h2>Title ${index + 1}</h2>`,
-          `<p>Summary ${index + 1}</p>`,
-          '</article>',
-        ].join('')).join('');
-        await page.setContent(`<main>${cards}</main>`);
+      const cards = Array.from({ length: 150 }, (_, index) => [
+        '<article>',
+        `<h2>Title ${index + 1}</h2>`,
+        `<p>Summary ${index + 1}</p>`,
+        '</article>',
+      ].join('')).join('');
+      const { snapshot, result } = await compressHtml(`<main>${cards}</main>`);
 
-        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
-        const result = compressAriaSnapshot(snapshot);
-
-        expect(snapshot).toContain('Title 150');
-        expect(result.removed).toBeGreaterThan(0);
-        expect(result.output).toContain('Title 10');
-        expect(result.output).not.toContain('Title 11');
-        expect(result.output).not.toContain('Title 150');
-        expect(result.output).toContain('playwright-compress:');
-      } finally {
-        await browser?.close().catch(() => undefined);
-      }
+      expect(snapshot).toContain('Title 150');
+      expect(result.removed).toBeGreaterThan(0);
+      expect(result.output).toContain('Title 10');
+      expect(result.output).not.toContain('Title 11');
+      expect(result.output).not.toContain('Title 150');
+      expect(result.output).toContain('playwright-compress:');
     });
 
     it.skipIf(!canRunAriaSnapshotIntegration)('should preserve real Playwright slider controls', async () => {
-      let browser: Browser | undefined;
-      try {
-        browser = await chromium.launch({
-          headless: true,
-          chromiumSandbox: false,
-        });
-        const page = await browser.newPage();
-        const sliders = Array.from({ length: 150 }, (_, index) => `<input type="range" aria-label="Volume ${index + 1}" min="0" max="100" value="50">`).join('');
-        await page.setContent(`<main>${sliders}</main>`);
+      const sliders = Array.from({ length: 150 }, (_, index) => `<input type="range" aria-label="Volume ${index + 1}" min="0" max="100" value="50">`).join('');
+      const { snapshot, result } = await compressHtml(`<main>${sliders}</main>`);
 
-        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
-        const result = compressAriaSnapshot(snapshot);
-
-        expect(snapshot).toContain('Volume 150');
-        expect(result).toEqual({ output: snapshot, removed: 0 });
-        expect(result.output).toContain('Volume 11');
-        expect(result.output).toContain('Volume 150');
-      } finally {
-        await browser?.close().catch(() => undefined);
-      }
+      expect(snapshot).toContain('Volume 150');
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Volume 11');
+      expect(result.output).toContain('Volume 150');
     });
 
     it.skipIf(!canRunAriaSnapshotIntegration)('should preserve real Playwright combobox controls', async () => {
-      let browser: Browser | undefined;
-      try {
-        browser = await chromium.launch({
-          headless: true,
-          chromiumSandbox: false,
-        });
-        const page = await browser.newPage();
-        const selects = Array.from({ length: 150 }, (_, index) => [
-          `<select aria-label="Choice ${index + 1}">`,
-          '<option>One</option>',
-          '<option>Two</option>',
-          '</select>',
-        ].join('')).join('');
-        await page.setContent(`<main>${selects}</main>`);
+      const selects = Array.from({ length: 150 }, (_, index) => [
+        `<select aria-label="Choice ${index + 1}">`,
+        '<option>One</option>',
+        '<option>Two</option>',
+        '</select>',
+      ].join('')).join('');
+      const { snapshot, result } = await compressHtml(`<main>${selects}</main>`);
 
-        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
-        const result = compressAriaSnapshot(snapshot);
-
-        expect(snapshot).toContain('Choice 150');
-        expect(result).toEqual({ output: snapshot, removed: 0 });
-        expect(result.output).toContain('Choice 11');
-        expect(result.output).toContain('Choice 150');
-      } finally {
-        await browser?.close().catch(() => undefined);
-      }
+      expect(snapshot).toContain('Choice 150');
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Choice 11');
+      expect(result.output).toContain('Choice 150');
     });
 
     it.skipIf(!canRunAriaSnapshotIntegration)('should preserve real Playwright actionable grid rows', async () => {
-      let browser: Browser | undefined;
-      try {
-        browser = await chromium.launch({
-          headless: true,
-          chromiumSandbox: false,
-        });
-        const page = await browser.newPage();
-        const rows = Array.from({ length: 150 }, (_, index) => [
-          `<div role="row" tabindex="0" aria-label="Order ${index + 1}">`,
-          `<span role="gridcell">Order ${index + 1}</span>`,
-          `<span role="gridcell">Status ${index + 1}</span>`,
-          '</div>',
-        ].join('')).join('');
-        await page.setContent(`<div role="grid">${rows}</div>`);
+      const rows = Array.from({ length: 150 }, (_, index) => [
+        `<div role="row" tabindex="0" aria-label="Order ${index + 1}">`,
+        `<span role="gridcell">Order ${index + 1}</span>`,
+        `<span role="gridcell">Status ${index + 1}</span>`,
+        '</div>',
+      ].join('')).join('');
+      const { snapshot, result } = await compressHtml(`<div role="grid">${rows}</div>`);
 
-        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
-        const result = compressAriaSnapshot(snapshot);
-
-        expect(snapshot).toContain('Order 150');
-        expect(result).toEqual({ output: snapshot, removed: 0 });
-        expect(result.output).toContain('Order 11');
-        expect(result.output).toContain('Order 150');
-      } finally {
-        await browser?.close().catch(() => undefined);
-      }
+      expect(snapshot).toContain('Order 150');
+      expect(result).toEqual({ output: snapshot, removed: 0 });
+      expect(result.output).toContain('Order 11');
+      expect(result.output).toContain('Order 150');
     });
 
     it.skipIf(!canRunAriaSnapshotIntegration)('should compress real Playwright plain table rows', async () => {
-      let browser: Browser | undefined;
-      try {
-        browser = await chromium.launch({
-          headless: true,
-          chromiumSandbox: false,
-        });
-        const page = await browser.newPage();
-        const rows = Array.from({ length: 150 }, (_, index) => [
-          '<tr>',
-          `<td>Order ${index + 1}</td>`,
-          `<td>Status ${index + 1}</td>`,
-          '</tr>',
-        ].join('')).join('');
-        await page.setContent(`<table><tbody>${rows}</tbody></table>`);
+      const rows = Array.from({ length: 150 }, (_, index) => [
+        '<tr>',
+        `<td>Order ${index + 1}</td>`,
+        `<td>Status ${index + 1}</td>`,
+        '</tr>',
+      ].join('')).join('');
+      const { snapshot, result } = await compressHtml(`<table><tbody>${rows}</tbody></table>`);
 
-        const snapshot = await page.ariaSnapshot({ mode: 'ai' });
-        const result = compressAriaSnapshot(snapshot);
-
-        expect(snapshot).toContain('Order 150');
-        expect(result.removed).toBeGreaterThan(0);
-        expect(result.output).toContain('Order 10');
-        expect(result.output).not.toContain('Order 11');
-        expect(result.output).not.toContain('Order 150');
-        expect(result.output).toContain('playwright-compress:');
-      } finally {
-        await browser?.close().catch(() => undefined);
-      }
+      expect(snapshot).toContain('Order 150');
+      expect(result.removed).toBeGreaterThan(0);
+      expect(result.output).toContain('Order 10');
+      expect(result.output).not.toContain('Order 11');
+      expect(result.output).not.toContain('Order 150');
+      expect(result.output).toContain('playwright-compress:');
     });
 
     it('should compress unrelated repeated siblings under a shared parent with refs', () => {

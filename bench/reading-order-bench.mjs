@@ -1,3 +1,4 @@
+import { median } from './statistics.mjs';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -47,12 +48,6 @@ for (const count of [400, 2000]) {
 }
 
 process.stdout.write(`${JSON.stringify({ node: process.version, warmups, iterations, results }, null, 2)}\n`);
-
-function median(samples) {
-  const sorted = [...samples].sort((first, second) => first - second);
-  const middle = Math.floor(sorted.length / 2);
-  return (sorted[middle - 1] + sorted[middle]) / 2;
-}
 
 function fixture(count, order) {
   const parent = {

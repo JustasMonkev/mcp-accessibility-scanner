@@ -15,8 +15,8 @@
  */
 
 import assert from 'node:assert/strict';
+import { forwardTransport } from './transportFixture.js';
 import { Client } from '@modelcontextprotocol/client';
-import type { Transport } from '@modelcontextprotocol/client';
 import { describe, it, vi } from 'vitest';
 import { resolveConfig } from '../src/config.js';
 import { wrapInProcess } from '../src/mcp/server.js';
@@ -139,25 +139,12 @@ describe('WebMCP proxy notification races', () => {
         },
         callTool: async () => ({ content: [] }),
       });
-      const transport: Transport = {
-        start: async () => {
-          inner.onmessage = (message, extra) => {
-            transport.onmessage?.(message, extra);
-            // The SDK has resolved the response, but the backend's listing
-            // continuation has not run when the provider switch starts.
-            if (provider === 0 && switchAfterResponse && 'result' in message && 'tools' in message.result) {
-              switchAfterResponse = false;
-              switched = backend.callTool('browser_connect', {});
-            }
-          };
-          inner.onclose = () => transport.onclose?.();
-          inner.onerror = error => transport.onerror?.(error);
-          await inner.start();
-        },
-        send: (message, options) => inner.send(message, options),
-        close: () => inner.close(),
-      };
-      return transport;
+      return forwardTransport(inner, message => {
+        if (provider === 0 && switchAfterResponse && 'result' in message && 'tools' in message.result) {
+          switchAfterResponse = false;
+          switched = backend.callTool('browser_connect', {});
+        }
+      });
     };
     const backend = new VSCodeProxyBackend(await resolveConfig({}), connect);
     try {
