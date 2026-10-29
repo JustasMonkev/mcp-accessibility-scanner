@@ -14,72 +14,97 @@
  * limitations under the License.
  */
 
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
-import { ensureNetworkPolicyRoutes } from '../src/networkPolicy.js';
+import { assertNetworkPolicySupported, ensureNetworkPolicyRoutes } from '../src/networkPolicy.js';
+import { resolveConfig } from '../src/config.js';
+import { createConnection } from '../src/index.js';
 import type { FullConfig } from '../src/config.js';
+import type { BrowserContext } from 'playwright';
 
 function createMockContext() {
-  return {
-    route: vi.fn().mockResolvedValue(undefined),
-    unroute: vi.fn().mockResolvedValue(undefined),
-  } as any;
+  const session = Object.assign(new EventEmitter(), {
+    send: vi.fn().mockResolvedValue(undefined),
+    detach: vi.fn().mockResolvedValue(undefined),
+  });
+  const browser = {
+    browserType: () => ({ name: () => 'chromium' }),
+    newBrowserCDPSession: vi.fn().mockResolvedValue(session),
+  };
+  const context = { browser: () => browser, routeWebSocket: vi.fn().mockResolvedValue(undefined) };
+  return { context: context as unknown as BrowserContext, routeWebSocket: context.routeWebSocket, browser, session };
 }
+
+const restrictedConfig = { browser: { browserName: 'chromium' }, network: { allowedOrigins: ['*.example'], blockedOrigins: ['tracker.example'] } } as FullConfig;
 
 describe('ensureNetworkPolicyRoutes', () => {
   it('touches nothing when no policy is configured', async () => {
-    const context = createMockContext();
-
+    const { context, browser, routeWebSocket } = createMockContext();
     await ensureNetworkPolicyRoutes({ network: undefined } as FullConfig, context);
-
-    expect(context.route).not.toHaveBeenCalled();
+    expect(browser.newBrowserCDPSession).not.toHaveBeenCalled();
+    expect(routeWebSocket).not.toHaveBeenCalled();
   });
 
-  it('installs the policy once per context, permanently', async () => {
-    // The factory ensures the policy before its storage-state reloads and
-    // Context ensures it again afterwards; the handlers must go in exactly
-    // once and never come off — an uninstall between the two would leave a
-    // window for a queued page request to reach a blocked origin.
-    const context = createMockContext();
-    const config = { network: { allowedOrigins: ['app.example'], blockedOrigins: ['tracker.example'] } } as FullConfig;
-
-    await ensureNetworkPolicyRoutes(config, context);
-    await ensureNetworkPolicyRoutes(config, context);
-
-    expect(context.route.mock.calls.map((call: any[]) => call[0]))
-        .toEqual(['**', '*://app.example/**', '*://tracker.example/**']);
-    expect(context.unroute).not.toHaveBeenCalled();
-  });
-
-  it('shares one installation between concurrent callers', async () => {
-    const context = createMockContext();
-    const config = { network: { blockedOrigins: ['tracker.example'] } } as FullConfig;
-
+  it('shares installation across simultaneous callers and contexts in the owned browser', async () => {
+    const { context, browser, routeWebSocket, session } = createMockContext();
+    const sibling = { browser: () => browser, routeWebSocket: vi.fn().mockResolvedValue(undefined) } as unknown as BrowserContext;
     await Promise.all([
-      ensureNetworkPolicyRoutes(config, context),
-      ensureNetworkPolicyRoutes(config, context),
+      ensureNetworkPolicyRoutes(restrictedConfig, context),
+      ensureNetworkPolicyRoutes(restrictedConfig, context),
+      ensureNetworkPolicyRoutes(restrictedConfig, sibling),
     ]);
-
-    expect(context.route).toHaveBeenCalledTimes(1);
+    expect(browser.newBrowserCDPSession).toHaveBeenCalledTimes(1);
+    expect(routeWebSocket).toHaveBeenCalledTimes(1);
+    expect(session.send).toHaveBeenCalledWith('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
+    for (const [url, allowed] of [['https://app.example/path', true], ['https://tracker.example/path', false], ['https://elsewhere.test/path', false]] as const) {
+      session.emit('Fetch.requestPaused', { requestId: url, request: { url } });
+      expect(session.send).toHaveBeenLastCalledWith(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest', {
+        requestId: url, ...(!allowed && { errorReason: 'BlockedByClient' }),
+      });
+    }
+    expect(session.detach).not.toHaveBeenCalled();
   });
 
-  it('unwinds already-registered handlers when a later registration fails, and retries next time', async () => {
-    // With the allowlist's abort-all route in but its continue routes missing,
-    // everything is blocked — and on a reused context the fragment would
-    // linger for whoever uses the context next.
-    const context = createMockContext();
-    context.route
-        .mockResolvedValueOnce(undefined)
-        .mockRejectedValueOnce(new Error('Route registration failed'))
-        .mockResolvedValue(undefined);
-    const config = { network: { allowedOrigins: ['app.example'] } } as FullConfig;
+  it('detaches a failed browser installation and permits retry', async () => {
+    const { context, browser, session, routeWebSocket } = createMockContext();
+    session.send.mockRejectedValueOnce(new Error('Fetch setup failed'));
+    await expect(ensureNetworkPolicyRoutes(restrictedConfig, context)).rejects.toThrow('Fetch setup failed');
+    expect(session.detach).toHaveBeenCalledTimes(1);
+    expect(routeWebSocket).not.toHaveBeenCalled();
+    await ensureNetworkPolicyRoutes(restrictedConfig, context);
+    expect(browser.newBrowserCDPSession).toHaveBeenCalledTimes(2);
+    expect(routeWebSocket).toHaveBeenCalledTimes(1);
+  });
 
-    await expect(ensureNetworkPolicyRoutes(config, context)).rejects.toThrow('Route registration failed');
-    expect(context.unroute).toHaveBeenCalledTimes(1);
-    expect(context.unroute).toHaveBeenCalledWith('**', context.route.mock.calls[0][1]);
+  it('does not forward blocked sockets and forwards allowed sockets without message rewriting', async () => {
+    const { context, routeWebSocket } = createMockContext();
+    await ensureNetworkPolicyRoutes(restrictedConfig, context);
+    const handler = routeWebSocket.mock.calls[0][1];
+    for (const [url, allowed] of [['wss://app.example/socket', true], ['ws://tracker.example/socket', false]] as const) {
+      const socket = { url: () => url, close: vi.fn().mockResolvedValue(undefined), connectToServer: vi.fn() };
+      await handler(socket);
+      expect(socket.connectToServer).toHaveBeenCalledTimes(allowed ? 1 : 0);
+      expect(socket.close).toHaveBeenCalledTimes(allowed ? 0 : 1);
+    }
+  });
 
-    // The failed installation is forgotten, so the next caller gets a fresh
-    // attempt rather than joining a rejected promise forever.
-    await ensureNetworkPolicyRoutes(config, context);
-    expect(context.route).toHaveBeenCalledTimes(4);
+  it.each(['firefox', 'webkit'] as const)('rejects restricted %s but preserves unrestricted use', async browserName => {
+    await expect(resolveConfig({ browser: { browserName }, network: { blockedOrigins: ['example.com'] } })).rejects.toThrow('locally launched Chromium');
+    await expect(resolveConfig({ browser: { browserName } })).resolves.toMatchObject({ browser: { browserName } });
+  });
+
+  it.each([
+    { cdpEndpoint: 'http://localhost:9222' },
+    { remoteEndpoint: 'ws://localhost:1234' },
+    { cdpLaunch: { command: 'owned-fixture' } },
+  ])('rejects configured external connections before acquisition: %j', async browser => {
+    await expect(resolveConfig({ browser, network: { allowedOrigins: ['example.com'] } })).rejects.toThrow('locally launched Chromium');
+  });
+
+  it('rejects a custom context getter before invoking it and rejects external factory ownership', async () => {
+    const getter = vi.fn();
+    await expect(createConnection({ network: { blockedOrigins: ['example.com'] } }, getter)).rejects.toThrow('custom-context');
+    expect(getter).not.toHaveBeenCalled();
+    expect(() => assertNetworkPolicySupported(restrictedConfig, false)).toThrow('external browser');
   });
 });

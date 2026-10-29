@@ -21,7 +21,7 @@ import { logUnhandledError } from './utils/log.js';
 import { createShortGuid } from './utils/guid.js';
 import { Tab } from './tab.js';
 import { outputFile } from './config.js';
-import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
+import { assertNetworkPolicySupported, ensureNetworkPolicyRoutes } from './networkPolicy.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
 import { truncateToUtf8Bytes } from './utils/fileUtils.js';
 
@@ -841,6 +841,7 @@ export class Context {
     // TODO: move to the browser context factory to make it based on isolation mode.
     // The factory gets the most recently started call's name — with overlap
     // that is the call whose execution is creating the context right now.
+    assertNetworkPolicySupported(this.config, this._browserContextFactory.ownsBrowser === true);
     const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningTools[this._runningTools.length - 1], { browserSession: this.options.browserSession });
     const closingGroup = idleGroups.get(result.browserContext)?.closing;
     if (closingGroup) {

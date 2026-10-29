@@ -34,6 +34,7 @@ import { BrowserServerBackend } from '../browserServerBackend.js';
 import { BrowserSessionRegistry } from '../browserSessions.js';
 import { assertStorageStateDoesNotResetUserProfile, contextFactory } from '../browserContextFactory.js';
 import { vscodeProfileConflictRemedy } from './browserContextFactory.js';
+import { assertNetworkPolicySupported } from '../networkPolicy.js';
 import { validateBrowserConnectConnectionString, validateBrowserConnectLib } from './validation.js';
 import type { Transport } from '@modelcontextprotocol/client';
 import type { ClientVersion, ServerBackend, ServerBackendContext, Tool, CallToolResult, CallToolRequest } from '../mcp/server.js';
@@ -205,6 +206,7 @@ export class VSCodeProxyBackend implements ServerBackend {
     // context. Validated here instead, so a rejected switch keeps the
     // session on the previous provider.
     try {
+      assertNetworkPolicySupported(this._config, false);
       assertStorageStateDoesNotResetUserProfile(this._config, vscodeProfileConflictRemedy);
     } catch (error) {
       return {

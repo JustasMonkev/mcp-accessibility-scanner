@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { assertNetworkPolicySupported } from './networkPolicy.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
 import { resolveConfig } from './config.js';
 import { contextFactory } from './browserContextFactory.js';
@@ -30,6 +31,7 @@ export async function createConnection(userConfig: Config = {}, contextGetter?: 
   if (userConfig.browser?.profileDirName)
     throw new Error('browser.profileDirName is only applied by the CLI\'s extension mode (--extension or --connect-tool); createConnection launches no extension relay to consume it. Remove the field.');
   const config = await resolveConfig(userConfig);
+  assertNetworkPolicySupported(config, !contextGetter);
   const factory = contextGetter ? new SimpleBrowserContextFactory(contextGetter) : contextFactory(config);
   return mcpServer.createServer('Playwright', packageJSON.version, new BrowserServerBackend(config, factory), false, { title: 'Accessibility Scanner', instructions: serverInstructions(config), redactUrlParams: config.redactUrlParams });
 }
