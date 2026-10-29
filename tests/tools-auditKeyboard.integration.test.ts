@@ -33,6 +33,47 @@ const canRun = !!process.env.MCP_TEST_BROWSER_NAME || existsSync(chromium.execut
 const server = http.createServer((request, response) => {
   const url = new URL(request.url || '/', 'http://localhost');
   response.writeHead(200, { 'content-type': 'text/html' });
+  if (url.pathname === '/focus-identity') {
+    response.end(`<button tabindex="0">Save</button><button tabindex="0">Save</button><button tabindex="0">Last</button>`);
+    return;
+  }
+  if (url.pathname === '/shadow-focus') {
+    response.end(`<div id="host" style="background:white"></div><button tabindex="0">Last</button><script>
+      document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML =
+        '<button tabindex="0">Save</button><button tabindex="0">Save</button>';
+    </script>`);
+    return;
+  }
+  if (url.pathname === '/shadow-obscuration') {
+    const covered = url.searchParams.has('covered');
+    response.end(`<style>body { margin: 0 } #target, #cover { position: absolute; left: 20px; top: 20px; width: 120px; height: 60px } #cover { background: black }</style>
+      ${covered ? '<button id="target">Target</button><div id="cover"></div>' : '<div id="target" tabindex="0">Target</div>'}
+      <script>
+        document.getElementById('${covered ? 'cover' : 'target'}').attachShadow({ mode: 'open' }).innerHTML =
+          '<div style="width:100%;height:100%;${covered ? '' : 'background:white'}"><div id="nested" style="width:100%;height:100%"></div></div>';
+        document.querySelector('${covered ? '#cover' : '#target'}').shadowRoot.getElementById('nested')
+          .attachShadow({ mode: 'open' }).innerHTML = '<span style="display:block;width:100%;height:100%;${covered ? '' : 'background:white'}"></span>';
+      </script>`);
+    return;
+  }
+  if (url.pathname === '/trapped-focus') {
+    response.end(`<button id="trapped" tabindex="0">Before</button><button tabindex="0">Unreachable</button><script>
+      const button = document.getElementById('trapped');
+      button.focus();
+      button.addEventListener('keydown', event => {
+        if (event.key === 'Tab') {
+          event.preventDefault();
+          button.textContent = 'After';
+        }
+      });
+    </script>`);
+    return;
+  }
+  if (url.pathname === '/reverse-focus') {
+    response.end(`<button tabindex="0">One</button><button id="start" tabindex="0">Two</button><button tabindex="0">Three</button>
+      <script>document.getElementById('start').focus()</script>`);
+    return;
+  }
   if (url.pathname === '/labelledby') {
     response.end(`<span id="verb">Save</span><span id="noun">draft</span>
       <button id="labelled" aria-labelledby=" verb\tnoun missing ">Fallback text</button>`);
@@ -167,4 +208,58 @@ it.skipIf(!canRun)('names stops from every aria-labelledby id reference', async 
   const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
   const stop = report.stops.find((s: { id: string | null }) => s.id === 'labelled');
   expect(stop?.name).toBe('Save draft');
+});
+
+it.skipIf(!canRun).each(['focus-identity', 'shadow-focus', 'reverse-focus', 'trapped-focus'])(
+  'distinguishes actual traps from %s traversal', async fixture => {
+    directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-identity-'));
+    const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory, timeoutSettle: 0 });
+    client = new Client({ name: 'keyboard-identity-test', version: '1' });
+    await client.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
+    await ok('browser_navigate', { url: `${origin}/${fixture}` });
+    await ok('audit_keyboard', {
+      maxTabs: 3,
+      includeShiftTab: fixture === 'reverse-focus',
+      checkSkipLink: false,
+      checkFocusVisibility: false,
+      checkFocusJumps: false,
+      checkTargetSize: false,
+      checkFocusObscured: true,
+      reportFile: 'keyboard.json',
+    });
+    const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
+    if (fixture === 'trapped-focus') {
+      expect(report.focusTrap.detected).toBe(true);
+      expect(report.focusTrap.step).toBe(1);
+      expect(report.stops[0].name).toBe('After');
+      return;
+    }
+    expect(report.focusTrap.detected).toBe(false);
+    expect(report.focusObscuredIssues).toEqual([]);
+    expect(report.stops.map((stop: { name: string }) => stop.name)).toEqual(
+      fixture === 'reverse-focus' ? ['Three', 'Two', 'Three'] : ['Save', 'Save', 'Last']
+    );
+    expect(report.uniqueFingerprints).toBe(fixture === 'reverse-focus' ? 2 : 3);
+  }
+);
+
+it.skipIf(!canRun).each([false, true])('checks shadow-tree paint ownership when covered=%s', async covered => {
+  directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-obscuration-'));
+  const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory, timeoutSettle: 0 });
+  client = new Client({ name: 'keyboard-obscuration-test', version: '1' });
+  await client.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
+  await ok('browser_navigate', { url: `${origin}/shadow-obscuration${covered ? '?covered' : ''}` });
+  await ok('audit_keyboard', {
+    maxTabs: 1,
+    checkSkipLink: false,
+    checkFocusTrap: false,
+    checkFocusVisibility: false,
+    checkFocusJumps: false,
+    checkTargetSize: false,
+    checkFocusObscured: true,
+    reportFile: 'keyboard.json',
+  });
+  const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
+  expect(report.stops.map((stop: { id: string }) => stop.id)).toEqual(['target']);
+  expect(report.focusObscuredIssues.map((stop: { id: string }) => stop.id)).toEqual(covered ? ['target'] : []);
 });

@@ -607,9 +607,10 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 #### `audit_keyboard`
 Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) with practical heuristics.
 - Checks skip links, focus visibility, focus jumps, and possible focus traps
+- Focus stops distinguish individual DOM elements, including controls in open shadow roots. Alternating Tab/Shift+Tab does not count an intentional return as a cycle; a keypress that cannot move focus can still indicate a trap.
 - Restores the original URL after cross-document skip-link navigation. It uses Back for a single observed history-entry increase, verifies the restored URL, and otherwise replaces the current entry with the original URL. Fragment jumps, same-document history changes, and same-URL reloads do not consume an earlier history entry. When forward history was truncated or an entry was replaced, restoration can reload the audited page rather than recover its previous document state.
 - Checks target size against WCAG 2.2 SC 2.5.8 (`checkTargetSize`, default on)
-- Checks that focus is not entirely obscured, WCAG 2.2 SC 2.4.11 (`checkFocusObscured`, default on)
+- Checks that focus is not entirely obscured, WCAG 2.2 SC 2.4.11 (`checkFocusObscured`, default on), including painted covering hosts and focused hosts’ own content across open shadow roots.
 - Optional issue screenshots (`screenshotOnIssue`)
 - Always writes a JSON report (default filename: `audit-keyboard-{timestamp}-{token}.json`)
 
