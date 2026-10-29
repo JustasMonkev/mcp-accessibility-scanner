@@ -48,6 +48,8 @@ export class Response {
   private _includeSnapshotBoxes: boolean | undefined;
   private _includeTabs = false;
   private _tabSnapshot: TabSnapshot | undefined;
+  private _initialModalStates: Set<TabSnapshot['modalStates'][number]>;
+  private _opensFileChooser = false;
   private _requestContext: CallToolRequestContext | undefined;
   private _structuredContent: Record<string, unknown> | undefined;
   private _filesToDeleteOnError = new Set<string>();
@@ -56,8 +58,9 @@ export class Response {
   readonly toolArgs: Record<string, unknown>;
   private _isError: boolean | undefined;
 
-  constructor(context: Context, toolName: string, toolArgs: Record<string, unknown>, requestContext?: CallToolRequestContext) {
+  constructor(context: Context, toolName: string, toolArgs: Record<string, unknown>, requestContext?: CallToolRequestContext, initialModalStates: TabSnapshot['modalStates'] = []) {
     this._context = context;
+    this._initialModalStates = new Set(initialModalStates);
     this.toolName = toolName;
     this.toolArgs = toolArgs;
     this._requestContext = requestContext;
@@ -99,7 +102,10 @@ export class Response {
   }
 
   code() {
-    return this._code.join('\n');
+    const code = this._code.join('\n');
+    if (code && this._opensFileChooser)
+      return `var fileChooserPromise = page.waitForEvent('filechooser');\n${code}\nvar fileChooser = await fileChooserPromise;`;
+    return code;
   }
 
   addImage(image: { contentType: string, data: Buffer }) {
@@ -194,6 +200,8 @@ export class Response {
     // All the async snapshotting post-action is happening here.
     // Everything below should race against modal states.
     const currentTab = this._context.currentTab();
+    if (this._code.length && !this._includeSnapshot && currentTab?.modalStates().some(state => state.type === 'fileChooser'))
+      this.setIncludeSnapshot();
     // The snapshot of the current tab and the titles of the others are
     // independent page reads, so they go out together rather than one after the
     // other. Only the current tab's snapshot also refreshes its title.
@@ -205,6 +213,7 @@ export class Response {
       Promise.allSettled(tabsToUpdate.map(tab => tab.updateTitle())),
     ]);
     this._tabSnapshot = snapshot;
+    this._opensFileChooser = !!this._code.length && (currentTab?.modalStates().some(state => state.type === 'fileChooser' && !this._initialModalStates.has(state)) ?? false);
     this._addDownloadErrors();
   }
 
@@ -234,7 +243,7 @@ export class Response {
     if (this._code.length) {
       response.push(`### Ran Playwright code
 \`\`\`js
-${this._code.join('\n')}
+${this.code()}
 \`\`\``);
       response.push('');
     }

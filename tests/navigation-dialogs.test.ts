@@ -15,7 +15,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Route } from 'playwright';
@@ -399,5 +399,57 @@ describe('navigation interrupted by a load-time dialog', () => {
     const handled = await backend.callTool('browser_handle_dialog', { accept: true });
     expect(handled.isError).not.toBe(true);
     await vi.waitFor(() => expect(page.url()).toBe('http://fixture.local/first'));
+  });
+  it('replays repeated native file chooser uploads and cancellation from emitted code', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'mcp-upload-replay-'));
+    const fixture = path.join(directory, 'fixture.txt');
+    const html = `<input aria-label="Trigger" oninput="document.querySelector('input[type=file]').click()"><input type="file" aria-label="Upload">`;
+    let replayContext: BrowserContext | undefined;
+    try {
+      await writeFile(fixture, 'upload fixture');
+      await backend.callTool('browser_navigate', { url: 'http://fixture.local/upload' });
+      const page = browserContext.pages()[0];
+      await page.setContent(html);
+      const snippets: string[] = [];
+      for (const [index, paths] of [[fixture], [], [fixture]].entries()) {
+        const snapshot = await backend.callTool('browser_snapshot', {});
+        const text = snapshot.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+        const ref = text.match(/button "Upload"[^\n]*\[ref=([^\]]+)\]/)![1];
+        const captureSnapshot = Tab.prototype.captureSnapshot;
+        const capture = vi.spyOn(Tab.prototype, 'captureSnapshot').mockImplementation(async function(this: Tab, boxes) {
+          return { ...await captureSnapshot.call(this, boxes), modalStates: [] };
+        });
+        const clicked = index > 0
+          ? await backend.callTool('browser_click', { element: 'Upload', ref })
+          : await backend.callTool('browser_type', { element: 'Trigger', ref: text.match(/textbox "Trigger"[^\n]*\[ref=([^\]]+)\]/)![1], text: 'open' });
+        capture.mockRestore();
+        expect(clicked.isError).not.toBe(true);
+        const pending = await backend.callTool('browser_snapshot', {});
+        expect(pending.content[0]).toMatchObject({ type: 'text', text: expect.not.stringContaining('fileChooserPromise') });
+        const waited = await backend.callTool('browser_wait_for', { time: 0.001 });
+        expect(waited.isError).not.toBe(true);
+        const uploaded = await backend.callTool('browser_file_upload', { paths });
+        expect(uploaded.isError).not.toBe(true);
+        for (const result of [clicked, waited, uploaded]) {
+          const text = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+          snippets.push(text.match(/```js\n([\s\S]*?)```/)![1]);
+        }
+        snippets.push('await recordSelection();');
+        expect(await page.getByLabel('Upload').evaluate((element: HTMLInputElement) => Array.from(element.files ?? [], file => file.name))).toEqual(paths.length ? ['fixture.txt'] : []);
+      }
+      replayContext = await browser.newContext();
+      const replayPage = await replayContext.newPage();
+      await replayPage.setContent(html);
+      replayPage.setDefaultTimeout(3000);
+      const selections: string[][] = [];
+      await new Function('page', 'recordSelection', `return (async () => { ${snippets.join('\n')} })();`)(replayPage, async () => {
+        selections.push(await replayPage.getByLabel('Upload').evaluate((element: HTMLInputElement) => Array.from(element.files ?? [], file => file.name)));
+      });
+      expect(selections).toEqual([['fixture.txt'], [], ['fixture.txt']]);
+      expect(await replayPage.getByLabel('Upload').evaluate((element: HTMLInputElement) => Array.from(element.files ?? [], file => file.name))).toEqual(['fixture.txt']);
+    } finally {
+      await replayContext?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

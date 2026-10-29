@@ -257,7 +257,7 @@ export class BrowserServerBackend implements ServerBackend {
     const id = webMCPSessionId(requestContext?._meta);
     const context = id === undefined ? this._context! : this._sessionRegistry!.resolve(id);
     const params = { ...(rawArguments ?? {}) };
-    const response = new Response(context, name, params, requestContext);
+    const response = new Response(context, name, params, requestContext, context.currentTab()?.modalStates());
     // Hold the session during discovery too, which can await a slow frame.
     const endToolCall = context.beginToolCall(name);
     try {
@@ -330,7 +330,7 @@ export class BrowserServerBackend implements ServerBackend {
         // Unknown handle: the tool itself reports it.
       }
     }
-    const response = new Response(context, name, responseArguments, requestContext);
+    const response = new Response(context, name, responseArguments, requestContext, context.currentTab()?.modalStates());
     // Per-call token, not a single slot: two overlapping calls on one session
     // must keep isRunningTool() true until BOTH finish, or the TTL reaper (and
     // browser_session_close) could dispose the browser under the slower call.
