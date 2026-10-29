@@ -210,6 +210,20 @@ npx --allow-scripts=re2 mcp-accessibility-scanner list-tools
 
 > **Note:** Tool names like `browser_navigate` and `scan_page` are MCP tool identifiers (and REPL commands in interactive mode). They are not shell subcommands -- you cannot run `npx mcp-accessibility-scanner browser_navigate`.
 
+## Programmatic API
+
+`createConnection` returns an MCP `Server` directly, not a wrapper with a `server`
+property. Its type is the SDK's `Server` from `@modelcontextprotocol/server`. Connect it
+with `server.connect(transport)` and release it with `await server.close()`.
+
+```ts
+import { createConnection } from 'mcp-accessibility-scanner';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
+
+const server = await createConnection({ browser: { isolated: true } });
+await server.connect(new StdioServerTransport());
+```
+
 ## Configuration
 
 Here's the Claude Desktop configuration:

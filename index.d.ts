@@ -14,14 +14,9 @@
  * limitations under the License.
  */
 
-import type { Server } from '@modelcontextprotocol/server';
+import type { McpServer } from '@modelcontextprotocol/server';
 import type { Config } from './config.js';
 import type { BrowserContext } from 'playwright';
 
-export type Connection = {
-  server: Server;
-  close(): Promise<void>;
-};
-
-export declare function createConnection(config?: Config, contextGetter?: () => Promise<BrowserContext>): Promise<Connection>;
+export declare function createConnection(config?: Config, contextGetter?: () => Promise<BrowserContext>): Promise<McpServer['server']>;
 export {};
