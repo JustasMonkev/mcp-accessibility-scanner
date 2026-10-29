@@ -218,9 +218,10 @@ with `server.connect(transport)` and release it with `await server.close()`.
 
 ```ts
 import { createConnection } from 'mcp-accessibility-scanner';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 
 const server = await createConnection({ browser: { isolated: true } });
-await server.close();
+await server.connect(new StdioServerTransport());
 ```
 
 ## Configuration
