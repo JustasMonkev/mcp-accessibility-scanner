@@ -210,6 +210,11 @@ npx --allow-scripts=re2 mcp-accessibility-scanner list-tools
 
 > **Note:** Tool names like `browser_navigate` and `scan_page` are MCP tool identifiers (and REPL commands in interactive mode). They are not shell subcommands -- you cannot run `npx mcp-accessibility-scanner browser_navigate`.
 
+`browser_fill_form` stops when a field opens a native dialog or file chooser,
+returns the modal-handling guidance, and reports how many later fields were not
+attempted. After handling the modal, submit those remaining fields again; the
+form does not resume filling them in the background.
+
 ## Configuration
 
 Here's the Claude Desktop configuration:

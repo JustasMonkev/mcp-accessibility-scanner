@@ -25,8 +25,7 @@ function setup(actions: { setChecked?: (checked: boolean) => Promise<void>, sele
     normalize: async () => ({ toString: () => "getByLabel('Field')" }),
     ...actions,
   };
-  // SAFETY: form handlers use only modalStates and refLocator on this tab.
-  const tab = { modalStates: () => [], refLocator: vi.fn().mockResolvedValue(locator) } as Tab;
+  const tab = { modalStates: () => [], refLocator: vi.fn().mockResolvedValue(locator), waitForCompletion: async (action: () => Promise<void>) => action() } as Tab;
   // SAFETY: the form handler and Response.code use only this context's current tab.
   const context = { currentTabOrDie: () => tab } as Context;
   const response = new Response(context, 'browser_fill_form', {});

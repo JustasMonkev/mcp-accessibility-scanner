@@ -39,19 +39,33 @@ const fillForm = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    for (const field of params.fields) {
-      const locator = await tab.refLocator({ element: field.name, ref: field.ref });
-      const locatorSource = `await page.${await generateLocator(locator)}`;
-      if (field.type === 'textbox' || field.type === 'slider') {
-        await locator.fill(field.value);
-        response.addCode(`${locatorSource}.fill(${javascript.quote(field.value)});`);
-      } else if (field.type === 'checkbox' || field.type === 'radio') {
-        await locator.setChecked(field.value === 'true');
-        response.addCode(`${locatorSource}.setChecked(${field.value === 'true'});`);
-      } else if (field.type === 'combobox') {
-        await locator.selectOption({ label: field.value });
-        response.addCode(`${locatorSource}.selectOption({ label: ${javascript.quote(field.value)} });`);
+    let stopped = false;
+    let attempted = 0;
+    await tab.waitForCompletion(async () => {
+      for (const field of params.fields) {
+        if (stopped || tab.modalStates().length)
+          break;
+        const locator = await tab.refLocator({ element: field.name, ref: field.ref });
+        const locatorSource = `await page.${await generateLocator(locator)}`;
+        if (stopped || tab.modalStates().length)
+          break;
+        attempted++;
+        if (field.type === 'textbox' || field.type === 'slider') {
+          response.addCode(`${locatorSource}.fill(${javascript.quote(field.value)});`);
+          await locator.fill(field.value);
+        } else if (field.type === 'checkbox' || field.type === 'radio') {
+          response.addCode(`${locatorSource}.setChecked(${field.value === 'true'});`);
+          await locator.setChecked(field.value === 'true');
+        } else if (field.type === 'combobox') {
+          response.addCode(`${locatorSource}.selectOption({ label: ${javascript.quote(field.value)} });`);
+          await locator.selectOption({ label: field.value });
+        }
       }
+    });
+    stopped = true;
+    if (tab.modalStates().length) {
+      response.setIncludeSnapshot();
+      response.addResult(`Form stopped because a modal opened; ${params.fields.length - attempted} remaining field(s) were not filled. Handle the modal, then retry the remaining fields.`);
     }
   },
 });
