@@ -55,7 +55,10 @@ function createHarness(sequence: FocusPoint[], requestContext?: any) {
       index++;
       return point;
     }),
-    evaluateHandle: vi.fn(async () => documentState),
+    evaluateHandle: vi.fn(async () => documentState).mockResolvedValueOnce({
+      evaluate: vi.fn(async () => true),
+      dispose: vi.fn(async () => undefined),
+    }),
     waitForURL: vi.fn(async () => undefined),
     keyboard: {
       press: vi.fn(async (_key: string) => undefined),

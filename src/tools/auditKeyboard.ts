@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { JSHandle } from 'playwright';
 import { defineTabTool } from './tool.js';
 import { writeJsonReport } from './report.js';
 import { safeIsoTimestampForFileName, sanitizeForFilePath } from '../utils/fileUtils.js';
@@ -9,6 +10,7 @@ type TargetRect = { x: number; y: number; width: number; height: number };
 
 /** @public */
 export type FocusPoint = {
+  focusIdentity?: string;
   role: string | null;
   name: string | null;
   tagName: string | null;
@@ -97,6 +99,8 @@ type KeyboardAuditResult = {
 };
 
 function buildFingerprint(point: FocusPoint): string {
+  if (point.focusIdentity !== undefined)
+    return point.focusIdentity;
   return [
     point.role ?? '',
     point.name ?? '',
@@ -308,8 +312,9 @@ export async function runKeyboardFocusAudit(
 
     let shouldStopOnCycle = false;
     if (options.checkFocusTrap) {
-      const recentStops = stops.slice(Math.max(0, stops.length - options.cycleWindow + 1));
-      const foundRepeat = recentStops.some(previous => previous.fingerprint === stop.fingerprint);
+      const directionStart = stops.findLastIndex(previous => previous.key !== key) + 1;
+      const recentStops = stops.slice(Math.max(directionStart, stops.length - options.cycleWindow + 1));
+      const foundRepeat = buildFingerprint(before) === stop.fingerprint || recentStops.some(previous => previous.fingerprint === stop.fingerprint);
       const touchedDocumentRoot = recentStops.some(previous => previous.tagName === 'HTML' || previous.tagName === 'BODY') || stop.tagName === 'HTML' || stop.tagName === 'BODY';
       if (foundRepeat && !touchedDocumentRoot) {
         focusTrapDetectedAt = step;
@@ -386,9 +391,27 @@ const auditKeyboard = defineTabTool({
     const reportPath = await tab.context.outputFile(reportFileName, reportFile !== undefined);
     if (reportFile !== undefined)
       response.deleteFileOnError(reportPath);
+    let focusState: JSHandle<{ identities: WeakMap<Element, number>; nextId: number }> | undefined;
+    let documentId = 0;
     const getActiveElementInfo = async (): Promise<FocusPoint> => {
-      return await tab.page.evaluate(({ checkTargetSize, checkFocusObscured, minTargetSize, maxNeighborTargets, maxTextLength }) => {
-        const current = document.activeElement;
+      if (focusState) {
+        try {
+          await focusState.evaluate(() => true);
+        } catch (error) {
+          if (!(error instanceof Error) || !/Execution context was destroyed|Cannot find context/.test(error.message))
+            throw error;
+          await focusState.dispose();
+          focusState = undefined;
+        }
+      }
+      if (!focusState) {
+        focusState = await tab.page.evaluateHandle(() => ({ identities: new WeakMap<Element, number>(), nextId: 0 }));
+        documentId++;
+      }
+      return await tab.page.evaluate(({ checkTargetSize, checkFocusObscured, minTargetSize, maxNeighborTargets, maxTextLength, focusState, documentId }) => {
+        let current = document.activeElement;
+        while (current?.shadowRoot?.activeElement)
+          current = current.shadowRoot.activeElement;
         const scrollX = window.scrollX;
         const scrollY = window.scrollY;
         if (!current) {
@@ -411,6 +434,11 @@ const auditKeyboard = defineTabTool({
           };
         }
 
+        let identity = focusState.identities.get(current);
+        if (identity === undefined) {
+          identity = focusState.nextId++;
+          focusState.identities.set(current, identity);
+        }
         const role = current.getAttribute('role') || current.tagName.toLowerCase();
         // aria-labelledby is a list of IDs separated by ASCII whitespace (not e.g. &nbsp;),
         // resolved in the current element's own tree.
@@ -544,11 +572,18 @@ const auditKeyboard = defineTabTool({
           let blocked = 0;
           let blockedBy: string | null = null;
           for (const [x, y] of samples) {
-            const hit = document.elementFromPoint(x, y);
+            let hit = document.elementFromPoint(x, y);
+            while (hit?.shadowRoot) {
+              const nestedHit = hit.shadowRoot.elementFromPoint(x, y);
+              if (!nestedHit || nestedHit === hit)
+                break;
+              hit = nestedHit;
+            }
             // Descendants paint the target itself; ancestors and associated labels
             // wrap it (the common visually-hidden custom control pattern).
-            const covers = hit !== null
-              && !current.contains(hit)
+            if (!hit)
+              continue;
+            const covers = !current.contains(hit)
               && !hit.contains(current)
               && !labels.some(label => label.contains(hit))
               && paintsOver(hit);
@@ -562,6 +597,7 @@ const auditKeyboard = defineTabTool({
         }
 
         return {
+          focusIdentity: `${documentId}:${identity}`,
           role,
           name: name ? name.slice(0, maxTextLength) : null,
           tagName: current.tagName,
@@ -589,6 +625,8 @@ const auditKeyboard = defineTabTool({
         minTargetSize: MIN_TARGET_SIZE_PX,
         maxNeighborTargets,
         maxTextLength: maxFocusTextLength,
+        focusState,
+        documentId,
       });
     };
 
@@ -643,7 +681,7 @@ const auditKeyboard = defineTabTool({
         }
       },
       captureScreenshot,
-    });
+    }).finally(async () => { await focusState?.dispose(); });
 
     const report = {
       version: 'v1',
