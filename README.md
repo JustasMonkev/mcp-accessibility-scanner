@@ -213,7 +213,7 @@ npx --allow-scripts=re2 mcp-accessibility-scanner list-tools
 ## Programmatic API
 
 `createConnection` returns an MCP `Server` directly, not a wrapper with a `server`
-property. The exported `Connection` type is an alias for that server. Connect it
+property. Its type is the SDK's `Server` from `@modelcontextprotocol/server`. Connect it
 with `server.connect(transport)` and release it with `await server.close()`.
 
 ```ts
