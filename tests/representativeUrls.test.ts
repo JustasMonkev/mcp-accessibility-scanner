@@ -121,6 +121,13 @@ describe('selectRepresentativeUrls', () => {
     }
   });
 
+  it('merges a flat list of single pages as one part', () => {
+    const urls = Array.from({ length: 100000 }, (_, index) => `https://example.com/page-${index}`);
+    const startedAt = performance.now();
+    expect(selectRepresentativeUrls(urls, 200)).toEqual(urls.slice(0, 200));
+    expect(performance.now() - startedAt).toBeLessThan(5000);
+  });
+
   it('handles a large list within the maximum budget quickly', () => {
     const urls = Array.from({ length: 20000 }, (_, index) => `https://example.com/section-${index % 40}/page-${index}`);
     const startedAt = performance.now();
