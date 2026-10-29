@@ -419,6 +419,11 @@ With the default persistent profile, sign-in state also survives across server r
 
 ### When a login form does not advance
 
+`browser_fill_form` stops when a field opens a native dialog or file chooser,
+returns the modal-handling guidance, and reports how many later fields were not
+attempted. After handling the modal, submit those remaining fields again; the
+form does not resume filling them in the background.
+
 - Take a fresh `browser_snapshot` after a rerender and use its current field references. Wait for an application-specific ready message with `browser_wait_for` before entering data.
 - `browser_fill_form` and ordinary `browser_type` use Playwright's `fill`. If the application requires individual key events, clear the field with `browser_type` and `text: ""`, then use `browser_type` with `slowly: true`. Slow typing appends characters; it does not clear an existing value.
 - Verify an authenticated page or account-specific element before scanning. A filled field or successful click is not proof of a successful login. Inspect `browser_console_messages` and `browser_network_requests` if submission fails; avoid sharing passwords, tokens or private response bodies in bug reports.

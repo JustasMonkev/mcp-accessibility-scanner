@@ -124,6 +124,66 @@ describe('navigation interrupted by a load-time dialog', () => {
     expect(next.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('await page.goto(') });
   });
 
+  it.each([
+    { type: 'textbox', html: '<input aria-label="First" oninput="alert(\'Form prompt\')">', value: 'filled', role: 'textbox' },
+    { type: 'checkbox', html: '<input type="checkbox" aria-label="First" onchange="alert(\'Form prompt\')">', value: 'true', role: 'checkbox' },
+    { type: 'combobox', html: '<select aria-label="First" onchange="alert(\'Form prompt\')"><option>Old</option><option>New</option></select>', value: 'New', role: 'combobox' },
+  ])('stops a form at a native dialog from $type without filling later fields', async ({ type, html, value, role }) => {
+    await backend.callTool('browser_navigate', { url: 'http://fixture.local/form' });
+    const page = browserContext.pages()[0];
+    await page.setContent(`${html}<input aria-label="Later">`);
+    const snapshot = await backend.callTool('browser_snapshot', {});
+    const text = snapshot.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+    const firstRef = text.match(new RegExp(`${role} "First" \\[ref=([^\\]]+)\\]`))![1];
+    const laterRef = text.match(/textbox "Later" \[ref=([^\]]+)\]/)![1];
+    const result = await backend.callTool('browser_fill_form', { fields: [
+      { name: 'First', type, ref: firstRef, value },
+      { name: 'Later', type: 'textbox', ref: laterRef, value: 'must wait' },
+    ] });
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('browser_handle_dialog') });
+    expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('1 remaining field') });
+    const handled = await backend.callTool('browser_handle_dialog', { accept: true });
+    expect(handled.isError).not.toBe(true);
+    await expect(page.getByLabel('Later').inputValue()).resolves.toBe('');
+    await page.getByLabel('Later').fill('ready');
+    await expect(page.getByLabel('Later').inputValue()).resolves.toBe('ready');
+  });
+
+  it('stops a form at a file chooser without filling later fields after cancellation', async () => {
+    await backend.callTool('browser_navigate', { url: 'http://fixture.local/form' });
+    const page = browserContext.pages()[0];
+    await page.setContent(`<input type="checkbox" aria-label="First" onchange="document.querySelector('input[type=file]').click()">
+      <input type="file" hidden><input aria-label="Later"><input aria-label="Last">`);
+    const snapshot = await backend.callTool('browser_snapshot', {});
+    const text = snapshot.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+    const firstRef = text.match(/checkbox "First" \[ref=([^\]]+)\]/)![1];
+    const laterRef = text.match(/textbox "Later" \[ref=([^\]]+)\]/)![1];
+    const lastRef = text.match(/textbox "Last" \[ref=([^\]]+)\]/)![1];
+    const chooserOpened = page.waitForEvent('filechooser');
+    const result = await backend.callTool('browser_fill_form', { fields: [
+      { name: 'First', type: 'checkbox', ref: firstRef, value: 'true' },
+      { name: 'Later', type: 'textbox', ref: laterRef, value: 'must wait' },
+      { name: 'Last', type: 'textbox', ref: lastRef, value: 'must also wait' },
+    ] });
+    await chooserOpened;
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('browser_file_upload') });
+    expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('2 remaining field(s) were not filled') });
+    await expect(page.getByLabel('Later').inputValue()).resolves.toBe('');
+    await expect(page.getByLabel('Last').inputValue()).resolves.toBe('');
+
+    const handled = await backend.callTool('browser_file_upload', { paths: [] });
+    expect(handled.isError).not.toBe(true);
+    const after = await backend.callTool('browser_snapshot', {});
+    expect(after.isError).not.toBe(true);
+    expect(after.content[0]).toMatchObject({ type: 'text', text: expect.not.stringContaining('browser_file_upload') });
+    await expect(page.getByLabel('Later').inputValue()).resolves.toBe('');
+    await expect(page.getByLabel('Last').inputValue()).resolves.toBe('');
+    await page.getByLabel('Later').fill('ready');
+    await expect(page.getByLabel('Later').inputValue()).resolves.toBe('ready');
+  });
+
   it('names the blocked handler when a dialog appears and browser_handle_dialog is blocked', async () => {
     const blockedConfig = await resolveConfig({
       browser: { browserName: 'chromium', isolated: true },
