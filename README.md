@@ -868,7 +868,8 @@ When an action opens a file chooser, its generated Playwright code installs a
 `filechooser` listener before the action and binds the resulting `fileChooser`.
 Concatenate that action snippet with `browser_file_upload`'s snippet to replay
 uploads (including empty-path cancellation). The reusable bindings support
-multiple chooser/upload sequences in the same script.
+multiple chooser/upload sequences in the same script. Intervening waits keep
+the existing chooser binding rather than waiting for another chooser event.
 
 #### `browser_verify_element_visible`
 Verify an element by ARIA role/name.

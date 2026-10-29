@@ -433,15 +433,22 @@ describe('navigation interrupted by a load-time dialog', () => {
         const snapshot = await backend.callTool('browser_snapshot', {});
         const text = snapshot.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
         const ref = text.match(/button "Upload"[^\n]*\[ref=([^\]]+)\]/)![1];
+        const captureSnapshot = Tab.prototype.captureSnapshot;
+        const capture = vi.spyOn(Tab.prototype, 'captureSnapshot').mockImplementation(async function(this: Tab, boxes) {
+          return { ...await captureSnapshot.call(this, boxes), modalStates: [] };
+        });
         const clicked = index > 0
           ? await backend.callTool('browser_click', { element: 'Upload', ref })
           : await backend.callTool('browser_type', { element: 'Trigger', ref: text.match(/textbox "Trigger"[^\n]*\[ref=([^\]]+)\]/)![1], text: 'open' });
+        capture.mockRestore();
         expect(clicked.isError).not.toBe(true);
         const pending = await backend.callTool('browser_snapshot', {});
         expect(pending.content[0]).toMatchObject({ type: 'text', text: expect.not.stringContaining('fileChooserPromise') });
+        const waited = await backend.callTool('browser_wait_for', { time: 0.001 });
+        expect(waited.isError).not.toBe(true);
         const uploaded = await backend.callTool('browser_file_upload', { paths });
         expect(uploaded.isError).not.toBe(true);
-        for (const result of [clicked, uploaded]) {
+        for (const result of [clicked, waited, uploaded]) {
           const text = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
           snippets.push(text.match(/```js\n([\s\S]*?)```/)![1]);
         }
@@ -451,6 +458,7 @@ describe('navigation interrupted by a load-time dialog', () => {
       replayContext = await browser.newContext();
       const replayPage = await replayContext.newPage();
       await replayPage.setContent(html);
+      replayPage.setDefaultTimeout(3000);
       const selections: string[][] = [];
       await new Function('page', 'recordSelection', `return (async () => { ${snippets.join('\n')} })();`)(replayPage, async () => {
         selections.push(await replayPage.getByLabel('Upload').evaluate((element: HTMLInputElement) => Array.from(element.files ?? [], file => file.name)));

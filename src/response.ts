@@ -48,6 +48,8 @@ export class Response {
   private _includeSnapshotBoxes: boolean | undefined;
   private _includeTabs = false;
   private _tabSnapshot: TabSnapshot | undefined;
+  private _initialModalStates: Set<TabSnapshot['modalStates'][number]>;
+  private _opensFileChooser = false;
   private _requestContext: CallToolRequestContext | undefined;
   private _structuredContent: Record<string, unknown> | undefined;
   private _filesToDeleteOnError = new Set<string>();
@@ -56,8 +58,9 @@ export class Response {
   readonly toolArgs: Record<string, unknown>;
   private _isError: boolean | undefined;
 
-  constructor(context: Context, toolName: string, toolArgs: Record<string, unknown>, requestContext?: CallToolRequestContext) {
+  constructor(context: Context, toolName: string, toolArgs: Record<string, unknown>, requestContext?: CallToolRequestContext, initialModalStates: TabSnapshot['modalStates'] = []) {
     this._context = context;
+    this._initialModalStates = new Set(initialModalStates);
     this.toolName = toolName;
     this.toolArgs = toolArgs;
     this._requestContext = requestContext;
@@ -100,7 +103,7 @@ export class Response {
 
   code() {
     const code = this._code.join('\n');
-    if (code && this._tabSnapshot?.modalStates.some(state => state.type === 'fileChooser'))
+    if (code && this._opensFileChooser)
       return `var fileChooserPromise = page.waitForEvent('filechooser');\n${code}\nvar fileChooser = await fileChooserPromise;`;
     return code;
   }
@@ -210,6 +213,7 @@ export class Response {
       Promise.allSettled(tabsToUpdate.map(tab => tab.updateTitle())),
     ]);
     this._tabSnapshot = snapshot;
+    this._opensFileChooser = !!this._code.length && (currentTab?.modalStates().some(state => state.type === 'fileChooser' && !this._initialModalStates.has(state)) ?? false);
     this._addDownloadErrors();
   }
 
