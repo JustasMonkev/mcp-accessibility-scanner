@@ -491,6 +491,22 @@ describe('Config', () => {
     }
   });
 
+  it.each(['', '   ', '\t\n'])('ignores blank numeric timeout environment values %j', async value => {
+    const config = await writeConfigFile({ timeouts: { settle: 175, navigationTimeout: 9000, defaultTimeout: 1250 } });
+    vi.stubEnv('PLAYWRIGHT_MCP_TIMEOUT_SETTLE', value);
+    vi.stubEnv('PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT', value);
+    vi.stubEnv('PLAYWRIGHT_MCP_DEFAULT_TIMEOUT', value);
+    try {
+      expect((await resolveCLIConfig({})).timeouts).toMatchObject({ settle: 500, navigationTimeout: 60000, defaultTimeout: 5000 });
+      expect((await resolveCLIConfig({ config })).timeouts).toMatchObject({ settle: 175, navigationTimeout: 9000, defaultTimeout: 1250 });
+      expect((await resolveCLIConfig({ config, timeoutSettle: 0 })).timeouts.settle).toBe(0);
+      vi.stubEnv('PLAYWRIGHT_MCP_TIMEOUT_SETTLE', '0');
+      expect((await resolveCLIConfig({ config })).timeouts.settle).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   describe('idle timeout', () => {
     afterEach(() => vi.unstubAllEnvs());
 
