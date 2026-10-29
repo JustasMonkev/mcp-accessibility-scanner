@@ -553,11 +553,22 @@ const auditKeyboard = defineTabTool({
           // `pointer-events: none` is never returned by hit testing, so it is missed
           // (under-report, never a false alarm). Upgrade path: intersect the focused box
           // against the boxes of positioned/stacking-context layers painted above it.
+          const composedParent = (element: Element): Element | null => {
+            const root = element.getRootNode();
+            return element.assignedSlot ?? element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+          };
+          const composedContains = (ancestor: Element, element: Element) => {
+            for (let node: Element | null = element; node; node = composedParent(node)) {
+              if (node === ancestor)
+                return true;
+            }
+            return false;
+          };
           const paintsOver = (element: Element) => {
             let paints = false;
             // Painted evidence never short-circuits the walk: an ancestor that renders
             // nothing (opacity: 0, visibility: hidden) hides its painted children too.
-            for (let node: Element | null = element; node && !node.contains(current); node = node.parentElement) {
+            for (let node: Element | null = element; node && !composedContains(node, current); node = composedParent(node)) {
               const nodeStyle = window.getComputedStyle(node);
               if (nodeStyle.visibility === 'hidden' || Number.parseFloat(nodeStyle.opacity || '1') === 0)
                 return false;
@@ -583,9 +594,9 @@ const auditKeyboard = defineTabTool({
             // wrap it (the common visually-hidden custom control pattern).
             if (!hit)
               continue;
-            const covers = !current.contains(hit)
-              && !hit.contains(current)
-              && !labels.some(label => label.contains(hit))
+            const covers = !composedContains(current, hit)
+              && !composedContains(hit, current)
+              && !labels.some(label => composedContains(label, hit))
               && paintsOver(hit);
             if (!covers)
               continue;
