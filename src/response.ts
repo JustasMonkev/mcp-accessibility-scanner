@@ -99,7 +99,10 @@ export class Response {
   }
 
   code() {
-    return this._code.join('\n');
+    const code = this._code.join('\n');
+    if (code && this._tabSnapshot?.modalStates.some(state => state.type === 'fileChooser'))
+      return `var fileChooserPromise = page.waitForEvent('filechooser');\n${code}\nvar fileChooser = await fileChooserPromise;`;
+    return code;
   }
 
   addImage(image: { contentType: string, data: Buffer }) {
@@ -194,6 +197,8 @@ export class Response {
     // All the async snapshotting post-action is happening here.
     // Everything below should race against modal states.
     const currentTab = this._context.currentTab();
+    if (this._code.length && !this._includeSnapshot && currentTab?.modalStates().some(state => state.type === 'fileChooser'))
+      this.setIncludeSnapshot();
     // The snapshot of the current tab and the titles of the others are
     // independent page reads, so they go out together rather than one after the
     // other. Only the current tab's snapshot also refreshes its title.
@@ -234,7 +239,7 @@ export class Response {
     if (this._code.length) {
       response.push(`### Ran Playwright code
 \`\`\`js
-${this._code.join('\n')}
+${this.code()}
 \`\`\``);
       response.push('');
     }

@@ -864,6 +864,12 @@ Upload files to the page.
 - Parameters: `paths` (array of absolute file paths)
 - If `setFiles` fails, the chooser stays available for another upload attempt; `paths: []` clears the selection and completes the chooser. A successful upload clears only that chooser and waits for page activity and the configured settle delay.
 
+When an action opens a file chooser, its generated Playwright code installs a
+`filechooser` listener before the action and binds the resulting `fileChooser`.
+Concatenate that action snippet with `browser_file_upload`'s snippet to replay
+uploads (including empty-path cancellation). The reusable bindings support
+multiple chooser/upload sequences in the same script.
+
 #### `browser_verify_element_visible`
 Verify an element by ARIA role/name.
 - Parameters: `role`, `accessibleName`
