@@ -317,6 +317,40 @@ async function readPage(page: Page, linkSelector: string): Promise<{ title: stri
 const allLinksSelector = 'a[href]';
 const navLinksSelector = 'nav a[href], header a[href], [role="navigation"] a[href]';
 
+function decodeSitemapLocation(value: string): string {
+  const entities: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+  const tokens = /<!\[CDATA\[|&([^&;]*);?/g;
+  const parts: string[] = [];
+  let copied = 0;
+  for (let token = tokens.exec(value); token; token = tokens.exec(value)) {
+    parts.push(value.slice(copied, token.index));
+    if (token[0] === '<![CDATA[') {
+      const end = value.indexOf(']]>', tokens.lastIndex);
+      if (end === -1)
+        throw new Error('Unterminated CDATA in sitemap location.');
+      parts.push(value.slice(tokens.lastIndex, end));
+      tokens.lastIndex = end + 3;
+    } else {
+      const entity = token[1];
+      if (!token[0].endsWith(';'))
+        throw new Error('Invalid XML entity in sitemap location.');
+      if (Object.hasOwn(entities, entity)) {
+        parts.push(entities[entity]);
+      } else if (/^#(?:[0-9]+|x[0-9a-fA-F]+)$/.test(entity)) {
+        const code = entity.startsWith('#x') ? Number.parseInt(entity.slice(2), 16) : Number(entity.slice(1));
+        if (!(code === 9 || code === 10 || code === 13 || (code >= 0x20 && code <= 0xD7FF) || (code >= 0xE000 && code <= 0xFFFD) || (code >= 0x10000 && code <= 0x10FFFF)))
+          throw new Error('Invalid XML entity in sitemap location.');
+        parts.push(String.fromCodePoint(code));
+      } else {
+        throw new Error('Invalid XML entity in sitemap location.');
+      }
+    }
+    copied = tokens.lastIndex;
+  }
+  parts.push(value.slice(copied));
+  return parts.join('');
+}
+
 async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: string, base: URL) => string): Promise<string[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
@@ -347,7 +381,7 @@ async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: strin
       }
       const xmlText = Buffer.concat(chunks).toString('utf8');
       return [...xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)]
-          .map(match => match[1].replace('<![CDATA[', '').replace(']]>', '').trim()).filter(Boolean);
+          .map(match => decodeSitemapLocation(match[1]).trim()).filter(Boolean);
     }
   } finally {
     clearTimeout(timer);
@@ -611,12 +645,6 @@ const auditSite = defineTabTool({
         return;
       }
 
-      // Cookie matching is path-boundary aware, so the cookie scope URL keeps
-      // the trailing slash that crawl-key normalization strips below.
-      const cookieUrl = normalizedUrl.toString();
-      if (normalizedUrl.pathname !== '/' && normalizedUrl.pathname.endsWith('/'))
-        normalizedUrl.pathname = normalizedUrl.pathname.slice(0, -1);
-
       if (!isAllowedByOrigin(normalizedUrl, startUrl, params.sameOriginOnly, params.includeSubdomains)) {
         skippedUrls++;
         return;
@@ -640,7 +668,7 @@ const auditSite = defineTabTool({
 
       queue.push({
         url: normalizedUrlString,
-        cookieUrl,
+        cookieUrl: normalizedUrlString,
         depth,
         discoveredFrom,
       });

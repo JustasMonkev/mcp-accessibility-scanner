@@ -49,6 +49,7 @@ const homeHtml = `<!doctype html>
   <body>
     <a class="sr-only" href="#main">Skip to main content</a>
     <a href="/about">About</a>
+    <a href="/directory/">Directory</a>
     <a href="https://example.org/outside">External</a>
     <main id="main">
       <input aria-label="Search" />
@@ -77,6 +78,14 @@ async function installFixtureRoutes(browserContext: BrowserContext): Promise<voi
         status: 200,
         contentType: 'text/html; charset=utf-8',
         body: homeHtml,
+      });
+      return;
+    }
+    if (requestUrl.pathname === '/directory/' || requestUrl.pathname === '/directory') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: requestUrl.pathname.endsWith('/') ? aboutHtml.replace('</main>', '<img src="missing.png"></main>') : aboutHtml,
       });
       return;
     }
@@ -292,7 +301,7 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
       includeSubdomains: false,
       excludePathPatterns: ['logout|signout'],
       ignoreQueryParams: ['utm_source'],
-      violationsTag: ['wcag2aa'],
+      violationsTag: ['wcag2a', 'wcag2aa'],
       maxNodesPerViolation: 5,
       waitAfterNavigationMs: 50,
     });
@@ -302,6 +311,8 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
     const siteReport = JSON.parse(await fs.promises.readFile(siteReportPath, 'utf-8'));
     expect(siteReport.summary.totals.scannedPages).toBeGreaterThanOrEqual(2);
     expect(siteReport.pages.some((page: any) => page.url.endsWith('/about'))).toBe(true);
+    expect(siteReport.pages.some((page: { url: string }) => page.url.endsWith('/directory/'))).toBe(true);
+    expect(siteReport.summary.violations.find((violation: { id: string }) => violation.id === 'image-alt').pagesAffected).toEqual([`${fixtureOrigin}/directory/`]);
     expect(siteResult.structuredContent).toMatchObject({
       kind: 'audit_site',
       report: {
