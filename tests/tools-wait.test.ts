@@ -31,6 +31,40 @@ describe('browser_wait_for', () => {
     return { context, waitFor, response: new Response(context, 'browser_wait_for', {}) };
   }
 
+  it.each([false, true])('cancels timed waits and removes their timer (already aborted: %s)', async alreadyAborted => {
+    const { context, response } = setup();
+    const controller = new AbortController();
+    if (alreadyAborted)
+      controller.abort(new Error('Cancelled by caller'));
+    const outcome = waitTools[0].handle(context, { time: 30 }, response, controller.signal)
+        .then(() => undefined, error => error);
+    if (!alreadyAborted)
+      controller.abort(new Error('Cancelled by caller'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(await outcome).toBeInstanceOf(Error);
+    expect(response.result()).toBe('');
+  });
+
+  it('cancels all pending text conditions', async () => {
+    const { context, response, waitFor } = setup();
+    const controller = new AbortController();
+    waitFor.mockImplementation(({ signal }: { signal: AbortSignal }) => new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timed out')), 1000);
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      }, { once: true });
+    }));
+    const outcome = waitTools[0].handle(context, { text: 'Ready', textGone: 'Loading' }, response, controller.signal)
+        .then(() => undefined, error => error);
+    controller.abort(new Error('Cancelled by caller'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(await outcome).toMatchObject({ message: 'Cancelled by caller' });
+    expect(response.result()).toBe('');
+  });
+
   it.each([
     [0.5, 0.5],
     [30, 30],

@@ -848,6 +848,7 @@ The output policy applies to standalone, CDP, extension, provider-switching and 
 ### Utility Tools
 
 #### `browser_wait_for`
+Cancelling an MCP request stops its pending timer or text waits and releases the browser session after those waits settle. This does not make other browser actions cancellable.
 Wait for text to appear/disappear or time to pass.
 - Parameters: `time` (optional), `text` (optional), `textGone` (optional)
 - `time` is in seconds, must be non-negative, and is capped at 30. `0` is treated the same as omitting it. Generated code uses the capped delay; time-only results report seconds and disclose when the requested delay exceeded the cap.

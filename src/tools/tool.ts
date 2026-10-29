@@ -42,7 +42,7 @@ export type Tool<Input extends z.Schema = z.Schema> = {
   // Set by the tab tools that resolve a modal state, so a blocked tab can name
   // the tool that unblocks it.
   clearsModalState?: ModalState['type'];
-  handle: (context: Context, params: z.output<Input>, response: Response) => Promise<void>;
+  handle: (context: Context, params: z.output<Input>, response: Response, signal?: AbortSignal) => Promise<void>;
 };
 
 export function defineTool<Input extends z.Schema>(tool: Tool<Input>): Tool<Input> {
@@ -53,13 +53,13 @@ export type TabTool<Input extends z.Schema = z.Schema> = {
   capability: ToolCapability;
   schema: ToolSchema<Input>;
   clearsModalState?: ModalState['type'];
-  handle: (tab: Tab, params: z.output<Input>, response: Response) => Promise<void>;
+  handle: (tab: Tab, params: z.output<Input>, response: Response, signal?: AbortSignal) => Promise<void>;
 };
 
 export function defineTabTool<Input extends z.Schema>(tool: TabTool<Input>): Tool<Input> {
   return {
     ...tool,
-    handle: async (context, params, response) => {
+    handle: async (context, params, response, signal) => {
       const tab = context.currentTabOrDie();
       const modalStates = tab.modalStates().map(state => state.type);
       if (tool.clearsModalState && !modalStates.includes(tool.clearsModalState))
@@ -67,7 +67,7 @@ export function defineTabTool<Input extends z.Schema>(tool: TabTool<Input>): Too
       else if (!tool.clearsModalState && modalStates.length)
         response.addError(`Error: Tool "${tool.schema.name}" does not handle the modal state.\n` + tab.modalStatesMarkdown().join('\n'));
       else
-        return tool.handle(tab, params, response);
+        return tool.handle(tab, params, response, signal);
     },
   };
 }

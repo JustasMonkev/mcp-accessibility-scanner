@@ -34,7 +34,8 @@ const wait = defineTool({
     type: 'readOnly',
   },
 
-  handle: async (context, params, response) => {
+  handle: async (context, params, response, signal) => {
+    signal?.throwIfAborted();
     if (!params.text && !params.textGone && !params.time)
       throw new Error('Either time, text or textGone must be provided');
 
@@ -66,8 +67,9 @@ const wait = defineTool({
 
       // Abort the losing wait once the race settles so it does not keep polling until its timeout.
       const abortController = new AbortController();
+      const waitSignal = signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal;
       const waits = conditions.map(async ({ text, state }) => {
-        await tab.page.getByText(text).first().waitFor({ state, ...timeoutOptions, signal: abortController.signal });
+        await tab.page.getByText(text).first().waitFor({ state, ...timeoutOptions, signal: waitSignal });
         return `Waited for ${text}`;
       });
       for (const wait of waits)
@@ -76,10 +78,22 @@ const wait = defineTool({
         response.addResult(await Promise.race(waits));
       } finally {
         abortController.abort();
+        await Promise.allSettled(waits);
       }
     } else if (time) {
       response.addCode(`await new Promise(f => setTimeout(f, ${time} * 1000));`);
-      await new Promise(f => setTimeout(f, time * 1000));
+      await new Promise<void>((resolve, reject) => {
+        signal?.throwIfAborted();
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(signal?.reason);
+        };
+        const timer = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+        }, time * 1000);
+        signal?.addEventListener('abort', onAbort, { once: true });
+      });
       if (time !== params.time)
         response.addResult(`Waited for ${time} seconds (requested ${params.time}, maximum is ${maxWaitSeconds})`);
       else

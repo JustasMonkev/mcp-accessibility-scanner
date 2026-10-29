@@ -18,6 +18,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { defineTool, defineTabTool } from '../src/tools/tool.js';
 import { z } from 'zod';
 import type { Response } from '../src/response.js';
+import type { Context } from '../src/context.js';
 
 describe('Tool Definitions', () => {
   describe('defineTool', () => {
@@ -117,10 +118,11 @@ describe('Tool Definitions', () => {
         handle: tabHandler,
       });
 
-      await tool.handle(mockContext as any, {}, mockResponse);
+      const signal = new AbortController().signal;
+      await tool.handle(mockContext as Context, {}, mockResponse, signal);
 
       expect(mockContext.currentTabOrDie).toHaveBeenCalled();
-      expect(tabHandler).toHaveBeenCalledWith(mockTab, {}, mockResponse);
+      expect(tabHandler).toHaveBeenCalledWith(mockTab, {}, mockResponse, signal);
     });
 
     it('should add error when modal state present and tool does not handle it', async () => {
@@ -224,7 +226,7 @@ describe('Tool Definitions', () => {
       await tool.handle(mockContext as any, {}, mockResponse);
 
       expect(mockResponse.addError).not.toHaveBeenCalled();
-      expect(tabHandler).toHaveBeenCalledWith(mockTab, {}, mockResponse);
+      expect(tabHandler).toHaveBeenCalledWith(mockTab, {}, mockResponse, undefined);
     });
   });
 });
