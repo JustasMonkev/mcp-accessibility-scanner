@@ -1453,6 +1453,18 @@ describe('audit_site tool', () => {
   });
 
   it.each([
+    { value: '&'.repeat(4096), error: 'Invalid XML entity' },
+    { value: '<![CDATA['.repeat(4096), error: 'Unterminated CDATA' },
+  ])('rejects repeated malformed sitemap tokens without crawling: $error', async ({ value, error }) => {
+    const { response, crawlTab } = createHarness({}, {
+      sitemapXmlByUrl: { 'https://example.com/sitemap.xml': `<urlset><url><loc>https://example.com/${value}</loc></url></urlset>` },
+    });
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap' }), response))
+        .rejects.toThrow(error);
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
+  });
+
+  it.each([
     { remoteEndpoint: 'ws://remote.example/browser' },
     { cdpEndpoint: 'https://remote.example:9222' },
     { cdpEndpoint: 'wss://remote.example/devtools/browser/session' },

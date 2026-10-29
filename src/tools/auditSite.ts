@@ -319,18 +319,36 @@ const navLinksSelector = 'nav a[href], header a[href], [role="navigation"] a[hre
 
 function decodeSitemapLocation(value: string): string {
   const entities: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
-  return value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>|&([^;]+);/g, (_match, cdata: string | undefined, entity: string) => {
-    if (cdata !== undefined)
-      return cdata;
-    if (Object.hasOwn(entities, entity))
-      return entities[entity];
-    if (/^#(?:[0-9]+|x[0-9a-fA-F]+)$/.test(entity)) {
-      const code = entity.startsWith('#x') ? Number.parseInt(entity.slice(2), 16) : Number(entity.slice(1));
-      if (code === 9 || code === 10 || code === 13 || (code >= 0x20 && code <= 0xD7FF) || (code >= 0xE000 && code <= 0xFFFD) || (code >= 0x10000 && code <= 0x10FFFF))
-        return String.fromCodePoint(code);
+  const tokens = /<!\[CDATA\[|&([^&;]*);?/g;
+  const parts: string[] = [];
+  let copied = 0;
+  for (let token = tokens.exec(value); token; token = tokens.exec(value)) {
+    parts.push(value.slice(copied, token.index));
+    if (token[0] === '<![CDATA[') {
+      const end = value.indexOf(']]>', tokens.lastIndex);
+      if (end === -1)
+        throw new Error('Unterminated CDATA in sitemap location.');
+      parts.push(value.slice(tokens.lastIndex, end));
+      tokens.lastIndex = end + 3;
+    } else {
+      const entity = token[1];
+      if (!token[0].endsWith(';'))
+        throw new Error('Invalid XML entity in sitemap location.');
+      if (Object.hasOwn(entities, entity)) {
+        parts.push(entities[entity]);
+      } else if (/^#(?:[0-9]+|x[0-9a-fA-F]+)$/.test(entity)) {
+        const code = entity.startsWith('#x') ? Number.parseInt(entity.slice(2), 16) : Number(entity.slice(1));
+        if (!(code === 9 || code === 10 || code === 13 || (code >= 0x20 && code <= 0xD7FF) || (code >= 0xE000 && code <= 0xFFFD) || (code >= 0x10000 && code <= 0x10FFFF)))
+          throw new Error('Invalid XML entity in sitemap location.');
+        parts.push(String.fromCodePoint(code));
+      } else {
+        throw new Error('Invalid XML entity in sitemap location.');
+      }
     }
-    throw new Error(`Invalid XML entity in sitemap location: &${entity};`);
-  });
+    copied = tokens.lastIndex;
+  }
+  parts.push(value.slice(copied));
+  return parts.join('');
 }
 
 async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: string, base: URL) => string): Promise<string[]> {
