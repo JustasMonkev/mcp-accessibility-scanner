@@ -569,7 +569,7 @@ export function parseCdpHeaders(entries: string[] | undefined): Record<string, s
 }
 
 function envToNumber(value: string | undefined): number | undefined {
-  if (!value)
+  if (!value?.trim())
     return undefined;
   return +value;
 }
