@@ -151,12 +151,7 @@ async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   parseFilePaths(config.filePaths);
   const { contextOptions, launchOptions } = config.browser;
   if (contextOptions.clientCertificates?.length) {
-    // Playwright 1.63's certificate interceptor only sees the context proxy.
-    // Preserve an explicit context override, otherwise carry the launch route
-    // into every fresh-context factory (including remote browser connections).
     const proxy = contextOptions.proxy ?? launchOptions.proxy;
-    if (proxy?.bypass?.trim())
-      throw new Error('clientCertificates with proxy.bypass is unsupported on Playwright 1.63.0: the certificate interceptor ignores bypass rules. Use a separate browser configuration for these routes; no browser was started.');
     if (proxy)
       contextOptions.proxy = proxy;
   }
@@ -183,8 +178,6 @@ async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
       || (channel !== undefined && channel !== 'chromium' && channel !== 'chrome-for-testing');
     config.browser.chromiumSandboxDefaulted = true;
   }
-  if ([launchOptions.proxy, contextOptions.proxy].some(proxy => proxy?.username || proxy?.password))
-    process.stderr.write('WARNING: Playwright 1.63.0 may send authenticated proxy credentials to a website\'s 401 authentication challenge. This warning does not prevent the leak. Avoid authenticated proxies until a Playwright release containing https://github.com/microsoft/playwright/pull/43482 is adopted.\n');
   return config;
 }
 

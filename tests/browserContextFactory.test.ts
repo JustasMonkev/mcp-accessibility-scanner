@@ -371,6 +371,10 @@ describe('browserContextFactory', () => {
       expect(error.name).toBe('TimeoutError');
       expect(error.message).toContain('Timeout 1000ms exceeded.');
       expect(error.message.includes(attachHint)).toBe(explained);
+      if (explained) {
+        expect(error.message).toContain('A sleeping or unresponsive tab can stall the attach');
+        expect(error.message).not.toContain('Playwright 1.63.0');
+      }
     });
 
     it('leaves other endpoint errors unchanged', async () => {

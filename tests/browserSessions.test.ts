@@ -44,7 +44,7 @@ function makeFactory() {
     browserContext.pages = vi.fn().mockReturnValue([]);
     browserContext.route = vi.fn().mockResolvedValue(undefined);
     // Only exercised when a test enables --save-session (the input recorder).
-    browserContext._enableRecorder = vi.fn().mockResolvedValue(undefined);
+    browserContext._startRecording = vi.fn().mockResolvedValue(undefined);
     const close = vi.fn().mockResolvedValue(undefined);
     created.push({ browserContext, close, newPage });
     return { browserContext, close };
@@ -321,7 +321,7 @@ describe('browser sessions', () => {
       page.setDefaultTimeout = vi.fn();
       page.url = () => 'about:blank';
       created[0].browserContext.emit('page', page);
-      const sink = created[0].browserContext._enableRecorder.mock.calls[0][1];
+      const sink = created[0].browserContext._startRecording.mock.calls[0][1];
       sink.actionAdded(page, { name: 'click', signals: [] }, 'await page.click();');
       sink.signalAdded(page, { name: 'navigation', url: 'https://example.com' }, "await page.goto('https://example.com');");
 

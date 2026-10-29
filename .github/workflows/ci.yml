@@ -9,11 +9,9 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Keep native browser dependencies on a fixed, supported Ubuntu release.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
-    container:
-      image: mcr.microsoft.com/playwright:v1.63.0-noble
-      options: --user pwuser --init --ipc=host
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
     defaults:
@@ -62,7 +60,10 @@ jobs:
           npm --version
           npm ci
 
-      - name: Verify preinstalled browsers
+      - name: Install matching browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Verify installed browsers
         run: |
           node --input-type=module <<'NODE'
           import { chromium, firefox, webkit } from 'playwright';
@@ -93,6 +94,9 @@ jobs:
 
       - name: Verify client-certificate proxy routing
         run: node tests/client-certificate-proxy-probe.mjs
+
+      - name: Verify authenticated proxy routing
+        run: node tests/authenticated-proxy-probe.mjs
 
   docker-smoke:
     runs-on: ubuntu-latest
@@ -171,9 +175,6 @@ jobs:
   webkit-regressions:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    container:
-      image: mcr.microsoft.com/playwright:v1.63.0-noble
-      options: --user pwuser --init --ipc=host
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
     defaults:
@@ -216,6 +217,7 @@ jobs:
           NODE
 
       - run: npm ci
+      - run: npx playwright install --with-deps firefox webkit
       - run: node tests/webkit-network-probe.mjs
       # Independent checks: a probe or WebKit failure must not hide the others.
       - if: ${{ !cancelled() }}
@@ -236,8 +238,9 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest, browser: firefox }
-          - { os: ubuntu-latest, browser: webkit }
-          - { os: macos-14, browser: webkit }
+          - { os: ubuntu-24.04, browser: webkit }
+          # macOS 14 receives frozen WebKit r2251, unsupported by this Playwright.
+          - { os: macos-15, browser: webkit }
           - { os: macos-14, browser: firefox }
           - { os: macos-14, browser: chromium }
     steps:
@@ -277,7 +280,7 @@ jobs:
 
       - run: npm ci
       - run: npx playwright install --with-deps ${{ matrix.browser }}
-      - if: ${{ matrix.browser != 'chromium' && !(matrix.os == 'macos-14' && matrix.browser == 'webkit') }}
+      - if: ${{ matrix.browser != 'chromium' }}
         run: npx vitest run tests/numpad-keys.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}

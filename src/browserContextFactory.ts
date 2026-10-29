@@ -147,10 +147,10 @@ async function navigateReplacementPages(replaced: { page: playwright.Page, url: 
   }));
 }
 
-/** Existing contexts can contain service workers and storage we cannot safely snapshot. */
+/** Storage-state rollback cannot restore removed service-worker registrations. */
 export function assertReusedContextStorageStateSupported(config: FullConfig): void {
   if (config.browser.contextOptions?.storageState)
-    throw new Error('Cannot apply --storage-state to an existing browser context on Playwright 1.63.0: its rollback snapshot can run service-worker-served scripts and alter storage. Use a fresh context (for CDP, add --isolated), or omit --storage-state and sign in interactively. No storage snapshot or reset was attempted.');
+    throw new Error('Cannot apply --storage-state to an existing browser context: Playwright removes service-worker registrations that a storage-state rollback cannot restore. Use a fresh context (for CDP, add --isolated), or omit --storage-state and sign in interactively. No storage snapshot or reset was attempted.');
 }
 
 function createContextFactory(config: FullConfig): BrowserContextFactory {
@@ -672,9 +672,9 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     const cdpTimeout = this.config.browser.cdpTimeout ?? 30000;
     let attachTimedOut = false;
     for (;;) {
-      // Every attempt also ends at the startup deadline: an attach that hangs
-      // on a tab without a renderer must not outlast the launch budget, even
-      // when --cdp-timeout is longer or 0 (disabled). Never 0 here, which
+      // Every attempt also ends at the startup deadline: a stalled attach
+      // must not outlast the launch budget, even when --cdp-timeout is longer
+      // or 0 (disabled). Never 0 here, which
       // would disable Playwright's timeout instead.
       const remaining = Math.max(1, deadline - Date.now());
       try {
@@ -1022,14 +1022,11 @@ function cdpConnectHeaders(clientInfo: ClientInfo, browserConfig: FullConfig['br
   return Object.keys(headers).length ? headers : undefined;
 }
 
-const cdpAttachTimeoutHint = 'The CDP WebSocket connected, but Playwright did not finish attaching before the timeout. An existing tab can block the attach: on Playwright 1.63.0 a tab without a renderer (crashed, or discarded by Memory Saver) never answers, and a sleeping or unresponsive tab can stall it. Reload or close that tab in the browser yourself, or attach to a separate browser, then retry; a longer --cdp-timeout helps only when the attach is merely slow.';
+const cdpAttachTimeoutHint = 'The CDP WebSocket connected, but Playwright did not finish attaching before the timeout. A sleeping or unresponsive tab can stall the attach. Reload or close an affected tab in the browser yourself, or attach to a separate browser, then retry; a longer --cdp-timeout helps only when the attach is merely slow.';
 
 /**
- * Playwright 1.63.0 initializes every existing tab while attaching over CDP,
- * and a tab without a renderer never answers, so `connectOverCDP` runs into
- * its timeout after the WebSocket connected (microsoft/playwright#42936). The
- * call log's `<ws connected>` entry tells that apart from an endpoint that
- * never answered, which must not be blamed on a tab.
+ * The call log's `<ws connected>` entry distinguishes stalled attachment
+ * from an endpoint that never answered, which must not be blamed on a tab.
  */
 function isCdpAttachTimeout(error: unknown): error is Error {
   return error instanceof Error && error.name === 'TimeoutError' && error.message.includes('<ws connected>');
