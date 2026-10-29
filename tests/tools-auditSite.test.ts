@@ -932,6 +932,88 @@ describe('audit_site tool', () => {
     expect(summaryViolation.uniqueOccurrences).toBe(1);
   });
 
+  it('groups unique occurrences into similar patterns and samples different ones', async () => {
+    const { response } = createHarness({ 'https://example.com/': [] });
+    const priceNodes = ['a', 'b', 'c', 'd'].map(id => createViolation('color-contrast', `<span id="price-${id}" class="price">$10</span>`, [`#price-${id}`]).nodes[0]);
+    const linkNode = createViolation('color-contrast', '<a href="/plans" class="footer-link">Compare all pricing plans</a>', ['a.footer-link']).nodes[0];
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/', [
+      { ...createViolation('color-contrast', ''), nodes: [...priceNodes, linkNode] },
+    ]));
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ maxPages: 1, waitAfterNavigationMs: 0 }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    const summaryViolation = report.summary.violations[0];
+    expect(summaryViolation).toMatchObject({ uniqueOccurrences: 5, similarPatterns: 2, similarPatternsCapped: false });
+    expect(summaryViolation.sampleNodes).toHaveLength(3);
+    expect(summaryViolation.sampleNodes.map((node: { html: string }) => node.html)).toContain(linkNode.html);
+    expect(response.structuredContent()!.topViolations).toEqual([
+      expect.objectContaining({ id: 'color-contrast', similarPatterns: 2, similarPatternsCapped: false }),
+    ]);
+    expect(response.result()).toContain('- color-contrast (serious): 1 pages, 5 nodes, 2 patterns');
+  });
+
+  it('says when a rule has more distinct patterns than it tracks', async () => {
+    const { response } = createHarness({ 'https://example.com/': [] });
+    const tags = Array.from({ length: 51 }, (_, index) => `x-widget-${index}`);
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/', [
+      { ...createViolation('region', ''), nodes: tags.map(tag => createViolation('region', `<${tag} role="${tag}">${tag}</${tag}>`, [tag]).nodes[0]) },
+    ]));
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ maxPages: 1, waitAfterNavigationMs: 0 }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.summary.violations[0]).toMatchObject({ uniqueOccurrences: 51, similarPatterns: 50, similarPatternsCapped: true });
+    expect(response.result()).toContain('51 nodes, over 50 patterns');
+  });
+
+  it('spreads maxPages across sitemap sections with representative page selection', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const blog = Array.from({ length: 6 }, (_, index) => `https://example.com/blog/post-${index}`);
+    const listed = [...blog, 'https://example.com/blog/post-0', 'https://example.com/about', 'https://example.com/pricing', 'https://external.example.org/'];
+    const { response } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: `<urlset>${listed.map(url => `<url><loc>${url}</loc></url>`).join('')}</urlset>` },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap', sitemapUrl, maxPages: 3, pageSelection: 'representative', waitAfterNavigationMs: 0 }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { url: string }) => page.url)).toEqual([
+      'https://example.com/blog/post-0',
+      'https://example.com/about',
+      'https://example.com/pricing',
+    ]);
+    expect(report.representativeSelection).toEqual({ candidates: 8, selected: 3 });
+    expect(report.metadata.options.pageSelection).toBe('representative');
+    // 5 unselected blog posts, the duplicate listing and the external URL.
+    expect(report.summary.totals.skippedUrls).toBe(7);
+    expect(response.structuredContent()).toMatchObject({ representativeSelection: { candidates: 8, selected: 3 } });
+    expect(response.result()).toContain('Representative selection: queued 3 of 8 listed URLs');
+  });
+
+  it('keeps listed order and reports no selection in discovery mode', async () => {
+    const urls = ['https://example.com/blog/a', 'https://example.com/blog/b', 'https://example.com/blog/c', 'https://example.com/about'];
+    const { response } = createHarness({});
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'provided', urls, maxPages: 2, waitAfterNavigationMs: 0 }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { url: string }) => page.url)).toEqual(urls.slice(0, 2));
+    expect(report.representativeSelection).toBeNull();
+    expect(response.result()).not.toContain('Representative selection');
+  });
+
+  it.each(['links', 'nav'] as const)('rejects representative page selection for the %s strategy', strategy => {
+    const parsed = tool.schema.inputSchema.safeParse({ strategy, pageSelection: 'representative' });
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues).toEqual([expect.objectContaining({
+      path: ['pageSelection'],
+      message: 'pageSelection="representative" requires strategy="sitemap" or strategy="provided"',
+    })]);
+  });
+
   it.each([1, 2, 10])('keeps full deduplicated counts when node details are capped at %i', async maxNodesPerViolation => {
     const { response } = createHarness({ 'https://example.com/': [] });
     const imageNodes = ['first', 'second', 'third'].map(id => createViolation('image-alt', `<img id="${id}">`, [`#${id}`]).nodes[0]);

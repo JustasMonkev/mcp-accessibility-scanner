@@ -8,7 +8,9 @@ import { writeJsonReport } from './report.js';
 import { TabEvents, type Tab } from '../tab.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
+import { HtmlPatternGroups } from '../utils/htmlPatterns.js';
 import { logUnhandledError } from '../utils/log.js';
+import { selectRepresentativeUrls } from '../utils/representativeUrls.js';
 import {
   assertRuleOptionsValid,
   axeRuleSchemaShape,
@@ -58,6 +60,10 @@ type SummaryViolation = {
   pagesAffected: string[];
   totalOccurrences: number;
   uniqueOccurrences: number;
+  // Unique occurrences grouped by near-identical markup: roughly, how many
+  // distinct components need fixing. A lower bound when similarPatternsCapped.
+  similarPatterns: number;
+  similarPatternsCapped: boolean;
   sampleNodes: {
     pageUrl: string;
     target: AxeViolation['nodes'][number]['target'];
@@ -87,7 +93,10 @@ type ViolationSummaryAggregate = {
   pagesAffected: Set<string>;
   totalOccurrences: number;
   fingerprints: Set<string>;
+  patterns: HtmlPatternGroups;
   sampleNodes: SummaryViolation['sampleNodes'];
+  // The pattern of each sample node, -1 when it fit no stored pattern.
+  samplePatterns: number[];
 };
 
 const defaultIgnoreQueryParams = [
@@ -106,6 +115,10 @@ const defaultExcludePathPatterns = [
 
 const maxExcludeRegexPatternLength = 200;
 
+const maxSampleNodes = 3;
+// Bounds the per-node grouping work on rules with very varied markup.
+const maxSimilarPatterns = 50;
+
 const impactPriority: Record<string, number> = {
   critical: 0,
   serious: 1,
@@ -115,6 +128,7 @@ const impactPriority: Record<string, number> = {
 };
 
 const crawlStrategySchema = z.enum(['links', 'nav', 'sitemap', 'provided']);
+const pageSelectionSchema = z.enum(['discovery', 'representative']);
 
 const auditSiteSchema = z.object({
   startUrl: z.string().optional().describe('URL to start the crawl from. Defaults to the current tab URL.'),
@@ -123,6 +137,7 @@ const auditSiteSchema = z.object({
   sitemapUrl: z.string().optional().describe('URL of the sitemap to fetch when strategy is "sitemap".'),
   maxPages: z.number().int().min(1).max(200).default(25).describe('Maximum pages to scan.'),
   maxDepth: z.number().int().min(0).max(5).default(2).describe('Maximum crawl depth for link strategy.'),
+  pageSelection: pageSelectionSchema.default('discovery').describe('Which URLs fill maxPages when strategy is "sitemap" or "provided" lists more. "discovery" takes them in listed order; "representative" spreads the budget across site sections and URL templates (exact k-median over the URL path tree), so one large section such as a blog cannot use it all.'),
   sameOriginOnly: z.boolean().default(true).describe('Restrict crawl to the start origin/host.'),
   includeSubdomains: z.boolean().default(false).describe('Only applies when sameOriginOnly=true. When enabled, also allows subdomains of the start host (e.g. blog.example.com when start host is example.com). Ignored when sameOriginOnly=false.'),
   excludePathPatterns: z.array(z.string()).default(defaultExcludePathPatterns).describe('Regex patterns applied to pathname+query. Avoid complex nested quantifiers to prevent performance issues.'),
@@ -138,6 +153,15 @@ const auditSiteSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ['urls'],
       message: 'urls is required when strategy="provided"',
+    });
+  }
+  // Representative selection needs the whole URL list before the first visit;
+  // a link crawl only learns its URLs page by page.
+  if (value.pageSelection === 'representative' && value.strategy !== 'sitemap' && value.strategy !== 'provided') {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['pageSelection'],
+      message: 'pageSelection="representative" requires strategy="sitemap" or strategy="provided"',
     });
   }
 });
@@ -427,7 +451,9 @@ function aggregateIntoSummary(
       pagesAffected: new Set<string>(),
       totalOccurrences: 0,
       fingerprints: new Set<string>(),
+      patterns: new HtmlPatternGroups(maxSimilarPatterns),
       sampleNodes: [],
+      samplePatterns: [],
     };
     summary.pagesAffected.add(pageUrl);
     summary.totalOccurrences += violation.nodes.length;
@@ -435,17 +461,30 @@ function aggregateIntoSummary(
     for (const node of violation.nodes) {
       // The fingerprint set is scoped to one violation id, so the
       // normalized node HTML alone identifies a unique occurrence.
-      const fingerprint = fastFingerprint(normalizeWhitespace(node.html ?? ''));
+      const normalizedHtml = normalizeWhitespace(node.html ?? '');
+      const fingerprint = fastFingerprint(normalizedHtml);
       if (summary.fingerprints.has(fingerprint))
         continue;
       summary.fingerprints.add(fingerprint);
-      if (summary.sampleNodes.length < 3) {
-        summary.sampleNodes.push({
-          pageUrl,
-          target: [...(node.target ?? [])],
-          html: node.html ?? '',
-          failureSummary: node.failureSummary ?? null,
-        });
+      const pattern = summary.patterns.add(normalizedHtml);
+      const sample = {
+        pageUrl,
+        target: [...(node.target ?? [])],
+        html: node.html ?? '',
+        failureSummary: node.failureSummary ?? null,
+      };
+      if (summary.sampleNodes.length < maxSampleNodes) {
+        summary.sampleNodes.push(sample);
+        summary.samplePatterns.push(pattern);
+      } else if (pattern !== -1 && !summary.samplePatterns.includes(pattern)) {
+        // A pattern no sample shows yet replaces a sample whose pattern another
+        // sample already shows, so the samples cover as many components as they can.
+        const redundant = summary.samplePatterns.findIndex((samplePattern, index) =>
+          samplePattern === -1 || summary.samplePatterns.indexOf(samplePattern) !== index);
+        if (redundant !== -1) {
+          summary.sampleNodes[redundant] = sample;
+          summary.samplePatterns[redundant] = pattern;
+        }
       }
     }
 
@@ -464,6 +503,8 @@ function toSortedSummaryViolations(summaryByRuleId: Map<string, ViolationSummary
     pagesAffected: [...summary.pagesAffected],
     totalOccurrences: summary.totalOccurrences,
     uniqueOccurrences: summary.fingerprints.size,
+    similarPatterns: summary.patterns.count,
+    similarPatternsCapped: summary.patterns.capped,
     sampleNodes: summary.sampleNodes,
   })).sort((first, second) => {
     const firstImpact = impactPriority[first.impact ?? 'unknown'] ?? impactPriority.unknown;
@@ -477,7 +518,7 @@ function toSortedSummaryViolations(summaryByRuleId: Map<string, ViolationSummary
 function summarizeTopViolations(violations: SummaryViolation[], count: number): string[] {
   return violations
       .slice(0, count)
-      .map(violation => `- ${violation.id} (${violation.impact ?? 'unknown'}): ${violation.pagesAffected.length} pages, ${violation.totalOccurrences} nodes`);
+      .map(violation => `- ${violation.id} (${violation.impact ?? 'unknown'}): ${violation.pagesAffected.length} pages, ${violation.totalOccurrences} nodes, ${violation.similarPatternsCapped ? 'over ' : ''}${violation.similarPatterns} ${violation.similarPatterns === 1 && !violation.similarPatternsCapped ? 'pattern' : 'patterns'}`);
 }
 
 function sortScannedPagesByViolations(pages: PageReport[]): PageReport[] {
@@ -638,28 +679,29 @@ const auditSite = defineTabTool({
     const summaryByViolation = new Map<string, ViolationSummaryAggregate>();
     const summaryByIncomplete = new Map<string, ViolationSummaryAggregate>();
 
-    const enqueueUrl = (rawUrl: string, depth: number, discoveredFrom: string | null) => {
+    // The normalized URL when it is in scope and not yet queued or visited;
+    // otherwise null, counted as skipped.
+    const admitUrl = (rawUrl: string): string | null => {
       const normalizedUrl = normalizeUrl(rawUrl, startUrl, ignoredParams);
-      if (!normalizedUrl) {
+      if (!normalizedUrl
+        || !isAllowedByOrigin(normalizedUrl, startUrl, params.sameOriginOnly, params.includeSubdomains)
+        || isExcludedByPath(normalizedUrl, excludePatterns)) {
         skippedUrls++;
-        return;
-      }
-
-      if (!isAllowedByOrigin(normalizedUrl, startUrl, params.sameOriginOnly, params.includeSubdomains)) {
-        skippedUrls++;
-        return;
-      }
-
-      if (isExcludedByPath(normalizedUrl, excludePatterns)) {
-        skippedUrls++;
-        return;
+        return null;
       }
 
       const normalizedUrlString = normalizedUrl.toString();
       if (visited.has(normalizedUrlString) || queued.has(normalizedUrlString)) {
         skippedUrls++;
-        return;
+        return null;
       }
+      return normalizedUrlString;
+    };
+
+    const enqueueUrl = (rawUrl: string, depth: number, discoveredFrom: string | null) => {
+      const normalizedUrlString = admitUrl(rawUrl);
+      if (!normalizedUrlString)
+        return;
 
       if (queue.length + visited.size >= params.maxPages) {
         skippedUrls++;
@@ -675,9 +717,34 @@ const auditSite = defineTabTool({
       queued.add(normalizedUrlString);
     };
 
+    // Listed URLs past maxPages are skipped; with representative selection the
+    // ones skipped are those closest to a page that is scanned.
+    let representativeSelection = null as { candidates: number, selected: number } | null;
+    const enqueueListedUrls = (rawUrls: string[], discoveredFrom: string | null) => {
+      if (params.pageSelection !== 'representative') {
+        for (const url of rawUrls)
+          enqueueUrl(url, 0, discoveredFrom);
+        return;
+      }
+      const candidates = new Set<string>();
+      for (const url of rawUrls) {
+        const admitted = admitUrl(url);
+        if (!admitted)
+          continue;
+        if (candidates.has(admitted))
+          skippedUrls++;
+        else
+          candidates.add(admitted);
+      }
+      const selected = selectRepresentativeUrls([...candidates], params.maxPages);
+      skippedUrls += candidates.size - selected.length;
+      for (const url of selected)
+        enqueueUrl(url, 0, discoveredFrom);
+      representativeSelection = { candidates: candidates.size, selected: selected.length };
+    };
+
     if (params.strategy === 'provided') {
-      for (const url of params.urls ?? [])
-        enqueueUrl(url, 0, null);
+      enqueueListedUrls(params.urls ?? [], null);
     } else if (params.strategy === 'sitemap') {
       if (context.config.browser.remoteEndpoint || context.config.browser.cdpEndpoint || ('name' in context.options.browserContextFactory && context.options.browserContextFactory.name === 'vscode'))
         throw new Error('Sitemap fetches run on the MCP host and do not support remoteEndpoint, cdpEndpoint, or browser_connect providers. Use the provided URL strategy with an attached browser.');
@@ -686,8 +753,7 @@ const auditSite = defineTabTool({
       const validateUrl = (input: string, base: URL) => parseSitemapUrl(input, base, startUrl, params.sameOriginOnly, params.includeSubdomains, context.config);
       const sitemapUrl = validateUrl(params.sitemapUrl ?? new URL('sitemap.xml', startUrl).toString(), startUrl);
       const sitemapUrls = await extractSitemapUrls(sitemapUrl, validateUrl);
-      for (const url of sitemapUrls)
-        enqueueUrl(url, 0, sitemapUrl);
+      enqueueListedUrls(sitemapUrls, sitemapUrl);
     } else {
       enqueueUrl(startUrl.toString(), 0, null);
     }
@@ -924,6 +990,7 @@ const auditSite = defineTabTool({
         options: {
           maxPages: params.maxPages,
           maxDepth: params.maxDepth,
+          pageSelection: params.pageSelection,
           sameOriginOnly: params.sameOriginOnly,
           includeSubdomains: params.includeSubdomains,
           excludePathPatterns: params.excludePathPatterns,
@@ -943,6 +1010,9 @@ const auditSite = defineTabTool({
       },
       pages,
       summary,
+      // How many listed URLs representative selection chose from; null when
+      // pages were taken in discovery order.
+      representativeSelection,
       sessionLosses,
       crawlTabRestarts,
     };
@@ -964,6 +1034,7 @@ const auditSite = defineTabTool({
         durationMs: report.metadata.durationMs,
       },
       totals: summary.totals,
+      representativeSelection,
       sessionLosses,
       crawlTabRestarts,
       pagesWithUnscannedFrames: pagesWithUnscannedFrames.map(page => ({
@@ -975,6 +1046,8 @@ const auditSite = defineTabTool({
         impact: violation.impact ?? null,
         pagesAffected: violation.pagesAffected.length,
         totalOccurrences: violation.totalOccurrences,
+        similarPatterns: violation.similarPatterns,
+        similarPatternsCapped: violation.similarPatternsCapped,
         helpUrl: violation.helpUrl,
       })),
       topIncomplete: summaryIncomplete.slice(0, 5).map(item => ({
@@ -982,6 +1055,8 @@ const auditSite = defineTabTool({
         impact: item.impact ?? null,
         pagesAffected: item.pagesAffected.length,
         totalOccurrences: item.totalOccurrences,
+        similarPatterns: item.similarPatterns,
+        similarPatternsCapped: item.similarPatternsCapped,
         helpUrl: item.helpUrl,
       })),
       topPages: scannedPagesByViolations
@@ -1016,6 +1091,7 @@ const auditSite = defineTabTool({
       ...frameWarning,
       ...sessionWarning,
       ...restartWarning,
+      ...(representativeSelection ? [`Representative selection: queued ${representativeSelection.selected} of ${representativeSelection.candidates} listed URLs, spread across site sections and URL templates.`] : []),
       `Scanned pages: ${summary.totals.scannedPages}`,
       `Errored pages: ${summary.totals.erroredPages}`,
       `Skipped URLs: ${summary.totals.skippedUrls}`,

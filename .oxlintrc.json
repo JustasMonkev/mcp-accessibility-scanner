@@ -230,12 +230,16 @@
         "src/tools/auditKeyboard.ts",
         "src/tools/auditScreenReader.ts",
         "src/tools/report.ts",
+        "src/utils/htmlPatterns.ts",
+        "src/utils/representativeUrls.ts",
         "tests/tools-auditScreenReader.test.ts",
         "tests/tools-auditSite.test.ts",
         "tests/tools-axe.test.ts",
         "tests/tools-scanPageMatrix.test.ts",
         "tests/tools-auditKeyboard.test.ts",
         "tests/tools-auditSite.integration.test.ts",
+        "tests/htmlPatterns.test.ts",
+        "tests/representativeUrls.test.ts",
         "bench/**"
       ],
       "rules": {
