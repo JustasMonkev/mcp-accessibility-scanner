@@ -210,11 +210,6 @@ npx --allow-scripts=re2 mcp-accessibility-scanner list-tools
 
 > **Note:** Tool names like `browser_navigate` and `scan_page` are MCP tool identifiers (and REPL commands in interactive mode). They are not shell subcommands -- you cannot run `npx mcp-accessibility-scanner browser_navigate`.
 
-`browser_fill_form` stops when a field opens a native dialog or file chooser,
-returns the modal-handling guidance, and reports how many later fields were not
-attempted. After handling the modal, submit those remaining fields again; the
-form does not resume filling them in the background.
-
 ## Configuration
 
 Here's the Claude Desktop configuration:
@@ -393,6 +388,11 @@ The interactive CLI, stdio MCP and initialized stateful HTTP connections can use
 With the default persistent profile, sign-in state also survives across server restarts, so you usually only sign in once. The default profile is keyed to the server's working directory, so each workspace's server keeps its own sign-in state — servers launched for different workspaces neither share cookies nor contend for the same profile.
 
 ### When a login form does not advance
+
+`browser_fill_form` stops when a field opens a native dialog or file chooser,
+returns the modal-handling guidance, and reports how many later fields were not
+attempted. After handling the modal, submit those remaining fields again; the
+form does not resume filling them in the background.
 
 - Take a fresh `browser_snapshot` after a rerender and use its current field references. Wait for an application-specific ready message with `browser_wait_for` before entering data.
 - `browser_fill_form` and ordinary `browser_type` use Playwright's `fill`. If the application requires individual key events, clear the field with `browser_type` and `text: ""`, then use `browser_type` with `slowly: true`. Slow typing appends characters; it does not clear an existing value.
