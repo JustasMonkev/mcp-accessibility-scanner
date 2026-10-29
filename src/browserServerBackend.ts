@@ -341,7 +341,7 @@ export class BrowserServerBackend implements ServerBackend {
         if (idleNotice)
           response.addNotice(idleNotice);
       }
-      await tool.handle(context, parsedArguments, response);
+      await tool.handle(context, parsedArguments, response, requestContext?.signal);
       await response.finish();
       if (name === 'browser_session_close') {
         // This response belongs to the default context; saves drained while
