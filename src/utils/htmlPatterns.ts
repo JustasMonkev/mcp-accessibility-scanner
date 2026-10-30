@@ -79,23 +79,66 @@ function similar(a: readonly string[], b: readonly string[]): boolean {
   return withinEditDistance(a, b, limit);
 }
 
-const openingTag = /^\s*<([a-z][\w:-]*)([^>]*)/i;
-const semanticAttribute = /(?:^|\s)(type|role)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi;
+const tagName = /^\s*<([a-z][^\s/>]*)/i;
+
+/**
+ * The root element's attributes, read the way the HTML tokenizer reads them:
+ * a quoted value runs to its closing quote whatever it contains (`>`, `=`,
+ * other attribute names), an unquoted one to whitespace or `>`, and the first
+ * of duplicate attributes wins. Names are lower-cased.
+ */
+function rootAttributes(html: string, from: number): Map<string, string> {
+  const attributes = new Map<string, string>();
+  const isSpace = (char: string) => char === ' ' || char === '\t' || char === '\n' || char === '\r' || char === '\f';
+  let index = from;
+  while (index < html.length) {
+    while (index < html.length && (isSpace(html[index]) || html[index] === '/'))
+      index++;
+    if (index >= html.length || html[index] === '>')
+      break;
+    const nameStart = index;
+    // A leading `=` is part of the name, as in the tokenizer.
+    index++;
+    while (index < html.length && !isSpace(html[index]) && html[index] !== '/' && html[index] !== '>' && html[index] !== '=')
+      index++;
+    const name = html.slice(nameStart, index).toLowerCase();
+    while (index < html.length && isSpace(html[index]))
+      index++;
+    let value = '';
+    if (html[index] === '=') {
+      index++;
+      while (index < html.length && isSpace(html[index]))
+        index++;
+      const quote = html[index];
+      if (quote === '"' || quote === '\'') {
+        const close = html.indexOf(quote, index + 1);
+        const valueEnd = close === -1 ? html.length : close;
+        value = html.slice(index + 1, valueEnd);
+        index = valueEnd + 1;
+      } else {
+        const valueStart = index;
+        while (index < html.length && !isSpace(html[index]) && html[index] !== '>')
+          index++;
+        value = html.slice(valueStart, index);
+      }
+    }
+    if (!attributes.has(name))
+      attributes.set(name, value);
+  }
+  return attributes;
+}
 
 /** The root element, its type and its role, which fuzzy matching may not change. @public */
 export function semanticSignature(html: string): string {
-  const match = openingTag.exec(html);
+  const match = tagName.exec(html);
   if (!match)
     return '';
   const tag = match[1].toLowerCase();
-  const attributes = new Map<string, string>();
-  for (const attribute of match[2].matchAll(semanticAttribute)) {
-    const name = attribute[1].toLowerCase();
-    if (!attributes.has(name))
-      attributes.set(name, (attribute[2] ?? attribute[3] ?? attribute[4]).trim().toLowerCase());
-  }
-  const type = attributes.get('type') ?? (tag === 'input' ? 'text' : '');
-  return `${tag} type=${type} role=${attributes.get('role') ?? ''}`;
+  const attributes = rootAttributes(html, match[0].length);
+  const read = (name: string) => attributes.get(name)?.trim().toLowerCase();
+  // An input with no or an empty type is a text input.
+  const type = read('type') || (tag === 'input' ? 'text' : '');
+  return `${tag} type=${type} role=${read('role') ?? ''}`;
 }
 
 type Entry<T> = { key: string, signature: string, tokens: string[], item: T };

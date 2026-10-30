@@ -60,6 +60,22 @@ describe('semanticSignature', () => {
     expect(semanticSignature('<div role=\'button\'><span role="img"></span></div>')).toBe('div type= role=button');
     expect(semanticSignature('<div data-type="x" aria-role="y">')).toBe('div type= role=');
   });
+
+  it.each([
+    ['a > inside an earlier quoted value', '<input title="a > b" type="checkbox" class="x">', 'input type=checkbox role='],
+    ['type= text inside an earlier quoted value', '<input title="choose type=checkbox carefully" type="text">', 'input type=text role='],
+    ['role= text inside an earlier quoted value', '<div title="use role=button here" role="link">', 'div type= role=link'],
+    ['a > inside a single-quoted value', '<input aria-label=\'a > b\' type="checkbox">', 'input type=checkbox role='],
+    ['a quote of the other kind inside a value', '<input title="it\'s type=\'radio\'" type="email">', 'input type=email role='],
+    ['unquoted values', '<input class=x type=checkbox>', 'input type=checkbox role='],
+    ['spaces around =', '<input type = "radio" >', 'input type=radio role='],
+    ['a value-less attribute before type', '<input disabled type="checkbox">', 'input type=checkbox role='],
+    ['duplicate attributes, where the first wins', '<input type="radio" type="text">', 'input type=radio role='],
+    ['an empty input type', '<input type="">', 'input type=text role='],
+    ['attributes of descendants', '<label class="x"><input type="checkbox"></label>', 'label type= role='],
+  ])('reads %s', (_, html, signature) => {
+    expect(semanticSignature(html)).toBe(signature);
+  });
 });
 
 describe('HtmlPatternGroups', () => {
@@ -84,6 +100,9 @@ describe('HtmlPatternGroups', () => {
     ['an explicit type against the input default', '<input type="email" class="form-control" name="email">', '<input class="form-control" name="email">'],
     ['roles', '<div role="button" class="chip" tabindex="0">Save draft now</div>', '<div role="link" class="chip" tabindex="0">Save draft now</div>'],
     ['elements', '<a class="action primary large" href="#">Continue to payment page</a>', '<button class="action primary large" type="button">Continue to payment page</button>'],
+    ['input types after a > in a title', '<input title="a > b" type="text" class="form-control" name="email">', '<input title="a > b" type="checkbox" class="form-control" name="terms">'],
+    ['input types after type= text in a title', '<input title="choose type=checkbox carefully" type="text" class="form-control" name="email">', '<input title="choose type=checkbox carefully" type="checkbox" class="form-control" name="email">'],
+    ['roles after role= text in a title', '<div title="use role=button here" role="button" class="chip">Save draft now</div>', '<div title="use role=button here" role="link" class="chip">Save draft now</div>'],
   ])('never groups across %s', (_, first, second) => {
     expect(group([first, second]).count).toBe(2);
   });
