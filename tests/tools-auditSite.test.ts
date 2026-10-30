@@ -932,6 +932,28 @@ describe('audit_site tool', () => {
     expect(summaryViolation.uniqueOccurrences).toBe(1);
   });
 
+  it('reports the same patterns and samples whatever order the pages were crawled in', async () => {
+    // Grouped in arrival order, A,B,C gives two patterns and B,A,C gives one.
+    const nodeByPath: Record<string, string> = { '/a': '<p>aa bb cc</p>', '/b': '<p>aa bb dd</p>', '/c': '<p>aa ee dd</p>' };
+    const summaries = [];
+    for (const order of [['/a', '/b', '/c'], ['/b', '/a', '/c']]) {
+      const { response } = createHarness({ 'https://example.com/': order.map(path => `https://example.com${path}`) });
+      vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => {
+        const html = nodeByPath[new URL(page.url()).pathname];
+        return createAxeResult(page.url(), html ? [createViolation('color-contrast', html, [new URL(page.url()).pathname])] : []);
+      });
+      await tool.handle(response.context, tool.schema.inputSchema.parse({ maxPages: 4, waitAfterNavigationMs: 0 }), response);
+      expect(JSON.parse(String(writeFileSpy.mock.calls.at(-1)![1])).pages.map((page: { url: string }) => new URL(page.url).pathname)).toEqual(['/', ...order]);
+      const report = JSON.parse(String(writeFileSpy.mock.calls.at(-1)![1]));
+      const { similarPatterns, similarPatternsCapped, sampleNodes } = report.summary.violations[0];
+      summaries.push({ similarPatterns, similarPatternsCapped, samples: sampleNodes.map((node: { html: string }) => node.html) });
+      vi.restoreAllMocks();
+      writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
+    }
+    expect(summaries[0]).toEqual(summaries[1]);
+    expect(summaries[0]).toMatchObject({ similarPatterns: 2, similarPatternsCapped: false });
+  });
+
   it('groups unique occurrences into similar patterns and samples different ones', async () => {
     const { response } = createHarness({ 'https://example.com/': [] });
     const priceNodes = ['a', 'b', 'c', 'd'].map(id => createViolation('color-contrast', `<span id="price-${id}" class="price">$10</span>`, [`#price-${id}`]).nodes[0]);
@@ -964,7 +986,7 @@ describe('audit_site tool', () => {
 
     const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
     expect(report.summary.violations[0]).toMatchObject({ uniqueOccurrences: 51, similarPatterns: 50, similarPatternsCapped: true });
-    expect(response.result()).toContain('51 nodes, over 50 patterns');
+    expect(response.result()).toContain('51 nodes, 50 patterns (partial)');
   });
 
   it('spreads maxPages across sitemap sections with representative page selection', async () => {

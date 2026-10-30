@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { selectRepresentativeUrls } from '../src/utils/representativeUrls.js';
 
-// The distance the selection optimizes, written out independently: 0 for a
-// shared template, otherwise 2^-(number of leading segments in common).
+// The objective and coverage rule, written out independently. The distance is
+// 0 for a shared template, otherwise 2^-(number of leading segments in common).
 function segments(url: string): string[] {
   const parsed = new URL(url);
-  return [parsed.host, ...parsed.pathname.split('/').filter(Boolean).map(segment => /^\d+$/.test(segment) ? ':id' : segment)];
+  const mask = (value: string) => /^\d+$/.test(value) ? ':id' : value;
+  const query = [...parsed.searchParams.entries()].sort().map(([key, value]) => `?${key}=${mask(value)}`);
+  return [parsed.host, ...parsed.pathname.split('/').filter(Boolean).map(mask), ...query];
 }
 
 function distance(first: string, second: string): number {
@@ -19,6 +21,25 @@ function distance(first: string, second: string): number {
 
 function cost(urls: string[], chosen: string[]): number {
   return urls.reduce((sum, url) => sum + Math.min(...chosen.map(facility => distance(url, facility))), 0);
+}
+
+// Whenever the chosen URLs under a prefix are at least its number of branches
+// (its own template plus each distinct next segment), each branch has one.
+function covers(urls: string[], chosen: string[]): boolean {
+  const all = urls.map(segments);
+  const picked = chosen.map(segments);
+  const key = (parts: string[]) => parts.join('\u0000');
+  const prefixes = new Set(all.flatMap(parts => parts.map((_, depth) => key(parts.slice(0, depth)))));
+  for (const prefix of prefixes) {
+    const under = (parts: string[]) => parts.length > 0 && (prefix === '' || key(parts).startsWith(prefix + '\u0000') || key(parts) === prefix);
+    const depth = prefix === '' ? 0 : prefix.split('\u0000').length;
+    const branch = (parts: string[]) => parts.length === depth ? '' : parts[depth];
+    const branches = new Set(all.filter(under).map(branch));
+    const chosenUnder = picked.filter(under);
+    if (chosenUnder.length >= branches.size && new Set(chosenUnder.map(branch)).size < branches.size)
+      return false;
+  }
+  return true;
 }
 
 function subsets<T>(items: T[], size: number): T[][] {
@@ -98,17 +119,56 @@ describe('selectRepresentativeUrls', () => {
     expect(selectRepresentativeUrls(urls, 2)).toContain('https://blog.example.com/a');
   });
 
-  it('finds the optimal k-median selection', () => {
+  it('covers every section the budget can reach, even against populous ones', () => {
+    const urls = [
+      ...Array.from({ length: 100 }, (_, index) => `https://example.com/blog/news/post-${index}`),
+      ...Array.from({ length: 100 }, (_, index) => `https://example.com/blog/guides/post-${index}`),
+      'https://example.com/checkout',
+    ];
+    expect(selectRepresentativeUrls(urls, 2)).toEqual(['https://example.com/blog/news/post-0', 'https://example.com/checkout']);
+    expect(selectRepresentativeUrls(urls, 3)).toEqual(['https://example.com/blog/news/post-0', 'https://example.com/blog/guides/post-0', 'https://example.com/checkout']);
+  });
+
+  it('lets k-median weigh sections by size when the budget cannot cover them all', () => {
+    const urls = [
+      ...Array.from({ length: 100 }, (_, index) => `https://example.com/blog/post-${index}`),
+      'https://example.com/checkout',
+      'https://example.com/help',
+    ];
+    // Three sections, one page: the blog serves the most URLs.
+    expect(selectRepresentativeUrls(urls, 1)).toEqual(['https://example.com/blog/post-0']);
+  });
+
+  it('tells query-routed screens apart while masking id values', () => {
+    const urls = [
+      'https://example.com/?page=home',
+      'https://example.com/?page=article',
+      'https://example.com/?page=checkout',
+      ...Array.from({ length: 20 }, (_, index) => `https://example.com/blog/post-${index}`),
+      'https://example.com/item?id=1',
+      'https://example.com/item?id=2',
+    ];
+    expect(selectRepresentativeUrls(urls, 5)).toEqual([
+      'https://example.com/?page=home',
+      'https://example.com/?page=article',
+      'https://example.com/?page=checkout',
+      'https://example.com/blog/post-0',
+      'https://example.com/item?id=1',
+    ]);
+  });
+
+  it('finds the optimal selection under the coverage rule', () => {
     const random = seededRandom(7);
     const words = ['a', 'b', 'c', '1', '2'];
-    for (let round = 0; round < 150; round++) {
+    for (let round = 0; round < 200; round++) {
       const urls = new Set<string>();
       const size = 2 + Math.floor(random() * 8);
       while (urls.size < size) {
         const depth = Math.floor(random() * 4);
         const host = random() < 0.2 ? 'other.example' : 'example.com';
         const path = Array.from({ length: depth }, () => words[Math.floor(random() * words.length)]).join('/');
-        urls.add(`https://${host}/${path}`);
+        const query = random() < 0.25 ? `?v=${words[Math.floor(random() * words.length)]}` : '';
+        urls.add(`https://${host}/${path}${query}`);
       }
       const list = [...urls];
       const k = 1 + Math.floor(random() * Math.min(4, list.length - 1));
@@ -116,7 +176,8 @@ describe('selectRepresentativeUrls', () => {
       const selected = selectRepresentativeUrls(list, k);
 
       expect(new Set(selected).size).toBe(k);
-      const optimum = Math.min(...subsets(list, k).map(subset => cost(list, subset)));
+      expect(covers(list, selected), `${list.join(' ')} -> ${selected.join(' ')}`).toBe(true);
+      const optimum = Math.min(...subsets(list, k).filter(subset => covers(list, subset)).map(subset => cost(list, subset)));
       expect(cost(list, selected)).toBe(optimum);
     }
   });

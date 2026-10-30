@@ -60,8 +60,9 @@ type SummaryViolation = {
   pagesAffected: string[];
   totalOccurrences: number;
   uniqueOccurrences: number;
-  // Unique occurrences grouped by near-identical markup: roughly, how many
-  // distinct components need fixing. A lower bound when similarPatternsCapped.
+  // Unique occurrences grouped by near-identical markup with the same root
+  // element, type and role. A markup heuristic, not a count of root causes;
+  // covers only part of the occurrences when similarPatternsCapped.
   similarPatterns: number;
   similarPatternsCapped: boolean;
   sampleNodes: {
@@ -93,10 +94,8 @@ type ViolationSummaryAggregate = {
   pagesAffected: Set<string>;
   totalOccurrences: number;
   fingerprints: Set<string>;
-  patterns: HtmlPatternGroups;
-  sampleNodes: SummaryViolation['sampleNodes'];
-  // The pattern of each sample node, -1 when it fit no stored pattern.
-  samplePatterns: number[];
+  // Every unique occurrence, as its sample; samples are chosen once grouped.
+  patterns: HtmlPatternGroups<SummaryViolation['sampleNodes'][number]>;
 };
 
 const defaultIgnoreQueryParams = [
@@ -116,8 +115,9 @@ const defaultExcludePathPatterns = [
 const maxExcludeRegexPatternLength = 200;
 
 const maxSampleNodes = 3;
-// Bounds the per-node grouping work on rules with very varied markup.
+// Bound the memory and grouping work on rules with many or very varied nodes.
 const maxSimilarPatterns = 50;
+const maxGroupedOccurrences = 500;
 
 const impactPriority: Record<string, number> = {
   critical: 0,
@@ -137,7 +137,7 @@ const auditSiteSchema = z.object({
   sitemapUrl: z.string().optional().describe('URL of the sitemap to fetch when strategy is "sitemap".'),
   maxPages: z.number().int().min(1).max(200).default(25).describe('Maximum pages to scan.'),
   maxDepth: z.number().int().min(0).max(5).default(2).describe('Maximum crawl depth for link strategy.'),
-  pageSelection: pageSelectionSchema.default('discovery').describe('Which URLs fill maxPages when strategy is "sitemap" or "provided" lists more. "discovery" takes them in listed order; "representative" spreads the budget across site sections and URL templates (exact k-median over the URL path tree), so one large section such as a blog cannot use it all.'),
+  pageSelection: pageSelectionSchema.default('discovery').describe('Which URLs fill maxPages when strategy is "sitemap" or "provided" lists more. "discovery" takes them in listed order; "representative" builds a tree of URL templates (host, path, query; id-like parts masked). Every branch of a group gets a page when its share of the budget covers its branches (so every top-level section is scanned when maxPages is at least their number); the rest go by exact k-median, which favors populous groups.'),
   sameOriginOnly: z.boolean().default(true).describe('Restrict crawl to the start origin/host.'),
   includeSubdomains: z.boolean().default(false).describe('Only applies when sameOriginOnly=true. When enabled, also allows subdomains of the start host (e.g. blog.example.com when start host is example.com). Ignored when sameOriginOnly=false.'),
   excludePathPatterns: z.array(z.string()).default(defaultExcludePathPatterns).describe('Regex patterns applied to pathname+query. Avoid complex nested quantifiers to prevent performance issues.'),
@@ -451,9 +451,7 @@ function aggregateIntoSummary(
       pagesAffected: new Set<string>(),
       totalOccurrences: 0,
       fingerprints: new Set<string>(),
-      patterns: new HtmlPatternGroups(maxSimilarPatterns),
-      sampleNodes: [],
-      samplePatterns: [],
+      patterns: new HtmlPatternGroups(maxSimilarPatterns, maxGroupedOccurrences),
     };
     summary.pagesAffected.add(pageUrl);
     summary.totalOccurrences += violation.nodes.length;
@@ -466,26 +464,12 @@ function aggregateIntoSummary(
       if (summary.fingerprints.has(fingerprint))
         continue;
       summary.fingerprints.add(fingerprint);
-      const pattern = summary.patterns.add(normalizedHtml);
-      const sample = {
+      summary.patterns.add(normalizedHtml, {
         pageUrl,
         target: [...(node.target ?? [])],
         html: node.html ?? '',
         failureSummary: node.failureSummary ?? null,
-      };
-      if (summary.sampleNodes.length < maxSampleNodes) {
-        summary.sampleNodes.push(sample);
-        summary.samplePatterns.push(pattern);
-      } else if (pattern !== -1 && !summary.samplePatterns.includes(pattern)) {
-        // A pattern no sample shows yet replaces a sample whose pattern another
-        // sample already shows, so the samples cover as many components as they can.
-        const redundant = summary.samplePatterns.findIndex((samplePattern, index) =>
-          samplePattern === -1 || summary.samplePatterns.indexOf(samplePattern) !== index);
-        if (redundant !== -1) {
-          summary.sampleNodes[redundant] = sample;
-          summary.samplePatterns[redundant] = pattern;
-        }
-      }
+      });
     }
 
     summaryByRuleId.set(violation.id, summary);
@@ -493,20 +477,23 @@ function aggregateIntoSummary(
 }
 
 function toSortedSummaryViolations(summaryByRuleId: Map<string, ViolationSummaryAggregate>): SummaryViolation[] {
-  return [...summaryByRuleId.values()].map(summary => ({
-    id: summary.id,
-    impact: summary.impact,
-    tags: summary.tags,
-    help: summary.help,
-    helpUrl: summary.helpUrl,
-    description: summary.description,
-    pagesAffected: [...summary.pagesAffected],
-    totalOccurrences: summary.totalOccurrences,
-    uniqueOccurrences: summary.fingerprints.size,
-    similarPatterns: summary.patterns.count,
-    similarPatternsCapped: summary.patterns.capped,
-    sampleNodes: summary.sampleNodes,
-  })).sort((first, second) => {
+  return [...summaryByRuleId.values()].map(summary => {
+    const patterns = summary.patterns.summarize(maxSampleNodes);
+    return {
+      id: summary.id,
+      impact: summary.impact,
+      tags: summary.tags,
+      help: summary.help,
+      helpUrl: summary.helpUrl,
+      description: summary.description,
+      pagesAffected: [...summary.pagesAffected],
+      totalOccurrences: summary.totalOccurrences,
+      uniqueOccurrences: summary.fingerprints.size,
+      similarPatterns: patterns.count,
+      similarPatternsCapped: patterns.capped,
+      sampleNodes: patterns.samples,
+    };
+  }).sort((first, second) => {
     const firstImpact = impactPriority[first.impact ?? 'unknown'] ?? impactPriority.unknown;
     const secondImpact = impactPriority[second.impact ?? 'unknown'] ?? impactPriority.unknown;
     if (firstImpact !== secondImpact)
@@ -518,7 +505,7 @@ function toSortedSummaryViolations(summaryByRuleId: Map<string, ViolationSummary
 function summarizeTopViolations(violations: SummaryViolation[], count: number): string[] {
   return violations
       .slice(0, count)
-      .map(violation => `- ${violation.id} (${violation.impact ?? 'unknown'}): ${violation.pagesAffected.length} pages, ${violation.totalOccurrences} nodes, ${violation.similarPatternsCapped ? 'over ' : ''}${violation.similarPatterns} ${violation.similarPatterns === 1 && !violation.similarPatternsCapped ? 'pattern' : 'patterns'}`);
+      .map(violation => `- ${violation.id} (${violation.impact ?? 'unknown'}): ${violation.pagesAffected.length} pages, ${violation.totalOccurrences} nodes, ${violation.similarPatterns} ${violation.similarPatterns === 1 ? 'pattern' : 'patterns'}${violation.similarPatternsCapped ? ' (partial)' : ''}`);
 }
 
 function sortScannedPagesByViolations(pages: PageReport[]): PageReport[] {

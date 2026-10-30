@@ -1,15 +1,24 @@
 /**
- * Picks `k` URLs that best represent a larger list, for crawls whose page budget
- * is smaller than the URL list (a sitemap with thousands of blog posts and a
- * budget of 25 pages should not spend all 25 on the blog).
+ * Picks `k` URLs to stand for a larger list, for crawls whose page budget is
+ * smaller than the URL list.
  *
- * This is k-median: choose k URLs minimizing the summed distance from every
- * listed URL to its nearest chosen one. URLs are placed in a tree by host and
- * path segment, with id-like segments masked so /products/1 and /products/2
- * share a node. Two URLs are at distance 2^-depth of their deepest common node,
- * and 0 when they share a template. That distance is an ultrametric, which makes
- * k-median solvable exactly by a knapsack over the tree, so no approximation
- * is needed.
+ * URLs are placed in a tree by host, path segment, then query parameter, with
+ * id-like segments and values masked, so /products/1 and /products/2 (or
+ * ?id=1 and ?id=2) share a node while ?page=home and ?page=checkout do not.
+ * URLs that end at the same node share a template and are treated as
+ * interchangeable; nothing else (fragments, client state) tells them apart.
+ *
+ * Selection follows two rules, and is exact under both:
+ * - Coverage: when the pages allotted to a node are at least the number of its
+ *   branches (its own template counts as one branch), every branch gets a
+ *   page. With maxPages at least the number of top-level sections, every
+ *   section is scanned.
+ * - k-median for the rest: minimize the summed distance from every listed URL
+ *   to its nearest chosen one, where two URLs are at distance 2^-depth of
+ *   their deepest common node and 0 when they share a template. Below the
+ *   coverage threshold this weighs sections by size, so a populous section can
+ *   take pages a small one does not get. The distance is an ultrametric, which
+ *   makes both rules solvable exactly by a knapsack over the tree.
  */
 
 type TreeNode = {
@@ -19,7 +28,7 @@ type TreeNode = {
   terminal: number[];
   size: number;
   // best[j] = least cost of serving every URL below this node with exactly j
-  // chosen URLs below it, for 1 <= j <= min(k, size). best[0] is unused.
+  // chosen URLs below it, under the coverage rule, for 1 <= j <= min(k, size).
   best: number[];
 };
 
@@ -27,8 +36,12 @@ const idSegment = /^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 
 function templateSegments(url: string): string[] {
   const parsed = new URL(url);
-  const segments = parsed.pathname.split('/').filter(Boolean).map(segment => idSegment.test(segment) ? ':id' : segment);
-  return [parsed.host, ...segments];
+  const mask = (value: string) => idSegment.test(value) ? ':id' : value;
+  const path = parsed.pathname.split('/').filter(Boolean).map(mask);
+  const query = [...parsed.searchParams.entries()]
+      .sort(([first], [second]) => (first < second ? -1 : first > second ? 1 : 0))
+      .map(([key, value]) => `?${key}=${mask(value)}`);
+  return [parsed.host, ...path, ...query];
 }
 
 function newNode(depth: number): TreeNode {
@@ -63,6 +76,16 @@ function parts(node: TreeNode): Part[] {
   return result;
 }
 
+// The node's branches: its own template plus each child.
+function branchCount(node: TreeNode): number {
+  return (node.terminal.length ? 1 : 0) + node.children.size;
+}
+
+// The fewest pages a part takes when every branch must be covered.
+function coveredCount(part: Part): number {
+  return part.kind === 'singles' ? part.size : 1;
+}
+
 // Cost of serving a part's URLs with `count` (>= 1) chosen among them.
 function partCost(part: Part, count: number, missCost: number): number {
   if (part.kind === 'terminal')
@@ -75,19 +98,21 @@ function partCost(part: Part, count: number, missCost: number): number {
 /**
  * Merges a node's parts one at a time: after part i, row[t] is the least cost
  * of the first i parts with t chosen URLs among them. A part given none is
- * served from a sibling at this node's distance. Only the previous row is
- * kept; `onRow` receives how many URLs each part got in each row's optimum,
- * for the reconstruction pass.
+ * served from a sibling at this node's distance. With `cover`, each part gets
+ * at least its covered count. Only the previous row is kept; `onRow` receives
+ * how many URLs each part got in each row's optimum, for the reconstruction
+ * pass.
  */
-function mergeParts(node: TreeNode, nodeParts: Part[], k: number, onRow?: (choice: Uint16Array) => void): number[] {
+function mergeParts(node: TreeNode, nodeParts: Part[], k: number, cover: boolean, onRow?: (choice: Uint16Array) => void): number[] {
   const missCost = 2 ** -node.depth;
   let previous = [0];
   for (const part of nodeParts) {
+    const minimum = cover ? coveredCount(part) : 0;
     const limit = Math.min(k, previous.length - 1 + Math.min(k, part.size));
     const row = new Array<number>(limit + 1).fill(Infinity);
     const choice = onRow ? new Uint16Array(limit + 1) : undefined;
     for (let t = 0; t <= limit; t++) {
-      for (let count = Math.max(0, t - (previous.length - 1)); count <= Math.min(t, part.size); count++) {
+      for (let count = Math.max(minimum, t - (previous.length - 1)); count <= Math.min(t, part.size); count++) {
         const value = previous[t - count] + (count === 0 ? part.size * missCost : partCost(part, count, missCost));
         if (value < row[t]) {
           row[t] = value;
@@ -106,13 +131,21 @@ function mergeParts(node: TreeNode, nodeParts: Part[], k: number, onRow?: (choic
 function solve(node: TreeNode, k: number) {
   for (const child of node.children.values())
     solve(child, k);
-  node.best = mergeParts(node, parts(node), k);
+  const nodeParts = parts(node);
+  const free = mergeParts(node, nodeParts, k, false);
+  const branches = branchCount(node);
+  if (branches > k) {
+    node.best = free;
+    return;
+  }
+  const covered = mergeParts(node, nodeParts, k, true);
+  node.best = free.map((cost, count) => count >= branches ? covered[count] : cost);
 }
 
 function collect(node: TreeNode, count: number, k: number, selected: number[]) {
   const nodeParts = parts(node);
   const choices: Uint16Array[] = [];
-  mergeParts(node, nodeParts, k, choice => choices.push(choice));
+  mergeParts(node, nodeParts, k, count >= branchCount(node), choice => choices.push(choice));
   let remaining = count;
   for (let index = nodeParts.length - 1; index >= 0; index--) {
     const given = choices[index][remaining];

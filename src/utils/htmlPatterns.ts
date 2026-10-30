@@ -1,18 +1,27 @@
 /**
- * Groups the HTML of Axe result nodes into patterns: nodes whose markup is
- * within a small token edit distance of each other are one pattern, so ten
- * product cards that differ only in an id, a src or a label count as one
- * component to fix instead of ten unique occurrences.
+ * Groups the HTML of Axe result nodes into patterns of near-identical markup:
+ * ten product cards that differ only in an id, a src or a label text form one
+ * pattern instead of ten unique occurrences. This is a markup heuristic: nodes
+ * in one pattern often share a template, but similar markup does not prove a
+ * shared root cause, and different markup can share one.
  *
- * Distance is unit-cost edit distance over tokens (tag names, attribute names,
- * attribute values, text words) rather than characters: changing `id="a1"` to
- * `id="b22"` is one edit, not three. Axe node HTML is short, so a banded
- * dynamic program with early exit is cheaper here than any asymptotically
- * faster scheme.
+ * Two nodes can share a pattern only when their root element, its `type`
+ * (inputs default to text) and its `role` match; within that, they share one
+ * when their markup is within a small edit distance over tokens (tag names,
+ * attribute names, attribute values, text words) rather than characters, so
+ * changing `id="a1"` to `id="b22"` is one edit, not three. Only the first
+ * tokens of a node are compared (see maxTokens); differences past them are
+ * invisible. Axe node HTML is short, so a banded dynamic program with early
+ * exit is cheaper here than any asymptotically faster scheme.
+ *
+ * Similarity is not transitive, so grouping depends on the order nodes are
+ * compared in. Nodes are therefore buffered and grouped in a canonical sort
+ * order, which makes the result depend only on the set of nodes, not on the
+ * order a crawl found them in.
  */
 
 // Long nodes are compared on their opening markup, where a component's
-// identity lives; descendants past this point rarely change the pattern.
+// identity usually lives; differences past this many tokens are not seen.
 const maxTokens = 48;
 // Two nodes are one pattern when at most this fraction of the longer token
 // list has to change (minimum one edit).
@@ -70,40 +79,95 @@ function similar(a: readonly string[], b: readonly string[]): boolean {
   return withinEditDistance(a, b, limit);
 }
 
+const openingTag = /^\s*<([a-z][\w:-]*)([^>]*)/i;
+const semanticAttribute = /(?:^|\s)(type|role)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi;
+
+/** The root element, its type and its role, which fuzzy matching may not change. @public */
+export function semanticSignature(html: string): string {
+  const match = openingTag.exec(html);
+  if (!match)
+    return '';
+  const tag = match[1].toLowerCase();
+  const attributes = new Map<string, string>();
+  for (const attribute of match[2].matchAll(semanticAttribute)) {
+    const name = attribute[1].toLowerCase();
+    if (!attributes.has(name))
+      attributes.set(name, (attribute[2] ?? attribute[3] ?? attribute[4]).trim().toLowerCase());
+  }
+  const type = attributes.get('type') ?? (tag === 'input' ? 'text' : '');
+  return `${tag} type=${type} role=${attributes.get('role') ?? ''}`;
+}
+
+type Entry<T> = { key: string, signature: string, tokens: string[], item: T };
+
+const byKey = <T>(first: Entry<T>, second: Entry<T>) => (first.key < second.key ? -1 : first.key > second.key ? 1 : 0);
+
 /**
- * Assigns each added HTML snippet to the first stored pattern it is similar
- * to, or opens a new pattern. At most `maxPatterns` are stored, which bounds
- * the work per node; once full, a node that matches none of them is not
- * grouped and `capped` turns true, so `count` is then a lower bound.
+ * Collects a rule's unique nodes, then groups them in canonical order: each
+ * node joins the first pattern whose leading node it is similar to, or opens a
+ * new one. At most `maxNodes` nodes (the first in canonical order) and
+ * `maxPatterns` patterns are kept, which bounds memory and the comparisons per
+ * node; when either limit cuts in, `capped` is true and the count covers only
+ * part of the nodes.
  */
-export class HtmlPatternGroups {
+export class HtmlPatternGroups<T> {
   private readonly _maxPatterns: number;
-  private readonly _representatives: string[][] = [];
-  private _capped = false;
+  private readonly _maxNodes: number;
+  private readonly _entries = new Map<string, Entry<T>>();
+  private _truncated = false;
 
-  constructor(maxPatterns: number) {
+  constructor(maxPatterns: number, maxNodes: number) {
     this._maxPatterns = maxPatterns;
+    this._maxNodes = maxNodes;
   }
 
-  /** The index of the node's pattern, or -1 when it fits none and the store is full. */
-  add(html: string): number {
+  /** Records a node; `item` is what `summarize` returns as its sample. */
+  add(html: string, item: T) {
     const tokens = htmlTokens(html);
-    const index = this._representatives.findIndex(representative => similar(representative, tokens));
-    if (index !== -1)
-      return index;
-    if (this._representatives.length >= this._maxPatterns) {
-      this._capped = true;
-      return -1;
+    const signature = semanticSignature(html);
+    const key = `${signature}\u0001${tokens.join('\u0000')}`;
+    if (this._entries.has(key))
+      return;
+    this._entries.set(key, { key, signature, tokens, item });
+    // Pruning to the canonical first maxNodes keeps the result independent of
+    // arrival order: a node dropped here could never rank among them later.
+    if (this._entries.size > 2 * this._maxNodes)
+      this._prune();
+  }
+
+  private _prune() {
+    const kept = [...this._entries.values()].sort(byKey).slice(0, this._maxNodes);
+    this._truncated = true;
+    this._entries.clear();
+    for (const entry of kept)
+      this._entries.set(entry.key, entry);
+  }
+
+  /** The pattern count, and samples that show as many different patterns as they can. */
+  summarize(maxSamples: number): { count: number, capped: boolean, samples: T[] } {
+    if (this._entries.size > this._maxNodes)
+      this._prune();
+    const leaders = new Map<string, Entry<T>[]>();
+    const firsts: Entry<T>[] = [];
+    const rest: Entry<T>[] = [];
+    let capped = this._truncated;
+    for (const entry of [...this._entries.values()].sort(byKey)) {
+      const sameSignature = leaders.get(entry.signature) ?? [];
+      if (sameSignature.some(leader => similar(leader.tokens, entry.tokens))) {
+        rest.push(entry);
+      } else if (firsts.length < this._maxPatterns) {
+        sameSignature.push(entry);
+        leaders.set(entry.signature, sameSignature);
+        firsts.push(entry);
+      } else {
+        capped = true;
+        rest.push(entry);
+      }
     }
-    this._representatives.push(tokens);
-    return this._representatives.length - 1;
-  }
-
-  get count(): number {
-    return this._representatives.length;
-  }
-
-  get capped(): boolean {
-    return this._capped;
+    return {
+      count: firsts.length,
+      capped,
+      samples: [...firsts, ...rest].slice(0, maxSamples).map(entry => entry.item),
+    };
   }
 }
