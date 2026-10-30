@@ -122,6 +122,7 @@ Crawl and aggregate accessibility violations across multiple pages. Writes a JSO
 **Key options:**
 - `maxPages` (1-200, default 25)
 - `maxDepth` (0-5, default 2, links strategy only)
+- `pageSelection` - `discovery` (default) or `representative`; with `sitemap`/`provided` lists longer than `maxPages`, `representative` gives every section a page when `maxPages` covers the number of sections, then fills the rest by URL template (path and query) instead of taking the first URLs listed
 - `includeSubdomains` - Allow subdomains when `sameOriginOnly=true`
 - `excludePathPatterns` - Regex patterns to skip (default: `logout|signout`)
 - `reportFile` - Custom output filename
