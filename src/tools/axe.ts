@@ -606,6 +606,9 @@ export async function runAxeScan(page: Page, options: AxeScanOptions = {}): Prom
     : { runOnly: { type: 'tag', values: [...(options.tags ?? defaultAxeTags)] } };
   if (!rules.length && options.disableRules?.length)
     axeOptions.rules = Object.fromEntries(options.disableRules.map(rule => [rule, { enabled: false }]));
+  // Only rule ids are kept for passing and inapplicable rules, so axe need not
+  // build a selector and HTML snippet for every passing node.
+  axeOptions.resultTypes = ['violations', 'incomplete'];
 
   // exclude wins over include for overlapping subtrees, which is what "scan
   // this component minus the widget" needs.
