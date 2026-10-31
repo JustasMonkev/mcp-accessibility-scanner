@@ -63,6 +63,20 @@ it.each([false, true])('renders URL parameters through real MCP without changing
     expect(output).toContain('keep=visible');
     expect(output).toContain('c%6Fde=synthetic-encoded-secret');
 
+    const network = await client.callTool({ name: 'browser_network_requests', arguments: {} });
+    const networkText = JSON.stringify(network);
+    const index = Number(networkText.match(/\[(\d+)\] \[GET\] http:\/\/redaction\.test\/start\?/)![1]);
+    const details = JSON.stringify(await client.callTool({ name: 'browser_network_request', arguments: { index } }));
+    for (const text of [networkText, details]) {
+      if (enabled) {
+        expect(text).not.toContain('synthetic-query-secret');
+        expect(text).toContain('/start?code=REDACTED&');
+      } else {
+        expect(text).toContain('synthetic-query-secret');
+      }
+      expect(text).toContain('keep=visible');
+    }
+
     if (enabled) {
       const audit = await client.callTool({ name: 'audit_keyboard', arguments: { maxTabs: 1, checkSkipLink: false, reportFile: 'redaction-audit.json' } });
       expect(audit.isError, JSON.stringify(audit)).not.toBe(true);
