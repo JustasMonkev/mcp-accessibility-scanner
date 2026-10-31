@@ -211,8 +211,16 @@ function createHarness(
   };
 }
 
+const auditSiteTool = auditSiteTools.find(entry => entry.schema.name === 'audit_site')!;
+
 describe('audit_site tool', () => {
-  const tool = auditSiteTools.find(entry => entry.schema.name === 'audit_site')!;
+  // The harness drives every crawl tab through one mock page with one current
+  // URL, so these tests crawl one page at a time; concurrent crawls have their
+  // own multi-tab harness below.
+  const tool = {
+    schema: auditSiteTool.schema,
+    handle: (context: any, params: any, response: any) => auditSiteTool.handle(context, { ...params, concurrency: 1 }, response),
+  };
   let writeFileSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -2474,5 +2482,194 @@ describe('audit_site tool', () => {
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     expect(report.sessionLosses).toEqual([]);
+  });
+});
+
+// Every crawl tab gets a page of its own, with its own current URL, and
+// navigations take as long as `delayFor` says, so pages finish out of order.
+function createConcurrentHarness(linkMap: Record<string, string[]>, options: {
+  delayFor?: (url: string) => number;
+  cookies?: () => { name: string }[];
+  onNavigate?: (url: string) => void;
+  newTabFails?: (opened: number) => boolean;
+} = {}) {
+  let navigating = 0;
+  let maxNavigating = 0;
+  let opened = 0;
+  const cookies = vi.fn(async () => (options.cookies?.() ?? []).map(cookie => ({ domain: 'example.com', path: '/', expires: -1, ...cookie })));
+  const originalTab: any = { page: { url: () => 'https://example.com/' }, modalStates: () => [] };
+  const tabs: any[] = [originalTab];
+  const createTab = () => {
+    let currentUrl = 'about:blank';
+    const mainFrame = { url: () => currentUrl };
+    const page = {
+      mainFrame: () => mainFrame,
+      addInitScript: vi.fn(async () => ({ dispose: async () => {} })),
+      on: vi.fn(),
+      off: vi.fn(),
+      context: () => ({ cookies }),
+      url: () => currentUrl,
+      evaluate: vi.fn(async (_callback: unknown, selector?: string) => ({
+        title: `Title for ${currentUrl}`,
+        links: selector ? linkMap[currentUrl] ?? [] : [],
+      })),
+    };
+    return {
+      page,
+      navigate: vi.fn(async (url: string) => {
+        navigating++;
+        maxNavigating = Math.max(maxNavigating, navigating);
+        await new Promise(resolve => setTimeout(resolve, options.delayFor?.(url) ?? 0));
+        navigating--;
+        currentUrl = url;
+        options.onNavigate?.(url);
+      }),
+      waitForTimeout: vi.fn(async () => undefined),
+      modalStates: () => [],
+      on: vi.fn(),
+      off: vi.fn(),
+    };
+  };
+  const context: any = {
+    currentTabOrDie: () => originalTab,
+    tabs: () => tabs,
+    newTab: vi.fn(async () => {
+      if (options.newTabFails?.(opened))
+        throw new Error('Could not open a tab');
+      opened++;
+      const tab: any = createTab();
+      tab.context = context;
+      tabs.push(tab);
+      return tab;
+    }),
+    closeTab: vi.fn(async (index: number) => {
+      tabs.splice(index, 1);
+      return '';
+    }),
+    selectTab: vi.fn(async () => undefined),
+    outputFile: vi.fn(async () => '/tmp/audit-site.json'),
+    config: { browser: { launchOptions: {}, contextOptions: {} }, network: {} },
+    options: { browserContextFactory: { name: 'chromium' } },
+  };
+  originalTab.context = context;
+  const response = new Response(context, 'audit_site', {});
+  return { context, response, tabs, originalTab, maxNavigating: () => maxNavigating };
+}
+
+describe('audit_site concurrent crawl', () => {
+  let writeFileSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => {
+      const url = page.url();
+      const violations = [createViolation('image-alt', `<img src="${new URL(url).pathname}.png">`)];
+      if (url.includes('b'))
+        violations.push(createViolation('label', '<input id="shared">'));
+      return createAxeResult(url, violations, [createViolation('color-contrast', `<p>${url}</p>`)]);
+    });
+  });
+
+  const site: Record<string, string[]> = {
+    'https://example.com/': ['https://example.com/a', 'https://example.com/b', 'https://example.com/c'],
+    'https://example.com/a': ['https://example.com/a1', 'https://example.com/a2', 'https://example.com/b'],
+    'https://example.com/b': ['https://example.com/b1', 'https://example.com/b2', 'https://example.com/a1'],
+    'https://example.com/c': ['https://example.com/c1', 'https://example.com/c2'],
+    'https://example.com/a1': ['https://example.com/deep'],
+  };
+  // Early pages are slow, so later pages finish first and their links would be
+  // queued first if discovery followed completion order.
+  const delayFor = (url: string) => ({ 'https://example.com/a': 30, 'https://example.com/b': 20, 'https://example.com/c': 1 } as Record<string, number>)[url] ?? 5;
+
+  async function crawl(concurrency: number) {
+    writeFileSpy.mockClear();
+    const harness = createConcurrentHarness(site, { delayFor });
+    await auditSiteTool.handle(harness.context, auditSiteTool.schema.inputSchema.parse({
+      startUrl: 'https://example.com/', maxPages: 7, maxDepth: 2, waitAfterNavigationMs: 0, concurrency,
+    }), harness.response);
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    delete report.metadata.startedAt;
+    delete report.metadata.finishedAt;
+    delete report.metadata.durationMs;
+    delete report.metadata.options.concurrency;
+    return { report, harness };
+  }
+
+  it('scans the same pages and reports the same findings as a one-tab crawl', async () => {
+    const sequential = await crawl(1);
+    const concurrent = await crawl(4);
+
+    expect(concurrent.report).toEqual(sequential.report);
+    expect(concurrent.report.pages.map((page: any) => page.url)).toEqual([
+      'https://example.com/',
+      'https://example.com/a',
+      'https://example.com/b',
+      'https://example.com/c',
+      'https://example.com/a1',
+      'https://example.com/a2',
+      'https://example.com/b1',
+    ]);
+    expect(sequential.harness.maxNavigating()).toBe(1);
+    expect(concurrent.harness.maxNavigating()).toBeGreaterThan(1);
+    expect(concurrent.harness.maxNavigating()).toBeLessThanOrEqual(4);
+  });
+
+  it('opens at most one tab per worker, closes them all and reselects the caller tab', async () => {
+    const { harness } = await crawl(3);
+
+    expect(harness.context.newTab).toHaveBeenCalledTimes(3);
+    expect(harness.tabs).toEqual([harness.originalTab]);
+    expect(harness.context.selectTab).toHaveBeenLastCalledWith(0);
+  });
+
+  it('opens no more tabs than there are pages', async () => {
+    const harness = createConcurrentHarness({});
+    await auditSiteTool.handle(harness.context, auditSiteTool.schema.inputSchema.parse({
+      strategy: 'provided', urls: ['https://example.com/a', 'https://example.com/b'], waitAfterNavigationMs: 0, concurrency: 8,
+    }), harness.response);
+
+    expect(harness.context.newTab).toHaveBeenCalledTimes(2);
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.summary.totals.scannedPages).toBe(2);
+    expect(report.metadata.options.concurrency).toBe(8);
+  });
+
+  it('names the pages loading at the same time when a session cookie disappears', async () => {
+    let signedIn = true;
+    const harness = createConcurrentHarness({}, {
+      delayFor: url => url.endsWith('/close-account') ? 1 : 20,
+      cookies: () => signedIn ? [{ name: 'sid' }] : [],
+      onNavigate: url => {
+        if (url.endsWith('/close-account'))
+          signedIn = false;
+      },
+    });
+    await auditSiteTool.handle(harness.context, auditSiteTool.schema.inputSchema.parse({
+      strategy: 'provided',
+      urls: ['https://example.com/slow', 'https://example.com/close-account'],
+      waitAfterNavigationMs: 0,
+      concurrency: 2,
+    }), harness.response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.sessionLosses).toEqual([{
+      url: 'https://example.com/close-account',
+      cookies: ['sid'],
+      concurrentUrls: ['https://example.com/slow'],
+    }]);
+    expect(harness.response.result()).toContain('disappeared while loading https://example.com/close-account, or one of the pages loading at the same time: https://example.com/slow.');
+  });
+
+  it('fails the crawl and still closes every tab when a worker cannot open its tab', async () => {
+    const harness = createConcurrentHarness(site, { delayFor, newTabFails: opened => opened === 1 });
+
+    await expect(auditSiteTool.handle(harness.context, auditSiteTool.schema.inputSchema.parse({
+      startUrl: 'https://example.com/', maxPages: 7, waitAfterNavigationMs: 0, concurrency: 2,
+    }), harness.response)).rejects.toThrow('Could not open a tab');
+
+    expect(harness.tabs).toEqual([harness.originalTab]);
+    expect(harness.context.selectTab).toHaveBeenLastCalledWith(0);
   });
 });
