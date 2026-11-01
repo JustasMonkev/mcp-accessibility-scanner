@@ -138,7 +138,7 @@ export function semanticSignature(html: string): string {
   const read = (name: string) => attributes.get(name)?.trim().toLowerCase();
   // An input with no or an empty type is a text input.
   const type = read('type') || (tag === 'input' ? 'text' : '');
-  return `${tag} type=${type} role=${read('role') ?? ''}`;
+  return JSON.stringify([tag, type, read('role') ?? '']);
 }
 
 type Entry<T> = { key: string, signature: string, tokens: string[], item: T };
@@ -168,7 +168,7 @@ export class HtmlPatternGroups<T> {
   add(html: string, item: T) {
     const tokens = htmlTokens(html);
     const signature = semanticSignature(html);
-    const key = `${signature}\u0001${tokens.join('\u0000')}`;
+    const key = JSON.stringify([signature, tokens]);
     if (this._entries.has(key))
       return;
     this._entries.set(key, { key, signature, tokens, item });
