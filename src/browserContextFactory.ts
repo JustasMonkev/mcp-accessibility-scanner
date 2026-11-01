@@ -28,6 +28,9 @@ import { logUnhandledError, testDebug } from './utils/log.js';
 import { createGuid, createHash, createShortGuid } from './utils/guid.js';
 import { outputFile  } from './config.js';
 import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
+import { settleWithin } from './utils/timeout.js';
+
+const defaultCdpTimeoutMs = 30_000;
 
 import type { FullConfig } from './config.js';
 
@@ -384,7 +387,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
         testDebug(`cdp-launch stderr: ${String(data).trimEnd()}`);
       });
 
-      browser = await this._waitForBrowser(endpoint, clientInfo, childProcess, cdpLaunch.startupTimeoutMs ?? 30000);
+      browser = await this._waitForBrowser(endpoint, clientInfo, childProcess, cdpLaunch.startupTimeoutMs ?? defaultCdpTimeoutMs);
     } catch (error) {
       if (pinnedLaunch)
         pinnedLaunch.closing = true;
@@ -393,53 +396,33 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
       if (allocatedPort !== undefined)
         reservedPorts.delete(allocatedPort);
     }
-    let browserContext: playwright.BrowserContext;
-    try {
-      if (this.config.browser.isolated) {
-        browserContext = await browser.newContext(this.config.browser.contextOptions);
-      } else {
-        const existing = browser.contexts()[0];
-        if (existing) {
-          assertReusedContextStorageStateSupported(this.config);
-          browserContext = existing;
-        } else {
-          browserContext = await browser.newContext(this.config.browser.contextOptions);
-        }
-      }
-    } catch (error) {
+    const closeLaunchedApp = async () => {
       if (pinnedLaunch)
         pinnedLaunch.closing = true;
       await browser.close().catch(logUnhandledError);
       childProcess.kill('SIGTERM');
+    };
+    try {
+      return { browserContext: await this._contextFor(browser), close: closeLaunchedApp };
+    } catch (error) {
+      await closeLaunchedApp();
       throw error;
     }
-    return {
-      browserContext,
-      close: async () => {
-        if (pinnedLaunch)
-          pinnedLaunch.closing = true;
-        await browser.close().catch(logUnhandledError);
-        childProcess.kill('SIGTERM');
-      }
-    };
+  }
+
+  private async _contextFor(browser: playwright.Browser): Promise<playwright.BrowserContext> {
+    const existing = this.config.browser.isolated ? undefined : browser.contexts()[0];
+    if (!existing)
+      return await browser.newContext(this.config.browser.contextOptions);
+    assertReusedContextStorageStateSupported(this.config);
+    return existing;
   }
 
   private async _waitForClosingPinnedPortHolder(cdpLaunch: NonNullable<FullConfig['browser']['cdpLaunch']>): Promise<void> {
     const previous = this._pinnedPortLaunch;
     if (!previous?.closing)
       return;
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      await Promise.race([
-        previous.exited,
-        new Promise<void>(resolve => {
-          timer = setTimeout(resolve, cdpLaunch.startupTimeoutMs ?? 30000);
-          timer.unref?.();
-        }),
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
+    await settleWithin(previous.exited, cdpLaunch.startupTimeoutMs ?? defaultCdpTimeoutMs);
   }
 
   private _assertPinnedPortFree(cdpLaunch: NonNullable<FullConfig['browser']['cdpLaunch']>): void {
@@ -464,7 +447,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
   private async _waitForBrowser(endpoint: string, clientInfo: ClientInfo, childProcess: ReturnType<typeof spawn>, startupTimeoutMs: number): Promise<playwright.Browser> {
     const deadline = Date.now() + startupTimeoutMs;
     const headers = cdpConnectHeaders(clientInfo, this.config.browser);
-    const cdpTimeout = this.config.browser.cdpTimeout ?? 30000;
+    const cdpTimeout = this.config.browser.cdpTimeout ?? defaultCdpTimeoutMs;
     let attachTimedOut = false;
     for (;;) {
       const remaining = Math.max(1, deadline - Date.now());

@@ -21,6 +21,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
 import { InProcessTransport } from './inProcessTransport.js';
 import { createUrlRedactor, redactToolResult } from '../utils/urlRedaction.js';
+import { rejectAfterTimeout } from '../utils/timeout.js';
 
 import type { CacheHint, Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
 export type { Server } from '@modelcontextprotocol/server';
@@ -166,18 +167,8 @@ const startHeartbeat = (server: Server) => {
     return;
 
   const beat = () => {
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const ping = server.request({ method: 'ping' }, { timeout }).finally(() => {
-      if (timeoutId)
-        clearTimeout(timeoutId);
-    });
-    Promise.race([
-      ping,
-      new Promise((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error('ping timeout')), timeout);
-      }),
-    ]).then(() => {
-      setTimeout(beat, 3000);
+    rejectAfterTimeout(server.request({ method: 'ping' }, { timeout }), timeout, 'ping timeout').then(() => {
+      setTimeout(beat, heartbeatIntervalMs);
     }).catch(error => {
       if (ProtocolError.isInstance(error) && error.code === ProtocolErrorCode.MethodNotFound)
         return;
@@ -189,6 +180,7 @@ const startHeartbeat = (server: Server) => {
 };
 
 const defaultPingTimeout = 5000;
+const heartbeatIntervalMs = 3000;
 
 const pingTimeout = (): number => {
   const value = process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS;

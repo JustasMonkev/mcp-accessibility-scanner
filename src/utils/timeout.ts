@@ -43,3 +43,24 @@ export async function rejectAfterTimeout<T>(promise: Promise<T>, timeoutMs: numb
     clearTimeout(timer);
   }
 }
+
+export async function rejectOnAbort<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  signal?.throwIfAborted();
+  if (!signal)
+    return run();
+  let onAbort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      run(),
+      new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted)
+          onAbort();
+      }),
+    ]);
+  } finally {
+    if (onAbort)
+      signal.removeEventListener('abort', onAbort);
+  }
+}
