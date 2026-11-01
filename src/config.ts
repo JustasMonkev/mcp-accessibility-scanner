@@ -557,8 +557,7 @@ function proxySettingsFromString(proxy: string): NonNullable<LaunchOptions['prox
         password: decodeProxyCredential(url.password),
       };
     }
-  } catch {
-  }
+  } catch {}
   return { server: proxy };
 }
 

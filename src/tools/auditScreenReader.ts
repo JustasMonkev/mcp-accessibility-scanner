@@ -118,54 +118,93 @@ function describe(node: ScreenReaderNode): string {
   return `${node.role} ${label}${node.selector ? ` (${node.selector})` : ''}`;
 }
 
-function overlapRatio(a: Rect, b: Rect, axis: 'x' | 'y'): number {
-  const aStart = axis === 'x' ? a.x : a.y;
-  const bStart = axis === 'x' ? b.x : b.y;
-  const aSize = axis === 'x' ? a.width : a.height;
-  const bSize = axis === 'x' ? b.width : b.height;
-  const overlap = Math.min(aStart + aSize, bStart + bSize) - Math.max(aStart, bStart);
-  const smaller = Math.min(aSize, bSize);
+type Axis = 'x' | 'y';
+
+function spanOf(rect: Rect, axis: Axis): { start: number, size: number, end: number } {
+  const start = axis === 'x' ? rect.x : rect.y;
+  const size = axis === 'x' ? rect.width : rect.height;
+  return { start, size, end: start + size };
+}
+
+function overlapRatio(a: Rect, b: Rect, axis: Axis): number {
+  const first = spanOf(a, axis);
+  const second = spanOf(b, axis);
+  const overlap = Math.min(first.end, second.end) - Math.max(first.start, second.start);
+  const smaller = Math.min(first.size, second.size);
   return smaller <= 0 ? 0 : overlap / smaller;
 }
 
-function countBands(rects: Rect[], axis: 'x' | 'y'): number {
-  const sorted = [...rects].sort((first, second) => axis === 'x'
-    ? first.x - second.x || first.width - second.width
-    : first.y - second.y || first.height - second.height);
-  const ordered = sorted.filter((rect, index) => index === 0 || (axis === 'x'
-    ? rect.x !== sorted[index - 1].x || rect.width !== sorted[index - 1].width
-    : rect.y !== sorted[index - 1].y || rect.height !== sorted[index - 1].height));
-  const band = ordered.map((_, index) => index);
-  const rootOf = (index: number): number => {
+function uniqueSpansInOrder(rects: Rect[], axis: Axis): Rect[] {
+  const sorted = [...rects].sort((first, second) => spanOf(first, axis).start - spanOf(second, axis).start || spanOf(first, axis).size - spanOf(second, axis).size);
+  return sorted.filter((rect, index) => {
+    if (index === 0)
+      return true;
+    const current = spanOf(rect, axis);
+    const previous = spanOf(sorted[index - 1], axis);
+    return current.start !== previous.start || current.size !== previous.size;
+  });
+}
+
+class DisjointSets {
+  private readonly _parent: number[];
+  count: number;
+
+  constructor(size: number) {
+    this._parent = Array.from({ length: size }, (_, index) => index);
+    this.count = size;
+  }
+
+  union(first: number, second: number): void {
+    const firstRoot = this._root(first);
+    const secondRoot = this._root(second);
+    if (firstRoot === secondRoot)
+      return;
+    this._parent[secondRoot] = firstRoot;
+    this.count--;
+  }
+
+  private _root(index: number): number {
     let root = index;
-    while (band[root] !== root)
-      root = band[root];
-    while (band[index] !== root) {
-      const next = band[index];
-      band[index] = root;
+    while (this._parent[root] !== root)
+      root = this._parent[root];
+    while (this._parent[index] !== root) {
+      const next = this._parent[index];
+      this._parent[index] = root;
       index = next;
     }
     return root;
-  };
-  let components = ordered.length;
+  }
+}
+
+function countBands(rects: Rect[], axis: Axis): number {
+  const ordered = uniqueSpansInOrder(rects, axis);
+  const bands = new DisjointSets(ordered.length);
   for (let i = 0; i < ordered.length; i++) {
-    const end = axis === 'x' ? ordered[i].x + ordered[i].width : ordered[i].y + ordered[i].height;
-    for (let j = i + 1; j < ordered.length; j++) {
-      const nextStart = axis === 'x' ? ordered[j].x : ordered[j].y;
-      if (nextStart >= end)
-        break;
-      if (overlapRatio(ordered[i], ordered[j], axis) >= bandOverlapRatio) {
-        const first = rootOf(i);
-        const second = rootOf(j);
-        if (first !== second) {
-          band[second] = first;
-          if (--components === 1)
-            return 1;
-        }
-      }
+    const end = spanOf(ordered[i], axis).end;
+    for (let j = i + 1; j < ordered.length && spanOf(ordered[j], axis).start < end; j++) {
+      if (overlapRatio(ordered[i], ordered[j], axis) < bandOverlapRatio)
+        continue;
+      bands.union(i, j);
+      if (bands.count === 1)
+        return 1;
     }
   }
-  return components;
+  return bands.count;
+}
+
+function groupBy<T, K>(items: Iterable<T>, keyOf: (item: T) => K | undefined): Map<K, T[]> {
+  const groups = new Map<K, T[]>();
+  for (const item of items) {
+    const key = keyOf(item);
+    if (key === undefined)
+      continue;
+    const group = groups.get(key);
+    if (group)
+      group.push(item);
+    else
+      groups.set(key, [item]);
+  }
+  return groups;
 }
 
 function isLayoutRelevant(node: ScreenReaderNode): boolean {
@@ -241,10 +280,7 @@ function checkAccessibleNames(nodes: ScreenReaderNode[], push: (finding: ScreenR
     }
 
     const visibleText = node.visibleText?.trim() ?? '';
-    const normalizedVisible = normalizeText(visibleText);
-    const isLeaf = node.childCount === 0;
-    if (labelInNameRoles.has(node.role) && isLeaf && normalizedVisible && visibleText.length <= 60
-        && /[\p{L}\p{N}]/u.test(visibleText) && !normalizeText(name).includes(normalizedVisible)) {
+    if (visibleLabelMissingFromName(node, visibleText, name)) {
       push({
         ...base,
         check: 'label-in-name-mismatch',
@@ -256,21 +292,26 @@ function checkAccessibleNames(nodes: ScreenReaderNode[], push: (finding: ScreenR
   }
 }
 
+function visibleLabelMissingFromName(node: ScreenReaderNode, visibleText: string, name: string): boolean {
+  const normalizedVisible = normalizeText(visibleText);
+  const isLeaf = node.childCount === 0;
+  return labelInNameRoles.has(node.role)
+    && isLeaf
+    && !!normalizedVisible
+    && visibleText.length <= 60
+    && /[\p{L}\p{N}]/u.test(visibleText)
+    && !normalizeText(name).includes(normalizedVisible);
+}
+
 function checkDuplicateNames(nodes: ScreenReaderNode[], push: (finding: ScreenReaderFinding) => void) {
-  const byParent = new Map<string, ScreenReaderNode[]>();
-  for (const node of nodes) {
+  const siblingsWithSameName = groupBy(nodes, node => {
     const normalized = normalizeText(node.name);
     if (!node.ref || node.ariaHidden || !normalized || !labelInNameRoles.has(node.role))
-      continue;
-    const key = `${node.parent ?? -1}|${node.role}|${normalized}`;
-    const group = byParent.get(key);
-    if (group)
-      group.push(node);
-    else
-      byParent.set(key, [node]);
-  }
+      return undefined;
+    return `${node.parent ?? -1}|${node.role}|${normalized}`;
+  });
 
-  for (const group of byParent.values()) {
+  for (const group of siblingsWithSameName.values()) {
     const targets = new Set(group.map(node => node.href));
     if (group.length < 2 || targets.has(null) || targets.size < 2)
       continue;
@@ -288,16 +329,7 @@ function checkDuplicateNames(nodes: ScreenReaderNode[], push: (finding: ScreenRe
 }
 
 function checkReadingOrder(nodes: ScreenReaderNode[], push: (finding: ScreenReaderFinding) => void) {
-  const childrenByParent = new Map<number, ScreenReaderNode[]>();
-  for (const node of nodes) {
-    if (node.parent === null || !isLayoutRelevant(node))
-      continue;
-    const siblings = childrenByParent.get(node.parent);
-    if (siblings)
-      siblings.push(node);
-    else
-      childrenByParent.set(node.parent, [node]);
-  }
+  const childrenByParent = groupBy(nodes, node => node.parent !== null && isLayoutRelevant(node) ? node.parent : undefined);
 
   for (const [parentIndex, siblings] of childrenByParent) {
     if (siblings.length < 2)
@@ -348,17 +380,21 @@ function checkReadingOrder(nodes: ScreenReaderNode[], push: (finding: ScreenRead
   }
 }
 
+function inheritAriaHidden(nodes: ScreenReaderNode[]): ScreenReaderNode[] {
+  const hidden = nodes.map(node => node.ariaHidden);
+  return nodes.map((node, index) => {
+    if (node.parent !== null && hidden[node.parent])
+      hidden[index] = true;
+    return hidden[index] === node.ariaHidden ? node : { ...node, ariaHidden: true };
+  });
+}
+
 /** @public */
 export function analyzeScreenReader(
   rawNodes: ScreenReaderNode[],
   options: ScreenReaderAuditOptions
 ): ScreenReaderAuditResult {
-  const inheritedHidden = rawNodes.map(node => node.ariaHidden);
-  const nodes = restoreDistilledNames(rawNodes.map((node, index) => {
-    if (node.parent !== null && inheritedHidden[node.parent])
-      inheritedHidden[index] = true;
-    return inheritedHidden[index] === node.ariaHidden ? node : { ...node, ariaHidden: true };
-  }));
+  const nodes = restoreDistilledNames(inheritAriaHidden(rawNodes));
 
   const findings: ScreenReaderFinding[] = [];
   const countByCheck = {
@@ -409,11 +445,6 @@ const auditScreenReader = defineTabTool({
   handle: async (tab, params, response) => {
     const reportPath = await reserveReportPath(tab.context, response, params.reportFile, 'audit-screen-reader');
     const ariaNodes = parseAriaSnapshot(await tab.page.ariaSnapshot({ mode: 'ai' }));
-    const childCounts = new Map<number, number>();
-    for (const node of ariaNodes) {
-      if (node.parent !== null)
-        childCounts.set(node.parent, (childCounts.get(node.parent) ?? 0) + 1);
-    }
 
     const measurement = await measureScreenReaderElements(tab.page, ariaNodes, {
       maxElements: params.maxElements,
@@ -423,38 +454,12 @@ const auditScreenReader = defineTabTool({
     const { factsByIndex, totalElements, analyzedElements, limitations } = measurement;
     const { unresolvedElements: unresolvedCount, unmeasuredNames, truncatedElements, stoppedAtFrameWorkLimit } = limitations;
 
-    const emptyFacts: ElementFacts = {
-      tagName: null,
-      selector: null,
-      visibleText: null,
-      href: null,
-      accessibleName: null,
-      nameMeasured: false,
-      rect: null,
-      direction: 'ltr',
-      positionFixed: false,
-      floating: false,
-      ariaHidden: false,
-    };
-
-    const nodes: ScreenReaderNode[] = ariaNodes.map((node, index) => ({
-      ...node,
-      ...(factsByIndex.get(index) ?? emptyFacts),
-      ref: factsByIndex.has(index) ? node.ref : null,
-      childCount: childCounts.get(index) ?? 0,
-    }));
-
-    const result = analyzeScreenReader(nodes, {
+    const result = analyzeScreenReader(withElementFacts(ariaNodes, factsByIndex), {
       checkNames: params.checkNames,
       checkReadingOrder: params.checkReadingOrder,
       maxFindingsPerCheck: params.maxFindingsPerCheck,
     });
 
-    const elementCountSuffix = stoppedAtFrameWorkLimit !== null
-      ? ` (stopped after ${analyzedElements} of ${totalElements}: timed-out frame work reached the ${stoppedAtFrameWorkLimit}-operation limit; re-run once the page is stable)`
-      : truncatedElements > 0
-        ? ` (truncated: analyzed the first ${analyzedElements} of ${totalElements}; raise maxElements to see the rest)`
-        : '';
     const totalFindings = Object.values(result.countByCheck).reduce((sum, count) => sum + count, 0);
 
     const report = {
@@ -502,32 +507,75 @@ const auditScreenReader = defineTabTool({
       reportUri: reportResource.uri,
     });
 
-    const findingLines = result.findings.map(finding => (
-      `- [${finding.check}] WCAG ${finding.wcag} — ${finding.problem}\n  Fix: ${finding.fix}${finding.ref ? `\n  Ref: ${finding.ref}` : ''}`
-    ));
     response.addCode('// Read the accessibility tree with page.ariaSnapshot() and compared names and geometry against reading order.');
-    response.addResult([
-      `Elements analyzed: ${analyzedElements}${elementCountSuffix}`,
-      ...(unresolvedCount > 0
-        ? [`WARNING: ${unresolvedCount} of these went stale before measurement (the page re-rendered mid-audit, or their frame stopped answering) and were not evaluated; findings may be incomplete. Re-run once the page is stable.`]
-        : []),
-      ...(unmeasuredNames > 0
-        ? [`WARNING: accessible names could not be measured for ${unmeasuredNames} of these (axe-core could not be installed or run in their frame); a control named only through its children may be reported there as missing a name.`]
-        : []),
-      `Findings: ${totalFindings}`,
-      'Check | Findings',
-      '--- | ---',
-      ...Object.entries(result.countByCheck).map(([check, count]) => `${check} | ${count}`),
-      ...(result.truncatedChecks.length
-        ? ['', `Showing at most ${params.maxFindingsPerCheck} findings per check; truncated: ${result.truncatedChecks.join(', ')}`]
-        : []),
-      '',
-      ...(findingLines.length ? findingLines : ['- No screen-reader-level issues detected.']),
-      '',
-      `JSON report: ${reportResource.path}`,
-    ].join('\n'));
+    response.addResult(renderScreenReaderSummary(result, measurement, totalFindings, params.maxFindingsPerCheck, reportResource.path));
   },
 });
+
+const emptyFacts: ElementFacts = {
+  tagName: null,
+  selector: null,
+  visibleText: null,
+  href: null,
+  accessibleName: null,
+  nameMeasured: false,
+  rect: null,
+  direction: 'ltr',
+  positionFixed: false,
+  floating: false,
+  ariaHidden: false,
+};
+
+function withElementFacts(ariaNodes: AriaTreeNode[], factsByIndex: ReadonlyMap<number, ElementFacts>): ScreenReaderNode[] {
+  const childCounts = new Map<number, number>();
+  for (const node of ariaNodes) {
+    if (node.parent !== null)
+      childCounts.set(node.parent, (childCounts.get(node.parent) ?? 0) + 1);
+  }
+  return ariaNodes.map((node, index) => ({
+    ...node,
+    ...(factsByIndex.get(index) ?? emptyFacts),
+    ref: factsByIndex.has(index) ? node.ref : null,
+    childCount: childCounts.get(index) ?? 0,
+  }));
+}
+
+type Measurement = Awaited<ReturnType<typeof measureScreenReaderElements>>;
+
+function elementCountSuffix({ totalElements, analyzedElements, limitations }: Measurement): string {
+  if (limitations.stoppedAtFrameWorkLimit !== null)
+    return ` (stopped after ${analyzedElements} of ${totalElements}: timed-out frame work reached the ${limitations.stoppedAtFrameWorkLimit}-operation limit; re-run once the page is stable)`;
+  if (limitations.truncatedElements > 0)
+    return ` (truncated: analyzed the first ${analyzedElements} of ${totalElements}; raise maxElements to see the rest)`;
+  return '';
+}
+
+function renderScreenReaderSummary(result: ScreenReaderAuditResult, measurement: Measurement, totalFindings: number, maxFindingsPerCheck: number, reportPath: string): string {
+  const { unresolvedElements, unmeasuredNames } = measurement.limitations;
+  const findingLines = result.findings.map(finding => (
+    `- [${finding.check}] WCAG ${finding.wcag} — ${finding.problem}\n  Fix: ${finding.fix}${finding.ref ? `\n  Ref: ${finding.ref}` : ''}`
+  ));
+  return [
+    `Elements analyzed: ${measurement.analyzedElements}${elementCountSuffix(measurement)}`,
+    ...(unresolvedElements > 0
+      ? [`WARNING: ${unresolvedElements} of these went stale before measurement (the page re-rendered mid-audit, or their frame stopped answering) and were not evaluated; findings may be incomplete. Re-run once the page is stable.`]
+      : []),
+    ...(unmeasuredNames > 0
+      ? [`WARNING: accessible names could not be measured for ${unmeasuredNames} of these (axe-core could not be installed or run in their frame); a control named only through its children may be reported there as missing a name.`]
+      : []),
+    `Findings: ${totalFindings}`,
+    'Check | Findings',
+    '--- | ---',
+    ...Object.entries(result.countByCheck).map(([check, count]) => `${check} | ${count}`),
+    ...(result.truncatedChecks.length
+      ? ['', `Showing at most ${maxFindingsPerCheck} findings per check; truncated: ${result.truncatedChecks.join(', ')}`]
+      : []),
+    '',
+    ...(findingLines.length ? findingLines : ['- No screen-reader-level issues detected.']),
+    '',
+    `JSON report: ${reportPath}`,
+  ].join('\n');
+}
 
 export default [
   auditScreenReader,

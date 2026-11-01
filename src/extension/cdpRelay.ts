@@ -412,8 +412,7 @@ async function findPlaywrightExtensionProfile(userDataDir: string): Promise<stri
     const lastUsed = localState?.profile?.last_used;
     if (typeof lastUsed === 'string' && profiles.includes(lastUsed))
       profiles = [lastUsed, ...profiles.filter(profile => profile !== lastUsed)];
-  } catch {
-  }
+  } catch {}
 
   for (const profile of profiles) {
     if (await isExtensionInstalledInProfile(userDataDir, profile))

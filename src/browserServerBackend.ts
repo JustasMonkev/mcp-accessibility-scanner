@@ -227,8 +227,7 @@ export class BrowserServerBackend implements ServerBackend {
     if (name === 'browser_session_close' && typeof parsedArguments.browserSessionId === 'string') {
       try {
         closingSessionContext = this._sessionRegistry!.resolve(parsedArguments.browserSessionId);
-      } catch {
-      }
+      } catch {}
     }
     const response = new Response(context, name, responseArguments, requestContext, context.currentTab()?.modalStates());
     const endToolCall = context.beginToolCall(name);

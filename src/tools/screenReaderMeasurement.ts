@@ -53,50 +53,46 @@ export function collectElementFacts(
 ): ElementFacts[] {
   const elements = Array.isArray(input) ? input : input.elements;
   const measureNames = Array.isArray(input) ? true : input.measureNames;
-  const styleCache = new Map<Element, CSSStyleDeclaration>();
-  const rectCache = new Map<Element, DOMRect>();
-  const getStyle = (element: Element) => {
-    let style = styleCache.get(element);
-    if (!style) {
-      style = window.getComputedStyle(element);
-      styleCache.set(element, style);
-    }
-    return style;
+  const memoize = <V>(compute: (element: Element) => V) => {
+    const cache = new Map<Element, V>();
+    return (element: Element): V => {
+      if (!cache.has(element))
+        cache.set(element, compute(element));
+      return cache.get(element)!;
+    };
   };
-  const getRect = (element: Element) => {
-    let rect = rectCache.get(element);
-    if (!rect) {
-      rect = element.getBoundingClientRect();
-      rectCache.set(element, rect);
-    }
-    return rect;
-  };
+  const getStyle = memoize(element => window.getComputedStyle(element));
+  const getRect = memoize(element => element.getBoundingClientRect());
   const textCache = new Map<Element, string>();
+  const referenceBoxSize = (element: Element, style: CSSStyleDeclaration, box: string): { width: number, height: number } => {
+    const px = (value: string) => parseFloat(value) || 0;
+    if (!(element instanceof HTMLElement))
+      return getRect(element);
+    switch (box) {
+      case 'border-box':
+        return { width: element.offsetWidth, height: element.offsetHeight };
+      case 'margin-box':
+        return {
+          width: element.offsetWidth + px(style.marginLeft) + px(style.marginRight),
+          height: element.offsetHeight + px(style.marginTop) + px(style.marginBottom),
+        };
+      case 'padding-box':
+        return { width: element.clientWidth, height: element.clientHeight };
+      case 'content-box':
+        return {
+          width: element.clientWidth - px(style.paddingLeft) - px(style.paddingRight),
+          height: element.clientHeight - px(style.paddingTop) - px(style.paddingBottom),
+        };
+      default:
+        return getRect(element);
+    }
+  };
   const insetClipsEverything = (clipPath: string, element: Element, style: CSSStyleDeclaration): boolean => {
     const match = /^inset\(([^)]*)\)(?:\s+([a-z-]+))?/.exec(clipPath);
     if (!match)
       return false;
     const args = match[1].split(' round ')[0].trim().split(/\s+/);
-    const px = (value: string) => parseFloat(value) || 0;
-    const box = match[2] ?? 'border-box';
-    const rect = getRect(element);
-    let width = rect.width;
-    let height = rect.height;
-    if (element instanceof HTMLElement) {
-      if (box === 'border-box') {
-        width = element.offsetWidth;
-        height = element.offsetHeight;
-      } else if (box === 'margin-box') {
-        width = element.offsetWidth + px(style.marginLeft) + px(style.marginRight);
-        height = element.offsetHeight + px(style.marginTop) + px(style.marginBottom);
-      } else if (box === 'padding-box') {
-        width = element.clientWidth;
-        height = element.clientHeight;
-      } else if (box === 'content-box') {
-        width = element.clientWidth - px(style.paddingLeft) - px(style.paddingRight);
-        height = element.clientHeight - px(style.paddingTop) - px(style.paddingBottom);
-      }
-    }
+    const { width, height } = referenceBoxSize(element, style, match[2] ?? 'border-box');
     const toPx = (value: string, size: number) => value.endsWith('%') ? (parseFloat(value) / 100) * size : parseFloat(value);
     const top = toPx(args[0], height);
     const right = toPx(args[1] ?? args[0], width);
@@ -247,6 +243,20 @@ export function collectElementFacts(
   };
 
   const buttonInputTypes = ['submit', 'button', 'reset'];
+  const isAriaHiddenInComposedTree = (element: Element): boolean => {
+    for (let node: Element | null = element; node; node = parentInComposedTree(node)) {
+      if (node.getAttribute('aria-hidden')?.toLowerCase() === 'true')
+        return true;
+    }
+    return false;
+  };
+  const visibleTextOf = (element: SVGElement | HTMLElement): string => {
+    if (subtreeHidden(element) || ancestorSubtreeHidden(element))
+      return '';
+    if (element instanceof HTMLInputElement && buttonInputTypes.includes(element.type))
+      return visibilityHidden(element) ? '' : element.value.trim();
+    return sightedText(element);
+  };
 
   const axe = measureNames ? window.__mcpAccessibilityScannerAxe : undefined;
   let measureName = (_element: Element): { accessibleName: string | null; nameMeasured: boolean } => ({ accessibleName: null, nameMeasured: false });
@@ -262,18 +272,13 @@ export function collectElementFacts(
           return { accessibleName: null, nameMeasured: false };
         }
       };
-    } catch {
-    }
+    } catch {}
   }
 
   const collect = (element: SVGElement | HTMLElement): ElementFacts => {
     const rect = getRect(element);
     const style = getStyle(element);
-    const text = subtreeHidden(element) || ancestorSubtreeHidden(element)
-      ? ''
-      : element instanceof HTMLInputElement && buttonInputTypes.includes(element.type)
-        ? (visibilityHidden(element) ? '' : element.value.trim())
-        : sightedText(element);
+    const text = visibleTextOf(element);
     return {
       tagName: element.tagName.toLowerCase(),
       selector: `${element.tagName.toLowerCase()}${element.id ? `#${element.id}` : ''}${element.classList[0] ? `.${element.classList[0]}` : ''}`,
@@ -289,13 +294,7 @@ export function collectElementFacts(
       direction: style.direction === 'rtl' ? 'rtl' : 'ltr',
       positionFixed: style.position === 'fixed',
       floating: style.float !== 'none',
-      ariaHidden: (() => {
-        for (let node: Element | null = element; node; node = parentInComposedTree(node)) {
-          if (node.getAttribute('aria-hidden')?.toLowerCase() === 'true')
-            return true;
-        }
-        return false;
-      })(),
+      ariaHidden: isAriaHiddenInComposedTree(element),
     };
   };
 
@@ -389,91 +388,105 @@ export async function measureScreenReaderElements(
     void Promise.all(handles.map(handle => handle.dispose().catch(() => undefined)));
   };
 
-  const measureCeiling = Math.min(refIndexes.length, options.maxElements * 2);
-  for (let start = 0; start < measureCeiling && reachable < options.maxElements;) {
-    const size = Math.min(measureChunkSize, options.maxElements - reachable, measureCeiling - start);
-    const chunk = refIndexes.slice(start, start + size);
-    start += size;
-    const handles = await Promise.all(chunk.map(index =>
-      page.locator(`aria-ref=${ariaNodes[index].ref}`).elementHandle({ timeout: refResolutionTimeoutMs }).catch(() => null)));
-    const owners = onlyFrame
-      ? handles.map(handle => handle ? onlyFrame : null)
-      : await withConcurrency(handles, async handle => {
-        if (!handle)
-          return null;
-        const lookup = await runFrameWork(
-            () => handle.ownerFrame(), null, page.mainFrame(),
-            (owner, timedOut) => {
-              if (!owner || timedOut)
-                disposeHandles([handle]);
-            });
-        if (!lookup.started)
-          disposeHandles([handle]);
-        return lookup.started && !lookup.timedOut ? lookup.value : null;
-      });
+  const resolveRefHandles = (chunk: number[]) => Promise.all(chunk.map(index =>
+    page.locator(`aria-ref=${ariaNodes[index].ref}`).elementHandle({ timeout: refResolutionTimeoutMs }).catch(() => null)));
+
+  const ownerFramesOf = async (handles: (playwright.ElementHandle<SVGElement | HTMLElement> | null)[]) => {
+    if (onlyFrame)
+      return handles.map(handle => handle ? onlyFrame : null);
+    return await withConcurrency(handles, async handle => {
+      if (!handle)
+        return null;
+      const lookup = await runFrameWork(
+          () => handle.ownerFrame(), null, page.mainFrame(),
+          (owner, timedOut) => {
+            if (!owner || timedOut)
+              disposeHandles([handle]);
+          });
+      if (!lookup.started)
+        disposeHandles([handle]);
+      return lookup.started && !lookup.timedOut ? lookup.value : null;
+    });
+  };
+
+  const groupByFrame = (chunk: number[], handles: (playwright.ElementHandle<SVGElement | HTMLElement> | null)[], owners: (playwright.Frame | null)[]) => {
     const byFrame = new Map<playwright.Frame, Measured[]>();
     for (const [position, handle] of handles.entries()) {
       const frame = owners[position];
       if (!handle || !frame)
         continue;
-      const batch = byFrame.get(frame);
-      if (batch)
-        batch.push({ index: chunk[position], handle });
-      else
-        byFrame.set(frame, [{ index: chunk[position], handle }]);
+      const batch = byFrame.get(frame) ?? [];
+      batch.push({ index: chunk[position], handle });
+      byFrame.set(frame, batch);
     }
-    await withConcurrency([...byFrame], async ([frame, batch]) => {
-      if (frameWorkSaturated || unavailableFrames.has(frame)) {
-        disposeHandles(batch.map(entry => entry.handle));
-        return;
-      }
-      let measureNames = options.checkNames;
-      if (measureNames) {
-        let installed = axeByFrame.get(frame);
-        if (installed === undefined) {
-          const installation = await runFrameWork(
-              () => injectAxeForNames(frame), false, frame,
-              (installed, timedOut) => {
-                if (timedOut) {
-                  axeByFrame.set(frame, installed);
-                  unavailableFrames.delete(frame);
-                }
-              });
-          if (!installation.started || installation.timedOut) {
-            if (installation.timedOut)
-              unavailableFrames.add(frame);
-            disposeHandles(batch.map(entry => entry.handle));
-            return;
+    return byFrame;
+  };
+
+  const ensureAxeForNames = async (frame: playwright.Frame): Promise<boolean | undefined> => {
+    const known = axeByFrame.get(frame);
+    if (known !== undefined)
+      return known;
+    const installation = await runFrameWork(
+        () => injectAxeForNames(frame), false, frame,
+        (installed, timedOut) => {
+          if (timedOut) {
+            axeByFrame.set(frame, installed);
+            unavailableFrames.delete(frame);
           }
-          installed = installation.value;
-          axeByFrame.set(frame, installed);
-        }
-        measureNames = installed;
-      }
-      const collected = await runFrameWork(
-          () => frame.evaluate(collectElementFacts, { elements: batch.map(entry => entry.handle), measureNames }), null, frame,
-          (facts, timedOut) => {
-            if (facts && timedOut)
-              unavailableFrames.delete(frame);
-            disposeHandles(batch.map(entry => entry.handle));
-          });
-      if (!collected.started) {
-        disposeHandles(batch.map(entry => entry.handle));
-        return;
-      }
-      if (collected.timedOut) {
+        });
+    if (!installation.started || installation.timedOut) {
+      if (installation.timedOut)
         unavailableFrames.add(frame);
-        return;
-      }
-      const facts = collected.value;
-      if (facts) {
-        if (options.checkNames)
-          unmeasuredNames += facts.filter(fact => !fact.nameMeasured).length;
-        batch.forEach((entry, position) => factsByIndex.set(entry.index, facts[position]));
-        resolvedCount += batch.length;
-        reachable += facts.filter(fact => !fact.ariaHidden).length;
-      }
-    });
+      return undefined;
+    }
+    axeByFrame.set(frame, installation.value);
+    return installation.value;
+  };
+
+  const measureFrameBatch = async ([frame, batch]: [playwright.Frame, Measured[]]) => {
+    const batchHandles = batch.map(entry => entry.handle);
+    if (frameWorkSaturated || unavailableFrames.has(frame)) {
+      disposeHandles(batchHandles);
+      return;
+    }
+    const measureNames = options.checkNames ? await ensureAxeForNames(frame) : false;
+    if (measureNames === undefined) {
+      disposeHandles(batchHandles);
+      return;
+    }
+    const collected = await runFrameWork(
+        () => frame.evaluate(collectElementFacts, { elements: batchHandles, measureNames }), null, frame,
+        (facts, timedOut) => {
+          if (facts && timedOut)
+            unavailableFrames.delete(frame);
+          disposeHandles(batchHandles);
+        });
+    if (!collected.started) {
+      disposeHandles(batchHandles);
+      return;
+    }
+    if (collected.timedOut) {
+      unavailableFrames.add(frame);
+      return;
+    }
+    const facts = collected.value;
+    if (!facts)
+      return;
+    if (options.checkNames)
+      unmeasuredNames += facts.filter(fact => !fact.nameMeasured).length;
+    batch.forEach((entry, position) => factsByIndex.set(entry.index, facts[position]));
+    resolvedCount += batch.length;
+    reachable += facts.filter(fact => !fact.ariaHidden).length;
+  };
+
+  const measureCeiling = Math.min(refIndexes.length, options.maxElements * 2);
+  for (let start = 0; start < measureCeiling && reachable < options.maxElements;) {
+    const size = Math.min(measureChunkSize, options.maxElements - reachable, measureCeiling - start);
+    const chunk = refIndexes.slice(start, start + size);
+    start += size;
+    const handles = await resolveRefHandles(chunk);
+    const owners = await ownerFramesOf(handles);
+    await withConcurrency([...groupByFrame(chunk, handles, owners)], measureFrameBatch);
     analyzedIndexes.push(...chunk);
     await options.reportProgress?.({
       progress: analyzedIndexes.length,

@@ -344,8 +344,7 @@ async function callInPage(params: { name: string, inputJson: string, timeOrigin:
         text = text.slice(0, end);
       if (typeof text === 'string' && utf8Prefix(text, params.errorBytes) === text.length)
         return `E${text}`;
-    } catch {
-    }
+    } catch {}
     return 'EThe page reported an error that could not be read.';
   };
   try {
@@ -472,8 +471,7 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
     try {
       const parsed: unknown = JSON.parse(json);
       isError = !!parsed && typeof parsed === 'object' && 'isError' in parsed && parsed.isError === true;
-    } catch {
-    }
+    } catch {}
     const text = `${preamble}\n${truncateDataUrls(json)}`;
     if (isError)
       response.addError(text);

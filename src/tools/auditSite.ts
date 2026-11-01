@@ -210,8 +210,7 @@ function inferStartUrlFromProvidedUrls(urls: string[] | undefined): string | und
       const candidate = new URL(rawUrl);
       if (candidate.protocol === 'http:' || candidate.protocol === 'https:')
         return candidate.toString();
-    } catch {
-    }
+    } catch {}
   }
   return undefined;
 }
