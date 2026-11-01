@@ -444,6 +444,39 @@ describe('Config', () => {
     });
   });
 
+  describe('extension tab groups', () => {
+    beforeEach(() => vi.stubEnv('PLAYWRIGHT_MCP_NO_TAB_GROUP', undefined));
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('defaults to grouping and preserves explicit programmatic settings', async () => {
+      expect((await resolveConfig({})).tabGroup).toBe(true);
+      expect((await resolveConfig({ tabGroup: false })).tabGroup).toBe(false);
+      expect((await resolveConfig({ tabGroup: true })).tabGroup).toBe(true);
+      expect((await resolveCLIConfig({})).tabGroup).toBe(true);
+    });
+
+    it('does not let Commander defaults override the config file', async () => {
+      const config = await writeConfigFile({ tabGroup: false });
+      expect((await resolveCLIConfig({ config, tabGroup: true })).tabGroup).toBe(false);
+      expect((await resolveCLIConfig({ tabGroup: false })).tabGroup).toBe(false);
+    });
+
+    it.each([
+      ['1', false], ['true', false], ['0', true], ['false', true],
+    ])('applies NO_TAB_GROUP=%s over the config file', async (value, expected) => {
+      const config = await writeConfigFile({ tabGroup: !expected });
+      vi.stubEnv('PLAYWRIGHT_MCP_NO_TAB_GROUP', value);
+      expect((await resolveCLIConfig({ config, tabGroup: true })).tabGroup).toBe(expected);
+      expect((await resolveCLIConfig({ config, tabGroup: false })).tabGroup).toBe(false);
+    });
+
+    it.each(['', 'invalid'])('leaves file settings unchanged for env value %j', async value => {
+      vi.stubEnv('PLAYWRIGHT_MCP_NO_TAB_GROUP', value);
+      const config = await writeConfigFile({ tabGroup: false });
+      expect((await resolveCLIConfig({ config })).tabGroup).toBe(false);
+    });
+  });
+
   describe('sandbox defaults', () => {
     const savedSandbox = process.env.PLAYWRIGHT_MCP_SANDBOX;
 

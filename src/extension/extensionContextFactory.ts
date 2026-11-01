@@ -40,12 +40,14 @@ export class ExtensionContextFactory implements BrowserContextFactory {
   private _userDataDir?: string;
   private _executablePath?: string;
   private _profileDirName?: string;
+  private _tabGroup: boolean;
 
-  constructor(browserChannel: string, userDataDir: string | undefined, executablePath: string | undefined, profileDirName: string | undefined) {
+  constructor(browserChannel: string, userDataDir: string | undefined, executablePath: string | undefined, profileDirName: string | undefined, tabGroup = true) {
     this._browserChannel = browserChannel;
     this._userDataDir = userDataDir;
     this._executablePath = executablePath;
     this._profileDirName = profileDirName;
+    this._tabGroup = tabGroup;
   }
 
   async createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
@@ -78,7 +80,7 @@ export class ExtensionContextFactory implements BrowserContextFactory {
       httpServer.close();
       throw new Error(abortSignal.reason);
     }
-    const cdpRelayServer = new CDPRelayServer(httpServer, this._browserChannel, this._userDataDir, this._executablePath, this._profileDirName);
+    const cdpRelayServer = new CDPRelayServer(httpServer, this._browserChannel, this._userDataDir, this._executablePath, this._profileDirName, this._tabGroup);
     const stop = () => cdpRelayServer.stop();
     abortSignal.addEventListener('abort', stop, { once: true });
     httpServer.once('close', () => abortSignal.removeEventListener('abort', stop));

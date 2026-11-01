@@ -896,7 +896,7 @@ describe('extension protocol v2', () => {
     }
   });
 
-  it('waits for extension approval and forwards the configured token', async () => {
+  it.each([undefined, true, false])('waits for extension approval and forwards token with tabGroup=%s', async tabGroup => {
     vi.mocked(spawn).mockClear();
     vi.stubEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', 'test-token');
     const server = http.createServer();
@@ -904,7 +904,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
+    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome', undefined, tabGroup);
     let extension: WebSocket | undefined;
     try {
       const aborted = new AbortController();
@@ -924,7 +924,12 @@ describe('extension protocol v2', () => {
       expect(settled).toBe(false);
 
       const args = vi.mocked(spawn).mock.calls[0][1] as string[];
-      expect(new URL(args.at(-1)!).searchParams.get('token')).toBe('test-token');
+      const params = new URL(args.at(-1)!).searchParams;
+      expect(params.get('token')).toBe('test-token');
+      expect(params.get('tabGroup')).toBe(tabGroup === false ? 'false' : null);
+      expect(params.get('protocolVersion')).toBe(VERSION.toString());
+      expect(JSON.parse(params.get('client')!)).toEqual({ name: 'test-client', version: '1.0.0' });
+      expect(params.get('mcpRelayUrl')).toBe(relay.extensionEndpoint());
       const cdpToken = new URL(relay.cdpEndpoint()).searchParams.get('token');
       expect(cdpToken).toBeTruthy();
       expect(args.join(' ')).not.toContain(cdpToken!);
@@ -939,6 +944,23 @@ describe('extension protocol v2', () => {
       relay.stop();
       await new Promise<void>(resolve => server.close(() => resolve()));
       vi.unstubAllEnvs();
+    }
+  });
+
+  it('passes the grouping setting from the extension browser provider to the connect URL', async () => {
+    vi.mocked(spawn).mockClear();
+    const controller = new AbortController();
+    const factory = new ExtensionContextFactory('chrome', undefined, '/tmp/chrome', undefined, false);
+    const connecting = factory.createContext({ name: 'test-client', version: '1.0.0' }, controller.signal, undefined);
+    const failure = expect(connecting).rejects.toThrow('cancelled');
+    try {
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+      const url = vi.mocked(spawn).mock.calls[0][1]?.at(-1);
+      expect(url).toBeDefined();
+      expect(new URL(url!).searchParams.get('tabGroup')).toBe('false');
+    } finally {
+      controller.abort(new Error('cancelled'));
+      await failure;
     }
   });
 

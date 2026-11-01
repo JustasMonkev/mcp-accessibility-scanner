@@ -54,6 +54,7 @@ export type CLIOptions = {
     imageResponses?: Config['imageResponses'];
     mobile?: boolean;
     sandbox?: boolean;
+    tabGroup?: boolean;
     outputDir?: string;
     filePaths?: string;
     port?: number;
@@ -91,6 +92,7 @@ const defaultConfig: FullConfig = {
   },
   server: {},
   saveTrace: false,
+  tabGroup: true,
   timeouts: {
     navigationTimeout: 60000,
     defaultTimeout: 5000,
@@ -124,6 +126,9 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
   const configInFile = await loadConfig(cliOptions.config);
   const envOptions = cliOptionsFromEnv();
   const envOverrides = configFromCLIOptions(envOptions, true);
+  const noTabGroup = envToBoolean(process.env.PLAYWRIGHT_MCP_NO_TAB_GROUP);
+  if (noTabGroup !== undefined)
+    envOverrides.tabGroup = !noTabGroup;
   const cliOverrides = configFromCLIOptions(cliOptions);
   const result = mergeCLIConfigSources(configInFile, envOverrides, cliOverrides);
   return validateResolvedConfig(applyMobileConfig(result, configInFile, envOverrides, cliOverrides, envOptions, cliOptions));
@@ -335,6 +340,7 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
       allowedOrigins: cliOptions.allowedOrigins,
       blockedOrigins: cliOptions.blockedOrigins,
     },
+    tabGroup: cliOptions.tabGroup === false ? false : undefined,
     saveSession: cliOptions.saveSession,
     saveTrace: cliOptions.saveTrace,
     snapshot: cliOptions.snapshotBoxes !== undefined ? { boxes: cliOptions.snapshotBoxes } : undefined,

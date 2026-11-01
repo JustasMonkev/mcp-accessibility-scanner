@@ -224,6 +224,7 @@ describe('CLI command dispatch contract', () => {
       expect(help).toContain('--config');
       expect(help).toContain('--headless');
       expect(help).toContain('--mobile');
+      expect(help).toContain('--no-tab-group');
       expect(help).toContain('--snapshot-boxes');
       expect(help).toContain('--timeout-settle');
       expect(help).toContain('--timeout-idle');

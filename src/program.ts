@@ -60,7 +60,7 @@ async function resolveProgramContext(options: Record<string, unknown>, extension
     if (config.browser.contextOptions?.storageState && !options.extension)
       throw new Error('--profile-dir-name cannot reach the extension provider with a storage state: the --connect-tool extension provider refuses storage states at switch time. Drop the storage state, or run --extension without it.');
   }
-  const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath, config.browser.profileDirName);
+  const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath, config.browser.profileDirName, config.tabGroup);
   // --extension runs every tool through the extension factory, not the one
   // contextFactory() builds, so validate the factory that will actually create
   // the context. Checked first because contextFactory() would otherwise
@@ -147,6 +147,7 @@ function configureBaseProgram() {
       .option('--isolated', 'keep the browser profile in memory, do not save it to disk.')
       .option('--image-responses <mode>', 'image response policy: "allow" (default), "omit", or "only". "only" omits text from successful responses with images; errors, browser lifecycle notices, structured content and resource links are preserved. "auto" is an alias for "allow".')
       .option('--mobile', 'emulate a generic mobile device (Pixel 10 for Chromium, iPhone 17 for WebKit). Cannot be combined with --device, CDP attach/launch modes, remote browser endpoints, or --extension.')
+      .option('--no-tab-group', 'do not group controlled tabs when using the extension browser provider.')
       .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
       .option('--output-dir <path>', 'path to the directory for output files.')
       .option('--file-paths <relative|absolute>', 'render output paths relative to the server working directory or as absolute paths; omitted preserves legacy rendering.')

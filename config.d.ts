@@ -32,6 +32,8 @@ export type ToolCapability =
   | 'verify';
 
 export type Config = {
+  tabGroup?: boolean;
+
   /**
    * The browser to use.
    */
