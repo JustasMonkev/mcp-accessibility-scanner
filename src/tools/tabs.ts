@@ -66,7 +66,7 @@ const navigationTimeout = defineTool({
   schema: {
     name: 'browser_navigation_timeout',
     title: 'Navigation timeout',
-    description: 'Sets the timeout for navigation and page load actions. Only affects the current tab and does not persist across browser context recreation.',
+    description: 'Sets the timeout for navigation and page load actions. Only affects existing tabs and does not persist across browser context recreation.',
     inputSchema: z.object({
       timeout: timeoutSchema('navigation'),
     }),
