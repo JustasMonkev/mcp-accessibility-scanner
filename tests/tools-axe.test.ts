@@ -183,7 +183,7 @@ describe('axe helpers', () => {
   it('scans with the default tag set and no scope when given no options', async () => {
     resetScan();
     await runAxeScan(pageWithSelectorCounts());
-    expect(lastScan?.options).toEqual({ runOnly: { type: 'tag', values: [...defaultAxeTags] } });
+    expect(lastScan?.options).toEqual({ runOnly: { type: 'tag', values: [...defaultAxeTags] }, resultTypes: ['violations', 'incomplete'] });
     expect(lastScan?.context).toBeNull();
   });
 
@@ -191,7 +191,7 @@ describe('axe helpers', () => {
     resetScan();
     await runAxeScan(pageWithSelectorCounts(), { tags: ['wcag2aa'], rules: ['image-alt', 'label'] });
     // A tag list would overwrite the rule list in axe's single runOnly slot.
-    expect(lastScan?.options).toEqual({ runOnly: { type: 'rule', values: ['image-alt', 'label'] } });
+    expect(lastScan?.options).toEqual({ runOnly: { type: 'rule', values: ['image-alt', 'label'] }, resultTypes: ['violations', 'incomplete'] });
   });
 
   it('rejects an explicitly empty rule list instead of silently scanning the full tag set', async () => {
@@ -218,6 +218,7 @@ describe('axe helpers', () => {
     expect(lastScan?.options).toEqual({
       runOnly: { type: 'tag', values: ['wcag2aa'] },
       rules: { 'color-contrast': { enabled: false } },
+      resultTypes: ['violations', 'incomplete'],
     });
   });
 
@@ -226,7 +227,7 @@ describe('axe helpers', () => {
     // axe ignores the per-rule enabled flag once runOnly holds a rule list, so
     // passing both through would still have run `label`.
     await runAxeScan(pageWithSelectorCounts(), { rules: ['image-alt', 'label'], disableRules: ['label'] });
-    expect(lastScan?.options).toEqual({ runOnly: { type: 'rule', values: ['image-alt'] } });
+    expect(lastScan?.options).toEqual({ runOnly: { type: 'rule', values: ['image-alt'] }, resultTypes: ['violations', 'incomplete'] });
   });
 
   it('refuses a rule list that disableRules empties, instead of silently scanning everything', async () => {
@@ -309,7 +310,7 @@ describe('axe helpers', () => {
       include: ['#checkout', '#summary'],
       exclude: ['#cookie-banner'],
     });
-    expect(lastScan?.options).toEqual({ runOnly: { type: 'tag', values: ['wcag2aa'] } });
+    expect(lastScan?.options).toEqual({ runOnly: { type: 'tag', values: ['wcag2aa'] }, resultTypes: ['violations', 'incomplete'] });
     expect(lastScan?.context).toEqual({ include: ['#checkout', '#summary'], exclude: ['#cookie-banner'] });
   });
 

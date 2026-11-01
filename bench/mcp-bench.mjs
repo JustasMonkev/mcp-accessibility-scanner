@@ -146,6 +146,11 @@ const scenarios = [
     setup: () => call('browser_navigate', { url: `${origin}/page-0.html` }),
     run: () => call('audit_site', { startUrl: `${origin}/page-0.html`, maxPages: 6, maxDepth: 2 }),
   },
+  {
+    name: 'audit_site (12 pages)',
+    setup: () => call('browser_navigate', { url: `${origin}/page-0.html` }),
+    run: () => call('audit_site', { startUrl: `${origin}/page-0.html`, maxPages: 12, maxDepth: 5 }),
+  },
   ...screenReaderCases.map(fixture => ({
     name: fixture.name,
     setup: () => call('browser_navigate', { url: `${origin}${fixture.path}` }),

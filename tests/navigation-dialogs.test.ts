@@ -280,8 +280,9 @@ describe('navigation interrupted by a load-time dialog', () => {
         body: `<!doctype html><html lang="en"><head><title>Terminal response</title></head><body>${++requests === 1 ? '<script>alert("Terminal response");</script>' : ''}<button>Loaded</button></body></html>`,
       }));
       const urls = ['first', 'terminal', 'second'].map(name => `http://fixture.local/${name}`);
+      // One tab, so 'second' follows the dialog in the tab that froze.
       const result = await backend.callTool('audit_site', {
-        startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0,
+        startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0, concurrency: 1,
       });
 
       expect(requests).toBe(1);
@@ -301,6 +302,39 @@ describe('navigation interrupted by a load-time dialog', () => {
     }
   });
 
+  it('reports a one-shot load dialog opened by the first page of a just-opened crawl tab without retrying it', async () => {
+    const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
+    config.outputDir = outputDir;
+    try {
+      await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
+      let requests = 0;
+      await browserContext.route('http://fixture.local/terminal', route => route.fulfill({
+        status: 300,
+        contentType: 'text/html',
+        // On an incorrect retry the dialog is gone, making the audit look successful.
+        body: `<!doctype html><html lang="en"><head><title>Terminal response</title></head><body>${++requests === 1 ? '<script>alert("Terminal response");</script>' : ''}<button>Loaded</button></body></html>`,
+      }));
+      const urls = ['first', 'terminal', 'second'].map(name => `http://fixture.local/${name}`);
+      // Each page gets a worker of its own, so 'terminal' loads in a tab opened for it.
+      const result = await backend.callTool('audit_site', {
+        startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0, concurrency: 3,
+      });
+
+      expect(requests).toBe(1);
+      expect(result.structuredContent).toMatchObject({ totals: { scannedPages: 2, erroredPages: 1 } });
+      const files = await readdir(outputDir);
+      const report = JSON.parse(await readFile(path.join(outputDir, files[0]), 'utf8'));
+      expect(report.pages.map((page: { url: string, status: string }) => [page.url, page.status])).toEqual([
+        [urls[0], 'scanned'], [urls[1], 'error'], [urls[2], 'scanned'],
+      ]);
+      expect(report.pages[1].error).toContain('"alert" dialog with message "Terminal response"');
+      expect(browserContext.pages()).toHaveLength(1);
+      expect(browserContext.pages()[0].url()).toBe('http://fixture.local/after');
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it('does not let a dialog a crawled page opens fail the pages after it', async () => {
     const outputDir = await mkdtemp(path.join(tmpdir(), 'mcp-crawl-dialog-'));
     config.outputDir = outputDir;
@@ -308,8 +342,9 @@ describe('navigation interrupted by a load-time dialog', () => {
     config.timeouts.navigationTimeout = 1000;
     await backend.callTool('browser_navigate', { url: 'http://fixture.local/after' });
     const urls = ['alert', 'first', 'confirm', 'prompt', 'second'].map(name => `http://fixture.local/${name}`);
+    // One tab, so every page after a dialog is the one that has to move on.
     const audit = backend.callTool('audit_site', {
-      startUrl: urls[0], strategy: 'provided', urls, maxPages: 5, waitAfterNavigationMs: 0,
+      startUrl: urls[0], strategy: 'provided', urls, maxPages: 5, waitAfterNavigationMs: 0, concurrency: 1,
     });
     let auditReturned = false;
     void audit.then(() => { auditReturned = true; });
@@ -353,9 +388,10 @@ describe('navigation interrupted by a load-time dialog', () => {
     return outputDir;
   }
 
+  // One tab, so each page is navigated to from the page before it.
   async function checkCrawl(outputDir: string, urls: string[], timeout: number, check: (result: Awaited<ReturnType<BrowserServerBackend['callTool']>>) => Promise<void>) {
     const audit = backend.callTool('audit_site', {
-      startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0,
+      startUrl: urls[0], strategy: 'provided', urls, maxPages: 3, waitAfterNavigationMs: 0, concurrency: 1,
     });
     let auditReturned = false;
     void audit.then(() => { auditReturned = true; });

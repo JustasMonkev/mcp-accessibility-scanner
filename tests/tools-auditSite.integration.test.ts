@@ -128,6 +128,8 @@ describe('audit_site integration', () => {
       violationsTag: ['wcag2aa'],
       maxNodesPerViolation: 10,
       waitAfterNavigationMs: 0,
+      // Every crawl tab here is the same mock page, so pages go one at a time.
+      concurrency: 1,
       reportFile: 'audit-site-report.json',
     } as any, response);
 
