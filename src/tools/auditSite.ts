@@ -5,6 +5,7 @@ import type { FullConfig } from '../config.js';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { reserveReportPath, writeJsonReport } from './report.js';
+import type { JsonReportResource } from './report.js';
 import { TabEvents, type Tab } from '../tab.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 import { HtmlPatternGroups } from '../utils/htmlPatterns.js';
@@ -855,6 +856,84 @@ function topSummaryEntries(violations: SummaryViolation[]) {
   }));
 }
 
+type SiteReportInput = {
+  startUrl: URL,
+  params: AuditSiteParams,
+  scanStartedAt: number,
+  pages: PageReport[],
+  summary: SummaryReport,
+  representativeSelection: CrawlFrontier['representativeSelection'],
+  sessionLosses: SessionLoss[],
+  crawlTabRestarts: { url: string }[],
+};
+
+function buildSiteReport({ startUrl, params, scanStartedAt, pages, summary, representativeSelection, sessionLosses, crawlTabRestarts }: SiteReportInput) {
+  return {
+    version: 'v2',
+    metadata: {
+      startUrl: startUrl.toString(),
+      strategy: params.strategy,
+      options: {
+        maxPages: params.maxPages,
+        maxDepth: params.maxDepth,
+        pageSelection: params.pageSelection,
+        sameOriginOnly: params.sameOriginOnly,
+        includeSubdomains: params.includeSubdomains,
+        excludePathPatterns: params.excludePathPatterns,
+        ignoreQueryParams: params.ignoreQueryParams,
+        violationsTag: params.violationsTag,
+        includeIncomplete: params.includeIncomplete,
+        includeSelectors: params.includeSelectors ?? null,
+        excludeSelectors: params.excludeSelectors ?? null,
+        withRules: params.withRules ?? null,
+        disableRules: params.disableRules ?? null,
+        maxNodesPerViolation: params.maxNodesPerViolation,
+        waitAfterNavigationMs: params.waitAfterNavigationMs,
+        concurrency: params.concurrency,
+      },
+      startedAt: new Date(scanStartedAt).toISOString(),
+      finishedAt: new Date().toISOString(),
+      durationMs: Date.now() - scanStartedAt,
+    },
+    pages,
+    summary,
+    representativeSelection,
+    sessionLosses,
+    crawlTabRestarts,
+  };
+}
+
+function siteStructuredContent(report: ReturnType<typeof buildSiteReport>, reportResource: JsonReportResource, pagesWithUnscannedFrames: PageReport[], scannedPagesByViolations: PageReport[]) {
+  return {
+    kind: 'audit_site',
+    version: 'v2',
+    report: reportResource,
+    crawl: {
+      startUrl: report.metadata.startUrl,
+      strategy: report.metadata.strategy,
+      durationMs: report.metadata.durationMs,
+    },
+    totals: report.summary.totals,
+    representativeSelection: report.representativeSelection,
+    sessionLosses: report.sessionLosses,
+    crawlTabRestarts: report.crawlTabRestarts,
+    pagesWithUnscannedFrames: pagesWithUnscannedFrames.map(page => ({
+      url: page.url,
+      unscannedFrames: page.unscannedFrames,
+    })),
+    topViolations: topSummaryEntries(report.summary.violations),
+    topIncomplete: topSummaryEntries(report.summary.incomplete),
+    topPages: scannedPagesByViolations
+        .slice(0, 5)
+        .map(page => ({
+          url: page.url,
+          title: page.title,
+          totalViolations: page.summary?.totalRules ?? 0,
+          totalNodes: page.summary?.totalNodes ?? 0,
+        })),
+  };
+}
+
 function orNone(lines: string[]): string[] {
   return lines.length ? lines : ['- None'];
 }
@@ -1088,73 +1167,13 @@ const auditSite = defineTabTool({
     const { representativeSelection } = frontier;
     const sessionLosses = session.losses;
 
-    const report = {
-      version: 'v2',
-      metadata: {
-        startUrl: startUrl.toString(),
-        strategy: params.strategy,
-        options: {
-          maxPages: params.maxPages,
-          maxDepth: params.maxDepth,
-          pageSelection: params.pageSelection,
-          sameOriginOnly: params.sameOriginOnly,
-          includeSubdomains: params.includeSubdomains,
-          excludePathPatterns: params.excludePathPatterns,
-          ignoreQueryParams: params.ignoreQueryParams,
-          violationsTag: params.violationsTag,
-          includeIncomplete: params.includeIncomplete,
-          includeSelectors: params.includeSelectors ?? null,
-          excludeSelectors: params.excludeSelectors ?? null,
-          withRules: params.withRules ?? null,
-          disableRules: params.disableRules ?? null,
-          maxNodesPerViolation: params.maxNodesPerViolation,
-          waitAfterNavigationMs: params.waitAfterNavigationMs,
-          concurrency: params.concurrency,
-        },
-        startedAt: new Date(scanStartedAt).toISOString(),
-        finishedAt: new Date().toISOString(),
-        durationMs: Date.now() - scanStartedAt,
-      },
-      pages,
-      summary,
-      representativeSelection,
-      sessionLosses,
-      crawlTabRestarts,
-    };
-
+    const report = buildSiteReport({ startUrl, params, scanStartedAt, pages, summary, representativeSelection, sessionLosses, crawlTabRestarts });
     const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'audit-site-report',
       title: 'Audit site JSON report',
       description: 'Aggregated JSON report for the site accessibility crawl.',
     });
-    response.setStructuredContent({
-      kind: 'audit_site',
-      version: 'v2',
-      report: reportResource,
-      crawl: {
-        startUrl: report.metadata.startUrl,
-        strategy: report.metadata.strategy,
-        durationMs: report.metadata.durationMs,
-      },
-      totals: summary.totals,
-      representativeSelection,
-      sessionLosses,
-      crawlTabRestarts,
-      pagesWithUnscannedFrames: pagesWithUnscannedFrames.map(page => ({
-        url: page.url,
-        unscannedFrames: page.unscannedFrames,
-      })),
-      topViolations: topSummaryEntries(summary.violations),
-      topIncomplete: topSummaryEntries(summary.incomplete),
-      topPages: scannedPagesByViolations
-          .slice(0, 5)
-          .map(page => ({
-            url: page.url,
-            title: page.title,
-            totalViolations: page.summary?.totalRules ?? 0,
-            totalNodes: page.summary?.totalNodes ?? 0,
-          })),
-    });
+    response.setStructuredContent(siteStructuredContent(report, reportResource, pagesWithUnscannedFrames, scannedPagesByViolations));
 
     response.addCode('// Crawled pages in a temporary tab and aggregated Axe violations.');
     response.addResult(renderSiteSummary({
