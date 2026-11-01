@@ -20,7 +20,6 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { defineTool } from './tool.js';
 
-
 const install = defineTool({
   capability: 'install',
   schema: {

@@ -28,7 +28,6 @@ export function assertToolNotBlocked(config: ToolPolicy, name: string): void {
     throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Tool "${name}" not found`);
 }
 
-/** Empty input explicitly clears a lower-precedence list; empty entries are errors. */
 export function toolNameList(value: string | undefined): string[] | undefined {
   if (value === undefined)
     return undefined;

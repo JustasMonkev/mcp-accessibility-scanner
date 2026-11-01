@@ -14,26 +14,15 @@
  * limitations under the License.
  */
 
-// Just enough of a JavaScript lexer to tell a function literal from an
-// expression, for callers that must decide from the source form alone. A parser
-// would be more exact, but the repo ships no runtime one and reaching into
-// Playwright's bundled Babel would add a deep private import for one question.
-
 const whitespace = /\s/;
 const identifierStart = /^[\p{ID_Start}$_][\p{ID_Continue}$]*/u;
 
-/**
- * Whether `source` is a function literal -- `() => {}`, `function () {}`,
- * `async x => x` -- as opposed to an expression that may merely evaluate to one.
- */
 export function isFunctionSource(source: string): boolean {
   let body = source.slice(skipTrivia(source, 0));
   for (;;) {
     const afterAsync = body.slice(skipAsyncKeyword(body));
     if (/^function\b/.test(afterAsync) || hasArrowHead(afterAsync))
       return true;
-    // `(() => 1)` and `(function () {})` are function literals inside grouping
-    // parentheses. Look inside before concluding this is an expression.
     const inner = stripEnclosingParens(body);
     if (inner === null)
       return false;
@@ -46,19 +35,10 @@ function skipAsyncKeyword(source: string): number {
   return keyword ? skipTrivia(source, keyword.length) : 0;
 }
 
-/**
- * Matches the head of an arrow function -- `x =>`, `(a, b) =>` -- without
- * matching a parenthesised expression such as `(a + b)`. The `async` keyword is
- * already stripped by the caller.
- */
 function hasArrowHead(source: string): boolean {
   let offset = 0;
   if (source[0] === '(') {
     const end = matchingParen(source, 0);
-    // The scanner does not model every parameter-list construct. When the match
-    // cannot be found, call it a function: passing a function through is the
-    // conservative answer, since a wrongly wrapped function fails silently
-    // while a wrongly passed-through expression fails loudly.
     if (end === -1)
       return true;
     offset = end + 1;
@@ -75,8 +55,6 @@ function stripEnclosingParens(source: string): string | null {
   if (source[0] !== '(')
     return null;
   const end = matchingParen(source, 0);
-  // Only a group that wraps the whole source: `(a) => a` closes early and its
-  // parentheses are a parameter list, not a group.
   if (end === -1 || skipTrivia(source, end + 1) !== source.length)
     return null;
   return source.slice(1, end);
@@ -86,11 +64,6 @@ function matchingParen(source: string, start: number): number {
   return matchingDelimiter(source, start, '(', ')');
 }
 
-/**
- * Finds the delimiter closing the one at `start`, stepping over comments,
- * strings, template substitutions and regular expression literals so that a
- * bracket inside any of them is not counted.
- */
 function matchingDelimiter(source: string, start: number, open: string, close: string): number {
   let depth = 0;
   for (let offset = start; offset < source.length; offset++) {
@@ -128,7 +101,6 @@ function endOfString(source: string, start: number): number {
     if (char === '\\') {
       offset++;
     } else if (quote === '`' && char === '$' && source[offset + 1] === '{') {
-      // A substitution can hold anything, including another template.
       const end = matchingDelimiter(source, offset + 1, '{', '}');
       if (end === -1)
         return -1;
@@ -140,8 +112,6 @@ function endOfString(source: string, start: number): number {
   return -1;
 }
 
-// A slash directly after a value is division; anywhere else it opens a regular
-// expression. Parameter defaults are the case that matters here: `(a = /)/)`.
 function startsRegex(source: string, offset: number): boolean {
   let index = offset - 1;
   while (index >= 0 && whitespace.test(source[index]))
@@ -167,7 +137,6 @@ function endOfRegex(source: string, start: number): number {
   return -1;
 }
 
-/** Offset of the first character at or after `offset` that is not whitespace or a comment. */
 function skipTrivia(source: string, offset: number): number {
   for (;;) {
     while (offset < source.length && whitespace.test(source[offset]))

@@ -541,6 +541,7 @@ const tests = [
     const lost = await callTool('audit_site', {
       ...auditSiteDefaults,
       maxPages: 3,
+      concurrency: 1,
       urls: [
         `${state.fixtureOrigin}/secure`,
         `${state.fixtureOrigin}/account/close`,
@@ -556,6 +557,7 @@ const tests = [
     const redirected = await callTool('audit_site', {
       ...auditSiteDefaults,
       maxPages: 2,
+      concurrency: 1,
       urls: [
         `${state.fixtureOrigin}/secure`,
         `${state.fixtureOrigin}/goodbye`,
@@ -570,6 +572,7 @@ const tests = [
     const failed = await callTool('audit_site', {
       ...auditSiteDefaults,
       maxPages: 3,
+      concurrency: 1,
       urls: [
         `${state.fixtureOrigin}/secure`,
         `${state.fixtureOrigin}/session/revoke`,

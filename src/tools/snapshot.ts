@@ -93,9 +93,6 @@ const scanPage = defineTool({
       ? await annotateAndScreenshot(tab, results.violations, response)
       : [];
 
-    // Omit the incomplete count entirely when it was not requested, matching
-    // audit_site: a bare "Incomplete: 3" with no rule blocks below reads as
-    // findings that were dropped from the report.
     const incompleteCount = params.includeIncomplete ? `Incomplete: ${results.incomplete.length}, ` : '';
     response.addResult([
       `URL: ${results.url}`,
@@ -105,17 +102,14 @@ const scanPage = defineTool({
       ...annotationLines,
     ].join('\n'));
 
-
-    // Trimmed nodes drop axe's any/all/none check arrays, which are the bulk of
-    // a raw result — a content-heavy page otherwise serializes to ~1MB here.
-    const { deduped, trimmed: violations } = prepareAxeResults(results.violations, params.maxNodesPerViolation);
-    violations.forEach((violation, index) => {
+    const violations = prepareAxeResults(results.violations, params.maxNodesPerViolation);
+    violations.trimmed.forEach((violation, index) => {
       response.addResult([
         '',
         `Violation rule: ${violation.id} (${violation.impact ?? 'unknown'}) — ${violation.help}`,
         `Help: ${violation.helpUrl}`,
         `Tags : ${violation.tags}`,
-        `Violations${nodeCountSuffix(violation.nodes.length, deduped[index].nodes.length)}: ${JSON.stringify(violation.nodes, null, 2)}`,
+        `Violations${nodeCountSuffix(violation.nodes.length, violations.deduped[index].nodes.length)}: ${JSON.stringify(violation.nodes, null, 2)}`,
       ].join('\n'));
     });
 
@@ -137,66 +131,59 @@ const scanPage = defineTool({
   },
 });
 
-// Node lists are capped by maxNodesPerViolation; say so rather than letting a
-// rule with 40 occurrences look identical to one with 10.
 function nodeCountSuffix(shown: number, total: number): string {
   return shown < total ? ` (showing ${shown} of ${total} nodes, raise maxNodesPerViolation for the rest)` : '';
 }
 
+type AnnotationMark = { path: string[], labels: string[] };
+
+function shadowPathOf(target: unknown[]): string[] | undefined {
+  const isInsideIframe = target.length !== 1;
+  if (isInsideIframe)
+    return undefined;
+  const path: unknown[] = [target[0]].flat(Infinity);
+  if (!path.length || !path.every(step => typeof step === 'string'))
+    return undefined;
+  return path as string[];
+}
 
 function buildAnnotationPlan(violations: AxeViolation[]) {
-  const marks = new Map<string, AnnotationMark>();
+  const marksByElement = new Map<string, AnnotationMark>();
   let totalNodes = 0;
   let unreachableNodes = 0;
   let queuedNodes = 0;
   for (const violation of violations) {
     for (const node of dedupeAxeNodes(violation.nodes)) {
       totalNodes++;
-      const target = node.target ?? [];
-      // A target with more than one step is nested inside an iframe, which
-      // page.evaluate cannot reach from the top document. A single step may
-      // still be an array — that is a path through open shadow roots, which we
-      // can walk, so flatten it rather than rejecting it as cross-frame.
-      const path: unknown[] = target.length === 1 ? [target[0]].flat(Infinity) : [];
-      if (!path.length || !path.every(step => typeof step === 'string')) {
+      const path = shadowPathOf(node.target ?? []);
+      if (!path) {
         unreachableNodes++;
         continue;
       }
       const key = JSON.stringify(path);
-      const existing = marks.get(key);
-      // One element commonly fails several rules. Keep a single box listing
-      // every rule id instead of stacking boxes whose labels hide each other.
+      const existing = marksByElement.get(key);
       if (existing)
         existing.labels.push(violation.id);
-      else if (marks.size < maxAnnotatedElements)
-        marks.set(key, { path, labels: [violation.id] });
+      else if (marksByElement.size < maxAnnotatedElements)
+        marksByElement.set(key, { path, labels: [violation.id] });
       else
         continue;
       queuedNodes++;
     }
   }
-  return { marks: [...marks.values()], totalNodes, unreachableNodes, queuedNodes };
+  return { marks: [...marksByElement.values()], totalNodes, unreachableNodes, queuedNodes };
 }
 
 async function annotateAndScreenshot(tab: Tab, violations: AxeViolation[], response: Response): Promise<string[]> {
   const { marks, totalNodes, unreachableNodes, queuedNodes } = buildAnnotationPlan(violations);
   const fileName = await tab.context.outputFile(`scan-page-annotated-${safeIsoTimestampForFileName()}.png`);
-  // Unique per scan: cleanup resolves the id document-order first, so a fixed
-  // id would delete the audited page's own element if it already used it.
   const layerId = `mcp-a11y-annotation-layer-${crypto.randomUUID()}`;
   let markedNodes = 0;
   try {
     markedNodes = await drawAnnotations(tab.page, layerId, marks);
     await tab.page.screenshot({ path: fileName, fullPage: true });
   } finally {
-    await tab.page.evaluate(id => {
-      // SAFETY: drawAnnotations creates this unique layer and attaches its paused animation list.
-      const layer = document.getElementById(id) as (HTMLElement & { mcpPausedAnimations?: Animation[] }) | null;
-      // Restart only what drawing paused, so a page that paused its own
-      // animations still has them paused afterwards.
-      layer?.mcpPausedAnimations?.forEach(animation => animation.play());
-      layer?.remove();
-    }, layerId);
+    await removeAnnotations(tab.page, layerId);
   }
 
   response.addFileResourceLink(fileName, {
@@ -218,100 +205,95 @@ async function annotateAndScreenshot(tab: Tab, violations: AxeViolation[], respo
   ];
 }
 
-type AnnotationMark = { path: string[], labels: string[] };
+async function removeAnnotations(page: playwright.Page, layerId: string): Promise<void> {
+  await page.evaluate(id => {
+    const layer = document.getElementById(id) as (HTMLElement & { mcpPausedAnimations?: Animation[] }) | null;
+    layer?.mcpPausedAnimations?.forEach(animation => animation.play());
+    layer?.remove();
+  }, layerId);
+}
 
 async function drawAnnotations(page: playwright.Page, layerId: string, marks: AnnotationMark[]): Promise<number> {
   return await page.evaluate(({ marks, layerId }) => {
-    // Playwright leaves animations running, so a target that is moving would
-    // drift between the measurement below and the screenshot and leave its
-    // marker behind. The cleanup evaluate resumes exactly these.
-    const paused = document.getAnimations().filter(animation => animation.playState === 'running');
-    for (const animation of paused) {
-      animation.pause();
-      // Setting currentTime synchronously completes the pending pause task;
-      // pause() alone can advance one more frame after we measure the target.
-      animation.currentTime = animation.currentTime;
+    const probeSizePx = 100;
+    const markerColor = '#e11d48';
+
+    function freezeRunningAnimations(): Animation[] {
+      const running = document.getAnimations().filter(animation => animation.playState === 'running');
+      for (const animation of running) {
+        animation.pause();
+        const completePendingPauseSynchronously = animation.currentTime;
+        animation.currentTime = completePendingPauseSynchronously;
+      }
+      return running;
     }
 
-    const layer = Object.assign(document.createElement('div'), { mcpPausedAnimations: paused });
-    layer.id = layerId;
-    // Absolutely positioned and out of flow, so the layer can never reflow the
-    // page we are about to photograph. It starts 100px square as a probe: the
-    // rendered size of a known length reveals the scale a CSS zoom or an
-    // ancestor transform applies to every length we write inside the layer.
-    // The overrides after `display` neutralise the UA popover stylesheet.
-    // Every declaration is !important: an important inline declaration outranks
-    // any author rule, so page CSS such as `div { display: none !important }`
-    // or `[popover] { opacity: 0 }` cannot hide the layer we are counting on.
-    layer.style.cssText = 'display:block;position:absolute;left:0;top:0;right:auto;bottom:auto;margin:0;border:0;padding:0;background:none;overflow:visible;width:100px;height:100px;z-index:2147483647;pointer-events:none;visibility:visible;opacity:1;transform:none;filter:none;clip-path:none;animation:none;transition:none;'
-        .replace(/;/g, '!important;');
-    // The markers live in a shadow root so page selectors cannot reach them at
-    // all; only inherited properties cross the boundary, and the host resets
-    // those it cares about above.
-    const root = layer.attachShadow({ mode: 'open' });
-    document.body.appendChild(layer);
-    // A manual popover joins the top layer, which paints above any open dialog,
-    // popover or fullscreen element — those sit above every z-index otherwise.
-    try {
-      layer.popover = 'manual';
-      layer.showPopover();
-    } catch {
-      // Engine without popover support: markers stay below top-layer content.
-      layer.removeAttribute('popover');
+    function importantDeclarations(css: string): string {
+      return css.replace(/;/g, '!important;');
     }
-    // The layer's own rect tells us where its (0,0) landed, which is not the
-    // document origin when an ancestor is itself positioned.
+
+    function promoteToTopLayer(element: HTMLElement) {
+      try {
+        element.popover = 'manual';
+        element.showPopover();
+      } catch {
+        element.removeAttribute('popover');
+      }
+    }
+
+    function resolveThroughShadowRoots(path: string[]): Element | null {
+      let scope: Document | ShadowRoot | Element = document;
+      let element: Element | null = null;
+      for (const selector of path) {
+        element = scope.querySelector(selector);
+        if (!element)
+          return null;
+        scope = element.shadowRoot ?? element;
+      }
+      return element;
+    }
+
+    function measure(path: string[]): DOMRect | undefined {
+      try {
+        return resolveThroughShadowRoots(path)?.getBoundingClientRect();
+      } catch {
+        return undefined;
+      }
+    }
+
+    function isInsideDocument(rect: DOMRect, pageWidth: number, pageHeight: number): boolean {
+      return rect.right + window.scrollX > 0 && rect.bottom + window.scrollY > 0
+        && rect.left + window.scrollX < pageWidth && rect.top + window.scrollY < pageHeight;
+    }
+
+    const layer = Object.assign(document.createElement('div'), { mcpPausedAnimations: freezeRunningAnimations() });
+    layer.id = layerId;
+    layer.style.cssText = importantDeclarations(`display:block;position:absolute;left:0;top:0;right:auto;bottom:auto;margin:0;border:0;padding:0;background:none;overflow:visible;width:${probeSizePx}px;height:${probeSizePx}px;z-index:2147483647;pointer-events:none;visibility:visible;opacity:1;transform:none;filter:none;clip-path:none;animation:none;transition:none;`);
+    const markerRoot = layer.attachShadow({ mode: 'open' });
+    document.body.appendChild(layer);
+    promoteToTopLayer(layer);
+
     const origin = layer.getBoundingClientRect();
-    // ponytail: uniform scale only — a rotated or skewed ancestor still
-    // misplaces markers. Fixing that needs the full transform matrix.
-    const scaleX = origin.width / 100 || 1;
-    const scaleY = origin.height / 100 || 1;
+    const scaleX = origin.width / probeSizePx || 1;
+    const scaleY = origin.height / probeSizePx || 1;
     layer.style.setProperty('width', '0px', 'important');
     layer.style.setProperty('height', '0px', 'important');
-    // A full-page screenshot is clipped to the document box, so anything drawn
-    // outside it is absent from the PNG however large its rectangle is.
     const pageWidth = document.documentElement.scrollWidth * scaleX;
     const pageHeight = document.documentElement.scrollHeight * scaleY;
 
     let marked = 0;
     for (const mark of marks) {
-      let rect: DOMRect | undefined;
-      try {
-        // Each step after the first descends into an open shadow root.
-        let root: Document | ShadowRoot | Element = document;
-        let element: Element | null = null;
-        for (const step of mark.path) {
-          element = root.querySelector(step);
-          if (!element)
-            break;
-          root = element.shadowRoot ?? element;
-        }
-        rect = element?.getBoundingClientRect();
-      } catch {
-        // Axe can report a selector this browser refuses to parse; skip it.
-        continue;
-      }
-      if (!rect || rect.width === 0 || rect.height === 0)
-        continue;
-      // Off-canvas elements (the `left:-9999px` visually-hidden idiom) have a
-      // real rectangle but never reach the PNG, so they are not marked.
-      if (rect.right + window.scrollX <= 0 || rect.bottom + window.scrollY <= 0
-        || rect.left + window.scrollX >= pageWidth || rect.top + window.scrollY >= pageHeight)
+      const rect = measure(mark.path);
+      if (!rect || rect.width === 0 || rect.height === 0 || !isInsideDocument(rect, pageWidth, pageHeight))
         continue;
       const left = (rect.left - origin.left) / scaleX;
       const top = (rect.top - origin.top) / scaleY;
-      const box = document.createElement('div');
-      // The ring is clipped to the element's own box (inset ring, overflow
-      // hidden) so it cannot extend the scrollable area or add scrollbars.
-      box.style.cssText = `position:absolute;left:${left}px;top:${top}px;width:${rect.width / scaleX}px;height:${rect.height / scaleY}px;overflow:hidden;box-shadow:inset 0 0 0 3px #e11d48;`;
-      // The label is a sibling of the ring, not a child: inside it the box's
-      // overflow:hidden clipped the rule ids away on any element smaller than
-      // its own label, while the node still counted as labelled.
+      const ring = document.createElement('div');
+      ring.style.cssText = `position:absolute;left:${left}px;top:${top}px;width:${rect.width / scaleX}px;height:${rect.height / scaleY}px;overflow:hidden;box-shadow:inset 0 0 0 3px ${markerColor};`;
       const label = document.createElement('span');
-      label.style.cssText = `position:absolute;left:${left}px;top:${top}px;background:#e11d48;color:#fff;padding:0 4px;font:11px/1.4 sans-serif;white-space:nowrap;`;
+      label.style.cssText = `position:absolute;left:${left}px;top:${top}px;background:${markerColor};color:#fff;padding:0 4px;font:11px/1.4 sans-serif;white-space:nowrap;`;
       label.textContent = mark.labels.join(', ');
-      root.append(box, label);
-      // Every rule that named this element is now visible on its one box.
+      markerRoot.append(ring, label);
       marked += mark.labels.length;
     }
     return marked;
@@ -345,82 +327,73 @@ const find = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    if (!params.text && !params.regex) {
-      response.addError('Provide either "text" or "regex" to search for.');
-      return;
-    }
-    if (params.text && params.regex) {
-      response.addError('Provide only one of "text" or "regex", not both.');
-      return;
-    }
-
-    let query: string;
-    let matches: (line: string) => boolean;
-    if (params.regex) {
-      const { regex, display } = compileRegex(params.regex);
-      query = display;
-      matches = line => regex.test(line);
-    } else {
-      query = `"${params.text}"`;
-      const needle = params.text!.toLowerCase();
-      matches = line => line.toLowerCase().includes(needle);
-    }
-
+    const { query, matches } = findMatcher(params);
     const lines = (await tab.page.ariaSnapshot({ mode: 'ai' })).split('\n');
-    const indents = lines.map(indentOf);
-    const matchedLines: number[] = [];
-    for (let i = 0; i < lines.length; i++) {
-      if (matches(lines[i]))
-        matchedLines.push(i);
-    }
-
+    const matchedLines = lines.flatMap((line, index) => matches(line) ? [index] : []);
     if (!matchedLines.length) {
       await writeFindResult(tab, params.filename, response, `No matches found for ${query}.`);
       return;
     }
 
-    const totalMatches = matchedLines.length;
-    const matchesToRender = params.maxResults !== undefined && params.maxResults < totalMatches
-      ? matchedLines.slice(0, params.maxResults)
-      : matchedLines;
-
-    const windows: { start: number, end: number }[] = [];
-    for (const line of matchesToRender) {
-      const start = Math.max(0, line - 3);
-      const end = Math.min(lines.length - 1, line + 3);
-      const last = windows[windows.length - 1];
-      if (last && start <= last.end + 1)
-        last.end = Math.max(last.end, end);
-      else
-        windows.push({ start, end });
-    }
-
-    const parents = parentIndices(lines, indents);
-    const path = new Set<number>();
-    for (const match of matchesToRender)
-      addPath(path, parents, match);
-
-    const snippets = windows.map(window => {
-      const indices = ancestorIndices(parents, window.start);
-      for (let i = window.start; i <= window.end; i++)
-        indices.push(i);
-
-      const out: string[] = [];
-      for (let i = 0; i < indices.length; i++) {
-        const index = indices[i];
-        if (i > 0 && index > indices[i - 1] + 1 && !path.has(index) && !path.has(indices[i - 1]))
-          out.push(' '.repeat(indents[index]) + '...');
-        out.push(lines[index]);
-      }
-      return truncateDataUrls(out.join('\n'));
-    });
-    const matchWord = totalMatches === 1 ? 'match' : 'matches';
-    const header = matchesToRender.length < totalMatches
-      ? `Found ${totalMatches} ${matchWord} for ${query} (showing first ${matchesToRender.length}):`
-      : `Found ${totalMatches} ${matchWord} for ${query}:`;
+    const shownMatches = matchedLines.slice(0, params.maxResults ?? matchedLines.length);
+    const snippets = renderFindSnippets(lines, shownMatches);
+    const matchWord = matchedLines.length === 1 ? 'match' : 'matches';
+    const header = shownMatches.length < matchedLines.length
+      ? `Found ${matchedLines.length} ${matchWord} for ${query} (showing first ${shownMatches.length}):`
+      : `Found ${matchedLines.length} ${matchWord} for ${query}:`;
     await writeFindResult(tab, params.filename, response, `${header}\n\n${snippets.join('\n\n----\n\n')}`);
   },
 });
+
+const findContextLines = 3;
+
+function findMatcher(params: { text?: string, regex?: string }): { query: string, matches: (line: string) => boolean } {
+  if (params.regex) {
+    const { regex, display } = compileRegex(params.regex);
+    return { query: display, matches: line => regex.test(line) };
+  }
+  const needle = params.text!.toLowerCase();
+  return { query: `"${params.text}"`, matches: line => line.toLowerCase().includes(needle) };
+}
+
+function renderFindSnippets(lines: string[], shownMatches: number[]): string[] {
+  const indents = lines.map(indentOf);
+  const parents = parentIndices(lines, indents);
+  const pathToMatches = new Set<number>();
+  for (const match of shownMatches)
+    addPath(pathToMatches, parents, match);
+
+  return mergedContextWindows(shownMatches, lines.length).map(window => {
+    const indices = [...ancestorIndices(parents, window.start), ...range(window.start, window.end)];
+    const out: string[] = [];
+    indices.forEach((index, position) => {
+      const previous = indices[position - 1];
+      const skippedLines = position > 0 && index > previous + 1;
+      if (skippedLines && !pathToMatches.has(index) && !pathToMatches.has(previous))
+        out.push(' '.repeat(indents[index]) + '...');
+      out.push(lines[index]);
+    });
+    return truncateDataUrls(out.join('\n'));
+  });
+}
+
+function mergedContextWindows(matches: number[], lineCount: number): { start: number, end: number }[] {
+  const windows: { start: number, end: number }[] = [];
+  for (const line of matches) {
+    const start = Math.max(0, line - findContextLines);
+    const end = Math.min(lineCount - 1, line + findContextLines);
+    const last = windows[windows.length - 1];
+    if (last && start <= last.end + 1)
+      last.end = Math.max(last.end, end);
+    else
+      windows.push({ start, end });
+  }
+  return windows;
+}
+
+function range(start: number, end: number): number[] {
+  return Array.from({ length: end - start + 1 }, (_, offset) => start + offset);
+}
 
 async function writeFindResult(tab: Tab, filename: string | undefined, response: Response, result: string) {
   if (filename === undefined) {
@@ -508,18 +481,11 @@ const click = defineTabTool({
     const locator = await tab.refLocator(params);
     const button = params.button;
     const buttonAttr = button ? `{ button: '${button}' }` : '';
-
-    if (params.doubleClick)
-      response.addCode(`await page.${await generateLocator(locator)}.dblclick(${buttonAttr});`);
-    else
-      response.addCode(`await page.${await generateLocator(locator)}.click(${buttonAttr});`);
-
+    const method = params.doubleClick ? 'dblclick' : 'click';
+    response.addCode(`await page.${await generateLocator(locator)}.${method}(${buttonAttr});`);
 
     await tab.waitForCompletion(async () => {
-      if (params.doubleClick)
-        await locator.dblclick({ button });
-      else
-        await locator.click({ button });
+      await locator[method]({ button });
     });
   },
 });
@@ -576,7 +542,6 @@ const drop = defineTabTool({
   handle: async (tab, params, response) => {
     response.setIncludeSnapshot();
 
-    // The schema guarantees at least one of them is non-empty.
     const payload: { files?: string[], data?: Record<string, string> } = {};
     if (params.paths?.length)
       payload.files = params.paths;
@@ -588,9 +553,6 @@ const drop = defineTabTool({
     response.addCode(`await page.${await generateLocator(locator)}.drop(${JSON.stringify(payload)});`);
 
     await tab.waitForCompletion(async () => {
-      // `drop` rejects when the target's dragover listener never calls
-      // preventDefault(), which is Playwright's way of saying the element does
-      // not accept the payload.
       await locator.drop(files ? { ...payload, files } : payload);
     });
   },

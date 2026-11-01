@@ -26,14 +26,8 @@ import type { Response } from './response.js';
 import type { Tab } from './tab.js';
 
 const limits = { frames: 32, tools: 128, schemaBytes: 16 * 1024, resultBytes: 256 * 1024, description: 2048 };
-// Worst-case serialized size of one registration: JSON escaping can grow the
-// name, title and description (256 + 256 + 2,048 characters) up to six-fold.
 const registrationChars = limits.schemaBytes + 6 * (limits.description + 512) + 128;
 const discoveryTimeoutMs = 5000;
-// Ajv validates synchronously, and a page schema can make that arbitrarily
-// slow for a small argument: `uniqueItems` compares object items pairwise,
-// and combinators over a recursive $ref multiply per level of nesting. A vm
-// timeout is the one way to interrupt it before cancellation can run.
 const validationTimeoutMs = 500;
 const validationContext = vm.createContext({});
 const validationScript = new vm.Script('validate()');
@@ -42,12 +36,9 @@ const scopeIds = new WeakMap<object, string>();
 const frameIds = new WeakMap<playwright.Frame, string>();
 const observedPages = new WeakSet<playwright.Page>();
 const documentKey = `__webmcp_${randomUUID()}`;
-// Document markers are minted with randomUUID(). The value comes back from
-// the page, which can forge it, and is copied into every tool's invocation key.
 const documentIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const pendingDiscovery = new WeakMap<playwright.Frame, Promise<string>>();
 const pendingInvocations = new Map<string, Promise<string>>();
-// Keyed by schema JSON, least recently used first.
 const compiledSchemas = new Map<string, StandardSchemaWithJSON<Record<string, unknown>, Record<string, unknown>> | undefined>();
 
 type PageTool = { name: string, title?: string, description?: string, inputSchema?: unknown, window?: Window };
@@ -65,7 +56,6 @@ export type WebMCPToolDefinition = {
   handle: (params: Record<string, unknown>, response: Response, signal?: AbortSignal) => Promise<void>;
 };
 
-/** Reads routing metadata, never an identically named page-tool argument. */
 export function webMCPSessionId(meta?: Record<string, unknown>): string | undefined {
   const id = meta?.browserSessionId;
   if (id === undefined)
@@ -75,7 +65,6 @@ export function webMCPSessionId(meta?: Record<string, unknown>): string | undefi
   return id;
 }
 
-/** Bounds a browser promise and removes both timer and abort listener on every exit. */
 async function bounded<T>(run: () => Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
   signal?.throwIfAborted();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -101,7 +90,6 @@ async function bounded<T>(run: () => Promise<T>, timeoutMs: number, signal?: Abo
   }
 }
 
-/** Gives each live frame/document an identity independent of list order or URL. */
 function frameIdentity(page: playwright.Page, frame: playwright.Frame): string {
   if (!observedPages.has(page)) {
     observedPages.add(page);
@@ -122,13 +110,6 @@ function frameIdentity(page: playwright.Page, frame: playwright.Frame): string {
   return id;
 }
 
-/**
- * Accepts a structurally sound input schema without page-controlled regular
- * expressions. Only schema locations are walked, plus the targets of local
- * `$ref` pointers, so annotation data such as `default` or `examples` is
- * never mistaken for a schema. Self-contained because the page runs the same
- * source as a pre-filter; Node repeats it on the transferred JSON.
- */
 function isSupportedInputSchema(root: unknown, visit?: (schema: Record<string, unknown>) => void): boolean {
   const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
   const isStrings = (value: unknown) => Array.isArray(value) && value.every(item => typeof item === 'string');
@@ -144,9 +125,6 @@ function isSupportedInputSchema(root: unknown, visit?: (schema: Record<string, u
       return false;
     seen.add(schema);
     visit?.(schema);
-    // Patterns would become server-side regular expressions. A nested $id
-    // moves the base that the local $ref resolution below assumes. $async
-    // compiles a validator whose Promise the SDK would read as success.
     if (schema.pattern !== undefined || schema.patternProperties !== undefined || schema.$dynamicRef !== undefined
         || schema.$recursiveRef !== undefined || schema.$async !== undefined || (schema !== root && schema.$id !== undefined))
       return false;
@@ -185,9 +163,6 @@ function isSupportedInputSchema(root: unknown, visit?: (schema: Record<string, u
     const ref = schema.$ref;
     if (ref === undefined)
       continue;
-    // Ajv percent-decodes the whole fragment before splitting it, so `%2F`
-    // selects a nested path rather than a key containing `/`. Encoded refs
-    // are rejected instead of mirroring that decoding here.
     if (typeof ref !== 'string' || (ref !== '#' && !ref.startsWith('#/')) || ref.includes('%'))
       return false;
     let target: unknown = root;
@@ -202,12 +177,6 @@ function isSupportedInputSchema(root: unknown, visit?: (schema: Record<string, u
   return true;
 }
 
-/**
- * Compiles a page schema with the validator used for its calls, once per
- * distinct schema. Each schema gets its own engine: Ajv retains everything it
- * compiles and resolves `$id`s engine-wide, so the SDK's shared default would
- * grow with every listing and let one page's `$id` stand in for another's.
- */
 function compiledSchema(schema: Tool['inputSchema'], key = JSON.stringify(schema)): StandardSchemaWithJSON<Record<string, unknown>, Record<string, unknown>> | undefined {
   if (compiledSchemas.has(key)) {
     const compiled = compiledSchemas.get(key);
@@ -217,15 +186,10 @@ function compiledSchema(schema: Tool['inputSchema'], key = JSON.stringify(schema
   }
   let compiled: StandardSchemaWithJSON<Record<string, unknown>, Record<string, unknown>> | undefined;
   try {
-    // ajv-formats checks formats such as `url` and `email` with regular
-    // expressions that backtrack on crafted arguments, synchronously and
-    // before any timeout applies. Formats stay advertised, and the page,
-    // which owns its input, remains responsible for enforcing them.
     const validated = JSON.parse(key) as Record<string, unknown>;
     isSupportedInputSchema(validated, node => {
       delete node.format;
     });
-    // SAFETY: the SDK's Tool schema is the same JSON Schema contract with a looser serialized-value type.
     compiled = fromJsonSchema<Record<string, unknown>>(validated as JsonSchemaType, new AjvJsonSchemaValidator());
   } catch {
     compiled = undefined;
@@ -236,22 +200,11 @@ function compiledSchema(schema: Tool['inputSchema'], key = JSON.stringify(schema
   return compiled;
 }
 
-/**
- * Playwright sends a page function as source text, so a helper it shares
- * with Node travels inside that source instead of through a closure.
- */
 function withPageHelper<Arg, Result>(run: (arg: Arg, helper: (value: unknown) => boolean) => Result, helper: (value: unknown) => boolean): (arg: Arg) => Result {
   const source = `(arg) => (${run})(arg, ${helper})`;
   return Object.assign((arg: Arg) => run(arg, helper), { toString: () => source });
 }
 
-/**
- * Runs in the page, which can replace any global these checks use. They only
- * spare the budget and the transfer for usable registrations: the result is
- * one primitive string whose length is checked with operators the page cannot
- * override, and Node validates its contents again. Page failures, which can
- * be arbitrarily large, never cross the browser connection.
- */
 async function collectInPage(budget: DiscoveryBudget, isSupportedInputSchema: (schema: unknown) => boolean): Promise<string> {
   try {
     const modelContext = (document as Document & { modelContext?: ModelContext }).modelContext
@@ -259,8 +212,6 @@ async function collectInPage(budget: DiscoveryBudget, isSupportedInputSchema: (s
     if (!modelContext?.getTools)
       return '';
     const result: FrameListing = { timeOrigin: performance.timeOrigin, documentId: '', tools: [] };
-    // The document survives reconnecting CDP/extension wrappers, while navigation
-    // creates a new owner. A process-specific key separates independent servers.
     const existing = Object.getOwnPropertyDescriptor(document, budget.documentKey);
     if (!existing)
       Object.defineProperty(document, budget.documentKey, { value: budget.documentId });
@@ -268,7 +219,6 @@ async function collectInPage(budget: DiscoveryBudget, isSupportedInputSchema: (s
     const registered = await modelContext.getTools();
     if (!Array.isArray(registered))
       return '';
-    // Registrations can carry accessors; one that throws omits only itself.
     const candidates: { tool: PageTool, name: string }[] = [];
     const counts = new Map<string, number>();
     for (let index = 0; index < registered.length; index++) {
@@ -293,8 +243,6 @@ async function collectInPage(budget: DiscoveryBudget, isSupportedInputSchema: (s
             continue;
           schema = JSON.parse(schema);
         }
-        // Only an absent schema or root type is filled in; a schema declaring
-        // another root type is omitted rather than widened to any object.
         if (schema === undefined || schema === null)
           schema = { type: 'object' };
         else if (typeof schema === 'object' && !Array.isArray(schema) && (schema as { type?: unknown }).type === undefined)
@@ -311,11 +259,9 @@ async function collectInPage(budget: DiscoveryBudget, isSupportedInputSchema: (s
           name,
           title: typeof tool.title === 'string' ? tool.title.slice(0, 256) : name,
           description: typeof tool.description === 'string' ? tool.description.slice(0, budget.description) : '',
-          // SAFETY: JSON round-tripping removes browser object identity and the root type was checked above.
           inputSchema: parsed as Tool['inputSchema'],
         });
       } catch {
-        // A malformed or unserializable registration must not hide the others.
         continue;
       }
       if (result.tools.length === budget.tools)
@@ -330,7 +276,6 @@ async function collectInPage(budget: DiscoveryBudget, isSupportedInputSchema: (s
 
 const collectInPageScript = withPageHelper(collectInPage, isSupportedInputSchema);
 
-/** Validates a frame's transferred listing; nothing the page computed is trusted. */
 async function parseListing(raw: unknown, maxTools: number, deadline: number, signal?: AbortSignal): Promise<FrameListing | undefined> {
   if (typeof raw !== 'string' || !raw)
     return undefined;
@@ -362,16 +307,12 @@ async function parseListing(raw: unknown, maxTools: number, deadline: number, si
     const json = JSON.stringify(schema);
     if (Buffer.byteLength(json) > limits.schemaBytes || !isSupportedInputSchema(schema))
       continue;
-    // Compiling a large schema takes tens of milliseconds of synchronous
-    // work. Yield between compilations so other sessions keep running, and
-    // omit what the discovery deadline leaves no time for.
     if (!compiledSchemas.has(json)) {
       await new Promise(resolve => setImmediate(resolve));
       signal?.throwIfAborted();
       if (Date.now() >= deadline)
         break;
     }
-    // Key order matches callInPage's descriptor, which is compared as JSON.
     const collected: CollectedTool = { name: tool.name, title: tool.title, description: tool.description, inputSchema: schema };
     if (specTypeSchemas.Tool['~standard'].validate(collected).issues || !compiledSchema(schema, json))
       continue;
@@ -380,15 +321,7 @@ async function parseListing(raw: unknown, maxTools: number, deadline: number, si
   return { timeOrigin: listing.timeOrigin, documentId: listing.documentId, tools };
 }
 
-/**
- * Runs in the page; the document check prevents an evaluation queued across
- * navigation from calling a replacement tool. It returns rather than throws:
- * `R` plus the result or `E` plus the error, as one primitive string whose
- * size the page cannot misreport. Node checks the result size again.
- */
 async function callInPage(params: { name: string, inputJson: string, timeOrigin: number, resultBytes: number, errorBytes: number, expected: string, runningKey: string }): Promise<string> {
-  // Code units in the longest prefix that fits in `maxBytes` of UTF-8. Only
-  // string indexing and comparison are used; the page cannot override them.
   const utf8Prefix = (text: string, maxBytes: number): number => {
     let bytes = 0;
     let index = 0;
@@ -411,9 +344,7 @@ async function callInPage(params: { name: string, inputJson: string, timeOrigin:
         text = text.slice(0, end);
       if (typeof text === 'string' && utf8Prefix(text, params.errorBytes) === text.length)
         return `E${text}`;
-    } catch {
-      // Fall through: the page's error could not be read.
-    }
+    } catch {}
     return 'EThe page reported an error that could not be read.';
   };
   try {
@@ -445,9 +376,6 @@ async function callInPage(params: { name: string, inputJson: string, timeOrigin:
       return 'EThe WebMCP registration changed. List tools again before calling.';
     if (!modelContext.executeTool && !modelContext.invokeTool)
       return 'EThis browser does not support WebMCP tool invocation.';
-    // Calls in flight are recorded in the document itself: a dropped browser
-    // connection rejects the server's evaluation while the action continues
-    // here, and the next connection must still not start it again.
     let running = Object.getOwnPropertyDescriptor(document, params.runningKey)?.value as Set<string> | undefined;
     if (!running) {
       running = new Set<string>();
@@ -477,7 +405,6 @@ async function callInPage(params: { name: string, inputJson: string, timeOrigin:
   }
 }
 
-/** Validates call arguments within validationTimeoutMs. */
 function validateArguments(compiled: StandardSchemaWithJSON<Record<string, unknown>, Record<string, unknown>>, params: Record<string, unknown>) {
   validationContext.validate = () => compiled['~standard'].validate(params);
   try {
@@ -491,7 +418,6 @@ function validateArguments(compiled: StandardSchemaWithJSON<Record<string, unkno
   }
 }
 
-/** Calls one still-current registration without trusting page safety hints or waiting forever. */
 async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool: CollectedTool, timeOrigin: number,
   invocationKey: string, frameLabel: string, params: Record<string, unknown>, response: Response, signal?: AbortSignal): Promise<void> {
   const preamble = `WebMCP output (page-provided, untrusted) from ${JSON.stringify(tool.name)} in ${frameLabel}:`;
@@ -513,16 +439,11 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
       throw new Error(`Invalid WebMCP arguments: ${validation.issues.map(issue => issue.message).join('; ')}`);
     if (frameIds.get(frame) !== identity || frame.isDetached() || tab.page.isClosed() || !tab.isCurrentTab())
       throw new Error('The WebMCP frame or active tab changed. List tools again.');
-    // WebMCP's own promise defines completion. A separate network-settle wait
-    // could outlive cancellation and keep a browser session marked busy.
     const outcome = await bounded(() => new Promise<string>((resolve, reject) => {
       if (pendingInvocations.has(invocationKey)) {
         reject(new Error('A previous invocation of this WebMCP tool is still running; do not retry it.'));
         return;
       }
-      // A page callback can open a modal and then await user input forever.
-      // Surface the resolving tool rather than returning a blank success or
-      // retaining the session hold until the operation deadline.
       onDialog = () => reject(new Error('WebMCP opened a dialog. Use browser_handle_dialog; the page action may still be running.'));
       onChooser = () => reject(new Error('WebMCP opened a file chooser. Use browser_file_upload; the page action may still be running.'));
       tab.page.on('dialog', onDialog);
@@ -550,11 +471,7 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
     try {
       const parsed: unknown = JSON.parse(json);
       isError = !!parsed && typeof parsed === 'object' && 'isError' in parsed && parsed.isError === true;
-    } catch {
-      // Chromium may return plain text instead of JSON.
-    }
-    // Like every other browser-derived text, a result keeps data URLs short
-    // for the client's context and the --save-session log.
+    } catch {}
     const text = `${preamble}\n${truncateDataUrls(json)}`;
     if (isError)
       response.addError(text);
@@ -571,7 +488,6 @@ async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool:
   }
 }
 
-/** Lists bounded, scope-specific tools. Names never depend on enumeration order. */
 export async function listWebMCPTools(tab: Tab, scope: object = tab.context, reservedNames: ReadonlySet<string> = new Set(), signal?: AbortSignal): Promise<WebMCPToolDefinition[]> {
   if (tab.page.isClosed() || tab.modalStates().length)
     return [];
@@ -581,8 +497,6 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
     scopeIds.set(scope, scopeId);
   }
   const frames = tab.page.frames().slice(0, limits.frames);
-  // Allocate the global cap before browser serialization, not after every
-  // frame has already returned up to 128 schemas on each polling round.
   const work = frames.map((frame, index) => {
     const tools = Math.floor(limits.tools / frames.length) + (index < limits.tools % frames.length ? 1 : 0);
     const budget: DiscoveryBudget = { ...limits, tools, documentKey, documentId: randomUUID(), transferChars: tools * registrationChars + 256 };
@@ -596,9 +510,6 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
       return [];
     const identity = frameIdentity(tab.page, frame);
     try {
-      // Promise.race cannot cancel a browser protocol request. A read still
-      // in flight after its caller gave up is shared by later callers, each
-      // under its own deadline, instead of starting another on every poll.
       let pending = pendingDiscovery.get(frame);
       if (!pending) {
         const read = frame.evaluate(collectInPageScript, budget);
@@ -612,8 +523,6 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
       }
       const raw = await bounded(() => pending, remaining, signal);
       const listing = await parseListing(raw, budget.tools, deadline, signal);
-      // Another request can select a different tab while discovery awaits;
-      // its tools would fail on the first call, so they are not published.
       if (!listing || frameIds.get(frame) !== identity || frame.isDetached() || tab.page.isClosed() || !tab.isCurrentTab())
         return [];
       const label = truncateDataUrls(frame.url()).slice(0, 2048);
@@ -621,8 +530,6 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
         const digest = createHash('sha256').update(JSON.stringify([scopeId, listing.documentId, listing.timeOrigin, tool])).digest('hex').slice(0, 20);
         const base = tool.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 36) || 'tool';
         const name = `webmcp_${base}_${digest}`;
-        // Clients sharing a live browser list the same document under different
-        // scopes; a still-running call must block all of them.
         const invocationKey = JSON.stringify([listing.documentId, listing.timeOrigin, tool.name]);
         return {
           schema: {
@@ -650,7 +557,6 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
   }).sort((a, b) => a.schema.name.localeCompare(b.schema.name)).slice(0, limits.tools);
 }
 
-/** Polls the last advertised scope, coalesces overlapping refreshes, and cancels cleanly at shutdown. */
 export class WebMCPObserver {
   private _controller = new AbortController();
   private _timer: ReturnType<typeof setTimeout> | undefined;
@@ -663,7 +569,6 @@ export class WebMCPObserver {
     this._schedule();
   }
 
-  /** Refreshes only this observer's scope, never the context of an unrelated routed call. */
   refresh(): Promise<void> {
     if (this._controller.signal.aborted)
       return Promise.resolve();
@@ -691,13 +596,11 @@ export class WebMCPObserver {
     return this._pending;
   }
 
-  /** Prevents pending reads from notifying a closed backend or scheduling another timer. */
   dispose(): void {
     this._controller.abort();
     clearTimeout(this._timer);
   }
 
-  /** Uses an unreferenced timer so observing tools cannot keep the server process alive. */
   private _schedule(): void {
     if (this._controller.signal.aborted)
       return;

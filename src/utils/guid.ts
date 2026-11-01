@@ -20,11 +20,6 @@ export function createGuid(): string {
   return crypto.randomBytes(16).toString('hex');
 }
 
-/**
- * Short collision-resistant token (8 hex chars) for artifact names that
- * already carry a timestamp: two connections created in the same millisecond
- * must still get distinct session/trace folders.
- */
 export function createShortGuid(): string {
   return crypto.randomBytes(4).toString('hex');
 }

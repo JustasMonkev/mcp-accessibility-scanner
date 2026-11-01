@@ -29,24 +29,10 @@ import type { Transport } from '@modelcontextprotocol/client';
 export type MCPProvider = {
   name: string;
   description: string;
-  /**
-   * Throws when this provider cannot serve the current configuration (e.g. a
-   * storage state the extension provider would silently drop). Runs before the
-   * current client is torn down, so a rejected switch leaves the session on
-   * its previous provider instead of stranding it with none.
-   */
   validate?(): void;
   connect(): Promise<Transport>;
 };
 
-/**
- * Wiring for stateless (per-request) proxy backends: the slot carries a
- * `browser_connect` switch across handshake-free requests, and `providers`
- * is the stateful-flavored provider list used to connect the shared client —
- * a process-scoped client outlives any single response, so it must not run
- * its default context in the throwaway per-request (ephemeral) shape. The
- * list must mirror the per-request providers name-for-name.
- */
 export type SharedProxySelection = {
   slot: SharedClientSlot;
   providers: MCPProvider[];
@@ -58,15 +44,11 @@ export class ProxyBackend implements ServerBackend {
   readonly dynamicToolList = true;
   private _mcpProviders: MCPProvider[];
   private _currentClient: Client | undefined;
-  // False when _currentClient is adopted from the shared slot: response
-  // cleanup (serverClosed) must not tear down a process-scoped client that
-  // later requests still route through.
   private _ownsCurrentClient = true;
   private _contextSwitchTool: Tool;
   private _backendContext: ServerBackendContext | undefined;
   private _sharedSelection: SharedProxySelection | undefined;
   private _relay = new ToolRelay(client => {
-    // Shared stateless clients have no persistent notification recipient.
     if (this._ownsCurrentClient && this._currentClient === client)
       return this._backendContext?.notifyToolListChanged();
   }, errorsDebug);
@@ -79,12 +61,6 @@ export class ProxyBackend implements ServerBackend {
 
   async initialize(context: ServerBackendContext, _clientVersion: ClientVersion): Promise<void> {
     this._backendContext = context;
-    // A process-scoped browser_connect switch is in effect: adopt it instead
-    // of connecting the default provider, so the selection made in an earlier
-    // handshake-free request keeps governing this one. The adoption holds a
-    // lease on the shared client (released in serverClosed, or earlier when
-    // this request switches away), so a concurrent switch cannot close it
-    // under this request's in-flight calls.
     const shared = this._sharedSelection?.slot.acquire();
     if (shared) {
       this._currentClient = shared;
@@ -114,8 +90,6 @@ export class ProxyBackend implements ServerBackend {
     if (this._ownsCurrentClient)
       void this._currentClient?.close().catch(errorsDebug);
     else if (this._currentClient)
-      // Adopted from the shared slot: release the lease instead of closing —
-      // the slot closes the client once it is retired and fully drained.
       void this._sharedSelection?.slot.release(this._currentClient);
   }
 
@@ -141,15 +115,8 @@ export class ProxyBackend implements ServerBackend {
     }
   }
 
-  // Stateless serving: publish the switch through the process-scoped slot so
-  // later per-request backends adopt it. The slot closes the previously
-  // shared client itself (exactly once, after the swap, once every adopting
-  // request has released it); only a client this request owned — its
-  // per-request default — is closed here.
   private async _switchSharedClient(name: string): Promise<void> {
     const { slot, providers } = this._sharedSelection!;
-    // The stateful-flavored list mirrors this._mcpProviders name-for-name;
-    // the name was already resolved and validated against the latter.
     const provider = providers.find(factory => factory.name === name);
     if (!provider)
       throw new Error('Unknown connection method: ' + name);
@@ -160,15 +127,9 @@ export class ProxyBackend implements ServerBackend {
       this._currentClient = shared;
       this._ownsCurrentClient = false;
     } else {
-      // Back to the default provider, which stateless serving runs
-      // per-request: finish this exchange on an owned per-request client.
       this._currentClient = await this._connectClient(this._mcpProviders[0]);
       this._ownsCurrentClient = true;
     }
-    // This request no longer routes through the shared client it adopted;
-    // when it was the retiring client's last adopter, this runs the close
-    // the replace deferred. Only on success — a failed replace threw above,
-    // and the request keeps using its adopted client.
     if (previousShared)
       await slot.release(previousShared);
     await previousOwned?.close().catch(errorsDebug);
@@ -199,9 +160,6 @@ export class ProxyBackend implements ServerBackend {
     const client = await this._connectClient(factory);
     this._currentClient = client;
     this._ownsCurrentClient = true;
-    // Page tools depend on the connected browser, so a switch is announced
-    // outright. Listing either provider's tools to compare them would run
-    // page discovery, and possibly attach a browser, that no client asked for.
     if (notifyOnChange)
       await this._backendContext?.notifyToolListChanged().catch(errorsDebug);
   }

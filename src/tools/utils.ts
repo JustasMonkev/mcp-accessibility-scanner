@@ -14,152 +14,112 @@
  * limitations under the License.
  */
 
-import coreBundle from 'playwright-core/lib/coreBundle';
-
-const { asLocator } = coreBundle.iso;
+import { settleWithin } from '../utils/timeout.js';
 
 import type * as playwright from 'playwright';
 import type { Request } from 'playwright';
 import type { Tab } from '../tab.js';
 
-// How long an action that finished quietly is watched for work it scheduled
-// rather than started - a click handler whose fetch fires from a timer has
-// issued nothing by the time its own promise resolves. Capped by the settle
-// delay it defers to, so lowering that lowers this with it.
-const quietWindowMs = 100;
+const scheduledWorkWindowMs = 100;
+const pageActivityTimeoutMs = 10_000;
+const targetClosedMessage = /Target (?:page, context or browser has been closed|page closed|closed)/i;
 
 export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>): Promise<R> {
   const settleMs = tab.context.config.timeouts.settle ?? 500;
-  const requests = new Set<Request>();
-  let requestSeen = false;
-  let frameNavigated = false;
-  let waitCallback: () => void = () => {};
-  const waitBarrier = new Promise<void>(f => { waitCallback = f; });
-  // Resolves on the first sign of page work, whenever it arrives.
-  let signalCallback: () => void = () => {};
-  const firstSignal = new Promise<void>(f => { signalCallback = f; });
-
-  const requestListener = (request: Request) => {
-    requestSeen = true;
-    requests.add(request);
-    signalCallback();
-  };
-  // A request that fails - offline, blocked by CORS, aborted - emits
-  // `requestfailed` and never `requestfinished`. Without the same removal path
-  // it would sit in the set until the 10s timeout below, turning a click that
-  // fired one doomed fetch into a ten-second tool call.
-  const requestSettledListener = (request: Request) => {
-    requests.delete(request);
-    if (!requests.size)
-      waitCallback();
-  };
-
-  const frameNavigateListener = (frame: playwright.Frame) => {
-    signalCallback();
-    if (frame.parentFrame()) {
-      // A child frame swapping documents is page work too, and it can issue no
-      // request at all. It must not gate the barrier on a top-level load state
-      // that this navigation will never produce.
-      return;
-    }
-    frameNavigated = true;
-    dispose();
-    clearTimeout(timeout);
-    void tab.waitForLoadState('load').then(waitCallback);
-  };
-
-  const onTimeout = () => {
-    dispose();
-    waitCallback();
-  };
-
-  tab.page.on('request', requestListener);
-  tab.page.on('requestfinished', requestSettledListener);
-  tab.page.on('requestfailed', requestSettledListener);
-  tab.page.on('framenavigated', frameNavigateListener);
-  const timeout = setTimeout(onTimeout, 10000);
-
-  const dispose = () => {
-    tab.page.off('request', requestListener);
-    tab.page.off('requestfinished', requestSettledListener);
-    tab.page.off('requestfailed', requestSettledListener);
-    tab.page.off('framenavigated', frameNavigateListener);
-    clearTimeout(timeout);
-  };
-
+  const activity = new PageActivity(tab);
   try {
     const result = await callback();
-    // Nothing has happened yet, which is not the same as nothing being about to:
-    // watch briefly for work the action scheduled instead of started.
-    if (!requestSeen && !frameNavigated)
-      await raceTimeout(firstSignal, Math.min(quietWindowMs, settleMs));
-    if (!requests.size && !frameNavigated)
-      waitCallback();
-    await waitBarrier;
-    // Timers can schedule DOM-only work without producing any observable page
-    // signal. Preserve the configured settle delay so the returned snapshot
-    // includes those updates too.
-    if (!tab.page.isClosed()) {
-      try {
-        await tab.waitForTimeout(settleMs);
-      } catch (error) {
-        const targetClosed = error instanceof Error && /Target (?:page, context or browser has been closed|page closed|closed)/i.test(error.message);
-        if (!tab.page.isClosed() || !targetClosed)
-          throw error;
-      }
-    }
+    await activity.waitUntilIdle(Math.min(scheduledWorkWindowMs, settleMs));
+    await waitForDomOnlyWork(tab, settleMs);
     return result;
   } finally {
-    dispose();
+    activity.dispose();
   }
 }
 
-// Resolves with `promise` or when the timeout elapses, whichever comes first.
-// Both branches resolve, so the losing one leaves nothing unhandled behind.
-async function raceTimeout(promise: Promise<void>, timeoutMs: number): Promise<void> {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+class PageActivity {
+  private readonly _tab: Tab;
+  private readonly _inFlightRequests = new Set<Request>();
+  private _sawRequest = false;
+  private _mainFrameNavigated = false;
+  private _markIdle: () => void = () => {};
+  private readonly _idle = new Promise<void>(resolve => { this._markIdle = resolve; });
+  private _markFirstActivity: () => void = () => {};
+  private readonly _firstActivity = new Promise<void>(resolve => { this._markFirstActivity = resolve; });
+  private readonly _timeout: ReturnType<typeof setTimeout>;
+
+  constructor(tab: Tab) {
+    this._tab = tab;
+    tab.page.on('request', this._onRequest);
+    tab.page.on('requestfinished', this._onRequestSettled);
+    tab.page.on('requestfailed', this._onRequestSettled);
+    tab.page.on('framenavigated', this._onFrameNavigated);
+    this._timeout = setTimeout(() => {
+      this.dispose();
+      this._markIdle();
+    }, pageActivityTimeoutMs);
+  }
+
+  async waitUntilIdle(scheduledWorkWindowMs: number): Promise<void> {
+    if (!this._sawRequest && !this._mainFrameNavigated)
+      await settleWithin(this._firstActivity, scheduledWorkWindowMs);
+    if (!this._inFlightRequests.size && !this._mainFrameNavigated)
+      this._markIdle();
+    await this._idle;
+  }
+
+  dispose(): void {
+    this._tab.page.off('request', this._onRequest);
+    this._tab.page.off('requestfinished', this._onRequestSettled);
+    this._tab.page.off('requestfailed', this._onRequestSettled);
+    this._tab.page.off('framenavigated', this._onFrameNavigated);
+    clearTimeout(this._timeout);
+  }
+
+  private _onRequest = (request: Request) => {
+    this._sawRequest = true;
+    this._inFlightRequests.add(request);
+    this._markFirstActivity();
+  };
+
+  private _onRequestSettled = (request: Request) => {
+    this._inFlightRequests.delete(request);
+    if (!this._inFlightRequests.size)
+      this._markIdle();
+  };
+
+  private _onFrameNavigated = (frame: playwright.Frame) => {
+    this._markFirstActivity();
+    if (frame.parentFrame())
+      return;
+    this._mainFrameNavigated = true;
+    this.dispose();
+    void this._tab.waitForLoadState('load').then(this._markIdle);
+  };
+}
+
+async function waitForDomOnlyWork(tab: Tab, settleMs: number): Promise<void> {
+  if (tab.page.isClosed())
+    return;
   try {
-    await Promise.race([
-      promise,
-      new Promise<void>(resolve => {
-        timeoutId = setTimeout(resolve, timeoutMs);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timeoutId);
+    await tab.waitForTimeout(settleMs);
+  } catch (error) {
+    const pageClosedWhileSettling = tab.page.isClosed() && error instanceof Error && targetClosedMessage.test(error.message);
+    if (!pageClosedWhileSettling)
+      throw error;
   }
 }
 
 export async function generateLocator(locator: playwright.Locator): Promise<string> {
-  // playwright-core 1.61 replaced the private `_resolveSelector` helper with the
-  // public `Locator.normalize()` method (microsoft/playwright). `normalize()`
-  // returns a locator whose `toString()` is the resolved JavaScript locator
-  // expression, which is exactly what the "Ran Playwright code" snippet needs.
-  if (typeof locator.normalize === 'function') {
-    try {
-      const normalized = await locator.normalize();
-      return normalized.toString();
-    } catch {
-      // Fall through to the legacy/string strategies below.
-    }
+  try {
+    return (await locator.normalize()).toString();
+  } catch {
+    const locatorText = String(locator);
+    return locatorText === '[object Object]' ? `locator('<unresolved>')` : locatorText;
   }
-
-  // Older cores (< 1.61) still expose the private `_resolveSelector` helper.
-  // SAFETY: older Playwright locators expose this optional method; its presence is checked before use.
-  const legacy = locator as playwright.Locator & { _resolveSelector?: () => Promise<{ resolvedSelector: string }> };
-  if (typeof legacy._resolveSelector === 'function') {
-    const { resolvedSelector } = await legacy._resolveSelector();
-    return asLocator('javascript', resolvedSelector);
-  }
-
-  // `generateLocator` only renders the "Ran Playwright code" snippet. It must
-  // not block the actual action when Playwright removes private helpers.
-  const locatorText = String(locator);
-  return locatorText === '[object Object]' ? `locator('<unresolved>')` : locatorText;
 }
 
 export async function callOnPageNoTrace<T>(page: playwright.Page, callback: (page: playwright.Page) => Promise<T>): Promise<T> {
-  // SAFETY: Playwright Page inherits this internal wrapper from its ChannelOwner implementation.
   const internalPage = page as playwright.Page & { _wrapApiCall: (callback: () => Promise<T>, options: { internal: boolean }) => Promise<T> };
   return await internalPage._wrapApiCall(() => callback(page), { internal: true });
 }

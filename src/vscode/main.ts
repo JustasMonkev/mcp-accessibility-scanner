@@ -22,8 +22,6 @@ import { validateBrowserConnectConnectionString, validateBrowserConnectLib } fro
 import type { FullConfig } from '../config.js';
 
 async function main(config: FullConfig, connectionString: string, lib: string) {
-  // Defense-in-depth: the child must not trust parent argv blindly — the
-  // host already validated both values before spawning (see validation.ts).
   const libError = validateBrowserConnectLib(lib);
   if (libError) {
     // eslint-disable-next-line no-console

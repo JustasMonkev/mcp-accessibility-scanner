@@ -115,10 +115,6 @@ function sendInternalError(req: http.IncomingMessage, res: http.ServerResponse, 
   res.end(responseBody === undefined ? undefined : JSON.stringify(responseBody));
 }
 
-// Optional bearer-token gate for the HTTP transport. The loopback Host/Origin
-// validation above stops remote and cross-site callers, but every local
-// process can still reach the endpoint; a configured token restricts access.
-// Remote access requires TLS in front of the loopback listener.
 function validateAuthorization(req: http.IncomingMessage, authToken: string | undefined): { statusCode: number, message: string } | undefined {
   if (!authToken)
     return;
@@ -132,44 +128,10 @@ function validateAuthorization(req: http.IncomingMessage, authToken: string | un
     return { statusCode: 401, message: 'Unauthorized: invalid token.' };
 }
 
-// ─── Sessionful 2025-era serving ─────────────────────────────────────────────
-// The Streamable HTTP transport (2025-era protocol revisions) keys
-// connections on the `Mcp-Session-Id` header and requires one MCP server per
-// session; the MCP 2026-07-28 revision removes that header and per-connection
-// sessions. The v2 SDK serves 2025-era HTTP traffic natively only in the
-// stateless per-request idiom (`createMcpHandler`'s `legacy: 'stateless'` —
-// no sessions, GET/DELETE answer 405), so this class remains as the minimal
-// user-land session map the SDK's sessionful transport requires: it keeps
-// stateful clients — heartbeat, standalone GET stream, server-initiated
-// notifications — working exactly as before. Refs #166.
-//
-// Sessionless POSTs are routed with the SDK's own era classifier
-// (`isLegacyRequest` — the exact predicate `createMcpHandler` routes on):
-//
-// - Requests carrying the 2026-07-28 per-request `_meta` envelope go to a
-//   modern `createMcpHandler` endpoint (`legacy: 'reject'` — this store owns
-//   all 2025 serving). That is the SDK's native 2026-07-28 serving: it
-//   answers `server/discover`, stamps `resultType` and the SEP-2549
-//   `ttlMs`/`cacheScope` cache fields, and validates the SEP-2243 standard
-//   headers (`MCP-Protocol-Version`/`Mcp-Method`/`Mcp-Name`) — none of which
-//   the 2025-era `Server` + transport pair provides. Refs #165, #166.
-// - Envelope-less 2025-era requests keep the pre-existing body routing: an
-//   `initialize` request gets the stateful session wire behavior; anything
-//   else (a handshake-free 2025 client) is dispatched through the SDK's
-//   stateless mode.
-// ─────────────────────────────────────────────────────────────────────────────
-
 type StatefulSession = { transport: NodeStreamableHTTPServerTransport, eventStreamReady: ManualPromise<void> };
 
 class SessionStore {
   private readonly _sessions = new Map<string, StatefulSession>();
-  // The modern (2026-07-28) endpoint: one handler for the server lifetime,
-  // serving each enveloped request with a fresh server + backend from the
-  // factory — the same per-request idiom as the legacy stateless path, so the
-  // factory's shared browser-session registry carries state across requests.
-  // The SDK closes the per-request server once its exchange finishes, which
-  // runs backend.serverClosed() and disposes any default context it created.
-  // No heartbeat: the modern era has no server-initiated request channel.
   private readonly _modernHandler: NodeMcpRequestHandler;
 
   constructor(private readonly _serverBackendFactory: ServerBackendFactory) {
@@ -180,11 +142,6 @@ class SessionStore {
     this._modernHandler = toNodeHandler(handler, { onerror: error => testDebug(error) });
   }
 
-  // Builds the per-request server for both stateless paths (modern envelope
-  // and handshake-free 2025 requests). The backend comes from the factory's
-  // stateless variant when it provides one: a per-request backend is torn
-  // down with the response, so e.g. its default browser context can run in a
-  // disposable profile instead of contending for the stable persistent one.
   private _createStatelessServer() {
     const backend = (this._serverBackendFactory.createStateless ?? this._serverBackendFactory.create)();
     return mcpServer.createServer(this._serverBackendFactory.name, this._serverBackendFactory.version, backend, false, this._serverBackendFactory);
@@ -200,10 +157,6 @@ class SessionStore {
       await this._handleSessionlessPost(req, res);
       return;
     }
-    // Sessionless GET/DELETE are 2025-era session operations that a
-    // stateless endpoint does not serve. Mirror the SDK's own stateless mode
-    // (`createLegacyStatelessFallback`), which answers every non-POST with
-    // this 405 JSON-RPC error body and no Allow header.
     res.statusCode = 405;
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null }));
@@ -217,10 +170,6 @@ class SessionStore {
       return;
     }
     if (req.method === 'GET' && req.headers.accept?.split(',').some(type => type.split(';')[0].trim().toLowerCase() === 'text/event-stream')) {
-      // The transport answers 200 on this GET only when it accepts it as the
-      // standalone event stream, and handleRequest resolves when that stream
-      // ends, not when it opens — so readiness has to be signalled at the
-      // header flush, and only for a stream that actually established.
       const writeHead = res.writeHead.bind(res);
       const resolveOnEstablished = (...args: Parameters<http.ServerResponse['writeHead']>) => {
         if (args[0] === 200)
@@ -232,15 +181,8 @@ class SessionStore {
     await session.transport.handleRequest(req, res);
   }
 
-  // Peeks at the JSON-RPC body once to route it: modern envelope → the
-  // 2026-07-28 handler; `initialize` (also inside a batch) → stateful
-  // session; anything else → stateless dispatch. The already-parsed body is
-  // handed to the chosen handler so the consumed request stream is never
-  // read twice.
   private async _handleSessionlessPost(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     if (!hasJsonContentType(req)) {
-      // Don't consume the stream — the transport rejects the media type
-      // itself (415, after its Accept check), same as before this routing.
       await this._handleStatelessRequest(req, res, undefined);
       return;
     }
@@ -249,8 +191,6 @@ class SessionStore {
       body = await readJsonBody(req);
     } catch (error) {
       if (error instanceof BodyTooLargeError) {
-        // Chunked bodies get one bounded discard window. A completed request
-        // stays reusable; a declared or still-incomplete request is closed.
         const reusable = req.headers['content-length'] === undefined && await discardRequestBody(req);
         if (res.destroyed)
           return;
@@ -286,15 +226,11 @@ class SessionStore {
         req.resume();
         return;
       }
-      // The stream is consumed, so the transport could no longer produce its
-      // own parse error; mirror the SDK's response exactly.
       res.statusCode = 400;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error: Invalid JSON' }, id: null }));
       return;
     }
-    // The parsed body is passed alongside the headers-only web request, so
-    // nothing further is read from the drained node stream.
     if (!(await isLegacyRequest(await toWebRequest(req, body), body))) {
       await this._modernHandler(req, res, body);
       return;
@@ -306,22 +242,8 @@ class SessionStore {
       await this._handleStatelessRequest(req, res, body);
   }
 
-  // Serves one request from a client that skips the initialize handshake. The
-  // SDK's stateless mode (`sessionIdGenerator: undefined`) performs no
-  // session validation but insists on a fresh transport per request, so each
-  // request gets its own transport, server and backend; the request then
-  // flows into the server's lazy ensureInitialized() path. A stateless tool
-  // call thus runs against a fresh default browser context — cross-request
-  // browser state travels via browser_session_open handles instead, whose
-  // registry the backend factory shares across the backends it creates. No
-  // heartbeat: the response stream ends with the request, so there is no
-  // long-lived connection to probe.
   private async _handleStatelessRequest(req: http.IncomingMessage, res: http.ServerResponse, parsedBody: unknown): Promise<void> {
     const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    // Dispose the per-request server — and with it the backend's default
-    // context, if the request ever created one — once the response finishes
-    // or aborts. Shared state (the factory's browser-session registry and
-    // the contexts it holds) deliberately survives this close.
     res.once('close', () => void transport.close().catch(e => testDebug(e)));
     try {
       await this._createStatelessServer().connect(transport);
@@ -367,14 +289,9 @@ function hasJsonContentType(req: http.IncomingMessage): boolean {
   const contentType = req.headers['content-type'];
   if (!contentType)
     return false;
-  // Media type only — parameters such as charset are irrelevant here.
   return contentType.split(';')[0].trim().toLowerCase() === 'application/json';
 }
 
-// Sessionless JSON POSTs are buffered here in user land (the parsed body is
-// handed to the SDK), so this reader owns the message-size cap the SDK
-// transports apply to the streams they read themselves. The value matches the
-// SDK's own per-message transport limit (10 MB).
 const maxJsonBodyBytes = STDIO_DEFAULT_MAX_BUFFER_SIZE;
 
 class BodyTooLargeError extends Error {
@@ -416,7 +333,6 @@ function discardRequestBody(req: http.IncomingMessage): Promise<boolean> {
 }
 
 async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
-  // A declared oversize is rejected before reading a single chunk.
   if (Number(req.headers['content-length']) > maxJsonBodyBytes)
     throw new BodyTooLargeError();
   const chunks: Buffer[] = [];
@@ -424,16 +340,12 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     totalBytes += buffer.length;
-    // Leave the request intact so the caller can discard the rest without
-    // retaining it; destroying unread input can reset the 413 response.
     if (totalBytes > maxJsonBodyBytes)
       throw new BodyTooLargeError();
     chunks.push(buffer);
   }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
-
-// ─── End of session compatibility layer ──────────────────────────────────────
 
 function decorateServer(server: net.Server) {
   const sockets = new Set<net.Socket>();

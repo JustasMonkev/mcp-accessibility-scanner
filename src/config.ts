@@ -113,8 +113,6 @@ export type FullConfig = Config & {
     network: NonNullable<Config['network']>,
     saveTrace: boolean;
     server: NonNullable<Config['server']>,
-    // mergeConfig() always materializes all timeouts from defaultConfig, so a
-    // resolved config never has a missing timeout to fall back on.
     timeouts: Required<NonNullable<Config['timeouts']>>,
 };
 
@@ -134,65 +132,83 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
   return validateResolvedConfig(applyMobileConfig(result, configInFile, envOverrides, cliOverrides, envOptions, cliOptions));
 }
 
-// A blank outputDir is an explicit value with no usable meaning, and both
-// ways of tolerating it go wrong silently: honoring it would fail on
-// mkdir('') only at the first artifact write — deep into a run — while
-// treating it as omitted (what a truthiness check on the resolved value does)
-// would quietly redirect artifacts the user configured a destination for
-// into a temp directory. Rejected here instead, at startup like the other
-// config validations, on the merged result so every source (config file,
-// env, CLI, programmatic Config) is covered. Only undefined/null count as
-// omitted — the nullish semantics the fallback historically used.
 async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   assertNetworkPolicySupported(config);
-  if (config.redactUrlParams !== undefined) {
-    if (!Array.isArray(config.redactUrlParams) || config.redactUrlParams.some(name => typeof name !== 'string' || !name.trim()))
-      throw new Error('redactUrlParams must be an array of non-blank parameter names. Use [] to disable URL parameter redaction.');
-    config.redactUrlParams = config.redactUrlParams.map(name => name.trim());
-  }
+  normalizeRedactUrlParams(config);
   if (config.allowedTools !== undefined || config.blockedTools !== undefined) {
     const { validateToolPolicy } = await import('./tools.js');
     validateToolPolicy(config);
   }
   validateAuthToken(config.server.authToken);
   parseFilePaths(config.filePaths);
-  const { contextOptions, launchOptions } = config.browser;
-  if (contextOptions.clientCertificates?.length) {
-    // Playwright 1.63's certificate interceptor only sees the context proxy.
-    // Preserve an explicit context override, otherwise carry the launch route
-    // into every fresh-context factory (including remote browser connections).
-    const proxy = contextOptions.proxy ?? launchOptions.proxy;
-    if (proxy?.bypass?.trim())
-      throw new Error('clientCertificates with proxy.bypass is unsupported on Playwright 1.63.0: the certificate interceptor ignores bypass rules. Use a separate browser configuration for these routes; no browser was started.');
-    if (proxy)
-      contextOptions.proxy = proxy;
-  }
-  if (!Number.isInteger(config.timeouts.idle) || config.timeouts.idle < 0 || config.timeouts.idle > 2_147_483_647)
-    throw new Error('timeouts.idle must be an integer from 0 to 2147483647 milliseconds. Use 0 to disable idle shutdown.');
-  const uploadDirs = config.browser.allowedUploadDirs;
-  if (uploadDirs !== undefined) {
-    if (!Array.isArray(uploadDirs))
-      throw new Error('allowedUploadDirs must be an array of directory paths. Use [] to deny all uploads.');
-    if (uploadDirs.some(dir => typeof dir !== 'string' || !dir.trim()))
-      throw new Error('allowedUploadDirs must not contain blank directory entries. Use [] to deny all uploads.');
-    // Resolve once at trusted startup; uploads must not follow a retargeted root.
-    config.browser.allowedUploadDirs = await Promise.all(uploadDirs.map(dir => fs.promises.realpath(dir)));
-  }
+  applyProxyToClientCertificates(config);
+  validateIdleTimeout(config.timeouts.idle);
+  config.browser.allowedUploadDirs = await resolveUploadDirs(config.browser.allowedUploadDirs);
   if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
     throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
-  const profileDirName = config.browser.profileDirName;
+  validateProfileDirName(config.browser.profileDirName);
+  applyDefaultChromiumSandbox(config);
+  warnAboutAuthenticatedProxies(config);
+  return config;
+}
+
+function normalizeRedactUrlParams(config: FullConfig): void {
+  if (config.redactUrlParams === undefined)
+    return;
+  if (!Array.isArray(config.redactUrlParams) || config.redactUrlParams.some(name => typeof name !== 'string' || !name.trim()))
+    throw new Error('redactUrlParams must be an array of non-blank parameter names. Use [] to disable URL parameter redaction.');
+  config.redactUrlParams = config.redactUrlParams.map(name => name.trim());
+}
+
+function applyProxyToClientCertificates(config: FullConfig): void {
+  const { contextOptions, launchOptions } = config.browser;
+  if (!contextOptions.clientCertificates?.length)
+    return;
+  const proxy = contextOptions.proxy ?? launchOptions.proxy;
+  if (proxy?.bypass?.trim())
+    throw new Error('clientCertificates with proxy.bypass is unsupported on Playwright 1.63.0: the certificate interceptor ignores bypass rules. Use a separate browser configuration for these routes; no browser was started.');
+  if (proxy)
+    contextOptions.proxy = proxy;
+}
+
+const maxTimerDelayMs = 2_147_483_647;
+
+function validateIdleTimeout(idle: number): void {
+  if (!Number.isInteger(idle) || idle < 0 || idle > maxTimerDelayMs)
+    throw new Error(`timeouts.idle must be an integer from 0 to ${maxTimerDelayMs} milliseconds. Use 0 to disable idle shutdown.`);
+}
+
+async function resolveUploadDirs(uploadDirs: string[] | undefined): Promise<string[] | undefined> {
+  if (uploadDirs === undefined)
+    return undefined;
+  if (!Array.isArray(uploadDirs))
+    throw new Error('allowedUploadDirs must be an array of directory paths. Use [] to deny all uploads.');
+  if (uploadDirs.some(dir => typeof dir !== 'string' || !dir.trim()))
+    throw new Error('allowedUploadDirs must not contain blank directory entries. Use [] to deny all uploads.');
+  return await Promise.all(uploadDirs.map(dir => fs.promises.realpath(dir)));
+}
+
+function validateProfileDirName(profileDirName: unknown): void {
   if (profileDirName !== undefined && (typeof profileDirName !== 'string' || !/^(?:Default|Profile \d+)$/.test(profileDirName)))
     throw new Error(`Invalid browser profile directory name ${JSON.stringify(profileDirName)}: must be a Chrome profile directory name such as "Default" or "Profile 1" (see "Profile Path" at chrome://version).`);
-  if (config.browser.browserName === 'chromium' && !config.browser.remoteEndpoint && config.browser.launchOptions.chromiumSandbox === undefined) {
-    const { channel, executablePath } = config.browser.launchOptions;
-    config.browser.launchOptions.chromiumSandbox = os.platform() !== 'linux'
-      || executablePath !== undefined
-      || (channel !== undefined && channel !== 'chromium' && channel !== 'chrome-for-testing');
-    config.browser.chromiumSandboxDefaulted = true;
-  }
+}
+
+function applyDefaultChromiumSandbox(config: FullConfig): void {
+  const { browser } = config;
+  if (browser.browserName !== 'chromium' || browser.remoteEndpoint || browser.launchOptions.chromiumSandbox !== undefined)
+    return;
+  const { channel, executablePath } = browser.launchOptions;
+  const bundledChromiumOnLinux = os.platform() === 'linux'
+    && executablePath === undefined
+    && (channel === undefined || channel === 'chromium' || channel === 'chrome-for-testing');
+  browser.launchOptions.chromiumSandbox = !bundledChromiumOnLinux;
+  browser.chromiumSandboxDefaulted = true;
+}
+
+function warnAboutAuthenticatedProxies(config: FullConfig): void {
+  const { launchOptions, contextOptions } = config.browser;
   if ([launchOptions.proxy, contextOptions.proxy].some(proxy => proxy?.username || proxy?.password))
     process.stderr.write('WARNING: Playwright 1.63.0 may send authenticated proxy credentials to a website\'s 401 authentication challenge. This warning does not prevent the leak. Avoid authenticated proxies until a Playwright release containing https://github.com/microsoft/playwright/pull/43482 is adopted.\n');
-  return config;
 }
 
 type MobileSource = 'env' | 'cli';
@@ -232,39 +248,32 @@ function applyMobileConfig(resolved: FullConfig, configInFile: Config, envOverri
   return mergeCLIConfigSources(configInFile, envOverrides, cliOverrides, mobileOverride, source);
 }
 
-function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = false): Config {
-  let browserName: 'chromium' | 'firefox' | 'webkit' | undefined;
-  let channel: string | undefined;
-  switch (cliOptions.browser) {
-    case 'chrome':
-    case 'chrome-beta':
-    case 'chrome-canary':
-    case 'chrome-dev':
-    case 'chromium':
-    case 'msedge':
-    case 'msedge-beta':
-    case 'msedge-canary':
-    case 'msedge-dev':
-      browserName = 'chromium';
-      channel = cliOptions.browser;
-      break;
-    case 'firefox':
-      browserName = 'firefox';
-      break;
-    case 'webkit':
-      browserName = 'webkit';
-      break;
-  }
+const chromiumChannels = new Set(['chrome', 'chrome-beta', 'chrome-canary', 'chrome-dev', 'chromium', 'msedge', 'msedge-beta', 'msedge-canary', 'msedge-dev']);
 
-  // Launch options
+function browserFromCLIOption(browser: string | undefined): { browserName?: 'chromium' | 'firefox' | 'webkit', channel?: string } {
+  if (browser && chromiumChannels.has(browser))
+    return { browserName: 'chromium', channel: browser };
+  if (browser === 'firefox' || browser === 'webkit')
+    return { browserName: browser };
+  return {};
+}
+
+function parseViewportSize(viewportSize: string): { width: number, height: number } {
+  const [width, height] = viewportSize.split(',').map(n => +n);
+  if (isNaN(width) || isNaN(height))
+    throw new Error('Invalid viewport size format: use "width,height", for example --viewport-size="800,600"');
+  return { width, height };
+}
+
+function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = false): Config {
+  const { browserName, channel } = browserFromCLIOption(cliOptions.browser);
+
   const launchOptions: LaunchOptions = {
     channel,
     executablePath: cliOptions.executablePath,
     headless: cliOptions.headless,
   };
 
-  // Commander reports true when --no-sandbox is omitted, while true from the
-  // environment is explicit and must override the platform default.
   if (cliOptions.sandbox === false || (sandboxTrueIsExplicit && cliOptions.sandbox === true))
     launchOptions.chromiumSandbox = cliOptions.sandbox;
 
@@ -280,7 +289,6 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
   if (cliOptions.cdpEndpoint && cliOptions.cdpLaunchCommand)
     throw new Error('CDP launch is not supported with cdpEndpoint.');
 
-  // Context options
   const contextOptions: BrowserContextOptions = cliOptions.device ? devices[cliOptions.device] : {};
   if (cliOptions.storageState)
     contextOptions.storageState = cliOptions.storageState;
@@ -288,16 +296,8 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
   if (cliOptions.userAgent)
     contextOptions.userAgent = cliOptions.userAgent;
 
-  if (cliOptions.viewportSize) {
-    try {
-      const [width, height] = cliOptions.viewportSize.split(',').map(n => +n);
-      if (isNaN(width) || isNaN(height))
-        throw new Error('bad values');
-      contextOptions.viewport = { width, height };
-    } catch (e) {
-      throw new Error('Invalid viewport size format: use "width,height", for example --viewport-size="800,600"');
-    }
-  }
+  if (cliOptions.viewportSize)
+    contextOptions.viewport = parseViewportSize(cliOptions.viewportSize);
 
   if (cliOptions.ignoreHttpsErrors)
     contextOptions.ignoreHTTPSErrors = true;
@@ -345,7 +345,6 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
     saveTrace: cliOptions.saveTrace,
     snapshot: cliOptions.snapshotBoxes !== undefined ? { boxes: cliOptions.snapshotBoxes } : undefined,
     outputDir: cliOptions.outputDir,
-    // SAFETY: resolveCLIConfig validates the merged value before returning it to consumers.
     filePaths: cliOptions.filePaths as Config['filePaths'],
     imageResponses: cliOptions.imageResponses,
     timeouts: {
@@ -419,40 +418,34 @@ async function loadConfig(configFile: string | undefined): Promise<Config> {
   }
 }
 
-// One fallback output directory per resolved config — i.e. per server, which
-// resolves its FullConfig once and hands the same object to every consumer.
-// Recomputing the timestamped path per call scattered one audit's artifacts
-// (screenshots, JSON reports, traces, session logs) across a different temp
-// directory per millisecond tick. Keyed weakly on the config object so two
-// server instances in one process still get distinct fallback directories.
 const defaultOutputDirs = new WeakMap<FullConfig, string>();
 
-/**
- * Resolves the output directory this config's artifacts land in, memoizing
- * the timestamped fallback when no `outputDir` is configured. Exported so a
- * config that crosses an identity boundary — the VS Code integration
- * serializes it into a spawned provider process, where JSON.parse mints a new
- * object the WeakMap has never seen — can materialize the resolved fallback
- * into the serialized copy instead of letting the other side mint a second
- * temp root.
- */
 export function resolveOutputDir(config: FullConfig): string {
   if (config.outputDir)
     return config.outputDir;
   let outputDir = defaultOutputDirs.get(config);
   if (!outputDir) {
-    // The random token keeps two servers starting in the same millisecond
-    // from sharing a fallback directory — the per-call timestamp used to
-    // make that unlikely; a per-server one no longer would.
     outputDir = path.join(os.tmpdir(), 'playwright-mcp-output', safeIsoTimestampForFileName());
     defaultOutputDirs.set(config, outputDir);
   }
   return outputDir;
 }
 
+const windowsReservedFileName = /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/i;
+const endsWithDotOrSpace = /[. ]$/;
+
+function isPortableFileName(requested: string, sanitized: string): boolean {
+  return !!sanitized
+    && sanitized !== '.'
+    && sanitized !== '..'
+    && !endsWithDotOrSpace.test(requested)
+    && !endsWithDotOrSpace.test(sanitized)
+    && !windowsReservedFileName.test(sanitized);
+}
+
 export async function outputFile(config: FullConfig, name: string, exclusive = false): Promise<string> {
   const fileName = name.trim() ? sanitizeForFilePath(name) : '';
-  if (!fileName || fileName === '.' || fileName === '..' || /[. ]$/.test(name) || /[. ]$/.test(fileName) || /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/i.test(fileName))
+  if (!isPortableFileName(name, fileName))
     throw new Error(`Invalid output filename "${name}": use a portable, non-reserved file name.`);
   const outputDir = resolveOutputDir(config);
   await fs.promises.mkdir(outputDir, { recursive: true });
@@ -540,11 +533,6 @@ export function commaSeparatedList(value: string | undefined): string[] | undefi
   return value.split(',').map(v => v.trim());
 }
 
-/**
- * Splits a value into a list on newlines, trimming each entry and dropping
- * empties. Used for `PLAYWRIGHT_MCP_CDP_HEADERS` so that commas inside header
- * values (e.g. `Forwarded: for=a, for=b`) are preserved.
- */
 function newlineSeparatedList(value: string | undefined): string[] | undefined {
   if (!value)
     return undefined;
@@ -552,14 +540,7 @@ function newlineSeparatedList(value: string | undefined): string[] | undefined {
   return entries.length ? entries : undefined;
 }
 
-/**
- * Parses `Name: Value` header entries (from `--cdp-header` flags or the
- * newline-separated `PLAYWRIGHT_MCP_CDP_HEADERS` env var) into a header map.
- * Only the first colon is treated as the name/value separator, so colons inside
- * the value are preserved.
- *
- * @public
- */
+/** @public */
 export function parseCdpHeaders(entries: string[] | undefined): Record<string, string> | undefined {
   if (!entries || !entries.length)
     return undefined;
@@ -596,10 +577,8 @@ function parseFilePaths(value: unknown): Config['filePaths'] {
   throw new Error('filePaths must be "relative" or "absolute".');
 }
 
-// Moves credentials from the proxy string, e.g. "http://user:pass@myproxy:3128", into explicit fields.
 function proxySettingsFromString(proxy: string): NonNullable<LaunchOptions['proxy']> {
   try {
-    // Browsers allow to specify proxy without a protocol, defaulting to http.
     const trimmed = proxy.trim();
     const url = new URL(/^\w+:\/\//.test(trimmed) ? trimmed : 'http://' + trimmed);
     if (url.username || url.password) {
@@ -609,13 +588,10 @@ function proxySettingsFromString(proxy: string): NonNullable<LaunchOptions['prox
         password: decodeProxyCredential(url.password),
       };
     }
-  } catch {
-  }
+  } catch {}
   return { server: proxy };
 }
 
-// Decodes each run of valid escapes on its own, so a literal '%' that does not
-// start an escape is kept as typed without leaving other escapes encoded.
 function decodeProxyCredential(value: string): string {
   return value.replace(/(?:%[0-9a-fA-F]{2})+/g, escapes => {
     try {
