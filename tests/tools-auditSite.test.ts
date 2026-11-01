@@ -2489,14 +2489,26 @@ describe('audit_site tool', () => {
 // navigations take as long as `delayFor` says, so pages finish out of order.
 function createConcurrentHarness(linkMap: Record<string, string[]>, options: {
   delayFor?: (url: string) => number;
-  cookies?: () => { name: string }[];
-  onNavigate?: (url: string) => void;
+  cookies?: () => { name: string, path?: string }[];
+  beforeCookieRead?: (urls?: string[]) => Promise<void>;
+  onNavigate?: (url: string) => void | Promise<void>;
   newTabFails?: (opened: number) => boolean;
 } = {}) {
   let navigating = 0;
   let maxNavigating = 0;
   let opened = 0;
-  const cookies = vi.fn(async () => (options.cookies?.() ?? []).map(cookie => ({ domain: 'example.com', path: '/', expires: -1, ...cookie })));
+  const cookies = vi.fn(async (urls?: string[]) => {
+    // Browser requests serialize their URL scope before the asynchronous read.
+    const scope = urls && [...urls];
+    await options.beforeCookieRead?.(urls);
+    return (options.cookies?.() ?? [])
+        .map(cookie => ({ domain: 'example.com', path: '/', expires: -1, ...cookie }))
+        .filter(cookie => !scope || scope.some(url => {
+          const pathname = new URL(url).pathname;
+          return pathname === cookie.path
+            || pathname.startsWith(cookie.path.endsWith('/') ? cookie.path : `${cookie.path}/`);
+        }));
+  });
   const originalTab: any = { page: { url: () => 'https://example.com/' }, modalStates: () => [] };
   const tabs: any[] = [originalTab];
   const createTab = () => {
@@ -2522,7 +2534,7 @@ function createConcurrentHarness(linkMap: Record<string, string[]>, options: {
         await new Promise(resolve => setTimeout(resolve, options.delayFor?.(url) ?? 0));
         navigating--;
         currentUrl = url;
-        options.onNavigate?.(url);
+        await options.onNavigate?.(url);
       }),
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: () => [],
@@ -2660,6 +2672,106 @@ describe('audit_site concurrent crawl', () => {
       concurrentUrls: ['https://example.com/slow'],
     }]);
     expect(harness.response.result()).toContain('disappeared while loading https://example.com/close-account, or one of the pages loading at the same time: https://example.com/slow.');
+  });
+
+  it('includes a culprit that starts while the cookie read is pending', async () => {
+    const root = 'https://example.com/';
+    const branch = 'https://example.com/branch';
+    const culprit = 'https://example.com/close-account';
+    const checkStarted = Promise.withResolvers<void>();
+    const cookieRemoved = Promise.withResolvers<void>();
+    let rootNavigated = false;
+    let delayed = false;
+    let signedIn = true;
+    const harness = createConcurrentHarness({ [root]: [branch], [branch]: [culprit] }, {
+      cookies: () => signedIn ? [{ name: 'sid' }] : [],
+      beforeCookieRead: async urls => {
+        if (rootNavigated && urls?.includes(root) && !delayed) {
+          delayed = true;
+          checkStarted.resolve();
+          await cookieRemoved.promise;
+        }
+      },
+      onNavigate: async url => {
+        if (url === root)
+          rootNavigated = true;
+        if (url === branch)
+          await checkStarted.promise;
+        if (url === culprit) {
+          signedIn = false;
+          cookieRemoved.resolve();
+        }
+      },
+    });
+
+    await auditSiteTool.handle(harness.context, auditSiteTool.schema.inputSchema.parse({
+      startUrl: root, maxPages: 3, maxDepth: 2, waitAfterNavigationMs: 0, concurrency: 3,
+    }), harness.response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.summary.totals.scannedPages).toBe(3);
+    expect(report.sessionLosses).toEqual([{
+      url: root, cookies: ['sid'], concurrentUrls: [branch, culprit],
+    }]);
+    expect(harness.response.result()).toContain(`pages loading at the same time: ${branch}, ${culprit}.`);
+  });
+
+  it.each([false, true])('keeps discovered cookies tracked across a pending read (later loss: %s)', async removeCookie => {
+    const root = 'https://example.com/';
+    const branch = 'https://example.com/branch';
+    const app = 'https://example.com/app';
+    const logout = 'https://example.com/app/logout';
+    const checkStarted = Promise.withResolvers<void>();
+    const appNavigated = Promise.withResolvers<void>();
+    const earlierChecksFinished = Promise.withResolvers<void>();
+    let rootNavigated = false;
+    let delayed = false;
+    let signedIn = true;
+    let scopeAtStart: string[] | undefined;
+    let scopeAtEnd: string[] | undefined;
+    const harness = createConcurrentHarness({ [root]: [branch], [branch]: [app], [app]: [logout] }, {
+      cookies: () => [{ name: 'root_sid' }, ...(signedIn ? [{ name: 'app_sid', path: '/app' }] : [])],
+      beforeCookieRead: async urls => {
+        if (rootNavigated && urls?.includes(root) && !delayed) {
+          delayed = true;
+          scopeAtStart = [...urls];
+          checkStarted.resolve();
+          await appNavigated.promise;
+          scopeAtEnd = [...urls];
+        }
+      },
+      onNavigate: async url => {
+        if (url === root)
+          rootNavigated = true;
+        if (url === branch)
+          await checkStarted.promise;
+        if (url === app)
+          appNavigated.resolve();
+        if (url === logout) {
+          await earlierChecksFinished.promise;
+          if (removeCookie)
+            signedIn = false;
+        }
+      },
+    });
+    vi.spyOn(harness.response, 'reportProgress').mockImplementation(async progress => {
+      if (progress.progress === 3)
+        earlierChecksFinished.resolve();
+    });
+
+    await auditSiteTool.handle(harness.context, auditSiteTool.schema.inputSchema.parse({
+      startUrl: root, maxPages: 4, maxDepth: 3, waitAfterNavigationMs: 0, concurrency: 3, excludePathPatterns: [],
+    }), harness.response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.summary.totals.scannedPages).toBe(4);
+    expect(report.sessionLosses).toEqual(removeCookie ? [{ url: logout, cookies: ['app_sid'] }] : []);
+    expect(scopeAtStart).toEqual([root, branch]);
+    expect(scopeAtEnd).toEqual(scopeAtStart);
+    if (removeCookie)
+      expect(harness.response.result()).toContain(`WARNING: cookie(s) app_sid present when the crawl started disappeared while loading ${logout}.`);
+    else
+      expect(harness.response.result()).not.toContain('WARNING: cookie(s)');
   });
 
   it('fails the crawl and still closes every tab when a worker cannot open its tab', async () => {

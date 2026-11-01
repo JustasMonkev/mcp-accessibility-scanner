@@ -828,9 +828,11 @@ const auditSite = defineTabTool({
       const check = cookieChecks.then(async () => {
         const window = [...activeSinceCheck];
         if (baselineCookies.size) {
-          const loss = await findCookieLoss(page, cookieScopeUrls, baselineCookies, requestedUrl, urlBeforeNavigation);
+          // Discovery can extend both collections while the cookie read is pending.
+          const loss = await findCookieLoss(page, [...cookieScopeUrls], new Map(baselineCookies), requestedUrl, urlBeforeNavigation);
           if (loss) {
-            const concurrentUrls = window.filter(([other]) => other !== sequence).map(([, url]) => url);
+            // Include pages that started during the read; they may have removed it.
+            const concurrentUrls = [...activeSinceCheck].filter(([other]) => other !== sequence).map(([, url]) => url);
             sessionLosses.push(concurrentUrls.length ? { url: loss.url, cookies: loss.cookies, concurrentUrls } : { url: loss.url, cookies: loss.cookies });
             // Removed from the jar snapshot too, or a later-discovered URL
             // could re-admit an already-reported cookie to the baseline and
