@@ -113,8 +113,6 @@ export type FullConfig = Config & {
     network: NonNullable<Config['network']>,
     saveTrace: boolean;
     server: NonNullable<Config['server']>,
-    // mergeConfig() always materializes all timeouts from defaultConfig, so a
-    // resolved config never has a missing timeout to fall back on.
     timeouts: Required<NonNullable<Config['timeouts']>>,
 };
 
@@ -134,15 +132,6 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
   return validateResolvedConfig(applyMobileConfig(result, configInFile, envOverrides, cliOverrides, envOptions, cliOptions));
 }
 
-// A blank outputDir is an explicit value with no usable meaning, and both
-// ways of tolerating it go wrong silently: honoring it would fail on
-// mkdir('') only at the first artifact write — deep into a run — while
-// treating it as omitted (what a truthiness check on the resolved value does)
-// would quietly redirect artifacts the user configured a destination for
-// into a temp directory. Rejected here instead, at startup like the other
-// config validations, on the merged result so every source (config file,
-// env, CLI, programmatic Config) is covered. Only undefined/null count as
-// omitted — the nullish semantics the fallback historically used.
 async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   assertNetworkPolicySupported(config);
   if (config.redactUrlParams !== undefined) {
@@ -158,9 +147,6 @@ async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   parseFilePaths(config.filePaths);
   const { contextOptions, launchOptions } = config.browser;
   if (contextOptions.clientCertificates?.length) {
-    // Playwright 1.63's certificate interceptor only sees the context proxy.
-    // Preserve an explicit context override, otherwise carry the launch route
-    // into every fresh-context factory (including remote browser connections).
     const proxy = contextOptions.proxy ?? launchOptions.proxy;
     if (proxy?.bypass?.trim())
       throw new Error('clientCertificates with proxy.bypass is unsupported on Playwright 1.63.0: the certificate interceptor ignores bypass rules. Use a separate browser configuration for these routes; no browser was started.');
@@ -175,7 +161,6 @@ async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
       throw new Error('allowedUploadDirs must be an array of directory paths. Use [] to deny all uploads.');
     if (uploadDirs.some(dir => typeof dir !== 'string' || !dir.trim()))
       throw new Error('allowedUploadDirs must not contain blank directory entries. Use [] to deny all uploads.');
-    // Resolve once at trusted startup; uploads must not follow a retargeted root.
     config.browser.allowedUploadDirs = await Promise.all(uploadDirs.map(dir => fs.promises.realpath(dir)));
   }
   if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
@@ -256,15 +241,12 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
       break;
   }
 
-  // Launch options
   const launchOptions: LaunchOptions = {
     channel,
     executablePath: cliOptions.executablePath,
     headless: cliOptions.headless,
   };
 
-  // Commander reports true when --no-sandbox is omitted, while true from the
-  // environment is explicit and must override the platform default.
   if (cliOptions.sandbox === false || (sandboxTrueIsExplicit && cliOptions.sandbox === true))
     launchOptions.chromiumSandbox = cliOptions.sandbox;
 
@@ -280,7 +262,6 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
   if (cliOptions.cdpEndpoint && cliOptions.cdpLaunchCommand)
     throw new Error('CDP launch is not supported with cdpEndpoint.');
 
-  // Context options
   const contextOptions: BrowserContextOptions = cliOptions.device ? devices[cliOptions.device] : {};
   if (cliOptions.storageState)
     contextOptions.storageState = cliOptions.storageState;
@@ -345,7 +326,6 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
     saveTrace: cliOptions.saveTrace,
     snapshot: cliOptions.snapshotBoxes !== undefined ? { boxes: cliOptions.snapshotBoxes } : undefined,
     outputDir: cliOptions.outputDir,
-    // SAFETY: resolveCLIConfig validates the merged value before returning it to consumers.
     filePaths: cliOptions.filePaths as Config['filePaths'],
     imageResponses: cliOptions.imageResponses,
     timeouts: {
@@ -419,31 +399,13 @@ async function loadConfig(configFile: string | undefined): Promise<Config> {
   }
 }
 
-// One fallback output directory per resolved config — i.e. per server, which
-// resolves its FullConfig once and hands the same object to every consumer.
-// Recomputing the timestamped path per call scattered one audit's artifacts
-// (screenshots, JSON reports, traces, session logs) across a different temp
-// directory per millisecond tick. Keyed weakly on the config object so two
-// server instances in one process still get distinct fallback directories.
 const defaultOutputDirs = new WeakMap<FullConfig, string>();
 
-/**
- * Resolves the output directory this config's artifacts land in, memoizing
- * the timestamped fallback when no `outputDir` is configured. Exported so a
- * config that crosses an identity boundary — the VS Code integration
- * serializes it into a spawned provider process, where JSON.parse mints a new
- * object the WeakMap has never seen — can materialize the resolved fallback
- * into the serialized copy instead of letting the other side mint a second
- * temp root.
- */
 export function resolveOutputDir(config: FullConfig): string {
   if (config.outputDir)
     return config.outputDir;
   let outputDir = defaultOutputDirs.get(config);
   if (!outputDir) {
-    // The random token keeps two servers starting in the same millisecond
-    // from sharing a fallback directory — the per-call timestamp used to
-    // make that unlikely; a per-server one no longer would.
     outputDir = path.join(os.tmpdir(), 'playwright-mcp-output', safeIsoTimestampForFileName());
     defaultOutputDirs.set(config, outputDir);
   }
@@ -540,11 +502,6 @@ export function commaSeparatedList(value: string | undefined): string[] | undefi
   return value.split(',').map(v => v.trim());
 }
 
-/**
- * Splits a value into a list on newlines, trimming each entry and dropping
- * empties. Used for `PLAYWRIGHT_MCP_CDP_HEADERS` so that commas inside header
- * values (e.g. `Forwarded: for=a, for=b`) are preserved.
- */
 function newlineSeparatedList(value: string | undefined): string[] | undefined {
   if (!value)
     return undefined;
@@ -552,14 +509,7 @@ function newlineSeparatedList(value: string | undefined): string[] | undefined {
   return entries.length ? entries : undefined;
 }
 
-/**
- * Parses `Name: Value` header entries (from `--cdp-header` flags or the
- * newline-separated `PLAYWRIGHT_MCP_CDP_HEADERS` env var) into a header map.
- * Only the first colon is treated as the name/value separator, so colons inside
- * the value are preserved.
- *
- * @public
- */
+/** @public */
 export function parseCdpHeaders(entries: string[] | undefined): Record<string, string> | undefined {
   if (!entries || !entries.length)
     return undefined;
@@ -596,10 +546,8 @@ function parseFilePaths(value: unknown): Config['filePaths'] {
   throw new Error('filePaths must be "relative" or "absolute".');
 }
 
-// Moves credentials from the proxy string, e.g. "http://user:pass@myproxy:3128", into explicit fields.
 function proxySettingsFromString(proxy: string): NonNullable<LaunchOptions['proxy']> {
   try {
-    // Browsers allow to specify proxy without a protocol, defaulting to http.
     const trimmed = proxy.trim();
     const url = new URL(/^\w+:\/\//.test(trimmed) ? trimmed : 'http://' + trimmed);
     if (url.username || url.password) {
@@ -614,8 +562,6 @@ function proxySettingsFromString(proxy: string): NonNullable<LaunchOptions['prox
   return { server: proxy };
 }
 
-// Decodes each run of valid escapes on its own, so a literal '%' that does not
-// start an escape is kept as typed without leaving other escapes encoded.
 function decodeProxyCredential(value: string): string {
   return value.replace(/(?:%[0-9a-fA-F]{2})+/g, escapes => {
     try {

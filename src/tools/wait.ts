@@ -17,7 +17,12 @@
 import { z } from 'zod';
 import { defineTool } from './tool.js';
 
+import type { Response } from '../response.js';
+import type { Tab } from '../tab.js';
+
 const maxWaitSeconds = 30;
+
+type TextCondition = { text: string, state: 'visible' | 'hidden' };
 
 const wait = defineTool({
   capability: 'core',
@@ -40,68 +45,77 @@ const wait = defineTool({
       throw new Error('Either time, text or textGone must be provided');
 
     const tab = context.currentTabOrDie();
-    const time = params.time ? Math.min(maxWaitSeconds, params.time) : undefined;
+    const seconds = params.time ? Math.min(maxWaitSeconds, params.time) : undefined;
+    const conditions: TextCondition[] = [
+      ...(params.text ? [{ text: params.text, state: 'visible' as const }] : []),
+      ...(params.textGone ? [{ text: params.textGone, state: 'hidden' as const }] : []),
+    ];
 
-    if (params.text || params.textGone) {
-      const timeoutOptions = time ? { timeout: time * 1000 } : {};
-      const conditions = [
-        ...(params.text ? [{ text: params.text, state: 'visible' as const }] : []),
-        ...(params.textGone ? [{ text: params.textGone, state: 'hidden' as const }] : []),
-      ];
-      const waitForCode = ({ text, state }: typeof conditions[number], signal?: string) => {
-        const timeout = time ? `, timeout: ${time * 1000}` : '';
-        const signalOption = signal ? `, signal: ${signal}` : '';
-        return `page.getByText(${JSON.stringify(text)}).first().waitFor({ state: '${state}'${timeout}${signalOption} })`;
-      };
-      // A combined wait replays as a block-scoped race that also cancels its loser.
-      response.addCode(conditions.length === 1
-        ? `await ${waitForCode(conditions[0])};`
-        : [
-          '{',
-          '  const abortController = new AbortController();',
-          '  await Promise.race([',
-          ...conditions.map(condition => `    ${waitForCode(condition, 'abortController.signal')},`),
-          '  ]).finally(() => abortController.abort());',
-          '}',
-        ].join('\n'));
-
-      // Abort the losing wait once the race settles so it does not keep polling until its timeout.
-      const abortController = new AbortController();
-      const waitSignal = signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal;
-      const waits = conditions.map(async ({ text, state }) => {
-        await tab.page.getByText(text).first().waitFor({ state, ...timeoutOptions, signal: waitSignal });
-        return `Waited for ${text}`;
-      });
-      for (const wait of waits)
-        wait.catch(() => {});
-      try {
-        response.addResult(await Promise.race(waits));
-      } finally {
-        abortController.abort();
-        await Promise.allSettled(waits);
-      }
-    } else if (time) {
-      response.addCode(`await new Promise(f => setTimeout(f, ${time} * 1000));`);
-      await new Promise<void>((resolve, reject) => {
-        signal?.throwIfAborted();
-        const onAbort = () => {
-          clearTimeout(timer);
-          reject(signal?.reason);
-        };
-        const timer = setTimeout(() => {
-          signal?.removeEventListener('abort', onAbort);
-          resolve();
-        }, time * 1000);
-        signal?.addEventListener('abort', onAbort, { once: true });
-      });
-      if (time !== params.time)
-        response.addResult(`Waited for ${time} seconds (requested ${params.time}, maximum is ${maxWaitSeconds})`);
-      else
-        response.addResult(`Waited for ${time} seconds`);
+    if (conditions.length) {
+      await waitForFirstTextCondition(tab, conditions, seconds, response, signal);
+    } else if (seconds) {
+      response.addCode(`await new Promise(f => setTimeout(f, ${seconds} * 1000));`);
+      await sleep(seconds * 1000, signal);
+      response.addResult(seconds === params.time
+        ? `Waited for ${seconds} seconds`
+        : `Waited for ${seconds} seconds (requested ${params.time}, maximum is ${maxWaitSeconds})`);
     }
     response.setIncludeSnapshot();
   },
 });
+
+async function waitForFirstTextCondition(tab: Tab, conditions: TextCondition[], seconds: number | undefined, response: Response, signal?: AbortSignal): Promise<void> {
+  const timeout = seconds ? seconds * 1000 : undefined;
+  response.addCode(replayableTextWait(conditions, timeout));
+
+  const cancelLosers = new AbortController();
+  const waitSignal = signal ? AbortSignal.any([signal, cancelLosers.signal]) : cancelLosers.signal;
+  const waits = conditions.map(async ({ text, state }) => {
+    await tab.page.getByText(text).first().waitFor({ state, ...(timeout ? { timeout } : {}), signal: waitSignal });
+    return `Waited for ${text}`;
+  });
+  for (const pendingWait of waits)
+    pendingWait.catch(() => {});
+  try {
+    response.addResult(await Promise.race(waits));
+  } finally {
+    cancelLosers.abort();
+    await Promise.allSettled(waits);
+  }
+}
+
+function replayableTextWait(conditions: TextCondition[], timeout: number | undefined): string {
+  const waitFor = ({ text, state }: TextCondition, signal?: string) => {
+    const timeoutOption = timeout ? `, timeout: ${timeout}` : '';
+    const signalOption = signal ? `, signal: ${signal}` : '';
+    return `page.getByText(${JSON.stringify(text)}).first().waitFor({ state: '${state}'${timeoutOption}${signalOption} })`;
+  };
+  if (conditions.length === 1)
+    return `await ${waitFor(conditions[0])};`;
+  return [
+    '{',
+    '  const abortController = new AbortController();',
+    '  await Promise.race([',
+    ...conditions.map(condition => `    ${waitFor(condition, 'abortController.signal')},`),
+    '  ]).finally(() => abortController.abort());',
+    '}',
+  ].join('\n');
+}
+
+function sleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    signal?.throwIfAborted();
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 export default [
   wait,

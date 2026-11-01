@@ -55,16 +55,12 @@ type ScreenReaderAuditOptions = {
   maxFindingsPerCheck: number;
 };
 
-// Roles that a screen-reader user reaches out of context, so an empty or
-// meaningless accessible name leaves them with nothing to act on.
 const namedRoles = new Set([
   'link', 'button', 'checkbox', 'radio', 'switch', 'textbox', 'searchbox', 'combobox',
   'listbox', 'slider', 'spinbutton', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
   'tab', 'treeitem', 'option', 'img', 'image',
 ]);
 
-// Only roles whose accessible name is expected to start with the visible label;
-// containers are excluded because their text is the concatenation of children.
 const labelInNameRoles = new Set([
   'link', 'button', 'checkbox', 'radio', 'switch', 'menuitem', 'menuitemcheckbox',
   'menuitemradio', 'tab', 'option', 'treeitem',
@@ -80,7 +76,6 @@ const uninformativeNames = new Set([
 const filenameNamePattern = /\.(jpe?g|png|gif|webp|svg|avif|bmp|tiff?|ico)$/i;
 const cameraFileNamePattern = /^(img|dsc|dscn|pxl|screenshot|image|photo)[-_ ]?\d{3,}$/i;
 
-// Bands narrower than this are noise (sr-only clip boxes, 1px spacers).
 const minLayoutSizePx = 2;
 const layoutTolerancePx = 1;
 const bandOverlapRatio = 0.5;
@@ -96,16 +91,8 @@ export function parseAriaSnapshot(snapshot: string): AriaTreeNode[] {
   const nodes: AriaTreeNode[] = [];
   const stack: { depth: number; index: number }[] = [];
   for (const rawLine of snapshot.split('\n')) {
-    // Playwright YAML-quotes the whole key when the accessible name contains
-    // ": ", " #", braces or backticks, doubling any apostrophe inside it. Left
-    // quoted, such a node is dropped and its children are mis-parented.
     const quotedKey = /^(\s*)- '((?:[^']|'')*)'(.*)$/.exec(rawLine);
-    // Separate the key from inline text before finding the final slash: the
-    // value can contain slashes too. Keys containing ": " are YAML-quoted.
     const key = quotedKey ? `${quotedKey[1]}- ${quotedKey[2].replace(/''/g, '\'')}` : rawLine.split(/:\s|:$/)[0];
-    // AI snapshots do not convert strings to regexes. On Playwright 1.63,
-    // literal names starting and ending in / are emitted without quotes;
-    // keep their delimiters and backslashes exactly as the page named them.
     const match = /^(\s*)- ([a-zA-Z]+)(?:\s+(?:"((?:[^"\\]|\\.)*)"|(\/(?:.*\/)?)))?(.*)$/.exec(key);
     if (!match)
       continue;
@@ -150,8 +137,6 @@ function countBands(rects: Rect[], axis: 'x' | 'y'): number {
     ? rect.x !== sorted[index - 1].x || rect.width !== sorted[index - 1].width
     : rect.y !== sorted[index - 1].y || rect.height !== sorted[index - 1].height));
   const band = ordered.map((_, index) => index);
-  // Iterative find with write-back path compression, so a long union chain
-  // costs O(1) per lookup instead of a walk each time.
   const rootOf = (index: number): number => {
     let root = index;
     while (band[root] !== root)
@@ -185,38 +170,18 @@ function countBands(rects: Rect[], axis: 'x' | 'y'): number {
 }
 
 function isLayoutRelevant(node: ScreenReaderNode): boolean {
-  // Floated and fixed boxes are placed outside the normal flow on purpose (media
-  // beside a paragraph, sticky bars), so their visual position never claims to
-  // match source order.
   if (!node.ref || !node.rect || node.positionFixed || node.floating || node.ariaHidden)
     return false;
-  // Only text-bearing elements can change what is *read* when they move. Icon
-  // affordances next to their label (disclosure arrows, leading glyphs) are the
-  // single largest source of false reading-order alarms.
   if (!/[\p{L}\p{N}]/u.test(node.visibleText ?? ''))
     return false;
   const { x, y, width, height } = node.rect;
-  // Off-canvas and clipped boxes are the standard visually-hidden techniques:
-  // they have no visual order to compare the reading order against.
   return width >= minLayoutSizePx && height >= minLayoutSizePx && x + width > 0 && y + height > 0;
 }
 
-/**
- * Playwright's AI snapshot drops a name once every element that produced it
- * is rendered as the node's own children (removeRedundantNames in its
- * distiller, since 1.62): `<a><strong>Docs</strong></a>` becomes `- link:`
- * over `- strong: Docs`, and a control labelled through aria-labelledby by
- * one of its own descendants loses its name the same way. The accessibility
- * tree still has the name, so it is taken from the one measured in the page.
- * A control the page names nothing keeps its missing name, and a name the
- * snapshot does carry is never replaced.
- */
 function restoreDistilledNames(nodes: ScreenReaderNode[]): ScreenReaderNode[] {
   return nodes.map(node => node.name === null && node.accessibleName ? { ...node, name: node.accessibleName } : node);
 }
 
-// An image inside a named link or button is announced through that control, so
-// its own missing name is not a defect (icon buttons are full of these).
 function hasNamedControlAncestor(nodes: ScreenReaderNode[], index: number): boolean {
   for (let parent = nodes[index].parent; parent !== null; parent = nodes[parent].parent) {
     if (nodes[parent].name?.trim() && labelInNameRoles.has(nodes[parent].role))
@@ -254,8 +219,6 @@ function checkAccessibleNames(nodes: ScreenReaderNode[], push: (finding: ScreenR
     if (!name)
       continue;
 
-    // Both name-quality checks below judge how a control or image is announced,
-    // so they only apply to roles that carry their own name.
     const isNamedRole = namedRoles.has(node.role);
 
     if (isNamedRole && uninformativeNames.has(normalizeText(name))) {
@@ -268,9 +231,6 @@ function checkAccessibleNames(nodes: ScreenReaderNode[], push: (finding: ScreenR
       });
     }
 
-    // Only an image is *described* by its name, so only there is a file name a
-    // defect; a link or button legitimately named after the file it downloads
-    // ("logo.png") is doing its job.
     if (isImage && (filenameNamePattern.test(name) || cameraFileNamePattern.test(name))) {
       push({
         ...base,
@@ -312,10 +272,6 @@ function checkDuplicateNames(nodes: ScreenReaderNode[], push: (finding: ScreenRe
   }
 
   for (const group of byParent.values()) {
-    // Same name pointing at the same destination is allowed (WCAG 2.4.4); only
-    // siblings that do different things are ambiguous. A destination is only
-    // observable for links, so controls whose action we cannot see (two "Save"
-    // submit buttons in one form) are never claimed to differ.
     const targets = new Set(group.map(node => node.href));
     if (group.length < 2 || targets.has(null) || targets.size < 2)
       continue;
@@ -350,17 +306,11 @@ function checkReadingOrder(nodes: ScreenReaderNode[], push: (finding: ScreenRead
     const rects = siblings.map(node => node.rect!);
     const rows = countBands(rects, 'y');
     const columns = countBands(rects, 'x');
-    // A true 2-D layout (grid, CSS columns, wrapped flex) has no single correct
-    // linear visual order, so comparing against DOM order there only cries wolf.
     const horizontal = rows === 1 && columns > 1;
     const vertical = columns === 1 && rows > 1;
     if (!horizontal && !vertical)
       continue;
 
-    // The container's own direction decides the order of its children, but an
-    // unmeasured parent has no measured direction (it defaults to ltr), and an
-    // iframe element's direction belongs to the embedding page rather than to
-    // the document inside it. Fall back to the children's inherited direction.
     const parent = nodes[parentIndex];
     const parentDirection = parent?.rect && parent.tagName !== 'iframe' ? parent.direction : siblings[0].direction;
     const rtl = parentDirection === 'rtl';
@@ -404,10 +354,6 @@ export function analyzeScreenReader(
   rawNodes: ScreenReaderNode[],
   options: ScreenReaderAuditOptions
 ): ScreenReaderAuditResult {
-  // Playwright inlines a child frame's tree under the iframe node, but inside
-  // that document closest() cannot see the embedding <iframe aria-hidden="true">.
-  // Hidden state is inherited down the tree instead; a parent always precedes
-  // its children in snapshot order.
   const inheritedHidden = rawNodes.map(node => node.ariaHidden);
   const nodes = restoreDistilledNames(rawNodes.map((node, index) => {
     if (node.parent !== null && inheritedHidden[node.parent])
@@ -438,7 +384,6 @@ export function analyzeScreenReader(
   if (options.checkReadingOrder)
     checkReadingOrder(nodes, push);
 
-  // SAFETY: this locally created table has exactly the ScreenReaderCheck keys listed above.
   const truncatedChecks = (Object.keys(countByCheck) as ScreenReaderCheck[])
       .filter(check => countByCheck[check] > options.maxFindingsPerCheck);
   return { findings, countByCheck, truncatedChecks };
@@ -567,13 +512,9 @@ const auditScreenReader = defineTabTool({
     response.addCode('// Read the accessibility tree with page.ariaSnapshot() and compared names and geometry against reading order.');
     response.addResult([
       `Elements analyzed: ${analyzedElements}${elementCountSuffix}`,
-      // Unresolved elements were skipped by every check, so a clean result
-      // covering only part of the page must say so rather than read as clean.
       ...(unresolvedCount > 0
         ? [`WARNING: ${unresolvedCount} of these went stale before measurement (the page re-rendered mid-audit, or their frame stopped answering) and were not evaluated; findings may be incomplete. Re-run once the page is stable.`]
         : []),
-      // Without a measured name, a control whose name the snapshot distilled
-      // into its children is reported as unnamed, so that must be said too.
       ...(unmeasuredNames > 0
         ? [`WARNING: accessible names could not be measured for ${unmeasuredNames} of these (axe-core could not be installed or run in their frame); a control named only through its children may be reported there as missing a name.`]
         : []),

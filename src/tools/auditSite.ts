@@ -29,7 +29,6 @@ type CrawlItem = {
   cookieUrl: string;
   depth: number;
   discoveredFrom: string | null;
-  // Set when a dialog from the previous page cut this item's navigation short.
   retriedAfterOutgoingDialog?: boolean;
 };
 
@@ -45,8 +44,6 @@ type PageReport = {
   summary: ReturnType<typeof summarizeAxeViolations> | null;
   violations: AxeViolation[];
   incomplete: AxeViolation[];
-  // Frames Axe never reached on this page, so a page with no violations is
-  // distinguishable from a page that was only partly scanned.
   unscannedFrames: string[];
 };
 
@@ -60,9 +57,6 @@ type SummaryViolation = {
   pagesAffected: string[];
   totalOccurrences: number;
   uniqueOccurrences: number;
-  // Unique occurrences grouped by near-identical markup with the same root
-  // element, type and role. A markup heuristic, not a count of root causes;
-  // covers only part of the occurrences when similarPatternsCapped.
   similarPatterns: number;
   similarPatternsCapped: boolean;
   sampleNodes: {
@@ -94,7 +88,6 @@ type ViolationSummaryAggregate = {
   pagesAffected: Set<string>;
   totalOccurrences: number;
   fingerprints: Set<string>;
-  // Every unique occurrence, as its sample; samples are chosen once grouped.
   patterns: HtmlPatternGroups<SummaryViolation['sampleNodes'][number]>;
 };
 
@@ -115,7 +108,6 @@ const defaultExcludePathPatterns = [
 const maxExcludeRegexPatternLength = 200;
 
 const maxSampleNodes = 3;
-// Bound the memory and grouping work on rules with many or very varied nodes.
 const maxSimilarPatterns = 50;
 const maxGroupedOccurrences = 500;
 
@@ -156,8 +148,6 @@ const auditSiteSchema = z.object({
       message: 'urls is required when strategy="provided"',
     });
   }
-  // Representative selection needs the whole URL list before the first visit;
-  // a link crawl only learns its URLs page by page.
   if (value.pageSelection === 'representative' && value.strategy !== 'sitemap' && value.strategy !== 'provided') {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -171,8 +161,6 @@ function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
-// 32-bit FNV-1a hash; gives occurrence dedup a fixed-size key so the
-// per-violation fingerprint sets do not retain full HTML strings.
 function fastFingerprint(value: string): string {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index++) {
@@ -224,12 +212,10 @@ function inferStartUrlFromProvidedUrls(urls: string[] | undefined): string | und
       if (candidate.protocol === 'http:' || candidate.protocol === 'https:')
         return candidate.toString();
     } catch {
-      // Ignore invalid entries here; validation happens when enqueueing URLs.
     }
   }
   return undefined;
 }
-
 
 function isExcludedByPath(candidate: URL, excludePatterns: RE2[]): boolean {
   const value = `${candidate.pathname}${candidate.search}`;
@@ -261,37 +247,11 @@ function normalizeUrl(rawUrl: string, baseUrl: URL, ignoredParams: Set<string>):
   return url;
 }
 
-/**
- * Cookies the crawled URLs would actually send, keyed by name + domain + path and
- * mapped to the name and expiry needed to report on them. Scoping to the crawl URLs
- * keeps an unrelated origin's expiring cookie from raising a false alarm, and keying
- * on the full identity stops a same-named cookie elsewhere from masking a deleted one.
- * Values are deliberately not compared: a rotating CSRF token is not a lost session.
- * Ceiling: a session cookie scoped to a path below the crawl URLs is not tracked.
- */
 async function readCrawlCookies(page: Page, urls: string[]): Promise<Map<string, { name: string, expires: number }>> {
   const cookies = await page.context().cookies(urls);
   return new Map(cookies.map(cookie => [`${cookie.name}\n${cookie.domain}\n${cookie.path}`, { name: cookie.name, expires: cookie.expires }]));
 }
 
-/**
- * Baseline cookies the context no longer carries, or null when nothing is missing.
- *
- * A cookie whose own expiry has already passed was deleted by the clock rather than
- * by the site, so it is not a lost session: Cloudflare's `__cf_bm` lives 30 minutes
- * and would otherwise warn on any longer crawl. Cookies are still not classified as
- * "authentication" ones — no cookie attribute marks that, and every proxy for it
- * (httpOnly, session scope) misfires both ways on real sites, which would turn a
- * false warning into a missed logout.
- *
- * A cookie read failure yields no loss: the context is gone, and aborting here would
- * throw away the pages already scanned along with the navigation error for this one.
- *
- * The identities of the missing cookies are returned so the caller can drop them
- * from the baseline: each cookie is reported once, at the URL where it vanished,
- * and monitoring continues afterwards — an analytics cookie expiring early in the
- * crawl must not mask the real session cookie being dropped ten pages later.
- */
 async function findCookieLoss(
   page: Page,
   urls: string[],
@@ -307,12 +267,6 @@ async function findCookieLoss(
       .filter(([identity, cookie]) => !current.has(identity) && !(cookie.expires > 0 && cookie.expires * 1000 <= now));
   if (!missing.length)
     return null;
-  // The page reached after redirects is the one that dropped the cookie, and the one
-  // worth excluding; the queued URL may only have pointed at it. A navigation that
-  // never committed leaves the tab on the previous page, which is innocent — there
-  // the URL asked for is the one whose response dropped the cookie. Browser error
-  // documents are not crawl destinations either: Chrome/Firefox may commit one
-  // after a failed navigation, but the response came from the requested URL.
   const reachedUrl = page.url();
   const url = !/^https?:\/\//i.test(reachedUrl) || reachedUrl === urlBeforeNavigation ? requestedUrl : reachedUrl;
   return {
@@ -322,12 +276,6 @@ async function findCookieLoss(
   };
 }
 
-/**
- * Title and outgoing links in one round trip: both are wanted for every crawled
- * page, and a second evaluate per page is pure latency on a 200-page crawl.
- * `linkSelector` is empty when this page contributes no links (depth exhausted,
- * or a strategy that only reads the entry page).
- */
 async function readPage(page: Page, linkSelector: string): Promise<{ title: string, links: string[] }> {
   return await page.evaluate(selector => ({
     title: document.title,
@@ -427,7 +375,6 @@ function parseSitemapUrl(input: string, base: URL, startUrl: URL, sameOriginOnly
     throw new Error('Sitemap URL must not contain credentials.');
   if (!isAllowedByOrigin(url, startUrl, sameOriginOnly, includeSubdomains))
     throw new Error(`Sitemap URL "${input}" is outside the allowed crawl scope (start origin ${startUrl.origin}).`);
-  // Use the same glob matcher as context.route(), with block rules taking priority.
   const matches = (origin: string) => coreBundle.iso.urlMatches(undefined, url.href, `*://${origin}/**`);
   if (config.network.blockedOrigins?.some(matches) ||
       (config.network.allowedOrigins?.length && !config.network.allowedOrigins.some(matches)))
@@ -458,8 +405,6 @@ function aggregateIntoSummary(
     summary.totalOccurrences += violation.nodes.length;
 
     for (const node of violation.nodes) {
-      // The fingerprint set is scoped to one violation id, so the
-      // normalized node HTML alone identifies a unique occurrence.
       const normalizedHtml = normalizeWhitespace(node.html ?? '');
       const fingerprint = fastFingerprint(normalizedHtml);
       if (summary.fingerprints.has(fingerprint))
@@ -521,14 +466,6 @@ function summarizeTopPages(sortedScannedPages: PageReport[], count: number): str
       .map(page => `- ${page.url}: ${page.summary?.totalRules ?? 0} violations, ${page.summary?.totalNodes ?? 0} nodes`);
 }
 
-/**
- * The crawl answers no dialog: it is not the crawl's to dismiss, and accepting an
- * alert or confirm would change what the page under audit does. A dialog freezes
- * its tab, though: navigation waits out the whole navigation timeout and a
- * `page.evaluate` never returns, so a page that opens one while it loads would
- * otherwise fail every later URL, or hang the crawl for good. The page is given up
- * on as soon as its dialog opens, and the crawl carries on in a fresh tab.
- */
 function openDialog(tab: Tab) {
   return tab.modalStates().find(state => state.type === 'dialog');
 }
@@ -539,25 +476,12 @@ function dialogFailure(description: string): Error {
   return new Error(`The page opened a dialog that the crawl does not answer, so it was not audited: ${shown}`);
 }
 
-/**
- * Fails `guard`ed work the moment a dialog opens on the tab. The abandoned call
- * stays pending until the tab is closed, which rejects it; the race has already
- * taken a handler on it, so that rejection is not reported again.
- */
 function watchForDialog(tab: Tab, requestedUrl: string) {
   let listener: ((state: { type: string, description: string }) => void) | undefined;
   let fired = false;
-  // Init scripts run only in newly created documents, before their page scripts.
-  // Unlike framenavigated this distinguishes a reload from pushState/replaceState
-  // even when both use the identical URL. Match the requested response as well,
-  // so an intervening navigation the outgoing document started does not count.
   let navigationResponse: Response | undefined;
   let committed = false;
   let raisedByOutgoingDocument = false;
-  // Once navigation has begun, a tab that had shown no page yet has no outgoing
-  // document to raise a dialog, so whatever opens one is the requested page.
-  // This must not wait on the commit notification: in a just-opened tab it can
-  // arrive after the requested page's own load-time dialog.
   const hasOutgoingDocument = tab.page.url() !== 'about:blank';
   let navigationMayHaveStarted = false;
   const withoutFragment = (url: string) => url.split('#')[0];
@@ -592,19 +516,15 @@ function watchForDialog(tab: Tab, requestedUrl: string) {
     };
     tab.on(TabEvents.modalState, listener);
   });
-  // A dialog can open while nothing is being guarded; the next guard still sees it.
   failed.catch(() => {
-    // A dialog between guards is consumed by the next guard or tab retirement.
   });
   const initScript = tab.page.addInitScript(({ onNewDocument }) => {
     if (window === window.top) {
       void onNewDocument(location.href).catch(() => {
-        // The crawl may retire the tab before this notification finishes.
       });
     }
   }, {
     onNewDocument: async (url: string) => {
-      // Terminal 3xx responses can create documents; actual redirects do not.
       if (navigationResponse && !navigationResponse.request().redirectedTo() && withoutFragment(url) === withoutFragment(navigationResponse.url()))
         committed = true;
     },
@@ -614,16 +534,11 @@ function watchForDialog(tab: Tab, requestedUrl: string) {
       navigationMayHaveStarted = true;
     }), failed]),
     guard: <T>(work: Promise<T>): Promise<T> => Promise.race([work, failed]),
-    /** A dialog opened: work on the tab may have been abandoned mid-call. */
     fired: () => fired,
-    /** True when the dialog came from the document being navigated away from. */
     raisedByOutgoingDocument: () => raisedByOutgoingDocument,
     stop: async () => {
-      // Script removal can wait behind a dialog too. Keep watching during
-      // cleanup; if a dialog wins, retiring the tab finishes script cleanup.
       if (!fired) {
         await Promise.race([initScript.then(script => script.dispose()).catch(logUnhandledError), failed]).catch(() => {
-          // A dialog during removal retires the tab and its init script together.
         });
       }
       tab.page.off('response', onResponse);
@@ -644,9 +559,6 @@ const auditSite = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    // Rule ids apply to the whole run, so a bad one must fail before any tab is
-    // opened or any URL visited; leaving it to the per-page scan would crawl the
-    // entire site and write a "completed" report of nothing but errored pages.
     assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
 
     const context = tab.context;
@@ -675,8 +587,6 @@ const auditSite = defineTabTool({
     const summaryByViolation = new Map<string, ViolationSummaryAggregate>();
     const summaryByIncomplete = new Map<string, ViolationSummaryAggregate>();
 
-    // The normalized URL when it is in scope and not yet queued or visited;
-    // otherwise null, counted as skipped.
     const admitUrl = (rawUrl: string): string | null => {
       const normalizedUrl = normalizeUrl(rawUrl, startUrl, ignoredParams);
       if (!normalizedUrl
@@ -713,8 +623,6 @@ const auditSite = defineTabTool({
       queued.add(normalizedUrlString);
     };
 
-    // Listed URLs past maxPages are skipped; with representative selection the
-    // ones skipped are those closest to a page that is scanned.
     let representativeSelection = null as { candidates: number, selected: number } | null;
     const enqueueListedUrls = (rawUrls: string[], discoveredFrom: string | null) => {
       if (params.pageSelection !== 'representative') {
@@ -760,39 +668,21 @@ const auditSite = defineTabTool({
       message: `Initialized site audit with ${queue.length} queued URL(s).`,
     });
 
-    // Each worker audits one page at a time in a crawl tab of its own. The first
-    // tab opens now, because the cookie baseline below is read through it; the
-    // others open when their worker first has a page to audit, so a crawl with
-    // fewer pages than workers opens no tab it does not use.
     type CrawlWorker = { tab: Tab | undefined, abandoned: boolean };
     const workers: CrawlWorker[] = Array.from({ length: Math.min(params.concurrency, params.maxPages) }, () => ({ tab: undefined, abandoned: false }));
     const firstTab = await context.newTab();
     workers[0].tab = firstTab;
-    // Crawl tabs given up on because a dialog froze them; each is closed, and the
-    // sweep below covers one whose close failed.
     const retiredTabs: Tab[] = [];
-    // Cookies the crawl URLs carry before the crawl are the session the caller
-    // signed in with. If one disappears mid-crawl every later page is audited as a
-    // signed-out user, which still looks like a clean run, so record where it happened.
     const cookieScopeUrls = queue.map(item => item.cookieUrl);
     const cookieScope = new Set(cookieScopeUrls);
-    // The whole jar is snapshotted once, so a URL discovered mid-crawl can only
-    // add identities that existed when the crawl started. Without this, a cookie
-    // minted by an earlier crawled page would enter the baseline at discovery
-    // and its later removal would be misreported as losing a crawl-start cookie.
     const initialCookieIdentities = new Set(
         (await firstTab.page.context().cookies().catch(() => []))
             .map(cookie => `${cookie.name}\n${cookie.domain}\n${cookie.path}`));
     const baselineCookies = await readCrawlCookies(firstTab.page, cookieScopeUrls);
     const sessionLosses: { url: string, cookies: string[], concurrentUrls?: string[] }[] = [];
-    // The first URL audited in each replacement crawl tab.
     const crawlTabRestarts: { url: string }[] = [];
     let processedPages = 0;
 
-    // Pages are numbered in the order they leave the queue, and the links each
-    // one discovers join the queue strictly in that order. The queue, and so
-    // which pages fill maxPages and their depth and discoveredFrom, is then the
-    // one a single-tab crawl builds, however the workers' pages interleave.
     let dequeuedPages = 0;
     let committedPages = 0;
     const discoveredLinks = new Map<number, { links: string[], depth: number, discoveredFrom: string }>();
@@ -812,15 +702,8 @@ const auditSite = defineTabTool({
       wakeWaiters();
     };
 
-    // Findings are aggregated after the crawl, in page order: pattern grouping
-    // keeps the first occurrences up to its caps, so aggregating in completion
-    // order would let tab timing decide which occurrences a capped rule reports.
     const pageFindings = new Map<PageReport, { violations: AxeViolation[], incomplete: AxeViolation[] | null }>();
 
-    // A cookie disappearing is noticed by the next check after it happened. With
-    // several pages loading at once, any page active since the previous check
-    // may have dropped it, so those pages are named alongside the one blamed.
-    // Checks run one at a time, or two of them would report the same loss.
     const activeSinceCheck = new Map<number, string>();
     const inFlight = new Set<number>();
     let cookieChecks: Promise<void> = Promise.resolve();
@@ -828,22 +711,16 @@ const auditSite = defineTabTool({
       const check = cookieChecks.then(async () => {
         const window = [...activeSinceCheck];
         if (baselineCookies.size) {
-          // Discovery can extend both collections while the cookie read is pending.
           const loss = await findCookieLoss(page, [...cookieScopeUrls], new Map(baselineCookies), requestedUrl, urlBeforeNavigation);
           if (loss) {
-            // Include pages that started during the read; they may have removed it.
             const concurrentUrls = [...activeSinceCheck].filter(([other]) => other !== sequence).map(([, url]) => url);
             sessionLosses.push(concurrentUrls.length ? { url: loss.url, cookies: loss.cookies, concurrentUrls } : { url: loss.url, cookies: loss.cookies });
-            // Removed from the jar snapshot too, or a later-discovered URL
-            // could re-admit an already-reported cookie to the baseline and
-            // report the same loss twice.
             for (const identity of loss.identities) {
               baselineCookies.delete(identity);
               initialCookieIdentities.delete(identity);
             }
           }
         }
-        // Pages still loading stay suspects for the next check as well.
         for (const [other] of window) {
           if (!inFlight.has(other))
             activeSinceCheck.delete(other);
@@ -867,8 +744,6 @@ const auditSite = defineTabTool({
         unscannedFrames: [],
       });
       const pageIndex = pages.push(newPageReport(queuedItem)) - 1;
-      // Every page commits its links exactly once, even when it errors, or the
-      // pages queued after it would wait for its discoveries forever.
       let linksCommitted = false;
       const commit = (links: string[]) => {
         if (linksCommitted)
@@ -886,17 +761,6 @@ const auditSite = defineTabTool({
           if (!worker.tab)
             worker.tab = await context.newTab();
 
-          // URLs discovered mid-crawl join cookie tracking before they are visited:
-          // a session cookie scoped below the start URL (say /app, discovered from /)
-          // is invisible to the start-URL baseline, so deleting it later would
-          // otherwise never raise a warning. Read before navigating — the visit
-          // itself may be what drops the cookie. Only identities from the crawl-start
-          // jar snapshot may join, so the warning's "present when the crawl started"
-          // stays literally true. Ceiling: a crawl-start cookie deleted before its
-          // scope URL is discovered is not seen by this live read and goes
-          // unreported — accepted, because deciding which snapshot cookies apply to
-          // a URL ourselves would reimplement browser cookie matching, and getting
-          // that wrong turns into false session-loss warnings.
           if (!cookieScope.has(item.cookieUrl)) {
             cookieScope.add(item.cookieUrl);
             cookieScopeUrls.push(item.cookieUrl);
@@ -907,21 +771,12 @@ const auditSite = defineTabTool({
             }
           }
 
-          // A dialog the previous page left open freezes this tab for every later URL.
-          // It goes, dialog and all, and the worker continues in a new tab; the tab the
-          // tool was called from is never touched. A tab whose dialog was answered
-          // elsewhere (a headed or shared CDP browser) goes too: the navigation or scan
-          // abandoned for that dialog may resume and race the next page.
           if (worker.abandoned || openDialog(worker.tab)) {
             worker.abandoned = false;
             const frozenTab = worker.tab;
             retiredTabs.push(frozenTab);
             worker.tab = await context.newTab();
-            // A new tab starts without the old one's sessionStorage, so pages from here
-            // on may run in a different session; the report says where that began.
             crawlTabRestarts.push({ url: item.url });
-            // Best effort: closing a frozen page can time out, and that must not end
-            // the crawl it was retired to rescue. The final sweep tries it again.
             const frozenIndex = context.tabs().indexOf(frozenTab);
             if (frozenIndex !== -1)
               await context.closeTab(frozenIndex).catch(logUnhandledError);
@@ -942,9 +797,6 @@ const auditSite = defineTabTool({
               || isExcludedByPath(normalizedReachedUrl, excludePatterns))
               throw new Error(`Requested URL "${item.url}" reached "${truncateDataUrls(reachedUrl)}", which is outside the allowed crawl scope or matches excludePathPatterns. The destination was not audited.`);
 
-            // Discover before scanning. A scoped scan throws when an
-            // includeSelectors entry is absent from this page, and that must not
-            // silently drop every descendant reachable only through it.
             let linkSelector = '';
             if (params.strategy === 'links' && item.depth < params.maxDepth)
               linkSelector = allLinksSelector;
@@ -953,8 +805,6 @@ const auditSite = defineTabTool({
 
             const { title, links } = await dialogWatch.guard(readPage(crawlTab.page, linkSelector));
             pageReport.title = title;
-            // Committed before the scan, so idle workers start on the new pages
-            // while this one is still being scanned.
             commit(links);
 
             const axeResult = await dialogWatch.guard(runAxeScan(crawlTab.page, axeScanOptions(params)));
@@ -973,10 +823,6 @@ const auditSite = defineTabTool({
             }
             pageFindings.set(pageReport, { violations: violations.deduped, incomplete: incompleteFindings });
           } catch (error) {
-            // A timer on the previous page can raise its dialog while this URL is
-            // still loading, even a reload of the same URL. That is not this page's
-            // dialog, so it is audited again,
-            // once, in the fresh tab the abandoned one is replaced with.
             if (!item.retriedAfterOutgoingDialog && dialogWatch.raisedByOutgoingDocument()) {
               retryItem = true;
             } else {
@@ -987,18 +833,8 @@ const auditSite = defineTabTool({
           } finally {
             await dialogWatch.stop();
             worker.abandoned = dialogWatch.fired();
-            // A page being retried is still loading, so it stays a suspect for
-            // later checks; a finished one is a suspect only up to this check.
             if (!retryItem)
               inFlight.delete(sequence);
-            // Checked after failed navigations too: a logout URL that clears the cookie
-            // and then times out still ended the session, and skipping it pins the
-            // warning on the next page that happens to load — an innocent route.
-            // Monitoring never stops at the first loss: reported cookies leave the
-            // baseline, so each later disappearance is still caught and attributed
-            // to its own URL instead of being masked by an earlier, unrelated one.
-            // A retried page never loaded: the outgoing page that raised the dialog
-            // is the one that ran in the meantime, so a loss is laid at its door.
             await checkSession(crawlTab.page, sequence, retryItem ? urlBeforeNavigation : item.url, urlBeforeNavigation);
             if (!retryItem) {
               processedPages++;
@@ -1014,7 +850,6 @@ const auditSite = defineTabTool({
           }
           if (!retryItem)
             return;
-          // Not counted or reported: the page runs again now, in a fresh tab.
           item = { ...item, retriedAfterOutgoingDialog: true };
         }
       } finally {
@@ -1027,7 +862,6 @@ const auditSite = defineTabTool({
     const runWorker = async (worker: CrawlWorker) => {
       while (!stopped) {
         if (!queue.length) {
-          // Every audited page has committed its links, so nothing more can arrive.
           if (committedPages === dequeuedPages)
             return;
           await new Promise<void>(resolve => waiters.push(resolve));
@@ -1047,9 +881,6 @@ const auditSite = defineTabTool({
     };
 
     try {
-      // A failure outside any page's own error handling (a tab that cannot be
-      // opened) ends the crawl, as it would a single-tab crawl; the other workers
-      // stop taking pages and finish the one they have before cleanup.
       const failures: unknown[] = [];
       await Promise.all(workers.map(worker => runWorker(worker).catch(error => {
         failures.push(error);
@@ -1059,9 +890,6 @@ const auditSite = defineTabTool({
       if (failures.length)
         throw failures[0];
     } finally {
-      // Each step is best effort, so one tab that will not close neither leaves
-      // the others open nor keeps the caller's tab unselected, and cleanup never
-      // discards the report built below. A tab left open still shows under Open tabs.
       for (const crawlOwnedTab of [...workers.map(worker => worker.tab), ...retiredTabs]) {
         const crawlTabIndex = crawlOwnedTab ? context.tabs().indexOf(crawlOwnedTab) : -1;
         if (crawlTabIndex !== -1)
@@ -1084,8 +912,6 @@ const auditSite = defineTabTool({
     const summaryViolations = toSortedSummaryViolations(summaryByViolation);
     const summaryIncomplete = toSortedSummaryViolations(summaryByIncomplete);
 
-    // A partly-scanned page reports fewer violations, and a reader counting them
-    // must know which pages those numbers are incomplete for.
     const pagesWithUnscannedFrames = pages.filter(page => page.unscannedFrames.length);
     const scannedPagesByViolations = sortScannedPagesByViolations(pages);
     const summary: SummaryReport = {
@@ -1100,8 +926,6 @@ const auditSite = defineTabTool({
     };
 
     const report = {
-      // v2: the singular `sessionLoss` object became the `sessionLosses` list,
-      // so a consumer keying its parser on the version has a signal.
       version: 'v2',
       metadata: {
         startUrl: startUrl.toString(),
@@ -1130,8 +954,6 @@ const auditSite = defineTabTool({
       },
       pages,
       summary,
-      // How many listed URLs representative selection chose from; null when
-      // pages were taken in discovery order.
       representativeSelection,
       sessionLosses,
       crawlTabRestarts,
@@ -1144,8 +966,6 @@ const auditSite = defineTabTool({
     });
     response.setStructuredContent({
       kind: 'audit_site',
-      // Mirrors the JSON report version: v2 replaced the singular sessionLoss
-      // object with the sessionLosses list on both surfaces.
       version: 'v2',
       report: reportResource,
       crawl: {

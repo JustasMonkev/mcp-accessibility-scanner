@@ -14,11 +14,6 @@
  * limitations under the License.
  */
 
-// adapted from:
-// - https://github.com/microsoft/playwright/blob/76ee48dc9d4034536e3ec5b2c7ce8be3b79418a8/packages/playwright-core/src/utils/isomorphic/stringUtils.ts
-// - https://github.com/microsoft/playwright/blob/76ee48dc9d4034536e3ec5b2c7ce8be3b79418a8/packages/playwright-core/src/server/codegen/javascript.ts
-
-// NOTE: this function should not be used to escape any selectors.
 export function escapeWithQuotes(text: string, char: string = '\'') {
   const stringified = JSON.stringify(text);
   const escapedText = stringified.substring(1, stringified.length - 1).replace(/\\"/g, '"');
@@ -52,8 +47,6 @@ export function formatObject(value: any, indent = '  '): string {
   return String(value);
 }
 
-// Formats an options object for code generation, returning an empty string
-// when every property is undefined (i.e. there are no options to emit).
 export function formatObjectOrVoid(value: any, indent = '  '): string {
   const result = formatObject(value, indent);
   return result === '{}' ? '' : result;

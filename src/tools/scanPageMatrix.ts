@@ -31,8 +31,6 @@ type VariantResult = {
   summary: ReturnType<typeof summarizeAxeViolations>;
   violations: AxeViolation[];
   incomplete: AxeViolation[];
-  // Frames Axe never reached for this variant, so a variant that looks clean is
-  // distinguishable from one that was only partly scanned.
   unscannedFrames: string[];
   nodeCountByRuleId: Record<string, number>;
   comparisonIncompleteRuleIds: string[];
@@ -96,26 +94,15 @@ const scanPageMatrixSchema = z.object({
 
 type MediaState = VariantResult['applied']['media'];
 
-// Playwright has no getter for a page's media emulation, and passing null to
-// emulateMedia resets a feature to the browser default rather than to whatever
-// the context was created with: a context made with `colorScheme: 'dark'` reads
-// light again after a null. So the effective state is measured from the page
-// before the first variant and used both as the per-variant fallback and to put
-// the page back afterwards - the same way the viewport and zoom already are.
 async function readPageState(page: playwright.Page): Promise<{ zoom: string, media: MediaState }> {
   return await page.evaluate(() => ({
     zoom: document.documentElement.style.zoom || '',
     media: {
-      // Neither query matching is a third state, not light. Pinning it to light
-      // would emulate a preference the page never had, so it is left
-      // un-emulated - the same treatment the unrepresentable contrast values get.
       colorScheme: matchMedia('(prefers-color-scheme: dark)').matches
         ? 'dark' as const
         : matchMedia('(prefers-color-scheme: light)').matches ? 'light' as const : null,
       forcedColors: matchMedia('(forced-colors: active)').matches ? 'active' as const : 'none' as const,
       reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduce' as const : 'no-preference' as const,
-      // `less` and `custom` are values emulateMedia cannot express. Leaving the
-      // feature un-emulated reproduces them exactly, naming a value cannot.
       contrast: matchMedia('(prefers-contrast: more)').matches
         ? 'more' as const
         : matchMedia('(prefers-contrast: no-preference)').matches ? 'no-preference' as const : null,
@@ -123,9 +110,6 @@ async function readPageState(page: playwright.Page): Promise<{ zoom: string, med
   }));
 }
 
-// An unset property means "whatever this page had before the scan started", not
-// "the browser default" - undoing the previous variant must not also undo the
-// media emulation the session was configured with.
 function normalizeMedia(variantMedia: z.output<typeof variantSchema>['media'] | undefined, original: MediaState): MediaState {
   return {
     colorScheme: variantMedia?.colorScheme ?? original.colorScheme,
@@ -134,7 +118,6 @@ function normalizeMedia(variantMedia: z.output<typeof variantSchema>['media'] | 
     reducedMotion: variantMedia?.reducedMotion ?? original.reducedMotion,
   };
 }
-
 
 function countNodesByRule(violations: { id: string; nodes: unknown[] }[]): Record<string, number> {
   const counts: Record<string, number> = {};
@@ -173,10 +156,6 @@ const scanPageMatrix = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    // Rule ids apply to the whole run, so a bad one must fail before the first
-    // variant is applied. The finally block restores viewport/media/zoom, but
-    // reloadBetweenVariants has already thrown away form and application state
-    // by the time the per-scan check would reject the argument.
     assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
 
     const reportFileName = params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`;
@@ -194,22 +173,10 @@ const scanPageMatrix = defineTabTool({
     const incompleteRuleIdsByVariant: string[][] = [];
     try {
       for (const variant of variants) {
-        // Apply each property once per variant: the variant value when set,
-        // otherwise the original page state (undoing the previous variant).
-        // Strictly in this order, not in parallel: a page that reacts to a
-        // viewport or media change by writing document.documentElement.style.zoom
-        // would overwrite a zoom applied alongside it, and the variant would be
-        // scanned - and reported - at a zoom it never actually had.
         await tab.page.setViewportSize(variant.viewport ?? originalViewport);
-        // One value, applied and then reported, so `applied.media` cannot drift
-        // from what the variant was actually scanned under.
         const media = normalizeMedia(variant.media, originalMedia);
         await tab.page.emulateMedia(media);
 
-        // Before the zoom, not after it. Viewport and media emulation survive a
-        // reload, but the zoom is an inline style on documentElement and the new
-        // document does not have it - applying it first would scan the variant
-        // unzoomed while `applied.zoomPercent` still claimed the requested zoom.
         if (params.reloadBetweenVariants)
           await tab.page.reload({ waitUntil: 'domcontentloaded' });
 
@@ -263,7 +230,6 @@ const scanPageMatrix = defineTabTool({
           : null;
       }
     } finally {
-      // Same ordering as the apply path, and for the same reason.
       await tab.page.setViewportSize(originalViewport);
       await tab.page.emulateMedia(originalMedia);
       await tab.page.evaluate(zoom => {
@@ -309,12 +275,7 @@ const scanPageMatrix = defineTabTool({
         name: result.name,
         totalViolations: result.summary.totalRules,
         totalNodes: result.summary.totalNodes,
-        // null, not 0, when collection is off: structuredContent does not carry
-        // includeIncomplete, so a 0 here is indistinguishable from a variant
-        // with no needs-review findings. Matches the "-" in the markdown table.
         totalIncomplete: params.includeIncomplete ? result.incomplete.length : null,
-        // Without this a client reading only structured output cannot tell a
-        // partly-scanned variant from a clean one.
         unscannedFrames: result.unscannedFrames,
         comparisonIncompleteRuleIds: result.comparisonIncompleteRuleIds,
         newViolationIds: result.diffFromBaseline?.newViolationIds ?? null,
@@ -347,9 +308,6 @@ const scanPageMatrix = defineTabTool({
         const topNew = result.diffFromBaseline
           ? result.diffFromBaseline.newViolationIds.slice(0, 5).join(', ') || '-'
           : `n/a (${comparisonReasons.join('; ')})`;
-        // "-" rather than 0: with collection off, 0 is indistinguishable from
-        // "no needs-review findings". audit_site omits its section for the same
-        // reason.
         const incomplete = params.includeIncomplete ? String(result.incomplete.length) : '-';
         return `${result.name} | ${result.summary.totalRules} | ${result.summary.totalNodes} | ${incomplete} | ${topNew}`;
       }),

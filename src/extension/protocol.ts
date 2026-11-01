@@ -14,14 +14,9 @@
  * limitations under the License.
  */
 
-// The protocol version defined in this file. Bumped whenever the
-// commands/events change. Sent to the extension, which rejects clients
-// requesting a version it does not support.
 export const VERSION = 2;
 export const EXTENSION_ID = 'mmlmfjhmonkocbjadbfplnigmagldckm';
 
-// Structural mirrors of @types/chrome shapes used over the wire. The extension
-// imports the real chrome.* types and they are structurally compatible.
 export type Debuggee = { tabId?: number; extensionId?: string; targetId?: string };
 export type DebuggerSession = Debuggee & { sessionId?: string };
 /** @public */
@@ -46,7 +41,6 @@ export type Tab = {
 /** @public */
 export type TabRemoveInfo = { windowId: number; isWindowClosing: boolean };
 
-// Protocol v2 command params/results mirror chrome.* positional arguments.
 export type ExtensionCommandV2 = {
   'chrome.debugger.attach': {
     params: [target: Debuggee, requiredVersion: string];
@@ -70,7 +64,6 @@ export type ExtensionCommandV2 = {
   };
 };
 
-// Protocol v2 events mirror chrome.<api>.<event>.addListener callback signatures.
 export type ExtensionEventsV2 = {
   'chrome.debugger.onEvent': {
     params: [source: DebuggerSession, method: string, eventParams?: object];

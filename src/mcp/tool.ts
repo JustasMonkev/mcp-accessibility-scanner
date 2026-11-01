@@ -22,8 +22,6 @@ export type ToolSchema<Input extends z.Schema> = {
   title: string;
   description: string;
   inputSchema: Input;
-  // State-changing tools default to non-idempotent; convergent setters can
-  // explicitly opt into safe retries.
   type: 'readOnly' | 'stateChanging' | 'destructive';
   idempotent?: boolean;
 };
@@ -41,8 +39,6 @@ export function toMcpTool(tool: ToolSchema<z.Schema>): mcpServer.Tool {
     annotations.idempotentHint = false;
   return {
     name: tool.name,
-    // Top-level title takes precedence over annotations.title on spec
-    // 2025-06-18+ clients; annotations.title is kept for older clients.
     title: tool.title,
     description: tool.description,
     inputSchema: z.toJSONSchema(tool.inputSchema) as mcpServer.Tool['inputSchema'],

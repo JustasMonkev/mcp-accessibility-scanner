@@ -20,6 +20,9 @@ import { defineTabTool } from './tool.js';
 import { generateLocator } from './utils.js';
 import * as javascript from '../utils/codegen.js';
 
+import type { Locator } from 'playwright';
+import type { Response } from '../response.js';
+
 const fillForm = defineTabTool({
   capability: 'core',
 
@@ -39,36 +42,49 @@ const fillForm = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    let stopped = false;
+    let callerStoppedWaiting = false;
     let attempted = 0;
+    const mustStop = () => callerStoppedWaiting || tab.modalStates().length > 0;
     await tab.waitForCompletion(async () => {
       for (const field of params.fields) {
-        if (stopped || tab.modalStates().length)
+        if (mustStop())
           break;
         const locator = await tab.refLocator({ element: field.name, ref: field.ref });
         const locatorSource = `await page.${await generateLocator(locator)}`;
-        if (stopped || tab.modalStates().length)
+        if (mustStop())
           break;
         attempted++;
-        if (field.type === 'textbox' || field.type === 'slider') {
-          response.addCode(`${locatorSource}.fill(${javascript.quote(field.value)});`);
-          await locator.fill(field.value);
-        } else if (field.type === 'checkbox' || field.type === 'radio') {
-          response.addCode(`${locatorSource}.setChecked(${field.value === 'true'});`);
-          await locator.setChecked(field.value === 'true');
-        } else if (field.type === 'combobox') {
-          response.addCode(`${locatorSource}.selectOption({ label: ${javascript.quote(field.value)} });`);
-          await locator.selectOption({ label: field.value });
-        }
+        await fillField(locator, locatorSource, field, response);
       }
     });
-    stopped = true;
+    callerStoppedWaiting = true;
     if (tab.modalStates().length) {
       response.setIncludeSnapshot();
       response.addResult(`Form stopped because a modal opened; ${params.fields.length - attempted} remaining field(s) were not filled. Handle the modal, then retry the remaining fields.`);
     }
   },
 });
+
+type FormField = z.output<typeof fillForm.schema.inputSchema>['fields'][number];
+
+async function fillField(locator: Locator, locatorSource: string, field: FormField, response: Response): Promise<void> {
+  switch (field.type) {
+    case 'textbox':
+    case 'slider':
+      response.addCode(`${locatorSource}.fill(${javascript.quote(field.value)});`);
+      await locator.fill(field.value);
+      return;
+    case 'checkbox':
+    case 'radio':
+      response.addCode(`${locatorSource}.setChecked(${field.value === 'true'});`);
+      await locator.setChecked(field.value === 'true');
+      return;
+    case 'combobox':
+      response.addCode(`${locatorSource}.selectOption({ label: ${javascript.quote(field.value)} });`);
+      await locator.selectOption({ label: field.value });
+      return;
+  }
+}
 
 export default [
   fillForm,

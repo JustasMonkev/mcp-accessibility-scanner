@@ -19,7 +19,6 @@ import type { CallToolRequestContext, CallToolRequest, CallToolResult, Tool } fr
 
 type Discovery = { pending: number; changed: boolean; notification?: ReturnType<typeof setImmediate> };
 
-/** Downstream discovery and invocation, without provider or tool-selection policy. */
 export class ToolRelay {
   private _discovery = new Map<Client, Discovery>();
   private _closed = false;
@@ -34,14 +33,10 @@ export class ToolRelay {
       if (this._closed)
         return;
       const discovery = this._discovery.get(client);
-      if (discovery) {
-        // Keep the dirty state on the client, not on an individual listing:
-        // a new listing may start after the last one settles but before its
-        // deferred notification runs.
+      if (discovery)
         discovery.changed = true;
-      } else {
+      else
         await this._notify(client);
-      }
     });
   }
 
@@ -87,8 +82,6 @@ export class ToolRelay {
   private _deferDiscoveryCompletion(client: Client, discovery: Discovery): void {
     if (discovery.notification)
       return;
-    // Keep buffering through the caller's promise continuation, even if no
-    // change has arrived yet. Every overlapping read must settle first.
     discovery.notification = setImmediate(() => {
       discovery.notification = undefined;
       if (this._closed || discovery.pending)

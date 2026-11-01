@@ -66,11 +66,6 @@ export class Response {
     this._requestContext = requestContext;
   }
 
-  /**
-   * The Context the tool call ran in. The `--save-session` log uses it as
-   * the entry's originating identity: the log is shared backend-wide, and
-   * its pending-action bookkeeping is scoped per context.
-   */
   get context(): Context {
     return this._context;
   }
@@ -197,14 +192,9 @@ export class Response {
   }
 
   async finish() {
-    // All the async snapshotting post-action is happening here.
-    // Everything below should race against modal states.
     const currentTab = this._context.currentTab();
     if (this._code.length && !this._includeSnapshot && currentTab?.modalStates().some(state => state.type === 'fileChooser'))
       this.setIncludeSnapshot();
-    // The snapshot of the current tab and the titles of the others are
-    // independent page reads, so they go out together rather than one after the
-    // other. Only the current tab's snapshot also refreshes its title.
     const tabsToUpdate = this._includeTabs
       ? this._context.tabs().filter(tab => !this._includeSnapshot || tab !== currentTab)
       : currentTab && !this._includeSnapshot ? [currentTab] : [];
@@ -218,8 +208,6 @@ export class Response {
   }
 
   private _addDownloadErrors() {
-    // Saves can fail after their page disappears or after the initiating tool
-    // returns. Report each failure once, without waiting on ongoing downloads.
     for (const error of this._context.takeDownloadErrors())
       this.addError(truncateDataUrls(error));
   }
@@ -229,8 +217,6 @@ export class Response {
   }
 
   serialize(): Pick<CallToolResult, 'content' | 'structuredContent' | 'isError'> {
-    // Also covers failed handlers, which never reach finish(), and saves that
-    // reject during asynchronous session logging after the snapshot completes.
     this._addDownloadErrors();
     const response: string[] = [];
 

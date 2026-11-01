@@ -36,8 +36,6 @@ const pdf = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    // Random token besides the timestamp: see browser_take_screenshot — two
-    // sessions saving a PDF in the same millisecond must not collide.
     const fileName = await tab.context.outputFile(params.filename ?? `page-${safeIsoTimestampForFileName()}.pdf`, params.filename !== undefined);
     if (params.filename !== undefined)
       response.deleteFileOnError(fileName);

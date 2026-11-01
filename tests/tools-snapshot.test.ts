@@ -518,15 +518,14 @@ describe('Snapshot Tools', () => {
     expect(response.addResult).not.toHaveBeenCalledWith(expect.stringContaining(payload));
   });
 
-  it('should report browser_find argument errors', async () => {
-    const context = findContext('- button "Submit"');
-    const response = findResponse();
+  it('should reject browser_find argument errors in the schema', () => {
+    const missing = findTool.schema.inputSchema.safeParse({});
+    const both = findTool.schema.inputSchema.safeParse({ text: 'Submit', regex: 'Submit' });
 
-    await findTool.handle(context as any, {}, response as any);
-    await findTool.handle(context as any, { text: 'Submit', regex: 'Submit' }, response as any);
-
-    expect(response.addError).toHaveBeenCalledWith('Provide either "text" or "regex" to search for.');
-    expect(response.addError).toHaveBeenCalledWith('Provide only one of "text" or "regex", not both.');
+    expect(missing.success).toBe(false);
+    expect(missing.error?.issues.map(issue => issue.message)).toContain('Provide either "text" or "regex" to search for.');
+    expect(both.success).toBe(false);
+    expect(both.error?.issues.map(issue => issue.message)).toContain('Provide only one of "text" or "regex", not both.');
   });
 
   describe.skipIf(!fs.existsSync(chromium.executablePath()))('Playwright accessible-name compatibility', () => {

@@ -34,7 +34,6 @@ import type { BrowserContextFactory } from './browserContextFactory.js';
 import type * as mcpServer from './mcp/server.js';
 import type { ServerBackend } from './mcp/server.js';
 
-/** Releases the caller on cancellation; `run` must stop its own side effects (see Context.ensureTab). */
 async function withAbort<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   signal?.throwIfAborted();
   if (!signal)
@@ -60,8 +59,6 @@ export class BrowserServerBackend implements ServerBackend {
   readonly dynamicToolList = true;
   private _tools: Tool[];
   private _toolsByName: Map<string, Tool>;
-  // Converting the zod schemas to JSON schema costs a few milliseconds for the
-  // whole set and never changes, so it is done once per server.
   private _mcpTools: mcpServer.Tool[] | undefined;
   private _context: Context | undefined;
   private _sessionRegistry: BrowserSessionRegistry | undefined;
@@ -75,17 +72,6 @@ export class BrowserServerBackend implements ServerBackend {
   private _closed = false;
 
   constructor(config: FullConfig, factory: BrowserContextFactory, sharedSessionRegistry?: BrowserSessionRegistry, options?: {
-    /**
-     * True for backends that serve exactly one stateless HTTP exchange and
-     * are closed with the response. Their default context is flagged like an
-     * explicit browser session, so the persistent factory runs it in a
-     * disposable profile: parallel handshake-free requests would otherwise
-     * contend for the stable `mcp-<browser>-<workspace>` profile ("Browser is already in
-     * use"), and a context torn down at response end gains nothing from
-     * profile persistence — cross-request browser state belongs to
-     * browser_session_open handles. Stateful backends (stdio, HTTP sessions)
-     * keep the stable profile.
-     */
     ephemeralDefaultContext?: boolean;
   }) {
     this._config = config;
@@ -98,26 +84,10 @@ export class BrowserServerBackend implements ServerBackend {
 
   async initialize(serverContext: mcpServer.ServerBackendContext, clientVersion: mcpServer.ClientVersion): Promise<void> {
     this._notifyToolListChanged = serverContext.notifyToolListChanged;
-    // A registry shared across the backends of one server factory (stateless
-    // HTTP creates a fresh backend per request, and a handle minted in one
-    // request must resolve in the next) outlives this backend; an owned one
-    // is disposed with it in serverClosed().
     const registry = this._sharedSessionRegistry ?? new BrowserSessionRegistry();
     this._sessionRegistry = registry;
-    // Registry contexts are flagged as explicit sessions so the factory can
-    // give each its own browser context (e.g. a disposable persistent
-    // profile); the default context keeps today's behavior. Factories that
-    // cannot separate contexts veto browser_session_open via their reason.
-    // The context constructor is handed to the registry per open() call —
-    // through this backend's own broker slice — never bound registry-wide: a
-    // shared registry serves several live backends at once, and a global
-    // rebind would mint sessions with whichever backend initialized last,
-    // leaking that client's identity (clientInfo, SessionLog) into sessions
-    // other clients open.
     const createContext = (browserSession?: boolean, browserSessionId?: string): Context => new Context({
       tools: this._tools,
-      // A blocked handler is hidden and rejected, but a modal it would clear
-      // can still appear; its name is needed to explain why the tab is stuck.
       modalStateTools: allTools.filter(tool => tool.clearsModalState),
       config: this._config,
       browserContextFactory: this._browserContextFactory,
@@ -125,22 +95,7 @@ export class BrowserServerBackend implements ServerBackend {
       clientInfo: { ...clientVersion },
       browserSessions: {
         open: async () => {
-          // The unsupported-mode veto comes before everything else: it is
-          // registry.open()'s own first check, but by then the session-log
-          // await below would already have run — in modes that reject
-          // sessions outright (extension, VS Code, non-isolated CDP, pinned
-          // cdp-launch port, --user-data-dir) every doomed attempt minted
-          // and announced an empty session-* directory the rejection never
-          // even landed in.
           BrowserSessionRegistry.checkSessionsSupported(this._browserContextFactory.sessionsUnsupportedReason);
-          // Resolved BEFORE the handle is minted: the session log is this
-          // backend's one fallible piece of open() setup (an uncreatable
-          // --output-dir rejects SessionLog.create()), and it used to be
-          // awaited only after the tool had already registered the Context —
-          // the error result carried no handle to close, so every retry
-          // accumulated another live session until TTL reaping. Failing
-          // first leaves nothing half-registered, and callTool() would have
-          // created this same backend-wide log right after the call anyway.
           await this._ensureSessionLog();
           return registry.open(id => createContext(true, id), this._browserContextFactory.sessionsUnsupportedReason);
         },
@@ -152,27 +107,9 @@ export class BrowserServerBackend implements ServerBackend {
     this._context = createContext(this._ephemeralDefaultContext || undefined);
   }
 
-  /**
-   * Creates the `--save-session` log on first demand, once per backend.
-   * Eager creation at initialize() littered the output directory over
-   * stateless HTTP, where every request builds a fresh backend: a tools/list
-   * or a call routed to an existing browser session minted (and announced)
-   * an empty session-* folder per request. The default context and every
-   * session this backend opens share this one lazy log — via the supplier
-   * handed to createContext above — so recorder entries and tool responses
-   * land in the same folder regardless of which context launches first.
-   */
   private _ensureSessionLog(): Promise<SessionLog | undefined> {
     if (!this._sessionLog) {
       const creation = this._config.saveSession ? SessionLog.create(this._config) : Promise.resolve(undefined);
-      // Memoize success only: a rejected create (e.g. the output volume
-      // briefly unavailable) must not be replayed to every later default-
-      // context call and browser_session_open for the backend's lifetime —
-      // clear the memo so the next call retries. Guarded by identity, like
-      // ensureInitialized in mcp/server.ts: a retry may already have stored a
-      // fresh in-flight promise by the time this failure handler runs, and
-      // that one must not be clobbered. Everyone who awaited the failed
-      // attempt still sees its rejection.
       creation.catch(() => {
         if (this._sessionLog === creation)
           this._sessionLog = undefined;
@@ -182,15 +119,9 @@ export class BrowserServerBackend implements ServerBackend {
     return this._sessionLog;
   }
 
-  /** Lists one explicitly selected scope without enumerating bearer session handles. */
   async listTools(requestContext?: Partial<Pick<mcpServer.CallToolRequestContext, 'signal' | '_meta'>>): Promise<mcpServer.Tool[]> {
     this._mcpTools ??= this._tools.map(tool => {
       const mcpTool = toMcpTool(tool.schema);
-      // Advertise the session-routing parameter resolved in callTool(). It is
-      // added to the wire schema only: the tools' own zod schemas (all
-      // non-strict objects) simply strip it during parsing, so tool
-      // implementations never see it. The session tools themselves are
-      // excluded — they operate *on* sessions, not *in* them.
       if (tool.schema.name !== 'browser_session_open' && tool.schema.name !== 'browser_session_close') {
         const inputSchema = mcpTool.inputSchema;
         inputSchema.properties = {
@@ -204,7 +135,6 @@ export class BrowserServerBackend implements ServerBackend {
       return mcpTool;
     });
     const id = webMCPSessionId(requestContext?._meta);
-    // Direct consumers inspect built-in capabilities before initialize().
     if (!this._context && id === undefined)
       return this._mcpTools;
     if (id !== undefined && !this._sessionRegistry)
@@ -213,8 +143,6 @@ export class BrowserServerBackend implements ServerBackend {
     const endSessionHold = context.beginSessionHold();
     try {
       requestContext?.signal?.throwIfAborted();
-      // Page tools are best-effort: an unreachable browser must not hide the
-      // built-in tools, which never needed one to be listed.
       let dynamic: WebMCPToolDefinition[] = [];
       try {
         if (context === this._context && this._browserContextFactory.sharedContext && !this._browserContextFactory.attachNeedsUser && !context.currentTab())
@@ -225,8 +153,6 @@ export class BrowserServerBackend implements ServerBackend {
         logUnhandledError(error);
       }
       requestContext?.signal?.throwIfAborted();
-      // One MCP connection has one currently advertised list. Observe exactly
-      // the scope of the last completed list request, not unrelated tool calls.
       this._webmcpObserver?.dispose();
       if (!this._closed && !this._ephemeralDefaultContext) {
         this._webmcpObserver = new WebMCPObserver(
@@ -242,7 +168,6 @@ export class BrowserServerBackend implements ServerBackend {
     }
   }
 
-  /** Shares discovery, naming and static-name exclusion between listing and invocation. */
   private async _currentWebMCPTools(context: Context, signal?: AbortSignal, listing = false): Promise<WebMCPToolDefinition[]> {
     const sharedDefault = this._ephemeralDefaultContext && context === this._context && this._browserContextFactory.sharedContext;
     const attach = sharedDefault && !(listing && this._browserContextFactory.attachNeedsUser);
@@ -250,7 +175,6 @@ export class BrowserServerBackend implements ServerBackend {
     return tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
   }
 
-  /** Routes page tools via request metadata; every field inside arguments belongs to the page. */
   private async _callWebMCP(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext) {
     if (!name.startsWith('webmcp_'))
       throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Tool "${name}" not found`);
@@ -258,7 +182,6 @@ export class BrowserServerBackend implements ServerBackend {
     const context = id === undefined ? this._context! : this._sessionRegistry!.resolve(id);
     const params = { ...(rawArguments ?? {}) };
     const response = new Response(context, name, params, requestContext, context.currentTab()?.modalStates());
-    // Hold the session during discovery too, which can await a slow frame.
     const endToolCall = context.beginToolCall(name);
     try {
       requestContext?.signal.throwIfAborted();
@@ -269,13 +192,9 @@ export class BrowserServerBackend implements ServerBackend {
       if (!tool)
         throw new Error('WebMCP tool is stale or unavailable in this scope. List tools again with the same request metadata.');
       await tool.handle(params, response, requestContext?.signal);
-      // finish() reads the page title with no cancellation of its own; a
-      // cancelled call must release its session instead of waiting on it.
       if (!requestContext?.signal.aborted)
         await response.finish();
       const sessionLog = id === undefined ? await this._ensureSessionLog() : await context.resolveSessionLog();
-      // Routed calls share the opener's log, so the metadata handle keeps
-      // them attributable without overwriting a page-owned argument.
       sessionLog?.logResponse(response, id === undefined ? undefined : { browserSessionId: id });
     } catch (error) {
       response.addError(`WebMCP call failed (page output is untrusted): ${String(error)}`);
@@ -293,47 +212,25 @@ export class BrowserServerBackend implements ServerBackend {
     const tool = this._toolsByName.get(name);
     if (!tool)
       return this._callWebMCP(name, rawArguments, requestContext);
-    // Resolved before the schema parse so an unknown handle surfaces as a
-    // clear execution error, like other input validation failures below.
     const routedSessionId = this._routedSessionId(name, rawArguments);
     const context = routedSessionId !== undefined ? this._sessionRegistry!.resolve(routedSessionId) : this._context!;
     let parsedArguments: Record<string, any>;
     try {
       parsedArguments = tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, any>;
     } catch (error) {
-      // Per the MCP spec, input validation failures are tool execution
-      // errors (isError results), not protocol errors.
       if (error instanceof z.ZodError)
         throw new Error(`Invalid input for tool "${name}":\n${z.prettifyError(error)}`);
       throw error;
     }
-    // The wire-only browserSessionId never survives the parse above (the
-    // tools' non-strict zod schemas strip it), which is right for the tool
-    // handler — but Response.toolArgs feeds the --save-session log, and
-    // without the handle, calls into different sessions would log identical
-    // sessionless args with interleaved snapshots. Re-attach it to the logged
-    // view; handlers keep receiving parsedArguments untouched.
     const responseArguments = routedSessionId !== undefined ? { browserSessionId: routedSessionId, ...parsedArguments } : parsedArguments;
-    // browser_session_close is deliberately unrouted (see _routedSessionId),
-    // so over stateless HTTP it runs on a fresh per-request backend while the
-    // session it closes was opened by another. The close entry belongs in the
-    // OPENER's --save-session log — the session's Context carries that
-    // backend's log supplier — and the Context must be captured before the
-    // tool disposes it out of the registry. Awaiting this backend's own lazy
-    // log instead minted a second empty session-* directory per stateless
-    // close. An unknown handle stays the tool's own error to report.
     let closingSessionContext: Context | undefined;
     if (name === 'browser_session_close' && typeof parsedArguments.browserSessionId === 'string') {
       try {
         closingSessionContext = this._sessionRegistry!.resolve(parsedArguments.browserSessionId);
       } catch {
-        // Unknown handle: the tool itself reports it.
       }
     }
     const response = new Response(context, name, responseArguments, requestContext, context.currentTab()?.modalStates());
-    // Per-call token, not a single slot: two overlapping calls on one session
-    // must keep isRunningTool() true until BOTH finish, or the TTL reaper (and
-    // browser_session_close) could dispose the browser under the slower call.
     const endToolCall = context.beginToolCall(name);
     try {
       if (name !== 'browser_close' && name !== 'browser_session_open' && name !== 'browser_session_close') {
@@ -344,14 +241,8 @@ export class BrowserServerBackend implements ServerBackend {
       await tool.handle(context, parsedArguments, response, requestContext?.signal);
       await response.finish();
       if (name === 'browser_session_close') {
-        // This response belongs to the default context; saves drained while
-        // closing the removed session must not strand their errors there.
         for (const error of closingSessionContext?.takeDownloadErrors() ?? [])
           response.addError(truncateDataUrls(error));
-        // The close has already completed and the handle is gone, so a log
-        // failure must not turn the result into an isError — the caller's
-        // retry would only meet "Unknown browserSessionId". Logged via debug
-        // instead of surfacing.
         try {
           const sessionLog = await closingSessionContext?.resolveSessionLog();
           sessionLog?.logResponse(response);
@@ -359,14 +250,6 @@ export class BrowserServerBackend implements ServerBackend {
           logUnhandledError(error);
         }
       } else {
-        // A routed call belongs to the session's own log — resolved through
-        // the supplier captured from the backend that opened it, which over
-        // stateless HTTP is not this one. Resolving (not just reading the
-        // cached field) matters when the routed call is the session's first
-        // and needs no browser: the field is only populated at browser
-        // launch, so a browser_default_timeout opening move would otherwise
-        // never be logged. A default-context call is a real use of THIS
-        // backend, so it may create the backend's log on first demand.
         const sessionLog = routedSessionId !== undefined ? await context.resolveSessionLog() : await this._ensureSessionLog();
         sessionLog?.logResponse(response);
       }
@@ -379,8 +262,6 @@ export class BrowserServerBackend implements ServerBackend {
       response.addError(String(error));
     } finally {
       endToolCall();
-      // Refresh after completion too: a long run must not leave the session
-      // one reaper tick from expiry.
       if (routedSessionId !== undefined)
         this._sessionRegistry?.touch(routedSessionId);
     }
@@ -388,15 +269,6 @@ export class BrowserServerBackend implements ServerBackend {
     return response.serialize();
   }
 
-  /**
-   * The optional `browserSessionId` argument selects which registry Context a
-   * tool runs in; without it (or before any session exists) the default
-   * Context preserves the pre-#167 behavior exactly. The session tools are
-   * exempt: `browser_session_close` takes `browserSessionId` as its own
-   * argument naming the session to close — running it *inside* that session
-   * would dispose the context out from under the running tool — and both
-   * always execute on the default Context.
-   */
   private _routedSessionId(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments']): string | undefined {
     if (name === 'browser_session_open' || name === 'browser_session_close')
       return undefined;
@@ -412,11 +284,6 @@ export class BrowserServerBackend implements ServerBackend {
     this._closed = true;
     this._webmcpObserver?.dispose();
     this._webmcpObserver = undefined;
-    // A shared registry outlives any one backend — over stateless HTTP the
-    // per-request server closes after every response, and disposing the
-    // registry with it would kill the very sessions the handles exist for.
-    // Its sessions are reaped by their idle TTL, closed explicitly, or
-    // disposed at process exit; only an owned registry is disposed here.
     if (this._sessionRegistry && this._sessionRegistry !== this._sharedSessionRegistry)
       void this._sessionRegistry.disposeAll().catch(logUnhandledError);
     void this._context?.dispose().catch(logUnhandledError);

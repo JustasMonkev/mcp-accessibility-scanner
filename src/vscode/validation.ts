@@ -14,10 +14,6 @@
  * limitations under the License.
  */
 
-// Shared `browser_connect` validation for the VS Code bridge, used by the
-// host (before spawning the child), the child entrypoint (before `import()`),
-// and the factory (before `connect()`), so the three never drift.
-
 const allowedBrowserConnectLibs = new Set(['playwright', 'playwright-core']);
 
 function isRemoteBrowserConnectAllowed(): boolean {
@@ -29,10 +25,6 @@ function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, '$1').replace(/\.$/, '');
   if (normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1')
     return true;
-  // The URL parser canonicalizes an IPv4-mapped IPv6 loopback such as
-  // [::ffff:127.0.0.1] to the hex form ::ffff:7f00:1 (two 16-bit groups),
-  // so accept that spelling too instead of failing closed on a legitimate
-  // loopback.
   const v4Mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(normalized);
   if (v4Mapped)
     return ((Number.parseInt(v4Mapped[1], 16) << 16) | Number.parseInt(v4Mapped[2], 16)) === 0x7f000001;
@@ -46,8 +38,6 @@ export function validateBrowserConnectLib(lib: unknown): string | undefined {
     return 'Invalid `lib`: null bytes are not allowed.';
   if (lib.includes('/') || lib.includes('\\'))
     return 'Invalid `lib`: path separators are not allowed, expected one of "playwright", "playwright-core".';
-  // The colon check also rejects every URL scheme (`data:`, `file:`, `https:`,
-  // `node:`, ...) — none may reach the child's `import()`.
   if (lib.includes(':'))
     return 'Invalid `lib`: URL schemes are not allowed, expected one of "playwright", "playwright-core".';
   if (lib.startsWith('.'))

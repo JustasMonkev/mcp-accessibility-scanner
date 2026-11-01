@@ -63,8 +63,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _modalStates: ModalState[] = [];
   private _downloads: TabSnapshot['downloads'] = [];
   private _defaultTimeout: number;
-  // The aria snapshot last handed to the caller; the refs in it are the refs the
-  // next tool call will name. Cleared whenever the page it described is gone.
   private _lastAriaSnapshot: string | undefined;
   private _ariaSnapshotGeneration = 0;
   private _pageGeneration = 0;
@@ -77,18 +75,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this.page = page;
     this._onPageClose = onPageClose;
     this._defaultTimeout = context.config.timeouts.defaultTimeout ?? 6000;
-    // Registered through a tracked list so dispose() can take them off again:
-    // on a shared (non-isolated CDP) context the page outlives the session,
-    // and listeners left behind would pile up with session churn.
     const listen = (event: string, listener: (...args: any[]) => void) => {
       page.on(event as any, listener);
       this._pageListeners.push({ event, listener });
     };
-    // Every document swap invalidates the cached snapshot, whoever caused it:
-    // goBack(), page.reload() from scan_page_matrix, a meta refresh, or the page
-    // assigning location itself. Tab.navigate() is only one of those routes, and
-    // a ref resolved against the page the user has left would target the wrong
-    // document.
     listen('framenavigated', (frame: playwright.Frame) => {
       if (!frame.parentFrame()) {
         ++this._pageGeneration;
@@ -108,24 +98,14 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       });
     });
     listen('dialog', dialog => this._dialogShown(dialog));
-    // Fires when a dialog is closed out of band (e.g. dismissed manually in
-    // headed mode or via a CDP side-channel), so a stale modal state cannot
-    // block snapshot-bearing tools. browser_handle_dialog keeps its
-    // already-closed fallback for a close that races with the event handler.
     listen('dialogclosed', dialog => this._dialogClosed(dialog));
     listen('download', download => {
-      // Tracked on the Context: the save outlives this tool call (and can
-      // outlive the tab), and context disposal must wait for it instead of
-      // closing the browser mid-stream. The context also owns the promise's
-      // rejection handling.
       this.context.trackPendingDownload(this._downloadStarted(download), download.suggestedFilename());
     });
     page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? 30000);
     page.setDefaultTimeout(this._defaultTimeout);
   }
 
-  // Detaches this wrapper from its page without closing the page: the page
-  // can belong to a shared context that outlives the session.
   dispose() {
     for (const { event, listener } of this._pageListeners)
       this.page.off(event as any, listener);
@@ -165,23 +145,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   private async _downloadStarted(download: playwright.Download) {
-    // The suggested name alone is not collision-safe: sessions share one
-    // output directory, and two downloads suggesting "report.pdf" would
-    // overwrite each other. The same {timestamp}-{token} fragment the other
-    // default artifact names carry goes in before the extension, keeping the
-    // suggested name as the recognizable part; responses print the suggested
-    // name next to the saved path, so the file stays attributable.
     const suggested = download.suggestedFilename().replace(/[. ]+$/, '') || 'download';
     const separator = suggested.lastIndexOf('.');
     let base = separator > 0 ? suggested.slice(0, separator) : suggested;
     let extension = separator > 0 ? suggested.slice(separator) : '';
     const uniqueSuffix = `-${safeIsoTimestampForFileName()}`;
-    // Filesystems cap a single name component at 255 bytes, and a long but
-    // valid Content-Disposition name plus the ~35-byte suffix used to fail
-    // saveAs() with ENAMETOOLONG. The recognizable part is truncated by BYTE
-    // length (UTF-8, whole code points) so extension and uniqueness suffix
-    // survive intact; a pathological "extension" too long to leave any base
-    // is just part of one long name and is truncated with it.
     const maxNameBytes = 255;
     let baseBudget = maxNameBytes - Buffer.byteLength(uniqueSuffix, 'utf8') - Buffer.byteLength(extension, 'utf8');
     if (baseBudget < 1) {
@@ -298,15 +266,11 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       throw new Error(`Cannot navigate while a modal state is present.\n${this.modalStatesMarkdown().join('\n')}`);
     this._markRequestsNavigation();
     this._clearCollectedArtifacts();
-    // Crawlers need the document ready before evaluating it, and cannot hand
-    // an open dialog back to the user between their internal navigations.
     if (!options?.returnOnDialog) {
       await this._navigate(url);
       return;
     }
     let navigation: Promise<void> | undefined;
-    // A dialog can block DOMContentLoaded or load until another tool handles
-    // it. Return its modal state immediately, leaving the dialog untouched.
     const modalStates = await this._raceAgainstModalStates(() => {
       navigation = this._navigate(url);
       return navigation;
@@ -314,8 +278,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     if (modalStates.length && navigation) {
       const pageGeneration = this._pageGeneration;
       void navigation.catch(error => {
-        // The tool already returned the dialog. Preserve a later failure for
-        // the next snapshot/console read, unless the user has moved on.
         if (pageGeneration === this._pageGeneration)
           this._handleConsoleMessage(navigationFailureToConsoleMessage(error));
       });
@@ -336,7 +298,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
         const download = await this._withPageStateTimeout(downloadEvent, 'waiting for download').catch(() => undefined);
         if (!download)
           throw e;
-        // Make sure other "download" listeners are notified first.
         await new Promise(resolve => setTimeout(resolve, 500));
         return;
       }
@@ -344,7 +305,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       this.page.off('download', downloadListener);
     }
 
-    // Cap load event to 5 seconds, the page is operational at this point.
     await this.waitForLoadState('load', { timeout: 5000 });
   }
 
@@ -353,8 +313,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this.page.goBack(options);
   }
 
-  // A beforeunload or load-time dialog blocks the history navigation until
-  // another tool handles it. Return its modal state immediately instead.
   async goBackReturningOnDialog(options?: Parameters<playwright.Page['goBack']>[0]): Promise<ModalState[]> {
     let navigation: Promise<unknown> | undefined;
     const modalStates = await this._raceAgainstModalStates(async () => {
@@ -383,10 +341,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this._requests.get(id);
   }
 
-  // Playwright resolves `Request.allHeaders()` and `Response.body()` with no
-  // timeout of their own, so a still-streaming response would hang a tool call
-  // until the page closed. Callers outside this class need the same bound the
-  // page-state reads above use.
   async withPageStateTimeout<T>(promise: Promise<T>, description: string): Promise<T> {
     return this._withPageStateTimeout(promise, description);
   }
@@ -401,8 +355,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
             this._captureAriaSnapshot(capture, boxes),
             'capturing page accessibility snapshot',
         ).catch(error => {
-          // Nothing describes the page any more, and the refs of an older
-          // snapshot must not be trusted against it.
           if (!(error instanceof StaleAriaSnapshotError)) {
             capture.valid = false;
             logUnhandledError(error);
@@ -431,7 +383,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       };
     });
     if (tabSnapshot) {
-      // Assign console message late so that we did not lose any to modal state.
       tabSnapshot.consoleMessages = this._recentConsoleMessages;
       this._recentConsoleMessages = [];
     }
@@ -502,12 +453,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   async refLocators(params: { element: string, ref: string }[]): Promise<playwright.Locator[]> {
-    // The refs a caller passes come from the snapshot the last tool call
-    // returned, which is the one cached here, so the common case needs no fresh
-    // capture. Playwright keeps a ref bound to the element it was issued for,
-    // but that element can change its accessible role or name while staying
-    // connected. Re-checking only the referenced nodes is still cheaper than a
-    // full-page snapshot and prevents an old ref from targeting repurposed UI.
     const cached = this._lastAriaSnapshot;
     const snapshot = cached && await this._refsMatchSnapshot(params, cached)
       ? cached
@@ -530,8 +475,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       const current = await this.page.locator(`aria-ref=${param.ref}`)
           .ariaSnapshot({ mode: 'ai', depth: 1, timeout })
           .catch(() => '');
-      // Refs are assigned from the full role and name before long names are
-      // omitted from rendering, so a semantic change still changes this line.
       return withoutSnapshotBox(current.split('\n', 1)[0]?.trim() ?? '') === withoutSnapshotBox(cached.trim());
     }));
     return pageGeneration === this._pageGeneration && matches.every(Boolean);
@@ -590,8 +533,6 @@ function pageErrorToConsoleMessage(errorOrValue: unknown): ConsoleMessage {
   };
 }
 
-// The console tool prints a page error's stack, and a synthetic Error created here
-// would only point into this server's own files. Rendered like an Error, minus the frames.
 function navigationFailureToConsoleMessage(error: unknown): ConsoleMessage {
   const text = `Navigation failed after dialog interruption: ${formatPageStateError(error)}`;
   return { type: undefined, text, toString: () => `Error: ${text}` };

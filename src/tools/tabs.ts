@@ -17,8 +17,10 @@
 import { z } from 'zod';
 import { defineTool } from './tool.js';
 
-const SECOND = 1000;
-const MINUTE = 60 * SECOND;
+const minTimeoutMs = 30_000;
+const maxTimeoutMs = 1_200_000;
+
+const timeoutSchema = (purpose: string) => z.number().min(minTimeoutMs).max(maxTimeoutMs).describe(`Timeout in milliseconds for ${purpose} (${minTimeoutMs}-${maxTimeoutMs}ms)`);
 
 const browserTabs = defineTool({
   capability: 'core-tabs',
@@ -37,28 +39,24 @@ const browserTabs = defineTool({
     if (params.isolatedContext !== undefined && params.isolatedContext !== 'default')
       throw new Error(`isolatedContext "${params.isolatedContext}" is not supported. Call browser_session_open and pass the returned browserSessionId to browser_tabs and every later browser tool call to use a separate browser context.`);
     switch (params.action) {
-      case 'list': {
+      case 'list':
         await context.ensureTab();
         response.setIncludeTabs();
         return;
-      }
-      case 'new': {
+      case 'new':
         await context.newTab();
         response.setIncludeTabs();
         return;
-      }
-      case 'close': {
+      case 'close':
         await context.closeTab(params.index);
         response.setIncludeSnapshot();
         return;
-      }
-      case 'select': {
+      case 'select':
         if (params.index === undefined)
           throw new Error('Tab index is required');
         await context.selectTab(params.index);
         response.setIncludeSnapshot();
         return;
-      }
     }
   },
 });
@@ -70,13 +68,12 @@ const navigationTimeout = defineTool({
     title: 'Navigation timeout',
     description: 'Sets the timeout for navigation and page load actions. Only affects the current tab and does not persist across browser context recreation.',
     inputSchema: z.object({
-      timeout: z.number().min(SECOND * 30).max(MINUTE * 20).describe('Timeout in milliseconds for navigation (0-300000ms)'),
+      timeout: timeoutSchema('navigation'),
     }),
     type: 'destructive',
   },
   handle: async (context, params, response) => {
-    const tabs = context.tabs();
-    for (const tab of tabs)
+    for (const tab of context.tabs())
       tab.page.setDefaultNavigationTimeout(params.timeout);
 
     response.addResult(`Navigation timeout set to ${params.timeout}ms for all tabs.`);
@@ -91,13 +88,12 @@ const defaultTimeout = defineTool({
     title: 'Default timeout',
     description: 'Sets the default timeout for all Playwright operations (clicks, fills, etc). Only affects existing tabs and does not persist across browser context recreation.',
     inputSchema: z.object({
-      timeout: z.number().min(SECOND * 30).max(MINUTE * 20).describe('Timeout in milliseconds for default operations (0-300000ms)'),
+      timeout: timeoutSchema('default operations'),
     }),
     type: 'destructive',
   },
   handle: async (context, params, response) => {
-    const tabs = context.tabs();
-    for (const tab of tabs)
+    for (const tab of context.tabs())
       tab.setDefaultTimeout(params.timeout);
 
     response.addResult(`Default timeout set to ${params.timeout}ms for all tabs.`);

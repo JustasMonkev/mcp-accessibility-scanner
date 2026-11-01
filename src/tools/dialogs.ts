@@ -17,11 +17,11 @@
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 
-// A dialog closed out of band can race with the dialogclosed event handler and
-// fail accept()/dismiss() with one of these messages — the protocol error on
-// the first attempt, or the client-side guard on a repeat. Treat either as a
-// successful close so the transient race cannot leave a stale modal state.
-const dialogAlreadyClosedError = /no dialog is showing|dialog which is already handled/i;
+const dialogAlreadyClosedMessage = /no dialog is showing|dialog which is already handled/i;
+
+function isDialogAlreadyClosedError(error: unknown): boolean {
+  return error instanceof Error && dialogAlreadyClosedMessage.test(error.message);
+}
 
 const handleDialog = defineTabTool({
   capability: 'core',
@@ -52,7 +52,7 @@ const handleDialog = defineTabTool({
         else
           await dialogState.dialog.dismiss();
       } catch (error) {
-        if (!(error instanceof Error) || !dialogAlreadyClosedError.test(error.message))
+        if (!isDialogAlreadyClosedError(error))
           throw error;
         response.addResult('The dialog was already closed out of band; cleared its leftover state.');
       }

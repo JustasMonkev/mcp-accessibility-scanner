@@ -30,8 +30,6 @@ export function truncateDataUrl(url: string): string {
 }
 
 export function truncateDataUrls(text: string): string {
-  // Snapshots are routinely hundreds of KB and usually hold no data URL at all,
-  // so nothing is copied or rebuilt until the first one is actually found.
   let start = findDataUrlStart(text, 0);
   if (start === -1)
     return text;
@@ -64,8 +62,6 @@ type DataUrlMatch = {
   quote: '"' | '\'' | undefined;
 };
 
-// Matches either prefix case-insensitively without lower-casing a copy of the
-// whole text, which on a large snapshot costs more than the scan itself.
 const dataUrlPrefixPattern = /data(?::|%3a)/gi;
 
 function findDataUrlStart(text: string, offset: number): number {
@@ -103,8 +99,6 @@ function parseDataUrl(text: string, start: number): DataUrlMatch | undefined {
   };
 }
 
-// Raw whitespace and wrappers already invalidate metadata. Stop there rather
-// than rescanning the rest of a long line for each malformed data: prefix.
 const dataUrlDelimiterPattern = /[,\s"'<>()[\]{}&]|%2c/gi;
 
 function findDataUrlDelimiter(text: string, offset: number): { start: number; end: number } | undefined {
@@ -193,8 +187,6 @@ function isLineBreak(char: string): boolean {
   return char === '\n' || char === '\r';
 }
 
-// Runs once per character of a base64 payload, which is the longest run in any
-// snapshot, so it stays a plain switch rather than a regex plus an array scan.
 function isBase64PayloadTerminator(char: string): boolean {
   switch (char) {
     case '"': case '\'': case '<': case '>':
@@ -307,16 +299,12 @@ function percentEncodedCharAt(text: string, position: number): string | undefine
   return String.fromCharCode(Number.parseInt(text.slice(position + 1, position + 3), 16));
 }
 
-// `value` is always lower-case ASCII here, so a char-code compare answers this
-// without allocating the slice these hot per-character scans would otherwise make.
 function startsWithIgnoreCase(text: string, position: number, value: string): boolean {
   if (position < 0 || position + value.length > text.length)
     return false;
   for (let index = 0; index < value.length; index++) {
     const char = text.charCodeAt(position + index);
     const expected = value.charCodeAt(index);
-    // Fold upper-case ASCII only; folding by bit would also equate control
-    // characters with punctuation.
     if (char !== expected && !(char >= 65 && char <= 90 && char + 32 === expected))
       return false;
   }

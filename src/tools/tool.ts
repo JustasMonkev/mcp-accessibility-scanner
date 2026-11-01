@@ -39,8 +39,6 @@ export type ModalState = FileUploadModalState | DialogModalState;
 export type Tool<Input extends z.Schema = z.Schema> = {
   capability: ToolCapability;
   schema: ToolSchema<Input>;
-  // Set by the tab tools that resolve a modal state, so a blocked tab can name
-  // the tool that unblocks it.
   clearsModalState?: ModalState['type'];
   handle: (context: Context, params: z.output<Input>, response: Response, signal?: AbortSignal) => Promise<void>;
 };
@@ -61,13 +59,20 @@ export function defineTabTool<Input extends z.Schema>(tool: TabTool<Input>): Too
     ...tool,
     handle: async (context, params, response, signal) => {
       const tab = context.currentTabOrDie();
-      const modalStates = tab.modalStates().map(state => state.type);
-      if (tool.clearsModalState && !modalStates.includes(tool.clearsModalState))
-        response.addError(`Error: The tool "${tool.schema.name}" can only be used when there is related modal state present.\n` + tab.modalStatesMarkdown().join('\n'));
-      else if (!tool.clearsModalState && modalStates.length)
-        response.addError(`Error: Tool "${tool.schema.name}" does not handle the modal state.\n` + tab.modalStatesMarkdown().join('\n'));
+      const modalError = modalStateMismatchError(tool, tab);
+      if (modalError)
+        response.addError(`${modalError}\n${tab.modalStatesMarkdown().join('\n')}`);
       else
-        return tool.handle(tab, params, response, signal);
+        await tool.handle(tab, params, response, signal);
     },
   };
+}
+
+function modalStateMismatchError(tool: TabTool<any>, tab: Tab): string | undefined {
+  const openModalTypes = tab.modalStates().map(state => state.type);
+  if (tool.clearsModalState && !openModalTypes.includes(tool.clearsModalState))
+    return `Error: The tool "${tool.schema.name}" can only be used when there is related modal state present.`;
+  if (!tool.clearsModalState && openModalTypes.length)
+    return `Error: Tool "${tool.schema.name}" does not handle the modal state.`;
+  return undefined;
 }

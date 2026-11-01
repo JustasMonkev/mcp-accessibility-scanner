@@ -38,7 +38,6 @@ export class InProcessTransport implements Transport {
     if (!this._connected)
       throw new Error('Transport not connected');
 
-
     this._serverTransport._receiveFromClient(message);
   }
 

@@ -65,14 +65,14 @@ const requestDetails = defineTabTool({
       return;
     }
 
-    const res = request.existingResponse();
+    const requestResponse = request.existingResponse();
     const details: RequestDetails = {
       index: params.index,
       request,
-      requestHeaders: await read(tab, () => request.allHeaders(), 'reading the request headers'),
-      response: res,
-      responseHeaders: res ? await read(tab, () => res.allHeaders(), 'reading the response headers') : undefined,
-      responseBody: res ? await read(tab, () => res.body(), 'reading the response body') : undefined,
+      requestHeaders: await readOrDescribeFailure(tab, () => request.allHeaders(), 'reading the request headers'),
+      response: requestResponse,
+      responseHeaders: requestResponse ? await readOrDescribeFailure(tab, () => requestResponse.allHeaders(), 'reading the response headers') : undefined,
+      responseBody: requestResponse ? await readOrDescribeFailure(tab, () => requestResponse.body(), 'reading the response body') : undefined,
     };
     for (const line of renderRequestDetails(details))
       response.addResult(line);
@@ -105,38 +105,31 @@ type RequestDetails = {
 
 function renderRequestDetails(details: RequestDetails): string[] {
   const { index, request, response } = details;
-  const requestHeaders = headersOf(details.requestHeaders);
   const result = [
     `### ${requestLine(index, request)}`,
     ...section('Request headers', renderHeaderSection(details.requestHeaders)),
   ];
 
-  // Use the buffer so the reported size is accurate for file uploads and other
-  // non-UTF-8 payloads.
   const postData = request.postDataBuffer();
   if (postData?.length)
-    result.push(...section('Request body', summarizeBody(postData, contentTypeOf(requestHeaders))));
+    result.push(...section('Request body', summarizeBody(postData, contentTypeOf(headersOf(details.requestHeaders)))));
 
-  // Playwright records a failure on the request even when a response already
-  // arrived — a connection reset mid-body is a 200 that never completed.
   const failure = request.failure();
   if (!response)
     return [...result, ...section('Response', [failure ? `The request failed: ${failure.errorText}` : 'The request has not completed yet.'])];
 
-  const responseHeaders = headersOf(details.responseHeaders);
   result.push(
       ...section('Response', [
         `[${response.status()}] ${response.statusText()}`,
         ...(failure ? [`The transfer then failed: ${failure.errorText}`] : []),
       ]),
       ...section('Response headers', renderHeaderSection(details.responseHeaders)),
-      ...section('Response body', renderResponseBody(details.responseBody, contentTypeOf(responseHeaders))),
+      ...section('Response body', renderResponseBody(details.responseBody, contentTypeOf(headersOf(details.responseHeaders)))),
   );
   return result;
 }
 
-// A failed read must not discard what the rest of the report already has.
-async function read<T>(tab: Tab, fetch: () => Promise<T>, description: string): Promise<Read<T>> {
+async function readOrDescribeFailure<T>(tab: Tab, fetch: () => Promise<T>, description: string): Promise<Read<T>> {
   try {
     return { value: await tab.withPageStateTimeout(fetch(), description) };
   } catch (error) {
@@ -154,9 +147,6 @@ function renderHeaderSection(read: Read<Record<string, string>> | undefined): st
   return 'error' in read ? [`<headers unavailable: ${read.error}>`] : renderHeaders(read.value);
 }
 
-// Credentials must never reach the model's context: this tool is the first one
-// here to surface raw headers, and a session cookie copied into a transcript is
-// as good as leaked. The length keeps the header's presence debuggable.
 const newlines = /\r?\n/g;
 
 const sensitiveHeaderNames = new Set([
@@ -176,30 +166,21 @@ function renderHeaders(headers: Record<string, string>): string[] {
     const value = headers[name];
     if (sensitiveHeaderNames.has(name.toLowerCase()))
       return `${name}: <redacted, ${value.length} characters>`;
-    // `allHeaders()` joins repeated headers (`set-cookie` especially) with a
-    // newline; keep one line per header so `name: value` stays parseable.
     return `${name}: ${truncateDataUrls(value).replace(newlines, '\\n')}`;
   });
 }
 
 function contentTypeOf(headers: Record<string, string>): string {
-  // `allHeaders()` joins a repeated header with a comma, so only the first
-  // media type and its parameters describe the payload.
-  const first = (headers['content-type'] ?? '').split(',')[0];
-  return first.split(';')[0].trim().toLowerCase();
+  const firstOfRepeatedHeaders = (headers['content-type'] ?? '').split(',')[0];
+  return firstOfRepeatedHeaders.split(';')[0].trim().toLowerCase();
 }
 
 function renderResponseBody(read: Read<Buffer> | undefined, mimeType: string): string[] {
   if (!read)
     return ['<empty>'];
-  // Redirects, responses whose body the browser never retained, and bodies
-  // still streaming all fail the read; the rest of the report is worth showing.
   return 'error' in read ? [`<body unavailable: ${read.error}>`] : summarizeBody(read.value, mimeType);
 }
 
-// Bodies can contain submitted credentials and private API data even when their
-// content type looks harmless. Report useful diagnostics without placing any
-// page-controlled body content in the MCP transcript.
 function summarizeBody(body: Buffer, mimeType: string): string[] {
   if (!body.length)
     return ['<empty>'];

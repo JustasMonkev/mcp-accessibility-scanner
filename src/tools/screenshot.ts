@@ -53,11 +53,7 @@ const screenshot = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    const fileType = params.type || 'png';
-    // The default name carries a random token besides the timestamp: sessions
-    // share one output directory, and two same-millisecond screenshots would
-    // otherwise overwrite each other. User-specified filenames are reserved
-    // exclusively so an existing artifact is never replaced.
+    const fileType = params.type;
     const fileName = await tab.context.outputFile(params.filename ?? `page-${safeIsoTimestampForFileName()}.${fileType}`, params.filename !== undefined);
     response.deleteFileOnError(fileName);
     const options: playwright.PageScreenshotOptions = {
@@ -69,27 +65,20 @@ const screenshot = defineTabTool({
     };
     const displayPath = response.formatFilePath(fileName);
     const displayOptions = { ...options, path: displayPath };
-    const isElementScreenshot = params.element && params.ref;
-
-    const screenshotTarget = isElementScreenshot ? params.element : (params.fullPage ? 'full page' : 'viewport');
+    const screenshotTarget = params.ref ? params.element : (params.fullPage ? 'full page' : 'viewport');
     response.addCode(`// Screenshot ${screenshotTarget} and save it as ${displayPath}`);
 
-    // Only get snapshot when element screenshot is needed
-    const locator = params.ref ? await tab.refLocator({ element: params.element || '', ref: params.ref }) : null;
-
-    if (locator)
-      response.addCode(`await page.${await generateLocator(locator)}.screenshot(${javascript.formatObject(displayOptions)});`);
-    else
-      response.addCode(`await page.screenshot(${javascript.formatObject(displayOptions)});`);
+    const locator = params.ref ? await tab.refLocator({ element: params.element || '', ref: params.ref }) : undefined;
+    const target = locator ? `page.${await generateLocator(locator)}` : 'page';
+    response.addCode(`await ${target}.screenshot(${javascript.formatObject(displayOptions)});`);
 
     const buffer = locator ? await locator.screenshot(options) : await tab.page.screenshot(options);
     if (!buffer.length)
       throw new Error(`The browser returned an empty ${fileType} screenshot. Try a smaller capture or explicitly request png or jpeg instead.`);
     response.addResult(`Took the ${screenshotTarget} screenshot and saved it as ${displayPath}`);
 
-    // https://github.com/microsoft/playwright-mcp/issues/817
-    // Never return large images to LLM, saving them to the file system is enough.
-    if (!params.fullPage) {
+    const fullPageImagesAreTooLargeToInline = params.fullPage;
+    if (!fullPageImagesAreTooLargeToInline) {
       response.addImage({
         contentType: `image/${fileType}`,
         data: buffer

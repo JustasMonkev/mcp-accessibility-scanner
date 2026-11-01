@@ -54,33 +54,18 @@ type LogEntry = {
   toolCall?: {
     toolName: string;
     toolArgs: Record<string, unknown>;
-    /** Routing metadata, kept apart from arguments the tool itself owns. */
     meta?: Record<string, unknown>;
     result: string;
     isError?: boolean;
   };
   userAction?: actions.Action;
-  /**
-   * The Context this entry originated from. One log is shared by a backend's
-   * default context and every explicit session it opens, so the pending-entry
-   * bookkeeping (action-update merging, navigate dedup) must be scoped by
-   * originating context — "the last entry" globally is whichever context
-   * wrote last, and merging into it would fold one session's action into
-   * another's whenever the action names match.
-   */
   source?: Context;
-  /** The tab this user action came from; used only while pending. */
   tab?: Tab;
-  /** Tags a session context's user actions in session.md; see logUserAction. */
   browserSessionId?: string;
   code: string;
   tabSnapshot?: TabSnapshot;
 };
 
-// Session handles are bearer tokens: whoever holds a live one can route tool
-// calls into that session. session.md keeps entries attributable with a
-// stable label instead, wherever a handle appears (routing, arguments,
-// results such as browser_session_open's).
 const sessionHandlePattern = /\bbs_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 
 function redactSessionHandles(text: string): string {
@@ -127,10 +112,6 @@ export class SessionLog {
   }
 
   static async create(config: FullConfig): Promise<SessionLog> {
-    // The random suffix keeps two sessions created in the same millisecond
-    // (e.g. concurrent HTTP connections) from sharing a folder — a collision
-    // would interleave their session.md entries and overwrite each other's
-    // snapshot ordinals. Nothing parses the folder name back.
     const sessionFolder = await outputFile(config, `session-${Date.now()}-${createShortGuid()}`);
     await fs.promises.mkdir(sessionFolder, { recursive: true });
     // eslint-disable-next-line no-console
@@ -138,11 +119,6 @@ export class SessionLog {
     return new SessionLog(sessionFolder, new NodeFileStorage(), config.redactUrlParams);
   }
 
-  /**
-   * `meta` records request metadata that routed the call. Page-registered
-   * WebMCP tools own every argument name, including `browserSessionId`, so
-   * their routing handle cannot be folded into the logged args.
-   */
   logResponse(response: Response, meta?: Record<string, unknown>) {
     const entry: LogEntry = {
       timestamp: performance.now(),
@@ -162,11 +138,6 @@ export class SessionLog {
 
   logUserAction(action: actions.Action, tab: Tab, code: string, isUpdate: boolean) {
     code = code.trim();
-    // All bookkeeping is scoped to the context and tab the recorder event came from:
-    // with the log shared across a backend's contexts, an update matched
-    // against the globally-last entry could merge into ANOTHER session's
-    // same-named pending action, and a navigate could be deduplicated
-    // against another session's location.
     const source = tab.context;
     const lastEntry = this._lastPendingEntryFor(source, tab);
     if (isUpdate) {
@@ -199,7 +170,6 @@ export class SessionLog {
       return;
     }
     if (action.name === 'navigate') {
-      // Already logged at this location.
       const lastContextEntry = this._lastPendingEntryFor(source);
       if (lastContextEntry?.userAction?.name === 'navigate' && lastContextEntry.tab === tab && lastContextEntry.tabSnapshot?.url === action.url)
         return;
@@ -209,11 +179,6 @@ export class SessionLog {
       userAction: action,
       source,
       tab,
-      // Session contexts' recorded actions carry their session in session.md
-      // (as a redacted label), mirroring how routed tool calls log a
-      // browserSessionId in their args — otherwise concurrent sessions' user
-      // actions would be indistinguishable in the shared log. Default-context
-      // actions stay untagged, exactly as before.
       browserSessionId: source.options.browserSessionId,
       code,
       tabSnapshot: {
@@ -228,7 +193,6 @@ export class SessionLog {
     this._appendEntry(entry);
   }
 
-  /** The last not-yet-flushed entry this tab wrote. */
   private _lastPendingEntryFor(source: Context, tab?: Tab): LogEntry | undefined {
     for (let i = this._pendingEntries.length - 1; i >= 0; i--) {
       if (this._pendingEntries[i].source === source && (!tab || this._pendingEntries[i].tab === tab))

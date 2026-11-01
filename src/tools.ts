@@ -43,7 +43,7 @@ import auditScreenReader from './tools/auditScreenReader.js';
 import type { Tool } from './tools/tool.js';
 import type { FullConfig } from './config.js';
 
-/** Also imported dynamically by bench/mcp-bench.mjs from the compiled lib. @public */
+/** @public */
 export const allTools: Tool<any>[] = [
   ...common,
   ...console,
@@ -71,7 +71,6 @@ export const allTools: Tool<any>[] = [
 ];
 
 export function validateToolPolicy(config: ToolPolicy): void {
-  // browser_connect belongs to the proxies, not the browser tool registry.
   const knownNames = new Set([...allTools.map(tool => tool.schema.name), 'browser_connect']);
   for (const option of ['allowedTools', 'blockedTools'] as const) {
     const names = config[option];
@@ -82,10 +81,6 @@ export function validateToolPolicy(config: ToolPolicy): void {
     for (const name of names) {
       if (knownNames.has(name))
         continue;
-      // Generated page-tool names hash a per-process scope id, a per-document
-      // id and the document's timeOrigin (see listWebMCPTools), so a name
-      // copied from tools/list can never match once the server restarts.
-      // Accepting it would leave the page tool silently exposed.
       throw new Error(name.startsWith('webmcp_')
         ? `Unknown tool in ${option}: ${name}. Page-registered WebMCP tool names are generated for each server run and registration, so they cannot be configured ahead of time.`
         : `Unknown tool in ${option}: ${name}`);
@@ -119,7 +114,6 @@ const interactionTools: [label: string, tool: string][] = [
 
 const joinList = (items: string[]) => items.length < 3 ? items.join(' and ') : `${items.slice(0, -1).join(', ')}, and ${items.at(-1)}`;
 
-/** Names only tools the policy leaves callable, so clients are never pointed at a guaranteed InvalidParams. */
 export function serverInstructions(policy: ToolPolicy): string {
   const usable = (name: string) => !isToolBlocked(policy, name);
   const canNavigate = usable('browser_navigate');
