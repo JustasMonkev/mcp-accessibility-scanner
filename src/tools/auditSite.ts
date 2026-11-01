@@ -245,15 +245,21 @@ function normalizeUrl(rawUrl: string, baseUrl: URL, ignoredParams: Set<string>):
   return url;
 }
 
-async function readCrawlCookies(page: Page, urls: string[]): Promise<Map<string, { name: string, expires: number }>> {
+type CrawlCookie = { name: string, expires: number };
+
+function cookieIdentity(cookie: { name: string, domain: string, path: string }): string {
+  return `${cookie.name}\n${cookie.domain}\n${cookie.path}`;
+}
+
+async function readCrawlCookies(page: Page, urls: string[]): Promise<Map<string, CrawlCookie>> {
   const cookies = await page.context().cookies(urls);
-  return new Map(cookies.map(cookie => [`${cookie.name}\n${cookie.domain}\n${cookie.path}`, { name: cookie.name, expires: cookie.expires }]));
+  return new Map(cookies.map(cookie => [cookieIdentity(cookie), { name: cookie.name, expires: cookie.expires }]));
 }
 
 async function findCookieLoss(
   page: Page,
   urls: string[],
-  baseline: Map<string, { name: string, expires: number }>,
+  baseline: Map<string, CrawlCookie>,
   requestedUrl: string,
   urlBeforeNavigation: string
 ): Promise<{ url: string, cookies: string[], identities: string[] } | null> {
@@ -514,13 +520,10 @@ function watchForDialog(tab: Tab, requestedUrl: string) {
     };
     tab.on(TabEvents.modalState, listener);
   });
-  failed.catch(() => {
-  });
+  failed.catch(() => {});
   const initScript = tab.page.addInitScript(({ onNewDocument }) => {
-    if (window === window.top) {
-      void onNewDocument(location.href).catch(() => {
-      });
-    }
+    if (window === window.top)
+      void onNewDocument(location.href).catch(() => {});
   }, {
     onNewDocument: async (url: string) => {
       if (navigationResponse && !navigationResponse.request().redirectedTo() && withoutFragment(url) === withoutFragment(navigationResponse.url()))
@@ -535,15 +538,374 @@ function watchForDialog(tab: Tab, requestedUrl: string) {
     fired: () => fired,
     raisedByOutgoingDocument: () => raisedByOutgoingDocument,
     stop: async () => {
-      if (!fired) {
-        await Promise.race([initScript.then(script => script.dispose()).catch(logUnhandledError), failed]).catch(() => {
-        });
-      }
+      if (!fired)
+        await Promise.race([initScript.then(script => script.dispose()).catch(logUnhandledError), failed]).catch(() => {});
       tab.page.off('response', onResponse);
       if (listener)
         tab.off(TabEvents.modalState, listener);
     },
   };
+}
+
+type AuditSiteParams = z.output<typeof auditSiteSchema>;
+type DiscoveredLinks = { links: string[], depth: number, discoveredFrom: string };
+
+class CrawlScope {
+  readonly startUrl: URL;
+  private readonly _ignoredParams: Set<string>;
+  private readonly _excludePatterns: RE2[];
+  private readonly _params: AuditSiteParams;
+
+  constructor(startUrl: URL, params: AuditSiteParams) {
+    this.startUrl = startUrl;
+    this._params = params;
+    this._ignoredParams = new Set(params.ignoreQueryParams.map(param => param.toLowerCase()));
+    this._excludePatterns = buildExcludePathPatterns(params.excludePathPatterns);
+  }
+
+  admit(rawUrl: string): string | null {
+    const normalizedUrl = normalizeUrl(rawUrl, this.startUrl, this._ignoredParams);
+    if (!normalizedUrl
+      || !isAllowedByOrigin(normalizedUrl, this.startUrl, this._params.sameOriginOnly, this._params.includeSubdomains)
+      || isExcludedByPath(normalizedUrl, this._excludePatterns))
+      return null;
+    return normalizedUrl.toString();
+  }
+}
+
+class CrawlFrontier {
+  readonly queue: CrawlItem[] = [];
+  readonly visited = new Set<string>();
+  skippedUrls = 0;
+  representativeSelection: { candidates: number, selected: number } | null = null;
+  private readonly _queued = new Set<string>();
+  private readonly _scope: CrawlScope;
+  private readonly _maxPages: number;
+
+  constructor(scope: CrawlScope, maxPages: number) {
+    this._scope = scope;
+    this._maxPages = maxPages;
+  }
+
+  enqueue(rawUrl: string, depth: number, discoveredFrom: string | null): void {
+    const url = this._admitUnseen(rawUrl);
+    if (!url)
+      return;
+    if (this.queue.length + this.visited.size >= this._maxPages) {
+      this.skippedUrls++;
+      return;
+    }
+    this.queue.push({ url, cookieUrl: url, depth, discoveredFrom });
+    this._queued.add(url);
+  }
+
+  enqueueListed(rawUrls: string[], discoveredFrom: string | null, pageSelection: AuditSiteParams['pageSelection']): void {
+    if (pageSelection !== 'representative') {
+      for (const url of rawUrls)
+        this.enqueue(url, 0, discoveredFrom);
+      return;
+    }
+    const candidates = new Set<string>();
+    for (const url of rawUrls) {
+      const admitted = this._admitUnseen(url);
+      if (!admitted)
+        continue;
+      if (candidates.has(admitted))
+        this.skippedUrls++;
+      else
+        candidates.add(admitted);
+    }
+    const selected = selectRepresentativeUrls([...candidates], this._maxPages);
+    this.skippedUrls += candidates.size - selected.length;
+    for (const url of selected)
+      this.enqueue(url, 0, discoveredFrom);
+    this.representativeSelection = { candidates: candidates.size, selected: selected.length };
+  }
+
+  takeUnvisited(): CrawlItem | undefined {
+    while (this.queue.length) {
+      const item = this.queue.shift()!;
+      this._queued.delete(item.url);
+      if (!this.visited.has(item.url)) {
+        this.visited.add(item.url);
+        return item;
+      }
+      this.skippedUrls++;
+    }
+    return undefined;
+  }
+
+  private _admitUnseen(rawUrl: string): string | null {
+    const url = this._scope.admit(rawUrl);
+    if (!url || this.visited.has(url) || this._queued.has(url)) {
+      this.skippedUrls++;
+      return null;
+    }
+    return url;
+  }
+}
+
+class OrderedLinkCommits {
+  dequeued = 0;
+  private _committed = 0;
+  private readonly _pending = new Map<number, DiscoveredLinks>();
+  private readonly _waiters: (() => void)[] = [];
+  private readonly _onCommit: (discovered: DiscoveredLinks) => void;
+
+  constructor(onCommit: (discovered: DiscoveredLinks) => void) {
+    this._onCommit = onCommit;
+  }
+
+  get allCommitted(): boolean {
+    return this._committed === this.dequeued;
+  }
+
+  commit(sequence: number, discovered: DiscoveredLinks): void {
+    this._pending.set(sequence, discovered);
+    for (let next = this._pending.get(this._committed); next; next = this._pending.get(this._committed)) {
+      this._pending.delete(this._committed);
+      this._committed++;
+      this._onCommit(next);
+    }
+    this.wakeWaiters();
+  }
+
+  waitForCommit(): Promise<void> {
+    return new Promise<void>(resolve => this._waiters.push(resolve));
+  }
+
+  wakeWaiters(): void {
+    for (const wake of this._waiters.splice(0))
+      wake();
+  }
+}
+
+type SessionLoss = { url: string, cookies: string[], concurrentUrls?: string[] };
+
+class SessionLossDetector {
+  readonly losses: SessionLoss[] = [];
+  private readonly _scopeUrls: string[];
+  private readonly _scope: Set<string>;
+  private readonly _initialIdentities: Set<string>;
+  private readonly _baseline: Map<string, CrawlCookie>;
+  private readonly _activeSinceCheck = new Map<number, string>();
+  private readonly _inFlight = new Set<number>();
+  private _checks: Promise<void> = Promise.resolve();
+
+  private constructor(scopeUrls: string[], initialIdentities: Set<string>, baseline: Map<string, CrawlCookie>) {
+    this._scopeUrls = scopeUrls;
+    this._scope = new Set(scopeUrls);
+    this._initialIdentities = initialIdentities;
+    this._baseline = baseline;
+  }
+
+  static async create(page: Page, scopeUrls: string[]): Promise<SessionLossDetector> {
+    const initialIdentities = new Set((await page.context().cookies().catch(() => [])).map(cookieIdentity));
+    const baseline = await readCrawlCookies(page, scopeUrls);
+    return new SessionLossDetector([...scopeUrls], initialIdentities, baseline);
+  }
+
+  async widenScope(page: Page, cookieUrl: string): Promise<void> {
+    if (this._scope.has(cookieUrl))
+      return;
+    this._scope.add(cookieUrl);
+    this._scopeUrls.push(cookieUrl);
+    const discovered = await readCrawlCookies(page, [cookieUrl]).catch(() => null);
+    for (const [identity, cookie] of discovered ?? []) {
+      if (this._initialIdentities.has(identity) && !this._baseline.has(identity))
+        this._baseline.set(identity, cookie);
+    }
+  }
+
+  pageStarted(sequence: number, url: string): void {
+    this._inFlight.add(sequence);
+    this._activeSinceCheck.set(sequence, url);
+  }
+
+  pageFinished(sequence: number): void {
+    this._inFlight.delete(sequence);
+  }
+
+  check(page: Page, sequence: number, requestedUrl: string, urlBeforeNavigation: string): Promise<void> {
+    const check = this._checks.then(async () => {
+      const activeDuringWindow = [...this._activeSinceCheck];
+      if (this._baseline.size) {
+        const loss = await findCookieLoss(page, [...this._scopeUrls], new Map(this._baseline), requestedUrl, urlBeforeNavigation);
+        if (loss)
+          this._recordLoss(loss, sequence);
+      }
+      for (const [other] of activeDuringWindow) {
+        if (!this._inFlight.has(other))
+          this._activeSinceCheck.delete(other);
+      }
+    });
+    this._checks = check.catch(() => {});
+    return check;
+  }
+
+  private _recordLoss(loss: { url: string, cookies: string[], identities: string[] }, sequence: number): void {
+    const concurrentUrls = [...this._activeSinceCheck].filter(([other]) => other !== sequence).map(([, url]) => url);
+    this.losses.push(concurrentUrls.length ? { url: loss.url, cookies: loss.cookies, concurrentUrls } : { url: loss.url, cookies: loss.cookies });
+    for (const identity of loss.identities) {
+      this._baseline.delete(identity);
+      this._initialIdentities.delete(identity);
+    }
+  }
+}
+
+function assertSitemapFetchSupported(context: Tab['context']): void {
+  const browser = context.config.browser;
+  const factory = context.options.browserContextFactory;
+  if (browser.remoteEndpoint || browser.cdpEndpoint || ('name' in factory && factory.name === 'vscode'))
+    throw new Error('Sitemap fetches run on the MCP host and do not support remoteEndpoint, cdpEndpoint, or browser_connect providers. Use the provided URL strategy with an attached browser.');
+  if (browser.launchOptions.proxy || browser.contextOptions.proxy)
+    throw new Error('Sitemap fetches do not support browser proxies. Use the provided URL strategy when a proxy is required.');
+}
+
+async function seedFrontier(frontier: CrawlFrontier, startUrl: URL, params: AuditSiteParams, context: Tab['context']): Promise<void> {
+  if (params.strategy === 'provided') {
+    frontier.enqueueListed(params.urls ?? [], null, params.pageSelection);
+    return;
+  }
+  if (params.strategy === 'sitemap') {
+    assertSitemapFetchSupported(context);
+    const validateUrl = (input: string, base: URL) => parseSitemapUrl(input, base, startUrl, params.sameOriginOnly, params.includeSubdomains, context.config);
+    const sitemapUrl = validateUrl(params.sitemapUrl ?? new URL('sitemap.xml', startUrl).toString(), startUrl);
+    frontier.enqueueListed(await extractSitemapUrls(sitemapUrl, validateUrl), sitemapUrl, params.pageSelection);
+    return;
+  }
+  frontier.enqueue(startUrl.toString(), 0, null);
+}
+
+function linkSelectorFor(params: AuditSiteParams, depth: number): string {
+  if (params.strategy === 'links' && depth < params.maxDepth)
+    return allLinksSelector;
+  if (params.strategy === 'nav' && depth === 0)
+    return navLinksSelector;
+  return '';
+}
+
+function newPageReport(item: CrawlItem): PageReport {
+  return {
+    url: item.url,
+    title: '',
+    depth: item.depth,
+    discoveredFrom: item.discoveredFrom,
+    status: 'error',
+    error: null,
+    summary: null,
+    violations: [],
+    incomplete: [],
+    unscannedFrames: [],
+  };
+}
+
+type PageFindings = { violations: AxeViolation[], incomplete: AxeViolation[] | null };
+
+async function scanCrawledPage(
+  crawlTab: Tab,
+  item: CrawlItem,
+  pageReport: PageReport,
+  scope: CrawlScope,
+  params: AuditSiteParams,
+  dialogWatch: ReturnType<typeof watchForDialog>,
+  commitLinks: (links: string[]) => void
+): Promise<PageFindings> {
+  await dialogWatch.ready();
+  await dialogWatch.guard(crawlTab.navigate(item.url));
+  await dialogWatch.guard(crawlTab.waitForTimeout(params.waitAfterNavigationMs));
+
+  const reachedUrl = crawlTab.page.url();
+  if (!scope.admit(reachedUrl))
+    throw new Error(`Requested URL "${item.url}" reached "${truncateDataUrls(reachedUrl)}", which is outside the allowed crawl scope or matches excludePathPatterns. The destination was not audited.`);
+
+  const { title, links } = await dialogWatch.guard(readPage(crawlTab.page, linkSelectorFor(params, item.depth)));
+  pageReport.title = title;
+  commitLinks(links);
+
+  const axeResult = await dialogWatch.guard(runAxeScan(crawlTab.page, axeScanOptions(params)));
+  const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
+  pageReport.status = 'scanned';
+  pageReport.unscannedFrames = axeResult.unscannedFrames;
+  pageReport.violations = violations.trimmed;
+  pageReport.summary = summarizeAxeViolations(violations.deduped);
+
+  if (!params.includeIncomplete)
+    return { violations: violations.deduped, incomplete: null };
+  const incomplete = prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation);
+  pageReport.incomplete = incomplete.trimmed;
+  return { violations: violations.deduped, incomplete: incomplete.deduped };
+}
+
+async function closeTabIfOpen(context: Tab['context'], tab: Tab | undefined): Promise<void> {
+  const index = tab ? context.tabs().indexOf(tab) : -1;
+  if (index !== -1)
+    await context.closeTab(index).catch(logUnhandledError);
+}
+
+function topSummaryEntries(violations: SummaryViolation[]) {
+  return violations.slice(0, 5).map(violation => ({
+    id: violation.id,
+    impact: violation.impact ?? null,
+    pagesAffected: violation.pagesAffected.length,
+    totalOccurrences: violation.totalOccurrences,
+    similarPatterns: violation.similarPatterns,
+    similarPatternsCapped: violation.similarPatternsCapped,
+    helpUrl: violation.helpUrl,
+  }));
+}
+
+function orNone(lines: string[]): string[] {
+  return lines.length ? lines : ['- None'];
+}
+
+function renderSiteSummary(options: {
+  pagesWithUnscannedFrames: PageReport[],
+  sessionLosses: SessionLoss[],
+  crawlTabRestarts: { url: string }[],
+  representativeSelection: { candidates: number, selected: number } | null,
+  summary: SummaryReport,
+  scannedPagesByViolations: PageReport[],
+  includeIncomplete: boolean,
+  reportPath: string,
+}): string {
+  const { summary, sessionLosses, crawlTabRestarts, representativeSelection } = options;
+  const frameWarning = unscannedFrameLines(
+      options.pagesWithUnscannedFrames.map(page => `${page.url}: ${page.unscannedFrames.join(', ')}`),
+      { unit: 'page(s)', maxEntries: 10, trailingLines: [''] }
+  );
+  const sessionWarning = sessionLosses.length ? [
+    ...sessionLosses.map(loss => `WARNING: cookie(s) ${loss.cookies.join(', ')} present when the crawl started disappeared while loading ${loss.url}${loss.concurrentUrls ? `, or one of the pages loading at the same time: ${loss.concurrentUrls.join(', ')}` : ''}.`),
+    'If one of these was a session cookie, pages scanned after the URL that dropped it were audited as a signed-out user. Add that URL to excludePathPatterns, sign in again, and re-run.',
+    '',
+  ] : [];
+  const restartWarning = crawlTabRestarts.length ? [
+    ...crawlTabRestarts.map(restart => `WARNING: a dialog froze the crawl tab, so the crawl continued in a fresh tab from ${restart.url}.`),
+    'Per-tab state such as sessionStorage from earlier pages was not carried over; if the site keeps its session there, pages from that URL on may have been audited in a different session.',
+    '',
+  ] : [];
+  return [
+    ...frameWarning,
+    ...sessionWarning,
+    ...restartWarning,
+    ...(representativeSelection ? [`Representative selection: queued ${representativeSelection.selected} of ${representativeSelection.candidates} listed URLs, spread across site sections and URL templates.`] : []),
+    `Scanned pages: ${summary.totals.scannedPages}`,
+    `Errored pages: ${summary.totals.erroredPages}`,
+    `Skipped URLs: ${summary.totals.skippedUrls}`,
+    '',
+    'Top violations by pages affected:',
+    ...orNone(summarizeTopViolations(summary.violations, 10)),
+    ...(options.includeIncomplete ? [
+      '',
+      'Top incomplete (needs review — verify these on the page):',
+      ...orNone(summarizeTopViolations(summary.incomplete, 10)),
+    ] : []),
+    '',
+    'Per-page summary (top 20 by violation count):',
+    ...orNone(summarizeTopPages(options.scannedPagesByViolations, 20)),
+    '',
+    `JSON report: ${options.reportPath}`,
+  ].join('\n');
 }
 
 const auditSite = defineTabTool({
@@ -562,105 +924,22 @@ const auditSite = defineTabTool({
     const context = tab.context;
     const reportPath = await reserveReportPath(context, response, params.reportFile, 'audit-site');
     const originalTab = tab;
-    const queue: CrawlItem[] = [];
-    const queued = new Set<string>();
-    const visited = new Set<string>();
     const pages: PageReport[] = [];
-    let skippedUrls = 0;
     let erroredPages = 0;
 
     const scanStartedAt = Date.now();
-    const startedAtIso = new Date(scanStartedAt).toISOString();
-    const activeTabUrl = originalTab.page.url();
     const inferredStartUrl = !params.startUrl && params.strategy === 'provided'
       ? inferStartUrlFromProvidedUrls(params.urls)
       : undefined;
-    const startUrl = parseStartUrl(params.startUrl ?? inferredStartUrl, activeTabUrl);
-    const ignoredParams = new Set(params.ignoreQueryParams.map(param => param.toLowerCase()));
-    const excludePatterns = buildExcludePathPatterns(params.excludePathPatterns);
-
-    const summaryByViolation = new Map<string, ViolationSummaryAggregate>();
-    const summaryByIncomplete = new Map<string, ViolationSummaryAggregate>();
-
-    const admitUrl = (rawUrl: string): string | null => {
-      const normalizedUrl = normalizeUrl(rawUrl, startUrl, ignoredParams);
-      if (!normalizedUrl
-        || !isAllowedByOrigin(normalizedUrl, startUrl, params.sameOriginOnly, params.includeSubdomains)
-        || isExcludedByPath(normalizedUrl, excludePatterns)) {
-        skippedUrls++;
-        return null;
-      }
-
-      const normalizedUrlString = normalizedUrl.toString();
-      if (visited.has(normalizedUrlString) || queued.has(normalizedUrlString)) {
-        skippedUrls++;
-        return null;
-      }
-      return normalizedUrlString;
-    };
-
-    const enqueueUrl = (rawUrl: string, depth: number, discoveredFrom: string | null) => {
-      const normalizedUrlString = admitUrl(rawUrl);
-      if (!normalizedUrlString)
-        return;
-
-      if (queue.length + visited.size >= params.maxPages) {
-        skippedUrls++;
-        return;
-      }
-
-      queue.push({
-        url: normalizedUrlString,
-        cookieUrl: normalizedUrlString,
-        depth,
-        discoveredFrom,
-      });
-      queued.add(normalizedUrlString);
-    };
-
-    let representativeSelection = null as { candidates: number, selected: number } | null;
-    const enqueueListedUrls = (rawUrls: string[], discoveredFrom: string | null) => {
-      if (params.pageSelection !== 'representative') {
-        for (const url of rawUrls)
-          enqueueUrl(url, 0, discoveredFrom);
-        return;
-      }
-      const candidates = new Set<string>();
-      for (const url of rawUrls) {
-        const admitted = admitUrl(url);
-        if (!admitted)
-          continue;
-        if (candidates.has(admitted))
-          skippedUrls++;
-        else
-          candidates.add(admitted);
-      }
-      const selected = selectRepresentativeUrls([...candidates], params.maxPages);
-      skippedUrls += candidates.size - selected.length;
-      for (const url of selected)
-        enqueueUrl(url, 0, discoveredFrom);
-      representativeSelection = { candidates: candidates.size, selected: selected.length };
-    };
-
-    if (params.strategy === 'provided') {
-      enqueueListedUrls(params.urls ?? [], null);
-    } else if (params.strategy === 'sitemap') {
-      if (context.config.browser.remoteEndpoint || context.config.browser.cdpEndpoint || ('name' in context.options.browserContextFactory && context.options.browserContextFactory.name === 'vscode'))
-        throw new Error('Sitemap fetches run on the MCP host and do not support remoteEndpoint, cdpEndpoint, or browser_connect providers. Use the provided URL strategy with an attached browser.');
-      if (context.config.browser.launchOptions.proxy || context.config.browser.contextOptions.proxy)
-        throw new Error('Sitemap fetches do not support browser proxies. Use the provided URL strategy when a proxy is required.');
-      const validateUrl = (input: string, base: URL) => parseSitemapUrl(input, base, startUrl, params.sameOriginOnly, params.includeSubdomains, context.config);
-      const sitemapUrl = validateUrl(params.sitemapUrl ?? new URL('sitemap.xml', startUrl).toString(), startUrl);
-      const sitemapUrls = await extractSitemapUrls(sitemapUrl, validateUrl);
-      enqueueListedUrls(sitemapUrls, sitemapUrl);
-    } else {
-      enqueueUrl(startUrl.toString(), 0, null);
-    }
+    const startUrl = parseStartUrl(params.startUrl ?? inferredStartUrl, originalTab.page.url());
+    const scope = new CrawlScope(startUrl, params);
+    const frontier = new CrawlFrontier(scope, params.maxPages);
+    await seedFrontier(frontier, startUrl, params, context);
 
     await response.reportProgress({
       progress: 0,
       total: params.maxPages,
-      message: `Initialized site audit with ${queue.length} queued URL(s).`,
+      message: `Initialized site audit with ${frontier.queue.length} queued URL(s).`,
     });
 
     type CrawlWorker = { tab: Tab | undefined, abandoned: boolean };
@@ -668,155 +947,60 @@ const auditSite = defineTabTool({
     const firstTab = await context.newTab();
     workers[0].tab = firstTab;
     const retiredTabs: Tab[] = [];
-    const cookieScopeUrls = queue.map(item => item.cookieUrl);
-    const cookieScope = new Set(cookieScopeUrls);
-    const initialCookieIdentities = new Set(
-        (await firstTab.page.context().cookies().catch(() => []))
-            .map(cookie => `${cookie.name}\n${cookie.domain}\n${cookie.path}`));
-    const baselineCookies = await readCrawlCookies(firstTab.page, cookieScopeUrls);
-    const sessionLosses: { url: string, cookies: string[], concurrentUrls?: string[] }[] = [];
+    const session = await SessionLossDetector.create(firstTab.page, frontier.queue.map(item => item.cookieUrl));
     const crawlTabRestarts: { url: string }[] = [];
+    const pageFindings = new Map<PageReport, PageFindings>();
+    const linkCommits = new OrderedLinkCommits(({ links, depth, discoveredFrom }) => {
+      for (const link of links)
+        frontier.enqueue(link, depth, discoveredFrom);
+    });
     let processedPages = 0;
 
-    let dequeuedPages = 0;
-    let committedPages = 0;
-    const discoveredLinks = new Map<number, { links: string[], depth: number, discoveredFrom: string }>();
-    const waiters: (() => void)[] = [];
-    const wakeWaiters = () => {
-      for (const wake of waiters.splice(0))
-        wake();
-    };
-    const commitLinks = (sequence: number, discovered: { links: string[], depth: number, discoveredFrom: string }) => {
-      discoveredLinks.set(sequence, discovered);
-      for (let next = discoveredLinks.get(committedPages); next; next = discoveredLinks.get(committedPages)) {
-        discoveredLinks.delete(committedPages);
-        committedPages++;
-        for (const link of next.links)
-          enqueueUrl(link, next.depth, next.discoveredFrom);
-      }
-      wakeWaiters();
+    const replaceTabFrozenByDialog = async (worker: CrawlWorker & { tab: Tab }, url: string) => {
+      worker.abandoned = false;
+      const frozenTab = worker.tab;
+      retiredTabs.push(frozenTab);
+      worker.tab = await context.newTab();
+      crawlTabRestarts.push({ url });
+      await closeTabIfOpen(context, frozenTab);
     };
 
-    const pageFindings = new Map<PageReport, { violations: AxeViolation[], incomplete: AxeViolation[] | null }>();
-
-    const activeSinceCheck = new Map<number, string>();
-    const inFlight = new Set<number>();
-    let cookieChecks: Promise<void> = Promise.resolve();
-    const checkSession = (page: Page, sequence: number, requestedUrl: string, urlBeforeNavigation: string): Promise<void> => {
-      const check = cookieChecks.then(async () => {
-        const window = [...activeSinceCheck];
-        if (baselineCookies.size) {
-          const loss = await findCookieLoss(page, [...cookieScopeUrls], new Map(baselineCookies), requestedUrl, urlBeforeNavigation);
-          if (loss) {
-            const concurrentUrls = [...activeSinceCheck].filter(([other]) => other !== sequence).map(([, url]) => url);
-            sessionLosses.push(concurrentUrls.length ? { url: loss.url, cookies: loss.cookies, concurrentUrls } : { url: loss.url, cookies: loss.cookies });
-            for (const identity of loss.identities) {
-              baselineCookies.delete(identity);
-              initialCookieIdentities.delete(identity);
-            }
-          }
-        }
-        for (const [other] of window) {
-          if (!inFlight.has(other))
-            activeSinceCheck.delete(other);
-        }
+    const reportPageProgress = async (pageReport: PageReport, url: string) => {
+      processedPages++;
+      const verb = pageReport.status === 'scanned' ? 'Scanned' : 'Failed';
+      await response.reportProgress({
+        progress: processedPages,
+        total: params.maxPages,
+        message: `${verb} page ${processedPages}/${params.maxPages}: ${url}`,
       });
-      cookieChecks = check.catch(() => {});
-      return check;
     };
 
     const auditPage = async (worker: CrawlWorker, queuedItem: CrawlItem, sequence: number) => {
-      const newPageReport = (item: CrawlItem): PageReport => ({
-        url: item.url,
-        title: '',
-        depth: item.depth,
-        discoveredFrom: item.discoveredFrom,
-        status: 'error',
-        error: null,
-        summary: null,
-        violations: [],
-        incomplete: [],
-        unscannedFrames: [],
-      });
       const pageIndex = pages.push(newPageReport(queuedItem)) - 1;
       let linksCommitted = false;
-      const commit = (links: string[]) => {
+      const commitLinks = (links: string[]) => {
         if (linksCommitted)
           return;
         linksCommitted = true;
-        commitLinks(sequence, { links, depth: queuedItem.depth + 1, discoveredFrom: queuedItem.url });
+        linkCommits.commit(sequence, { links, depth: queuedItem.depth + 1, discoveredFrom: queuedItem.url });
       };
-      inFlight.add(sequence);
-      activeSinceCheck.set(sequence, queuedItem.url);
+      session.pageStarted(sequence, queuedItem.url);
       try {
         for (let item = queuedItem; ;) {
           const pageReport = newPageReport(item);
           pages[pageIndex] = pageReport;
 
-          if (!worker.tab)
-            worker.tab = await context.newTab();
+          worker.tab ??= await context.newTab();
+          await session.widenScope(worker.tab.page, item.cookieUrl);
+          if (worker.abandoned || openDialog(worker.tab))
+            await replaceTabFrozenByDialog(worker as CrawlWorker & { tab: Tab }, item.url);
 
-          if (!cookieScope.has(item.cookieUrl)) {
-            cookieScope.add(item.cookieUrl);
-            cookieScopeUrls.push(item.cookieUrl);
-            const discovered = await readCrawlCookies(worker.tab.page, [item.cookieUrl]).catch(() => null);
-            for (const [identity, cookie] of discovered ?? []) {
-              if (initialCookieIdentities.has(identity) && !baselineCookies.has(identity))
-                baselineCookies.set(identity, cookie);
-            }
-          }
-
-          if (worker.abandoned || openDialog(worker.tab)) {
-            worker.abandoned = false;
-            const frozenTab = worker.tab;
-            retiredTabs.push(frozenTab);
-            worker.tab = await context.newTab();
-            crawlTabRestarts.push({ url: item.url });
-            const frozenIndex = context.tabs().indexOf(frozenTab);
-            if (frozenIndex !== -1)
-              await context.closeTab(frozenIndex).catch(logUnhandledError);
-          }
-
-          const crawlTab = worker.tab;
+          const crawlTab = worker.tab!;
           const urlBeforeNavigation = crawlTab.page.url();
           const dialogWatch = watchForDialog(crawlTab, item.url);
           let retryItem = false;
           try {
-            await dialogWatch.ready();
-            await dialogWatch.guard(crawlTab.navigate(item.url));
-            await dialogWatch.guard(crawlTab.waitForTimeout(params.waitAfterNavigationMs));
-
-            const reachedUrl = crawlTab.page.url();
-            const normalizedReachedUrl = normalizeUrl(reachedUrl, startUrl, ignoredParams);
-            if (!normalizedReachedUrl || !isAllowedByOrigin(normalizedReachedUrl, startUrl, params.sameOriginOnly, params.includeSubdomains)
-              || isExcludedByPath(normalizedReachedUrl, excludePatterns))
-              throw new Error(`Requested URL "${item.url}" reached "${truncateDataUrls(reachedUrl)}", which is outside the allowed crawl scope or matches excludePathPatterns. The destination was not audited.`);
-
-            let linkSelector = '';
-            if (params.strategy === 'links' && item.depth < params.maxDepth)
-              linkSelector = allLinksSelector;
-            else if (params.strategy === 'nav' && item.depth === 0)
-              linkSelector = navLinksSelector;
-
-            const { title, links } = await dialogWatch.guard(readPage(crawlTab.page, linkSelector));
-            pageReport.title = title;
-            commit(links);
-
-            const axeResult = await dialogWatch.guard(runAxeScan(crawlTab.page, axeScanOptions(params)));
-            const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
-
-            pageReport.status = 'scanned';
-            pageReport.unscannedFrames = axeResult.unscannedFrames;
-            pageReport.violations = violations.trimmed;
-            pageReport.summary = summarizeAxeViolations(violations.deduped);
-
-            let incompleteFindings: AxeViolation[] | null = null;
-            if (params.includeIncomplete) {
-              const incomplete = prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation);
-              pageReport.incomplete = incomplete.trimmed;
-              incompleteFindings = incomplete.deduped;
-            }
-            pageFindings.set(pageReport, { violations: violations.deduped, incomplete: incompleteFindings });
+            pageFindings.set(pageReport, await scanCrawledPage(crawlTab, item, pageReport, scope, params, dialogWatch, commitLinks));
           } catch (error) {
             if (!item.retriedAfterOutgoingDialog && dialogWatch.raisedByOutgoingDocument()) {
               retryItem = true;
@@ -829,49 +1013,35 @@ const auditSite = defineTabTool({
             await dialogWatch.stop();
             worker.abandoned = dialogWatch.fired();
             if (!retryItem)
-              inFlight.delete(sequence);
-            await checkSession(crawlTab.page, sequence, retryItem ? urlBeforeNavigation : item.url, urlBeforeNavigation);
-            if (!retryItem) {
-              processedPages++;
-              const message = pageReport.status === 'scanned'
-                ? `Scanned page ${processedPages}/${params.maxPages}: ${item.url}`
-                : `Failed page ${processedPages}/${params.maxPages}: ${item.url}`;
-              await response.reportProgress({
-                progress: processedPages,
-                total: params.maxPages,
-                message,
-              });
-            }
+              session.pageFinished(sequence);
+            await session.check(crawlTab.page, sequence, retryItem ? urlBeforeNavigation : item.url, urlBeforeNavigation);
+            if (!retryItem)
+              await reportPageProgress(pageReport, item.url);
           }
           if (!retryItem)
             return;
           item = { ...item, retriedAfterOutgoingDialog: true };
         }
       } finally {
-        inFlight.delete(sequence);
-        commit([]);
+        session.pageFinished(sequence);
+        commitLinks([]);
       }
     };
 
     let stopped = false;
     const runWorker = async (worker: CrawlWorker) => {
       while (!stopped) {
-        if (!queue.length) {
-          if (committedPages === dequeuedPages)
+        if (!frontier.queue.length) {
+          if (linkCommits.allCommitted)
             return;
-          await new Promise<void>(resolve => waiters.push(resolve));
+          await linkCommits.waitForCommit();
           continue;
         }
         if (pages.length >= params.maxPages)
           return;
-        const item = queue.shift()!;
-        queued.delete(item.url);
-        if (visited.has(item.url)) {
-          skippedUrls++;
-          continue;
-        }
-        visited.add(item.url);
-        await auditPage(worker, item, dequeuedPages++);
+        const item = frontier.takeUnvisited();
+        if (item)
+          await auditPage(worker, item, linkCommits.dequeued++);
       }
     };
 
@@ -880,21 +1050,20 @@ const auditSite = defineTabTool({
       await Promise.all(workers.map(worker => runWorker(worker).catch(error => {
         failures.push(error);
         stopped = true;
-        wakeWaiters();
+        linkCommits.wakeWaiters();
       })));
       if (failures.length)
         throw failures[0];
     } finally {
-      for (const crawlOwnedTab of [...workers.map(worker => worker.tab), ...retiredTabs]) {
-        const crawlTabIndex = crawlOwnedTab ? context.tabs().indexOf(crawlOwnedTab) : -1;
-        if (crawlTabIndex !== -1)
-          await context.closeTab(crawlTabIndex).catch(logUnhandledError);
-      }
+      for (const crawlOwnedTab of [...workers.map(worker => worker.tab), ...retiredTabs])
+        await closeTabIfOpen(context, crawlOwnedTab);
       const originalTabIndex = context.tabs().indexOf(originalTab);
       if (originalTabIndex !== -1)
         await context.selectTab(originalTabIndex).catch(logUnhandledError);
     }
 
+    const summaryByViolation = new Map<string, ViolationSummaryAggregate>();
+    const summaryByIncomplete = new Map<string, ViolationSummaryAggregate>();
     for (const page of pages) {
       const findings = pageFindings.get(page);
       if (!findings)
@@ -904,21 +1073,20 @@ const auditSite = defineTabTool({
         aggregateIntoSummary(summaryByIncomplete, findings.incomplete, page.url);
     }
 
-    const summaryViolations = toSortedSummaryViolations(summaryByViolation);
-    const summaryIncomplete = toSortedSummaryViolations(summaryByIncomplete);
-
     const pagesWithUnscannedFrames = pages.filter(page => page.unscannedFrames.length);
     const scannedPagesByViolations = sortScannedPagesByViolations(pages);
     const summary: SummaryReport = {
       totals: {
         scannedPages: scannedPagesByViolations.length,
         erroredPages,
-        skippedUrls,
-        queuedUrls: visited.size,
+        skippedUrls: frontier.skippedUrls,
+        queuedUrls: frontier.visited.size,
       },
-      violations: summaryViolations,
-      incomplete: summaryIncomplete,
+      violations: toSortedSummaryViolations(summaryByViolation),
+      incomplete: toSortedSummaryViolations(summaryByIncomplete),
     };
+    const { representativeSelection } = frontier;
+    const sessionLosses = session.losses;
 
     const report = {
       version: 'v2',
@@ -943,7 +1111,7 @@ const auditSite = defineTabTool({
           waitAfterNavigationMs: params.waitAfterNavigationMs,
           concurrency: params.concurrency,
         },
-        startedAt: startedAtIso,
+        startedAt: new Date(scanStartedAt).toISOString(),
         finishedAt: new Date().toISOString(),
         durationMs: Date.now() - scanStartedAt,
       },
@@ -976,24 +1144,8 @@ const auditSite = defineTabTool({
         url: page.url,
         unscannedFrames: page.unscannedFrames,
       })),
-      topViolations: summaryViolations.slice(0, 5).map(violation => ({
-        id: violation.id,
-        impact: violation.impact ?? null,
-        pagesAffected: violation.pagesAffected.length,
-        totalOccurrences: violation.totalOccurrences,
-        similarPatterns: violation.similarPatterns,
-        similarPatternsCapped: violation.similarPatternsCapped,
-        helpUrl: violation.helpUrl,
-      })),
-      topIncomplete: summaryIncomplete.slice(0, 5).map(item => ({
-        id: item.id,
-        impact: item.impact ?? null,
-        pagesAffected: item.pagesAffected.length,
-        totalOccurrences: item.totalOccurrences,
-        similarPatterns: item.similarPatterns,
-        similarPatternsCapped: item.similarPatternsCapped,
-        helpUrl: item.helpUrl,
-      })),
+      topViolations: topSummaryEntries(summary.violations),
+      topIncomplete: topSummaryEntries(summary.incomplete),
       topPages: scannedPagesByViolations
           .slice(0, 5)
           .map(page => ({
@@ -1004,46 +1156,17 @@ const auditSite = defineTabTool({
           })),
     });
 
-    const topViolations = summarizeTopViolations(summaryViolations, 10);
-    const topIncomplete = summarizeTopViolations(summaryIncomplete, 10);
-    const topPages = summarizeTopPages(scannedPagesByViolations, 20);
-    const frameWarning = unscannedFrameLines(
-        pagesWithUnscannedFrames.map(page => `${page.url}: ${page.unscannedFrames.join(', ')}`),
-        { unit: 'page(s)', maxEntries: 10, trailingLines: [''] }
-    );
-    const sessionWarning = sessionLosses.length ? [
-      ...sessionLosses.map(loss => `WARNING: cookie(s) ${loss.cookies.join(', ')} present when the crawl started disappeared while loading ${loss.url}${loss.concurrentUrls ? `, or one of the pages loading at the same time: ${loss.concurrentUrls.join(', ')}` : ''}.`),
-      'If one of these was a session cookie, pages scanned after the URL that dropped it were audited as a signed-out user. Add that URL to excludePathPatterns, sign in again, and re-run.',
-      '',
-    ] : [];
-    const restartWarning = crawlTabRestarts.length ? [
-      ...crawlTabRestarts.map(restart => `WARNING: a dialog froze the crawl tab, so the crawl continued in a fresh tab from ${restart.url}.`),
-      'Per-tab state such as sessionStorage from earlier pages was not carried over; if the site keeps its session there, pages from that URL on may have been audited in a different session.',
-      '',
-    ] : [];
     response.addCode('// Crawled pages in a temporary tab and aggregated Axe violations.');
-    response.addResult([
-      ...frameWarning,
-      ...sessionWarning,
-      ...restartWarning,
-      ...(representativeSelection ? [`Representative selection: queued ${representativeSelection.selected} of ${representativeSelection.candidates} listed URLs, spread across site sections and URL templates.`] : []),
-      `Scanned pages: ${summary.totals.scannedPages}`,
-      `Errored pages: ${summary.totals.erroredPages}`,
-      `Skipped URLs: ${summary.totals.skippedUrls}`,
-      '',
-      'Top violations by pages affected:',
-      ...(topViolations.length ? topViolations : ['- None']),
-      ...(params.includeIncomplete ? [
-        '',
-        'Top incomplete (needs review — verify these on the page):',
-        ...(topIncomplete.length ? topIncomplete : ['- None']),
-      ] : []),
-      '',
-      'Per-page summary (top 20 by violation count):',
-      ...(topPages.length ? topPages : ['- None']),
-      '',
-      `JSON report: ${reportResource.path}`,
-    ].join('\n'));
+    response.addResult(renderSiteSummary({
+      pagesWithUnscannedFrames,
+      sessionLosses,
+      crawlTabRestarts,
+      representativeSelection,
+      summary,
+      scannedPagesByViolations,
+      includeIncomplete: params.includeIncomplete,
+      reportPath: reportResource.path,
+    }));
   },
 });
 
