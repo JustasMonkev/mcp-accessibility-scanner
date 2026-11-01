@@ -98,8 +98,9 @@ export function filteredTools(config: FullConfig) {
 }
 
 const auditGuidance: [tool: string, purpose: string][] = [
+  ['scan_page', 'to scan the current page for WCAG violations'],
   ['audit_site', 'to crawl and scan multiple pages of a site'],
-  ['scan_page_matrix', 'to scan the current page across viewports and WCAG tag sets'],
+  ['scan_page_matrix', 'to compare the current page across viewport, color-scheme, reduced-motion and zoom variants'],
   ['audit_keyboard', 'to check keyboard navigation, focus visibility and skip links'],
   ['audit_screen_reader', 'to check accessible name quality and reading order'],
 ];

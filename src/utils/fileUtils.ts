@@ -44,3 +44,8 @@ export function truncateToUtf8Bytes(value: string, maxBytes: number): string {
   }
   return result;
 }
+
+export function truncateWithMarker(message: string, maxBytes: number): string {
+  const bounded = truncateToUtf8Bytes(message, maxBytes);
+  return bounded === message ? message : `${bounded}… [truncated]`;
+}

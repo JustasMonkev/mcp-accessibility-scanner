@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import { settleWithin } from '../utils/timeout.js';
+
 import type * as playwright from 'playwright';
 import type { Request } from 'playwright';
 import type { Tab } from '../tab.js';
@@ -60,7 +62,7 @@ class PageActivity {
 
   async waitUntilIdle(scheduledWorkWindowMs: number): Promise<void> {
     if (!this._sawRequest && !this._mainFrameNavigated)
-      await resolveWithin(this._firstActivity, scheduledWorkWindowMs);
+      await settleWithin(this._firstActivity, scheduledWorkWindowMs);
     if (!this._inFlightRequests.size && !this._mainFrameNavigated)
       this._markIdle();
     await this._idle;
@@ -105,20 +107,6 @@ async function waitForDomOnlyWork(tab: Tab, settleMs: number): Promise<void> {
     const pageClosedWhileSettling = tab.page.isClosed() && error instanceof Error && targetClosedMessage.test(error.message);
     if (!pageClosedWhileSettling)
       throw error;
-  }
-}
-
-async function resolveWithin(promise: Promise<void>, timeoutMs: number): Promise<void> {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      promise,
-      new Promise<void>(resolve => {
-        timeoutId = setTimeout(resolve, timeoutMs);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 

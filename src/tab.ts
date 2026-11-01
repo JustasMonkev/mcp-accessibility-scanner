@@ -22,7 +22,8 @@ import { logUnhandledError } from './utils/log.js';
 import { ManualPromise } from './mcp/manualPromise.js';
 import { isToolBlocked } from './mcp/toolPolicy.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
-import { safeIsoTimestampForFileName, truncateToUtf8Bytes } from './utils/fileUtils.js';
+import { safeIsoTimestampForFileName, truncateToUtf8Bytes, truncateWithMarker } from './utils/fileUtils.js';
+import { rejectAfterTimeout } from './utils/timeout.js';
 import type { ModalState } from './tools/tool.js';
 
 import type { Context } from './context.js';
@@ -47,6 +48,26 @@ export type TabSnapshot = {
 };
 
 class StaleAriaSnapshotError extends Error {}
+
+const defaultActionTimeoutMs = 6000;
+const defaultNavigationTimeoutMs = 30000;
+const fallbackOperationTimeoutMs = 5000;
+const maxRetainedRequests = 200;
+const maxDownloadErrorBytes = 2000;
+const maxFileNameBytes = 255;
+
+function uniqueDownloadFileName(suggestedFilename: string): string {
+  const suggested = suggestedFilename.replace(/[. ]+$/, '') || 'download';
+  const separator = suggested.lastIndexOf('.');
+  const uniqueSuffix = `-${safeIsoTimestampForFileName()}`;
+  const suffixBytes = Buffer.byteLength(uniqueSuffix, 'utf8');
+  const base = separator > 0 ? suggested.slice(0, separator) : suggested;
+  const extension = separator > 0 ? suggested.slice(separator) : '';
+  const baseBudget = maxFileNameBytes - suffixBytes - Buffer.byteLength(extension, 'utf8');
+  if (baseBudget < 1)
+    return `${truncateToUtf8Bytes(suggested, maxFileNameBytes - suffixBytes)}${uniqueSuffix}`;
+  return `${truncateToUtf8Bytes(base, baseBudget)}${uniqueSuffix}${extension}`;
+}
 
 export class Tab extends EventEmitter<TabEventsInterface> {
   readonly context: Context;
@@ -74,7 +95,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this.context = context;
     this.page = page;
     this._onPageClose = onPageClose;
-    this._defaultTimeout = context.config.timeouts.defaultTimeout ?? 6000;
+    this._defaultTimeout = context.config.timeouts.defaultTimeout ?? defaultActionTimeoutMs;
     const listen = (event: string, listener: (...args: any[]) => void) => {
       page.on(event as any, listener);
       this._pageListeners.push({ event, listener });
@@ -102,7 +123,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     listen('download', download => {
       this.context.trackPendingDownload(this._downloadStarted(download), download.suggestedFilename());
     });
-    page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? 30000);
+    page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? defaultNavigationTimeoutMs);
     page.setDefaultTimeout(this._defaultTimeout);
   }
 
@@ -145,32 +166,17 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   private async _downloadStarted(download: playwright.Download) {
-    const suggested = download.suggestedFilename().replace(/[. ]+$/, '') || 'download';
-    const separator = suggested.lastIndexOf('.');
-    let base = separator > 0 ? suggested.slice(0, separator) : suggested;
-    let extension = separator > 0 ? suggested.slice(separator) : '';
-    const uniqueSuffix = `-${safeIsoTimestampForFileName()}`;
-    const maxNameBytes = 255;
-    let baseBudget = maxNameBytes - Buffer.byteLength(uniqueSuffix, 'utf8') - Buffer.byteLength(extension, 'utf8');
-    if (baseBudget < 1) {
-      base = suggested;
-      extension = '';
-      baseBudget = maxNameBytes - Buffer.byteLength(uniqueSuffix, 'utf8');
-    }
-    const uniqueName = `${truncateToUtf8Bytes(base, baseBudget)}${uniqueSuffix}${extension}`;
     const entry: TabSnapshot['downloads'][number] = {
       download,
       finished: false,
-      outputFile: await this.context.outputFile(uniqueName)
+      outputFile: await this.context.outputFile(uniqueDownloadFileName(download.suggestedFilename())),
     };
     this._downloads.push(entry);
     try {
       await download.saveAs(entry.outputFile);
       entry.finished = true;
     } catch (error) {
-      const message = truncateDataUrls(formatPageStateError(error));
-      const bounded = truncateToUtf8Bytes(message, 2000);
-      entry.error = bounded === message ? bounded : `${bounded}… [truncated]`;
+      entry.error = truncateWithMarker(truncateDataUrls(formatPageStateError(error)), maxDownloadErrorBytes);
       throw error;
     }
   }
@@ -185,7 +191,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   private _markRequestsNavigation() {
     for (const id of this._requests.keys()) {
-      if (this._requests.size <= 200)
+      if (this._requests.size <= maxRetainedRequests)
         break;
       this._requests.delete(id);
     }
@@ -229,10 +235,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   async updateTitle() {
     await this._raceAgainstModalStates(async () => {
       try {
-        this._lastTitle = await this._withPageStateTimeout(
+        this._lastTitle = await this.withPageStateTimeout(
             callOnPageNoTrace(this.page, page => page.title()),
             'reading page title',
-            Math.min(this._pageStateTimeoutMs(), 5000),
+            Math.min(this.operationTimeout(), fallbackOperationTimeoutMs),
         );
       } catch (error) {
         logUnhandledError(error);
@@ -250,7 +256,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   operationTimeout(): number {
-    return this._defaultTimeout > 0 ? this._defaultTimeout : 5000;
+    return this._defaultTimeout > 0 ? this._defaultTimeout : fallbackOperationTimeoutMs;
   }
 
   isCurrentTab(): boolean {
@@ -275,13 +281,16 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       navigation = this._navigate(url);
       return navigation;
     });
-    if (modalStates.length && navigation) {
-      const pageGeneration = this._pageGeneration;
-      void navigation.catch(error => {
-        if (pageGeneration === this._pageGeneration)
-          this._handleConsoleMessage(navigationFailureToConsoleMessage(error));
-      });
-    }
+    if (modalStates.length && navigation)
+      this._reportLateNavigationFailure(navigation);
+  }
+
+  private _reportLateNavigationFailure(navigation: Promise<unknown>) {
+    const pageGeneration = this._pageGeneration;
+    void navigation.catch(error => {
+      if (pageGeneration === this._pageGeneration)
+        this._handleConsoleMessage(navigationFailureToConsoleMessage(error));
+    });
   }
 
   private async _navigate(url: string) {
@@ -291,13 +300,12 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     try {
       try {
         await this.page.goto(url, { waitUntil: 'domcontentloaded' });
-      } catch (_e: unknown) {
-        const e = _e as Error;
-        if (!e.message.includes('Download is starting'))
-          throw e;
-        const download = await this._withPageStateTimeout(downloadEvent, 'waiting for download').catch(() => undefined);
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes('Download is starting'))
+          throw error;
+        const download = await this.withPageStateTimeout(downloadEvent, 'waiting for download').catch(() => undefined);
         if (!download)
-          throw e;
+          throw error;
         await new Promise(resolve => setTimeout(resolve, 500));
         return;
       }
@@ -305,7 +313,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       this.page.off('download', downloadListener);
     }
 
-    await this.waitForLoadState('load', { timeout: 5000 });
+    await this.waitForLoadState('load', { timeout: fallbackOperationTimeoutMs });
   }
 
   goBack(options?: Parameters<playwright.Page['goBack']>[0]) {
@@ -319,13 +327,8 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       navigation = this.goBack(options);
       await navigation;
     });
-    if (modalStates.length && navigation) {
-      const pageGeneration = this._pageGeneration;
-      void navigation.catch(error => {
-        if (pageGeneration === this._pageGeneration)
-          this._handleConsoleMessage(navigationFailureToConsoleMessage(error));
-      });
-    }
+    if (modalStates.length && navigation)
+      this._reportLateNavigationFailure(navigation);
     return modalStates;
   }
 
@@ -341,8 +344,8 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this._requests.get(id);
   }
 
-  async withPageStateTimeout<T>(promise: Promise<T>, description: string): Promise<T> {
-    return this._withPageStateTimeout(promise, description);
+  async withPageStateTimeout<T>(promise: Promise<T>, description: string, timeoutMs = this.operationTimeout()): Promise<T> {
+    return await rejectAfterTimeout(promise, timeoutMs, `Timed out after ${timeoutMs}ms while ${description}.`);
   }
 
   async captureSnapshot(boxes?: boolean): Promise<TabSnapshot> {
@@ -351,7 +354,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     const snapshotGeneration = this._ariaSnapshotGeneration;
     const modalStates = await this._raceAgainstModalStates(async () => {
       const [snapshot, title] = await Promise.all([
-        this._withPageStateTimeout(
+        this.withPageStateTimeout(
             this._captureAriaSnapshot(capture, boxes),
             'capturing page accessibility snapshot',
         ).catch(error => {
@@ -363,7 +366,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
           }
           return `# Page snapshot unavailable: ${formatPageStateError(error)}`;
         }),
-        this._withPageStateTimeout(
+        this.withPageStateTimeout(
             this.page.title(),
             'reading page title',
         ).catch(error => {
@@ -403,27 +406,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   private _javaScriptBlocked(): boolean {
     return this._modalStates.some(state => state.type === 'dialog');
-  }
-
-  private _pageStateTimeoutMs(): number {
-    return this.operationTimeout();
-  }
-
-  private async _withPageStateTimeout<T>(promise: Promise<T>, description: string, timeoutMs = this._pageStateTimeoutMs()): Promise<T> {
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<never>((_, reject) => {
-          timeoutId = setTimeout(() => {
-            reject(new Error(`Timed out after ${timeoutMs}ms while ${description}.`));
-          }, timeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timeoutId)
-        clearTimeout(timeoutId);
-    }
   }
 
   private async _raceAgainstModalStates(action: () => Promise<void>): Promise<ModalState[]> {
@@ -467,7 +449,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private async _refsMatchSnapshot(params: { ref: string }[], snapshot: string): Promise<boolean> {
     const pageGeneration = this._pageGeneration;
     const lines = snapshot.split('\n');
-    const timeout = Math.min(this._pageStateTimeoutMs(), 1000);
+    const timeout = Math.min(this.operationTimeout(), 1000);
     const matches = await Promise.all(params.map(async param => {
       const cached = lines.find(line => line.includes(`[ref=${param.ref}]`));
       if (!cached)
