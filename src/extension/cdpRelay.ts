@@ -94,6 +94,7 @@ export class CDPRelayServer {
   private _userDataDir?: string;
   private _executablePath?: string;
   private _profileDirName?: string;
+  private _tabGroup: boolean;
   private readonly _token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
   private _cdpPath: string;
   private readonly _cdpToken = crypto.randomUUID();
@@ -105,13 +106,14 @@ export class CDPRelayServer {
   private _handler!: ExtensionProtocolV2;
   private _extensionConnectionPromise!: ManualPromise<void>;
 
-  constructor(server: http.Server, browserChannel: string, userDataDir?: string, executablePath?: string, profileDirName?: string) {
+  constructor(server: http.Server, browserChannel: string, userDataDir?: string, executablePath?: string, profileDirName?: string, tabGroup = true) {
     this._server = server;
     this._wsHost = httpAddressToString(server.address()).replace(/^http/, 'ws');
     this._browserChannel = browserChannel;
     this._userDataDir = userDataDir;
     this._executablePath = executablePath;
     this._profileDirName = profileDirName;
+    this._tabGroup = tabGroup;
 
     const uuid = crypto.randomUUID();
     this._cdpPath = `/cdp/${uuid}`;
@@ -207,6 +209,8 @@ export class CDPRelayServer {
     };
     url.searchParams.set('client', JSON.stringify(client));
     url.searchParams.set('protocolVersion', process.env.PWMCP_TEST_PROTOCOL_VERSION ?? protocol.VERSION.toString());
+    if (!this._tabGroup)
+      url.searchParams.set('tabGroup', 'false');
     if (this._token)
       url.searchParams.set('token', this._token);
     const href = url.toString();
