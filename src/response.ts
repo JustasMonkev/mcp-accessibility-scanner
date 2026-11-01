@@ -193,7 +193,8 @@ export class Response {
 
   async finish() {
     const currentTab = this._context.currentTab();
-    if (this._code.length && !this._includeSnapshot && currentTab?.modalStates().some(state => state.type === 'fileChooser'))
+    const fileChoosers = () => currentTab?.modalStates().filter(state => state.type === 'fileChooser') ?? [];
+    if (this._code.length && !this._includeSnapshot && fileChoosers().length)
       this.setIncludeSnapshot();
     const tabsToUpdate = this._includeTabs
       ? this._context.tabs().filter(tab => !this._includeSnapshot || tab !== currentTab)
@@ -203,7 +204,7 @@ export class Response {
       Promise.allSettled(tabsToUpdate.map(tab => tab.updateTitle())),
     ]);
     this._tabSnapshot = snapshot;
-    this._opensFileChooser = !!this._code.length && (currentTab?.modalStates().some(state => state.type === 'fileChooser' && !this._initialModalStates.has(state)) ?? false);
+    this._opensFileChooser = !!this._code.length && fileChoosers().some(state => !this._initialModalStates.has(state));
     this._addDownloadErrors();
   }
 
