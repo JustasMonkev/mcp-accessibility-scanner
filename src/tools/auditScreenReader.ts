@@ -1,8 +1,7 @@
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { measureScreenReaderElements } from './screenReaderMeasurement.js';
-import { writeJsonReport } from './report.js';
-import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
+import { reserveReportPath, writeJsonReport } from './report.js';
 
 import type { ElementFacts, Rect } from './screenReaderMeasurement.js';
 
@@ -408,10 +407,7 @@ const auditScreenReader = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    const reportFileName = params.reportFile ?? `audit-screen-reader-${safeIsoTimestampForFileName()}.json`;
-    const reportPath = await tab.context.outputFile(reportFileName, params.reportFile !== undefined);
-    if (params.reportFile !== undefined)
-      response.deleteFileOnError(reportPath);
+    const reportPath = await reserveReportPath(tab.context, response, params.reportFile, 'audit-screen-reader');
     const ariaNodes = parseAriaSnapshot(await tab.page.ariaSnapshot({ mode: 'ai' }));
     const childCounts = new Map<number, number>();
     for (const node of ariaNodes) {

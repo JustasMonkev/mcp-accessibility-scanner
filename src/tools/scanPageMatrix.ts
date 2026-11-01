@@ -1,8 +1,7 @@
 import { z } from 'zod';
 import type * as playwright from 'playwright';
 import { defineTabTool } from './tool.js';
-import { writeJsonReport } from './report.js';
-import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
+import { reserveReportPath, writeJsonReport } from './report.js';
 import {
   assertRuleOptionsValid,
   axeRuleSchemaShape,
@@ -15,6 +14,8 @@ import {
   unscannedFrameLines,
   type AxeViolation,
 } from './axe.js';
+
+import type { Tab } from '../tab.js';
 
 type VariantResult = {
   name: string;
@@ -145,6 +146,113 @@ function computeDiffFromBaseline(
   return { newViolationIds, resolvedViolationIds, changedCounts };
 }
 
+type Variant = z.output<typeof variantSchema>;
+type ScanPageMatrixParams = z.output<typeof scanPageMatrixSchema>;
+type PageState = { viewport: { width: number, height: number }, zoom: string, media: MediaState };
+
+async function capturePageState(page: playwright.Page): Promise<PageState> {
+  const viewport = page.viewportSize() ?? await page.evaluate(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  const { zoom, media } = await readPageState(page);
+  return { viewport, zoom, media };
+}
+
+async function setZoom(page: playwright.Page, zoom: string): Promise<void> {
+  await page.evaluate(value => {
+    document.documentElement.style.zoom = value;
+  }, zoom);
+}
+
+async function restorePageState(page: playwright.Page, original: PageState): Promise<void> {
+  await page.setViewportSize(original.viewport);
+  await page.emulateMedia(original.media);
+  await setZoom(page, original.zoom);
+}
+
+async function scanVariant(tab: Tab, variant: Variant, original: PageState, params: ScanPageMatrixParams): Promise<{ result: VariantResult, incompleteRuleIds: string[] }> {
+  await tab.page.setViewportSize(variant.viewport ?? original.viewport);
+  const media = normalizeMedia(variant.media, original.media);
+  await tab.page.emulateMedia(media);
+  if (params.reloadBetweenVariants)
+    await tab.page.reload({ waitUntil: 'domcontentloaded' });
+  await setZoom(tab.page, variant.zoomPercent !== undefined ? `${variant.zoomPercent}%` : original.zoom);
+  await tab.waitForTimeout(params.waitAfterApplyMs);
+
+  const axeResult = await runAxeScan(tab.page, axeScanOptions(params));
+  const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
+  return {
+    incompleteRuleIds: axeResult.incomplete.map(result => result.id),
+    result: {
+      name: variant.name,
+      applied: {
+        viewport: variant.viewport ?? null,
+        media,
+        zoomPercent: variant.zoomPercent ?? null,
+      },
+      summary: summarizeAxeViolations(violations.deduped),
+      unscannedFrames: axeResult.unscannedFrames,
+      violations: violations.trimmed,
+      incomplete: params.includeIncomplete
+        ? prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation).trimmed
+        : [],
+      nodeCountByRuleId: countNodesByRule(violations.deduped),
+      comparisonIncompleteRuleIds: [],
+      diffFromBaseline: null,
+    },
+  };
+}
+
+function compareWithBaseline(variantResults: VariantResult[], incompleteRuleIdsByVariant: string[][]): void {
+  const baseline = variantResults[0];
+  const baselineCounts = baseline?.nodeCountByRuleId ?? {};
+  for (const [index, result] of variantResults.entries()) {
+    const violatedRuleIds = new Set([...Object.keys(baselineCounts), ...Object.keys(result.nodeCountByRuleId)]);
+    result.comparisonIncompleteRuleIds = [...new Set([
+      ...incompleteRuleIdsByVariant[0],
+      ...incompleteRuleIdsByVariant[index],
+    ])].filter(id => violatedRuleIds.has(id)).sort();
+    const comparable = !result.unscannedFrames.length && !baseline?.unscannedFrames.length && !result.comparisonIncompleteRuleIds.length;
+    result.diffFromBaseline = comparable
+      ? computeDiffFromBaseline(baselineCounts, result.nodeCountByRuleId)
+      : null;
+  }
+}
+
+function renderMatrixTable(variantResults: VariantResult[], includeIncomplete: boolean, reportPath: string): string {
+  const baselineMissedFrames = !!variantResults[0]?.unscannedFrames.length;
+  const variantsWithUnscannedFrames = variantResults.filter(result => result.unscannedFrames.length);
+  return [
+    ...unscannedFrameLines(
+        variantsWithUnscannedFrames.map(result => `${result.name}: ${result.unscannedFrames.join(', ')}`),
+        {
+          unit: 'variant(s)',
+          trailingLines: [
+            'Baseline deltas are reported as "n/a" wherever the two scans did not cover the same documents.',
+            '',
+          ],
+        }
+    ),
+    'Variant | Violations | Nodes | Incomplete | Top new vs baseline',
+    '--- | --- | --- | --- | ---',
+    ...variantResults.map(result => {
+      const notComparableReasons: string[] = [];
+      if (result.unscannedFrames.length || baselineMissedFrames)
+        notComparableReasons.push('coverage differs');
+      if (result.comparisonIncompleteRuleIds.length)
+        notComparableReasons.push(`incomplete checks: ${result.comparisonIncompleteRuleIds.join(', ')}`);
+      const topNew = result.diffFromBaseline
+        ? result.diffFromBaseline.newViolationIds.slice(0, 5).join(', ') || '-'
+        : `n/a (${notComparableReasons.join('; ')})`;
+      const incomplete = includeIncomplete ? String(result.incomplete.length) : '-';
+      return `${result.name} | ${result.summary.totalRules} | ${result.summary.totalNodes} | ${incomplete} | ${topNew}`;
+    }),
+    '',
+    `JSON report: ${reportPath}`,
+  ].join('\n');
+}
+
 const scanPageMatrix = defineTabTool({
   capability: 'core',
   schema: {
@@ -158,83 +266,26 @@ const scanPageMatrix = defineTabTool({
   handle: async (tab, params, response) => {
     assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
 
-    const reportFileName = params.reportFile ?? `scan-matrix-${safeIsoTimestampForFileName()}.json`;
-    const reportPath = await tab.context.outputFile(reportFileName, params.reportFile !== undefined);
-    if (params.reportFile !== undefined)
-      response.deleteFileOnError(reportPath);
+    const reportPath = await reserveReportPath(tab.context, response, params.reportFile, 'scan-matrix');
     const variants = params.variants ?? defaultVariants;
-    const originalViewport = tab.page.viewportSize() ?? await tab.page.evaluate(() => ({
-      width: window.innerWidth,
-      height: window.innerHeight,
-    }));
-    const { zoom: originalZoom, media: originalMedia } = await readPageState(tab.page);
+    const original = await capturePageState(tab.page);
 
     const variantResults: VariantResult[] = [];
     const incompleteRuleIdsByVariant: string[][] = [];
     try {
       for (const variant of variants) {
-        await tab.page.setViewportSize(variant.viewport ?? originalViewport);
-        const media = normalizeMedia(variant.media, originalMedia);
-        await tab.page.emulateMedia(media);
-
-        if (params.reloadBetweenVariants)
-          await tab.page.reload({ waitUntil: 'domcontentloaded' });
-
-        await tab.page.evaluate(zoom => {
-          document.documentElement.style.zoom = zoom;
-        }, variant.zoomPercent !== undefined ? `${variant.zoomPercent}%` : originalZoom);
-
-        await tab.waitForTimeout(params.waitAfterApplyMs);
-
-        const axeResult = await runAxeScan(tab.page, axeScanOptions(params));
-        const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
-        const nodeCountByRuleId = countNodesByRule(violations.deduped);
-        incompleteRuleIdsByVariant.push(axeResult.incomplete.map(result => result.id));
-
-        variantResults.push({
-          name: variant.name,
-          applied: {
-            viewport: variant.viewport ?? null,
-            media,
-            zoomPercent: variant.zoomPercent ?? null,
-          },
-          summary: summarizeAxeViolations(violations.deduped),
-          unscannedFrames: axeResult.unscannedFrames,
-          violations: violations.trimmed,
-          incomplete: params.includeIncomplete
-            ? prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation).trimmed
-            : [],
-          nodeCountByRuleId,
-          comparisonIncompleteRuleIds: [],
-          diffFromBaseline: null,
-        });
-
+        const { result, incompleteRuleIds } = await scanVariant(tab, variant, original, params);
+        variantResults.push(result);
+        incompleteRuleIdsByVariant.push(incompleteRuleIds);
         await response.reportProgress({
           progress: variantResults.length,
           total: variants.length,
           message: `Scanned variant ${variantResults.length}/${variants.length}: ${variant.name}`,
         });
       }
-
-      const baseline = variantResults[0];
-      const baselineCounts = baseline?.nodeCountByRuleId ?? {};
-      for (const [index, result] of variantResults.entries()) {
-        const violatedRuleIds = new Set([...Object.keys(baselineCounts), ...Object.keys(result.nodeCountByRuleId)]);
-        result.comparisonIncompleteRuleIds = [...new Set([
-          ...incompleteRuleIdsByVariant[0],
-          ...incompleteRuleIdsByVariant[index],
-        ])].filter(id => violatedRuleIds.has(id)).sort();
-        const comparable = !result.unscannedFrames.length && !baseline?.unscannedFrames.length && !result.comparisonIncompleteRuleIds.length;
-        result.diffFromBaseline = comparable
-          ? computeDiffFromBaseline(baselineCounts, result.nodeCountByRuleId)
-          : null;
-      }
+      compareWithBaseline(variantResults, incompleteRuleIdsByVariant);
     } finally {
-      await tab.page.setViewportSize(originalViewport);
-      await tab.page.emulateMedia(originalMedia);
-      await tab.page.evaluate(zoom => {
-        document.documentElement.style.zoom = zoom;
-      }, originalZoom);
+      await restorePageState(tab.page, original);
     }
 
     const report = {
@@ -285,37 +336,8 @@ const scanPageMatrix = defineTabTool({
       })),
     });
 
-    const variantsWithUnscannedFrames = variantResults.filter(result => result.unscannedFrames.length);
-    const lines = [
-      ...unscannedFrameLines(
-          variantsWithUnscannedFrames.map(result => `${result.name}: ${result.unscannedFrames.join(', ')}`),
-          {
-            unit: 'variant(s)',
-            trailingLines: [
-              'Baseline deltas are reported as "n/a" wherever the two scans did not cover the same documents.',
-              '',
-            ],
-          }
-      ),
-      'Variant | Violations | Nodes | Incomplete | Top new vs baseline',
-      '--- | --- | --- | --- | ---',
-      ...variantResults.map(result => {
-        const comparisonReasons: string[] = [];
-        if (result.unscannedFrames.length || variantResults[0]?.unscannedFrames.length)
-          comparisonReasons.push('coverage differs');
-        if (result.comparisonIncompleteRuleIds.length)
-          comparisonReasons.push(`incomplete checks: ${result.comparisonIncompleteRuleIds.join(', ')}`);
-        const topNew = result.diffFromBaseline
-          ? result.diffFromBaseline.newViolationIds.slice(0, 5).join(', ') || '-'
-          : `n/a (${comparisonReasons.join('; ')})`;
-        const incomplete = params.includeIncomplete ? String(result.incomplete.length) : '-';
-        return `${result.name} | ${result.summary.totalRules} | ${result.summary.totalNodes} | ${incomplete} | ${topNew}`;
-      }),
-      '',
-      `JSON report: ${reportResource.path}`,
-    ];
     response.addCode('// Applied viewport/media/zoom variants and compared Axe deltas against baseline.');
-    response.addResult(lines.join('\n'));
+    response.addResult(renderMatrixTable(variantResults, params.includeIncomplete, reportResource.path));
   },
 });
 

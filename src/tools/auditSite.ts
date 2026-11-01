@@ -4,10 +4,9 @@ import type { Page, Request, Response } from 'playwright';
 import type { FullConfig } from '../config.js';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
-import { writeJsonReport } from './report.js';
+import { reserveReportPath, writeJsonReport } from './report.js';
 import { TabEvents, type Tab } from '../tab.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
-import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 import { HtmlPatternGroups } from '../utils/htmlPatterns.js';
 import { logUnhandledError } from '../utils/log.js';
 import { selectRepresentativeUrls } from '../utils/representativeUrls.js';
@@ -562,10 +561,7 @@ const auditSite = defineTabTool({
     assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
 
     const context = tab.context;
-    const reportFileName = params.reportFile ?? `audit-site-${safeIsoTimestampForFileName()}.json`;
-    const reportPath = await context.outputFile(reportFileName, params.reportFile !== undefined);
-    if (params.reportFile !== undefined)
-      response.deleteFileOnError(reportPath);
+    const reportPath = await reserveReportPath(context, response, params.reportFile, 'audit-site');
     const originalTab = tab;
     const queue: CrawlItem[] = [];
     const queued = new Set<string>();
