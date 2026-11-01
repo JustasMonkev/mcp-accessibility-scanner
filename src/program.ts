@@ -65,20 +65,30 @@ async function resolveProgramContext(options: Record<string, unknown>, extension
   return { config, browserContextFactory, extensionContextFactory };
 }
 
-async function startMCPServer(config: FullConfig, browserContextFactory: BrowserContextFactory) {
+const toolListCacheTtlMs = 3_600_000;
+
+function browserBackendFactory(
+  config: FullConfig,
+  browserContextFactory: BrowserContextFactory,
+  names: Pick<mcpServer.ServerBackendFactory, 'name' | 'title' | 'nameInConfig'>
+): mcpServer.ServerBackendFactory {
   const sessionRegistry = new BrowserSessionRegistry();
-  const factory: mcpServer.ServerBackendFactory = {
-    name: 'Playwright',
-    title: 'Accessibility Scanner',
-    nameInConfig: 'playwright',
+  return {
+    ...names,
     version: packageJSON.version,
     instructions: serverInstructions(config),
     redactUrlParams: config.redactUrlParams,
-    toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
+    toolListCacheHint: { ttlMs: toolListCacheTtlMs, cacheScope: 'private' },
     create: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry),
-    createStateless: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry, { ephemeralDefaultContext: true })
+    createStateless: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry, { ephemeralDefaultContext: true }),
   };
-  await mcpServer.start(factory, config.server);
+}
+
+function parseInteractiveLine(line: string): { toolName: string, json: string } {
+  const spaceIndex = line.indexOf(' ');
+  if (spaceIndex === -1)
+    return { toolName: line, json: '{}' };
+  return { toolName: line.substring(0, spaceIndex), json: line.substring(spaceIndex + 1).trim() };
 }
 
 function appendCdpHeader(value: string, previous: string[]): string[] {
@@ -153,19 +163,11 @@ configureBaseProgram()
       const { config, browserContextFactory, extensionContextFactory } = await resolveProgramContext(options);
 
       if (options.extension) {
-        const sessionRegistry = new BrowserSessionRegistry();
-        const serverBackendFactory: mcpServer.ServerBackendFactory = {
+        await mcpServer.start(browserBackendFactory(config, extensionContextFactory, {
           name: 'Playwright w/ extension',
           title: 'Accessibility Scanner (browser extension)',
           nameInConfig: 'playwright-extension',
-          version: packageJSON.version,
-          instructions: serverInstructions(config),
-          redactUrlParams: config.redactUrlParams,
-          toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
-          create: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry),
-          createStateless: () => new BrowserServerBackend(config, extensionContextFactory, sessionRegistry, { ephemeralDefaultContext: true }),
-        };
-        await mcpServer.start(serverBackendFactory, config.server);
+        }), config.server);
         return;
       }
 
@@ -208,7 +210,11 @@ configureBaseProgram()
         return;
       }
 
-      await startMCPServer(config, browserContextFactory);
+      await mcpServer.start(browserBackendFactory(config, browserContextFactory, {
+        name: 'Playwright',
+        title: 'Accessibility Scanner',
+        nameInConfig: 'playwright',
+      }), config.server);
     });
 
 program
@@ -217,8 +223,7 @@ program
     .action(async () => {
       const parentOptions = program.opts();
       const { config } = await resolveProgramContext(parentOptions);
-      const tools = filteredTools(config);
-      for (const tool of tools) {
+      for (const tool of filteredTools(config)) {
         // eslint-disable-next-line no-console
         console.log(`${tool.schema.name}  ${tool.schema.description}`);
       }
@@ -259,9 +264,7 @@ program
           return;
         }
 
-        const spaceIndex = trimmed.indexOf(' ');
-        const toolName = spaceIndex === -1 ? trimmed : trimmed.substring(0, spaceIndex);
-        const jsonStr = spaceIndex === -1 ? '{}' : trimmed.substring(spaceIndex + 1).trim();
+        const { toolName, json: jsonStr } = parseInteractiveLine(trimmed);
 
         let args: Record<string, unknown>;
         try {
