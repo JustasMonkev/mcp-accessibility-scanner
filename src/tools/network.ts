@@ -17,6 +17,7 @@
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
+import { errorMessage } from '../utils/errors.js';
 
 import type { Request, Response } from 'playwright';
 import type { Tab } from '../tab.js';
@@ -133,7 +134,7 @@ async function readOrDescribeFailure<T>(tab: Tab, fetch: () => Promise<T>, descr
   try {
     return { value: await tab.withPageStateTimeout(fetch(), description) };
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) };
+    return { error: errorMessage(error) };
   }
 }
 

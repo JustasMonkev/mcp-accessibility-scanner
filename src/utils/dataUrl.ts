@@ -92,7 +92,7 @@ function parseDataUrl(text: string, start: number): DataUrlMatch | undefined {
   const decodedMetadata = decodeDataUrlMetadata(metadata, isEncodedMetadata);
   return {
     payloadStart: delimiter.end,
-    displayPrefix: dataUrlDisplayPrefix(text, start, metadata, decodedMetadata, delimiter, isEncodedMetadata),
+    displayPrefix: dataUrlDisplayPrefix(text, start, delimiter, { raw: metadata, decoded: decodedMetadata, isEncoded: isEncodedMetadata }),
     isBase64: decodedMetadata.toLowerCase().split(';').includes('base64'),
     isEmbeddedQueryValue: start > 0 && text[start - 1] === '=',
     quote: dataUrlQuoteAt(text, start),
@@ -111,13 +111,16 @@ function findDataUrlDelimiter(text: string, offset: number): { start: number; en
   }
 }
 
-function dataUrlDisplayPrefix(text: string, start: number, metadata: string, decodedMetadata: string, delimiter: { start: number; end: number }, isEncoded: boolean): string {
-  if (metadata.length <= maxDataUrlMetadataLength)
+type DataUrlMetadata = { raw: string, decoded: string, isEncoded: boolean };
+
+function dataUrlDisplayPrefix(text: string, start: number, delimiter: { start: number; end: number }, metadata: DataUrlMetadata): string {
+  if (metadata.raw.length <= maxDataUrlMetadataLength)
     return text.slice(start, delimiter.end);
 
-  const compactMetadata = compactDataUrlMetadata(decodedMetadata);
+  const scheme = text.slice(start, start + dataUrlPrefixLengthAt(text, start));
+  const compactMetadata = encodeDataUrlMetadata(compactDataUrlMetadata(metadata.decoded), metadata.isEncoded);
   const delimiterText = text.slice(delimiter.start, delimiter.end);
-  return `${text.slice(start, start + dataUrlPrefixLengthAt(text, start))}${encodeDataUrlMetadata(compactMetadata, isEncoded)}${delimiterText}`;
+  return `${scheme}${compactMetadata}${delimiterText}`;
 }
 
 function compactDataUrlMetadata(decodedMetadata: string): string {

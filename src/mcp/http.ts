@@ -26,6 +26,7 @@ import debug from 'debug';
 import { createMcpHandler, isInitializeRequest, isJSONRPCRequest, isLegacyRequest, STDIO_DEFAULT_MAX_BUFFER_SIZE } from '@modelcontextprotocol/server';
 import { NodeStreamableHTTPServerTransport, toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
 import { ManualPromise } from './manualPromise.js';
+import { isHttpUrl } from '../utils/httpUrl.js';
 import * as mcpServer from './server.js';
 
 import type { NodeMcpRequestHandler } from '@modelcontextprotocol/node';
@@ -443,7 +444,7 @@ export function parseAuthority(authority: string): { hostname: string, authority
 function parseOriginAuthority(origin: string): { hostname: string, authority: string, scheme: 'http' | 'https' } | undefined {
   try {
     const url = new URL(origin);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:')
+    if (!isHttpUrl(url))
       return;
     const hostname = normalizeHostname(url.hostname);
     return {

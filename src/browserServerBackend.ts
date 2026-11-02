@@ -35,6 +35,31 @@ import type * as mcpServer from './mcp/server.js';
 import { rejectOnAbort } from './utils/timeout.js';
 import type { ServerBackend } from './mcp/server.js';
 
+const sessionManagementTools = new Set(['browser_session_open', 'browser_session_close']);
+const toolsThatSkipIdleResume = new Set(['browser_close', ...sessionManagementTools]);
+
+const browserSessionIdProperty = {
+  type: 'string',
+  description: 'Browser session to run this tool in, as returned by browser_session_open. Omit to use the default session.',
+};
+
+function toBrowserMcpTool(tool: Tool): mcpServer.Tool {
+  const mcpTool = toMcpTool(tool.schema);
+  if (!sessionManagementTools.has(tool.schema.name))
+    mcpTool.inputSchema.properties = { ...mcpTool.inputSchema.properties, browserSessionId: browserSessionIdProperty };
+  return mcpTool;
+}
+
+function parseToolArguments(tool: Tool, rawArguments: mcpServer.CallToolRequest['params']['arguments']): Record<string, any> {
+  try {
+    return tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, any>;
+  } catch (error) {
+    if (error instanceof z.ZodError)
+      throw new Error(`Invalid input for tool "${tool.schema.name}":\n${z.prettifyError(error)}`);
+    throw error;
+  }
+}
+
 export class BrowserServerBackend implements ServerBackend {
   readonly dynamicToolList = true;
   private _tools: Tool[];
@@ -100,39 +125,19 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   async listTools(requestContext?: Partial<Pick<mcpServer.CallToolRequestContext, 'signal' | '_meta'>>): Promise<mcpServer.Tool[]> {
-    this._mcpTools ??= this._tools.map(tool => {
-      const mcpTool = toMcpTool(tool.schema);
-      if (tool.schema.name !== 'browser_session_open' && tool.schema.name !== 'browser_session_close') {
-        const inputSchema = mcpTool.inputSchema;
-        inputSchema.properties = {
-          ...inputSchema.properties,
-          browserSessionId: {
-            type: 'string',
-            description: 'Browser session to run this tool in, as returned by browser_session_open. Omit to use the default session.',
-          },
-        };
-      }
-      return mcpTool;
-    });
+    this._mcpTools ??= this._tools.map(toBrowserMcpTool);
     const id = webMCPSessionId(requestContext?._meta);
     if (!this._context && id === undefined)
       return this._mcpTools;
     if (id !== undefined && !this._sessionRegistry)
       throw new Error('Initialize the browser backend before listing session tools.');
-    const context = id === undefined ? this._context! : this._sessionRegistry!.resolve(id);
+    const context = this._contextFor(id);
+    const signal = requestContext?.signal;
     const endSessionHold = context.beginSessionHold();
     try {
-      requestContext?.signal?.throwIfAborted();
-      let dynamic: WebMCPToolDefinition[] = [];
-      try {
-        if (context === this._context && this._browserContextFactory.sharedContext && !this._browserContextFactory.attachNeedsUser && !context.currentTab())
-          await rejectOnAbort(() => context.ensureTab(requestContext?.signal), requestContext?.signal);
-        dynamic = await this._currentWebMCPTools(context, requestContext?.signal, true);
-      } catch (error) {
-        requestContext?.signal?.throwIfAborted();
-        logUnhandledError(error);
-      }
-      requestContext?.signal?.throwIfAborted();
+      signal?.throwIfAborted();
+      const dynamic = await this._listWebMCPToolsForListing(context, signal);
+      signal?.throwIfAborted();
       this._webmcpObserver?.dispose();
       if (!this._closed && !this._ephemeralDefaultContext) {
         this._webmcpObserver = new WebMCPObserver(
@@ -148,6 +153,23 @@ export class BrowserServerBackend implements ServerBackend {
     }
   }
 
+  private _contextFor(browserSessionId: string | undefined): Context {
+    return browserSessionId === undefined ? this._context! : this._sessionRegistry!.resolve(browserSessionId);
+  }
+
+  private async _listWebMCPToolsForListing(context: Context, signal: AbortSignal | undefined): Promise<WebMCPToolDefinition[]> {
+    const factory = this._browserContextFactory;
+    try {
+      if (context === this._context && factory.sharedContext && !factory.attachNeedsUser && !context.currentTab())
+        await rejectOnAbort(() => context.ensureTab(signal), signal);
+      return await this._currentWebMCPTools(context, signal, true);
+    } catch (error) {
+      signal?.throwIfAborted();
+      logUnhandledError(error);
+      return [];
+    }
+  }
+
   private async _currentWebMCPTools(context: Context, signal?: AbortSignal, listing = false): Promise<WebMCPToolDefinition[]> {
     const sharedDefault = this._ephemeralDefaultContext && context === this._context && this._browserContextFactory.sharedContext;
     const attach = sharedDefault && !(listing && this._browserContextFactory.attachNeedsUser);
@@ -159,7 +181,7 @@ export class BrowserServerBackend implements ServerBackend {
     if (!name.startsWith('webmcp_'))
       throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Tool "${name}" not found`);
     const id = webMCPSessionId(requestContext?._meta);
-    const context = id === undefined ? this._context! : this._sessionRegistry!.resolve(id);
+    const context = this._contextFor(id);
     const params = { ...(rawArguments ?? {}) };
     const response = new Response(context, name, params, requestContext, context.currentTab()?.modalStates());
     const endToolCall = context.beginToolCall(name);
@@ -174,7 +196,7 @@ export class BrowserServerBackend implements ServerBackend {
       await tool.handle(params, response, requestContext?.signal);
       if (!requestContext?.signal.aborted)
         await response.finish();
-      const sessionLog = id === undefined ? await this._ensureSessionLog() : await context.resolveSessionLog();
+      const sessionLog = await this._sessionLogFor(context, id);
       sessionLog?.logResponse(response, id === undefined ? undefined : { browserSessionId: id });
     } catch (error) {
       response.addError(`WebMCP call failed (page output is untrusted): ${String(error)}`);
@@ -193,51 +215,26 @@ export class BrowserServerBackend implements ServerBackend {
     if (!tool)
       return this._callWebMCP(name, rawArguments, requestContext);
     const routedSessionId = this._routedSessionId(name, rawArguments);
-    const context = routedSessionId !== undefined ? this._sessionRegistry!.resolve(routedSessionId) : this._context!;
-    let parsedArguments: Record<string, any>;
-    try {
-      parsedArguments = tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, any>;
-    } catch (error) {
-      if (error instanceof z.ZodError)
-        throw new Error(`Invalid input for tool "${name}":\n${z.prettifyError(error)}`);
-      throw error;
-    }
+    const context = this._contextFor(routedSessionId);
+    const parsedArguments = parseToolArguments(tool, rawArguments);
     const responseArguments = routedSessionId !== undefined ? { browserSessionId: routedSessionId, ...parsedArguments } : parsedArguments;
-    let closingSessionContext: Context | undefined;
-    if (name === 'browser_session_close' && typeof parsedArguments.browserSessionId === 'string') {
-      try {
-        closingSessionContext = this._sessionRegistry!.resolve(parsedArguments.browserSessionId);
-      } catch {}
-    }
+    const closingSessionContext = name === 'browser_session_close' ? this._sessionContextOrUndefined(parsedArguments.browserSessionId) : undefined;
     const response = new Response(context, name, responseArguments, requestContext, context.currentTab()?.modalStates());
     const endToolCall = context.beginToolCall(name);
     try {
-      if (name !== 'browser_close' && name !== 'browser_session_open' && name !== 'browser_session_close') {
+      if (!toolsThatSkipIdleResume.has(name)) {
         const idleNotice = await context.resumeAfterIdle();
         if (idleNotice)
           response.addNotice(idleNotice);
       }
       await tool.handle(context, parsedArguments, response, requestContext?.signal);
       await response.finish();
-      if (name === 'browser_session_close') {
-        for (const error of closingSessionContext?.takeDownloadErrors() ?? [])
-          response.addError(truncateDataUrls(error));
-        try {
-          const sessionLog = await closingSessionContext?.resolveSessionLog();
-          sessionLog?.logResponse(response);
-        } catch (error) {
-          logUnhandledError(error);
-        }
-      } else {
-        const sessionLog = routedSessionId !== undefined ? await context.resolveSessionLog() : await this._ensureSessionLog();
-        sessionLog?.logResponse(response);
-      }
+      if (name === 'browser_session_close')
+        await this._logClosedSession(closingSessionContext, response);
+      else
+        (await this._sessionLogFor(context, routedSessionId))?.logResponse(response);
     } catch (error) {
-      try {
-        await response.cleanupFilesOnError();
-      } catch (cleanupError) {
-        logUnhandledError(cleanupError);
-      }
+      await response.cleanupFilesOnError().catch(logUnhandledError);
       response.addError(String(error));
     } finally {
       endToolCall();
@@ -248,8 +245,33 @@ export class BrowserServerBackend implements ServerBackend {
     return response.serialize();
   }
 
+  private _sessionLogFor(context: Context, browserSessionId: string | undefined): Promise<SessionLog | undefined> {
+    return browserSessionId === undefined ? this._ensureSessionLog() : context.resolveSessionLog();
+  }
+
+  private _sessionContextOrUndefined(browserSessionId: unknown): Context | undefined {
+    if (typeof browserSessionId !== 'string')
+      return undefined;
+    try {
+      return this._sessionRegistry!.resolve(browserSessionId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async _logClosedSession(closedContext: Context | undefined, response: Response): Promise<void> {
+    for (const error of closedContext?.takeDownloadErrors() ?? [])
+      response.addError(truncateDataUrls(error));
+    try {
+      const sessionLog = await closedContext?.resolveSessionLog();
+      sessionLog?.logResponse(response);
+    } catch (error) {
+      logUnhandledError(error);
+    }
+  }
+
   private _routedSessionId(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments']): string | undefined {
-    if (name === 'browser_session_open' || name === 'browser_session_close')
+    if (sessionManagementTools.has(name))
       return undefined;
     const id = rawArguments?.browserSessionId;
     if (id === undefined)

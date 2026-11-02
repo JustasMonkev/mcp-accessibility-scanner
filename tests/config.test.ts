@@ -789,6 +789,17 @@ describe('Config', () => {
       expect(config.browser.contextOptions.userAgent).toContain('iPhone');
     });
 
+    it('leaves the shared Playwright device descriptor untouched when CLI options override it', async () => {
+      const { devices } = await import('playwright');
+      const descriptor = structuredClone(devices['iPhone 15']);
+
+      const config = await resolveCLIConfig({ device: 'iPhone 15', userAgent: 'custom-agent', viewportSize: '800,600' });
+
+      expect(config.browser.contextOptions.userAgent).toBe('custom-agent');
+      expect(config.browser.contextOptions.viewport).toEqual({ width: 800, height: 600 });
+      expect(devices['iPhone 15']).toEqual(descriptor);
+    });
+
     it('lets explicit CLI context options override the inferred mobile device', async () => {
       const config = await resolveCLIConfig({ mobile: true, viewportSize: '800,600' });
 

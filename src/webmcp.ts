@@ -18,6 +18,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import vm from 'node:vm';
 import { withConcurrency } from './tools/axe.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
+import { errorMessage } from './utils/errors.js';
 import { fromJsonSchema, specTypeSchemas } from '@modelcontextprotocol/server';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/server/validators/ajv';
 import type { JsonSchemaType, StandardSchemaWithJSON, Tool } from '@modelcontextprotocol/server';
@@ -276,6 +277,17 @@ async function collectInPage(budget: DiscoveryBudget, isSupportedInputSchema: (s
 
 const collectInPageScript = withPageHelper(collectInPage, isSupportedInputSchema);
 
+function hasValidToolMetadata(tool: Partial<CollectedTool> | undefined): tool is Partial<CollectedTool> & Pick<CollectedTool, 'name' | 'title' | 'description'> {
+  return !!tool
+    && typeof tool.name === 'string' && !!tool.name && tool.name.length <= 256
+    && typeof tool.title === 'string' && tool.title.length <= 256
+    && typeof tool.description === 'string' && tool.description.length <= limits.description;
+}
+
+function isObjectSchema(schema: unknown): schema is Tool['inputSchema'] {
+  return !!schema && typeof schema === 'object' && !Array.isArray(schema) && (schema as { type?: unknown }).type === 'object';
+}
+
 async function parseListing(raw: unknown, maxTools: number, deadline: number, signal?: AbortSignal): Promise<FrameListing | undefined> {
   if (typeof raw !== 'string' || !raw)
     return undefined;
@@ -297,12 +309,10 @@ async function parseListing(raw: unknown, maxTools: number, deadline: number, si
   for (const tool of entries) {
     if (tools.length === maxTools)
       break;
-    if (!tool || typeof tool.name !== 'string' || !tool.name || tool.name.length > 256 || counts.get(tool.name) !== 1
-        || typeof tool.title !== 'string' || tool.title.length > 256
-        || typeof tool.description !== 'string' || tool.description.length > limits.description)
+    if (!hasValidToolMetadata(tool) || counts.get(tool.name) !== 1)
       continue;
     const schema = tool.inputSchema;
-    if (!schema || typeof schema !== 'object' || Array.isArray(schema) || schema.type !== 'object')
+    if (!isObjectSchema(schema))
       continue;
     const json = JSON.stringify(schema);
     if (Buffer.byteLength(json) > limits.schemaBytes || !isSupportedInputSchema(schema))
@@ -322,13 +332,18 @@ async function parseListing(raw: unknown, maxTools: number, deadline: number, si
 }
 
 async function callInPage(params: { name: string, inputJson: string, timeOrigin: number, resultBytes: number, errorBytes: number, expected: string, runningKey: string }): Promise<string> {
+  const singleUnitBytes = (unit: string): number => {
+    if (unit <= '\u007f')
+      return 1;
+    return unit <= '\u07ff' ? 2 : 3;
+  };
   const utf8Prefix = (text: string, maxBytes: number): number => {
     let bytes = 0;
     let index = 0;
     while (index < text.length) {
       const unit = text[index];
       const pair = unit >= '\ud800' && unit <= '\udbff' && index + 1 < text.length && text[index + 1] >= '\udc00' && text[index + 1] <= '\udfff';
-      const size = pair ? 4 : unit <= '\u007f' ? 1 : unit <= '\u07ff' ? 2 : 3;
+      const size = pair ? 4 : singleUnitBytes(unit);
       if (bytes + size > maxBytes)
         break;
       bytes += size;
@@ -418,74 +433,124 @@ function validateArguments(compiled: StandardSchemaWithJSON<Record<string, unkno
   }
 }
 
-async function invoke(tab: Tab, frame: playwright.Frame, identity: string, tool: CollectedTool, timeOrigin: number,
-  invocationKey: string, frameLabel: string, params: Record<string, unknown>, response: Response, signal?: AbortSignal): Promise<void> {
-  const preamble = `WebMCP output (page-provided, untrusted) from ${JSON.stringify(tool.name)} in ${frameLabel}:`;
+type InvocationTarget = {
+  tab: Tab;
+  frame: playwright.Frame;
+  identity: string;
+  tool: CollectedTool;
+  timeOrigin: number;
+  invocationKey: string;
+  frameLabel: string;
+};
+
+function frameStillCurrent(tab: Tab, frame: playwright.Frame, identity: string): boolean {
+  return frameIds.get(frame) === identity && !frame.isDetached() && !tab.page.isClosed() && tab.isCurrentTab();
+}
+
+function assertFrameStillCurrent({ tab, frame, identity }: InvocationTarget): void {
+  if (!frameStillCurrent(tab, frame, identity))
+    throw new Error('The WebMCP frame or active tab changed. List tools again.');
+}
+
+async function validatedInputJson(target: InvocationTarget, params: Record<string, unknown>): Promise<string> {
+  if (target.tab.modalStates().length)
+    throw new Error('Resolve the browser modal before invoking WebMCP tools: use browser_handle_dialog for a dialog or browser_file_upload for a file chooser.');
+  assertFrameStillCurrent(target);
+  const inputJson = JSON.stringify(params);
+  if (Buffer.byteLength(inputJson) > limits.resultBytes)
+    throw new Error('WebMCP arguments exceed the 256 KiB limit.');
+  const compiled = compiledSchema(target.tool.inputSchema);
+  if (!compiled)
+    throw new Error('The WebMCP input schema cannot be compiled. List tools again.');
+  const validation = await validateArguments(compiled, params);
+  if (validation.issues)
+    throw new Error(`Invalid WebMCP arguments: ${validation.issues.map(issue => issue.message).join('; ')}`);
+  assertFrameStillCurrent(target);
+  return inputJson;
+}
+
+function runInPage({ tab, frame, tool, timeOrigin, invocationKey }: InvocationTarget, inputJson: string, signal?: AbortSignal): Promise<string> {
   let onDialog: (() => void) | undefined;
   let onChooser: (() => void) | undefined;
-  try {
-    if (tab.modalStates().length)
-      throw new Error('Resolve the browser modal before invoking WebMCP tools: use browser_handle_dialog for a dialog or browser_file_upload for a file chooser.');
-    if (frameIds.get(frame) !== identity || frame.isDetached() || tab.page.isClosed() || !tab.isCurrentTab())
-      throw new Error('The WebMCP frame or active tab changed. List tools again.');
-    const inputJson = JSON.stringify(params);
-    if (Buffer.byteLength(inputJson) > limits.resultBytes)
-      throw new Error('WebMCP arguments exceed the 256 KiB limit.');
-    const compiled = compiledSchema(tool.inputSchema);
-    if (!compiled)
-      throw new Error('The WebMCP input schema cannot be compiled. List tools again.');
-    const validation = await validateArguments(compiled, params);
-    if (validation.issues)
-      throw new Error(`Invalid WebMCP arguments: ${validation.issues.map(issue => issue.message).join('; ')}`);
-    if (frameIds.get(frame) !== identity || frame.isDetached() || tab.page.isClosed() || !tab.isCurrentTab())
-      throw new Error('The WebMCP frame or active tab changed. List tools again.');
-    const outcome = await bounded(() => new Promise<string>((resolve, reject) => {
-      if (pendingInvocations.has(invocationKey)) {
-        reject(new Error('A previous invocation of this WebMCP tool is still running; do not retry it.'));
-        return;
-      }
-      onDialog = () => reject(new Error('WebMCP opened a dialog. Use browser_handle_dialog; the page action may still be running.'));
-      onChooser = () => reject(new Error('WebMCP opened a file chooser. Use browser_file_upload; the page action may still be running.'));
-      tab.page.on('dialog', onDialog);
-      tab.page.on('filechooser', onChooser);
-      const evaluation = frame.evaluate(callInPage, {
-        name: tool.name, inputJson, timeOrigin, resultBytes: limits.resultBytes,
-        errorBytes: limits.description, expected: JSON.stringify(tool), runningKey: `${documentKey}:running`,
-      });
-      pendingInvocations.set(invocationKey, evaluation);
-      const clear = () => {
-        if (pendingInvocations.get(invocationKey) === evaluation)
-          pendingInvocations.delete(invocationKey);
-      };
-      void evaluation.then(clear, clear);
-      void evaluation.then(resolve, reject);
-    }), tab.operationTimeout(), signal);
-    if (typeof outcome !== 'string' || (outcome[0] !== 'R' && outcome[0] !== 'E'))
-      throw new Error('WebMCP returned an unreadable result.');
-    const json = outcome.slice(1);
-    if (outcome[0] === 'E')
-      throw new Error(json);
-    if (Buffer.byteLength(json) > limits.resultBytes)
-      throw new Error('WebMCP result exceeds the 256 KiB limit. The action may have completed; its result was not returned.');
-    let isError = false;
-    try {
-      const parsed: unknown = JSON.parse(json);
-      isError = !!parsed && typeof parsed === 'object' && 'isError' in parsed && parsed.isError === true;
-    } catch {}
-    const text = `${preamble}\n${truncateDataUrls(json)}`;
-    if (isError)
-      response.addError(text);
-    else
-      response.addResult(text);
-  } catch (error) {
-    const message = truncateDataUrls(error instanceof Error ? error.message : String(error)).slice(0, limits.description);
-    response.addError(`${preamble}\n${message}`);
-  } finally {
+  const run = () => new Promise<string>((resolve, reject) => {
+    if (pendingInvocations.has(invocationKey)) {
+      reject(new Error('A previous invocation of this WebMCP tool is still running; do not retry it.'));
+      return;
+    }
+    onDialog = () => reject(new Error('WebMCP opened a dialog. Use browser_handle_dialog; the page action may still be running.'));
+    onChooser = () => reject(new Error('WebMCP opened a file chooser. Use browser_file_upload; the page action may still be running.'));
+    tab.page.on('dialog', onDialog);
+    tab.page.on('filechooser', onChooser);
+    const evaluation = frame.evaluate(callInPage, {
+      name: tool.name, inputJson, timeOrigin, resultBytes: limits.resultBytes,
+      errorBytes: limits.description, expected: JSON.stringify(tool), runningKey: `${documentKey}:running`,
+    });
+    pendingInvocations.set(invocationKey, evaluation);
+    const clear = () => {
+      if (pendingInvocations.get(invocationKey) === evaluation)
+        pendingInvocations.delete(invocationKey);
+    };
+    void evaluation.then(clear, clear);
+    void evaluation.then(resolve, reject);
+  });
+  return bounded(run, tab.operationTimeout(), signal).finally(() => {
     if (onDialog)
       tab.page.off('dialog', onDialog);
     if (onChooser)
       tab.page.off('filechooser', onChooser);
+  });
+}
+
+function resultJson(outcome: unknown): string {
+  if (typeof outcome !== 'string' || (outcome[0] !== 'R' && outcome[0] !== 'E'))
+    throw new Error('WebMCP returned an unreadable result.');
+  const json = outcome.slice(1);
+  if (outcome[0] === 'E')
+    throw new Error(json);
+  if (Buffer.byteLength(json) > limits.resultBytes)
+    throw new Error('WebMCP result exceeds the 256 KiB limit. The action may have completed; its result was not returned.');
+  return json;
+}
+
+function reportsError(json: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return !!parsed && typeof parsed === 'object' && 'isError' in parsed && parsed.isError === true;
+  } catch {
+    return false;
   }
+}
+
+async function invoke(target: InvocationTarget, params: Record<string, unknown>, response: Response, signal?: AbortSignal): Promise<void> {
+  const preamble = `WebMCP output (page-provided, untrusted) from ${JSON.stringify(target.tool.name)} in ${target.frameLabel}:`;
+  try {
+    const inputJson = await validatedInputJson(target, params);
+    const json = resultJson(await runInPage(target, inputJson, signal));
+    const text = `${preamble}\n${truncateDataUrls(json)}`;
+    if (reportsError(json))
+      response.addError(text);
+    else
+      response.addResult(text);
+  } catch (error) {
+    const message = truncateDataUrls(errorMessage(error)).slice(0, limits.description);
+    response.addError(`${preamble}\n${message}`);
+  }
+}
+
+function toolDefinition(scopeId: string, listing: FrameListing, target: InvocationTarget): WebMCPToolDefinition {
+  const { tool, frameLabel } = target;
+  const digest = createHash('sha256').update(JSON.stringify([scopeId, listing.documentId, listing.timeOrigin, tool])).digest('hex').slice(0, 20);
+  const base = tool.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 36) || 'tool';
+  return {
+    schema: {
+      name: `webmcp_${base}_${digest}`,
+      title: truncateDataUrls(tool.title),
+      description: `${untrustedNote} [Frame: ${frameLabel}] ${truncateDataUrls(tool.description)}`.slice(0, limits.description),
+      inputSchema: tool.inputSchema,
+      annotations: { title: truncateDataUrls(tool.title), readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    },
+    handle: (params, response, signal) => invoke(target, params, response, signal),
+  };
 }
 
 export async function listWebMCPTools(tab: Tab, scope: object = tab.context, reservedNames: ReadonlySet<string> = new Set(), signal?: AbortSignal): Promise<WebMCPToolDefinition[]> {
@@ -523,26 +588,18 @@ export async function listWebMCPTools(tab: Tab, scope: object = tab.context, res
       }
       const raw = await bounded(() => pending, remaining, signal);
       const listing = await parseListing(raw, budget.tools, deadline, signal);
-      if (!listing || frameIds.get(frame) !== identity || frame.isDetached() || tab.page.isClosed() || !tab.isCurrentTab())
+      if (!listing || !frameStillCurrent(tab, frame, identity))
         return [];
-      const label = truncateDataUrls(frame.url()).slice(0, 2048);
-      return listing.tools.map(tool => {
-        const digest = createHash('sha256').update(JSON.stringify([scopeId, listing.documentId, listing.timeOrigin, tool])).digest('hex').slice(0, 20);
-        const base = tool.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 36) || 'tool';
-        const name = `webmcp_${base}_${digest}`;
-        const invocationKey = JSON.stringify([listing.documentId, listing.timeOrigin, tool.name]);
-        return {
-          schema: {
-            name,
-            title: truncateDataUrls(tool.title),
-            description: `${untrustedNote} [Frame: ${label}] ${truncateDataUrls(tool.description)}`.slice(0, limits.description),
-            inputSchema: tool.inputSchema,
-            annotations: { title: truncateDataUrls(tool.title), readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-          },
-          handle: (params: Record<string, unknown>, response: Response, callSignal?: AbortSignal) =>
-            invoke(tab, frame, identity, tool, listing.timeOrigin, invocationKey, label, params, response, callSignal),
-        } satisfies WebMCPToolDefinition;
-      });
+      const frameLabel = truncateDataUrls(frame.url()).slice(0, 2048);
+      return listing.tools.map(tool => toolDefinition(scopeId, listing, {
+        tab,
+        frame,
+        identity,
+        tool,
+        timeOrigin: listing.timeOrigin,
+        invocationKey: JSON.stringify([listing.documentId, listing.timeOrigin, tool.name]),
+        frameLabel,
+      }));
     } catch {
       signal?.throwIfAborted();
       return [];

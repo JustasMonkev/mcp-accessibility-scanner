@@ -15,7 +15,7 @@
  */
 
 import { assertReusedContextStorageStateSupported, assertStorageStateDoesNotResetUserProfile } from '../browserContextFactory.js';
-import type { BrowserContextFactory, ClientInfo } from '../browserContextFactory.js';
+import type { BrowserContextFactory, ClientInfo, ContextHandle } from '../browserContextFactory.js';
 import type { FullConfig } from '../config.js';
 import type { BrowserContext } from 'playwright-core';
 import { validateBrowserConnectConnectionString } from './validation.js';
@@ -31,7 +31,7 @@ export class VSCodeBrowserContextFactory implements BrowserContextFactory {
 
   constructor(private _config: FullConfig, private _playwright: typeof import('playwright'), private _connectionString: string) {}
 
-  async createContext(clientInfo: ClientInfo, abortSignal: AbortSignal): Promise<{ browserContext: BrowserContext; close: () => Promise<void>; }> {
+  async createContext(clientInfo: ClientInfo, abortSignal: AbortSignal): Promise<ContextHandle> {
     assertStorageStateDoesNotResetUserProfile(this._config, vscodeProfileConflictRemedy);
     let launchOptions: Record<string, unknown> = { ...this._config.browser.launchOptions };
     if (this._config.browser.chromiumSandboxDefaulted)

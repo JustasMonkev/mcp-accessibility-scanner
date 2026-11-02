@@ -687,6 +687,22 @@ const auditKeyboardSchema = z.object({
   reportFile: z.string().optional().describe('Output JSON report file name.'),
 });
 
+function keyboardAuditSummary(result: KeyboardAuditResult) {
+  return {
+    uniqueFocusStops: result.uniqueFingerprints,
+    skipLinkFound: result.skipLink.found,
+    skipLinkStep: result.skipLink.step,
+    skipLinkActivated: result.skipLink.activated,
+    focusVisibilityIssueCount: result.focusVisibilityIssues.length,
+    focusJumpIssueCount: result.focusJumpIssues.length,
+    targetSizeIssueCount: result.targetSizeIssues.length,
+    focusObscuredIssueCount: result.focusObscuredIssues.length,
+    focusTrapDetected: result.focusTrap.detected,
+    focusTrapStep: result.focusTrap.step,
+    screenshotCount: result.screenshots.length,
+  };
+}
+
 const auditKeyboard = defineTabTool({
   capability: 'core',
   schema: {
@@ -754,19 +770,7 @@ const auditKeyboard = defineTabTool({
       page: {
         url: tab.page.url(),
       },
-      summary: {
-        uniqueFocusStops: result.uniqueFingerprints,
-        skipLinkFound: result.skipLink.found,
-        skipLinkStep: result.skipLink.step,
-        skipLinkActivated: result.skipLink.activated,
-        focusVisibilityIssueCount: result.focusVisibilityIssues.length,
-        focusJumpIssueCount: result.focusJumpIssues.length,
-        targetSizeIssueCount: result.targetSizeIssues.length,
-        focusObscuredIssueCount: result.focusObscuredIssues.length,
-        focusTrapDetected: result.focusTrap.detected,
-        focusTrapStep: result.focusTrap.step,
-        screenshotCount: result.screenshots.length,
-      },
+      summary: keyboardAuditSummary(result),
       screenshots: screenshotResources,
       reportUri: reportResource.uri,
     });

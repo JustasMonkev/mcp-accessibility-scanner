@@ -24,6 +24,7 @@ import { createUrlRedactor, redactToolResult } from '../utils/urlRedaction.js';
 import { rejectAfterTimeout } from '../utils/timeout.js';
 
 import type { CacheHint, Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
+import { printToStderr } from '../utils/terminal.js';
 export type { Server } from '@modelcontextprotocol/server';
 export type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/server';
 
@@ -49,7 +50,7 @@ export interface ServerBackend {
   serverClosed?(): void;
 }
 
-export type ServerMetadata = {
+type ServerMetadata = {
   title?: string;
   instructions?: string;
   redactUrlParams?: readonly string[];
@@ -65,7 +66,7 @@ export type ServerBackendFactory = ServerMetadata & {
 };
 
 export async function connect(factory: ServerBackendFactory, transport: Transport, runHeartbeat: boolean, heartbeatReady: Promise<void> = Promise.resolve()) {
-  const server = createServer(factory.name, factory.version, factory.create(), runHeartbeat, factory, heartbeatReady);
+  const server = createServer(factory.name, factory.version, factory.create(), runHeartbeat, { ...factory, heartbeatReady });
   await server.connect(transport);
 }
 
@@ -74,53 +75,26 @@ export async function wrapInProcess(backend: ServerBackend): Promise<Transport> 
   return new InProcessTransport(server);
 }
 
-export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean, metadata?: ServerMetadata, heartbeatReady: Promise<void> = Promise.resolve()): Server {
-  const redactSecrets = createUrlRedactor(metadata?.redactUrlParams);
-  const server = new Server({ name, version, title: metadata?.title }, {
+type ServerOptions = ServerMetadata & { heartbeatReady?: Promise<void> };
+
+export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean, options?: ServerOptions): Server {
+  const redactSecrets = createUrlRedactor(options?.redactUrlParams);
+  const server = new Server({ name, version, title: options?.title }, {
     capabilities: {
       tools: {
         listChanged: true,
       },
     },
-    instructions: metadata?.instructions,
-    ...(!backend.dynamicToolList && metadata?.toolListCacheHint ? { cacheHints: { 'tools/list': metadata.toolListCacheHint } } : {}),
+    instructions: options?.instructions,
+    ...(!backend.dynamicToolList && options?.toolListCacheHint ? { cacheHints: { 'tools/list': options.toolListCacheHint } } : {}),
   });
-
-  let backendInitialized: Promise<void> | undefined;
-  const ensureInitialized = (): Promise<void> => {
-    if (!backendInitialized) {
-      const initialization = (async () => {
-        const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
-        const context: ServerBackendContext = {
-          notifyToolListChanged: () => server.sendToolListChanged(),
-        };
-        await backend.initialize?.(context, clientVersion);
-      })();
-      initialization.catch(() => {
-        if (backendInitialized === initialization)
-          backendInitialized = undefined;
-      });
-      backendInitialized = initialization;
-    }
-    return backendInitialized;
-  };
+  const ensureInitialized = backendInitializer(server, backend);
 
   server.setRequestHandler('tools/list', async (_request, ctx) => {
     serverDebug('listTools');
     await ensureInitialized();
     const tools = await backend.listTools({ _meta: ctx.mcpReq._meta, signal: ctx.mcpReq.signal });
-    if (!redactSecrets)
-      return { tools };
-    return { tools: tools.map(tool => {
-      const rendered = { ...tool };
-      if (typeof tool.title === 'string')
-        rendered.title = redactSecrets(tool.title);
-      if (typeof tool.description === 'string')
-        rendered.description = redactSecrets(tool.description);
-      if (typeof tool.annotations?.title === 'string')
-        rendered.annotations = { ...tool.annotations, title: redactSecrets(tool.annotations.title) };
-      return rendered;
-    }) };
+    return { tools: redactSecrets ? tools.map(tool => redactToolMetadata(tool, redactSecrets)) : tools };
   });
 
   let heartbeatRunning = false;
@@ -130,17 +104,13 @@ export function createServer(name: string, version: string, backend: ServerBacke
 
     if (runHeartbeat && !heartbeatRunning) {
       heartbeatRunning = true;
-      void heartbeatReady.then(() => startHeartbeat(server)).catch(errorsDebug);
+      void (options?.heartbeatReady ?? Promise.resolve()).then(() => startHeartbeat(server)).catch(errorsDebug);
     }
 
     const requestContext: CallToolRequestContext = {
       signal: ctx.mcpReq.signal,
       requestId: ctx.mcpReq.id,
-      sendNotification: notification => {
-        if (redactSecrets && notification.method === 'notifications/progress' && typeof notification.params?.message === 'string')
-          return ctx.mcpReq.notify({ ...notification, params: { ...notification.params, message: redactSecrets(notification.params.message) } });
-        return ctx.mcpReq.notify(notification);
-      },
+      sendNotification: notification => ctx.mcpReq.notify(redactProgressMessage(notification, redactSecrets)),
       _meta: ctx.mcpReq._meta,
     };
     try {
@@ -159,6 +129,41 @@ export function createServer(name: string, version: string, backend: ServerBacke
   });
   addServerListener(server, 'close', () => backend.serverClosed?.());
   return server;
+}
+
+function backendInitializer(server: Server, backend: ServerBackend): () => Promise<void> {
+  let initialized: Promise<void> | undefined;
+  return () => {
+    if (initialized)
+      return initialized;
+    const initialization = (async () => {
+      const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
+      await backend.initialize?.({ notifyToolListChanged: () => server.sendToolListChanged() }, clientVersion);
+    })();
+    initialization.catch(() => {
+      if (initialized === initialization)
+        initialized = undefined;
+    });
+    initialized = initialization;
+    return initialization;
+  };
+}
+
+function redactToolMetadata(tool: Tool, redact: (text: string) => string): Tool {
+  const rendered = { ...tool };
+  if (typeof tool.title === 'string')
+    rendered.title = redact(tool.title);
+  if (typeof tool.description === 'string')
+    rendered.description = redact(tool.description);
+  if (typeof tool.annotations?.title === 'string')
+    rendered.annotations = { ...tool.annotations, title: redact(tool.annotations.title) };
+  return rendered;
+}
+
+function redactProgressMessage(notification: ServerNotification, redact: ((text: string) => string) | undefined): ServerNotification {
+  if (!redact || notification.method !== 'notifications/progress' || typeof notification.params?.message !== 'string')
+    return notification;
+  return { ...notification, params: { ...notification.params, message: redact(notification.params.message) } };
 }
 
 const startHeartbeat = (server: Server) => {
@@ -229,6 +234,5 @@ export async function start(serverBackendFactory: ServerBackendFactory, options:
     options.authToken !== undefined ? 'Put this in your client config and replace <YOUR_AUTH_TOKEN> locally with your configured token:' : 'Put this in your client config:',
     JSON.stringify(mcpConfig, undefined, 2),
   ].join('\n');
-    // eslint-disable-next-line no-console
-  console.error(message);
+  printToStderr(message);
 }

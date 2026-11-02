@@ -102,34 +102,31 @@ const scanPage = defineTool({
       ...annotationLines,
     ].join('\n'));
 
-    const violations = prepareAxeResults(results.violations, params.maxNodesPerViolation);
-    violations.trimmed.forEach((violation, index) => {
-      response.addResult([
-        '',
-        `Violation rule: ${violation.id} (${violation.impact ?? 'unknown'}) — ${violation.help}`,
-        `Help: ${violation.helpUrl}`,
-        `Tags : ${violation.tags}`,
-        `Violations${nodeCountSuffix(violation.nodes.length, violations.deduped[index].nodes.length)}: ${JSON.stringify(violation.nodes, null, 2)}`,
-      ].join('\n'));
-    });
+    for (const line of renderAxeRules(prepareAxeResults(results.violations, params.maxNodesPerViolation), violationRuleStyle))
+      response.addResult(line);
 
     if (params.includeIncomplete && results.incomplete.length) {
       const incomplete = prepareAxeResults(results.incomplete, params.maxNodesPerViolation);
-      response.addResult([
-        '',
-        `Incomplete (needs review — Axe could not decide, verify these on the page): ${incomplete.trimmed.length} rule(s)`,
-      ].join('\n'));
-      incomplete.trimmed.forEach((item, index) => {
-        response.addResult([
-          '',
-          `Incomplete rule: ${item.id} (${item.impact ?? 'unknown'}) — ${item.help}`,
-          `Help: ${item.helpUrl}`,
-          `Nodes${nodeCountSuffix(item.nodes.length, incomplete.deduped[index].nodes.length)}: ${JSON.stringify(item.nodes, null, 2)}`,
-        ].join('\n'));
-      });
+      response.addResult(`\nIncomplete (needs review — Axe could not decide, verify these on the page): ${incomplete.trimmed.length} rule(s)`);
+      for (const line of renderAxeRules(incomplete, incompleteRuleStyle))
+        response.addResult(line);
     }
   },
 });
+
+type AxeRuleStyle = { kind: string, nodesLabel: string, showTags: boolean };
+const violationRuleStyle: AxeRuleStyle = { kind: 'Violation', nodesLabel: 'Violations', showTags: true };
+const incompleteRuleStyle: AxeRuleStyle = { kind: 'Incomplete', nodesLabel: 'Nodes', showTags: false };
+
+function renderAxeRules(rules: ReturnType<typeof prepareAxeResults>, { kind, nodesLabel, showTags }: AxeRuleStyle): string[] {
+  return rules.trimmed.map((rule, index) => [
+    '',
+    `${kind} rule: ${rule.id} (${rule.impact ?? 'unknown'}) — ${rule.help}`,
+    `Help: ${rule.helpUrl}`,
+    ...(showTags ? [`Tags : ${rule.tags}`] : []),
+    `${nodesLabel}${nodeCountSuffix(rule.nodes.length, rules.deduped[index].nodes.length)}: ${JSON.stringify(rule.nodes, null, 2)}`,
+  ].join('\n'));
+}
 
 function nodeCountSuffix(shown: number, total: number): string {
   return shown < total ? ` (showing ${shown} of ${total} nodes, raise maxNodesPerViolation for the rest)` : '';

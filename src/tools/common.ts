@@ -20,6 +20,8 @@ import * as javascript from '../utils/codegen.js';
 
 import type * as playwright from 'playwright';
 
+type EmulateMediaOptions = NonNullable<Parameters<playwright.Page['emulateMedia']>[0]>;
+
 const close = defineTool({
   capability: 'core',
   schema: {
@@ -77,14 +79,9 @@ const emulateMedia = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    const requested = {
-      colorScheme: params.colorScheme,
-      contrast: params.contrast,
-      forcedColors: params.forcedColors,
-      media: params.media,
-      reducedMotion: params.reducedMotion,
-    };
-    const options = Object.fromEntries(Object.entries(requested).filter(([, value]) => value !== undefined)) as NonNullable<Parameters<playwright.Page['emulateMedia']>[0]>;
+    const { colorScheme, contrast, forcedColors, media, reducedMotion } = params;
+    const requested = { colorScheme, contrast, forcedColors, media, reducedMotion };
+    const options: EmulateMediaOptions = Object.fromEntries(Object.entries(requested).filter(([, value]) => value !== undefined));
     if (!Object.keys(options).length) {
       response.addError('Specify at least one media feature to emulate.');
       return;

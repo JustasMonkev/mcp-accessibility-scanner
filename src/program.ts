@@ -37,6 +37,7 @@ import { runVSCodeTools } from './vscode/host.js';
 import type { MCPProvider, SharedProxySelection } from './mcp/proxyBackend.js';
 import type { FullConfig } from './config.js';
 import type { BrowserContextFactory } from './browserContextFactory.js';
+import { printToStderr, printToStdout } from './utils/terminal.js';
 
 type ProgramContext = {
   config: FullConfig;
@@ -56,7 +57,13 @@ async function resolveProgramContext(options: Record<string, unknown>, extension
     if (config.browser.contextOptions?.storageState && !options.extension)
       throw new Error('--profile-dir-name cannot reach the extension provider with a storage state: the --connect-tool extension provider refuses storage states at switch time. Drop the storage state, or run --extension without it.');
   }
-  const extensionContextFactory = new ExtensionContextFactory(config.browser.launchOptions.channel || 'chrome', config.browser.userDataDir, config.browser.launchOptions.executablePath, config.browser.profileDirName, config.tabGroup);
+  const extensionContextFactory = new ExtensionContextFactory({
+    browserChannel: config.browser.launchOptions.channel || 'chrome',
+    userDataDir: config.browser.userDataDir,
+    executablePath: config.browser.launchOptions.executablePath,
+    profileDirName: config.browser.profileDirName,
+    tabGroup: config.tabGroup,
+  });
   if (options.extension)
     assertStorageStateSupported(config, extensionContextFactory, '--extension attaches to the browser you are already running and uses the context it already has; --isolated does not change that. Drop the storage state and sign in in that browser before auditing.');
   const browserContextFactory = contextFactory(config);
@@ -223,10 +230,8 @@ program
     .action(async () => {
       const parentOptions = program.opts();
       const { config } = await resolveProgramContext(parentOptions);
-      for (const tool of filteredTools(config)) {
-        // eslint-disable-next-line no-console
-        console.log(`${tool.schema.name}  ${tool.schema.description}`);
-      }
+      for (const tool of filteredTools(config))
+        printToStdout(`${tool.schema.name}  ${tool.schema.description}`);
     });
 
 program
@@ -250,8 +255,7 @@ program
         output: process.stdout,
       });
 
-      // eslint-disable-next-line no-console
-      console.log('Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.');
+      printToStdout('Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.');
 
       const prompt = () => rl.prompt();
       rl.setPrompt('> ');
@@ -270,8 +274,7 @@ program
         try {
           args = JSON.parse(jsonStr) as Record<string, unknown>;
         } catch {
-          // eslint-disable-next-line no-console
-          console.error(`Invalid JSON: ${jsonStr}`);
+          printToStderr(`Invalid JSON: ${jsonStr}`);
           prompt();
           return;
         }
@@ -281,13 +284,11 @@ program
           if (result.content) {
             for (const item of result.content) {
               if (item.type === 'text')
-                // eslint-disable-next-line no-console
-                console.log(item.text);
+                printToStdout(item.text);
             }
           }
         } catch (error) {
-          // eslint-disable-next-line no-console
-          console.error(`Error: ${String(error)}`);
+          printToStderr(`Error: ${String(error)}`);
         }
 
         prompt();

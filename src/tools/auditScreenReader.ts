@@ -113,9 +113,16 @@ export function parseAriaSnapshot(snapshot: string): AriaTreeNode[] {
   return nodes;
 }
 
+function nameLabel(node: ScreenReaderNode): string {
+  if (node.name)
+    return `"${node.name}"`;
+  if (node.visibleText)
+    return `showing "${node.visibleText.slice(0, 40)}"`;
+  return 'no name';
+}
+
 function describe(node: ScreenReaderNode): string {
-  const label = node.name ? `"${node.name}"` : node.visibleText ? `showing "${node.visibleText.slice(0, 40)}"` : 'no name';
-  return `${node.role} ${label}${node.selector ? ` (${node.selector})` : ''}`;
+  return `${node.role} ${nameLabel(node)}${node.selector ? ` (${node.selector})` : ''}`;
 }
 
 type Axis = 'x' | 'y';
@@ -328,6 +335,30 @@ function checkDuplicateNames(nodes: ScreenReaderNode[], push: (finding: ScreenRe
   }
 }
 
+type ReadingAxis = {
+  isInverted: (furthest: Rect, current: Rect) => boolean;
+  sortKey: (rect: Rect) => number;
+};
+
+function readingAxis(horizontal: boolean, rtl: boolean): ReadingAxis {
+  if (!horizontal)
+    return { isInverted: (a, b) => a.y >= b.y + b.height - layoutTolerancePx, sortKey: rect => rect.y };
+  if (rtl)
+    return { isInverted: (a, b) => a.x + a.width <= b.x + layoutTolerancePx, sortKey: rect => -(rect.x + rect.width) };
+  return { isInverted: (a, b) => a.x >= b.x + b.width - layoutTolerancePx, sortKey: rect => rect.x };
+}
+
+function visitsBackwards(rects: Rect[], axis: ReadingAxis): boolean {
+  let furthest = rects[0];
+  for (const current of rects.slice(1)) {
+    if (axis.isInverted(furthest, current))
+      return true;
+    if (axis.sortKey(current) > axis.sortKey(furthest))
+      furthest = current;
+  }
+  return false;
+}
+
 function checkReadingOrder(nodes: ScreenReaderNode[], push: (finding: ScreenReaderFinding) => void) {
   const childrenByParent = groupBy(nodes, node => node.parent !== null && isLayoutRelevant(node) ? node.parent : undefined);
 
@@ -345,26 +376,11 @@ function checkReadingOrder(nodes: ScreenReaderNode[], push: (finding: ScreenRead
     const parent = nodes[parentIndex];
     const parentDirection = parent?.rect && parent.tagName !== 'iframe' ? parent.direction : siblings[0].direction;
     const rtl = parentDirection === 'rtl';
-    const isInverted = (a: Rect, b: Rect) => horizontal
-      ? (rtl ? a.x + a.width <= b.x + layoutTolerancePx : a.x >= b.x + b.width - layoutTolerancePx)
-      : a.y >= b.y + b.height - layoutTolerancePx;
-    const sortKey = (rect: Rect) => horizontal ? (rtl ? -(rect.x + rect.width) : rect.x) : rect.y;
-
-    let inverted = false;
-    let furthest = rects[0];
-    for (let i = 1; i < rects.length; i++) {
-      const current = rects[i];
-      if (isInverted(furthest, current)) {
-        inverted = true;
-        break;
-      }
-      if (sortKey(current) > sortKey(furthest))
-        furthest = current;
-    }
-    if (!inverted)
+    const axis = readingAxis(horizontal, rtl);
+    if (!visitsBackwards(rects, axis))
       continue;
 
-    const visualOrder = [...siblings].sort((a, b) => sortKey(a.rect!) - sortKey(b.rect!));
+    const visualOrder = [...siblings].sort((a, b) => axis.sortKey(a.rect!) - axis.sortKey(b.rect!));
     const label = (list: ScreenReaderNode[]) => list.slice(0, 6).map(node => describe(node)).join(' -> ')
         + (list.length > 6 ? ` -> ... (+${list.length - 6})` : '');
     push({

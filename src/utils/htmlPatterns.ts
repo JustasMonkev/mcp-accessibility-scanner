@@ -105,7 +105,11 @@ export function semanticSignature(html: string): string {
 
 type Entry<T> = { key: string, signature: string, tokens: string[], item: T };
 
-const byKey = <T>(first: Entry<T>, second: Entry<T>) => (first.key < second.key ? -1 : first.key > second.key ? 1 : 0);
+function byKey<T>(first: Entry<T>, second: Entry<T>): number {
+  if (first.key === second.key)
+    return 0;
+  return first.key < second.key ? -1 : 1;
+}
 
 export class HtmlPatternGroups<T> {
   private readonly _maxPatterns: number;

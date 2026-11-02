@@ -19,6 +19,7 @@ import type * as playwright from 'playwright';
 import type { Request, Response } from 'playwright';
 import { callOnPageNoTrace, waitForCompletion } from './tools/utils.js';
 import { logUnhandledError } from './utils/log.js';
+import { errorMessage } from './utils/errors.js';
 import { ManualPromise } from './mcp/manualPromise.js';
 import { isToolBlocked } from './mcp/toolPolicy.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
@@ -176,7 +177,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       await download.saveAs(entry.outputFile);
       entry.finished = true;
     } catch (error) {
-      entry.error = truncateWithMarker(truncateDataUrls(formatPageStateError(error)), maxDownloadErrorBytes);
+      entry.error = truncateWithMarker(truncateDataUrls(errorMessage(error)), maxDownloadErrorBytes);
       throw error;
     }
   }
@@ -298,17 +299,15 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     const downloadListener = (download: playwright.Download) => downloadEvent.resolve(download);
     this.page.once('download', downloadListener);
     try {
-      try {
-        await this.page.goto(url, { waitUntil: 'domcontentloaded' });
-      } catch (error) {
-        if (!(error instanceof Error) || !error.message.includes('Download is starting'))
-          throw error;
-        const download = await this.withPageStateTimeout(downloadEvent, 'waiting for download').catch(() => undefined);
-        if (!download)
-          throw error;
-        await new Promise(resolve => setTimeout(resolve, 500));
-        return;
-      }
+      await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+    } catch (error) {
+      if (!errorMessage(error).includes('Download is starting'))
+        throw error;
+      const download = await this.withPageStateTimeout(downloadEvent, 'waiting for download').catch(() => undefined);
+      if (!download)
+        throw error;
+      await new Promise(resolve => setTimeout(resolve, 500));
+      return;
     } finally {
       this.page.off('download', downloadListener);
     }
@@ -364,7 +363,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
             if (snapshotGeneration === this._ariaSnapshotGeneration)
               this._invalidateAriaSnapshot();
           }
-          return `# Page snapshot unavailable: ${formatPageStateError(error)}`;
+          return `# Page snapshot unavailable: ${errorMessage(error)}`;
         }),
         this.withPageStateTimeout(
             this.page.title(),
@@ -385,23 +384,22 @@ export class Tab extends EventEmitter<TabEventsInterface> {
         downloads: this._downloads,
       };
     });
-    if (tabSnapshot) {
-      tabSnapshot.consoleMessages = this._recentConsoleMessages;
-      this._recentConsoleMessages = [];
-    }
     if (!tabSnapshot) {
       capture.valid = false;
       this._invalidateAriaSnapshot();
+      return {
+        url: this.page.url(),
+        title: '',
+        mainDocumentStatus: this._mainDocumentStatus,
+        ariaSnapshot: '',
+        modalStates,
+        consoleMessages: [],
+        downloads: [],
+      };
     }
-    return tabSnapshot ?? {
-      url: this.page.url(),
-      title: '',
-      mainDocumentStatus: this._mainDocumentStatus,
-      ariaSnapshot: '',
-      modalStates,
-      consoleMessages: [],
-      downloads: [],
-    };
+    tabSnapshot.consoleMessages = this._recentConsoleMessages;
+    this._recentConsoleMessages = [];
+    return tabSnapshot;
   }
 
   private _javaScriptBlocked(): boolean {
@@ -501,29 +499,14 @@ function messageToConsoleMessage(message: playwright.ConsoleMessage): ConsoleMes
 }
 
 function pageErrorToConsoleMessage(errorOrValue: unknown): ConsoleMessage {
-  if (errorOrValue instanceof Error) {
-    return {
-      type: undefined,
-      text: errorOrValue.message,
-      toString: () => errorOrValue.stack || errorOrValue.message,
-    };
-  }
-  return {
-    type: undefined,
-    text: String(errorOrValue),
-    toString: () => String(errorOrValue),
-  };
+  const text = errorMessage(errorOrValue);
+  const details = (errorOrValue instanceof Error && errorOrValue.stack) || text;
+  return { type: undefined, text, toString: () => details };
 }
 
 function navigationFailureToConsoleMessage(error: unknown): ConsoleMessage {
-  const text = `Navigation failed after dialog interruption: ${formatPageStateError(error)}`;
+  const text = `Navigation failed after dialog interruption: ${errorMessage(error)}`;
   return { type: undefined, text, toString: () => `Error: ${text}` };
-}
-
-function formatPageStateError(error: unknown): string {
-  if (error instanceof Error)
-    return error.message;
-  return String(error);
 }
 
 export function renderModalStates(context: Context, modalStates: ModalState[]): string[] {

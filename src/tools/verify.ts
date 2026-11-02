@@ -20,6 +20,10 @@ import { defineTabTool } from './tool.js';
 import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
 
+import type { Page } from 'playwright';
+
+type AriaRole = Parameters<Page['getByRole']>[0];
+
 const verifyElement = defineTabTool({
   capability: 'verify',
   schema: {
@@ -34,7 +38,7 @@ const verifyElement = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    const locator = tab.page.getByRole(params.role as any, { name: params.accessibleName });
+    const locator = tab.page.getByRole(params.role as AriaRole, { name: params.accessibleName });
     if (await locator.count() === 0) {
       response.addError(`Element with role "${params.role}" and accessible name "${params.accessibleName}" not found`);
       return;

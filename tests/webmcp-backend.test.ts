@@ -404,7 +404,7 @@ describe('WebMCP backend scope and argument contracts', () => {
 
   it('attaches the extension for a listing when a token makes approval unnecessary', async () => {
     const { ExtensionContextFactory } = await import('../src/extension/extensionContextFactory.js');
-    const factory = new ExtensionContextFactory('chrome', undefined, undefined, undefined);
+    const factory = new ExtensionContextFactory({ browserChannel: 'chrome' });
     vi.stubEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', '');
     try {
       assert.equal(factory.attachNeedsUser, true);

@@ -20,9 +20,11 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import debug from 'debug';
+import coreBundle from 'playwright-core/lib/coreBundle';
 import { WebSocket, WebSocketServer } from 'ws';
 import { httpAddressToString, parseAuthority } from '../mcp/http.js';
 import { logUnhandledError } from '../utils/log.js';
+import { isHttpUrl } from '../utils/httpUrl.js';
 import { ManualPromise } from '../mcp/manualPromise.js';
 import { ExtensionProtocolV2 } from './cdpRelayV2.js';
 import * as protocol from './protocol.js';
@@ -33,8 +35,6 @@ import type { ClientInfo } from '../browserContextFactory.js';
 import type { CDPMessage } from './browserModel.js';
 import type { ExtensionCommandV2, ExtensionEventsV2 } from './protocol.js';
 
-// @ts-ignore -- internal bundle entry point exposed via package exports
-const coreBundle = (await import('playwright-core/lib/coreBundle')).default;
 const { registry } = coreBundle.registry;
 
 const debugLogger = debug('pw:mcp:relay');
@@ -65,18 +65,22 @@ function validateUpgradeRequest(request: http.IncomingMessage): { statusCode: nu
   } catch {
     return { statusCode: 400, message: 'Invalid Origin header' };
   }
-  if (origin.protocol === 'http:' || origin.protocol === 'https:')
+  if (isHttpUrl(origin))
     return { statusCode: 403, message: 'Forbidden Origin header' };
 }
+
+export type ExtensionBrowserOptions = {
+  browserChannel: string;
+  userDataDir?: string;
+  executablePath?: string;
+  profileDirName?: string;
+  tabGroup?: boolean;
+};
 
 export class CDPRelayServer {
   private _server: http.Server;
   private _wsHost: string;
-  private _browserChannel: string;
-  private _userDataDir?: string;
-  private _executablePath?: string;
-  private _profileDirName?: string;
-  private _tabGroup: boolean;
+  private readonly _browser: ExtensionBrowserOptions;
   private readonly _token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
   private _cdpPath: string;
   private readonly _cdpToken = crypto.randomUUID();
@@ -88,14 +92,10 @@ export class CDPRelayServer {
   private _handler!: ExtensionProtocolV2;
   private _extensionConnectionPromise!: ManualPromise<void>;
 
-  constructor(server: http.Server, browserChannel: string, userDataDir?: string, executablePath?: string, profileDirName?: string, tabGroup = true) {
+  constructor(server: http.Server, browser: ExtensionBrowserOptions) {
     this._server = server;
     this._wsHost = httpAddressToString(server.address()).replace(/^http/, 'ws');
-    this._browserChannel = browserChannel;
-    this._userDataDir = userDataDir;
-    this._executablePath = executablePath;
-    this._profileDirName = profileDirName;
-    this._tabGroup = tabGroup;
+    this._browser = browser;
 
     const uuid = crypto.randomUUID();
     this._cdpPath = `/cdp/${uuid}`;
@@ -180,28 +180,28 @@ export class CDPRelayServer {
     };
     url.searchParams.set('client', JSON.stringify(client));
     url.searchParams.set('protocolVersion', process.env.PWMCP_TEST_PROTOCOL_VERSION ?? protocol.VERSION.toString());
-    if (!this._tabGroup)
+    if (this._browser.tabGroup === false)
       url.searchParams.set('tabGroup', 'false');
     if (this._token)
       url.searchParams.set('token', this._token);
     const href = url.toString();
 
-    let executablePath = this._executablePath;
+    let executablePath = this._browser.executablePath;
     if (!executablePath) {
-      const executableInfo = registry.findExecutable(this._browserChannel);
+      const executableInfo = registry.findExecutable(this._browser.browserChannel);
       if (!executableInfo)
-        throw new Error(`Unsupported channel: "${this._browserChannel}"`);
+        throw new Error(`Unsupported channel: "${this._browser.browserChannel}"`);
       executablePath = executableInfo.executablePath();
       if (!executablePath)
-        throw new Error(`"${this._browserChannel}" executable not found. Make sure it is installed at a standard location.`);
+        throw new Error(`"${this._browser.browserChannel}" executable not found. Make sure it is installed at a standard location.`);
     }
 
     const args: string[] = [];
-    if (this._userDataDir) {
-      args.push(`--user-data-dir=${this._userDataDir}`);
-      const profileDirectory = this._profileDirName ?? await findPlaywrightExtensionProfile(this._userDataDir);
-      if (this._profileDirName && !this._executablePath && !await isExtensionInstalledInProfile(this._userDataDir, this._profileDirName))
-        throw new Error(`Playwright Extension is not installed in profile "${this._profileDirName}" of ${this._userDataDir}. Install it in that profile or pass the directory name of a profile that has it.`);
+    if (this._browser.userDataDir) {
+      args.push(`--user-data-dir=${this._browser.userDataDir}`);
+      const profileDirectory = this._browser.profileDirName ?? await findPlaywrightExtensionProfile(this._browser.userDataDir);
+      if (this._browser.profileDirName && !this._browser.executablePath && !await isExtensionInstalledInProfile(this._browser.userDataDir, this._browser.profileDirName))
+        throw new Error(`Playwright Extension is not installed in profile "${this._browser.profileDirName}" of ${this._browser.userDataDir}. Install it in that profile or pass the directory name of a profile that has it.`);
       if (profileDirectory)
         args.push(`--profile-directory=${profileDirectory}`);
     }
@@ -396,13 +396,17 @@ async function pathExists(p: string): Promise<boolean> {
   }
 }
 
+function profileOrder(profileDirName: string): number {
+  return profileDirName === 'Default' ? -1 : parseInt(profileDirName.slice('Profile '.length), 10);
+}
+
 async function findPlaywrightExtensionProfile(userDataDir: string): Promise<string | undefined> {
   let profiles: string[];
   try {
     profiles = (await fs.readdir(userDataDir, { withFileTypes: true }))
         .filter(entry => entry.isDirectory() && (entry.name === 'Default' || /^Profile \d+$/.test(entry.name)))
         .map(entry => entry.name)
-        .sort((a, b) => a === 'Default' ? -1 : b === 'Default' ? 1 : parseInt(a.slice(8), 10) - parseInt(b.slice(8), 10));
+        .sort((a, b) => profileOrder(a) - profileOrder(b));
   } catch {
     return;
   }

@@ -19,7 +19,8 @@ import * as playwright from 'playwright';
 import { startHttpServer } from '../mcp/http.js';
 import { CDPRelayServer } from './cdpRelay.js';
 
-import type { BrowserContextFactory, ClientInfo } from '../browserContextFactory.js';
+import type { ExtensionBrowserOptions } from './cdpRelay.js';
+import type { BrowserContextFactory, ClientInfo, ContextHandle } from '../browserContextFactory.js';
 
 const debugLogger = debug('pw:mcp:relay');
 
@@ -30,21 +31,13 @@ export class ExtensionContextFactory implements BrowserContextFactory {
   }
   readonly appliesStorageState = false;
   readonly sessionsUnsupportedReason = '--extension works through the browser you are already running and uses its existing context, which every session would share (same tabs, cookies and storage).';
-  private _browserChannel: string;
-  private _userDataDir?: string;
-  private _executablePath?: string;
-  private _profileDirName?: string;
-  private _tabGroup: boolean;
+  private readonly _browser: ExtensionBrowserOptions;
 
-  constructor(browserChannel: string, userDataDir: string | undefined, executablePath: string | undefined, profileDirName: string | undefined, tabGroup = true) {
-    this._browserChannel = browserChannel;
-    this._userDataDir = userDataDir;
-    this._executablePath = executablePath;
-    this._profileDirName = profileDirName;
-    this._tabGroup = tabGroup;
+  constructor(browser: ExtensionBrowserOptions) {
+    this._browser = browser;
   }
 
-  async createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  async createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<ContextHandle> {
     const browser = await this._obtainBrowser(clientInfo, abortSignal, toolName);
     return {
       browserContext: browser.contexts()[0],
@@ -74,7 +67,7 @@ export class ExtensionContextFactory implements BrowserContextFactory {
       httpServer.close();
       throw new Error(abortSignal.reason);
     }
-    const cdpRelayServer = new CDPRelayServer(httpServer, this._browserChannel, this._userDataDir, this._executablePath, this._profileDirName, this._tabGroup);
+    const cdpRelayServer = new CDPRelayServer(httpServer, this._browser);
     const stop = () => cdpRelayServer.stop();
     abortSignal.addEventListener('abort', stop, { once: true });
     httpServer.once('close', () => abortSignal.removeEventListener('abort', stop));

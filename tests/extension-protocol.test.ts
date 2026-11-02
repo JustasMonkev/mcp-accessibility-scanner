@@ -779,7 +779,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', executablePath: '/tmp/chrome' });
     const clientInfo = { name: 'test-client', version: '1.0.0' };
     let second: WebSocket | undefined;
     try {
@@ -817,7 +817,7 @@ describe('extension protocol v2', () => {
       server.listen(0, '127.0.0.1', resolve);
     });
     onTestFinished(() => new Promise<void>(resolve => server.close(() => resolve())));
-    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', executablePath: '/tmp/chrome' });
     expect(server.listening).toBe(true);
 
     relay.stop();
@@ -834,7 +834,7 @@ describe('extension protocol v2', () => {
     vi.spyOn(playwright.chromium, 'connectOverCDP').mockRejectedValue(new Error('attach failed'));
     onTestFinished(() => (ensure.mock.instances[0] as CDPRelayServer | undefined)?.stop());
 
-    const factory = new ExtensionContextFactory('chrome', undefined, '/tmp/chrome');
+    const factory = new ExtensionContextFactory({ browserChannel: 'chrome', executablePath: '/tmp/chrome' });
     await expect(factory.createContext(
         { name: 'test-client', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow('attach failed');
     expect(stop).toHaveBeenCalledTimes(1);
@@ -848,7 +848,7 @@ describe('extension protocol v2', () => {
     vi.stubEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', phase === 'manual approval' ? '' : 'test-token');
     const server = http.createServer();
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', executablePath: '/tmp/chrome' });
     const controller = new AbortController();
     const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
     // SAFETY: This real relay owns these private fields; the test drives setup without launching Chrome.
@@ -904,7 +904,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome', undefined, tabGroup);
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', executablePath: '/tmp/chrome', tabGroup });
     let extension: WebSocket | undefined;
     try {
       const aborted = new AbortController();
@@ -950,7 +950,7 @@ describe('extension protocol v2', () => {
   it('passes the grouping setting from the extension browser provider to the connect URL', async () => {
     vi.mocked(spawn).mockClear();
     const controller = new AbortController();
-    const factory = new ExtensionContextFactory('chrome', undefined, '/tmp/chrome', undefined, false);
+    const factory = new ExtensionContextFactory({ browserChannel: 'chrome', executablePath: '/tmp/chrome', tabGroup: false });
     const connecting = factory.createContext({ name: 'test-client', version: '1.0.0' }, controller.signal, undefined);
     const failure = expect(connecting).rejects.toThrow('cancelled');
     try {
@@ -971,7 +971,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', executablePath: '/tmp/chrome' });
     const cdpEndpoint = relay.cdpEndpoint();
     const cdpPath = cdpEndpoint.slice(0, cdpEndpoint.indexOf('?token='));
     const cdpToken = new URL(cdpEndpoint).searchParams.get('token');
@@ -1025,7 +1025,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', userDataDir, executablePath: '/tmp/chrome' });
     let extension: WebSocket | undefined;
     try {
       const connecting = relay.ensureExtensionConnectionForMCPContext(
@@ -1062,7 +1062,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome', 'Profile 1');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', userDataDir, executablePath: '/tmp/chrome', profileDirName: 'Profile 1' });
     let extension: WebSocket | undefined;
     try {
       const connecting = relay.ensureExtensionConnectionForMCPContext(
@@ -1104,7 +1104,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chromium', userDataDir, undefined, 'Profile 1');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chromium', userDataDir, profileDirName: 'Profile 1' });
     const controller = new AbortController();
     const abortTimer = setTimeout(() => controller.abort(new Error('test timeout')), 1000);
     try {
@@ -1163,7 +1163,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', userDataDir, executablePath: '/tmp/chrome' });
     const controller = new AbortController();
     try {
       const connecting = relay.ensureExtensionConnectionForMCPContext(
@@ -1195,7 +1195,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chromium', userDataDir, undefined, 'Profile 1');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chromium', userDataDir, profileDirName: 'Profile 1' });
     const controller = new AbortController();
     const abortTimer = setTimeout(() => controller.abort(new Error('test timeout')), 250);
     try {
@@ -1227,7 +1227,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome', 'Profile 1');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', userDataDir, executablePath: '/tmp/chrome', profileDirName: 'Profile 1' });
     let extension: WebSocket | undefined;
     try {
       const connecting = relay.ensureExtensionConnectionForMCPContext(
@@ -1268,7 +1268,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', userDataDir, executablePath: '/tmp/chrome' });
     try {
       const controller = new AbortController();
       const connecting = relay.ensureExtensionConnectionForMCPContext(
@@ -1316,7 +1316,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', userDataDir, '/tmp/chrome');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', userDataDir, executablePath: '/tmp/chrome' });
     try {
       const controller = new AbortController();
       const connecting = relay.ensureExtensionConnectionForMCPContext(
@@ -1349,7 +1349,7 @@ describe('extension protocol v2', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', '/tmp/profile', '/tmp/chrome');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', userDataDir: '/tmp/profile', executablePath: '/tmp/chrome' });
     try {
       const controller = new AbortController();
       const connecting = relay.ensureExtensionConnectionForMCPContext(
@@ -1380,7 +1380,7 @@ describe('cdp relay upgrade hardening', () => {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', resolve);
     });
-    const relay = new CDPRelayServer(server, 'chrome', undefined, '/tmp/chrome');
+    const relay = new CDPRelayServer(server, { browserChannel: 'chrome', executablePath: '/tmp/chrome' });
     onTestFinished(async () => {
       relay.stop();
       await new Promise<void>(resolve => server.close(() => resolve()));

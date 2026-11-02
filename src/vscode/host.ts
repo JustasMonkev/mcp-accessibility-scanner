@@ -25,6 +25,7 @@ import { ToolRelay } from '../mcp/toolRelay.js';
 import { SharedClientSlot } from '../mcp/sharedClientSlot.js';
 import { assertToolNotBlocked, isToolBlocked } from '../mcp/toolPolicy.js';
 import { logUnhandledError } from '../utils/log.js';
+import { errorMessage } from '../utils/errors.js';
 import { packageJSON } from '../utils/package.js';
 
 import { resolveOutputDir } from '../config.js';
@@ -160,7 +161,7 @@ export class VSCodeProxyBackend implements ServerBackend {
       assertStorageStateDoesNotResetUserProfile(this._config, vscodeProfileConflictRemedy);
     } catch (error) {
       return {
-        content: [{ type: 'text', text: `### Result\n${error instanceof Error ? error.message : String(error)}\n` }],
+        content: [{ type: 'text', text: `### Result\n${errorMessage(error)}\n` }],
         isError: true,
       };
     }

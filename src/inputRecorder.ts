@@ -58,15 +58,151 @@ const addMissingPageAlias = (
   else
     recorded.unshift(declarationAction);
 };
-type RecorderHub = {
-  recorders: Set<InputRecorder>;
-  recordings: Map<Context, RecordingTarget>;
-  starting: number;
-  ready: Promise<void>;
-  arm: () => Promise<void>;
-  ensureArmed: () => Promise<void>;
-  standbyIfIdle: () => Promise<void>;
+const recorderParams = {
+  mode: 'recording',
+  recorderMode: 'api',
+  omitCallTracking: true,
+  language: 'javascript',
 };
+
+type RecorderSink = {
+  actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => void;
+  actionUpdated: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => void;
+  signalAdded: (page: playwright.Page, data: actions.Signal | actions.SignalInContext, code: string) => void;
+};
+
+type PlaywrightRecorderControl = {
+  _enableRecorder(params: typeof recorderParams, sink: RecorderSink): Promise<void>;
+  _disableRecorder(): Promise<void>;
+};
+
+class RecorderHub {
+  readonly recorders = new Set<InputRecorder>();
+  readonly recordings = new Map<Context, RecordingTarget>();
+  starting = 0;
+  readonly ready: Promise<void>;
+  private readonly _browserContext: playwright.BrowserContext;
+  private readonly _lastActionSequence = new WeakMap<playwright.Page, number>();
+  private _actionSequence = 0;
+  private _armed = false;
+  private _transition = Promise.resolve();
+
+  constructor(browserContext: playwright.BrowserContext) {
+    this._browserContext = browserContext;
+    this.ready = this.arm();
+  }
+
+  arm(): Promise<void> {
+    return this._enqueue(() => this._arm());
+  }
+
+  ensureArmed(): Promise<void> {
+    return this._enqueue(async () => {
+      if (!this._armed)
+        await this._arm();
+    });
+  }
+
+  standbyIfIdle(): Promise<void> {
+    return this._enqueue(async () => {
+      if (this.starting || this.recorders.size || this.recordings.size)
+        return;
+      try {
+        await this._control()._disableRecorder();
+      } finally {
+        this._armed = false;
+      }
+    });
+  }
+
+  private _control(): PlaywrightRecorderControl {
+    return this._browserContext as unknown as PlaywrightRecorderControl;
+  }
+
+  private async _arm(): Promise<void> {
+    await this._control()._enableRecorder(recorderParams, this._sink);
+    this._armed = true;
+  }
+
+  private _enqueue(callback: () => Promise<void>): Promise<void> {
+    const result = this._transition.then(callback, callback);
+    this._transition = result.catch(() => {});
+    return result;
+  }
+
+  private _dispatch(buffered: boolean, flushable: boolean, log: (recorder: InputRecorder) => void, record: (target: RecordingTarget) => void): void {
+    const contexts = new Set<Context>(recorderContexts.get(this._browserContext));
+    for (const context of this.recordings.keys())
+      contexts.add(context);
+    const running = [...contexts].filter(context => context.isRunningToolForRecording(buffered));
+    if (!running.length) {
+      for (const recorder of this.recorders)
+        log(recorder);
+    }
+    for (const [context, target] of this.recordings) {
+      if ((!target.state.stopping || flushable) && !running.some(runningContext => runningContext !== context)) {
+        record(target);
+        context.markRecordingActivity();
+      }
+    }
+  }
+
+  private readonly _sink: RecorderSink = {
+    actionAdded: (page, data, code) => {
+      const sequence = ++this._actionSequence;
+      this._lastActionSequence.set(page, sequence);
+      const action = 'action' in data ? data.action : data;
+      const isAssertion = action.name.startsWith('assert');
+      if (isAssertion)
+        code = code.replace(/^(\s*)\/\/ ?/gm, '$1');
+      const buffered = actionIsBuffered(action);
+      this._dispatch(
+          buffered,
+          buffered || action.name === 'closePage',
+          recorder => recorder.logActionAdded(page, action, isAssertion ? `${expectPrelude}\n${code}` : code, sequence),
+          target => {
+            if (isAssertion && !target.actions.some(recorded => recorded.code === expectPrelude))
+              target.actions.push({ page, code: expectPrelude });
+            addMissingPageAlias(target.actions, page, code, target.pageIndexes, this._browserContext);
+            target.actions.push({ page, code, sequence });
+          },
+      );
+    },
+    actionUpdated: (page, data, code) => {
+      const sequence = this._lastActionSequence.get(page);
+      if (sequence === undefined)
+        return;
+      const action = 'action' in data ? data.action : data;
+      this._dispatch(
+          true,
+          true,
+          recorder => recorder.logActionUpdated(page, action, code, sequence),
+          target => {
+            const recorded = target.actions.findLast(candidate => candidate.sequence === sequence);
+            if (recorded)
+              recorded.code = code;
+          },
+      );
+    },
+    signalAdded: (page, data, code) => {
+      const sequence = this._lastActionSequence.get(page);
+      const signal = 'signal' in data ? data.signal : data;
+      this._dispatch(
+          true,
+          true,
+          recorder => recorder.logSignalAdded(page, signal, code, sequence),
+          target => {
+            if (sequence === undefined)
+              return;
+            const recorded = target.actions.findLast(candidate => candidate.sequence === sequence);
+            if (recorded && code)
+              recorded.code = code;
+          },
+      );
+    },
+  };
+}
+
 const recorderHubs = new WeakMap<playwright.BrowserContext, RecorderHub>();
 const recorderContexts = new WeakMap<playwright.BrowserContext, Set<Context>>();
 
@@ -145,127 +281,10 @@ export class InputRecorder {
   }
 
   private static _ensureHub(browserContext: playwright.BrowserContext): RecorderHub {
-    const hub = recorderHubs.get(browserContext);
-    if (hub)
-      return hub;
-
-    const recorders = new Set<InputRecorder>();
-    const recordings = new Map<Context, RecordingTarget>();
-    let actionSequence = 0;
-    const lastActionSequence = new WeakMap<playwright.Page, number>();
-    let armed = false;
-    let transition = Promise.resolve();
-    const enqueue = (callback: () => Promise<void>) => {
-      const result = transition.then(callback, callback);
-      transition = result.catch(() => {});
-      return result;
-    };
-    const dispatch = (
-      buffered: boolean,
-      flushable: boolean,
-      log: (recorder: InputRecorder) => void,
-      record: (target: RecordingTarget) => void,
-    ) => {
-      const contexts = new Set<Context>(recorderContexts.get(browserContext));
-      for (const context of recordings.keys())
-        contexts.add(context);
-      const running = [...contexts].filter(context => context.isRunningToolForRecording(buffered));
-      if (!running.length) {
-        for (const recorder of recorders)
-          log(recorder);
-      }
-      for (const [context, target] of recordings) {
-        if ((!target.state.stopping || flushable) && !running.some(runningContext => runningContext !== context)) {
-          record(target);
-          context.markRecordingActivity();
-        }
-      }
-    };
-    const params = {
-        mode: 'recording',
-        recorderMode: 'api',
-        omitCallTracking: true,
-        language: 'javascript',
-    };
-    const sink = {
-        actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
-          const sequence = ++actionSequence;
-          lastActionSequence.set(page, sequence);
-          const action = 'action' in data ? data.action : data;
-          const isAssertion = action.name.startsWith('assert');
-          if (isAssertion)
-            code = code.replace(/^(\s*)\/\/ ?/gm, '$1');
-          const buffered = actionIsBuffered(action);
-          dispatch(
-              buffered,
-              buffered || action.name === 'closePage',
-              recorder => recorder._actionAdded(page, action, isAssertion ? `${expectPrelude}\n${code}` : code, sequence),
-              target => {
-                if (isAssertion && !target.actions.some(action => action.code === expectPrelude))
-                  target.actions.push({ page, code: expectPrelude });
-                addMissingPageAlias(target.actions, page, code, target.pageIndexes, browserContext);
-                target.actions.push({ page, code, sequence });
-              },
-          );
-        },
-        actionUpdated: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => {
-          const sequence = lastActionSequence.get(page);
-          if (sequence === undefined)
-            return;
-          const action = 'action' in data ? data.action : data;
-          dispatch(
-              true,
-              true,
-              recorder => recorder._actionUpdated(page, action, code, sequence),
-              target => {
-                const recorded = target.actions.findLast(action => action.sequence === sequence);
-                if (recorded)
-                  recorded.code = code;
-              },
-          );
-        },
-        signalAdded: (page: playwright.Page, data: actions.Signal | actions.SignalInContext, code: string) => {
-          const sequence = lastActionSequence.get(page);
-          const signal = 'signal' in data ? data.signal : data;
-          dispatch(
-              true,
-              true,
-              recorder => recorder._signalAdded(page, signal, code, sequence),
-              target => {
-                if (sequence === undefined)
-                  return;
-                const action = target.actions.findLast(action => action.sequence === sequence);
-                if (action && code)
-                  action.code = code;
-              },
-          );
-        },
-    };
-    const arm = async () => {
-      await (browserContext as any)._enableRecorder(params, sink);
-      armed = true;
-    };
-    const created: RecorderHub = {
-      recorders,
-      recordings,
-      starting: 0,
-      ready: enqueue(arm),
-      arm: () => enqueue(arm),
-      ensureArmed: () => enqueue(async () => {
-        if (armed)
-          return;
-        await arm();
-      }),
-      standbyIfIdle: () => enqueue(async () => {
-        if (created.starting || recorders.size || recordings.size)
-          return;
-        try {
-          await (browserContext as any)._disableRecorder();
-        } finally {
-          armed = false;
-        }
-      }),
-    };
+    const existing = recorderHubs.get(browserContext);
+    if (existing)
+      return existing;
+    const created = new RecorderHub(browserContext);
     created.ready.catch(() => {
       if (recorderHubs.get(browserContext) === created)
         recorderHubs.delete(browserContext);
@@ -274,14 +293,14 @@ export class InputRecorder {
     return created;
   }
 
-  private _actionAdded(page: playwright.Page, action: actions.Action, code: string, sequence: number) {
+  logActionAdded(page: playwright.Page, action: actions.Action, code: string, sequence: number) {
     this._lastActions.set(page, { action, sequence });
     const tab = this._context.tabForPage(page);
     if (tab)
       this._context.sessionLog!.logUserAction(action, tab, code, false);
   }
 
-  private _actionUpdated(page: playwright.Page, action: actions.Action, code: string, sequence: number) {
+  logActionUpdated(page: playwright.Page, action: actions.Action, code: string, sequence: number) {
     if (this._lastActions.get(page)?.sequence !== sequence)
       return;
     this._lastActions.set(page, { action, sequence });
@@ -290,7 +309,7 @@ export class InputRecorder {
       this._context.sessionLog!.logUserAction(action, tab, code, true);
   }
 
-  private _signalAdded(page: playwright.Page, signal: actions.Signal, code: string, sequence?: number) {
+  logSignalAdded(page: playwright.Page, signal: actions.Signal, code: string, sequence?: number) {
     const lastAction = this._lastActions.get(page);
     if (sequence !== undefined && lastAction?.sequence !== sequence)
       return;

@@ -127,9 +127,9 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
   const noTabGroup = envToBoolean(process.env.PLAYWRIGHT_MCP_NO_TAB_GROUP);
   if (noTabGroup !== undefined)
     envOverrides.tabGroup = !noTabGroup;
-  const cliOverrides = configFromCLIOptions(cliOptions);
-  const result = mergeCLIConfigSources(configInFile, envOverrides, cliOverrides);
-  return validateResolvedConfig(applyMobileConfig(result, configInFile, envOverrides, cliOverrides, envOptions, cliOptions));
+  const layers: ConfigLayers = { file: configInFile, env: envOverrides, cli: configFromCLIOptions(cliOptions) };
+  const options: OptionLayers = { env: envOptions, cli: cliOptions };
+  return validateResolvedConfig(applyMobileConfig(mergeConfigLayers(layers), layers, options));
 }
 
 async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
@@ -212,27 +212,33 @@ function warnAboutAuthenticatedProxies(config: FullConfig): void {
 }
 
 type MobileSource = 'env' | 'cli';
+type ConfigLayers = { file: Config, env: Config, cli: Config };
+type OptionLayers = { env: CLIOptions, cli: CLIOptions };
 
-function mergeCLIConfigSources(configInFile: Config, envOverrides: Config, cliOverrides: Config, mobileOverride?: Config, mobileSource?: MobileSource): FullConfig {
-  let result = defaultConfig;
-  result = mergeConfig(result, configInFile);
-  if (mobileSource === 'env' && mobileOverride)
-    result = mergeConfig(result, mobileOverride);
-  result = mergeConfig(result, envOverrides);
-  if (mobileSource === 'cli' && mobileOverride)
-    result = mergeConfig(result, mobileOverride);
-  result = mergeConfig(result, cliOverrides);
+function mergeConfigLayers(layers: ConfigLayers, mobile?: { override: Config, source: MobileSource }): FullConfig {
+  let result = mergeConfig(defaultConfig, layers.file);
+  for (const source of ['env', 'cli'] as const) {
+    if (mobile?.source === source)
+      result = mergeConfig(result, mobile.override);
+    result = mergeConfig(result, layers[source]);
+  }
   return result;
 }
 
-function applyMobileConfig(resolved: FullConfig, configInFile: Config, envOverrides: Config, cliOverrides: Config, envOptions: CLIOptions, cliOptions: CLIOptions): FullConfig {
-  const source = cliOptions.mobile !== undefined ? (cliOptions.mobile ? 'cli' : undefined) : (envOptions.mobile ? 'env' : undefined);
+function mobileSourceOf(options: OptionLayers): MobileSource | undefined {
+  if (options.cli.mobile !== undefined)
+    return options.cli.mobile ? 'cli' : undefined;
+  return options.env.mobile ? 'env' : undefined;
+}
+
+function applyMobileConfig(resolved: FullConfig, layers: ConfigLayers, options: OptionLayers): FullConfig {
+  const source = mobileSourceOf(options);
   if (!source)
     return resolved;
 
-  if (cliOptions.device || envOptions.device)
+  if (options.cli.device || options.env.device)
     throw new Error('Cannot use --mobile together with --device, pick one.');
-  if (cliOptions.extension)
+  if (options.cli.extension)
     throw new Error('Mobile emulation is not supported with --extension.');
   if (resolved.browser.browserName === 'firefox')
     throw new Error('--mobile is not supported with the Firefox browser.');
@@ -244,8 +250,7 @@ function applyMobileConfig(resolved: FullConfig, configInFile: Config, envOverri
     throw new Error('Mobile emulation is not supported with --cdp-launch-command.');
 
   const device = resolved.browser.browserName === 'webkit' ? 'iPhone 17' : 'Pixel 10';
-  const mobileOverride: Config = { browser: { contextOptions: devices[device] } };
-  return mergeCLIConfigSources(configInFile, envOverrides, cliOverrides, mobileOverride, source);
+  return mergeConfigLayers(layers, { override: { browser: { contextOptions: devices[device] } }, source });
 }
 
 const chromiumChannels = new Set(['chrome', 'chrome-beta', 'chrome-canary', 'chrome-dev', 'chromium', 'msedge', 'msedge-beta', 'msedge-canary', 'msedge-dev']);
@@ -265,54 +270,56 @@ function parseViewportSize(viewportSize: string): { width: number, height: numbe
   return { width, height };
 }
 
-function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = false): Config {
-  const { browserName, channel } = browserFromCLIOption(cliOptions.browser);
-
+function launchOptionsFromCLI(cliOptions: CLIOptions, channel: string | undefined, sandboxTrueIsExplicit: boolean): LaunchOptions {
   const launchOptions: LaunchOptions = {
     channel,
     executablePath: cliOptions.executablePath,
     headless: cliOptions.headless,
   };
-
   if (cliOptions.sandbox === false || (sandboxTrueIsExplicit && cliOptions.sandbox === true))
     launchOptions.chromiumSandbox = cliOptions.sandbox;
-
   if (cliOptions.proxyServer) {
     launchOptions.proxy = proxySettingsFromString(cliOptions.proxyServer);
     if (cliOptions.proxyBypass)
       launchOptions.proxy.bypass = cliOptions.proxyBypass;
   }
+  return launchOptions;
+}
 
-  if (cliOptions.device && cliOptions.cdpEndpoint)
-    throw new Error('Device emulation is not supported with cdpEndpoint.');
-
-  if (cliOptions.cdpEndpoint && cliOptions.cdpLaunchCommand)
-    throw new Error('CDP launch is not supported with cdpEndpoint.');
-
-  const contextOptions: BrowserContextOptions = cliOptions.device ? devices[cliOptions.device] : {};
+function contextOptionsFromCLI(cliOptions: CLIOptions): BrowserContextOptions {
+  const contextOptions: BrowserContextOptions = cliOptions.device ? { ...devices[cliOptions.device] } : {};
   if (cliOptions.storageState)
     contextOptions.storageState = cliOptions.storageState;
-
   if (cliOptions.userAgent)
     contextOptions.userAgent = cliOptions.userAgent;
-
   if (cliOptions.viewportSize)
     contextOptions.viewport = parseViewportSize(cliOptions.viewportSize);
-
   if (cliOptions.ignoreHttpsErrors)
     contextOptions.ignoreHTTPSErrors = true;
-
   if (cliOptions.blockServiceWorkers)
     contextOptions.serviceWorkers = 'block';
+  return contextOptions;
+}
 
-  const cdpLaunch = cliOptions.cdpLaunchCommand ? {
+function cdpLaunchFromCLI(cliOptions: CLIOptions): NonNullable<Config['browser']>['cdpLaunch'] {
+  if (!cliOptions.cdpLaunchCommand)
+    return undefined;
+  return {
     command: cliOptions.cdpLaunchCommand,
     args: cliOptions.cdpLaunchArgs,
     cwd: cliOptions.cdpLaunchCwd,
     port: cliOptions.cdpLaunchPort,
     startupTimeoutMs: cliOptions.cdpLaunchStartupTimeout,
-  } : undefined;
+  };
+}
 
+function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = false): Config {
+  if (cliOptions.device && cliOptions.cdpEndpoint)
+    throw new Error('Device emulation is not supported with cdpEndpoint.');
+  if (cliOptions.cdpEndpoint && cliOptions.cdpLaunchCommand)
+    throw new Error('CDP launch is not supported with cdpEndpoint.');
+
+  const { browserName, channel } = browserFromCLIOption(cliOptions.browser);
   return {
     browser: {
       browserName,
@@ -320,9 +327,9 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
       userDataDir: cliOptions.userDataDir,
       profileDirName: cliOptions.profileDirName,
       allowedUploadDirs: cliOptions.allowedUploadDirs,
-      launchOptions,
-      contextOptions,
-      cdpLaunch,
+      launchOptions: launchOptionsFromCLI(cliOptions, channel, sandboxTrueIsExplicit),
+      contextOptions: contextOptionsFromCLI(cliOptions),
+      cdpLaunch: cdpLaunchFromCLI(cliOptions),
       cdpEndpoint: cliOptions.cdpEndpoint,
       cdpHeaders: parseCdpHeaders(cliOptions.cdpHeader),
       cdpTimeout: cliOptions.cdpTimeout,
@@ -469,6 +476,8 @@ function pickDefined<T extends object>(obj: T | undefined): Partial<T> {
   ) as Partial<T>;
 }
 
+const undocumentedPlaywrightLaunchOptions = { assistantMode: true };
+
 function mergeConfig(base: FullConfig, overrides: Config): FullConfig {
   const browser: FullConfig['browser'] = {
     ...pickDefined(base.browser),
@@ -478,7 +487,7 @@ function mergeConfig(base: FullConfig, overrides: Config): FullConfig {
     launchOptions: {
       ...pickDefined(base.browser?.launchOptions),
       ...pickDefined(overrides.browser?.launchOptions),
-      ...{ assistantMode: true },
+      ...undocumentedPlaywrightLaunchOptions,
     },
     contextOptions: {
       ...pickDefined(base.browser?.contextOptions),
@@ -486,7 +495,7 @@ function mergeConfig(base: FullConfig, overrides: Config): FullConfig {
     },
   };
 
-  if (browser.browserName !== 'chromium' && browser.launchOptions)
+  if (browser.browserName !== 'chromium')
     delete browser.launchOptions.channel;
 
   return {
