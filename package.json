@@ -47,8 +47,8 @@
 	},
 	"dependencies": {
 		"@modelcontextprotocol/client": "^2.3.1",
-		"@modelcontextprotocol/node": "^2.1.1",
-		"@modelcontextprotocol/server": "^2.3.1",
+		"@modelcontextprotocol/node": "^2.1.2",
+		"@modelcontextprotocol/server": "^2.4.0",
 		"axe-core": "4.14.0",
 		"commander": "^15.0.0",
 		"debug": "^4.4.3",
@@ -96,7 +96,7 @@
 		"access": "public"
 	},
 	"overrides": {
-		"minimatch": ">=10.2.5",
+		"minimatch": "^11.0.1",
 		"diff": "5.2.2",
 		"rollup": "^4.62.2",
 		"qs": ">=6.15.3"
