@@ -65,7 +65,7 @@ const screenshot = defineTabTool({
     };
     const displayPath = response.formatFilePath(fileName);
     const displayOptions = { ...options, path: displayPath };
-    const screenshotTarget = params.ref ? params.element : (params.fullPage ? 'full page' : 'viewport');
+    const screenshotTarget = params.ref ? params.element : fullPageOrViewport(params.fullPage);
     response.addCode(`// Screenshot ${screenshotTarget} and save it as ${displayPath}`);
 
     const locator = params.ref ? await tab.refLocator({ element: params.element || '', ref: params.ref }) : undefined;
@@ -86,6 +86,10 @@ const screenshot = defineTabTool({
     }
   }
 });
+
+function fullPageOrViewport(fullPage: boolean | undefined): string {
+  return fullPage ? 'full page' : 'viewport';
+}
 
 export default [
   screenshot,

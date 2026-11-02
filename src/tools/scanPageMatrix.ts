@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type * as playwright from 'playwright';
 import { defineTabTool } from './tool.js';
 import { reserveReportPath, writeJsonReport } from './report.js';
+import type { JsonReportResource } from './report.js';
 import {
   assertRuleOptionsValid,
   axeRuleSchemaShape,
@@ -96,19 +97,19 @@ const scanPageMatrixSchema = z.object({
 type MediaState = VariantResult['applied']['media'];
 
 async function readPageState(page: playwright.Page): Promise<{ zoom: string, media: MediaState }> {
-  return await page.evaluate(() => ({
-    zoom: document.documentElement.style.zoom || '',
-    media: {
-      colorScheme: matchMedia('(prefers-color-scheme: dark)').matches
-        ? 'dark' as const
-        : matchMedia('(prefers-color-scheme: light)').matches ? 'light' as const : null,
-      forcedColors: matchMedia('(forced-colors: active)').matches ? 'active' as const : 'none' as const,
-      reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduce' as const : 'no-preference' as const,
-      contrast: matchMedia('(prefers-contrast: more)').matches
-        ? 'more' as const
-        : matchMedia('(prefers-contrast: no-preference)').matches ? 'no-preference' as const : null,
-    },
-  }));
+  return await page.evaluate(() => {
+    const firstMatching = <T extends string>(feature: string, values: T[]): T | null =>
+      values.find(value => matchMedia(`(${feature}: ${value})`).matches) ?? null;
+    return {
+      zoom: document.documentElement.style.zoom || '',
+      media: {
+        colorScheme: firstMatching('prefers-color-scheme', ['dark', 'light']),
+        forcedColors: firstMatching('forced-colors', ['active']) ?? 'none',
+        reducedMotion: firstMatching('prefers-reduced-motion', ['reduce']) ?? 'no-preference',
+        contrast: firstMatching('prefers-contrast', ['more', 'no-preference']),
+      },
+    };
+  });
 }
 
 function normalizeMedia(variantMedia: z.output<typeof variantSchema>['media'] | undefined, original: MediaState): MediaState {
@@ -253,6 +254,53 @@ function renderMatrixTable(variantResults: VariantResult[], includeIncomplete: b
   ].join('\n');
 }
 
+function buildMatrixReport(url: string, variantResults: VariantResult[], params: ScanPageMatrixParams) {
+  return {
+    version: 'v2',
+    metadata: {
+      url,
+      baselineVariant: variantResults[0]?.name ?? 'baseline',
+      options: {
+        violationsTag: params.violationsTag,
+        includeIncomplete: params.includeIncomplete,
+        includeSelectors: params.includeSelectors ?? null,
+        excludeSelectors: params.excludeSelectors ?? null,
+        withRules: params.withRules ?? null,
+        disableRules: params.disableRules ?? null,
+        maxNodesPerViolation: params.maxNodesPerViolation,
+        waitAfterApplyMs: params.waitAfterApplyMs,
+        reloadBetweenVariants: params.reloadBetweenVariants,
+      },
+      generatedAt: new Date().toISOString(),
+    },
+    variants: variantResults,
+  };
+}
+
+function matrixStructuredContent(report: ReturnType<typeof buildMatrixReport>, reportResource: JsonReportResource, includeIncomplete: boolean) {
+  return {
+    kind: 'scan_page_matrix',
+    version: 'v2',
+    report: reportResource,
+    page: {
+      url: report.metadata.url,
+    },
+    baselineVariant: report.metadata.baselineVariant,
+    variants: report.variants.map(result => ({
+      name: result.name,
+      totalViolations: result.summary.totalRules,
+      totalNodes: result.summary.totalNodes,
+      totalIncomplete: includeIncomplete ? result.incomplete.length : null,
+      unscannedFrames: result.unscannedFrames,
+      comparisonIncompleteRuleIds: result.comparisonIncompleteRuleIds,
+      newViolationIds: result.diffFromBaseline?.newViolationIds ?? null,
+      resolvedViolationIds: result.diffFromBaseline?.resolvedViolationIds ?? null,
+      changedRuleIds: result.diffFromBaseline ? Object.keys(result.diffFromBaseline.changedCounts) : null,
+      reportUri: reportResource.uri,
+    })),
+  };
+}
+
 const scanPageMatrix = defineTabTool({
   capability: 'core',
   schema: {
@@ -288,53 +336,13 @@ const scanPageMatrix = defineTabTool({
       await restorePageState(tab.page, original);
     }
 
-    const report = {
-      version: 'v2',
-      metadata: {
-        url: tab.page.url(),
-        baselineVariant: variantResults[0]?.name ?? 'baseline',
-        options: {
-          violationsTag: params.violationsTag,
-          includeIncomplete: params.includeIncomplete,
-          includeSelectors: params.includeSelectors ?? null,
-          excludeSelectors: params.excludeSelectors ?? null,
-          withRules: params.withRules ?? null,
-          disableRules: params.disableRules ?? null,
-          maxNodesPerViolation: params.maxNodesPerViolation,
-          waitAfterApplyMs: params.waitAfterApplyMs,
-          reloadBetweenVariants: params.reloadBetweenVariants,
-        },
-        generatedAt: new Date().toISOString(),
-      },
-      variants: variantResults,
-    };
-
+    const report = buildMatrixReport(tab.page.url(), variantResults, params);
     const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'scan-page-matrix-report',
       title: 'Scan page matrix JSON report',
       description: 'JSON report containing per-variant Axe results and baseline deltas.',
     });
-    response.setStructuredContent({
-      kind: 'scan_page_matrix',
-      version: 'v2',
-      report: reportResource,
-      page: {
-        url: tab.page.url(),
-      },
-      baselineVariant: report.metadata.baselineVariant,
-      variants: variantResults.map(result => ({
-        name: result.name,
-        totalViolations: result.summary.totalRules,
-        totalNodes: result.summary.totalNodes,
-        totalIncomplete: params.includeIncomplete ? result.incomplete.length : null,
-        unscannedFrames: result.unscannedFrames,
-        comparisonIncompleteRuleIds: result.comparisonIncompleteRuleIds,
-        newViolationIds: result.diffFromBaseline?.newViolationIds ?? null,
-        resolvedViolationIds: result.diffFromBaseline?.resolvedViolationIds ?? null,
-        changedRuleIds: result.diffFromBaseline ? Object.keys(result.diffFromBaseline.changedCounts) : null,
-        reportUri: reportResource.uri,
-      })),
-    });
+    response.setStructuredContent(matrixStructuredContent(report, reportResource, params.includeIncomplete));
 
     response.addCode('// Applied viewport/media/zoom variants and compared Axe deltas against baseline.');
     response.addResult(renderMatrixTable(variantResults, params.includeIncomplete, reportResource.path));

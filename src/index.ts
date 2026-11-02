@@ -24,7 +24,7 @@ import { packageJSON } from './utils/package.js';
 
 import type { Config } from '../config.js';
 import type { BrowserContext } from 'playwright';
-import type { BrowserContextFactory } from './browserContextFactory.js';
+import type { BrowserContextFactory, ContextHandle } from './browserContextFactory.js';
 import type { Server } from '@modelcontextprotocol/server';
 
 export async function createConnection(userConfig: Config = {}, contextGetter?: () => Promise<BrowserContext>): Promise<Server> {
@@ -48,7 +48,7 @@ class SimpleBrowserContextFactory implements BrowserContextFactory {
     this._contextGetter = contextGetter;
   }
 
-  async createContext(): Promise<{ browserContext: BrowserContext, close: () => Promise<void> }> {
+  async createContext(): Promise<ContextHandle> {
     const browserContext = await this._contextGetter();
     return {
       browserContext,

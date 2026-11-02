@@ -18,6 +18,7 @@ import debug from 'debug';
 import type * as playwright from 'playwright';
 
 import { logUnhandledError } from './utils/log.js';
+import { errorMessage } from './utils/errors.js';
 import { createShortGuid } from './utils/guid.js';
 import { Tab } from './tab.js';
 import { outputFile } from './config.js';
@@ -29,7 +30,7 @@ import { rejectAfterTimeout, settleWithin } from './utils/timeout.js';
 
 import type { FullConfig } from './config.js';
 import type { Tool } from './tools/tool.js';
-import type { BrowserContextFactory, ClientInfo } from './browserContextFactory.js';
+import type { BrowserContextFactory, ClientInfo, ContextHandle } from './browserContextFactory.js';
 import type { BrowserSessionBroker } from './browserSessions.js';
 import type { SessionLog } from './sessionLog.js';
 import type { RecordedAction, Recording, RecordingTarget } from './inputRecorder.js';
@@ -88,8 +89,6 @@ function releaseOnce(release: () => void): () => void {
     release();
   };
 }
-
-type BrowserContextHandle = { browserContext: playwright.BrowserContext, close: () => Promise<void>, closeStarting?: () => void };
 
 class ContextRegistry {
   private readonly _contexts = new Set<Context>();
@@ -181,7 +180,7 @@ export class Context {
   readonly modalStateTools: Tool[];
   readonly config: FullConfig;
   readonly options: ContextOptions;
-  private _browserContextPromise: Promise<BrowserContextHandle> | undefined;
+  private _browserContextPromise: Promise<ContextHandle> | undefined;
   private _browserContextFactory: BrowserContextFactory;
   private _tabs: Tab[] = [];
   private _currentTab: Tab | undefined;
@@ -479,8 +478,7 @@ export class Context {
     const settled = promise.catch(error => {
       if (this._downloadErrors.length < maxRetainedDownloadErrors) {
         const label = filename ? ` "${filename}"` : '';
-        const cause = error instanceof Error ? error.message : String(error);
-        this._downloadErrors.push(truncateWithMarker(truncateDataUrls(`Failed to save download${label}: ${cause}`), maxDownloadErrorBytes));
+        this._downloadErrors.push(truncateWithMarker(truncateDataUrls(`Failed to save download${label}: ${errorMessage(error)}`), maxDownloadErrorBytes));
       } else {
         ++this._omittedDownloadErrors;
       }
@@ -648,7 +646,7 @@ export class Context {
     return this._browserContextPromise;
   }
 
-  private async _setupBrowserContext(): Promise<BrowserContextHandle> {
+  private async _setupBrowserContext(): Promise<ContextHandle> {
     if (this._closeBrowserContextPromise)
       throw new Error('Another browser context is being closed.');
     assertNetworkPolicySupported(this.config, this._browserContextFactory.ownsBrowser === true);

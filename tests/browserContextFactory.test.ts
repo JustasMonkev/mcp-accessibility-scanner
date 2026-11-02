@@ -1014,7 +1014,7 @@ describe('browserContextFactory', () => {
     const userProfile = contextFactory(await resolveConfig({ browser: { userDataDir: '/tmp/my-profile' } }));
     expect(userProfile.sessionsUnsupportedReason).toContain('--user-data-dir');
 
-    const extension = new ExtensionContextFactory('chrome', undefined, undefined);
+    const extension = new ExtensionContextFactory({ browserChannel: 'chrome' });
     expect(extension.sessionsUnsupportedReason).toContain('--extension');
 
     const vscode = new VSCodeBrowserContextFactory(await resolveConfig({}), playwright as any, 'ws://127.0.0.1:1234');
@@ -1828,7 +1828,7 @@ describe('browserContextFactory', () => {
         contextOptions: { storageState: '/tmp/auth.json' },
       },
     });
-    const extensionFactory = new ExtensionContextFactory('chrome', undefined, undefined);
+    const extensionFactory = new ExtensionContextFactory({ browserChannel: 'chrome' });
 
     expect(() => contextFactory(config)).not.toThrow();
     expect(() => assertStorageStateSupported(config, extensionFactory, 'remedy'))

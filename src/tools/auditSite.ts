@@ -6,10 +6,13 @@ import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { reserveReportPath, writeJsonReport } from './report.js';
 import type { JsonReportResource } from './report.js';
+import type { Response as ToolResponse } from '../response.js';
 import { TabEvents, type Tab } from '../tab.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 import { HtmlPatternGroups } from '../utils/htmlPatterns.js';
 import { logUnhandledError } from '../utils/log.js';
+import { errorMessage } from '../utils/errors.js';
+import { isHttpUrl } from '../utils/httpUrl.js';
 import { selectRepresentativeUrls } from '../utils/representativeUrls.js';
 import {
   assertRuleOptionsValid,
@@ -186,8 +189,7 @@ function buildExcludePathPatterns(patterns: string[]): RE2[] {
     try {
       return new RE2(pattern, 'i');
     } catch (error) {
-      const errorText = error instanceof Error ? error.message : String(error);
-      throw new Error(`Invalid regex in excludePathPatterns[${index}] ("${pattern}"): ${errorText}`);
+      throw new Error(`Invalid regex in excludePathPatterns[${index}] ("${pattern}"): ${errorMessage(error)}`);
     }
   });
 }
@@ -200,7 +202,7 @@ function parseStartUrl(startUrlInput: string | undefined, activeTabUrl: string):
   } catch {
     throw new Error(`Invalid start URL "${startUrlValue}". Provide params.startUrl with an absolute http(s) URL or navigate the active tab (currently "${activeTabUrl}") first.`);
   }
-  if (startUrl.protocol !== 'http:' && startUrl.protocol !== 'https:')
+  if (!isHttpUrl(startUrl))
     throw new Error(`Start URL must use http:// or https://. Received "${startUrlValue}" (active tab: "${activeTabUrl}").`);
   return startUrl;
 }
@@ -209,7 +211,7 @@ function inferStartUrlFromProvidedUrls(urls: string[] | undefined): string | und
   for (const rawUrl of urls ?? []) {
     try {
       const candidate = new URL(rawUrl);
-      if (candidate.protocol === 'http:' || candidate.protocol === 'https:')
+      if (isHttpUrl(candidate))
         return candidate.toString();
     } catch {}
   }
@@ -229,7 +231,7 @@ function normalizeUrl(rawUrl: string, baseUrl: URL, ignoredParams: Set<string>):
     return null;
   }
 
-  if (url.protocol !== 'http:' && url.protocol !== 'https:')
+  if (!isHttpUrl(url))
     return null;
 
   url.hash = '';
@@ -237,12 +239,7 @@ function normalizeUrl(rawUrl: string, baseUrl: URL, ignoredParams: Set<string>):
     if (ignoredParams.has(key.toLowerCase()))
       url.searchParams.delete(key);
   }
-
-  const sortedParams = [...url.searchParams.entries()].sort(([first], [second]) => (first < second ? -1 : first > second ? 1 : 0));
-  url.search = '';
-  for (const [key, value] of sortedParams)
-    url.searchParams.append(key, value);
-
+  url.searchParams.sort();
   return url;
 }
 
@@ -295,8 +292,31 @@ async function readPage(page: Page, linkSelector: string): Promise<{ title: stri
 const allLinksSelector = 'a[href]';
 const navLinksSelector = 'nav a[href], header a[href], [role="navigation"] a[href]';
 
+const namedXmlEntities: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+
+function invalidSitemapEntityError(): Error {
+  return new Error('Invalid XML entity in sitemap location.');
+}
+
+function isXmlCharacter(code: number): boolean {
+  return code === 9 || code === 10 || code === 13
+    || (code >= 0x20 && code <= 0xD7FF)
+    || (code >= 0xE000 && code <= 0xFFFD)
+    || (code >= 0x10000 && code <= 0x10FFFF);
+}
+
+function decodeXmlEntity(entity: string): string {
+  if (Object.hasOwn(namedXmlEntities, entity))
+    return namedXmlEntities[entity];
+  if (!/^#(?:[0-9]+|x[0-9a-fA-F]+)$/.test(entity))
+    throw invalidSitemapEntityError();
+  const code = entity.startsWith('#x') ? Number.parseInt(entity.slice(2), 16) : Number(entity.slice(1));
+  if (!isXmlCharacter(code))
+    throw invalidSitemapEntityError();
+  return String.fromCodePoint(code);
+}
+
 function decodeSitemapLocation(value: string): string {
-  const entities: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
   const tokens = /<!\[CDATA\[|&([^&;]*);?/g;
   const parts: string[] = [];
   let copied = 0;
@@ -309,24 +329,28 @@ function decodeSitemapLocation(value: string): string {
       parts.push(value.slice(tokens.lastIndex, end));
       tokens.lastIndex = end + 3;
     } else {
-      const entity = token[1];
       if (!token[0].endsWith(';'))
-        throw new Error('Invalid XML entity in sitemap location.');
-      if (Object.hasOwn(entities, entity)) {
-        parts.push(entities[entity]);
-      } else if (/^#(?:[0-9]+|x[0-9a-fA-F]+)$/.test(entity)) {
-        const code = entity.startsWith('#x') ? Number.parseInt(entity.slice(2), 16) : Number(entity.slice(1));
-        if (!(code === 9 || code === 10 || code === 13 || (code >= 0x20 && code <= 0xD7FF) || (code >= 0xE000 && code <= 0xFFFD) || (code >= 0x10000 && code <= 0x10FFFF)))
-          throw new Error('Invalid XML entity in sitemap location.');
-        parts.push(String.fromCodePoint(code));
-      } else {
-        throw new Error('Invalid XML entity in sitemap location.');
-      }
+        throw invalidSitemapEntityError();
+      parts.push(decodeXmlEntity(token[1]));
     }
     copied = tokens.lastIndex;
   }
   parts.push(value.slice(copied));
   return parts.join('');
+}
+
+const maxSitemapBytes = 10 * 1024 * 1024;
+
+async function readSitemapBody(response: globalThis.Response): Promise<string> {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for await (const chunk of response.body ?? []) {
+    size += chunk.length;
+    if (size > maxSitemapBytes)
+      throw new Error('Sitemap exceeds the 10 MiB limit.');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: string, base: URL) => string): Promise<string[]> {
@@ -347,17 +371,7 @@ async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: strin
         await response.body?.cancel();
         throw new Error(`Failed to fetch sitemap ${sitemapUrl}: ${response.status} ${response.statusText}`);
       }
-      const chunks: Uint8Array[] = [];
-      let size = 0;
-      if (response.body) {
-        for await (const chunk of response.body) {
-          size += chunk.length;
-          if (size > 10 * 1024 * 1024)
-            throw new Error('Sitemap exceeds the 10 MiB limit.');
-          chunks.push(chunk);
-        }
-      }
-      const xmlText = Buffer.concat(chunks).toString('utf8');
+      const xmlText = await readSitemapBody(response);
       return [...xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)]
           .map(match => decodeSitemapLocation(match[1]).trim()).filter(Boolean);
     }
@@ -367,19 +381,19 @@ async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: strin
   }
 }
 
-function parseSitemapUrl(input: string, base: URL, startUrl: URL, sameOriginOnly: boolean, includeSubdomains: boolean, config: FullConfig): string {
+function parseSitemapUrl(input: string, base: URL, scope: CrawlScope, config: FullConfig): string {
   let url: URL;
   try {
     url = new URL(input, base);
   } catch {
     throw new Error(`Invalid sitemap URL "${input}".`);
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:')
+  if (!isHttpUrl(url))
     throw new Error(`Sitemap URL must use http:// or https://. Received "${input}".`);
   if (url.username || url.password)
     throw new Error('Sitemap URL must not contain credentials.');
-  if (!isAllowedByOrigin(url, startUrl, sameOriginOnly, includeSubdomains))
-    throw new Error(`Sitemap URL "${input}" is outside the allowed crawl scope (start origin ${startUrl.origin}).`);
+  if (!scope.allowsOrigin(url))
+    throw new Error(`Sitemap URL "${input}" is outside the allowed crawl scope (start origin ${scope.startUrl.origin}).`);
   const matches = (origin: string) => coreBundle.iso.urlMatches(undefined, url.href, `*://${origin}/**`);
   if (config.network.blockedOrigins?.some(matches) ||
       (config.network.allowedOrigins?.length && !config.network.allowedOrigins.some(matches)))
@@ -564,11 +578,13 @@ class CrawlScope {
     this._excludePatterns = buildExcludePathPatterns(params.excludePathPatterns);
   }
 
+  allowsOrigin(candidate: URL): boolean {
+    return isAllowedByOrigin(candidate, this.startUrl, this._params.sameOriginOnly, this._params.includeSubdomains);
+  }
+
   admit(rawUrl: string): string | null {
     const normalizedUrl = normalizeUrl(rawUrl, this.startUrl, this._ignoredParams);
-    if (!normalizedUrl
-      || !isAllowedByOrigin(normalizedUrl, this.startUrl, this._params.sameOriginOnly, this._params.includeSubdomains)
-      || isExcludedByPath(normalizedUrl, this._excludePatterns))
+    if (!normalizedUrl || !this.allowsOrigin(normalizedUrl) || isExcludedByPath(normalizedUrl, this._excludePatterns))
       return null;
     return normalizedUrl.toString();
   }
@@ -763,14 +779,15 @@ function assertSitemapFetchSupported(context: Tab['context']): void {
     throw new Error('Sitemap fetches do not support browser proxies. Use the provided URL strategy when a proxy is required.');
 }
 
-async function seedFrontier(frontier: CrawlFrontier, startUrl: URL, params: AuditSiteParams, context: Tab['context']): Promise<void> {
+async function seedFrontier(frontier: CrawlFrontier, scope: CrawlScope, params: AuditSiteParams, context: Tab['context']): Promise<void> {
+  const startUrl = scope.startUrl;
   if (params.strategy === 'provided') {
     frontier.enqueueListed(params.urls ?? [], null, params.pageSelection);
     return;
   }
   if (params.strategy === 'sitemap') {
     assertSitemapFetchSupported(context);
-    const validateUrl = (input: string, base: URL) => parseSitemapUrl(input, base, startUrl, params.sameOriginOnly, params.includeSubdomains, context.config);
+    const validateUrl = (input: string, base: URL) => parseSitemapUrl(input, base, scope, context.config);
     const sitemapUrl = validateUrl(params.sitemapUrl ?? new URL('sitemap.xml', startUrl).toString(), startUrl);
     frontier.enqueueListed(await extractSitemapUrls(sitemapUrl, validateUrl), sitemapUrl, params.pageSelection);
     return;
@@ -802,39 +819,33 @@ function newPageReport(item: CrawlItem): PageReport {
 }
 
 type PageFindings = { violations: AxeViolation[], incomplete: AxeViolation[] | null };
+type DialogWatch = ReturnType<typeof watchForDialog>;
+type PageVisit = { tab: Tab, item: CrawlItem, report: PageReport, dialogWatch: DialogWatch };
 
-async function scanCrawledPage(
-  crawlTab: Tab,
-  item: CrawlItem,
-  pageReport: PageReport,
-  scope: CrawlScope,
-  params: AuditSiteParams,
-  dialogWatch: ReturnType<typeof watchForDialog>,
-  commitLinks: (links: string[]) => void
-): Promise<PageFindings> {
+async function scanCrawledPage({ tab, item, report, dialogWatch }: PageVisit, scope: CrawlScope, params: AuditSiteParams, commitLinks: (links: string[]) => void): Promise<PageFindings> {
   await dialogWatch.ready();
-  await dialogWatch.guard(crawlTab.navigate(item.url));
-  await dialogWatch.guard(crawlTab.waitForTimeout(params.waitAfterNavigationMs));
+  await dialogWatch.guard(tab.navigate(item.url));
+  await dialogWatch.guard(tab.waitForTimeout(params.waitAfterNavigationMs));
 
-  const reachedUrl = crawlTab.page.url();
+  const reachedUrl = tab.page.url();
   if (!scope.admit(reachedUrl))
     throw new Error(`Requested URL "${item.url}" reached "${truncateDataUrls(reachedUrl)}", which is outside the allowed crawl scope or matches excludePathPatterns. The destination was not audited.`);
 
-  const { title, links } = await dialogWatch.guard(readPage(crawlTab.page, linkSelectorFor(params, item.depth)));
-  pageReport.title = title;
+  const { title, links } = await dialogWatch.guard(readPage(tab.page, linkSelectorFor(params, item.depth)));
+  report.title = title;
   commitLinks(links);
 
-  const axeResult = await dialogWatch.guard(runAxeScan(crawlTab.page, axeScanOptions(params)));
+  const axeResult = await dialogWatch.guard(runAxeScan(tab.page, axeScanOptions(params)));
   const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
-  pageReport.status = 'scanned';
-  pageReport.unscannedFrames = axeResult.unscannedFrames;
-  pageReport.violations = violations.trimmed;
-  pageReport.summary = summarizeAxeViolations(violations.deduped);
+  report.status = 'scanned';
+  report.unscannedFrames = axeResult.unscannedFrames;
+  report.violations = violations.trimmed;
+  report.summary = summarizeAxeViolations(violations.deduped);
 
   if (!params.includeIncomplete)
     return { violations: violations.deduped, incomplete: null };
   const incomplete = prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation);
-  pageReport.incomplete = incomplete.trimmed;
+  report.incomplete = incomplete.trimmed;
   return { violations: violations.deduped, incomplete: incomplete.deduped };
 }
 
@@ -987,6 +998,187 @@ function renderSiteSummary(options: {
   ].join('\n');
 }
 
+function requestedStartUrl(params: AuditSiteParams): string | undefined {
+  if (params.startUrl !== undefined || params.strategy !== 'provided')
+    return params.startUrl;
+  return inferStartUrlFromProvidedUrls(params.urls);
+}
+
+type CrawlSetup = {
+  context: Tab['context'];
+  params: AuditSiteParams;
+  scope: CrawlScope;
+  frontier: CrawlFrontier;
+  response: ToolResponse;
+};
+
+type CrawlWorker = { tab: Tab | undefined, abandoned: boolean };
+
+class SiteCrawl {
+  readonly pages: PageReport[] = [];
+  readonly crawlTabRestarts: { url: string }[] = [];
+  erroredPages = 0;
+  private readonly _setup: CrawlSetup;
+  private readonly _session: SessionLossDetector;
+  private readonly _workers: CrawlWorker[];
+  private readonly _retiredTabs: Tab[] = [];
+  private readonly _pageFindings = new Map<PageReport, PageFindings>();
+  private readonly _linkCommits: OrderedLinkCommits;
+  private _processedPages = 0;
+  private _stopped = false;
+
+  static async open(setup: CrawlSetup): Promise<SiteCrawl> {
+    const firstTab = await setup.context.newTab();
+    const session = await SessionLossDetector.create(firstTab.page, setup.frontier.queue.map(item => item.cookieUrl));
+    return new SiteCrawl(setup, firstTab, session);
+  }
+
+  private constructor(setup: CrawlSetup, firstTab: Tab, session: SessionLossDetector) {
+    this._setup = setup;
+    this._session = session;
+    const workerCount = Math.min(setup.params.concurrency, setup.params.maxPages);
+    this._workers = Array.from({ length: workerCount }, (_, index) => ({ tab: index === 0 ? firstTab : undefined, abandoned: false }));
+    this._linkCommits = new OrderedLinkCommits(({ links, depth, discoveredFrom }) => {
+      for (const link of links)
+        setup.frontier.enqueue(link, depth, discoveredFrom);
+    });
+  }
+
+  get sessionLosses(): SessionLoss[] {
+    return this._session.losses;
+  }
+
+  async run(): Promise<void> {
+    const failures: unknown[] = [];
+    await Promise.all(this._workers.map(worker => this._runWorker(worker).catch(error => {
+      failures.push(error);
+      this._stopped = true;
+      this._linkCommits.wakeWaiters();
+    })));
+    if (failures.length)
+      throw failures[0];
+  }
+
+  async closeTabs(originalTab: Tab): Promise<void> {
+    const { context } = this._setup;
+    for (const crawlOwnedTab of [...this._workers.map(worker => worker.tab), ...this._retiredTabs])
+      await closeTabIfOpen(context, crawlOwnedTab);
+    const originalTabIndex = context.tabs().indexOf(originalTab);
+    if (originalTabIndex !== -1)
+      await context.selectTab(originalTabIndex).catch(logUnhandledError);
+  }
+
+  aggregatedFindings(): Pick<SummaryReport, 'violations' | 'incomplete'> {
+    const violations = new Map<string, ViolationSummaryAggregate>();
+    const incomplete = new Map<string, ViolationSummaryAggregate>();
+    for (const page of this.pages) {
+      const findings = this._pageFindings.get(page);
+      if (!findings)
+        continue;
+      aggregateIntoSummary(violations, findings.violations, page.url);
+      if (findings.incomplete)
+        aggregateIntoSummary(incomplete, findings.incomplete, page.url);
+    }
+    return { violations: toSortedSummaryViolations(violations), incomplete: toSortedSummaryViolations(incomplete) };
+  }
+
+  private async _runWorker(worker: CrawlWorker): Promise<void> {
+    const { frontier, params } = this._setup;
+    while (!this._stopped) {
+      if (!frontier.queue.length) {
+        if (this._linkCommits.allCommitted)
+          return;
+        await this._linkCommits.waitForCommit();
+        continue;
+      }
+      if (this.pages.length >= params.maxPages)
+        return;
+      const item = frontier.takeUnvisited();
+      if (item)
+        await this._auditPage(worker, item, this._linkCommits.dequeued++);
+    }
+  }
+
+  private async _auditPage(worker: CrawlWorker, queuedItem: CrawlItem, sequence: number): Promise<void> {
+    const pageIndex = this.pages.push(newPageReport(queuedItem)) - 1;
+    const commitLinks = this._linkCommitterFor(queuedItem, sequence);
+    this._session.pageStarted(sequence, queuedItem.url);
+    try {
+      let item = queuedItem;
+      while (await this._attemptPage(worker, item, { pageIndex, sequence }, commitLinks) === 'retry')
+        item = { ...item, retriedAfterOutgoingDialog: true };
+    } finally {
+      this._session.pageFinished(sequence);
+      commitLinks([]);
+    }
+  }
+
+  private _linkCommitterFor(item: CrawlItem, sequence: number): (links: string[]) => void {
+    let committed = false;
+    return links => {
+      if (committed)
+        return;
+      committed = true;
+      this._linkCommits.commit(sequence, { links, depth: item.depth + 1, discoveredFrom: item.url });
+    };
+  }
+
+  private async _attemptPage(worker: CrawlWorker, item: CrawlItem, slot: { pageIndex: number, sequence: number }, commitLinks: (links: string[]) => void): Promise<'done' | 'retry'> {
+    const report = newPageReport(item);
+    this.pages[slot.pageIndex] = report;
+    const tab = await this._readyTab(worker, item);
+    const urlBeforeNavigation = tab.page.url();
+    const dialogWatch = watchForDialog(tab, item.url);
+    let retry = false;
+    try {
+      this._pageFindings.set(report, await scanCrawledPage({ tab, item, report, dialogWatch }, this._setup.scope, this._setup.params, commitLinks));
+    } catch (error) {
+      retry = !item.retriedAfterOutgoingDialog && dialogWatch.raisedByOutgoingDocument();
+      if (!retry) {
+        this.erroredPages++;
+        report.status = 'error';
+        report.error = errorMessage(error);
+      }
+    } finally {
+      await dialogWatch.stop();
+      worker.abandoned = dialogWatch.fired();
+      if (!retry)
+        this._session.pageFinished(slot.sequence);
+      await this._session.check(tab.page, slot.sequence, retry ? urlBeforeNavigation : item.url, urlBeforeNavigation);
+      if (!retry)
+        await this._reportPageProgress(report, item.url);
+    }
+    return retry ? 'retry' : 'done';
+  }
+
+  private async _readyTab(worker: CrawlWorker, item: CrawlItem): Promise<Tab> {
+    worker.tab ??= await this._setup.context.newTab();
+    await this._session.widenScope(worker.tab.page, item.cookieUrl);
+    if (worker.abandoned || openDialog(worker.tab))
+      await this._replaceTabFrozenByDialog(worker, worker.tab, item.url);
+    return worker.tab;
+  }
+
+  private async _replaceTabFrozenByDialog(worker: CrawlWorker, frozenTab: Tab, url: string): Promise<void> {
+    worker.abandoned = false;
+    this._retiredTabs.push(frozenTab);
+    worker.tab = await this._setup.context.newTab();
+    this.crawlTabRestarts.push({ url });
+    await closeTabIfOpen(this._setup.context, frozenTab);
+  }
+
+  private async _reportPageProgress(report: PageReport, url: string): Promise<void> {
+    this._processedPages++;
+    const { params, response } = this._setup;
+    const verb = report.status === 'scanned' ? 'Scanned' : 'Failed';
+    await response.reportProgress({
+      progress: this._processedPages,
+      total: params.maxPages,
+      message: `${verb} page ${this._processedPages}/${params.maxPages}: ${url}`,
+    });
+  }
+}
+
 const auditSite = defineTabTool({
   capability: 'core',
   schema: {
@@ -1002,18 +1194,11 @@ const auditSite = defineTabTool({
 
     const context = tab.context;
     const reportPath = await reserveReportPath(context, response, params.reportFile, 'audit-site');
-    const originalTab = tab;
-    const pages: PageReport[] = [];
-    let erroredPages = 0;
-
     const scanStartedAt = Date.now();
-    const inferredStartUrl = !params.startUrl && params.strategy === 'provided'
-      ? inferStartUrlFromProvidedUrls(params.urls)
-      : undefined;
-    const startUrl = parseStartUrl(params.startUrl ?? inferredStartUrl, originalTab.page.url());
+    const startUrl = parseStartUrl(requestedStartUrl(params), tab.page.url());
     const scope = new CrawlScope(startUrl, params);
     const frontier = new CrawlFrontier(scope, params.maxPages);
-    await seedFrontier(frontier, startUrl, params, context);
+    await seedFrontier(frontier, scope, params, context);
 
     await response.reportProgress({
       progress: 0,
@@ -1021,151 +1206,27 @@ const auditSite = defineTabTool({
       message: `Initialized site audit with ${frontier.queue.length} queued URL(s).`,
     });
 
-    type CrawlWorker = { tab: Tab | undefined, abandoned: boolean };
-    const workers: CrawlWorker[] = Array.from({ length: Math.min(params.concurrency, params.maxPages) }, () => ({ tab: undefined, abandoned: false }));
-    const firstTab = await context.newTab();
-    workers[0].tab = firstTab;
-    const retiredTabs: Tab[] = [];
-    const session = await SessionLossDetector.create(firstTab.page, frontier.queue.map(item => item.cookieUrl));
-    const crawlTabRestarts: { url: string }[] = [];
-    const pageFindings = new Map<PageReport, PageFindings>();
-    const linkCommits = new OrderedLinkCommits(({ links, depth, discoveredFrom }) => {
-      for (const link of links)
-        frontier.enqueue(link, depth, discoveredFrom);
-    });
-    let processedPages = 0;
-
-    const replaceTabFrozenByDialog = async (worker: CrawlWorker & { tab: Tab }, url: string) => {
-      worker.abandoned = false;
-      const frozenTab = worker.tab;
-      retiredTabs.push(frozenTab);
-      worker.tab = await context.newTab();
-      crawlTabRestarts.push({ url });
-      await closeTabIfOpen(context, frozenTab);
-    };
-
-    const reportPageProgress = async (pageReport: PageReport, url: string) => {
-      processedPages++;
-      const verb = pageReport.status === 'scanned' ? 'Scanned' : 'Failed';
-      await response.reportProgress({
-        progress: processedPages,
-        total: params.maxPages,
-        message: `${verb} page ${processedPages}/${params.maxPages}: ${url}`,
-      });
-    };
-
-    const auditPage = async (worker: CrawlWorker, queuedItem: CrawlItem, sequence: number) => {
-      const pageIndex = pages.push(newPageReport(queuedItem)) - 1;
-      let linksCommitted = false;
-      const commitLinks = (links: string[]) => {
-        if (linksCommitted)
-          return;
-        linksCommitted = true;
-        linkCommits.commit(sequence, { links, depth: queuedItem.depth + 1, discoveredFrom: queuedItem.url });
-      };
-      session.pageStarted(sequence, queuedItem.url);
-      try {
-        for (let item = queuedItem; ;) {
-          const pageReport = newPageReport(item);
-          pages[pageIndex] = pageReport;
-
-          worker.tab ??= await context.newTab();
-          await session.widenScope(worker.tab.page, item.cookieUrl);
-          if (worker.abandoned || openDialog(worker.tab))
-            await replaceTabFrozenByDialog(worker as CrawlWorker & { tab: Tab }, item.url);
-
-          const crawlTab = worker.tab!;
-          const urlBeforeNavigation = crawlTab.page.url();
-          const dialogWatch = watchForDialog(crawlTab, item.url);
-          let retryItem = false;
-          try {
-            pageFindings.set(pageReport, await scanCrawledPage(crawlTab, item, pageReport, scope, params, dialogWatch, commitLinks));
-          } catch (error) {
-            if (!item.retriedAfterOutgoingDialog && dialogWatch.raisedByOutgoingDocument()) {
-              retryItem = true;
-            } else {
-              erroredPages++;
-              pageReport.status = 'error';
-              pageReport.error = error instanceof Error ? error.message : String(error);
-            }
-          } finally {
-            await dialogWatch.stop();
-            worker.abandoned = dialogWatch.fired();
-            if (!retryItem)
-              session.pageFinished(sequence);
-            await session.check(crawlTab.page, sequence, retryItem ? urlBeforeNavigation : item.url, urlBeforeNavigation);
-            if (!retryItem)
-              await reportPageProgress(pageReport, item.url);
-          }
-          if (!retryItem)
-            return;
-          item = { ...item, retriedAfterOutgoingDialog: true };
-        }
-      } finally {
-        session.pageFinished(sequence);
-        commitLinks([]);
-      }
-    };
-
-    let stopped = false;
-    const runWorker = async (worker: CrawlWorker) => {
-      while (!stopped) {
-        if (!frontier.queue.length) {
-          if (linkCommits.allCommitted)
-            return;
-          await linkCommits.waitForCommit();
-          continue;
-        }
-        if (pages.length >= params.maxPages)
-          return;
-        const item = frontier.takeUnvisited();
-        if (item)
-          await auditPage(worker, item, linkCommits.dequeued++);
-      }
-    };
-
+    const crawl = await SiteCrawl.open({ context, params, scope, frontier, response });
     try {
-      const failures: unknown[] = [];
-      await Promise.all(workers.map(worker => runWorker(worker).catch(error => {
-        failures.push(error);
-        stopped = true;
-        linkCommits.wakeWaiters();
-      })));
-      if (failures.length)
-        throw failures[0];
+      await crawl.run();
     } finally {
-      for (const crawlOwnedTab of [...workers.map(worker => worker.tab), ...retiredTabs])
-        await closeTabIfOpen(context, crawlOwnedTab);
-      const originalTabIndex = context.tabs().indexOf(originalTab);
-      if (originalTabIndex !== -1)
-        await context.selectTab(originalTabIndex).catch(logUnhandledError);
+      await crawl.closeTabs(tab);
     }
 
-    const summaryByViolation = new Map<string, ViolationSummaryAggregate>();
-    const summaryByIncomplete = new Map<string, ViolationSummaryAggregate>();
-    for (const page of pages) {
-      const findings = pageFindings.get(page);
-      if (!findings)
-        continue;
-      aggregateIntoSummary(summaryByViolation, findings.violations, page.url);
-      if (findings.incomplete)
-        aggregateIntoSummary(summaryByIncomplete, findings.incomplete, page.url);
-    }
-
+    const { pages, crawlTabRestarts } = crawl;
     const pagesWithUnscannedFrames = pages.filter(page => page.unscannedFrames.length);
     const scannedPagesByViolations = sortScannedPagesByViolations(pages);
     const summary: SummaryReport = {
       totals: {
         scannedPages: scannedPagesByViolations.length,
-        erroredPages,
+        erroredPages: crawl.erroredPages,
         skippedUrls: frontier.skippedUrls,
         queuedUrls: frontier.visited.size,
       },
-      violations: toSortedSummaryViolations(summaryByViolation),
-      incomplete: toSortedSummaryViolations(summaryByIncomplete),
+      ...crawl.aggregatedFindings(),
     };
     const { representativeSelection } = frontier;
-    const sessionLosses = session.losses;
+    const sessionLosses = crawl.sessionLosses;
 
     const report = buildSiteReport({ startUrl, params, scanStartedAt, pages, summary, representativeSelection, sessionLosses, crawlTabRestarts });
     const reportResource = await writeJsonReport(response, reportPath, report, {

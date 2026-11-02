@@ -22,17 +22,19 @@ import path from 'node:path';
 import * as playwright from 'playwright';
 import coreBundle from 'playwright-core/lib/coreBundle';
 
-const { registryDirectory } = coreBundle.registry;
-const { startTraceViewerServer } = coreBundle.server;
 import { logUnhandledError, testDebug } from './utils/log.js';
+import { errorMessage } from './utils/errors.js';
 import { createGuid, createHash, createShortGuid } from './utils/guid.js';
-import { outputFile  } from './config.js';
+import { outputFile } from './config.js';
 import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
 import { settleWithin } from './utils/timeout.js';
-
-const defaultCdpTimeoutMs = 30_000;
+import { printToStderr } from './utils/terminal.js';
 
 import type { FullConfig } from './config.js';
+
+const { registryDirectory } = coreBundle.registry;
+const { startTraceViewerServer } = coreBundle.server;
+const defaultCdpTimeoutMs = 30_000;
 
 export function assertStorageStateSupported(config: FullConfig, factory: BrowserContextFactory, remedy: string): void {
   if (config.browser.contextOptions?.storageState && !factory.appliesStorageState)
@@ -124,6 +126,12 @@ function createContextFactory(config: FullConfig): BrowserContextFactory {
 
 export type ClientInfo = { name?: string, version?: string };
 
+export type ContextHandle = {
+  browserContext: playwright.BrowserContext;
+  close: () => Promise<void>;
+  closeStarting?: () => void;
+};
+
 export type CreateContextOptions = {
   browserSession?: boolean;
 };
@@ -134,7 +142,7 @@ export interface BrowserContextFactory {
   readonly attachNeedsUser?: boolean;
   readonly appliesStorageState?: boolean;
   readonly sessionsUnsupportedReason?: string;
-  createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined, options?: CreateContextOptions): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void>, closeStarting?: () => void }>;
+  createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined, options?: CreateContextOptions): Promise<ContextHandle>;
 }
 
 abstract class BaseContextFactory implements BrowserContextFactory {
@@ -212,7 +220,7 @@ abstract class BaseContextFactory implements BrowserContextFactory {
     return true;
   }
 
-  async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  async createContext(clientInfo: ClientInfo): Promise<ContextHandle> {
     testDebug(`create browser context (${this._logName})`);
     const { browser, release } = await this._acquireBrowser(clientInfo);
     let browserContext: playwright.BrowserContext;
@@ -247,8 +255,8 @@ class IsolatedContextFactory extends BaseContextFactory {
         handleSIGINT: false,
         handleSIGTERM: false,
       }).catch(error => {
-        if (error.message.includes('Executable doesn\'t exist'))
-          throw browserNotInstalledError(error);
+        if (errorMessage(error).includes('Executable doesn\'t exist'))
+          throw browserNotInstalledError(errorMessage(error));
         throw error;
       });
     } finally {
@@ -358,7 +366,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     return undefined;
   }
 
-  async createContext(clientInfo: ClientInfo): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  async createContext(clientInfo: ClientInfo): Promise<ContextHandle> {
     const cdpLaunch = this.config.browser.cdpLaunch!;
     if (cdpLaunch.port !== undefined) {
       await this._waitForClosingPinnedPortHolder(cdpLaunch);
@@ -472,6 +480,34 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
 
 class StorageStateError extends Error {}
 
+type StableProfileClaim = {
+  closing: boolean;
+  released: Promise<void>;
+  release: () => void;
+};
+
+function disposableProfileSuffix(hasStorageState: boolean, browserSession: boolean): string {
+  if (hasStorageState)
+    return `-storage-state-${createGuid()}`;
+  if (browserSession)
+    return `-session-${createGuid()}`;
+  return '';
+}
+
+function releasingClaimOnClose(result: ContextHandle, claim: StableProfileClaim): ContextHandle {
+  return {
+    browserContext: result.browserContext,
+    closeStarting: () => { claim.closing = true; },
+    close: async () => {
+      try {
+        await result.close();
+      } finally {
+        claim.release();
+      }
+    },
+  };
+}
+
 export const persistentProfileConflictRemedy = 'Drop --user-data-dir (a managed, disposable profile is used for storage-state sessions), or drop the storage state and sign in in that profile instead.';
 
 export class PersistentContextFactory implements BrowserContextFactory {
@@ -483,13 +519,9 @@ export class PersistentContextFactory implements BrowserContextFactory {
 
   private _userDataDirs = new Set<string>();
 
-  private _stableProfileClaim: {
-    closing: boolean;
-    released: Promise<void>;
-    release: () => void;
-  } | undefined;
+  private _stableProfileClaim: StableProfileClaim | undefined;
 
-  private _claimStableProfile(): NonNullable<PersistentContextFactory['_stableProfileClaim']> {
+  private _claimStableProfile(): StableProfileClaim {
     let resolveReleased!: () => void;
     const released = new Promise<void>(resolve => { resolveReleased = resolve; });
     const claim = {
@@ -515,79 +547,34 @@ export class PersistentContextFactory implements BrowserContextFactory {
     return undefined;
   }
 
-  async createContext(clientInfo: ClientInfo, _abortSignal?: AbortSignal, _toolName?: string, options?: CreateContextOptions): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void>, closeStarting?: () => void }> {
+  async createContext(clientInfo: ClientInfo, _abortSignal?: AbortSignal, _toolName?: string, options?: CreateContextOptions): Promise<ContextHandle> {
     testDebug('create browser context (persistent)');
     const { storageState, ...contextOptions } = this.config.browser.contextOptions ?? {};
     assertStorageStateDoesNotResetUserProfile(this.config, persistentProfileConflictRemedy);
     const tracesDir = await startTraceServer(this.config);
     const { cdpPortOptions, releaseCdpPort } = await allocateCdpPort(this.config.browser);
-    let profileSuffix = storageState
-      ? `-storage-state-${createGuid()}`
-      : options?.browserSession
-        ? `-session-${createGuid()}`
-        : '';
-    let claim: PersistentContextFactory['_stableProfileClaim'];
+    let claim: StableProfileClaim | undefined;
     let userDataDir: string | undefined;
     let disposableProfile = false;
-    const browserType = playwright[this.config.browser.browserName];
     try {
-      if (!profileSuffix && !this.config.browser.userDataDir) {
-        const holder = this._stableProfileClaim;
-        if (holder?.closing) {
-          testDebug('stable persistent profile holder is closing; waiting for its release');
-          await holder.released;
-        }
-        if (this._stableProfileClaim) {
-          profileSuffix = `-concurrent-${createGuid()}`;
-          testDebug('stable persistent profile is in use by a concurrent context; falling back to a disposable profile');
-        } else {
-          claim = this._claimStableProfile();
-        }
-      }
-      userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(profileSuffix);
-      disposableProfile = !!profileSuffix && !this.config.browser.userDataDir;
+      const profile = await this._reserveProfile(disposableProfileSuffix(!!storageState, !!options?.browserSession));
+      claim = profile.claim;
+      userDataDir = this.config.browser.userDataDir ?? await this._createUserDataDir(profile.suffix);
+      disposableProfile = !!profile.suffix && !this.config.browser.userDataDir;
 
       this._userDataDirs.add(userDataDir);
       testDebug('lock user data dir', userDataDir);
 
-      for (let i = 0; i < 5; i++) {
-        try {
-          const browserContext = await browserType.launchPersistentContext(userDataDir, {
-            tracesDir,
-            ...this.config.browser.launchOptions,
-            ...cdpPortOptions,
-            ...contextOptions,
-            handleSIGINT: false,
-            handleSIGTERM: false,
-          });
-          const result = await this._applyStorageState(browserContext, storageState, userDataDir, disposableProfile);
-          if (!claim)
-            return result;
-          const heldClaim = claim;
-          return {
-            browserContext: result.browserContext,
-            closeStarting: () => { heldClaim.closing = true; },
-            close: async () => {
-              try {
-                await result.close();
-              } finally {
-                heldClaim.release();
-              }
-            },
-          };
-        } catch (error: any) {
-          if (error instanceof StorageStateError)
-            throw error;
-          if (error.message.includes('Executable doesn\'t exist'))
-            throw browserNotInstalledError(error);
-          if (error.message.includes('ProcessSingleton') || error.message.includes('Invalid URL')) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            continue;
-          }
-          throw error;
-        }
-      }
-      throw new Error(`Browser is already in use for ${userDataDir}, use --isolated to run multiple instances of the same browser`);
+      const browserContext = await this._launchPersistentContext(userDataDir, {
+        tracesDir,
+        ...this.config.browser.launchOptions,
+        ...cdpPortOptions,
+        ...contextOptions,
+        handleSIGINT: false,
+        handleSIGTERM: false,
+      });
+      const result = await this._applyStorageState(browserContext, storageState, userDataDir, disposableProfile);
+      return claim ? releasingClaimOnClose(result, claim) : result;
     } catch (error) {
       claim?.release();
       if (disposableProfile && userDataDir !== undefined) {
@@ -600,7 +587,37 @@ export class PersistentContextFactory implements BrowserContextFactory {
     }
   }
 
-  private async _applyStorageState(browserContext: playwright.BrowserContext, storageState: NonNullable<FullConfig['browser']['contextOptions']>['storageState'], userDataDir: string, disposableProfile: boolean): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  private async _reserveProfile(suffix: string): Promise<{ suffix: string, claim?: StableProfileClaim }> {
+    if (suffix || this.config.browser.userDataDir)
+      return { suffix };
+    if (this._stableProfileClaim?.closing) {
+      testDebug('stable persistent profile holder is closing; waiting for its release');
+      await this._stableProfileClaim.released;
+    }
+    if (!this._stableProfileClaim)
+      return { suffix, claim: this._claimStableProfile() };
+    testDebug('stable persistent profile is in use by a concurrent context; falling back to a disposable profile');
+    return { suffix: `-concurrent-${createGuid()}` };
+  }
+
+  private async _launchPersistentContext(userDataDir: string, launchOptions: Parameters<playwright.BrowserType['launchPersistentContext']>[1]): Promise<playwright.BrowserContext> {
+    const browserType = playwright[this.config.browser.browserName];
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        return await browserType.launchPersistentContext(userDataDir, launchOptions);
+      } catch (error) {
+        const message = errorMessage(error);
+        if (message.includes('Executable doesn\'t exist'))
+          throw browserNotInstalledError(message);
+        if (!message.includes('ProcessSingleton') && !message.includes('Invalid URL'))
+          throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    throw new Error(`Browser is already in use for ${userDataDir}, use --isolated to run multiple instances of the same browser`);
+  }
+
+  private async _applyStorageState(browserContext: playwright.BrowserContext, storageState: NonNullable<FullConfig['browser']['contextOptions']>['storageState'], userDataDir: string, disposableProfile: boolean): Promise<ContextHandle> {
     if (storageState) {
       try {
         const replaced = await replaceOpenPagesWithBlankTabs(browserContext);
@@ -609,7 +626,7 @@ export class PersistentContextFactory implements BrowserContextFactory {
         await navigateReplacementPages(replaced);
       } catch (error) {
         await this._closeBrowserContext(browserContext, userDataDir, disposableProfile);
-        throw new StorageStateError(error instanceof Error ? error.message : String(error));
+        throw new StorageStateError(errorMessage(error));
       }
     }
     const close = () => this._closeBrowserContext(browserContext, userDataDir, disposableProfile);
@@ -678,8 +695,8 @@ async function findFreePort(options?: { reserve?: boolean }): Promise<number> {
   }
 }
 
-function browserNotInstalledError(error: Error): Error {
-  const match = error.message.match(/Executable doesn't exist at ([^\r\n]+)/);
+function browserNotInstalledError(message: string): Error {
+  const match = message.match(/Executable doesn't exist at ([^\r\n]+)/);
   const location = match ? `; expected executable at ${match[1].trim()}` : '';
   return new Error(`Browser specified in your config is not installed${location}. Either install it (likely) or change the config.`);
 }
@@ -706,7 +723,6 @@ async function doStartTraceServer(config: FullConfig): Promise<string> {
   const server = await startTraceViewerServer();
   const urlPrefix = server.urlPrefix('human-readable');
   const url = urlPrefix + '/trace/index.html?trace=' + tracesDir + '/trace.json';
-  // eslint-disable-next-line no-console
-  console.error('\nTrace viewer listening on ' + url);
+  printToStderr('\nTrace viewer listening on ' + url);
   return tracesDir;
 }

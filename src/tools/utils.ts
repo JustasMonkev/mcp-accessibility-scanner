@@ -60,9 +60,9 @@ class PageActivity {
     }, pageActivityTimeoutMs);
   }
 
-  async waitUntilIdle(scheduledWorkWindowMs: number): Promise<void> {
+  async waitUntilIdle(firstActivityWindowMs: number): Promise<void> {
     if (!this._sawRequest && !this._mainFrameNavigated)
-      await settleWithin(this._firstActivity, scheduledWorkWindowMs);
+      await settleWithin(this._firstActivity, firstActivityWindowMs);
     if (!this._inFlightRequests.size && !this._mainFrameNavigated)
       this._markIdle();
     await this._idle;

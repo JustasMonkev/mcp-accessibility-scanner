@@ -28,6 +28,7 @@ import type { FullConfig } from './config.js';
 import type * as actions from './actions.js';
 import type { Context } from './context.js';
 import type { Tab, TabSnapshot } from './tab.js';
+import { printToStderr } from './utils/terminal.js';
 
 export interface IFileStorage {
   readFile(filePath: string): Promise<string>;
@@ -114,8 +115,7 @@ export class SessionLog {
   static async create(config: FullConfig): Promise<SessionLog> {
     const sessionFolder = await outputFile(config, `session-${Date.now()}-${createShortGuid()}`);
     await fs.promises.mkdir(sessionFolder, { recursive: true });
-    // eslint-disable-next-line no-console
-    console.error(`Session: ${sessionFolder}`);
+    printToStderr(`Session: ${sessionFolder}`);
     return new SessionLog(sessionFolder, new NodeFileStorage(), config.redactUrlParams);
   }
 

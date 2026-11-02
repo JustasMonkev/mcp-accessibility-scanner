@@ -124,8 +124,6 @@ export type Action = ClickAction | CheckAction | ClosesPageAction | OpenPageActi
 export type AssertAction = AssertCheckedAction | AssertValueAction | AssertTextAction | AssertVisibleAction | AssertSnapshotAction;
 export type PerformOnRecordAction = ClickAction | CheckAction | UncheckAction | PressAction | SelectAction;
 
-// Signals.
-
 export type BaseSignal = {
 };
 

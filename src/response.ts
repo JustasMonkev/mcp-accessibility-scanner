@@ -196,9 +196,7 @@ export class Response {
     const fileChoosers = () => currentTab?.modalStates().filter(state => state.type === 'fileChooser') ?? [];
     if (this._code.length && !this._includeSnapshot && fileChoosers().length)
       this.setIncludeSnapshot();
-    const tabsToUpdate = this._includeTabs
-      ? this._context.tabs().filter(tab => !this._includeSnapshot || tab !== currentTab)
-      : currentTab && !this._includeSnapshot ? [currentTab] : [];
+    const tabsToUpdate = this._tabsNeedingTitleRefresh(currentTab);
     const [snapshot] = await Promise.all([
       this._includeSnapshot && currentTab ? currentTab.captureSnapshot(this._includeSnapshotBoxes) : undefined,
       Promise.allSettled(tabsToUpdate.map(tab => tab.updateTitle())),
@@ -206,6 +204,13 @@ export class Response {
     this._tabSnapshot = snapshot;
     this._opensFileChooser = !!this._code.length && fileChoosers().some(state => !this._initialModalStates.has(state));
     this._addDownloadErrors();
+  }
+
+  private _tabsNeedingTitleRefresh(currentTab: Tab | undefined): Tab[] {
+    const snapshotRefreshesCurrentTab = this._includeSnapshot ? currentTab : undefined;
+    if (this._includeTabs)
+      return this._context.tabs().filter(tab => tab !== snapshotRefreshesCurrentTab);
+    return currentTab && !snapshotRefreshesCurrentTab ? [currentTab] : [];
   }
 
   private _addDownloadErrors() {

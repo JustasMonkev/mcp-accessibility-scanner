@@ -13,9 +13,8 @@ function templateSegments(url: string): string[] {
   const parsed = new URL(url);
   const mask = (value: string) => idSegment.test(value) ? ':id' : value;
   const path = parsed.pathname.split('/').filter(Boolean).map(mask);
-  const query = [...parsed.searchParams.entries()]
-      .sort(([first], [second]) => (first < second ? -1 : first > second ? 1 : 0))
-      .map(([key, value]) => `?${key}=${mask(value)}`);
+  parsed.searchParams.sort();
+  const query = [...parsed.searchParams].map(([key, value]) => `?${key}=${mask(value)}`);
   return [parsed.host, ...path, ...query];
 }
 
@@ -63,26 +62,28 @@ function partCost(part: Part, count: number, missCost: number): number {
   return part.child.best[count];
 }
 
+function mergePart(previous: number[], part: Part, minimum: number, k: number, missCost: number): { row: number[], choice: Uint16Array } {
+  const limit = Math.min(k, previous.length - 1 + Math.min(k, part.size));
+  const row = new Array<number>(limit + 1).fill(Infinity);
+  const choice = new Uint16Array(limit + 1);
+  for (let total = 0; total <= limit; total++) {
+    for (let count = Math.max(minimum, total - (previous.length - 1)); count <= Math.min(total, part.size); count++) {
+      const value = previous[total - count] + (count === 0 ? part.size * missCost : partCost(part, count, missCost));
+      if (value < row[total]) {
+        row[total] = value;
+        choice[total] = count;
+      }
+    }
+  }
+  return { row, choice };
+}
+
 function mergeParts(node: TreeNode, nodeParts: Part[], k: number, cover: boolean, onRow?: (choice: Uint16Array) => void): number[] {
   const missCost = 2 ** -node.depth;
   let previous = [0];
   for (const part of nodeParts) {
-    const minimum = cover ? coveredCount(part) : 0;
-    const limit = Math.min(k, previous.length - 1 + Math.min(k, part.size));
-    const row = new Array<number>(limit + 1).fill(Infinity);
-    const choice = onRow ? new Uint16Array(limit + 1) : undefined;
-    for (let t = 0; t <= limit; t++) {
-      for (let count = Math.max(minimum, t - (previous.length - 1)); count <= Math.min(t, part.size); count++) {
-        const value = previous[t - count] + (count === 0 ? part.size * missCost : partCost(part, count, missCost));
-        if (value < row[t]) {
-          row[t] = value;
-          if (choice)
-            choice[t] = count;
-        }
-      }
-    }
-    if (choice)
-      onRow!(choice);
+    const { row, choice } = mergePart(previous, part, cover ? coveredCount(part) : 0, k, missCost);
+    onRow?.(choice);
     previous = row;
   }
   return previous;

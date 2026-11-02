@@ -190,18 +190,20 @@ export function collectElementFacts(
     }
     return false;
   };
+  const renderedChildren = (element: Element): ArrayLike<Node> & Iterable<Node> => {
+    if (element.shadowRoot)
+      return element.shadowRoot.childNodes;
+    if (element instanceof HTMLSlotElement)
+      return element.assignedNodes({ flatten: true });
+    return element.childNodes;
+  };
   const sightedText = (element: Element, clipState: 'none' | 'escapable' = 'none'): string => {
     const cached = clipState === 'none' ? textCache.get(element) : undefined;
     if (cached !== undefined)
       return cached;
     let text = '';
     const ownTextVisible = clipState === 'none' && !visibilityHidden(element);
-    const children = element.shadowRoot
-      ? element.shadowRoot.childNodes
-      : element instanceof HTMLSlotElement
-        ? element.assignedNodes({ flatten: true })
-        : element.childNodes;
-    for (const child of children) {
+    for (const child of renderedChildren(element)) {
       if (child.nodeType === Node.TEXT_NODE) {
         if (ownTextVisible)
           text += child.nodeValue ?? '';
