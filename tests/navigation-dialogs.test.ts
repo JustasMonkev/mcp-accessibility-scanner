@@ -515,10 +515,20 @@ describe('navigation interrupted by a load-time dialog', () => {
         const capture = vi.spyOn(Tab.prototype, 'captureSnapshot').mockImplementation(async function(this: Tab, boxes) {
           return { ...await captureSnapshot.call(this, boxes), modalStates: [] };
         });
-        const clicked = index > 0
-          ? await backend.callTool('browser_click', { element: 'Upload', ref })
-          : await backend.callTool('browser_type', { element: 'Trigger', ref: text.match(/textbox "Trigger"[^\n]*\[ref=([^\]]+)\]/)![1], text: 'open' });
-        capture.mockRestore();
+        const waitForCompletion = Tab.prototype.waitForCompletion;
+        const completion = vi.spyOn(Tab.prototype, 'waitForCompletion').mockImplementation(async function(this: Tab, callback) {
+          const chooserOpened = this.page.waitForEvent('filechooser');
+          await Promise.all([waitForCompletion.call(this, callback), chooserOpened]);
+        });
+        let clicked;
+        try {
+          clicked = index > 0
+            ? await backend.callTool('browser_click', { element: 'Upload', ref })
+            : await backend.callTool('browser_type', { element: 'Trigger', ref: text.match(/textbox "Trigger"[^\n]*\[ref=([^\]]+)\]/)![1], text: 'open' });
+        } finally {
+          completion.mockRestore();
+          capture.mockRestore();
+        }
         expect(clicked.isError).not.toBe(true);
         const pending = await backend.callTool('browser_snapshot', {});
         expect(pending.content[0]).toMatchObject({ type: 'text', text: expect.not.stringContaining('fileChooserPromise') });
