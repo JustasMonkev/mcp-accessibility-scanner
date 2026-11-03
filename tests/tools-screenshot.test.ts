@@ -57,6 +57,14 @@ describe('Screenshot Tools', () => {
     expect(screenshotTool.schema.type).toBe('readOnly');
   });
 
+  it('should point vision users to coordinate-based mouse tools', () => {
+    const description = screenshotTool.schema.description;
+    expect(description).toContain('Use browser_snapshot for actions by default');
+    expect(description).toContain('vision capability');
+    expect(description).toContain('coordinate-based mouse tools');
+    expect(description).not.toContain("You can't perform actions based on the screenshot");
+  });
+
   it('should expose a scale option defaulting to css', () => {
     const params = screenshotTool.schema.inputSchema.parse({});
     expect(params.scale).toBe('css');
