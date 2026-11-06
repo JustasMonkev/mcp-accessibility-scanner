@@ -94,6 +94,12 @@ jobs:
       - name: Verify client-certificate proxy routing
         run: node tests/client-certificate-proxy-probe.mjs
 
+      - if: ${{ !cancelled() }}
+        name: Strict shared-worker browser survival gate
+        run: npx vitest run tests/cdp-worker.integration.test.ts
+        env:
+          MCP_TEST_SHARED_WORKER: '1'
+
   docker-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30
