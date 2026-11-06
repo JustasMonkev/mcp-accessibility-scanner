@@ -804,7 +804,7 @@ Install the configured browser engine (use when browser executable is missing).
 Disabled by default. Enable it at server startup with `--caps install`, `PLAYWRIGHT_MCP_CAPS=install`, or `"capabilities": ["install"]` in the config file. Exact-name opt-in via `--allowed-tools browser_install` or `allowedTools` is also supported. Explicit `core-install` settings remain supported as a deprecated alias; use `install` in new configurations. Without this opt-in, the tool is neither listed nor callable; existing browser installations can still be used.
 
 On Windows, Chrome stable/beta installation first queries the native OS
-architecture through PowerShell, with a five-second timeout. ARM64 installations
+architecture through PowerShell, with a thirty-second timeout. ARM64 installations
 are refused because Playwright 1.65.0 selects an x64 MSI. Failed or unrecognized
 architecture detection also refuses installation. This does not install native
 ARM64 Chrome: provision it separately, then select its executable with

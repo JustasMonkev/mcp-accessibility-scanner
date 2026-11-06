@@ -57,7 +57,7 @@ it.skipIf(!enabled).each(['chrome', 'chrome-beta'])(
       try {
         await client.connect(await wrapInProcess(backend));
         const started = performance.now();
-        const result = await client.callTool({ name: 'browser_install', arguments: {} }, { timeout: 8000 });
+        const result = await client.callTool({ name: 'browser_install', arguments: {} }, { timeout: 35000 });
         const text = JSON.stringify(result.content);
         const elapsedMs = performance.now() - started;
         process.stdout.write(JSON.stringify({ scenario: 'real-windows-native-architecture', channel,
@@ -92,4 +92,4 @@ it.skipIf(!enabled).each(['chrome', 'chrome-beta'])(
           }
         }
       }
-    }, 15000);
+    }, 45000);

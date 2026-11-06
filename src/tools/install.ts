@@ -67,7 +67,7 @@ const install = defineTool({
         architecture = await new Promise<string>((resolve, reject) => {
           execFile('powershell.exe', [
             '-NoProfile', '-NonInteractive', '-Command', windowsArchitectureScript,
-          ], { encoding: 'utf8', timeout: 5000, windowsHide: true }, (error, stdout) => {
+          ], { encoding: 'utf8', timeout: 30000, windowsHide: true }, (error, stdout) => {
             if (error)
               reject(error);
             else

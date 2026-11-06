@@ -129,7 +129,7 @@ describe('browser_install platform selection', () => {
     await expect(install.handle(ctx, {}, new Response(ctx, 'browser_install', {}))).rejects.toThrow(/Windows ARM64/);
     expect(childProcess.execFile).toHaveBeenCalledWith('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-Command', expect.any(String),
-    ], { encoding: 'utf8', timeout: 5000, windowsHide: true }, expect.any(Function));
+    ], { encoding: 'utf8', timeout: 30000, windowsHide: true }, expect.any(Function));
     const script = vi.mocked(childProcess.execFile).mock.calls[0][1]?.[3];
     expect(script).toContain('Add-Type');
     expect(script).toContain('IsWow64Process2(currentProcess.Handle, out processMachine, out nativeMachine)');
