@@ -75,3 +75,15 @@ An existing Firefox screen-reader own-heading measurement case crashes the page,
 5. **Platform/lifecycle gaps:** native Windows ARM64 installer acceptance (#292), genuine Memory Saver discard, native Firefox crash retention, Windows-specific network exhaustion, and local SIGHUP/IPC-disconnect cleanup remain separately unresolved.
 
 `npm run knip` flags `tests/transportFixture.ts` as unused in both pristine main and this branch; this is a verified baseline finding. Changed-code slop-check reports zero findings. The PR stays draft and no issue is closed automatically.
+
+## Final corrected-fixture code head
+
+Code head `e0eeba333d54b4b5c364fd104607024c757fb5ce` is tested by [CI 42159050663](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/42159050663). The real shared-worker fixture now explicitly enables automation so its OS-assigned CDP port can be discovered. Local synthetic server address handling is null-checked and its focused test passes.
+
+The corrected worker scenario reaches MCP attachment, then Chromium 158 disconnects with WebSocket code 1006 before cleanup. No client assertion is observed; the browser is no longer connected and follow-up cannot run. Thus #303 remains unresolved despite the passing synthetic orphan-target guard. The strict expectation remains unchanged.
+
+The main stable-browser suite still reports **1,986 passed, 2 failed, 5 skipped**: the actual worker attachment failure and the already-loaded-page origin-policy escape. Native WebMCP passes **3/3**, build succeeds, and the Chromium certificate/proxy and authenticated-proxy matrices pass. Core recorder, storage, screenshot, CDP crash/frame-tree and accessibility regressions pass within that suite.
+
+Hosted Linux Firefox also passes actual isolated crash cycles and persistent-browser survival. The sandbox-only inability to inspect `/proc` is therefore superseded by real hosted measurements; RSS remains diagnostic and is not proof about every retained native window. Windows x64 bundled Chromium, Chrome and Edge download/history gates each pass all 18 cases; native ARM64 installation and genuine Memory Saver/BFCache restoration remain separate gates.
+
+At this checkpoint, two equivalent final-run matrix jobs (macOS WebKit and Windows bundled Chromium installation) may still be running; their exact code/browsers were already exercised in the preceding recorded runs. No outstanding or source-inspected platform case is counted as passing. This docs-only follow-up does not alter the tested code, tests or workflow.
