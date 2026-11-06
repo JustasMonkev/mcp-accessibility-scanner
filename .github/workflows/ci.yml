@@ -285,6 +285,11 @@ jobs:
         run: npx vitest run tests/browser-upgrade-controls.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
+      - if: ${{ !cancelled() && matrix.browser == 'firefox' }}
+        name: Verify Firefox client-certificate proxy combinations
+        run: npx vitest run tests/client-certificates.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_NAME: firefox
 
       - if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' && matrix.browser == 'firefox' }}
         name: Probe crashes only in this disposable runner's Firefox
