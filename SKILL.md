@@ -241,6 +241,8 @@ These tools are always available and work in the interactive REPL.
 
 **`--caps install`:** `browser_install {}` - Install the configured browser. Disabled by default. If the browser is missing and installation is authorized, restart the REPL with `npx --allow-scripts=re2 mcp-accessibility-scanner --caps install interactive`, preserving the existing browser options, then call `browser_install {}`. This downloads executable code through Playwright without independent archive checksum/signature verification; trust the download source and TLS configuration before enabling it. Alternatively, use a provisioned browser with `--executable-path`. Explicit `core-install` settings remain supported as a deprecated alias for `install`.
 
+Windows Chrome stable/beta installation refuses ARM64 or undetermined native architecture. Provision native Chrome separately and select `--executable-path` instead of retrying a rejected install. Browser channels are not switched automatically.
+
 **`--caps pdf`:** `browser_pdf_save` - Save page as PDF
 
 **`--caps verify`:** `browser_verify_element_visible`, `browser_verify_text_visible`, `browser_verify_list_visible`, `browser_verify_value`
