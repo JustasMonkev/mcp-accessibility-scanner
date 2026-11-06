@@ -1126,9 +1126,9 @@ below remain characterized on 1.65.0.
 
 The September 28, 2026 validation measured these on Playwright **1.63.0**; see the
 [platform results and rerun commands](docs/browser-upgrade-validation-251.md).
-The 1.65.0 upgrade was rechecked on Linux only, so the macOS entries below are
-still to be confirmed by the macOS CI jobs, which expect fixed behavior unless an
-entry says otherwise.
+The macOS CI jobs run on `macos-15` (hosted `macos-14` jobs are now cancelled
+before they start) and expect fixed behavior unless an entry says otherwise; the
+macOS 14 WebKit entry therefore has no CI coverage.
 
 - **Preloaded CDP pages:** on 1.63.0, nested cross-site/sandboxed frames could
   redirect evaluation, locators and scans into an iframe even while `page.url()`
