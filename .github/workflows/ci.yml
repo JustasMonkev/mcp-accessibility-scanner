@@ -94,6 +94,12 @@ jobs:
       - name: Verify client-certificate proxy routing
         run: node tests/client-certificate-proxy-probe.mjs
 
+      - if: ${{ !cancelled() }}
+        name: Strict Firefox mobile screen gate
+        run: npx vitest run tests/playwright-165-accessibility.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_NAME: firefox
+
   docker-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30

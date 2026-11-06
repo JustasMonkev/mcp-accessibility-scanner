@@ -1081,6 +1081,16 @@ counts: multiple MCP clients share one client-side browser context, while the hu
 multiplexes session logs and explicit recordings and excludes sibling tool actions.
 A dependency bump alone must not change that ownership model.
 
+Device emulation retains Playwright's device-descriptor `screen` dimensions as
+well as its viewport. Chromium 158 and WebKit 27.2 expose a 393×852
+`window.screen` with device scale factor 3 for `--device "iPhone 15"`.
+Firefox 159 instead reports 393×659, matching that descriptor's viewport despite
+the configured 393×852 screen; its strict device-screen check remains failing.
+The server does not overwrite screen dimensions in page JavaScript. Keeping the
+descriptor intentionally follows Playwright's device configuration rather than
+the host display; screen-based media queries can change after upgrading from
+Playwright 1.63.
+
 Playwright 1.65.0 contains [upstream #42627](https://github.com/microsoft/playwright/pull/42627),
 so the hub uses `_startRecording({ language: 'javascript' }, sink)` / `_stopRecording()`
 instead of `_enableRecorder` / `_disableRecorder`, with no method-name fallback.
