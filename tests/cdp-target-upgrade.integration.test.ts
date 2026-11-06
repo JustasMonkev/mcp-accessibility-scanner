@@ -49,7 +49,7 @@ it('detaches a synthetic target without browserContextId and keeps the CDP clien
   try {
     await once(server, 'listening');
     const address = server.address();
-    if (typeof address === 'string')
+    if (!address || typeof address === 'string')
       throw new Error('Expected TCP WebSocket server');
     // A dependency assertion must fail the child, without killing Vitest itself.
     const script = `import { chromium } from 'playwright';
