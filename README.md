@@ -168,6 +168,11 @@ npx --allow-scripts=re2 mcp-accessibility-scanner            # starts the MCP se
 
 All of the MCP client configuration examples in this README already use this default mode.
 
+On POSIX systems, stdin closure, SIGINT, SIGTERM and SIGHUP trigger the same
+graceful server cleanup. Locally owned browser processes and temporary browser
+directories are released; caller-supplied persistent-profile directories are
+retained.
+
 ### Interactive REPL (`interactive` subcommand)
 
 For manual terminal use, the `interactive` subcommand starts a readline REPL where you can call any tool directly:
@@ -219,6 +224,12 @@ npx --allow-scripts=re2 mcp-accessibility-scanner list-tools
 `createConnection` returns an MCP `Server` directly, not a wrapper with a `server`
 property. Its type is the SDK's `Server` from `@modelcontextprotocol/server`. Connect it
 with `server.connect(transport)` and release it with `await server.close()`.
+
+Passing a custom context getter transfers that context's lifecycle to the server:
+`browser_close` or client disconnection closes the supplied context. Its parent
+browser and sibling contexts remain open. Supply a dedicated context, not one
+whose tabs or storage must survive the MCP connection. Multiple sessions cannot
+use a custom getter to obtain independent contexts.
 
 ```ts
 import { createConnection } from 'mcp-accessibility-scanner';

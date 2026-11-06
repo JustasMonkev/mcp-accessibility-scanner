@@ -61,6 +61,12 @@ async function installPolicy(config: FullConfig, context: BrowserContext): Promi
     installation.catch(() => browserPolicies.delete(browser));
   }
   await installation;
+  await context.route('**', async route => {
+    if (isAllowed(config, route.request().url()))
+      await route.continue();
+    else
+      await route.abort('blockedbyclient');
+  });
   await context.routeWebSocket('**', async socket => {
     if (isAllowed(config, socket.url()))
       socket.connectToServer();
