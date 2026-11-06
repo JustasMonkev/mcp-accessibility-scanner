@@ -172,8 +172,9 @@ function applyProxyToClientCertificates(config: FullConfig): void {
   const unsupported = proxy?.bypass?.split(',').map(entry => entry.trim()).filter(entry => entry && !plainBypassEntry.test(entry));
   if (unsupported?.length)
     throw new Error(`clientCertificates supports only host and domain entries in proxy.bypass, such as "example.com" or ".example.com"; unsupported: ${unsupported.map(entry => JSON.stringify(entry)).join(', ')}. Wildcards, ports, IP ranges and <local> are not applied by Playwright's certificate interceptor. No browser was started.`);
+  // The interceptor compares entries against the lowercased URL hostname as-is.
   if (proxy)
-    contextOptions.proxy = proxy;
+    contextOptions.proxy = proxy.bypass ? { ...proxy, bypass: proxy.bypass.toLowerCase() } : proxy;
 }
 
 const maxTimerDelayMs = 2_147_483_647;

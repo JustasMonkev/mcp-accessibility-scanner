@@ -126,6 +126,13 @@ describe('Config', () => {
       expect(config.browser.contextOptions.proxy).toEqual(options.proxy);
     });
 
+    it('lowercases certificate proxy bypass entries for the interceptor\'s hostname match', async () => {
+      const launchProxy = { ...proxy, bypass: 'Private.TEST,.Internal.Test' };
+      const config = await resolveConfig({ browser: { launchOptions: { proxy: launchProxy }, contextOptions: { clientCertificates } } });
+      expect(config.browser.contextOptions.proxy).toEqual({ ...proxy, bypass: 'private.test,.internal.test' });
+      expect(config.browser.launchOptions.proxy).toEqual(launchProxy);
+    });
+
     it.each(['*.private.test', '<local>', 'private.test:8443', '10.0.0.0/8', '[::1]', 'http://private.test'])('rejects bypass syntax the certificate interceptor ignores: %s', async entry => {
       for (const level of ['launch', 'context']) {
         const options = { proxy: { ...proxy, bypass: `ok.test,${entry}` } };
