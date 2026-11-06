@@ -105,9 +105,12 @@ try {
         } };
         const scenario = { isolated, certificates, bypass };
         if (certificates && bypass) {
-          await assert.rejects(resolveConfig(options), /clientCertificates with proxy.bypass is unsupported/);
-          results.push({ ...scenario, rejectedBeforeLaunch: true });
-          continue;
+          // Playwright's certificate interceptor matches bypass entries only as
+          // domain suffixes, so browser-specific syntax is rejected before launch.
+          const unsupported = structuredClone(options);
+          unsupported.browser.launchOptions.proxy.bypass = '127.0.0.1,<local>';
+          await assert.rejects(resolveConfig(unsupported), /clientCertificates supports only host and domain entries in proxy\.bypass/);
+          results.push({ ...scenario, unsupportedBypassRejectedBeforeLaunch: true });
         }
         const config = await resolveConfig(options);
         const result = await contextFactory(config).createContext({}, new AbortController().signal, undefined);

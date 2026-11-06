@@ -133,7 +133,7 @@ describe('CDP attach with a tab without a renderer (#244)', () => {
       expect(result.isError, text).toBe(true);
       expect(text).toContain('Timeout 2000ms exceeded');
       expect(text).toContain('Playwright did not finish attaching before the timeout');
-      expect(text).toContain('a tab without a renderer (crashed, or discarded by Memory Saver)');
+      expect(text).toContain('on Playwright 1.63.0 so did a tab without a renderer (crashed, or discarded by Memory Saver)');
       expect(elapsed).toBeLessThan(attachBound);
     } else {
       expect(result.isError, text).not.toBe(true);

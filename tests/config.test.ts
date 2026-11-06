@@ -117,20 +117,32 @@ describe('Config', () => {
       expect(config.browser.contextOptions.proxy).toEqual(contextProxy);
     });
 
-    it.each(['launch', 'context'])('rejects an effective %s proxy bypass with certificates', async level => {
-      const options = { proxy: { ...proxy, bypass: 'private.test' } };
-      await expect(resolveConfig({ browser: {
+    it.each(['launch', 'context'])('applies an effective %s host and domain proxy bypass with certificates', async level => {
+      const options = { proxy: { ...proxy, bypass: 'private.test, .internal.test,127.0.0.1,' } };
+      const config = await resolveConfig({ browser: {
         launchOptions: level === 'launch' ? options : {},
         contextOptions: { clientCertificates, ...(level === 'context' ? options : {}) },
-      } })).rejects.toThrow('clientCertificates with proxy.bypass is unsupported');
+      } });
+      expect(config.browser.contextOptions.proxy).toEqual(options.proxy);
+    });
+
+    it.each(['*.private.test', '<local>', 'private.test:8443', '10.0.0.0/8', '[::1]', 'http://private.test'])('rejects bypass syntax the certificate interceptor ignores: %s', async entry => {
+      for (const level of ['launch', 'context']) {
+        const options = { proxy: { ...proxy, bypass: `ok.test,${entry}` } };
+        await expect(resolveConfig({ browser: {
+          launchOptions: level === 'launch' ? options : {},
+          contextOptions: { clientCertificates, ...(level === 'context' ? options : {}) },
+        } })).rejects.toThrow(`clientCertificates supports only host and domain entries in proxy.bypass, such as "example.com" or ".example.com"; unsupported: ${JSON.stringify(entry)}.`);
+      }
     });
 
     it('validates the merged CLI, environment and file proxy settings', async () => {
       const config = await writeConfigFile({ browser: { contextOptions: { clientCertificates } } });
       expect((await resolveCLIConfig({ config, proxyServer: proxy.server })).browser.contextOptions.proxy).toEqual({ server: proxy.server });
-      await expect(resolveCLIConfig({ config, proxyServer: proxy.server, proxyBypass: 'private.test' })).rejects.toThrow('proxy.bypass');
+      expect((await resolveCLIConfig({ config, proxyServer: proxy.server, proxyBypass: 'private.test' })).browser.contextOptions.proxy).toEqual({ server: proxy.server, bypass: 'private.test' });
+      await expect(resolveCLIConfig({ config, proxyServer: proxy.server, proxyBypass: '*.private.test' })).rejects.toThrow('proxy.bypass');
       vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', proxy.server);
-      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', 'private.test');
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', '<local>');
       await expect(resolveCLIConfig({ config })).rejects.toThrow('proxy.bypass');
       vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', '');
       expect((await resolveCLIConfig({ config })).browser.contextOptions.proxy).toEqual({ server: proxy.server });
@@ -174,7 +186,7 @@ describe('Config', () => {
     });
   });
 
-  describe('authenticated proxy warning', () => {
+  describe('authenticated proxies', () => {
     beforeEach(() => {
       vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', '');
       vi.stubEnv('PLAYWRIGHT_MCP_PROXY_BYPASS', '');
@@ -186,43 +198,17 @@ describe('Config', () => {
 
     const proxy = { server: 'http://private-proxy.test:3128', username: 'private-user', password: 'private-password' };
 
-    it.each(['launch', 'context', 'both'])('warns once without exposing %s proxy settings', async level => {
+    // Playwright 1.65 answers only proxy challenges with proxy credentials
+    // (microsoft/playwright#43482), so the 1.63 leak warning was removed;
+    // tests/proxy-credentials.integration.test.ts checks the real browsers.
+    it.each(['launch', 'context', 'both'])('applies %s proxy credentials without a startup warning', async level => {
       const warning = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       const config = await resolveConfig({ browser: {
         launchOptions: level === 'context' ? {} : { proxy },
         contextOptions: level === 'launch' ? {} : { proxy },
       } });
-      expect(warning).toHaveBeenCalledTimes(1);
-      const message = warning.mock.calls.flat().join('\n');
-      expect(message).toContain('Playwright 1.63.0');
-      expect(message).toContain('website');
-      expect(message).toContain('401');
-      expect(message).toContain('does not prevent');
-      expect(message).not.toMatch(/private-proxy|private-user|private-password/);
-      expect(level === 'context' ? config.browser.contextOptions.proxy : config.browser.launchOptions.proxy).toEqual(proxy);
-    });
-
-    it.each(['cli', 'env', 'file-launch', 'file-context'])('warns for credentials from %s', async source => {
-      const warning = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-      const config = await writeConfigFile({ browser: {
-        launchOptions: source === 'file-launch' ? { proxy } : {},
-        contextOptions: source === 'file-context' ? { proxy } : {},
-      } });
-      if (source === 'env')
-        vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', 'http://private-user:private-password@private-proxy.test:3128');
-      await resolveCLIConfig({ config, proxyServer: source === 'cli' ? 'http://private-user:private-password@private-proxy.test:3128' : undefined });
-      expect(warning).toHaveBeenCalledTimes(1);
-      expect(warning.mock.calls.flat().join('\n')).not.toContain('private-');
-    });
-
-    it('stays silent without credentials, including credentials replaced by a CLI override', async () => {
-      const warning = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-      await resolveConfig({});
-      await resolveConfig({ browser: { launchOptions: { proxy: { server: proxy.server } }, contextOptions: { proxy: { server: proxy.server, username: '', password: '' } } } });
-      const config = await writeConfigFile({ browser: { launchOptions: { proxy } } });
-      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', 'http://private-user:private-password@private-proxy.test:3128');
-      await resolveCLIConfig({ config, proxyServer: 'http://unauthenticated.test:3128' });
       expect(warning).not.toHaveBeenCalled();
+      expect(level === 'context' ? config.browser.contextOptions.proxy : config.browser.launchOptions.proxy).toEqual(proxy);
     });
   });
 

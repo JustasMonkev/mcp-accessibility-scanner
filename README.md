@@ -317,16 +317,16 @@ Create a `config.json` file with the following options:
 
 - `browser.browserName`: Browser to use (`chromium`, `firefox`, `webkit`)
 
-  With WebKit on the pinned Playwright 1.63.0, the contents of an open `<details>` nested inside a closed `<details>` count as visible: they appear in `browser_snapshot` and `browser_find` results, and `browser_verify_element_visible` and `browser_verify_text_visible` succeed for them. Chromium and Firefox hide them until the outer `<details>` is opened. The [upstream fix](https://github.com/microsoft/playwright/pull/42951) is not in a stable release yet. The server does not filter snapshots or patch Playwright to work around this. See the [verification notes](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#webkit-nested-details-visibility-246).
+  An open `<details>` nested inside a closed `<details>` stays hidden from `browser_snapshot`, `browser_find`, `browser_verify_element_visible` and `browser_verify_text_visible` until the outer `<details>` is opened, in Chromium, Firefox and WebKit on the pinned Playwright 1.65.0. With WebKit on Playwright 1.63.0 its contents counted as visible ([upstream fix](https://github.com/microsoft/playwright/pull/42951)); `tests/details-visibility.integration.test.ts` checks each engine. See the [verification notes](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#webkit-nested-details-visibility-246).
 - `browser.allowedUploadDirs`: Restrict files sent by `browser_file_upload` and `browser_drop` to regular files inside these directories, including resolved symlink targets. Restricted uploads and drops use a checked file handle and accept up to 50 MiB total per call. Unset allows any path; `[]` denies all file uploads and drops (text-only drops still work). Blank list entries are rejected. CLI: `--allowed-upload-dirs` (semicolon-separated; `""` denies all), env: `PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS` (empty string denies all).
 
   The list must be an array, not `null`. Roots must exist at startup: their canonical paths are resolved once and retained for the server's lifetime, so retargeting a configured symlink does not grant access to a new tree. Non-empty upload allowlists require macOS or Linux with `/proc/self/fd` available. macOS blocks ancestor symlinks during the file open; Linux checks the opened descriptor's path. Other platforms reject restricted file uploads and drops rather than rely on race-prone pathname checks. Unrestricted uploads, deny-all lists, and text-only drops keep working on all platforms.
 - `browser.launchOptions.headless`: Run browser in headless mode (default: `true` on Linux without display, `false` otherwise)
 - `browser.launchOptions.channel`: Browser channel (`chrome`, `chrome-beta`, `msedge`, etc.)
-- `browser.contextOptions.clientCertificates`: With client certificates, a configured launch proxy is also applied to fresh contexts unless `browser.contextOptions.proxy` explicitly overrides it. Playwright 1.63.0 ignores certificate-interceptor proxy bypass rules, so combining certificates with a nonblank effective `proxy.bypass` is rejected before launch. For a fresh context on a remote browser, configure its proxy explicitly; a proxy inherited only from that browser cannot be inspected. Existing attached contexts retain their current settings.
+- `browser.contextOptions.clientCertificates`: With client certificates, a configured launch proxy is also applied to fresh contexts unless `browser.contextOptions.proxy` explicitly overrides it. With certificates, Playwright routes every request through its certificate interceptor, which matches `proxy.bypass` entries only as domain suffixes: `example.com` and `.example.com` both bypass `example.com` and its subdomains, and IP addresses match exactly. Entries using browser-specific syntax (wildcards such as `*.example.com`, ports, IP ranges, `<local>`) would be ignored there, so they are rejected before launch. Playwright 1.63.0 ignored every bypass entry in the interceptor; `tests/client-certificate-proxy-probe.mjs` checks bypassed and proxied routes on the pinned version. For a fresh context on a remote browser, configure its proxy explicitly; a proxy inherited only from that browser cannot be inspected. Existing attached contexts retain their current settings.
 - `browser.launchOptions.proxy`: Browser proxy (CLI: `--proxy-server`, `--proxy-bypass`; env: `PLAYWRIGHT_MCP_PROXY_SERVER`, `PLAYWRIGHT_MCP_PROXY_BYPASS`). Credentials in a CLI or environment proxy URL, such as `http://user:password@myproxy:3128`, are moved into `proxy.username` and `proxy.password` so the browser can answer `407 Proxy Authentication Required`; percent-encode reserved characters such as `@`, `:` or `/` in them. A proxy set in the config file keeps its explicit `username` and `password` fields.
 
-  **Authenticated proxy credential leak:** The pinned Playwright 1.63.0 can send proxy credentials as website HTTP authentication after a proxy `407` challenge has been answered and cached, when a website responds with `401`. This affects credentials supplied through `--proxy-server`, `PLAYWRIGHT_MCP_PROXY_SERVER`, `browser.launchOptions.proxy`, and `browser.contextOptions.proxy`. Avoid authenticated proxies until a release containing [the upstream fix](https://github.com/microsoft/playwright/pull/43482) is adopted. Playwright 1.64.1, the latest stable release checked on October 20, 2026, also predates that fix. Startup emits one credential-free warning on stderr per configuration resolution when either configured proxy has credentials, including programmatic `createConnection` usage. The warning does not prevent the leak; unauthenticated proxies are unchanged. Proxies inherited only from an attached browser cannot be inspected or warned about by this server.
+  **Proxy credentials and website authentication:** Playwright 1.65.0 sends proxy credentials only in answer to a proxy `407` challenge, never to a website's `401` challenge ([upstream fix](https://github.com/microsoft/playwright/pull/43482)); Playwright 1.63.0 leaked them, and the server's former startup warning was removed with the upgrade. Use `browser.contextOptions.httpCredentials` for website authentication. Without it, full Chromium fails a website's `401` with `net::ERR_INVALID_AUTH_CREDENTIALS`, with or without a proxy, while Firefox and WebKit show the `401` page. `tests/proxy-credentials.integration.test.ts` checks the credentials reach only the proxy.
 
 - `browser.launchOptions.chromiumSandbox`: Defaults to `false` for downloaded Chromium builds on Linux because they lack the setuid sandbox helper, and `true` otherwise. Remote and VS Code endpoints choose on the remote host. An explicit config or `PLAYWRIGHT_MCP_SANDBOX` value wins; `--no-sandbox` always disables it.
 - `browser.cdpEndpoint`: Attach to an already-running Chromium-family app with CDP enabled
@@ -367,9 +367,9 @@ sockets or other browser traffic must be restricted.
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
-If CDP attachment times out after the WebSocket connects, an existing tab may be blocking Playwright's browser initialization. On the pinned Playwright 1.63.0, a tab without a renderer — one whose renderer crashed, or one discarded by Chrome's Memory Saver — is never answered, so the attach cannot succeed while that tab exists ([upstream fix, unreleased](https://github.com/microsoft/playwright/pull/42936)); a sleeping or unresponsive tab can stall it too ([upstream report](https://github.com/microsoft/playwright/issues/42730)). `--cdp-endpoint` then fails after `--cdp-timeout`, and `--cdp-launch` by `--cdp-launch-startup-timeout` (each attach attempt also stops at `--cdp-timeout`), with an error that names this cause; `--cdp-launch` stops only the application it launched. For `--cdp-endpoint`, use an explicit positive `--cdp-timeout` to bound the attempt; `0` disables it and the attach can then wait forever. Reload or close the affected tab yourself, or attach to a separate disposable browser. `noDefaults` and `--isolated` do not skip initialization of existing tabs; the server does not close or reload your tabs or bypass Playwright's initialization to work around this. See the [verification notes](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#cdp-attach-and-numpad-keys-244).
+If CDP attachment times out after the WebSocket connects, an existing tab may be blocking Playwright's browser initialization: a sleeping or unresponsive tab can stall it ([upstream report](https://github.com/microsoft/playwright/issues/42730)). Playwright 1.63.0 also never finished attaching while a tab had no renderer — one whose renderer crashed, or one discarded by Chrome's Memory Saver; the pinned Playwright 1.65.0 attaches and omits that tab ([upstream fix](https://github.com/microsoft/playwright/pull/42936)), as `tests/cdp-attach.integration.test.ts` checks. `--cdp-endpoint` then fails after `--cdp-timeout`, and `--cdp-launch` by `--cdp-launch-startup-timeout` (each attach attempt also stops at `--cdp-timeout`), with an error that names this cause; `--cdp-launch` stops only the application it launched. For `--cdp-endpoint`, use an explicit positive `--cdp-timeout` to bound the attempt; `0` disables it and the attach can then wait forever. Reload or close the affected tab yourself, or attach to a separate disposable browser. `noDefaults` and `--isolated` do not skip initialization of existing tabs; the server does not close or reload your tabs or bypass Playwright's initialization to work around this. See the [verification notes](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#cdp-attach-and-numpad-keys-244).
 
-Playwright 1.63 does not support back/forward-cache (BFCache) restoration: an attached browser with BFCache enabled can return unusable references and omit iframe contents after back navigation. This was reproduced with full Chromium, Chrome, and Edge. For a browser you launch yourself, include `--disable-back-forward-cache` before attaching, or use the server's normal browser launch mode, which retains Playwright's default flag. The server does not change an attached browser's flags or replace back navigation with a reload. See the [upstream maintainer's explanation](https://github.com/microsoft/playwright/issues/42777#issuecomment-5739095543), [Playwright's BFCache limitation](https://playwright.dev/docs/navigations#backforward-cache-bfcache), and the [verification and reproduction command](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#history-references-231).
+Playwright does not support back/forward-cache (BFCache) restoration: an attached browser with BFCache enabled can return unusable references and omit iframe contents after back navigation. This was reproduced with full Chromium, Chrome, and Edge on Playwright 1.63.0, and again with full Chromium 158 on the pinned Playwright 1.65.0 (`MCP_TEST_ENABLE_BFCACHE=1`). For a browser you launch yourself, include `--disable-back-forward-cache` before attaching, or use the server's normal browser launch mode, which retains Playwright's default flag. The server does not change an attached browser's flags or replace back navigation with a reload. See the [upstream maintainer's explanation](https://github.com/microsoft/playwright/issues/42777#issuecomment-5739095543), [Playwright's BFCache limitation](https://playwright.dev/docs/navigations#backforward-cache-bfcache), and the [verification and reproduction command](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#history-references-231).
 
 HTTP listeners accept `Host` headers for loopback aliases, the bound non-wildcard address, and the configured hostname (`--host`, `server.host`, or `PLAYWRIGHT_MCP_HOST`). A named host must resolve to an address on the server to bind; other hostnames remain forbidden. Wildcard binds (`--host 0.0.0.0` or `--host ::`) do not allow arbitrary hostnames or the wildcard address itself: use a loopback hostname or bind a specific hostname/address. Missing or invalid `Host` returns `400`; disallowed hosts return `403`. When present, `Origin` must use HTTP and exactly match the normalized `Host` hostname and port; HTTPS or a different authority returns `403`. These checks also apply with bearer authentication, which still requires a loopback listener.
 
@@ -386,7 +386,7 @@ Unexpected HTTP request setup failures, including stateful initialization, retur
 
 Caller-supplied screenshot, PDF, find-result, scan-page-matrix, and audit report filenames use a no-clobber policy: an existing file causes the tool call to fail instead of being overwritten. Windows-reserved basenames and names ending in a dot or space are rejected on every platform so configured names behave consistently across hosts.
 
-Failed download saves are reported as tool errors in the current or next response, including after the tab closes; failed entries do not advertise a saved file or an ongoing download. The server retains up to 20 bounded error messages between responses and reports any omitted count. Full Chromium-family browsers on Playwright 1.63.0 have [verified native crashes after persistent-profile relaunch](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#persistent-profile-downloads-230). Error reporting does not fix that native crash. The explicit `--isolated` control passed, but does not preserve a profile between launches; use recorded storage state when needed for authentication. Existing profiles and browser defaults are preserved.
+Failed download saves are reported as tool errors in the current or next response, including after the tab closes; failed entries do not advertise a saved file or an ongoing download. The server retains up to 20 bounded error messages between responses and reports any omitted count. Full Chromium-family browsers on Playwright 1.63.0 had [verified native crashes after persistent-profile relaunch](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#persistent-profile-downloads-230). On the pinned Playwright 1.65.0, bundled Chromium 158 relaunched and saved downloads on Linux; Chrome for Testing 153.0.8010.12, a build already on that crash list, still crashed. Branded Chrome and Edge are checked by the Windows CI matrix. Error reporting does not fix a native crash. The explicit `--isolated` control passed, but does not preserve a profile between launches; use recorded storage state when needed for authentication. Existing profiles and browser defaults are preserved.
 
 Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. CLI values take precedence over environment and file configuration, including `0`. Empty or whitespace-only numeric timeout environment variables are ignored, preserving file configuration or defaults. Zero disables settling and can return before delayed page updates; the default remains `500` ms. It applies after every action so delayed DOM-only updates are included in the response; a short observation window also catches scheduled requests and waits for them before that delay.
 
@@ -440,7 +440,7 @@ Direct DOM value assignments can bypass application event handlers, and syntheti
 Record a session once with Playwright's codegen, then hand the file to the server:
 
 ```bash
-npx playwright@1.63.0 codegen --save-storage=auth.json https://example.com/login
+npx playwright@1.65.0 codegen --save-storage=auth.json https://example.com/login
 ```
 
 Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.
@@ -468,9 +468,9 @@ PLAYWRIGHT_MCP_ISOLATED=true PLAYWRIGHT_MCP_STORAGE_STATE=./auth.json npx --allo
 
 > **Every supported mode handles the state — by applying it or refusing it.**
 >
-> **Playwright 1.63.0 safety restriction:** importing into an existing context is rejected before taking a rollback snapshot or resetting any storage. On this pin, snapshot capture can execute service-worker-served scripts for a previously visited origin whose tab is no longer open ([upstream fix](https://github.com/microsoft/playwright/pull/42664)). Use a fresh context, or omit `--storage-state` and sign in interactively. Service workers are not disabled. A future dependency upgrade must also pass the recorder/shared-client checks in [#218](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/218) and IndexedDB checks in [#224](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/224) before this restriction is reconsidered.
+> **Existing-context safety restriction:** importing into an existing context is rejected before taking a rollback snapshot or resetting any storage. On Playwright 1.63.0, snapshot capture could execute service-worker-served scripts for a previously visited origin whose tab was no longer open ([upstream fix](https://github.com/microsoft/playwright/pull/42664)). The restriction is kept on the pinned Playwright 1.65.0 until that path is revalidated. Use a fresh context, or omit `--storage-state` and sign in interactively. Service workers are not disabled. Lifting it also requires passing the recorder/shared-client checks in [#218](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/218) and IndexedDB checks in [#224](https://github.com/JustasMonkev/mcp-accessibility-scanner/issues/224).
 >
-> **IndexedDB snapshot limitation:** on pinned Playwright 1.63.0 with Chromium 153.0.8010.12 and Firefox 155.0, `storageState({ indexedDB: true })` loses `Map` and `Set` contents. Both `newContext({ storageState })` and `setStorageState()` restore them as empty plain objects; ordinary JSON records survive. Fresh contexts protect existing browser data, but cannot recover values already lost during capture. The [upstream fix](https://github.com/microsoft/playwright/pull/42707) is merged but is not in this pin. Before allowing imports into existing contexts again, verify both restore paths preserve Map/Set types and entries on each supported engine, including after a failed import. The real-browser regression in `tests/browser-failures.integration.test.ts` checks that rejecting an import leaves the original Map/Set records intact and that isolated JSON IndexedDB imports still work.
+> **IndexedDB `Map` and `Set` records:** Playwright 1.63.0 lost `Map` and `Set` contents in `storageState({ indexedDB: true })`, restoring them as empty plain objects ([upstream fix](https://github.com/microsoft/playwright/pull/42707)). On the pinned Playwright 1.65.0, both `newContext({ storageState })` and `setStorageState()` preserved `Map` and `Set` types and entries with Chromium 158.0.8127.18, Firefox 159.0 and WebKit 27.2 on Linux. The real-browser regression in `tests/browser-failures.integration.test.ts` checks that rejecting an import leaves the original Map/Set records intact and that isolated JSON IndexedDB imports still work.
 >
 > - **Fresh-context modes** (`--isolated`, the remote-endpoint mode, or either CDP mode combined with `--isolated`): the context is created with the storage state directly.
 > - **Default persistent-profile mode with `--storage-state`**: the session runs in a fresh, disposable profile — unique to that session and removed when it closes — built from the state, so the recorded state is provably the only session data (without `--storage-state` the regular persistent profile is used and survives restarts, as before). Any page the launch opened (for example from a URL in `browser.launchOptions.args`) is parked on a blank replacement before the state lands, then the replacement is navigated to the same URL, so a still-running anonymous page cannot overwrite the recorded identity and a scan never reads its DOM. This also means `--storage-state` cannot be combined with `--user-data-dir` (a user-supplied profile carries its own session and will not be wiped; the server refuses the combination).
@@ -765,7 +765,7 @@ Fill multiple fields with one call. Generated Playwright code preserves checkbox
 #### `browser_press_key`
 Press a key on the keyboard.
 - Parameters: `key` (e.g., 'ArrowLeft' or 'a')
-- Keys are delivered by Playwright's US keyboard layout. On the pinned Playwright 1.63.0, some numpad keys differ from a physical keyboard. In Chromium, Firefox and WebKit, `NumpadDecimal` sends key `"\u0000"` instead of `Delete`; WebKit on macOS also inserts that NUL character into the focused input ([upstream fix](https://github.com/microsoft/playwright/pull/42927), merged after 1.63.0 and not in the stable pin). In Chromium only, numpad `keyup` events do not report the numpad location ([upstream fix](https://github.com/microsoft/playwright/pull/42913), merged after 1.63.0), and shifted numpad digits such as `Shift+Numpad1`, and `Shift+NumpadDecimal`, type nothing. Pages that rely on numpad `key`, `location` or shifted digits may therefore not be exercised faithfully; the server passes keys through unchanged rather than remapping them. Use `Delete` when deletion matters more than the physical numpad identity. `tests/numpad-keys.integration.test.ts` characterizes only the measured paired versions, browser builds and platforms; other environments must satisfy the intended key contract.
+- Keys are delivered by Playwright's US keyboard layout: unshifted numpad keys act with NumLock off (`NumpadDecimal` sends `Delete`), `Shift` yields the digit or decimal point, and every event reports the numpad location. On the pinned Playwright 1.65.0 Chromium, Firefox and WebKit on Linux delivered numpad keys this way. Playwright 1.63.0 sent `NumpadDecimal` as key `"\u0000"` (WebKit on macOS also inserted it), and in Chromium dropped the numpad `keyup` location and typed nothing for shifted numpad digits (upstream fixes [#42927](https://github.com/microsoft/playwright/pull/42927) and [#42913](https://github.com/microsoft/playwright/pull/42913)). The server passes keys through unchanged rather than remapping them. `tests/numpad-keys.integration.test.ts` characterizes only the measured paired versions, browser builds and platforms; other environments must satisfy the intended key contract.
 
 #### `browser_start_recording` / `browser_stop_recording`
 Record browser actions and return them as Playwright JavaScript. Start the server with `--caps devtools`, call `browser_start_recording`, perform the flow, then call `browser_stop_recording`.
@@ -803,7 +803,7 @@ Install the configured browser engine (use when browser executable is missing).
 
 Disabled by default. Enable it at server startup with `--caps install`, `PLAYWRIGHT_MCP_CAPS=install`, or `"capabilities": ["install"]` in the config file. Exact-name opt-in via `--allowed-tools browser_install` or `allowedTools` is also supported. Explicit `core-install` settings remain supported as a deprecated alias; use `install` in new configurations. Without this opt-in, the tool is neither listed nor callable; existing browser installations can still be used.
 
-This tool invokes Playwright's installer, which downloads executable code. In [Playwright 1.63.0](https://github.com/microsoft/playwright/blob/v1.63.0/packages/playwright-core/src/server/registry/oopDownloadBrowserMain.ts), browser archives have no checksum or signature verification before extraction; the default download hosts use HTTPS. Only enable installation when you trust the download source and TLS configuration, including any custom `PLAYWRIGHT_DOWNLOAD_HOST`, browser-specific host overrides, or TLS-inspecting proxy. Do not disable TLS certificate validation.
+This tool invokes Playwright's installer, which downloads executable code. In [Playwright 1.65.0](https://github.com/microsoft/playwright/blob/v1.65.0/packages/playwright-core/src/server/registry/oopDownloadBrowserMain.ts), browser archives still have no checksum or signature verification before extraction; the default download hosts use HTTPS. Only enable installation when you trust the download source and TLS configuration, including any custom `PLAYWRIGHT_DOWNLOAD_HOST`, browser-specific host overrides, or TLS-inspecting proxy. Do not disable TLS certificate validation.
 
 For deployments that require independently verified binaries, provision the browser through your trusted deployment process and use `--executable-path` or an existing browser connection. The capability opt-in limits MCP-triggered installation; it does not add archive verification or change manual, CI, or Docker build downloads.
 
@@ -1065,7 +1065,7 @@ the removal rationale and validation results.
 ### Playwright upgrade gate
 
 The Linux `test` and `webkit-regressions` CI jobs use the official
-`mcr.microsoft.com/playwright:v1.63.0-noble` image with its preinstalled browsers
+`mcr.microsoft.com/playwright:v1.65.0-noble` image with its preinstalled browsers
 and system dependencies, rather than downloading browsers during each job.
 They run as `pwuser` so Firefox can use GitHub's user-owned home directory.
 Keep both image tags in `.github/workflows/ci.yml` aligned with the pinned
@@ -1074,18 +1074,19 @@ the package's Docker smoke test remain separate; branded Chrome and Edge are
 not included in the Playwright image. See the
 [Playwright Docker guidance](https://playwright.dev/docs/docker).
 
-The September 16, 2026 review keeps `playwright` and `playwright-core` paired at
-**1.63.0**, the [latest stable release](https://github.com/microsoft/playwright/releases/tag/v1.63.0)
+The November 6, 2026 upgrade pairs `playwright` and `playwright-core` at
+**1.65.0**, the [latest stable release](https://github.com/microsoft/playwright/releases/tag/v1.65.0)
 on that date. Keep the local `InputRecorder` hub and the existing factory reference
 counts: multiple MCP clients share one client-side browser context, while the hub
 multiplexes session logs and explicit recordings and excludes sibling tool actions.
 A dependency bump alone must not change that ownership model.
 
-Before adopting a stable release containing [upstream #42627](https://github.com/microsoft/playwright/pull/42627),
-adapt the hub from `_enableRecorder` / `_disableRecorder` to
-`_startRecording({ language: 'javascript' }, sink)` / `_stopRecording()` and verify
-the per-client event contract against the installed runtime. Do not ship a
-prerelease bump or an untested method-name fallback. Migrating to the separate
+Playwright 1.65.0 contains [upstream #42627](https://github.com/microsoft/playwright/pull/42627),
+so the hub uses `_startRecording({ language: 'javascript' }, sink)` / `_stopRecording()`
+instead of `_enableRecorder` / `_disableRecorder`, with no method-name fallback.
+Playwright starts one programmatic recording per client connection and rejects a
+second start, so the hub arms once and does not restart an armed recorder, which
+matches the 1.63.0 re-enable no-op. Migrating to the separate
 connections in [#42622](https://github.com/microsoft/playwright/pull/42622) is a
 separate ownership change requiring the same lifecycle checks.
 
@@ -1104,28 +1105,36 @@ tests also cover failed-start recovery and overlapping start/stop. The recorder
 must receive the final input event before stop; unbuffered input delivered after
 stop begins is excluded, while buffered clicks/navigation get a 500 ms drain.
 
-Also recheck the dependency fixes motivating the upgrade. On 1.63.0 Chromium,
+Also recheck the dependency fixes motivating an upgrade. On 1.63.0 Chromium,
 both full-page and oversized element screenshots changed `navigator.maxTouchPoints`
-from 1 to 0 and `(pointer: coarse)` from true to false; navigation restored the
-properties ([#42617](https://github.com/microsoft/playwright/pull/42617)).
-The fixed-header/smooth-scroll retry fixture clicked successfully but emitted 19
+from 1 to 0 and `(pointer: coarse)` from true to false
+([#42617](https://github.com/microsoft/playwright/pull/42617)), and the
+fixed-header/smooth-scroll retry fixture clicked successfully but emitted 19 to 26
 scroll events rather than instant jumps ([#42626](https://github.com/microsoft/playwright/pull/42626)).
-A candidate upgrade must preserve touch properties after full-page and element
-screenshots and navigation, and complete retry scrolling without smooth animation.
-These are dependency limitations; the recorder gate alone does not verify them.
+On 1.65.0 Chromium, touch properties survived full-page and element screenshots
+and navigation, and the retry scrolled once. The recorder gate alone does not
+verify these.
+
+Tests that characterize a known upstream deviation name the exact paired versions
+on which it was measured; any other version must show the intended behavior. The
+1.65.0 upgrade proved the fixes for the WebKit nested-`<details>` leak (#246),
+numpad keys and renderer-less CDP tabs (#244), and preloaded CDP frame trees on
+Linux. The Linux WebKit lost-abort race and the macOS 14 WebKit page-setup failure
+below remain characterized on 1.65.0.
 
 ### Newly reported browser limitations (#251)
 
-The September 28, 2026 validation retains the paired Playwright **1.63.0** pins;
-no containing stable release is available. See the [platform results and rerun
-commands](docs/browser-upgrade-validation-251.md) before upgrading.
+The September 28, 2026 validation measured these on Playwright **1.63.0**; see the
+[platform results and rerun commands](docs/browser-upgrade-validation-251.md).
+The 1.65.0 upgrade was rechecked on Linux only, so the macOS entries below are
+still to be confirmed by the macOS CI jobs, which expect fixed behavior unless an
+entry says otherwise.
 
-- **Preloaded CDP pages:** nested cross-site/sandboxed frames can redirect
-  evaluation, locators and scans into an iframe even while `page.url()` shows the
-  top URL. Both `--cdp-endpoint` and `--cdp-launch` reproduced this. Prefer a fresh
-  isolated context when losing the existing tab state is acceptable; do not trust
-  a top-level URL alone as proof of the scan target. This is separate from the
-  crashed-tab attach timeout in #244.
+- **Preloaded CDP pages:** on 1.63.0, nested cross-site/sandboxed frames could
+  redirect evaluation, locators and scans into an iframe even while `page.url()`
+  showed the top URL, through both `--cdp-endpoint` and `--cdp-launch`. On 1.65.0
+  on Linux, both paths evaluated and scanned the top document. This is separate
+  from the crashed-tab attach timeout in #244.
 - **Full-page screenshots on macOS:** bundled Chromium headless shell changed
   actual fonts and layout after capture. Chrome changed the monospace font but
   retained the measured geometry. Viewport screenshots did not change either.
@@ -1134,18 +1143,20 @@ commands](docs/browser-upgrade-validation-251.md) before upgrading.
   layout-sensitive checks, or disable those screenshots with
   `screenshotOnIssue: false` and `annotateScreenshot: false`. The server does
   not reset fonts or reload pages.
-- **Firefox on macOS:** `browser_press_key` with `Alt+a` inserted `a`; Chromium
-  and WebKit controls did not. The Firefox r1553 roll addressing Option-key and
-  frame-focus behavior is merged but unreleased. Keys remain passed through.
+- **Firefox on macOS:** on 1.63.0, `browser_press_key` with `Alt+a` inserted `a`;
+  Chromium and WebKit controls did not. Playwright 1.65.0 ships Firefox r1572,
+  after the r1553 roll addressing Option-key and frame-focus behavior. Keys remain
+  passed through.
 - **WebKit on macOS 14:** page creation fails with
   `Unknown setting: PushAPIEnabled` in the frozen r2251 bundle, reproduced on a
-  hosted macOS 14.8.9 arm64 runner. The macOS 26/r2359 control passed. Use a
-  separately validated browser/OS combination if affected, rather than blindly
-  downgrading Playwright.
+  hosted macOS 14.8.9 arm64 runner with 1.63.0. Playwright 1.65.0 still uses r2251
+  on macOS 14 and still sends that setting. The macOS 26 control passed on 1.63.0.
+  Use a separately validated browser/OS combination if affected, rather than
+  blindly downgrading Playwright.
 
-The WebKit provisional-load event-order race was also reproduced on Linux: a
-cancelled navigation waited for its configured timeout instead of reporting the
-abort promptly. Keep a finite navigation timeout; it bounds the wait but does
+The WebKit provisional-load event-order race was also reproduced on Linux, with
+1.63.0 and again with 1.65.0 (WebKit 27.2): a cancelled navigation waited for its
+configured timeout instead of reporting the abort promptly. Keep a finite navigation timeout; it bounds the wait but does
 not fix the missed error. Linux Firefox crash cycles showed increased parent
 RSS, but context closure alone does not prove native windows were freed. These
 remain separate upgrade checks. No engine patches, alpha upgrades, or browser

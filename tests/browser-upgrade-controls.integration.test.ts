@@ -38,9 +38,14 @@ const versions = {
 };
 // Only the measured paired pin may retain these upstream deviations. An upgrade
 // must pass the intended behavior instead of inheriting a known failure.
-const pinned = versions.playwright === '1.63.0' && versions.playwrightCore === '1.63.0';
+const paired = versions.playwright === versions.playwrightCore ? versions.playwright : undefined;
+const pinned = paired === '1.63.0';
+// Still present on 1.65.0: Linux WebKit lost aborts reproduced there, and
+// 1.65.0 keeps macOS 14 on the frozen r2251 bundle while still sending the
+// PushAPIEnabled setting that bundle rejects.
+const knownOn = (...measured: string[]) => paired !== undefined && measured.includes(paired);
 const mac14WebKit = browserName === 'webkit' && process.platform === 'darwin' && os.release().startsWith('23.');
-const knownPageSetupFailure = pinned && mac14WebKit;
+const knownPageSetupFailure = knownOn('1.63.0', '1.65.0') && mac14WebKit;
 let browser: playwright.Browser | undefined;
 let backend: BrowserServerBackend | undefined;
 let directory: string | undefined;
@@ -203,9 +208,10 @@ it.skipIf(knownPageSetupFailure)('delivers navigation errors, bounds stalled loa
             await fresh.goto(origin + target, { waitUntil: 'domcontentloaded', timeout: 3000 });
           } catch (error) {
             // #42957's abort-before-request order was protocol-confirmed on
-            // pinned Linux WebKit. Only its served-but-uncommitted signature
-            // may time out; a containing fix must deliver cancellation promptly.
-            const knownTimeout = pinned && process.platform === 'linux' && error instanceof playwright.errors.TimeoutError;
+            // Linux WebKit with 1.63.0 and still reproduces with 1.65.0. Only its
+            // served-but-uncommitted signature may time out; a containing fix
+            // must deliver cancellation promptly.
+            const knownTimeout = knownOn('1.63.0', '1.65.0') && process.platform === 'linux' && error instanceof playwright.errors.TimeoutError;
             const deliveredAbort = error instanceof Error && error.message.startsWith('page.goto: Load request cancelled');
             if (!knownTimeout && !deliveredAbort)
               throw error;
@@ -247,7 +253,7 @@ it.skipIf(!mac14WebKit)('characterizes actual macOS 14 WebKit page setup (#42964
     if (first === 'stalled')
       await browser.close();
     const result = await creating;
-    if (pinned) {
+    if (knownPageSetupFailure) {
       if (!('error' in result) || !(result.error instanceof Error))
         throw new Error('Expected the pinned WebKit page-setup error');
       expect(result.error.message).toContain('Unknown setting: PushAPIEnabled');
