@@ -253,4 +253,8 @@ it('matches mixed-case ARIA roles and states with lowercase controls (#303)', as
     ]) {
       const line = snapshot.split('\n').find(line => line.includes(`${role} "${prefix} ${suffix}"`));
       expect(line, snapshot).toContain(state);
-      await ok('browser_
+      await ok('browser_verify_element_visible', { role, accessibleName: `${prefix} ${suffix}` });
+    }
+    expect(await ok('browser_find', { text: `${prefix} action` })).toContain(`button "${prefix} action"`);
+  }
+});

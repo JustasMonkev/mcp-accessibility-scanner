@@ -243,8 +243,8 @@ jobs:
           - { os: ubuntu-latest, browser: firefox }
           - { os: ubuntu-24.04, browser: webkit }
           - { os: macos-15, browser: webkit }
-          - { os: macos-14, browser: firefox }
-          - { os: macos-14, browser: chromium }
+          - { os: macos-15, browser: firefox }
+          - { os: macos-15, browser: chromium }
     steps:
       - name: Checkout code
         shell: bash

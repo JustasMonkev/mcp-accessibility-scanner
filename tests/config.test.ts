@@ -791,6 +791,7 @@ describe('Config', () => {
 
       expect(config.browser.contextOptions.userAgent).toBe('custom-agent');
       expect(config.browser.contextOptions.viewport).toEqual({ width: 800, height: 600 });
+      expect(config.browser.contextOptions.screen).toEqual(descriptor.screen);
       expect(devices['iPhone 15']).toEqual(descriptor);
     });
 
