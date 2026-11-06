@@ -148,7 +148,6 @@ async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
     throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
   validateProfileDirName(config.browser.profileDirName);
   applyDefaultChromiumSandbox(config);
-  warnAboutAuthenticatedProxies(config);
   return config;
 }
 
@@ -160,15 +159,22 @@ function normalizeRedactUrlParams(config: FullConfig): void {
   config.redactUrlParams = config.redactUrlParams.map(name => name.trim());
 }
 
+const plainBypassEntry = /^\.?[a-z0-9-]+(\.[a-z0-9-]+)*$/i;
+
 function applyProxyToClientCertificates(config: FullConfig): void {
   const { contextOptions, launchOptions } = config.browser;
   if (!contextOptions.clientCertificates?.length)
     return;
   const proxy = contextOptions.proxy ?? launchOptions.proxy;
-  if (proxy?.bypass?.trim())
-    throw new Error('clientCertificates with proxy.bypass is unsupported on Playwright 1.63.0: the certificate interceptor ignores bypass rules. Use a separate browser configuration for these routes; no browser was started.');
+  // With certificates, Playwright routes every request through its certificate
+  // interceptor, which matches bypass entries only as domain suffixes. Reject
+  // browser-specific syntax there rather than silently proxying those routes.
+  const unsupported = proxy?.bypass?.split(',').map(entry => entry.trim()).filter(entry => entry && !plainBypassEntry.test(entry));
+  if (unsupported?.length)
+    throw new Error(`clientCertificates supports only host and domain entries in proxy.bypass, such as "example.com" or ".example.com"; unsupported: ${unsupported.map(entry => JSON.stringify(entry)).join(', ')}. Wildcards, ports, IP ranges and <local> are not applied by Playwright's certificate interceptor. No browser was started.`);
+  // The interceptor compares entries against the lowercased URL hostname as-is.
   if (proxy)
-    contextOptions.proxy = proxy;
+    contextOptions.proxy = proxy.bypass ? { ...proxy, bypass: proxy.bypass.toLowerCase() } : proxy;
 }
 
 const maxTimerDelayMs = 2_147_483_647;
@@ -203,12 +209,6 @@ function applyDefaultChromiumSandbox(config: FullConfig): void {
     && (channel === undefined || channel === 'chromium' || channel === 'chrome-for-testing');
   browser.launchOptions.chromiumSandbox = !bundledChromiumOnLinux;
   browser.chromiumSandboxDefaulted = true;
-}
-
-function warnAboutAuthenticatedProxies(config: FullConfig): void {
-  const { launchOptions, contextOptions } = config.browser;
-  if ([launchOptions.proxy, contextOptions.proxy].some(proxy => proxy?.username || proxy?.password))
-    process.stderr.write('WARNING: Playwright 1.63.0 may send authenticated proxy credentials to a website\'s 401 authentication challenge. This warning does not prevent the leak. Avoid authenticated proxies until a Playwright release containing https://github.com/microsoft/playwright/pull/43482 is adopted.\n');
 }
 
 type MobileSource = 'env' | 'cli';

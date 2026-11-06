@@ -58,12 +58,7 @@ const addMissingPageAlias = (
   else
     recorded.unshift(declarationAction);
 };
-const recorderParams = {
-  mode: 'recording',
-  recorderMode: 'api',
-  omitCallTracking: true,
-  language: 'javascript',
-};
+const recorderParams = { language: 'javascript' };
 
 type RecorderSink = {
   actionAdded: (page: playwright.Page, data: actions.Action | actions.ActionInContext, code: string) => void;
@@ -71,9 +66,11 @@ type RecorderSink = {
   signalAdded: (page: playwright.Page, data: actions.Signal | actions.SignalInContext, code: string) => void;
 };
 
+// Playwright starts one programmatic recording per client connection, always in
+// 'recording' mode with call tracking omitted; starting a second one throws.
 type PlaywrightRecorderControl = {
-  _enableRecorder(params: typeof recorderParams, sink: RecorderSink): Promise<void>;
-  _disableRecorder(): Promise<void>;
+  _startRecording(params: typeof recorderParams, sink: RecorderSink): Promise<void>;
+  _stopRecording(): Promise<void>;
 };
 
 class RecorderHub {
@@ -89,11 +86,7 @@ class RecorderHub {
 
   constructor(browserContext: playwright.BrowserContext) {
     this._browserContext = browserContext;
-    this.ready = this.arm();
-  }
-
-  arm(): Promise<void> {
-    return this._enqueue(() => this._arm());
+    this.ready = this.ensureArmed();
   }
 
   ensureArmed(): Promise<void> {
@@ -108,7 +101,7 @@ class RecorderHub {
       if (this.starting || this.recorders.size || this.recordings.size)
         return;
       try {
-        await this._control()._disableRecorder();
+        await this._control()._stopRecording();
       } finally {
         this._armed = false;
       }
@@ -120,7 +113,7 @@ class RecorderHub {
   }
 
   private async _arm(): Promise<void> {
-    await this._control()._enableRecorder(recorderParams, this._sink);
+    await this._control()._startRecording(recorderParams, this._sink);
     this._armed = true;
   }
 
@@ -250,7 +243,7 @@ export class InputRecorder {
       await hub.ready;
       if (existingHub) {
         await new Promise(resolve => setTimeout(resolve, recorderBufferMs));
-        await hub.arm();
+        await hub.ensureArmed();
       }
       for (const [index, page] of browserContext.pages().entries())
         target.pageIndexes.set(page, index);
