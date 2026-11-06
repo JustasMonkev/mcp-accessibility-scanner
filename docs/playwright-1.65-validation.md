@@ -55,3 +55,23 @@ The first local full-suite attempt (while some agent fixtures/docs were still be
 Focused source checks pass lint/typecheck and build. Recorder/session unit gate: 124/124. Config/program/factory gate: 282/282. Process/factory/backend lifecycle gate: 150/150. Counts overlap and must not be added together. Final broad non-integration run: **1,703 passed, 0 failed, 41 skipped** (browser-backed screen-reader, keyboard and navigation suites excluded and run separately). The docs pin and parallel-load WebMCP checks were rechecked serially: 90 passed, 4 skipped. New network Firefox gate: 5 passed, one Chromium-only skip. New accessibility Firefox gate: 9/9 passed. Existing Firefox controls pass numpad, focus/Alt and navigation recovery. The Firefox crash-retention probe cannot inspect the reported browser PID through this sandbox's `/proc`, so it never reaches its signal stage.
 
 An existing Firefox screen-reader own-heading measurement case crashes the page, and the Firefox navigation suite exposes an unrelated session-loss expectation. These failures remain recorded; no assertion is relaxed. Hosted Chromium and supported native OS CI are required before merge. This change closes no issue automatically.
+
+## Hosted stable-browser evidence
+
+[PR #326](https://github.com/JustasMonkev/mcp-accessibility-scanner/pull/326), head `c22e48118bbb1190c635d85d1b803a5cff1d0ac3`, [CI run 42158289889](https://github.com/JustasMonkev/mcp-accessibility-scanner/actions/runs/42158289889):
+
+- Stable container launches Chromium 158.0.8127.18, Firefox 159.0 and WebKit 27.2. Build, lint/typecheck and both proxy probes pass their executed checks.
+- Main suite: **1,986 passed, 2 failed, 5 skipped**. Crashed-tab CDP attachment (4), preloaded frame-tree checks (2), recorder, numpad, touch/smooth-scroll (3) and screenshot fonts pass. One failed newly added shared-worker fixture stops before exercising the worker because `Browser.getBrowserCommandLine` requires `--enable-automation`; its setup is corrected separately. The other is the genuine origin-policy failure below.
+- Persistent-history/download regressions: 18/18 on Linux Chromium 158 and Windows Chrome 157.0.8103.39, with `knownNativeCrash: false`; Windows Edge also passes. macOS Firefox 159 passes its full job, including 15 accessibility/network/storage tests and one Chromium-only skip.
+- Chromium 158 on macOS preserves all five sampled font families and layout after viewport/full-page capture. All nine new Chromium accessibility cases and storage tests pass.
+- Linux WebKit stress passes 200 cancellation/navigation cycles with no recorded network errors; nested-details controls pass WebKit and Firefox. This does not deterministically rule out the native network race.
+
+### Remaining observed failures
+
+1. **Origin policy on already loaded pages (#296):** on both Linux and macOS Chromium 158, a new blocked-origin fetch reaches the fixture server after policy setup. Browser fetch rejects because CORS denies the response, so asserting only fetch rejection would hide the escape. The regression asserts the destination receives no request and remains strict. The existing browser-level Fetch interception does not rebuild already-created document loader factories; fixing this safely requires page/worker/redirect lifetime work beyond a method-name dependency migration. This is not claimed to be introduced by 1.65 without a runtime baseline comparison.
+2. **WebKit consumed empty responses (#257):** valid zero-byte response returns an explicit body-unavailable protocol error instead of `<empty>` on both Linux and macOS. Large-body errors are honest; the legitimate-empty control remains strict.
+3. **WebKit navigation race (#251):** Linux strict 350-navigation control times out after the server handles a nominal `/ok` request (observed round 312); macOS also fails its bounded navigation control. No 1.63 allowance or larger timeout is granted to 1.65.
+4. **Persistent Firefox client certificates (#235):** proxy routing works, but the TLS origin receives no configured client certificate in a persistent context. A direct upstream `firefox.launchPersistentContext` reproduction confirms this without the repository factory. Isolated Firefox certificate+bypass controls pass.
+5. **Platform/lifecycle gaps:** native Windows ARM64 installer acceptance (#292), genuine Memory Saver discard, native Firefox crash retention, Windows-specific network exhaustion, and local SIGHUP/IPC-disconnect cleanup remain separately unresolved.
+
+`npm run knip` flags `tests/transportFixture.ts` as unused in both pristine main and this branch; this is a verified baseline finding. Changed-code slop-check reports zero findings. The PR stays draft and no issue is closed automatically.

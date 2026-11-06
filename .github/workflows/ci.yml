@@ -83,12 +83,14 @@ jobs:
         run: npm test
 
       - name: Run native WebMCP integration
+        if: ${{ !cancelled() }}
         run: npm test -- tests/webmcp-browser.test.ts
         env:
           WEBMCP_BROWSER_TEST: '1'
           WEBMCP_BROWSER_NO_SANDBOX: '1'
 
       - name: Build
+        if: ${{ !cancelled() }}
         run: npm run build
 
       - name: Verify client-certificate proxy routing

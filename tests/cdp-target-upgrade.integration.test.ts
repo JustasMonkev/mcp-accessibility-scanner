@@ -94,7 +94,8 @@ it('attaches through MCP after a second client inspects a terminated shared work
     if (!address || typeof address === 'string')
       throw new Error('Expected TCP fixture server');
     const origin = `http://127.0.0.1:${address.port}`;
-    browser = await chromium.launch({ args: ['--remote-debugging-port=0'] });
+    // Browser.getBrowserCommandLine requires this flag to discover the OS-assigned CDP port.
+    browser = await chromium.launch({ args: ['--remote-debugging-port=0', '--enable-automation'] });
     const inspector = await browser.newBrowserCDPSession();
     const { arguments: browserArguments } = await inspector.send('Browser.getBrowserCommandLine');
     const profile = browserArguments.find(argument => argument.startsWith('--user-data-dir='))?.slice('--user-data-dir='.length);
