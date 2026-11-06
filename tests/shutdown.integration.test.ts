@@ -19,7 +19,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 const rootDir = path.resolve(__dirname, '..');
@@ -30,10 +30,6 @@ const fixtureResponseSchema = z.object({
   result: z.object({ isError: z.boolean().optional() }).loose().optional(),
 });
 type FixtureResponse = z.infer<typeof fixtureResponseSchema>;
-
-beforeAll(() => {
-  execFileSync(process.execPath, [path.join(rootDir, 'node_modules/typescript/bin/tsc'), '--project', path.join(rootDir, 'tsconfig.json')]);
-});
 
 function descendants(pid: number): number[] {
   const rows = execFileSync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8' })
@@ -56,6 +52,21 @@ function alive(pid: number): boolean {
 }
 
 describe.skipIf(process.platform === 'win32')('POSIX CLI shutdown', () => {
+  let buildDir: string;
+
+  beforeAll(async () => {
+    const cacheDir = path.join(rootDir, 'node_modules', '.cache');
+    await fs.mkdir(cacheDir, { recursive: true });
+    buildDir = await fs.mkdtemp(path.join(cacheDir, 'shutdown-'));
+    await Promise.all(['cli.js', 'package.json'].map(file => fs.copyFile(path.join(rootDir, file), path.join(buildDir, file))));
+    execFileSync(process.execPath, [path.join(rootDir, 'node_modules/typescript/bin/tsc'), '--project', path.join(rootDir, 'tsconfig.json'), '--outDir', path.join(buildDir, 'lib')]);
+  });
+
+  afterAll(async () => {
+    if (buildDir)
+      await fs.rm(buildDir, { recursive: true, force: true });
+  });
+
   it.each([
     ...triggers.map(trigger => ({ trigger, isolated: true })),
     ...triggers.map(trigger => ({ trigger, isolated: false })),
@@ -68,7 +79,7 @@ describe.skipIf(process.platform === 'win32')('POSIX CLI shutdown', () => {
     const sentinel = path.join(profile, 'caller-owned.txt');
     await fs.writeFile(sentinel, 'retain');
     await fs.writeFile(path.join(directory, 'config.json'), JSON.stringify({ browser: { isolated, userDataDir: isolated ? undefined : profile, launchOptions: { channel: 'chromium' } } }));
-    const child = spawn(process.execPath, [path.join(rootDir, 'cli.js'), '--headless', '--browser', 'chromium', '--config', path.join(directory, 'config.json')], {
+    const child = spawn(process.execPath, [path.join(buildDir, 'cli.js'), '--headless', '--browser', 'chromium', '--config', path.join(directory, 'config.json')], {
       stdio: 'pipe',
       env: { PATH: process.env.PATH, TMPDIR: temporary, PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH },
     });
