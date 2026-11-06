@@ -876,6 +876,13 @@ Returns credential-redacted request/response headers and body metadata for one r
 - A request that failed after its response arrived reports both the status and the failure.
 - Sections that could not be read are reported in place (`<headers unavailable: ...>`, `<body unavailable: ...>`) rather than failing the whole call; reads are bounded by the default timeout, so a still-streaming response cannot hang the tool.
 
+- WebKit 27.2 can report a missing body even after a successful empty response.
+  The tool recovers `<empty>` only when completion, transfer-size metadata and
+  HTTP semantics confirm that result: a HEAD/204/205 response or an unambiguous
+  `Content-Length: 0`. Ambiguous chunked-empty responses can still report
+  `<body unavailable: ...>`; unavailable or evicted data is never assumed empty,
+  and inspecting a response never replays its request.
+
 ### URL redaction coverage
 
 `--redact-url-params code,access_token` is an opt-in output convenience, not a security boundary. It follows the [upstream Playwright text-matching policy](UPSTREAM.md): a literal configured name after `?`, `&` or `#`, followed by `=`, starts a match anywhere in text, including prose. Keys are not decoded, so `code` does not match `c%6Fde`. Values stop at `&`, `#`, whitespace, quotes, angle brackets, parentheses, square brackets, backticks or backslashes. Suffixes after these delimiters remain visible; for example, `?code=first'tail` becomes `?code=REDACTED'tail`. Percent-encoded value characters are masked as ordinary text. This does not find arbitrary secrets or decode whole percent-encoded URL blobs.
