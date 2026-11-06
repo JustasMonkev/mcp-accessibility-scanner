@@ -190,11 +190,11 @@ describe('browserContextFactory', () => {
     const browser = createMockBrowser(browserContext);
     connectOverCDP.mockResolvedValue(browser);
     spawnMock.mockImplementation(createMockChildProcess);
-    // Cookie-only states are also unsafe: capture can visit previously seen origins.
+    // Cookie-only imports still clear registrations that a rollback cannot restore.
     for (const storageState of ['/missing/auth.json', { cookies: [], origins: [] }]) {
       const config = await resolveConfig({ browser: { ...browserOptions, contextOptions: { storageState } } });
       await expect(contextFactory(config).createContext({ name: 'vitest' }, new AbortController().signal, undefined))
-          .rejects.toThrow(/Cannot apply --storage-state.*existing browser context.*No storage snapshot or reset/);
+          .rejects.toThrow(/Cannot apply --storage-state.*existing browser context.*service-worker registrations.*No storage snapshot or reset/);
     }
     expect(browserContext.storageState).not.toHaveBeenCalled();
     expect(browserContext.setStorageState).not.toHaveBeenCalled();

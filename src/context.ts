@@ -108,7 +108,7 @@ class ContextRegistry {
 
 const contextRegistry = new ContextRegistry();
 
-type TraceHub = { users: number, ready: Promise<void> };
+type TraceHub = { users: number, ready: Promise<unknown> };
 const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
 
 type IdleGroup = {

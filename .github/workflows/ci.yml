@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     container:
-      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      image: mcr.microsoft.com/playwright:v1.65.0-noble
       options: --user pwuser --init --ipc=host
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
@@ -92,7 +92,12 @@ jobs:
         run: npm run build
 
       - name: Verify client-certificate proxy routing
+        if: ${{ !cancelled() }}
         run: node tests/client-certificate-proxy-probe.mjs
+
+      - name: Verify authenticated proxy credential isolation
+        if: ${{ !cancelled() }}
+        run: node tests/authenticated-proxy-probe.mjs
 
   docker-smoke:
     runs-on: ubuntu-latest
@@ -172,7 +177,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
-      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      image: mcr.microsoft.com/playwright:v1.65.0-noble
       options: --user pwuser --init --ipc=host
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
@@ -236,8 +241,8 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest, browser: firefox }
-          - { os: ubuntu-latest, browser: webkit }
-          - { os: macos-14, browser: webkit }
+          - { os: ubuntu-24.04, browser: webkit }
+          - { os: macos-15, browser: webkit }
           - { os: macos-14, browser: firefox }
           - { os: macos-14, browser: chromium }
     steps:
@@ -277,12 +282,18 @@ jobs:
 
       - run: npm ci
       - run: npx playwright install --with-deps ${{ matrix.browser }}
-      - if: ${{ matrix.browser != 'chromium' && !(matrix.os == 'macos-14' && matrix.browser == 'webkit') }}
+      - if: ${{ matrix.browser != 'chromium' }}
         run: npx vitest run tests/numpad-keys.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
       - if: ${{ !cancelled() }}
         run: npx vitest run tests/browser-upgrade-controls.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
+
+      - if: ${{ !cancelled() }}
+        name: Verify accessibility and storage upgrade behavior
+        run: npx vitest run tests/playwright-165-accessibility.integration.test.ts tests/playwright-165-network.integration.test.ts tests/storage-upgrade.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
 

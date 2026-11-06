@@ -145,18 +145,15 @@ describe('tool policy CLI options', () => {
   });
 });
 
-describe('authenticated proxy disclosure', () => {
-  it('describes the credential leak risk in --proxy-server help', () => {
-    expect(runCLI('--help')).toMatch(/credentials[\s\S]*website[\s\S]*401/);
+describe('authenticated proxy CLI', () => {
+  it('advertises credentialed proxy URLs in --proxy-server help', () => {
+    expect(runCLI('--help')).toContain('http://user:password@myproxy:3128');
   });
 
-  it('warns on stderr before stdio startup without logging proxy settings', async () => {
+  it('accepts credentials without warnings or logging proxy settings', async () => {
     const result = await collectOutput(['--proxy-server', 'http://private-user:private-password@private-proxy.test:3128']);
     expect(result.stdout).toBe('');
-    expect(result.stderr).toContain('Playwright 1.63.0');
-    expect(result.stderr).toContain('does not prevent');
-    expect(result.stderr.match(/WARNING/g)).toHaveLength(1);
-    expect(result.stderr).not.toContain('private-');
+    expect(result.stderr).toBe('');
   });
 });
 

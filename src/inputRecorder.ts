@@ -59,9 +59,6 @@ const addMissingPageAlias = (
     recorded.unshift(declarationAction);
 };
 const recorderParams = {
-  mode: 'recording',
-  recorderMode: 'api',
-  omitCallTracking: true,
   language: 'javascript',
 };
 
@@ -72,8 +69,8 @@ type RecorderSink = {
 };
 
 type PlaywrightRecorderControl = {
-  _enableRecorder(params: typeof recorderParams, sink: RecorderSink): Promise<void>;
-  _disableRecorder(): Promise<void>;
+  _startRecording(params: typeof recorderParams, sink: RecorderSink): Promise<void>;
+  _stopRecording(): Promise<void>;
 };
 
 class RecorderHub {
@@ -108,7 +105,7 @@ class RecorderHub {
       if (this.starting || this.recorders.size || this.recordings.size)
         return;
       try {
-        await this._control()._disableRecorder();
+        await this._control()._stopRecording();
       } finally {
         this._armed = false;
       }
@@ -120,7 +117,7 @@ class RecorderHub {
   }
 
   private async _arm(): Promise<void> {
-    await this._control()._enableRecorder(recorderParams, this._sink);
+    await this._control()._startRecording(recorderParams, this._sink);
     this._armed = true;
   }
 
@@ -169,18 +166,25 @@ class RecorderHub {
       );
     },
     actionUpdated: (page, data, code) => {
-      const sequence = this._lastActionSequence.get(page);
-      if (sequence === undefined)
-        return;
       const action = 'action' in data ? data.action : data;
+      if (action.name !== 'fill')
+        return;
+      const previousSequence = this._lastActionSequence.get(page);
+      const sequence = ++this._actionSequence;
+      this._lastActionSequence.set(page, sequence);
       this._dispatch(
-          true,
-          true,
-          recorder => recorder.logActionUpdated(page, action, code, sequence),
+          false,
+          false,
+          recorder => recorder.logActionUpdated(page, action, code, previousSequence, sequence),
           target => {
-            const recorded = target.actions.findLast(candidate => candidate.sequence === sequence);
-            if (recorded)
+            const recorded = previousSequence === undefined ? undefined : target.actions.findLast(candidate => candidate.sequence === previousSequence);
+            if (recorded) {
               recorded.code = code;
+              recorded.sequence = sequence;
+            } else {
+              addMissingPageAlias(target.actions, page, code, target.pageIndexes, this._browserContext);
+              target.actions.push({ page, code, sequence });
+            }
           },
       );
     },
@@ -250,7 +254,7 @@ export class InputRecorder {
       await hub.ready;
       if (existingHub) {
         await new Promise(resolve => setTimeout(resolve, recorderBufferMs));
-        await hub.arm();
+        await hub.ensureArmed();
       }
       for (const [index, page] of browserContext.pages().entries())
         target.pageIndexes.set(page, index);
@@ -300,9 +304,11 @@ export class InputRecorder {
       this._context.sessionLog!.logUserAction(action, tab, code, false);
   }
 
-  logActionUpdated(page: playwright.Page, action: actions.Action, code: string, sequence: number) {
-    if (this._lastActions.get(page)?.sequence !== sequence)
+  logActionUpdated(page: playwright.Page, action: actions.Action, code: string, previousSequence: number | undefined, sequence: number) {
+    if (previousSequence === undefined || this._lastActions.get(page)?.sequence !== previousSequence) {
+      this.logActionAdded(page, action, code, sequence);
       return;
+    }
     this._lastActions.set(page, { action, sequence });
     const tab = this._context.tabForPage(page);
     if (tab)

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chromium, type Browser } from 'playwright';
+import * as playwright from 'playwright';
+import type { Browser } from 'playwright';
 import auditScreenReaderTools, {
   analyzeScreenReader,
   collectElementFacts,
@@ -13,6 +14,11 @@ import auditScreenReaderTools, {
 import { Response } from '../src/response.js';
 import { injectAxeForNames } from '../src/tools/axe.js';
 import { measureScreenReaderElements } from '../src/tools/screenReaderMeasurement.js';
+
+const browserName = process.env.MCP_TEST_BROWSER_NAME || 'chromium';
+if (browserName !== 'chromium' && browserName !== 'firefox' && browserName !== 'webkit')
+  throw new Error(`Unsupported MCP_TEST_BROWSER_NAME: ${browserName}`);
+const browserType = playwright[browserName];
 
 function node(overrides: Partial<ScreenReaderNode>): ScreenReaderNode {
   return {
@@ -1285,7 +1291,7 @@ describe('collectElementFacts in a real page', () => {
   let browser: Browser | undefined;
 
   beforeEach(async () => {
-    browser ??= await chromium.launch();
+    browser ??= await browserType.launch();
   });
 
   // Shared scaffold for the pure visible-text measurements; tests asserting

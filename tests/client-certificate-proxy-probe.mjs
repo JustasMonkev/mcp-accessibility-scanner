@@ -30,6 +30,12 @@ import { resolveConfig } from '../lib/config.js';
 // Ambient proxy settings must not disguise a dropped configured route.
 for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'])
   delete process.env[key];
+const browserName = process.env.MCP_TEST_BROWSER_NAME || 'chromium';
+if (!['chromium', 'firefox', 'webkit'].includes(browserName))
+  throw new Error(`Unsupported MCP_TEST_BROWSER_NAME: ${browserName}`);
+const channel = process.env.MCP_TEST_BROWSER_CHANNEL || (browserName === 'chromium' ? 'chromium-headless-shell' : undefined);
+if (channel && browserName !== 'chromium')
+  throw new Error('MCP_TEST_BROWSER_CHANNEL requires chromium');
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-certificate-proxy-'));
 const sockets = new Set();
 const servers = [];
@@ -94,48 +100,47 @@ try {
   const clientCertificates = [{ origin: `https://127.0.0.1:${tlsPort}`,
     certPath: path.join(directory, 'client.crt'), keyPath: path.join(directory, 'client.key') }];
   for (const isolated of [true, false]) {
-    for (const certificates of [false, true]) {
-      for (const bypass of [false, true]) {
-        const options = { browser: {
-          isolated,
-          ...(!isolated && { userDataDir: await fs.mkdtemp(path.join(directory, 'profile-')) }),
-          launchOptions: { channel: 'chromium-headless-shell', headless: true, chromiumSandbox: false, timeout: 30_000,
-            proxy: { server: `http://127.0.0.1:${proxyPort}`, ...(bypass && { bypass: '127.0.0.1' }) } },
-          contextOptions: { ignoreHTTPSErrors: true, ...(certificates && { clientCertificates }) },
-        } };
-        const scenario = { isolated, certificates, bypass };
-        if (certificates && bypass) {
-          await assert.rejects(resolveConfig(options), /clientCertificates with proxy.bypass is unsupported/);
-          results.push({ ...scenario, rejectedBeforeLaunch: true });
-          continue;
-        }
-        const config = await resolveConfig(options);
-        const result = await contextFactory(config).createContext({}, new AbortController().signal, undefined);
-        try {
-          requests = [];
-          const page = await result.browserContext.newPage();
-          for (const [scheme, port] of [['http', originPort], ['https', tlsPort]]) {
-            await page.goto(`${scheme}://127.0.0.1:${port}/probe`, { timeout: 10_000 });
-            assert.equal(await page.textContent('body'), 'fixture');
+    for (const proxySource of ['launch', 'context']) {
+      for (const certificates of [false, true]) {
+        for (const bypass of [false, true]) {
+          const proxySettings = { server: `http://127.0.0.1:${proxyPort}`, ...(bypass && { bypass: '127.0.0.1' }) };
+          const options = { browser: {
+            browserName, isolated,
+            ...(!isolated && { userDataDir: await fs.mkdtemp(path.join(directory, 'profile-')) }),
+            launchOptions: { channel, headless: true, chromiumSandbox: false, timeout: 30_000,
+              ...(proxySource === 'launch' && { proxy: proxySettings }) },
+            contextOptions: { ignoreHTTPSErrors: true, ...(certificates && { clientCertificates }),
+              ...(proxySource === 'context' && { proxy: proxySettings }) },
+          } };
+          const scenario = { browserName, isolated, proxySource, certificates, bypass };
+          const config = await resolveConfig(options);
+          const result = await contextFactory(config).createContext({}, new AbortController().signal, undefined);
+          try {
+            requests = [];
+            const page = await result.browserContext.newPage();
+            for (const [scheme, port] of [['http', originPort], ['https', tlsPort]]) {
+              await page.goto(`${scheme}://127.0.0.1:${port}/probe`, { timeout: 10_000 });
+              assert.equal(await page.textContent('body'), 'fixture');
+            }
+            const proxyRequests = requests.filter(request => request.kind.startsWith('proxy-'));
+            assert.equal(proxyRequests.length > 0, !bypass, JSON.stringify({ ...scenario, requests }));
+            assert.ok(requests.some(request => request.kind === 'origin' && request.path === '/probe'));
+            assert.ok(requests.some(request => request.kind === 'tls-origin' && request.path === '/probe'
+              && request.client === (certificates ? 'disposable-client' : undefined)), JSON.stringify({ ...scenario, requests }));
+            if (!bypass) {
+              assert.ok(proxyRequests.some(request => request.path.includes(`:${originPort}`)), 'HTTP must pass through the proxy');
+              assert.ok(proxyRequests.some(request => request.path.includes(`:${tlsPort}`)), 'HTTPS must pass through the proxy');
+            }
+            results.push({ ...scenario, browserVersion: result.browserContext.browser()?.version(), proxyRequests: proxyRequests.length, clientCertificateVerified: certificates });
+          } finally {
+            await result.close();
           }
-          const proxyRequests = requests.filter(request => request.kind.startsWith('proxy-'));
-          assert.equal(proxyRequests.length > 0, !bypass, JSON.stringify({ ...scenario, requests }));
-          assert.ok(requests.some(request => request.kind === 'origin' && request.path === '/probe'));
-          assert.ok(requests.some(request => request.kind === 'tls-origin' && request.path === '/probe'
-            && request.client === (certificates ? 'disposable-client' : undefined)));
-          if (!bypass) {
-            assert.ok(proxyRequests.some(request => request.path.includes(`:${originPort}`)), 'HTTP must pass through the proxy');
-            assert.ok(proxyRequests.some(request => request.path.includes(`:${tlsPort}`)), 'HTTPS must pass through the proxy');
-          }
-          results.push({ ...scenario, proxyRequests: proxyRequests.length, clientCertificateVerified: certificates });
-        } finally {
-          await result.close();
         }
       }
     }
   }
-  process.stdout.write(JSON.stringify(results, null, 2) + '\n');
 } finally {
+  process.stdout.write(JSON.stringify(results, null, 2) + '\n');
   for (const socket of sockets)
     socket.destroy();
   try {

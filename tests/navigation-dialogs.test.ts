@@ -18,10 +18,16 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { chromium, type Browser, type BrowserContext, type Route } from 'playwright';
+import * as playwright from 'playwright';
+import type { Browser, BrowserContext, Route } from 'playwright';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { resolveConfig } from '../src/config.js';
 import { Tab } from '../src/tab.js';
+
+const browserName = process.env.MCP_TEST_BROWSER_NAME || 'chromium';
+if (browserName !== 'chromium' && browserName !== 'firefox' && browserName !== 'webkit')
+  throw new Error(`Unsupported MCP_TEST_BROWSER_NAME: ${browserName}`);
+const browserType = playwright[browserName];
 
 describe('navigation interrupted by a load-time dialog', () => {
   let browser: Browser;
@@ -30,12 +36,12 @@ describe('navigation interrupted by a load-time dialog', () => {
   let config: Awaited<ReturnType<typeof resolveConfig>>;
 
   beforeAll(async () => {
-    browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    browser = await browserType.launch({ headless: true, chromiumSandbox: false });
   });
 
   beforeEach(async () => {
     config = await resolveConfig({
-      browser: { browserName: 'chromium', isolated: true },
+      browser: { browserName, isolated: true },
       timeouts: { navigationTimeout: 15000, defaultTimeout: 5000, settle: 0 },
     });
     backend = new BrowserServerBackend(config, {
@@ -186,7 +192,7 @@ describe('navigation interrupted by a load-time dialog', () => {
 
   it('names the blocked handler when a dialog appears and browser_handle_dialog is blocked', async () => {
     const blockedConfig = await resolveConfig({
-      browser: { browserName: 'chromium', isolated: true },
+      browser: { browserName, isolated: true },
       timeouts: { navigationTimeout: 15000, defaultTimeout: 5000, settle: 0 },
       blockedTools: ['browser_handle_dialog'],
     });

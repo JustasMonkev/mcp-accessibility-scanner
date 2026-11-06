@@ -115,7 +115,7 @@ describe('recorder compatibility with pinned Playwright (#218)', () => {
     expect(secondRecording.split('~~~js')[1]?.split('~~~')[0]).not.toContain('Sibling tool');
 
     await call(second, 'browser_start_recording');
-    await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Restarted');
+    await page.getByRole('textbox', { name: 'Other', exact: true }).fill('Restarted');
     await expect.poll(async () => (await logs()).some(log => log.includes("fill('Restarted')")), { timeout: 10_000 }).toBe(true);
     const restarted = resultText(await call(second, 'browser_stop_recording'));
     const restartedCode = restarted.split('~~~js')[1]?.split('~~~')[0];
