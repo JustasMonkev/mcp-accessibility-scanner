@@ -121,6 +121,9 @@ function createContextFactory(config: FullConfig): BrowserContextFactory {
     return new CdpContextFactory(config);
   if (config.browser.isolated)
     return new IsolatedContextFactory(config);
+  if (config.browser.browserName === 'firefox' && config.browser.contextOptions.clientCertificates?.length
+      && (config.browser.contextOptions.proxy ?? config.browser.launchOptions.proxy))
+    throw new Error('Persistent Firefox does not support clientCertificates together with a proxy: Playwright bypasses the certificate interceptor and omits the client certificate. Use --isolated with Firefox, select Chromium explicitly, or remove the proxy. No browser was started.');
   return new PersistentContextFactory(config);
 }
 

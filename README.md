@@ -168,6 +168,11 @@ npx --allow-scripts=re2 mcp-accessibility-scanner            # starts the MCP se
 
 All of the MCP client configuration examples in this README already use this default mode.
 
+On POSIX systems, stdin closure, SIGINT, SIGTERM and SIGHUP trigger the same
+graceful server cleanup. Locally owned browser processes and temporary browser
+directories are released; caller-supplied persistent-profile directories are
+retained.
+
 ### Interactive REPL (`interactive` subcommand)
 
 For manual terminal use, the `interactive` subcommand starts a readline REPL where you can call any tool directly:
@@ -219,6 +224,12 @@ npx --allow-scripts=re2 mcp-accessibility-scanner list-tools
 `createConnection` returns an MCP `Server` directly, not a wrapper with a `server`
 property. Its type is the SDK's `Server` from `@modelcontextprotocol/server`. Connect it
 with `server.connect(transport)` and release it with `await server.close()`.
+
+Passing a custom context getter transfers that context's lifecycle to the server:
+`browser_close` or client disconnection closes the supplied context. Its parent
+browser and sibling contexts remain open. Supply a dedicated context, not one
+whose tabs or storage must survive the MCP connection. Multiple sessions cannot
+use a custom getter to obtain independent contexts.
 
 ```ts
 import { createConnection } from 'mcp-accessibility-scanner';
@@ -324,6 +335,13 @@ Create a `config.json` file with the following options:
 - `browser.launchOptions.headless`: Run browser in headless mode (default: `true` on Linux without display, `false` otherwise)
 - `browser.launchOptions.channel`: Browser channel (`chrome`, `chrome-beta`, `msedge`, etc.)
 - `browser.contextOptions.clientCertificates`: With client certificates, a configured launch proxy is also applied to fresh contexts unless `browser.contextOptions.proxy` explicitly overrides it. With certificates, Playwright routes every request through its certificate interceptor, which matches `proxy.bypass` entries only as domain suffixes: `example.com` and `.example.com` both bypass `example.com` and its subdomains, and IP addresses match exactly. Entries using browser-specific syntax (wildcards such as `*.example.com`, ports, IP ranges, `<local>`) would be ignored there, so they are rejected before launch. Playwright 1.63.0 ignored every bypass entry in the interceptor; `tests/client-certificate-proxy-probe.mjs` checks bypassed and proxied routes on the pinned version. For a fresh context on a remote browser, configure its proxy explicitly; a proxy inherited only from that browser cannot be inspected. Existing attached contexts retain their current settings.
+
+  Local persistent Firefox cannot combine client certificates with a configured
+  proxy on Playwright 1.65.0: it sends requests without the configured certificate.
+  This combination is rejected before launch. Explicitly use isolated Firefox
+  or Chromium if suitable for your workflow; the server does not change browser,
+  proxy or persistence mode automatically. Firefox without certificates or
+  without a proxy remains supported.
 - `browser.launchOptions.proxy`: Browser proxy (CLI: `--proxy-server`, `--proxy-bypass`; env: `PLAYWRIGHT_MCP_PROXY_SERVER`, `PLAYWRIGHT_MCP_PROXY_BYPASS`). Credentials in a CLI or environment proxy URL, such as `http://user:password@myproxy:3128`, are moved into `proxy.username` and `proxy.password` so the browser can answer `407 Proxy Authentication Required`; percent-encode reserved characters such as `@`, `:` or `/` in them. A proxy set in the config file keeps its explicit `username` and `password` fields.
 
   **Proxy credentials and website authentication:** Playwright 1.65.0 sends proxy credentials only in answer to a proxy `407` challenge, never to a website's `401` challenge ([upstream fix](https://github.com/microsoft/playwright/pull/43482)); Playwright 1.63.0 leaked them, and the server's former startup warning was removed with the upgrade. Use `browser.contextOptions.httpCredentials` for website authentication. Without it, full Chromium fails a website's `401` with `net::ERR_INVALID_AUTH_CREDENTIALS`, with or without a proxy, while Firefox and WebKit show the `401` page. `tests/proxy-credentials.integration.test.ts` checks the credentials reach only the proxy.
@@ -805,6 +823,14 @@ Install the configured browser engine (use when browser executable is missing).
 
 Disabled by default. Enable it at server startup with `--caps install`, `PLAYWRIGHT_MCP_CAPS=install`, or `"capabilities": ["install"]` in the config file. Exact-name opt-in via `--allowed-tools browser_install` or `allowedTools` is also supported. Explicit `core-install` settings remain supported as a deprecated alias; use `install` in new configurations. Without this opt-in, the tool is neither listed nor callable; existing browser installations can still be used.
 
+On Windows, Chrome stable/beta installation first queries the native OS
+architecture through PowerShell, with a thirty-second timeout. ARM64 installations
+are refused because Playwright 1.65.0 selects an x64 MSI. Failed or unrecognized
+architecture detection also refuses installation. This does not install native
+ARM64 Chrome: provision it separately, then select its executable with
+`--executable-path` or `browser.launchOptions.executablePath`. Browser channels
+and existing installations are not changed automatically.
+
 This tool invokes Playwright's installer, which downloads executable code. In [Playwright 1.65.0](https://github.com/microsoft/playwright/blob/v1.65.0/packages/playwright-core/src/server/registry/oopDownloadBrowserMain.ts), browser archives still have no checksum or signature verification before extraction; the default download hosts use HTTPS. Only enable installation when you trust the download source and TLS configuration, including any custom `PLAYWRIGHT_DOWNLOAD_HOST`, browser-specific host overrides, or TLS-inspecting proxy. Do not disable TLS certificate validation.
 
 For deployments that require independently verified binaries, provision the browser through your trusted deployment process and use `--executable-path` or an existing browser connection. The capability opt-in limits MCP-triggered installation; it does not add archive verification or change manual, CI, or Docker build downloads.
@@ -877,6 +903,13 @@ Returns credential-redacted request/response headers and body metadata for one r
 - Request and response body contents are never returned because they can contain submitted credentials or private API data. Non-empty bodies are reported as `<redacted, N bytes, mime/type>`; empty bodies remain `<empty>`.
 - A request that failed after its response arrived reports both the status and the failure.
 - Sections that could not be read are reported in place (`<headers unavailable: ...>`, `<body unavailable: ...>`) rather than failing the whole call; reads are bounded by the default timeout, so a still-streaming response cannot hang the tool.
+
+- WebKit 27.2 can report a missing body even after a successful empty response.
+  The tool recovers `<empty>` only when completion, transfer-size metadata and
+  HTTP semantics confirm that result: a HEAD/204/205 response or an unambiguous
+  `Content-Length: 0`. Ambiguous chunked-empty responses can still report
+  `<body unavailable: ...>`; unavailable or evicted data is never assumed empty,
+  and inspecting a response never replays its request.
 
 ### URL redaction coverage
 

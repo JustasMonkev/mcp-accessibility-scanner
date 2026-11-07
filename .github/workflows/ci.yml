@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'codex/issue-*']
 
 permissions:
   contents: read
@@ -162,11 +162,22 @@ jobs:
           NODE
 
       - run: npm ci
-      - run: npx playwright install --with-deps ${{ matrix.channel }}
+      - id: browser_install
+        run: npx playwright install --with-deps ${{ matrix.channel }}
       - run: npx vitest run tests/history-downloads.integration.test.ts
         env:
           MCP_TEST_BROWSER_CHANNEL: ${{ matrix.channel }}
           DEBUG: pw:browser,pw:mcp:errors
+      - if: ${{ !cancelled() && runner.os == 'Windows' && steps.browser_install.outcome == 'success' }}
+        name: Verify native Windows architecture through MCP
+        run: npx vitest run tests/windows-architecture.integration.test.ts
+        env:
+          MCP_TEST_EXPECT_NATIVE_MACHINE: ${{ runner.arch }}
+      - if: ${{ !cancelled() && runner.os == 'Windows' && steps.browser_install.outcome == 'success' }}
+        name: Verify Windows networking through MCP
+        run: npx vitest run tests/windows-network.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_CHANNEL: ${{ matrix.channel }}
 
   webkit-regressions:
     runs-on: ubuntu-latest
@@ -226,6 +237,10 @@ jobs:
         run: npx vitest run tests/details-visibility.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: firefox
+      - if: ${{ !cancelled() }}
+        run: npx vitest run tests/network-bodies.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_NAME: webkit
 
   keyboard-controls:
     name: Browser controls (${{ matrix.os }}, ${{ matrix.browser }})
@@ -285,6 +300,11 @@ jobs:
         run: npx vitest run tests/browser-upgrade-controls.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
+      - if: ${{ !cancelled() && matrix.browser == 'firefox' }}
+        name: Verify Firefox client-certificate proxy combinations
+        run: npx vitest run tests/client-certificates.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_NAME: firefox
 
       - if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' && matrix.browser == 'firefox' }}
         name: Probe crashes only in this disposable runner's Firefox
