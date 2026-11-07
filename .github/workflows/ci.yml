@@ -121,6 +121,27 @@ jobs:
           git checkout --detach "$CHECKOUT_SHA"
       - name: Test Docker image
         run: npm run test:docker
+      - name: Verify cleanup with a non-reaping Linux PID 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup_container_id=''
+          cleanup_owned_container() {
+            if [ -n "$cleanup_container_id" ]; then
+              docker rm --force "$cleanup_container_id"
+            fi
+          }
+          trap cleanup_owned_container EXIT
+          cleanup_image="${IMAGE_TAG:-mcp-accessibility-scanner:test}"
+          cleanup_container_id="$(docker run -d --entrypoint tail --user root --workdir /tmp/cleanup-no-init \
+            --env NODE_ENV=test --env PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 --env MCP_TEST_HEADED_DISCARD=0 \
+            "$cleanup_image" -f /dev/null)"
+          docker cp "$GITHUB_WORKSPACE/." "$cleanup_container_id:/tmp/cleanup-no-init"
+          docker exec "$cleanup_container_id" node --version
+          docker exec "$cleanup_container_id" sh -c 'echo "PID1=$(cat /proc/1/comm)"'
+          docker exec "$cleanup_container_id" sh -c 'test "$(cat /proc/1/comm)" = tail'
+          docker exec "$cleanup_container_id" npm ci --include=dev --no-audit --no-fund
+          docker exec "$cleanup_container_id" npx vitest run tests/cdp-discard.integration.test.ts
 
   browser-regressions:
     name: Browser regressions (${{ matrix.os }}, ${{ matrix.channel }})
