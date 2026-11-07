@@ -31,8 +31,8 @@ function createMockContext() {
     browserType: () => ({ name: () => 'chromium' }),
     newBrowserCDPSession: vi.fn().mockResolvedValue(session),
   };
-  const context = { browser: () => browser, routeWebSocket: vi.fn().mockResolvedValue(undefined) };
-  return { context: context as unknown as BrowserContext, routeWebSocket: context.routeWebSocket, browser, session };
+  const context = { browser: () => browser, route: vi.fn().mockResolvedValue(undefined), routeWebSocket: vi.fn().mockResolvedValue(undefined) };
+  return { context: context as unknown as BrowserContext, route: context.route, routeWebSocket: context.routeWebSocket, browser, session };
 }
 
 const restrictedConfig = { browser: { browserName: 'chromium' }, network: { allowedOrigins: ['*.example'], blockedOrigins: ['tracker.example'] } } as FullConfig;
@@ -46,8 +46,8 @@ describe('ensureNetworkPolicyRoutes', () => {
   });
 
   it('shares installation across simultaneous callers and contexts in the owned browser', async () => {
-    const { context, browser, routeWebSocket, session } = createMockContext();
-    const sibling = { browser: () => browser, routeWebSocket: vi.fn().mockResolvedValue(undefined) } as unknown as BrowserContext;
+    const { context, browser, route, routeWebSocket, session } = createMockContext();
+    const sibling = { browser: () => browser, route: vi.fn().mockResolvedValue(undefined), routeWebSocket: vi.fn().mockResolvedValue(undefined) } as unknown as BrowserContext;
     await Promise.all([
       ensureNetworkPolicyRoutes(restrictedConfig, context),
       ensureNetworkPolicyRoutes(restrictedConfig, context),
@@ -55,6 +55,14 @@ describe('ensureNetworkPolicyRoutes', () => {
     ]);
     expect(browser.newBrowserCDPSession).toHaveBeenCalledTimes(1);
     expect(routeWebSocket).toHaveBeenCalledTimes(1);
+    expect(route).toHaveBeenCalledTimes(1);
+    const handler = route.mock.calls[0][1];
+    for (const [url, allowed] of [['https://app.example/path', true], ['https://tracker.example/path', false], ['https://elsewhere.test/path', false]] as const) {
+      const request = { request: () => ({ url: () => url }), continue: vi.fn(), abort: vi.fn() };
+      await handler(request);
+      expect(request.continue).toHaveBeenCalledTimes(allowed ? 1 : 0);
+      expect(request.abort).toHaveBeenCalledTimes(allowed ? 0 : 1);
+    }
     expect(session.send).toHaveBeenCalledWith('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
     for (const [url, allowed] of [['https://app.example/path', true], ['https://tracker.example/path', false], ['https://elsewhere.test/path', false]] as const) {
       session.emit('Fetch.requestPaused', { requestId: url, request: { url } });
