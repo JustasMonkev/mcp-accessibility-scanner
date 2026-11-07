@@ -119,15 +119,15 @@ export class VSCodeProxyBackend implements ServerBackend {
     return await this._sessionClient;
   }
 
-  serverClosed?(): void {
+  async serverClosed(): Promise<void> {
     this._relay.close();
     this._backendContext = undefined;
     this._listedClient = undefined;
-    if (this._ownsCurrentClient)
-      void this._currentClient?.close().catch(logUnhandledError);
-    else if (this._currentClient)
-      void this._sharedSlot?.release(this._currentClient);
-    void this._sessionClient?.then(client => client.close()).catch(logUnhandledError);
+    const client = this._currentClient;
+    await Promise.all([
+      this._ownsCurrentClient ? client?.close().catch(logUnhandledError) : client && this._sharedSlot?.release(client),
+      this._sessionClient?.then(sessionClient => sessionClient.close()).catch(logUnhandledError),
+    ]);
   }
 
   private async _callContextSwitchTool(params: z.infer<typeof contextSwitchOptions>, _requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {

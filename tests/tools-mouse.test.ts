@@ -62,6 +62,14 @@ describe('Mouse Tools', () => {
     expect(response.code()).toContain('await page.mouse.click(10, 20);');
   });
 
+  it('accepts only positive whole click counts', () => {
+    const input = { element: 'target', x: 10, y: 20, delay: 0 };
+    const { inputSchema } = clickTool.schema;
+    expect(inputSchema.safeParse({ ...input, clickCount: 0 }).success).toBe(false);
+    expect(inputSchema.safeParse({ ...input, clickCount: 1.5 }).success).toBe(false);
+    expect(inputSchema.safeParse({ ...input, clickCount: 2 }).success).toBe(true);
+  });
+
   it('forwards button, clickCount and delay to the click and generated code', async () => {
     await clickTool.handle(
         mockContext,

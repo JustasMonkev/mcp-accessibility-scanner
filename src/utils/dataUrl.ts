@@ -58,6 +58,7 @@ type DataUrlMatch = {
   payloadStart: number;
   displayPrefix: string;
   isBase64: boolean;
+  base64SuffixBoundary?: number;
   isEmbeddedQueryValue: boolean;
   quote: '"' | '\'' | undefined;
 };
@@ -89,26 +90,56 @@ function parseDataUrl(text: string, start: number): DataUrlMatch | undefined {
   if (!isValidDataUrlMetadata(metadata, isEncodedMetadata))
     return;
 
-  const decodedMetadata = decodeDataUrlMetadata(metadata, isEncodedMetadata);
+  const decodedMetadata = decodeDataUrlPart(metadata, isEncodedMetadata);
   return {
-    payloadStart: delimiter.end,
+    payloadStart: delimiter.markupStart ?? delimiter.end,
     displayPrefix: dataUrlDisplayPrefix(text, start, delimiter, { raw: metadata, decoded: decodedMetadata, isEncoded: isEncodedMetadata }),
-    isBase64: decodedMetadata.toLowerCase().split(';').includes('base64'),
+    isBase64: delimiter.markupStart === undefined && decodedMetadata.toLowerCase().split(';').includes('base64'),
+    base64SuffixBoundary: delimiter.base64SuffixBoundary,
     isEmbeddedQueryValue: start > 0 && text[start - 1] === '=',
     quote: dataUrlQuoteAt(text, start),
   };
 }
 
 const dataUrlDelimiterPattern = /[,\s"'<>()[\]{}&]|%2c/gi;
+const base64BeforeOuterSuffix = /(?:[a-z0-9+/_=-]|%[0-9a-f]{2})*(?=[&#])/iy;
 
-function findDataUrlDelimiter(text: string, offset: number): { start: number; end: number } | undefined {
+type DataUrlDelimiter = { start: number; end: number; markupStart?: number; base64SuffixBoundary?: number };
+
+function findDataUrlDelimiter(text: string, offset: number): DataUrlDelimiter | undefined {
   dataUrlDelimiterPattern.lastIndex = offset;
+  let encodedDelimiter: DataUrlDelimiter | undefined;
   for (let match = dataUrlDelimiterPattern.exec(text); match; match = dataUrlDelimiterPattern.exec(text)) {
-    if (match[0] === ',' || match[0].length === 3)
-      return { start: match.index, end: match.index + match[0].length };
+    if (match[0] === ',') {
+      if (!encodedDelimiter)
+        return { start: match.index, end: match.index + 1 };
+      // A later delimiter may begin markup or base64 after an escaped MIME parameter.
+      // Keep it out of the preview: text after the first comma may already be payload.
+      const payloadStart = match.index + 1;
+      if (isRawMarkupPayload(text, payloadStart)) {
+        encodedDelimiter.markupStart = payloadStart;
+      } else if (/(?:;|%3b)base64$/i.test(text.slice(encodedDelimiter.end, match.index))) {
+        base64BeforeOuterSuffix.lastIndex = payloadStart;
+        const payload = base64BeforeOuterSuffix.exec(text)?.[0];
+        if (payload === '' || (payload && /^[a-z0-9+/_-]+={0,2}$/i.test(decodeDataUrlPart(payload, true))))
+          encodedDelimiter.base64SuffixBoundary = base64BeforeOuterSuffix.lastIndex;
+      }
+      return encodedDelimiter;
+    }
+    if (match[0].length === 3) {
+      if (encodedDelimiter)
+        continue;
+      encodedDelimiter = { start: match.index, end: match.index + 3 };
+      const metadata = text.slice(offset, match.index);
+      const parameterStart = metadata.search(/;|%3b/i);
+      if (parameterStart === -1 || !/(?:=|%3d)/i.test(metadata.slice(parameterStart + 1)))
+        return encodedDelimiter;
+      continue;
+    }
     if (match[0] !== '&' || looksLikeQueryParam(text, match.index + 1))
-      return;
+      break;
   }
+  return encodedDelimiter;
 }
 
 type DataUrlMetadata = { raw: string, decoded: string, isEncoded: boolean };
@@ -137,7 +168,7 @@ function encodeDataUrlMetadata(metadata: string, isEncoded: boolean): string {
 function isValidDataUrlMetadata(metadata: string, isEncoded: boolean): boolean {
   if (!metadata)
     return true;
-  const decodedMetadata = decodeDataUrlMetadata(metadata, isEncoded);
+  const decodedMetadata = decodeDataUrlPart(metadata, isEncoded);
   if (!decodedMetadata || /[\r\n]/.test(decodedMetadata) || /[\s"'<>()[\]{}]/.test(metadata))
     return false;
   if (decodedMetadata.startsWith(';'))
@@ -148,15 +179,17 @@ function isValidDataUrlMetadata(metadata: string, isEncoded: boolean): boolean {
   return /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(mediaType);
 }
 
-function decodeDataUrlMetadata(metadata: string, isEncoded: boolean): string {
+function decodeDataUrlPart(text: string, isEncoded: boolean): string {
   if (!isEncoded)
-    return metadata;
+    return text;
   try {
-    return decodeURIComponent(metadata);
+    return decodeURIComponent(text);
   } catch {
     return '';
   }
 }
+
+const encodedQueryParamPattern = /%26(?:[a-z0-9_.~+-]|%(?!26|23|3d)[0-9a-f]{2})+%3d/iy;
 
 function findDataUrlEnd(text: string, match: DataUrlMatch): number {
   let end = match.payloadStart;
@@ -164,12 +197,17 @@ function findDataUrlEnd(text: string, match: DataUrlMatch): number {
     const char = text[end];
     if (isLineBreak(char))
       break;
+    if (end === match.base64SuffixBoundary && char === '#')
+      break;
     if (match.isEmbeddedQueryValue && char === '&' && isQueryParamBoundary(text, match, end))
       break;
-    if (match.isBase64 && char === '&')
+    if (match.isBase64 && (char === '&' || char === '#'))
       break;
-    if (match.isBase64 && isEncodedPayloadTerminator(text, end))
-      break;
+    if (match.isBase64 && char === '%') {
+      encodedQueryParamPattern.lastIndex = end;
+      if (isEncodedPayloadTerminator(text, end) || startsWithIgnoreCase(text, end, '%23') || encodedQueryParamPattern.test(text))
+        break;
+    }
     if (match.isBase64 && isBase64PayloadTerminator(char))
       break;
     if (!match.isBase64 && match.quote && char === match.quote && isQuotedDataUrlEnd(text, match, end))
@@ -207,7 +245,7 @@ function isWhitespace(char: string): boolean {
 function isQueryParamBoundary(text: string, match: DataUrlMatch, ampersand: number): boolean {
   if (!looksLikeQueryParam(text, ampersand + 1))
     return false;
-  return match.isBase64 || isRawPayloadCompleteBefore(text, match.payloadStart, ampersand);
+  return match.isBase64 || ampersand === match.base64SuffixBoundary || isRawPayloadCompleteBefore(text, match.payloadStart, ampersand);
 }
 
 function isRawPayloadCompleteBefore(text: string, payloadStart: number, end: number): boolean {

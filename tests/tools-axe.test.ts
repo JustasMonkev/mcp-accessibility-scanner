@@ -893,6 +893,32 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
     }
   });
 
+  it('warns about an unscanned frame projected through two slots into a modal', async () => {
+    const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<slot id="document-slot"><div id="outer"><span slot="frame" id="frame-host"></span></div></slot>');
+      const loaded = page.waitForEvent('framenavigated', frame => frame.url() === 'about:srcdoc');
+      await page.evaluate(() => {
+        const outer = document.querySelector('#outer')!.attachShadow({ mode: 'open' });
+        outer.innerHTML = '<div id="inner"><slot name="frame" slot="inside"></slot></div>';
+        const inner = outer.querySelector('#inner')!.attachShadow({ mode: 'open' });
+        inner.innerHTML = '<dialog id="shadow-dialog"><slot name="inside"></slot></dialog>';
+        inner.querySelector('dialog')!.showModal();
+        const frame = document.createElement('iframe');
+        frame.srcdoc = '<button>Inside modal</button>';
+        document.querySelector('#frame-host')!.attachShadow({ mode: 'closed' }).append(frame);
+      });
+      await loaded;
+
+      expect((await runAxeScan(page)).unscannedFrames).toEqual(['about:srcdoc']);
+      expect((await runAxeScan(page, { exclude: ['#shadow-dialog', '#document-slot'] })).unscannedFrames).toEqual(['about:srcdoc']);
+      expect((await runAxeScan(page, { exclude: ['#frame-host'] })).unscannedFrames).toEqual([]);
+    } finally {
+      await browser.close();
+    }
+  });
+
   it('reports a hidden iframe made visible by author CSS outside a CSS-hidden modal', async () => {
     const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
     try {
@@ -920,15 +946,32 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
     }
   });
 
-  it('reports a frame inside the first slotted summary of closed details', async () => {
+  it('warns about a failed slotted frame only while its slot is visible', async () => {
+    const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<div id="host"><iframe name="widget" srcdoc="<script>Object.defineProperty(window, 'axe', { value: {} })</script>"></iframe></div>`);
+      await page.locator('#host').evaluate(host => {
+        host.attachShadow({ mode: 'open' }).innerHTML = '<slot style="display:none"></slot>';
+      });
+
+      expect((await runAxeScan(page)).unscannedFrames).toEqual([]);
+      await page.locator('slot').evaluate(slot => slot.removeAttribute('style'));
+      expect((await runAxeScan(page)).unscannedFrames).toEqual(['about:srcdoc (name="widget")']);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it.each(['open', 'closed'] as const)('reports a frame inside the first slotted summary of closed details in a %s shadow root', async mode => {
     const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
     try {
       const page = await browser.newPage();
       await page.setContent('<div id="host"></div>');
       const loaded = page.waitForEvent('framenavigated', frame => frame.url() === 'about:srcdoc');
-      await page.evaluate(() => {
+      await page.evaluate(mode => {
         const host = document.querySelector('#host')!;
-        host.attachShadow({ mode: 'closed' }).innerHTML = '<details><slot></slot></details>';
+        host.attachShadow({ mode }).innerHTML = '<details><slot></slot></details>';
         const summary = document.createElement('summary');
         const innerHost = document.createElement('span');
         const frame = document.createElement('iframe');
@@ -936,10 +979,29 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
         innerHost.attachShadow({ mode: 'closed' }).append(frame);
         summary.append(innerHost);
         host.append(summary);
-      });
+      }, mode);
       await loaded;
 
       expect((await runAxeScan(page)).unscannedFrames).toEqual(['about:srcdoc']);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it.each([true, false])('respects the slot fallback in closed details with shadow root %s', async shadow => {
+    const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    try {
+      const page = await browser.newPage();
+      const loaded = Promise.all(['summary', 'body'].map(name => page.waitForEvent('framenavigated', frame => frame.name() === name && frame.url() === 'about:srcdoc')));
+      await page.setContent('<div id="host"></div>');
+      await page.locator('#host').evaluate((host, shadow) => {
+        const frame = (name: string) => `<iframe name="${name}" srcdoc="<script>Object.defineProperty(window, 'axe', { value: {} })</script>"></iframe>`;
+        const root = shadow ? host.attachShadow({ mode: 'open' }) : host;
+        root.innerHTML = `<details><slot><summary>${frame('summary')}</summary>${frame('body')}</slot></details>`;
+      }, shadow);
+      await loaded;
+
+      expect((await runAxeScan(page)).unscannedFrames).toEqual(shadow ? ['about:srcdoc (name="summary")'] : []);
     } finally {
       await browser.close();
     }

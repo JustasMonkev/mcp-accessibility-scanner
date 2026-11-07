@@ -1115,14 +1115,19 @@ describe('audit_screen_reader tool measurement', () => {
         frameReadDelayFor: frameIndex => frameIndex < 2 ? 0 : 1_500,
       });
 
-      const audit = run(harness, 8, false);
+      const response = new Response(harness.context, 'audit_screen_reader', {});
+      const audit = tool.handle(harness.context, tool.schema.inputSchema.parse({ maxElements: 8, checkNames: false }), response);
       await vi.advanceTimersByTimeAsync(1_100);
-      const result = await audit;
+      await audit;
+      const result = response.result();
       expect(result).toContain('stopped after 8 of 8: timed-out frame work reached the 4-operation limit');
       expect(result).toContain('WARNING: 6 of these went stale before measurement');
       expect(harness.disposals.count).toBe(4);
       const report = JSON.parse(vi.mocked(fs.promises.writeFile).mock.calls[0][1] as string);
       expect(report.elements.truncated).toBe(true);
+      expect(response.structuredContent()).toMatchObject({
+        summary: { elementsTruncated: 0, stoppedAtFrameWorkLimit: 4 },
+      });
       await vi.advanceTimersByTimeAsync(500);
       expect(harness.disposals.count).toBe(8);
     } finally {
@@ -1796,14 +1801,20 @@ describe('collectElementFacts in a real page', () => {
     expect(visibleText).toEqual(['Send', null]);
   });
 
-  it('keeps counter-rotated descendants visible in preserved 3-D', async () => {
+  it('keeps only invertible transforms recoverable in preserved 3-D', async () => {
     const visibleText = await measureVisibleText(`
       <div style="transform-style:preserve-3d;transform:rotateY(90deg)">
         <button id="counter-rotated" style="transform:rotateY(-90deg)" aria-label="Submit">Send</button>
+      </div>
+      <div style="transform-style:preserve-3d;transform:scale(0)">
+        <button id="zero" aria-label="Submit">Send</button>
+      </div>
+      <div style="transform-style:preserve-3d;transform:scale3d(0,1,2)">
+        <button id="zero-3d" style="transform:rotateY(45deg)" aria-label="Submit">Send</button>
       </div>`,
-    ['#counter-rotated']);
+    ['#counter-rotated', '#zero', '#zero-3d']);
 
-    expect(visibleText).toEqual(['Send']);
+    expect(visibleText).toEqual(['Send', null, null]);
   });
 
   it('lets an out-of-flow control escape a collapsed clip box that is not its containing block', async () => {

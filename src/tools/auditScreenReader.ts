@@ -515,6 +515,7 @@ const auditScreenReader = defineTabTool({
         elementsUnresolved: unresolvedCount,
         elementsWithoutMeasuredName: unmeasuredNames,
         elementsTruncated: truncatedElements,
+        stoppedAtFrameWorkLimit,
         totalFindings,
         countByCheck: result.countByCheck,
         truncatedChecks: result.truncatedChecks,

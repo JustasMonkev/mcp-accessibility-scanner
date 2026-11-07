@@ -47,7 +47,7 @@ const startedAt = new Date().toISOString();
 
 let server;
 let origin;
-const outputDir = fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'mcp-bench-'));
+const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-bench-'));
 
 const transport = new StdioClientTransport({
   command: process.execPath,

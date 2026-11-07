@@ -70,11 +70,11 @@ describe('session log folders', () => {
       const sessionTab = { context: sessionContext, page: { url: () => 'https://session.example/' } } as any;
       const defaultTab = { context: defaultContext, page: { url: () => 'https://default.example/' } } as any;
 
-      log.logUserAction({ name: 'fill', text: 'session-1' } as any, sessionTab, `await page.fill('#a', 'session-1');`, false);
+      log.logUserAction({ name: 'fill', selector: '#a', signals: [], text: 'session-1', ariaSnapshot: '- textbox: session-1' }, sessionTab, `await page.fill('#a', 'session-1');`, false);
       log.logUserAction({ name: 'fill', text: 'default-1' } as any, defaultTab, `await page.fill('#b', 'default-1');`, false);
       // The session's update must merge into ITS pending action, not into the
       // default context's more recent same-named one.
-      log.logUserAction({ name: 'fill', text: 'session-2' } as any, sessionTab, `await page.fill('#a', 'session-2');`, true);
+      log.logUserAction({ name: 'fill', selector: '#a', signals: [], text: 'session-2', ariaSnapshot: '- textbox: session-2' }, sessionTab, `await page.fill('#a', 'session-2');`, true);
 
       await vi.advanceTimersByTimeAsync(1000);
 
@@ -90,6 +90,7 @@ describe('session log folders', () => {
       // The default context's entry is intact and stays untagged, as before.
       expect(defaultBlock).toContain('"text": "default-1"');
       expect(defaultBlock).not.toContain('browserSessionId');
+      expect(storage.writeFile).toHaveBeenCalledWith('/unused/001.snapshot.yml', '- textbox: session-2');
     } finally {
       vi.useRealTimers();
     }
@@ -121,34 +122,42 @@ describe('session log folders', () => {
     }
   });
 
-  it('replaces a flushed action and its arguments with a late update', async () => {
+  it('keeps the final arguments and snapshot after consecutive updates to a flushed action', async () => {
     vi.useFakeTimers();
     try {
       let content = '';
+      let snapshot = '';
       const storage = {
         readFile: vi.fn(async () => content),
         writeFile: vi.fn(async (filePath: string, value: string) => {
           if (filePath.endsWith('session.md'))
             content = value;
+          else
+            snapshot = value;
         }),
         appendFile: vi.fn(async (_filePath: string, value: string) => { content += value; }),
       };
       const log = new SessionLog('/unused', storage);
       const context = { options: {} } as any;
       const tab = { context, page: { url: () => 'https://example.com/' } } as any;
-      const initial = { name: 'fill', text: 'H' } as any;
-      const updated = { name: 'fill', text: 'Hi' } as any;
+      const initial = { name: 'fill', selector: '#name', signals: [], text: 'H', ariaSnapshot: '- textbox: H' } as const;
+      const updated = { ...initial, signals: [], text: 'Hi', ariaSnapshot: '- textbox: Hi' };
 
-      log.logUserAction(initial, tab, "await page.fill('#name', 'H');", false);
-      await vi.advanceTimersByTimeAsync(1000);
+      log.logUserAction({ ...initial, signals: [] }, tab, "await page.fill('#name', 'H');", false);
+      await log.flush();
+      expect(content).toContain('"text": "H"');
+      expect(snapshot).toBe('- textbox: H');
+      expect(vi.getTimerCount()).toBe(0);
       log.logUserAction(updated, tab, "await page.fill('#name', 'Hi');", true);
-      await (log as any)._sessionFileQueue;
+      log.logUserAction({ ...updated, text: 'Hi!', ariaSnapshot: '- textbox: Hi!' }, tab, "await page.fill('#name', 'Hi!');", true);
+      await log.flush();
 
       expect(content.match(/### User action: fill/g)).toHaveLength(1);
-      expect(content).toContain('"text": "Hi"');
-      expect(content).toContain("await page.fill('#name', 'Hi');");
+      expect(content).toContain('"text": "Hi!"');
+      expect(content).toContain("await page.fill('#name', 'Hi!');");
       expect(content).not.toContain('"text": "H"');
       expect(content).not.toContain("await page.fill('#name', 'H');");
+      expect(snapshot).toBe('- textbox: Hi!');
     } finally {
       vi.useRealTimers();
     }
@@ -173,7 +182,8 @@ describe('session log folders', () => {
       expect(initialMarkdown).toContain(enabled ? 'https://fixture.test/?code=REDACTED&state=old' : initialAction.text);
       if (enabled)
         expect(initialMarkdown).not.toContain('synthetic-recorded-secret');
-      const updated = { ...initial, signals: [], text: 'https://fixture.test/?code=synthetic-updated-secret&state=new' };
+      const updatedSnapshot = initial.ariaSnapshot.replace('synthetic-snapshot-secret', 'synthetic-updated-snapshot-secret').replace('link "Next"', 'link "Done"');
+      const updated = { ...initial, signals: [], text: 'https://fixture.test/?code=synthetic-updated-secret&state=new', ariaSnapshot: updatedSnapshot };
       log.logUserAction(updated, tab, `await page.fill('input', '${updated.text}');`, true);
       await vi.advanceTimersByTimeAsync(0);
       const rendered = [...files.values()].join('\n');
@@ -184,17 +194,19 @@ describe('session log folders', () => {
         expect(rendered).not.toContain('synthetic-recorded-secret');
         expect(rendered).not.toContain('synthetic-snapshot-secret');
         expect(rendered).not.toContain('synthetic-updated-secret');
+        expect(rendered).not.toContain('synthetic-updated-snapshot-secret');
         expect(rendered).toContain('REDACTED');
       } else {
-        expect(rendered).toContain('synthetic-snapshot-secret');
+        expect(rendered).not.toContain('synthetic-snapshot-secret');
+        expect(rendered).toContain('synthetic-updated-snapshot-secret');
         expect(rendered).toContain('synthetic-updated-secret');
       }
-      expect(files.get('/unused/001.snapshot.yml')).toBe(enabled ? initial.ariaSnapshot.replace('code=synthetic-snapshot-secret', 'code=REDACTED') : initial.ariaSnapshot);
+      expect(files.get('/unused/001.snapshot.yml')).toBe(enabled ? updatedSnapshot.replace('code=synthetic-updated-snapshot-secret', 'code=REDACTED') : updatedSnapshot);
       expect(rendered).not.toContain('state=old');
       expect(initialAction.text).toBe('https://fixture.test/?code=synthetic-recorded-secret&state=old');
       expect(initialAction.ariaSnapshot).toBe(initial.ariaSnapshot);
       expect(updated.text).toBe('https://fixture.test/?code=synthetic-updated-secret&state=new');
-      expect(updated.ariaSnapshot).toBe(initial.ariaSnapshot);
+      expect(updated.ariaSnapshot).toBe(updatedSnapshot);
     } finally {
       vi.useRealTimers();
     }

@@ -63,8 +63,8 @@ describe('mcp http transport hardening', () => {
     servers.clear();
   });
 
-  it('binds to localhost by default', async () => {
-    const server = await startHttpServer({ port: 0 });
+  it.each([undefined, ''])('binds to localhost when the host is %j', async host => {
+    const server = await startHttpServer({ host, port: 0 });
     servers.add(server);
     const address = server.address();
     if (!address || typeof address === 'string')
@@ -547,9 +547,17 @@ describe('mcp http transport hardening', () => {
     expect(JSON.parse(response.body)).toEqual(methodNotAllowedBody);
   });
 
-  it.each(['0.0.0.0', '::'])('keeps wildcard listener %s restricted to loopback hosts', async host => {
-    const { port } = await startServer(testBackendFactory, undefined, host);
-    expect((await sendRequest(port)).statusCode).toBe(405);
+  it.each([['0.0.0.0', '127.0.0.1'], ['::', '[::1]']])('advertises a usable loopback URL for wildcard listener %s', async (host, loopback) => {
+    const { server, port } = await startServer(testBackendFactory, undefined, host);
+    const clientUrl = `${httpAddressToString(server.address(), 'client')}/mcp`;
+    expect(clientUrl).toBe(`http://${loopback}:${port}/mcp`);
+    const statusCode = await new Promise<number | undefined>((resolve, reject) => {
+      http.get(clientUrl, { agent: false }, response => {
+        response.resume();
+        resolve(response.statusCode);
+      }).on('error', reject);
+    });
+    expect(statusCode).toBe(405);
     for (const hostHeader of [`evil.example:${port}`, host === '::' ? `[::]:${port}` : `${host}:${port}`])
       expect((await sendRequest(port, { hostHeader })).statusCode).toBe(403);
   });
@@ -1270,15 +1278,17 @@ describe('mcp http transport hardening', () => {
       'io.modelcontextprotocol/clientCapabilities': {},
     };
 
-    async function modernPost(port: number, body: unknown, headers: Record<string, string> = {}) {
+    async function modernPost(port: number, body: unknown, headers: Record<string, string> = {}, protocolVersion: string | null = '2026-07-28') {
+      const requestHeaders = new Headers({
+        'content-type': 'application/json',
+        'accept': 'application/json, text/event-stream',
+        ...headers,
+      });
+      if (protocolVersion !== null)
+        requestHeaders.set('MCP-Protocol-Version', protocolVersion);
       const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
         method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'accept': 'application/json, text/event-stream',
-          'MCP-Protocol-Version': '2026-07-28',
-          ...headers,
-        },
+        headers: requestHeaders,
         body: JSON.stringify(body),
       });
       return { statusCode: response.status, json: await response.json() as any };
@@ -1370,12 +1380,15 @@ describe('mcp http transport hardening', () => {
           { jsonrpc: '2.0', id: 3, method: 'tools/list', params: { _meta: envelope } });
       expect(missing.statusCode).toBe(400);
       expect(missing.json.error.code).toBe(-32020);
+    });
 
-      const emptyVersion = await modernPost(port,
+    it.each([null, ''])('rejects a modern POST when the protocol version header is %j', async protocolVersion => {
+      const { port } = await startServer(probeFactory);
+      const { statusCode, json } = await modernPost(port,
           { jsonrpc: '2.0', id: 4, method: 'tools/list', params: { _meta: envelope } },
-          { 'Mcp-Method': 'tools/list', 'MCP-Protocol-Version': '' });
-      expect(emptyVersion.statusCode).toBe(400);
-      expect(emptyVersion.json.error.code).toBe(-32020);
+          { 'Mcp-Method': 'tools/list', 'Mcp-Name': 'raw-modern' }, protocolVersion);
+      expect(statusCode).toBe(400);
+      expect(json.error.code).toBe(-32020);
     });
   });
 

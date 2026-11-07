@@ -320,7 +320,7 @@ const find = defineTabTool({
     title: 'Find in page snapshot',
     description: 'Search the accessibility snapshot of the current page for text or a regular expression. Returns matching snapshot nodes with a few lines of surrounding context, each shown under its path from the root of the tree.',
     inputSchema: findSchema,
-    type: 'readOnly',
+    type: 'stateChanging',
   },
 
   handle: async (tab, params, response) => {
