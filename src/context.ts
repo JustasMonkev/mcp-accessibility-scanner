@@ -108,7 +108,7 @@ class ContextRegistry {
 
 const contextRegistry = new ContextRegistry();
 
-type TraceHub = { users: number, ready: Promise<unknown> };
+type TraceHub = { users: number, ready: Promise<unknown>, stopping?: Promise<void> };
 const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
 
 type IdleGroup = {
@@ -121,6 +121,12 @@ const idleGroups = new WeakMap<playwright.BrowserContext, IdleGroup>();
 
 async function acquireTrace(browserContext: playwright.BrowserContext): Promise<void> {
   let hub = traceHubs.get(browserContext);
+  while (hub?.stopping) {
+    await hub.stopping.catch(() => {
+      // The releasing session handles stop failures; a new session can still try to start.
+    });
+    hub = traceHubs.get(browserContext);
+  }
   if (!hub) {
     const created: TraceHub = {
       users: 0,
@@ -151,7 +157,11 @@ async function releaseTrace(browserContext: playwright.BrowserContext): Promise<
   const hub = traceHubs.get(browserContext);
   if (!hub || --hub.users)
     return;
-  traceHubs.delete(browserContext);
+  hub.stopping = stopTrace(browserContext).finally(() => traceHubs.delete(browserContext));
+  await hub.stopping;
+}
+
+async function stopTrace(browserContext: playwright.BrowserContext): Promise<void> {
   try {
     await browserContext.tracing.stop();
   } catch (originalError) {

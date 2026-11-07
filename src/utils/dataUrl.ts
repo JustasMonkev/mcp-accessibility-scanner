@@ -103,12 +103,25 @@ const dataUrlDelimiterPattern = /[,\s"'<>()[\]{}&]|%2c/gi;
 
 function findDataUrlDelimiter(text: string, offset: number): { start: number; end: number } | undefined {
   dataUrlDelimiterPattern.lastIndex = offset;
+  let encodedDelimiter: { start: number; end: number } | undefined;
   for (let match = dataUrlDelimiterPattern.exec(text); match; match = dataUrlDelimiterPattern.exec(text)) {
-    if (match[0] === ',' || match[0].length === 3)
-      return { start: match.index, end: match.index + match[0].length };
+    if (match[0] === ',')
+      return { start: match.index, end: match.index + 1 };
+    if (match[0].length === 3) {
+      if (encodedDelimiter)
+        continue;
+      encodedDelimiter = { start: match.index, end: match.index + 3 };
+      const metadata = text.slice(offset, match.index);
+      const parameterStart = metadata.search(/;|%3b/i);
+      // A MIME parameter can contain %2C before the literal delimiter.
+      if (parameterStart === -1 || !/(?:=|%3d)/i.test(metadata.slice(parameterStart + 1)))
+        return encodedDelimiter;
+      continue;
+    }
     if (match[0] !== '&' || looksLikeQueryParam(text, match.index + 1))
-      return;
+      break;
   }
+  return encodedDelimiter;
 }
 
 type DataUrlMetadata = { raw: string, decoded: string, isEncoded: boolean };
@@ -158,6 +171,8 @@ function decodeDataUrlMetadata(metadata: string, isEncoded: boolean): string {
   }
 }
 
+const encodedQueryParamPattern = /%26(?:[a-z0-9_.~+-]|%(?!26|23|3d)[0-9a-f]{2})+%3d/iy;
+
 function findDataUrlEnd(text: string, match: DataUrlMatch): number {
   let end = match.payloadStart;
   while (end < text.length) {
@@ -166,10 +181,13 @@ function findDataUrlEnd(text: string, match: DataUrlMatch): number {
       break;
     if (match.isEmbeddedQueryValue && char === '&' && isQueryParamBoundary(text, match, end))
       break;
-    if (match.isBase64 && char === '&')
+    if (match.isBase64 && (char === '&' || char === '#'))
       break;
-    if (match.isBase64 && isEncodedPayloadTerminator(text, end))
-      break;
+    if (match.isBase64 && char === '%') {
+      encodedQueryParamPattern.lastIndex = end;
+      if (isEncodedPayloadTerminator(text, end) || startsWithIgnoreCase(text, end, '%23') || encodedQueryParamPattern.test(text))
+        break;
+    }
     if (match.isBase64 && isBase64PayloadTerminator(char))
       break;
     if (!match.isBase64 && match.quote && char === match.quote && isQuotedDataUrlEnd(text, match, end))

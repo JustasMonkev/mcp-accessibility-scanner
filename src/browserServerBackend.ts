@@ -75,6 +75,7 @@ export class BrowserServerBackend implements ServerBackend {
   private _notifyToolListChanged: (() => Promise<void>) | undefined;
   private _webmcpObserver: WebMCPObserver | undefined;
   private _closed = false;
+  private _closePromise: Promise<void> | undefined;
 
   constructor(config: FullConfig, factory: BrowserContextFactory, sharedSessionRegistry?: BrowserSessionRegistry, options?: {
     ephemeralDefaultContext?: boolean;
@@ -281,12 +282,19 @@ export class BrowserServerBackend implements ServerBackend {
     return id;
   }
 
-  serverClosed() {
+  serverClosed(): Promise<void> {
+    if (this._closePromise)
+      return this._closePromise;
     this._closed = true;
     this._webmcpObserver?.dispose();
     this._webmcpObserver = undefined;
-    if (this._sessionRegistry && this._sessionRegistry !== this._sharedSessionRegistry)
-      void this._sessionRegistry.disposeAll().catch(logUnhandledError);
-    void this._context?.dispose().catch(logUnhandledError);
+    const registryCleanup = this._sessionRegistry !== this._sharedSessionRegistry
+      ? this._sessionRegistry?.disposeAll().catch(logUnhandledError) : undefined;
+    this._closePromise = Promise.all([registryCleanup, this._context?.dispose().catch(logUnhandledError)])
+        .then(async () => {
+          const sessionLog = await this._sessionLog;
+          await sessionLog?.flush();
+        }).catch(logUnhandledError);
+    return this._closePromise;
   }
 }

@@ -207,6 +207,23 @@ describe('Utils', () => {
       expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data:text/html;base64%2C...&id=123');
     });
 
+    it.each([';name=', ';name%3D', '%3Bname%3D'])('preserves escaped metadata commas after %s', assignment => {
+      const prefix = `data:text/plain${assignment}a%2Cb;base64,`;
+      expect(truncateDataUrl(`${prefix}eA==`)).toBe(`${prefix}...`);
+      expect(truncateDataUrls(`https://api.example/?src=${prefix}eA==&id=123`))
+          .toBe(`https://api.example/?src=${prefix}...&id=123`);
+    });
+
+    it('preserves the outer fragment after a data URL', () => {
+      expect(truncateDataUrls('https://api.example/?src=data:text/html;base64,eA==#details'))
+          .toBe('https://api.example/?src=data:text/html;base64,...#details');
+    });
+
+    it.each(['%26id%3D123', '%23details'])('preserves the %s suffix of an encoded nested URL', suffix => {
+      const prefix = 'https://api.example/?next=https%3A%2F%2Fx%2F%3Fsrc%3Ddata%3Atext%2Fhtml%3Bbase64%2C';
+      expect(truncateDataUrls(`${prefix}eA%3D%3D${suffix}&outer=1`)).toBe(`${prefix}...${suffix}&outer=1`);
+    });
+
     it('should truncate data URLs with literal prefixes and encoded metadata', () => {
       const payload = encodeURIComponent(Buffer.from('<p>hello</p>').toString('base64'));
       const text = `https://api.example/upload?src=data:text%2Fhtml%3Bbase64%2C${payload}&id=123`;

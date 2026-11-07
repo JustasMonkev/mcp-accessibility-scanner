@@ -24,7 +24,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const { connectOverCDP, spawnMock, startTraceViewerServerMock } = vi.hoisted(() => ({
   connectOverCDP: vi.fn(),
   spawnMock: vi.fn(),
-  startTraceViewerServerMock: vi.fn(async () => ({ urlPrefix: () => 'http://127.0.0.1:0' })),
+  startTraceViewerServerMock: vi.fn<typeof import('playwright-core/lib/coreBundle').default.server.startTraceViewerServer>(),
 }));
 
 vi.mock('../src/utils/cdpConnection.js', () => ({ connectOverCDP }));
@@ -53,8 +53,7 @@ vi.mock('node:child_process', () => ({
   spawn: spawnMock,
 }));
 
-// The trace-viewer server binds a real listening socket; tests spy on the
-// start instead. The registry directory (the fallback profile root when
+// The registry directory (the fallback profile root when
 // PWMCP_PROFILES_DIR_FOR_TEST is unset) is pointed into the temp dir so tests
 // never touch the real Playwright registry.
 vi.mock('playwright-core/lib/coreBundle', async () => {
@@ -917,16 +916,25 @@ describe('browserContextFactory', () => {
     }
   });
 
-  it('starts one trace-viewer server per config and shares it across launches', async () => {
+  it('shares one trace viewer that serves only the retained traces across launches', async () => {
     // With --save-trace in persistent mode every launch used to call
     // startTraceViewerServer(), leaking one listening HTTP server per
     // explicit-session open/close cycle for the life of the process.
     const profilesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-profiles-'));
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp trace viewer & '));
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let stopViewer: (() => Promise<void>) | undefined;
     process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
     try {
       vi.mocked(playwright.chromium.launchPersistentContext).mockImplementation(async () => createMockBrowserContext());
+      const { default: actualBundle } = await vi.importActual<typeof import('playwright-core/lib/coreBundle')>('playwright-core/lib/coreBundle');
+      startTraceViewerServerMock.mockImplementationOnce(async options => {
+        const viewer = await actualBundle.server.startTraceViewerServer(options);
+        stopViewer = () => viewer.stop();
+        return viewer;
+      });
 
-      const config = await resolveConfig({ saveTrace: true });
+      const config = await resolveConfig({ saveTrace: true, outputDir });
       const factory = contextFactory(config);
       const clientInfo = { name: 'vitest', version: '1.0.0' };
       const signal = new AbortController().signal;
@@ -943,9 +951,29 @@ describe('browserContextFactory', () => {
           .map(([, options]) => options?.tracesDir);
       expect(tracesDirs[0]).toMatch(/traces-/);
       expect(tracesDirs[1]).toBe(tracesDirs[0]);
+
+      const tracesDir = tracesDirs[0]!;
+      const traceName = 'trace-context-1.trace';
+      fs.mkdirSync(tracesDir);
+      fs.writeFileSync(path.join(tracesDir, traceName), 'retained trace');
+      const outside = path.join(outputDir, 'other-artifact.txt');
+      fs.writeFileSync(outside, 'outside trace directory');
+
+      expect(stderr.mock.calls).toHaveLength(1);
+      const viewerUrl = new URL(String(stderr.mock.calls[0][0]).trim().replace(/^Trace viewer listening on /, ''));
+      const descriptor = await fetch(new URL(viewerUrl.searchParams.get('trace')!, viewerUrl));
+      expect(descriptor.status).toBe(200);
+      const { entries } = await descriptor.json();
+      expect(entries).toHaveLength(1);
+      expect(entries[0].name).toBe(traceName);
+      expect(await (await fetch(new URL(entries[0].path, viewerUrl))).text()).toBe('retained trace');
+      expect((await fetch(new URL(`file?path=${encodeURIComponent(outside)}`, viewerUrl))).status).toBe(403);
     } finally {
+      await stopViewer?.();
+      stderr.mockRestore();
       delete process.env.PWMCP_PROFILES_DIR_FOR_TEST;
       fs.rmSync(profilesDir, { recursive: true, force: true });
+      fs.rmSync(outputDir, { recursive: true, force: true });
     }
   });
 

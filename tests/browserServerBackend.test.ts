@@ -37,6 +37,27 @@ describe('BrowserServerBackend.callTool', () => {
     vi.restoreAllMocks();
   });
 
+  it('flushes the final session entry before awaited backend shutdown completes', async () => {
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-final-session-'));
+    const config = await resolveConfig({ outputDir, saveSession: true });
+    const backend = new BrowserServerBackend(config, unusedFactory);
+    try {
+      await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'shutdown-test', version: '1' });
+      await backend.callTool('browser_default_timeout', { timeout: 31000 });
+      const closing = backend.serverClosed();
+      expect(backend.serverClosed()).toBe(closing);
+      await closing;
+      const folders = fs.readdirSync(outputDir);
+      expect(folders).toHaveLength(1);
+      const log = fs.readFileSync(path.join(outputDir, folders[0], 'session.md'), 'utf8');
+      expect(log).toContain('browser_default_timeout');
+      expect(log).toContain('31000');
+    } finally {
+      await backend.serverClosed();
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects unknown tools with an InvalidParams protocol error', async () => {
     const config = await resolveConfig({});
     const backend = new BrowserServerBackend(config, unusedFactory);

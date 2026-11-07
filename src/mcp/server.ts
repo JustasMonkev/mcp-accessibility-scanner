@@ -47,7 +47,7 @@ export interface ServerBackend {
   initialize?(context: ServerBackendContext, clientVersion: ClientVersion): Promise<void>;
   listTools(requestContext?: Partial<Pick<CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]>;
   callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: CallToolRequestContext): Promise<CallToolResult>;
-  serverClosed?(): void;
+  serverClosed?(): void | Promise<void>;
 }
 
 type ServerMetadata = {
@@ -221,16 +221,16 @@ export async function start(serverBackendFactory: ServerBackendFactory, options:
     await new Promise<void>(resolve => httpServer.close(() => resolve()));
     throw error;
   }
-  const url = httpAddressToString(httpServer.address());
+  const address = httpServer.address();
 
   const clientConfig: { url: string; headers?: { Authorization: string } } = {
-    url: `${url}/mcp`
+    url: `${httpAddressToString(address, 'client')}/mcp`
   };
   if (options.authToken !== undefined)
     clientConfig.headers = { Authorization: 'Bearer <YOUR_AUTH_TOKEN>' };
   const mcpConfig = { mcpServers: { [serverBackendFactory.nameInConfig]: clientConfig } };
   const message = [
-    `Listening on ${url}`,
+    `Listening on ${httpAddressToString(address)}`,
     options.authToken !== undefined ? 'Put this in your client config and replace <YOUR_AUTH_TOKEN> locally with your configured token:' : 'Put this in your client config:',
     JSON.stringify(mcpConfig, undefined, 2),
   ].join('\n');

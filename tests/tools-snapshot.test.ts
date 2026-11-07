@@ -116,7 +116,7 @@ describe('Snapshot Tools', () => {
     const jsonSchema = mcpTool.inputSchema as JSONSchema7;
 
     expect(findTool).toBeDefined();
-    expect(findTool.schema.type).toBe('readOnly');
+    expect(mcpTool.annotations?.readOnlyHint).toBe(false);
     expect(jsonSchema.properties?.text).toBeDefined();
     expect(jsonSchema.properties?.regex).toBeDefined();
     expect(() => findTool.schema.inputSchema.parse({})).toThrow();

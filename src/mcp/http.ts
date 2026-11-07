@@ -37,7 +37,7 @@ const allowedLoopbackHostnamePattern = /^127(?:\.\d{1,3}){3}$/;
 const configuredHostnames = new WeakMap<http.Server, string>();
 
 export async function startHttpServer(config: { host?: string, port?: number }, abortSignal?: AbortSignal): Promise<http.Server> {
-  const host = config.host ?? 'localhost';
+  const host = config.host || 'localhost';
   const { port } = config;
   const httpServer = http.createServer();
   configuredHostnames.set(httpServer, normalizeHostname(host));
@@ -56,13 +56,14 @@ export async function startHttpServer(config: { host?: string, port?: number }, 
   return httpServer;
 }
 
-export function httpAddressToString(address: string | net.AddressInfo | null): string {
+export function httpAddressToString(address: string | net.AddressInfo | null, purpose: 'bind' | 'client' = 'bind'): string {
   assert(address, 'Could not bind server socket');
   if (typeof address === 'string')
     return address;
-  const resolvedPort = address.port;
-  const resolvedHost = address.family === 'IPv4' ? address.address : `[${address.address}]`;
-  return `http://${resolvedHost}:${resolvedPort}`;
+  let host = address.address;
+  if (purpose === 'client' && isWildcardAddress(host))
+    host = address.family === 'IPv4' ? '127.0.0.1' : '::1';
+  return `http://${address.family === 'IPv4' ? host : `[${host}]`}:${address.port}`;
 }
 
 export async function installHttpTransport(httpServer: http.Server, serverBackendFactory: ServerBackendFactory, options?: { authToken?: string }) {

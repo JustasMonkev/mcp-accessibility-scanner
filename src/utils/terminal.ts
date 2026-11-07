@@ -14,6 +14,22 @@
  * limitations under the License.
  */
 
+import type { CallToolResult } from '@modelcontextprotocol/server';
+
+export function printToolResult(result: CallToolResult, redactSecrets?: (text: string) => string): void {
+  const print = result.isError ? printToStderr : printToStdout;
+  for (const item of result.content) {
+    let text: string;
+    if (item.type === 'text')
+      text = item.text;
+    else if (item.type === 'resource_link')
+      text = `Resource link: ${item.name} (${item.uri})`;
+    else
+      continue;
+    print(redactSecrets?.(text) ?? text);
+  }
+}
+
 export function printToStdout(text: string): void {
   console.log(text);
 }

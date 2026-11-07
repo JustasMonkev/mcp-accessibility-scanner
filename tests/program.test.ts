@@ -16,6 +16,7 @@
 
 import { beforeAll, describe, it, expect } from 'vitest';
 import { execFile, execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -258,6 +259,38 @@ describe('CLI command dispatch contract', () => {
     }
   });
 
+  it('flushes the last saved interactive tool call when stdin closes', async () => {
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-interactive-log-'));
+    try {
+      const child = spawn(process.execPath, [...cliArgs, '--save-session', '--output-dir', outputDir, 'interactive'], {
+        timeout: 15_000,
+        killSignal: 'SIGKILL',
+      });
+      let stdout = '';
+      let stderr = '';
+      let commandSent = false;
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk; });
+      child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+        stdout += chunk;
+        if (!stdout.endsWith('> '))
+          return;
+        if (stdout.includes('await page.close()')) {
+          child.stdin.end();
+        } else if (!commandSent) {
+          commandSent = true;
+          child.stdin.write('browser_close\n');
+        }
+      });
+      const [exitCode] = await once(child, 'close');
+      expect(exitCode, stderr).toBe(0);
+      const sessionDirs = fs.readdirSync(outputDir).filter(name => name.startsWith('session-'));
+      expect(sessionDirs).toHaveLength(1);
+      expect(fs.readFileSync(path.join(outputDir, sessionDirs[0], 'session.md'), 'utf8')).toContain('browser_close');
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it('prints usable auth setup without exposing the configured token', async () => {
     const secret = 'startup-secret-do-not-print';
     const { stderr } = await collectOutput(['--port', '0'], 3000, { PLAYWRIGHT_MCP_AUTH_TOKEN: secret });
@@ -287,8 +320,8 @@ describe('CLI command dispatch contract', () => {
     });
   });
 
-  describe('--connect-tool with a profile-conflicting storage state', () => {
-    it('rejects at startup instead of advertising two unusable providers', async () => {
+  describe('profile-conflicting storage state', () => {
+    it.each([[], ['--connect-tool']])('rejects at startup instead of advertising unusable tools (%j)', async (...args) => {
       // The persistent default provider rejects --storage-state combined with
       // --user-data-dir only on its first browser operation, and the extension
       // provider refuses a storage state at switch time — starting the server
@@ -297,7 +330,7 @@ describe('CLI command dispatch contract', () => {
       const stateFile = path.join(stateDir, 'auth.json');
       fs.writeFileSync(stateFile, JSON.stringify({ cookies: [], origins: [] }));
       const profileDir = path.join(stateDir, 'profile');
-      const { stderr } = await collectFailure(['--connect-tool', '--storage-state', stateFile, '--user-data-dir', profileDir]);
+      const { stderr } = await collectFailure([...args, '--storage-state', stateFile, '--user-data-dir', profileDir]);
       expect(stderr).toContain('--storage-state and --user-data-dir contradict each other');
     });
   });

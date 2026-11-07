@@ -54,8 +54,9 @@ declare module 'playwright-core/lib/coreBundle' {
       readonly WebSocketTransport: {
         connect(progress: CdpProgress, endpoint: string, options: { headers: Record<string, string>; followRedirects: boolean }): Promise<CdpTransport>;
       };
-      startTraceViewerServer(): Promise<{
-        urlPrefix(type: string): string;
+      startTraceViewerServer(options: { allowedFileRoots: () => string[] }): Promise<{
+        urlPrefix(type: 'precise' | 'human-readable'): string;
+        stop(): Promise<void>;
       }>;
     };
   }

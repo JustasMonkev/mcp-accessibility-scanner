@@ -402,23 +402,30 @@ function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize,
   function nearbyPointerTargets(element: Element, rect: DOMRect): Rect[] {
     const neighbors: Rect[] = [];
     const reach = 2 * minTargetSize;
-    for (const candidate of document.querySelectorAll<HTMLElement>(pointerTargetSelector)) {
-      if (candidate === element)
-        continue;
-      const other = candidate.getBoundingClientRect();
-      if (!isPointerTarget(candidate, other))
-        continue;
-      const outOfRange = other.right < rect.left - reach
-        || other.left > rect.right + reach
-        || other.bottom < rect.top - reach
-        || other.top > rect.bottom + reach;
-      if (outOfRange)
-        continue;
-      neighbors.push({ x: other.x, y: other.y, width: other.width, height: other.height });
-      if (neighbors.length >= maxNeighborTargets)
-        break;
+    for (let target = element; ;) {
+      const root = target.getRootNode();
+      if (!(root instanceof Document || root instanceof ShadowRoot))
+        return neighbors;
+      for (const candidate of root.querySelectorAll(pointerTargetSelector)) {
+        if (candidate === target && (target === element || target.shadowRoot?.delegatesFocus))
+          continue;
+        const other = candidate.getBoundingClientRect();
+        if (!isPointerTarget(candidate, other))
+          continue;
+        const outOfRange = other.right < rect.left - reach
+          || other.left > rect.right + reach
+          || other.bottom < rect.top - reach
+          || other.top > rect.bottom + reach;
+        if (outOfRange)
+          continue;
+        neighbors.push({ x: other.x, y: other.y, width: other.width, height: other.height });
+        if (neighbors.length >= maxNeighborTargets)
+          return neighbors;
+      }
+      if (!(root instanceof ShadowRoot))
+        return neighbors;
+      target = root.host;
     }
-    return neighbors;
   }
 
   function composedParent(element: Element): Element | null {

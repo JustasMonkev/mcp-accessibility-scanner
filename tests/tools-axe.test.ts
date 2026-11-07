@@ -893,6 +893,32 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
     }
   });
 
+  it('warns about an unscanned frame projected through two slots into a modal', async () => {
+    const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<slot id="document-slot"><div id="outer"><span slot="frame" id="frame-host"></span></div></slot>');
+      const loaded = page.waitForEvent('framenavigated', frame => frame.url() === 'about:srcdoc');
+      await page.evaluate(() => {
+        const outer = document.querySelector('#outer')!.attachShadow({ mode: 'open' });
+        outer.innerHTML = '<div id="inner"><slot name="frame" slot="inside"></slot></div>';
+        const inner = outer.querySelector('#inner')!.attachShadow({ mode: 'open' });
+        inner.innerHTML = '<dialog id="shadow-dialog"><slot name="inside"></slot></dialog>';
+        inner.querySelector('dialog')!.showModal();
+        const frame = document.createElement('iframe');
+        frame.srcdoc = '<button>Inside modal</button>';
+        document.querySelector('#frame-host')!.attachShadow({ mode: 'closed' }).append(frame);
+      });
+      await loaded;
+
+      expect((await runAxeScan(page)).unscannedFrames).toEqual(['about:srcdoc']);
+      expect((await runAxeScan(page, { exclude: ['#shadow-dialog', '#document-slot'] })).unscannedFrames).toEqual(['about:srcdoc']);
+      expect((await runAxeScan(page, { exclude: ['#frame-host'] })).unscannedFrames).toEqual([]);
+    } finally {
+      await browser.close();
+    }
+  });
+
   it('reports a hidden iframe made visible by author CSS outside a CSS-hidden modal', async () => {
     const browser = await chromium.launch({ headless: true, chromiumSandbox: false });
     try {

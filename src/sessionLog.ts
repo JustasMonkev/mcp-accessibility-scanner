@@ -101,7 +101,7 @@ export class SessionLog {
   private _sessionFileQueue = Promise.resolve();
   private _flushEntriesTimeout: NodeJS.Timeout | undefined;
   private _storage: IFileStorage;
-  private _lastFlushedAction = new WeakMap<Tab, { action: actions.Action; browserSessionId?: string; code: string; marker: string }>();
+  private _lastFlushedAction = new WeakMap<Tab, { action: actions.Action; browserSessionId?: string; code: string; snapshotFile: string }>();
 
   private _redactSecrets: ((text: string) => string) | undefined;
 
@@ -144,6 +144,8 @@ export class SessionLog {
       if (lastEntry?.userAction?.name === action.name) {
         lastEntry.userAction = action;
         lastEntry.code = code;
+        if (lastEntry.tabSnapshot && action.ariaSnapshot !== undefined)
+          lastEntry.tabSnapshot.ariaSnapshot = action.ariaSnapshot;
         return;
       }
       const flushed = this._lastFlushedAction.get(tab);
@@ -158,13 +160,16 @@ export class SessionLog {
           .then(async () => {
             const content = await this._storage.readFile(this._file);
             const oldBlock = this._redact(renderUserAction(previousAction, flushed.browserSessionId, previousCode).join('\n'));
-            const newBlock = this._redact(renderUserAction(flushed.action, flushed.browserSessionId, flushed.code).join('\n'));
-            const markerIndex = content.indexOf(flushed.marker);
+            const newBlock = this._redact(renderUserAction(action, flushed.browserSessionId, code).join('\n'));
+            const markerIndex = content.indexOf(`- Snapshot: ${flushed.snapshotFile}`);
             if (markerIndex === -1)
               return;
             const blockIndex = content.lastIndexOf(oldBlock, markerIndex);
-            if (blockIndex !== -1)
-              await this._storage.writeFile(this._file, content.slice(0, blockIndex) + newBlock + content.slice(blockIndex + oldBlock.length));
+            if (blockIndex === -1)
+              return;
+            if (action.ariaSnapshot !== undefined)
+              await this._writeSnapshot(flushed.snapshotFile, action.ariaSnapshot).catch(logUnhandledError);
+            await this._storage.writeFile(this._file, content.slice(0, blockIndex) + newBlock + content.slice(blockIndex + oldBlock.length));
           })
           .catch(logUnhandledError);
       return;
@@ -193,6 +198,12 @@ export class SessionLog {
     this._appendEntry(entry);
   }
 
+  async flush(): Promise<void> {
+    if (this._pendingEntries.length)
+      await this._flushEntries();
+    await this._sessionFileQueue;
+  }
+
   private _lastPendingEntryFor(source: Context, tab?: Tab): LogEntry | undefined {
     for (let i = this._pendingEntries.length - 1; i >= 0; i--) {
       if (this._pendingEntries[i].source === source && (!tab || this._pendingEntries[i].tab === tab))
@@ -210,9 +221,11 @@ export class SessionLog {
 
   private async _flushEntries() {
     clearTimeout(this._flushEntriesTimeout);
+    this._flushEntriesTimeout = undefined;
     const entries = this._pendingEntries;
     this._pendingEntries = [];
     const lines: string[] = [''];
+    const snapshotWrites: Promise<void>[] = [];
 
     for (const entry of entries) {
       const ordinal = (++this._ordinal).toString().padStart(3, '0');
@@ -243,15 +256,14 @@ export class SessionLog {
 
       if (entry.tabSnapshot) {
         const fileName = `${ordinal}.snapshot.yml`;
-        this._storage.writeFile(path.join(this._folder, fileName), this._redactSecrets?.(entry.tabSnapshot.ariaSnapshot) ?? entry.tabSnapshot.ariaSnapshot).catch(logUnhandledError);
-        const marker = `- Snapshot: ${fileName}`;
-        lines.push(marker);
+        snapshotWrites.push(this._writeSnapshot(fileName, entry.tabSnapshot.ariaSnapshot).catch(logUnhandledError));
+        lines.push(`- Snapshot: ${fileName}`);
         if (entry.userAction && entry.tab) {
           this._lastFlushedAction.set(entry.tab, {
             action: entry.userAction,
             browserSessionId: entry.browserSessionId,
             code: entry.code,
-            marker,
+            snapshotFile: fileName,
           });
         }
       }
@@ -261,8 +273,15 @@ export class SessionLog {
 
     this._sessionFileQueue = this._sessionFileQueue
         .catch(logUnhandledError)
-        .then(() => this._storage.appendFile(this._file, this._redact(lines.join('\n'))))
+        .then(async () => {
+          await Promise.all(snapshotWrites);
+          await this._storage.appendFile(this._file, this._redact(lines.join('\n')));
+        })
         .catch(logUnhandledError);
+  }
+
+  private _writeSnapshot(fileName: string, snapshot: string): Promise<void> {
+    return this._storage.writeFile(path.join(this._folder, fileName), this._redactSecrets?.(snapshot) ?? snapshot);
   }
 
   private _redact(text: string): string {

@@ -241,15 +241,17 @@ type FrameScope = {
 };
 
 function inspectFrameScope(frameElement: Element, scope: { include: string[], exclude: string[] }): FrameScope {
+  function flattenedParentOf(element: Element): Element | null {
+    while (element.assignedSlot)
+      element = element.assignedSlot;
+    const root = element.getRootNode();
+    return element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+  }
+
   function composedAncestorsOf(element: Element): Element[] {
     const ancestors: Element[] = [];
-    let current: Element | null = element;
-    while (current) {
+    for (let current: Element | null = element; current; current = flattenedParentOf(current))
       ancestors.push(current);
-      const slotted: Element = current.assignedSlot ?? current;
-      const root = slotted.getRootNode();
-      current = slotted.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
-    }
     return ancestors;
   }
 
@@ -289,7 +291,7 @@ function inspectFrameScope(frameElement: Element, scope: { include: string[], ex
   }
 
   function hidesItsSubtree(element: Element): boolean {
-    const parent = element.assignedSlot?.parentElement ?? element.parentElement;
+    const parent = flattenedParentOf(element);
     const style = getComputedStyle(element);
     return element.getAttribute('aria-hidden') === 'true'
       || style.display === 'none'
@@ -299,7 +301,9 @@ function inspectFrameScope(frameElement: Element, scope: { include: string[], ex
   }
 
   const ancestors = composedAncestorsOf(frameElement);
-  const matchesSelector = (selector: string) => ancestors.some(element => element.matches(selector));
+  // Axe resolves flat CSS in the document and omits slot nodes from its scan tree.
+  const matchesSelector = (selector: string) => ancestors.some(element =>
+    element.getRootNode() === document && !(element instanceof HTMLSlotElement) && element.matches(selector));
   const openModals = allDocumentAndShadowRoots().flatMap(root => [...root.querySelectorAll('dialog:modal')].filter(modal => isVisibleOnTop(root, modal)));
   const blockedByModal = openModals.length > 0 && !openModals.some(modal => ancestors.includes(modal));
   const frameVisibility = getComputedStyle(frameElement).visibility;
