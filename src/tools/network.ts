@@ -73,8 +73,9 @@ const requestDetails = defineTabTool({
       requestHeaders: await readOrDescribeFailure(tab, () => request.allHeaders(), 'reading the request headers'),
       response: requestResponse,
       responseHeaders: requestResponse ? await readOrDescribeFailure(tab, () => requestResponse.allHeaders(), 'reading the response headers') : undefined,
-      responseBody: requestResponse ? await readOrDescribeFailure(tab, () => requestResponse.body(), 'reading the response body') : undefined,
     };
+    if (requestResponse)
+      details.responseBody = await readResponseBody(tab, request, requestResponse, headersOf(details.responseHeaders));
     for (const line of renderRequestDetails(details))
       response.addResult(line);
   },
@@ -136,6 +137,21 @@ async function readOrDescribeFailure<T>(tab: Tab, fetch: () => Promise<T>, descr
   } catch (error) {
     return { error: errorMessage(error) };
   }
+}
+
+async function readResponseBody(tab: Tab, request: Request, response: Response, headers: Record<string, string>): Promise<Read<Buffer>> {
+  const body = await readOrDescribeFailure(tab, () => response.body(), 'reading the response body');
+  if ('value' in body)
+    return body;
+  const status = response.status();
+  const bodyless = request.method() === 'HEAD' || status === 204 || status === 205;
+  const zeroLength = headers['content-length'] === '0' && !headers['transfer-encoding'] && !headers['content-encoding'];
+  if (!body.error.includes('Protocol error (Network.getResponseBody): Missing content of resource for given requestId')
+      || (status >= 300 && status < 400) || (!bodyless && !zeroLength))
+    return body;
+  const empty = await readOrDescribeFailure(tab, async () =>
+    await response.finished() === null && !request.failure() && (await request.sizes()).responseBodySize === 0, 'confirming an empty response body');
+  return 'value' in empty && empty.value ? { value: Buffer.alloc(0) } : body;
 }
 
 function headersOf(read: Read<Record<string, string>> | undefined): Record<string, string> {

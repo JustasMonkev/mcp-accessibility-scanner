@@ -324,6 +324,9 @@ function setupExitWatchdog(cleanup: () => Promise<void> = () => Context.disposeA
   process.on('SIGTERM', () => {
     void handleExit();
   });
+  process.on('SIGHUP', () => {
+    void handleExit();
+  });
   return handleExit;
 }
 

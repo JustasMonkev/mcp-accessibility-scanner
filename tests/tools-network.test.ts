@@ -394,6 +394,79 @@ describe('Network Tools', () => {
       expect(response.result()).toContain('#### Response body\n<empty>');
     });
 
+    const missingContent = 'response.body: Protocol error (Network.getResponseBody): Missing content of resource for given requestId';
+
+    it.each([
+      { method: 'GET', status: 200, headers: { 'content-length': '0' } },
+      { method: 'HEAD', status: 200, headers: { 'content-length': '100' } },
+      { method: 'GET', status: 204, headers: {} },
+      { method: 'GET', status: 205, headers: {} },
+    ])('should report confirmed empty WebKit bodies ($method $status)', async ({ method, status, headers }) => {
+      response = await detail({
+        request: { method: () => method, sizes: async () => ({ responseBodySize: 0 }) },
+        response: {
+          status: () => status,
+          allHeaders: async () => headers,
+          finished: async () => null,
+          body: async () => { throw new Error(missingContent); },
+        },
+      });
+      expect(response.result()).toContain('#### Response body\n<empty>');
+    });
+
+    it.each([
+      { name: 'unknown body error', error: 'Unknown body error' },
+      { name: 'eviction', error: 'Response body was evicted!' },
+      { name: 'redirect', status: 302 },
+      { name: 'unknown framing', headers: {} },
+      { name: 'nonzero content length', headers: { 'content-length': '4' } },
+      { name: 'transfer encoding overrides length', headers: { 'content-length': '0', 'transfer-encoding': 'chunked' } },
+      { name: 'content encoding', headers: { 'content-length': '0', 'content-encoding': 'gzip' } },
+      { name: 'failed transfer', failure: { errorText: 'transfer aborted' } },
+      { name: 'completion error', finished: new Error('transfer aborted') },
+      { name: 'nonzero received bytes', size: 4 },
+      { name: 'unknown received size', size: -1 },
+    ])('should preserve unavailable bodies for $name', async ({ error = missingContent, status = 200, headers = { 'content-length': '0' }, failure = null, finished = null, size = 0 }) => {
+      response = await detail({
+        request: { failure: () => failure, sizes: async () => ({ responseBodySize: size }) },
+        response: {
+          status: () => status,
+          allHeaders: async () => headers,
+          finished: async () => finished,
+          body: async () => { throw new Error(error); },
+        },
+      });
+      expect(response.result()).toContain(`<body unavailable: ${error}>`);
+      expect(response.result()).not.toContain('#### Response body\n<empty>');
+    });
+
+    it('should retain the body error when completion metadata cannot be read', async () => {
+      response = await detail({
+        response: {
+          allHeaders: async () => ({ 'content-length': '0' }),
+          finished: async () => { throw new Error('Target page closed'); },
+          body: async () => { throw new Error(missingContent); },
+        },
+      });
+      expect(response.result()).toContain(`<body unavailable: ${missingContent}>`);
+    });
+
+    it('should retain the body error when completion confirmation times out', async () => {
+      mockTab.withPageStateTimeout = async (promise, description) => {
+        if (description === 'confirming an empty response body')
+          throw new Error('Timed out confirming completion');
+        return promise;
+      };
+      response = await detail({
+        response: {
+          allHeaders: async () => ({ 'content-length': '0' }),
+          finished: () => new Promise(() => {}),
+          body: async () => { throw new Error(missingContent); },
+        },
+      });
+      expect(response.result()).toContain(`<body unavailable: ${missingContent}>`);
+    });
+
     it('should keep the report when the body cannot be read', async () => {
       response = await detail({
         response: { body: async () => { throw new Error('Response body is unavailable for redirect responses'); } },

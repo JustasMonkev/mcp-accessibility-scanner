@@ -238,3 +238,75 @@ it('filters redirect destinations from a verified out-of-process iframe', async 
     await browser.close();
   }
 });
+
+it.each([true, false])('blocks existing-page HTTP requests through MCP with isolated=%s', async isolated => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'network-policy-existing-'));
+  const server = await createConnection({
+    browser: { browserName: 'chromium', isolated, userDataDir: directory, launchOptions: { channel: 'chromium', headless: true } },
+    network: { blockedOrigins: [new URL(blocked).host] },
+  });
+  const client = new Client({ name: 'network-existing-test', version: '1' });
+  try {
+    await client.connect(new InProcessTransport(server));
+    const navigated = await client.callTool({ name: 'browser_navigate', arguments: { url: allowed } });
+    expect(navigated.isError).not.toBe(true);
+    hits.length = 0;
+    const evaluated = await client.callTool({ name: 'browser_evaluate', arguments: {
+      function: `async () => {
+        const allowed = await fetch(${JSON.stringify(allowed)} + '/echo').then(response => response.ok);
+        await fetch(${JSON.stringify(blocked)} + '/existing-page').catch(() => {});
+        await fetch(${JSON.stringify(allowed)} + '/redirect').catch(() => {});
+        return allowed;
+      }`,
+    } });
+    expect(evaluated.isError).not.toBe(true);
+    expect(evaluated.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'text', text: expect.stringContaining('### Result\ntrue') })]));
+    expect(hits).toEqual([]);
+  } finally {
+    await client.callTool({ name: 'browser_close', arguments: {} }).catch(() => {});
+    await client.close();
+    await server.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+it.each(['allowlist', 'blocklist'] as const)('enforces %s when attaching to loaded pages, sharing a browser and recreating contexts', async policy => {
+  browser = await chromium.launch();
+  const contexts = await Promise.all([browser.newContext({ serviceWorkers: 'block' }), browser.newContext({ serviceWorkers: 'block' })]);
+  try {
+    const pages = await Promise.all(contexts.map(context => context.newPage()));
+    hits.length = 0;
+    await pages[0].goto(`${blocked}/positive-control`);
+    expect(hits).toContain('/positive-control');
+    await Promise.all(pages.map(page => page.goto(allowed)));
+    const config = await resolveConfig({ network: policy === 'allowlist' ? { allowedOrigins: [new URL(allowed).host] } : { blockedOrigins: [new URL(blocked).host] } });
+    await Promise.all(contexts.flatMap(context => [ensureNetworkPolicyRoutes(config, context), ensureNetworkPolicyRoutes(config, context)]));
+    for (const [index, page] of pages.entries()) {
+      hits.length = 0;
+      await page.evaluate(async urls => {
+        const response = await fetch(urls[0]);
+        if (!response.ok)
+          throw new Error('Allowed control failed');
+        for (const url of urls.slice(1))
+          await fetch(url).catch(() => {});
+      }, [`${allowed}/echo`, `${blocked}/existing-${index}`, `${allowed}/redirect`]);
+      expect(hits).toEqual([]);
+      await contexts[index].close();
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const context = await browser.newContext({ serviceWorkers: 'block' });
+      contexts.push(context);
+      await ensureNetworkPolicyRoutes(config, context);
+      const page = await context.newPage();
+      await page.goto(allowed);
+      hits.length = 0;
+      await page.evaluate(async url => { await fetch(url).catch(() => {}); }, `${allowed}/redirect`);
+      expect(hits).toEqual([]);
+      await context.close();
+    }
+  } finally {
+    await Promise.all(contexts.map(context => context.close()));
+    await browser.close();
+  }
+});

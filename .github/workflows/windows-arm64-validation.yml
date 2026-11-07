@@ -1,0 +1,126 @@
+name: Windows ARM64 validation
+
+on:
+  pull_request:
+    branches: [main, 'codex/issue-*']
+    paths:
+      - 'src/tools/install.ts'
+      - 'src/browserContextFactory.ts'
+      - 'tests/windows-architecture.integration.test.ts'
+      - 'tests/native-chrome.integration.test.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/windows-arm64-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-windows:
+    name: Native Windows ARM64 (Node ${{ matrix.node-architecture }})
+    runs-on: windows-11-arm
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        node-architecture: [arm64, x64]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+      MCP_TEST_EXPECT_NATIVE_MACHINE: ARM64
+      MCP_TEST_EXPECT_NODE_ARCH: ${{ matrix.node-architecture }}
+
+    steps:
+      - name: Checkout code
+        env:
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git init .
+          if ($LASTEXITCODE -ne 0) { throw 'git init failed' }
+          git remote add origin "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY.git"
+          if ($LASTEXITCODE -ne 0) { throw 'git remote add failed' }
+          git fetch --no-tags --depth=1 origin "$env:CHECKOUT_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'git fetch failed' }
+          git checkout --detach "$env:CHECKOUT_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'git checkout failed' }
+
+      - name: Install checksum-verified official Node.js for selected architecture
+        env:
+          NODE_ARCHITECTURE: ${{ matrix.node-architecture }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nodeVersion = '26.5.0'
+          $archiveName = "node-v$nodeVersion-win-$env:NODE_ARCHITECTURE.zip"
+          $downloadRoot = "https://nodejs.org/dist/v$nodeVersion"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archiveName
+          $checksumsPath = Join-Path $env:RUNNER_TEMP 'node-SHASUMS256.txt'
+          Invoke-WebRequest "$downloadRoot/SHASUMS256.txt" -OutFile $checksumsPath -TimeoutSec 120
+          Invoke-WebRequest "$downloadRoot/$archiveName" -OutFile $archivePath -TimeoutSec 180
+          $checksumLines = @(Get-Content $checksumsPath | Where-Object { $_ -match ('^[a-fA-F0-9]{64}\s+' + [regex]::Escape($archiveName) + '$') })
+          if ($checksumLines.Count -ne 1) { throw "Missing unambiguous official checksum for $archiveName" }
+          $expectedChecksum = ($checksumLines[0] -split '\s+')[0]
+          $actualChecksum = (Get-FileHash $archivePath -Algorithm SHA256).Hash
+          if ($actualChecksum -ne $expectedChecksum) { throw 'Node.js archive SHA256 mismatch' }
+          Write-Host "Verified $archiveName SHA256=$actualChecksum"
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $env:RUNNER_TEMP
+          $nodeDirectory = Join-Path $env:RUNNER_TEMP "node-v$nodeVersion-win-$env:NODE_ARCHITECTURE"
+          $nodeExecutable = Join-Path $nodeDirectory 'node.exe'
+          & $nodeExecutable -e 'if (process.arch !== process.env.MCP_TEST_EXPECT_NODE_ARCH) throw new Error("Unexpected Node architecture"); console.log(JSON.stringify({node:process.version, arch:process.arch, platform:process.platform}))'
+          if ($LASTEXITCODE -ne 0) { throw 'Selected Node.js failed architecture validation' }
+          $nodeDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify real native architecture through MCP without running an installer
+        run: npx vitest run tests/tools-install.test.ts tests/windows-architecture.integration.test.ts
+
+      - name: Provision native Chrome only on disposable ARM64 runner
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $chromePath = Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'
+          function Get-ChromeMachine([string] $filePath) {
+            $stream = [System.IO.File]::OpenRead($filePath)
+            $reader = [System.IO.BinaryReader]::new($stream)
+            try {
+              if ($reader.ReadUInt16() -ne 0x5a4d) { throw 'Chrome is not an MZ executable' }
+              $stream.Position = 0x3c
+              $peOffset = $reader.ReadUInt32()
+              $stream.Position = $peOffset
+              if ($reader.ReadUInt32() -ne 0x00004550) { throw 'Chrome has no PE signature' }
+              return $reader.ReadUInt16()
+            } finally {
+              $reader.Dispose()
+            }
+          }
+          if (!(Test-Path $chromePath) -or (Get-ChromeMachine $chromePath) -ne 0xaa64) {
+            $msiPath = Join-Path $env:RUNNER_TEMP 'google-chrome-arm64.msi'
+            $installerLog = Join-Path $env:RUNNER_TEMP 'google-chrome-arm64-install.log'
+            Invoke-WebRequest 'https://dl.google.com/tag/s/dl/chrome/install/googlechromestandaloneenterprise_arm64.msi' -OutFile $msiPath -TimeoutSec 180
+            $signature = Get-AuthenticodeSignature -FilePath $msiPath
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(^|,\s*)O=Google LLC(,|$)') {
+              throw 'Chrome MSI must have a valid Google LLC Authenticode signature'
+            }
+            Write-Host "Chrome MSI SHA256=$((Get-FileHash $msiPath -Algorithm SHA256).Hash)"
+            $installer = Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /qn /norestart /L*v `"$installerLog`"" -PassThru
+            if (!$installer.WaitForExit(300000)) {
+              taskkill.exe /PID $installer.Id /T /F
+              throw 'Chrome ARM64 MSI timed out after five minutes'
+            }
+            if ($installer.ExitCode -notin @(0, 3010)) { throw "Chrome MSI failed with exit code $($installer.ExitCode); see $installerLog" }
+          }
+          if (!(Test-Path $chromePath)) { throw "Native Chrome executable missing at $chromePath" }
+          $machine = Get-ChromeMachine $chromePath
+          if ($machine -ne 0xaa64) { throw ('Chrome is not native ARM64: PE machine 0x{0:x}' -f $machine) }
+          Write-Host ('Chrome executable PE machine: 0x{0:x}' -f $machine)
+          "MCP_TEST_NATIVE_CHROME_PATH=$chromePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify native Chrome navigation and accessibility scan through MCP
+        run: npx vitest run tests/native-chrome.integration.test.ts
