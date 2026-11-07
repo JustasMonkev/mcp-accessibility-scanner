@@ -22,6 +22,7 @@ import path from 'node:path';
 import { afterAll, afterEach, beforeAll, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/client';
 import { chromium } from 'playwright';
+import type { BrowserContextOptions } from 'playwright';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { contextFactory } from '../src/browserContextFactory.js';
 import { resolveCLIConfig } from '../src/config.js';
@@ -94,12 +95,13 @@ afterAll(async () => {
   await new Promise<void>(resolve => server.close(() => resolve()));
 });
 
-async function setup(device?: string) {
+async function setup(device?: string, contextOptions: BrowserContextOptions = {}) {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-playwright-165-'));
   const config = await resolveCLIConfig({
     browser, device, headless: true, isolated: true, outputDir: directory,
     defaultTimeout: 1000, navigationTimeout: 5000, timeoutSettle: 0,
   });
+  config.browser.contextOptions = { ...config.browser.contextOptions, ...contextOptions };
   expect(config.browser.browserName).toBe(browser);
   const factory = contextFactory(config);
   const createContext = factory.createContext.bind(factory);
@@ -181,7 +183,11 @@ it.skipIf(!canRun)(`explains inert click failure without firing the handler and 
   expect(clicked).toContain('Control activations: 1');
 });
 
-it.skipIf(!canRun)(`preserves the iPhone 15 screen descriptor through CLI configuration (${browser}, #325)`, async () => {
+it.skipIf(!canRun)(`preserves or explicitly rejects the iPhone 15 screen descriptor through CLI configuration (${browser}, #325)`, async () => {
+  if (browser === 'firefox') {
+    await expect(setup('iPhone 15')).rejects.toThrow(/Firefox 159.*mobile.*screen.*viewport.*No browser was started/);
+    return;
+  }
   const config = await setup('iPhone 15');
   expect(config.browser.contextOptions).toMatchObject({
     screen: { width: 393, height: 852 }, deviceScaleFactor: 3, isMobile: true,
@@ -193,4 +199,42 @@ it.skipIf(!canRun)(`preserves the iPhone 15 screen descriptor through CLI config
   expect(result.text).toMatch(/"width": 393/);
   expect(result.text).toMatch(/"height": 852/);
   expect(result.text).toMatch(/"dpr": 3/);
+});
+
+it.skipIf(!canRun || browser !== 'firefox')('preserves a distinct Firefox desktop screen without enabling mobile mode (#325)', async () => {
+  const config = await setup(undefined, {
+    viewport: { width: 393, height: 659 }, screen: { width: 393, height: 852 }, deviceScaleFactor: 3, isMobile: false,
+  });
+  expect(config.browser.contextOptions.isMobile).toBe(false);
+  await ok('browser_navigate', { url: origin });
+  const result = await ok('browser_evaluate', {
+    function: '() => ({ width: screen.width, height: screen.height, dpr: devicePixelRatio, viewportHeight: innerHeight })',
+  });
+  expect(result.text).toMatch(/"width": 393/);
+  expect(result.text).toMatch(/"height": 852/);
+  expect(result.text).toMatch(/"dpr": 3/);
+  expect(result.text).toMatch(/"viewportHeight": 659/);
+});
+
+it.skipIf(!canRun || browser !== 'firefox')('preserves Firefox mobile mode when the explicit viewport matches its screen (#325)', async () => {
+  const config = await setup('iPhone 15', { viewport: { width: 393, height: 852 } });
+  expect(config.browser.contextOptions).toMatchObject({
+    screen: { width: 393, height: 852 }, viewport: { width: 393, height: 852 }, deviceScaleFactor: 3, isMobile: true,
+  });
+  await ok('browser_navigate', { url: origin });
+  const beforeMeta = await ok('browser_evaluate', { function: '() => innerWidth' });
+  expect(beforeMeta.text).toContain('### Result\n980');
+  const result = await ok('browser_evaluate', {
+    function: `() => {
+      const meta = document.createElement('meta');
+      meta.name = 'viewport';
+      meta.content = 'width=device-width, initial-scale=1';
+      document.head.appendChild(meta);
+      return { width: screen.width, height: screen.height, dpr: devicePixelRatio, viewportWidth: innerWidth };
+    }`,
+  });
+  expect(result.text).toMatch(/"width": 393/);
+  expect(result.text).toMatch(/"height": 852/);
+  expect(result.text).toMatch(/"dpr": 3/);
+  expect(result.text).toMatch(/"viewportWidth": 393/);
 });

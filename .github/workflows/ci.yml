@@ -101,7 +101,7 @@ jobs:
           MCP_TEST_SHARED_WORKER: '1'
 
       - if: ${{ !cancelled() }}
-        name: Strict Firefox mobile screen gate
+        name: Verify Firefox mobile screen configuration contracts
         run: npx vitest run tests/playwright-165-accessibility.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: firefox
@@ -195,9 +195,9 @@ jobs:
           NODE
 
       - run: npm ci
-      - name: Verify owned browser-process cleanup on Windows
+      - name: Verify CDP connection and process cleanup on Windows
         if: ${{ runner.os == 'Windows' && matrix.channel == 'chromium' }}
-        run: npx vitest run tests/cdp-discard.integration.test.ts
+        run: npx vitest run tests/cdp-discard.integration.test.ts tests/cdpConnection.test.ts
         env:
           MCP_TEST_HEADED_DISCARD: '0'
       - id: browser_install

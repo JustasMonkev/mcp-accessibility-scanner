@@ -52,7 +52,7 @@ npx --allow-scripts=re2 mcp-accessibility-scanner --headless --browser chrome
 | `--headless` | Run browser in headless mode (headed by default) |
 | `--caps <caps>` | Comma-separated extra capabilities: `vision`, `pdf`, `verify`, `devtools`, `install` (allows browser downloads) |
 | `--viewport-size <size>` | Browser viewport, e.g. `"1280, 720"` |
-| `--device <device>` | Device emulation, e.g. `"iPhone 15"` |
+| `--device <device>` | Device emulation, e.g. `"iPhone 15"`. Local Firefox rejects mobile descriptors with different screen/viewport sizes; use Chromium or WebKit for those descriptors. |
 | `--output-dir <path>` | Directory for output files (reports, screenshots) |
 | `--config <path>` | Path to configuration file |
 | `--user-data-dir <path>` | Browser profile directory |
