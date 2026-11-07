@@ -61,33 +61,43 @@ const evaluate = defineTabTool({
 });
 
 function formatEvaluationResult(result: unknown): string {
-  if (isJSONValue(result))
-    return JSON.stringify(result, null, 2);
-  return inspect(result, {
-    depth: null,
-    maxArrayLength: null,
-    maxStringLength: null,
-    compact: false,
-    colors: false,
-    customInspect: false,
-  });
+  return canFormatAsJSON(result)
+    ? JSON.stringify(result, null, 2)
+    : inspect(result, {
+      depth: null,
+      maxArrayLength: null,
+      maxStringLength: null,
+      compact: false,
+      colors: false,
+      customInspect: false,
+    });
 }
 
-function isJSONValue(value: unknown, ancestors = new Set<object>()): boolean {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean')
-    return true;
-  if (typeof value === 'number')
-    return Number.isFinite(value) && !Object.is(value, -0);
-  if (typeof value !== 'object' || ancestors.has(value))
-    return false;
-  if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype)
-    return false;
-  ancestors.add(value);
-  try {
-    return Object.values(value).every(item => isJSONValue(item, ancestors));
-  } finally {
-    ancestors.delete(value);
+// JSON must preserve the value, not merely accept it without throwing.
+function canFormatAsJSON(value: unknown, parents: readonly object[] = []): boolean {
+  switch (typeof value) {
+    case 'string':
+    case 'boolean':
+      return true;
+    case 'number':
+      // JSON changes NaN/Infinity to null and negative zero to zero.
+      return Number.isFinite(value) && !Object.is(value, -0);
+    case 'object':
+      return value === null || hasJSONContents(value, parents);
+    default:
+      // JSON drops undefined/functions/symbols and rejects bigint.
+      return false;
   }
+}
+
+function hasJSONContents(value: object, parents: readonly object[]): boolean {
+  const isPlainContainer = Array.isArray(value) || Object.getPrototypeOf(value) === Object.prototype;
+  const isCircular = parents.includes(value);
+  const childParents = [...parents, value];
+
+  // A reference back to a parent is a cycle; shared sibling values are fine.
+  return isPlainContainer && !isCircular
+    && Object.values(value).every(child => canFormatAsJSON(child, childParents));
 }
 
 function functionSerializingAs(source: string): () => void {
