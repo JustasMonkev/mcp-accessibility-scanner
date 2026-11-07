@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'codex/issue-*']
 
 permissions:
   contents: read
@@ -162,11 +162,17 @@ jobs:
           NODE
 
       - run: npm ci
-      - run: npx playwright install --with-deps ${{ matrix.channel }}
+      - id: browser_install
+        run: npx playwright install --with-deps ${{ matrix.channel }}
       - run: npx vitest run tests/history-downloads.integration.test.ts
         env:
           MCP_TEST_BROWSER_CHANNEL: ${{ matrix.channel }}
           DEBUG: pw:browser,pw:mcp:errors
+      - if: ${{ !cancelled() && runner.os == 'Windows' && steps.browser_install.outcome == 'success' }}
+        name: Verify native Windows architecture through MCP
+        run: npx vitest run tests/windows-architecture.integration.test.ts
+        env:
+          MCP_TEST_EXPECT_NATIVE_MACHINE: ${{ runner.arch }}
 
   webkit-regressions:
     runs-on: ubuntu-latest

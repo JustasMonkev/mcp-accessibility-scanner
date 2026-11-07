@@ -810,6 +810,14 @@ Install the configured browser engine (use when browser executable is missing).
 
 Disabled by default. Enable it at server startup with `--caps install`, `PLAYWRIGHT_MCP_CAPS=install`, or `"capabilities": ["install"]` in the config file. Exact-name opt-in via `--allowed-tools browser_install` or `allowedTools` is also supported. Explicit `core-install` settings remain supported as a deprecated alias; use `install` in new configurations. Without this opt-in, the tool is neither listed nor callable; existing browser installations can still be used.
 
+On Windows, Chrome stable/beta installation first queries the native OS
+architecture through PowerShell, with a thirty-second timeout. ARM64 installations
+are refused because Playwright 1.65.0 selects an x64 MSI. Failed or unrecognized
+architecture detection also refuses installation. This does not install native
+ARM64 Chrome: provision it separately, then select its executable with
+`--executable-path` or `browser.launchOptions.executablePath`. Browser channels
+and existing installations are not changed automatically.
+
 This tool invokes Playwright's installer, which downloads executable code. In [Playwright 1.65.0](https://github.com/microsoft/playwright/blob/v1.65.0/packages/playwright-core/src/server/registry/oopDownloadBrowserMain.ts), browser archives still have no checksum or signature verification before extraction; the default download hosts use HTTPS. Only enable installation when you trust the download source and TLS configuration, including any custom `PLAYWRIGHT_DOWNLOAD_HOST`, browser-specific host overrides, or TLS-inspecting proxy. Do not disable TLS certificate validation.
 
 For deployments that require independently verified binaries, provision the browser through your trusted deployment process and use `--executable-path` or an existing browser connection. The capability opt-in limits MCP-triggered installation; it does not add archive verification or change manual, CI, or Docker build downloads.

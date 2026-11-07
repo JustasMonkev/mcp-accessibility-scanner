@@ -14,11 +14,39 @@
  * limitations under the License.
  */
 
-import { fork } from 'node:child_process';
+import { execFile, fork } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { defineTool } from './tool.js';
+
+const windowsArchitectureScript = `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class NativeBrowserArchitecture {
+  [DllImport("kernel32.dll", SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
+
+  public static string GetNativeArchitecture() {
+    using (var currentProcess = System.Diagnostics.Process.GetCurrentProcess()) {
+      ushort processMachine, nativeMachine;
+      if (!IsWow64Process2(currentProcess.Handle, out processMachine, out nativeMachine))
+        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+      switch (nativeMachine) {
+        case 0xAA64: return "Arm64";
+        case 0x8664: return "X64";
+        case 0x014c: return "X86";
+        default: return "Unknown";
+      }
+    }
+  }
+}
+'@
+[NativeBrowserArchitecture]::GetNativeArchitecture()
+`;
 
 const install = defineTool({
   capability: 'install',
@@ -32,6 +60,32 @@ const install = defineTool({
 
   handle: async (context, params, response) => {
     const channel = context.config.browser?.launchOptions?.channel ?? context.config.browser?.browserName ?? 'chrome';
+    if (process.platform === 'win32' && (channel === 'chrome' || channel === 'chrome-beta')) {
+      const workaround = 'Provision native Chrome separately and select it with browser.launchOptions.executablePath (--executable-path).';
+      let architecture: string;
+      try {
+        const windowsRoot = process.env.SYSTEMROOT || process.env.windir || 'C:\\Windows';
+        if (!path.win32.isAbsolute(windowsRoot))
+          throw new Error('Windows system directory must be absolute');
+        const powershell = path.win32.join(windowsRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+        architecture = await new Promise<string>((resolve, reject) => {
+          execFile(powershell, [
+            '-NoProfile', '-NonInteractive', '-Command', windowsArchitectureScript,
+          ], { encoding: 'utf8', timeout: 30000, windowsHide: true }, (error, stdout) => {
+            if (error)
+              reject(error);
+            else
+              resolve(stdout.trim());
+          });
+        });
+      } catch (error) {
+        throw new Error(`Cannot verify native Windows architecture; refusing the Chrome installer. ${workaround}`, { cause: error });
+      }
+      if (architecture === 'Arm64')
+        throw new Error(`Chrome installation on Windows ARM64 is blocked because Playwright's stable/beta installer selects x64 Chrome. ${workaround}`);
+      if (architecture !== 'X64' && architecture !== 'X86')
+        throw new Error(`Cannot verify native Windows architecture; refusing the Chrome installer. ${workaround}`);
+    }
     const cliUrl = import.meta.resolve('playwright/package.json');
     const cliPath = path.join(fileURLToPath(cliUrl), '..', 'cli.js');
     const child = fork(cliPath, ['install', channel], {
