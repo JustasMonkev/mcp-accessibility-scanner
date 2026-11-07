@@ -15,6 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { chromium } from 'playwright';
 import evaluateTools, { toFunctionSource } from '../src/tools/evaluate.js';
 import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
@@ -74,6 +75,63 @@ describe('browser_evaluate tool', () => {
     await evaluateTool.handle(mockContext, { function: '() => ({})' }, response);
 
     expect(response.result()).toBe(JSON.stringify({ a: [1, 'two', null] }, null, 2));
+  });
+
+  it.each([
+    ['object properties', () => { const shared = { n: 1 }; return { a: shared, b: shared }; }],
+    ['array entries', () => { const shared = [{ n: 1 }]; return [shared, shared]; }],
+    ['nested branches', () => { const shared = { n: 1 }; return { a: { shared }, b: [shared] }; }],
+  ])('keeps acyclic shared references in %s as pretty JSON', async (_name, makeValue) => {
+    const value = makeValue();
+    pageEvaluate.mockResolvedValueOnce(value);
+
+    await evaluateTool.handle(mockContext, { function: '() => ({})' }, response);
+
+    expect(response.result()).toBe(JSON.stringify(value, null, 2));
+    expect(JSON.parse(response.result())).toEqual(value);
+  });
+
+  it.each([
+    ['a direct cycle', () => { const value: { self?: unknown } = {}; value.self = value; return value; }],
+    ['an indirect cycle', () => { const value: unknown[] = []; value.push({ value }); return value; }],
+    ['a cycle after a shared branch', () => { const shared = { n: 1 }; const value: Record<string, unknown> = { a: shared, b: shared }; value.self = value; return value; }],
+  ])('keeps inspect formatting for %s', async (_name, makeValue) => {
+    pageEvaluate.mockResolvedValueOnce(makeValue());
+
+    await evaluateTool.handle(mockContext, { function: '() => ({})' }, response);
+
+    expect(response.result()).toContain('[Circular *1]');
+    expect(response.isError()).toBeFalsy();
+  });
+
+  it('formats real browser results as JSON for aliases and inspect for cycles and non-JSON values', async () => {
+    const browser = await chromium.launch();
+    try {
+      mockTab.page = await browser.newPage();
+      const cases = [
+        { source: '() => { const x = { n: 1 }; return { a: x, b: x }; }', json: { a: { n: 1 }, b: { n: 1 } } },
+        { source: '() => { const x = [1, 2]; return [x, x]; }', json: [[1, 2], [1, 2]] },
+        { source: '() => { const x = {}; x.self = x; return x; }', inspect: '[Circular *1]' },
+        { source: '() => ({ value: undefined })', inspect: 'value: undefined' },
+        { source: '() => new Date("2026-01-02T03:04:05.000Z")', inspect: '2026-01-02T03:04:05.000Z' },
+        { source: '() => [undefined, NaN, Infinity, -0, 10n]', inspect: '10n' },
+      ];
+      for (const testCase of cases) {
+        const result = new Response(mockContext, 'browser_evaluate', {});
+        await evaluateTool.handle(mockContext, { function: testCase.source }, result);
+        if ('json' in testCase) {
+          expect(result.result()).toBe(JSON.stringify(testCase.json, null, 2));
+          expect(JSON.parse(result.result())).toEqual(testCase.json);
+        } else {
+          expect(result.result()).toContain(testCase.inspect);
+          expect(() => JSON.parse(result.result())).toThrow();
+        }
+        expect(result.isError()).toBeFalsy();
+      }
+      expect(await mockTab.page.evaluate(() => 2 + 2)).toBe(4);
+    } finally {
+      await browser.close();
+    }
   });
 
   it.each([

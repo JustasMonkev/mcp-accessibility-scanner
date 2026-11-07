@@ -73,17 +73,21 @@ function formatEvaluationResult(result: unknown): string {
   });
 }
 
-function isJSONValue(value: unknown, seen = new Set<object>()): boolean {
+function isJSONValue(value: unknown, ancestors = new Set<object>()): boolean {
   if (value === null || typeof value === 'string' || typeof value === 'boolean')
     return true;
   if (typeof value === 'number')
     return Number.isFinite(value) && !Object.is(value, -0);
-  if (typeof value !== 'object' || seen.has(value))
+  if (typeof value !== 'object' || ancestors.has(value))
     return false;
   if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype)
     return false;
-  seen.add(value);
-  return Object.values(value).every(item => isJSONValue(item, seen));
+  ancestors.add(value);
+  try {
+    return Object.values(value).every(item => isJSONValue(item, ancestors));
+  } finally {
+    ancestors.delete(value);
+  }
 }
 
 function functionSerializingAs(source: string): () => void {

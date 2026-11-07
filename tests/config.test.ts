@@ -20,6 +20,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, it, expect, onTestFinished, vi } from 'vitest';
 import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders, resolveOutputDir, uploadDirectoryList } from '../src/config.js';
 import type { Config } from '../config.js';
+import { contextFactory } from '../src/browserContextFactory.js';
 
 async function writeConfigFile(config: Config): Promise<string> {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-config-test-'));
@@ -159,6 +160,60 @@ describe('Config', () => {
       const config = await resolveConfig({ browser: { launchOptions: { proxy: { ...proxy, bypass: 'private.test' } }, contextOptions: { clientCertificates } } });
       expect(config.browser.contextOptions.proxy).toBeUndefined();
       expect(config.browser.launchOptions.proxy?.bypass).toBe('private.test');
+    });
+
+    it.each(['launch', 'context'])('rejects persistent Firefox with certificates and an effective %s proxy before launch', async level => {
+      const config = await resolveConfig({ browser: {
+        browserName: 'firefox',
+        launchOptions: level === 'launch' ? { proxy } : {},
+        contextOptions: { clientCertificates, ...(level === 'context' && { proxy }) },
+      } });
+      expect(() => contextFactory(config)).toThrow('Persistent Firefox does not support clientCertificates together with a proxy');
+    });
+
+    it('validates persistent Firefox after merging file, environment and CLI options', async () => {
+      const config = await writeConfigFile({ browser: { browserName: 'firefox', contextOptions: { clientCertificates } } });
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', proxy.server);
+      const resolved = await resolveCLIConfig({ config });
+      expect(() => contextFactory(resolved)).toThrow('Persistent Firefox');
+      expect((await resolveCLIConfig({ config, isolated: true })).browser.contextOptions.proxy).toEqual({ server: proxy.server });
+    });
+
+    it.each([undefined, []])('allows persistent Firefox proxies without certificates (%j)', async clientCertificates => {
+      const config = await resolveConfig({ browser: { browserName: 'firefox', launchOptions: { proxy }, contextOptions: { clientCertificates } } });
+      expect(config.browser.launchOptions.proxy).toEqual(proxy);
+      expect(() => contextFactory(config)).not.toThrow();
+    });
+
+    it('preserves the explicit proxy override for isolated Firefox certificates', async () => {
+      const contextProxy = { server: 'http://override.test:3128', bypass: '' };
+      const config = await resolveConfig({ browser: {
+        browserName: 'firefox', isolated: true,
+        launchOptions: { proxy: { ...proxy, bypass: 'private.test' } },
+        contextOptions: { clientCertificates, proxy: contextProxy },
+      } });
+      expect(config.browser.contextOptions.proxy).toEqual(contextProxy);
+      expect(() => contextFactory(config)).not.toThrow();
+    });
+
+    it.each([
+      { remoteEndpoint: 'ws://remote.test' },
+      { cdpEndpoint: 'http://127.0.0.1:9222' },
+      { cdpLaunch: { command: 'fixture-browser' } },
+    ])('does not treat an attached/remote context as a local persistent launch (%j)', async connection => {
+      const config = await resolveConfig({ browser: {
+        browserName: 'firefox', ...connection,
+        launchOptions: { proxy }, contextOptions: { clientCertificates },
+      } });
+      expect(config.browser.contextOptions.proxy).toEqual(proxy);
+      expect(() => contextFactory(config)).not.toThrow();
+    });
+
+    it('allows persistent Firefox certificates without a proxy', async () => {
+      const config = await resolveConfig({ browser: { browserName: 'firefox', contextOptions: { clientCertificates } } });
+      expect(config.browser.contextOptions.clientCertificates).toEqual(clientCertificates);
+      expect(config.browser.contextOptions.proxy).toBeUndefined();
+      expect(() => contextFactory(config)).not.toThrow();
     });
 
     it('allows certificates without a configured proxy', async () => {
@@ -822,10 +877,43 @@ describe('Config', () => {
     });
 
     it('rejects unknown device names', async () => {
+      delete process.env.PLAYWRIGHT_MCP_DEVICE;
       await expect(resolveCLIConfig({ device: 'Unknown Phone' }))
           .rejects.toThrow('Unknown device "Unknown Phone"');
       await expect(resolveCLIConfig({ device: 'toString' }))
           .rejects.toThrow('Unknown device "toString"');
+    });
+
+    it.each(['Unknown Phone', 'toString'])('rejects an unknown environment device: %s', async device => {
+      process.env.PLAYWRIGHT_MCP_DEVICE = device;
+      await expect(resolveCLIConfig({}))
+          .rejects.toThrow(`Unknown device "${device}"`);
+    });
+
+    it.each(['Unknown Phone', 'toString'])('lets a valid CLI device override an unknown environment device: %s', async device => {
+      process.env.PLAYWRIGHT_MCP_DEVICE = device;
+      const config = await resolveCLIConfig({ device: 'iPhone 15' });
+      expect(config.browser.contextOptions).toMatchObject({
+        screen: { width: 393, height: 852 }, isMobile: true, deviceScaleFactor: 3,
+      });
+    });
+
+    it('rejects an unknown CLI device even with a valid environment device', async () => {
+      process.env.PLAYWRIGHT_MCP_DEVICE = 'iPhone 15';
+      await expect(resolveCLIConfig({ device: 'Unknown Phone' }))
+          .rejects.toThrow('Unknown device "Unknown Phone"');
+    });
+
+    it('does not let an empty CLI device hide an unknown environment device', async () => {
+      process.env.PLAYWRIGHT_MCP_DEVICE = 'Unknown Phone';
+      await expect(resolveCLIConfig({ device: '' }))
+          .rejects.toThrow('Unknown device "Unknown Phone"');
+    });
+
+    it('retains the mobile-device conflict after overriding an unknown environment device', async () => {
+      process.env.PLAYWRIGHT_MCP_DEVICE = 'Unknown Phone';
+      await expect(resolveCLIConfig({ device: 'iPhone 15', mobile: true }))
+          .rejects.toThrow('Cannot use --mobile together with --device');
     });
 
     it('rejects mobile emulation with an explicit device', async () => {

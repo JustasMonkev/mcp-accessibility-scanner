@@ -52,7 +52,7 @@ npx --allow-scripts=re2 mcp-accessibility-scanner --headless --browser chrome
 | `--headless` | Run browser in headless mode (headed by default) |
 | `--caps <caps>` | Comma-separated extra capabilities: `vision`, `pdf`, `verify`, `devtools`, `install` (allows browser downloads) |
 | `--viewport-size <size>` | Browser viewport, e.g. `"1280, 720"` |
-| `--device <device>` | Device emulation, e.g. `"iPhone 15"` |
+| `--device <device>` | Device emulation, e.g. `"iPhone 15"`. Local Firefox rejects mobile descriptors with different screen/viewport sizes; use Chromium or WebKit for those descriptors. |
 | `--output-dir <path>` | Directory for output files (reports, screenshots) |
 | `--config <path>` | Path to configuration file |
 | `--user-data-dir <path>` | Browser profile directory |
@@ -219,6 +219,8 @@ These tools are always available and work in the interactive REPL.
 | `browser_handle_dialog` | Handle browser dialog: `{"accept": true}` |
 | `browser_evaluate` | Run JavaScript on page: a function or a bare expression such as `{"function": "document.title"}` |
 
+Evaluation results are pretty-printed JSON for JSON-compatible values; other values transferred by Playwright (for example `undefined`, `NaN`, `BigInt`, dates, or cycles) use JavaScript inspection text, which is not JSON. Return JSON-compatible values when the client needs to parse JSON.
+
 ### Tabs & Config
 
 | Tool | Description |
@@ -233,13 +235,17 @@ These tools are always available and work in the interactive REPL.
 
 | Tool | Description |
 |------|-------------|
-| `browser_console_messages` | Get all console messages |
+| `browser_console_messages` | Get all console messages; source locations use one-based line numbers, as in snapshot console snippets |
 | `browser_network_requests` | List requests since explicit navigation with stable tab-local IDs; `{"all": true}` also includes up to 200 earlier requests |
 | `browser_network_request` | Get credential-redacted headers and body metadata using a retained request ID: `{"index": 3}` |
 
 ### Optional Tools (require `--caps`)
 
 **`--caps install`:** `browser_install {}` - Install the configured browser. Disabled by default. If the browser is missing and installation is authorized, restart the REPL with `npx --allow-scripts=re2 mcp-accessibility-scanner --caps install interactive`, preserving the existing browser options, then call `browser_install {}`. This downloads executable code through Playwright without independent archive checksum/signature verification; trust the download source and TLS configuration before enabling it. Alternatively, use a provisioned browser with `--executable-path`. Explicit `core-install` settings remain supported as a deprecated alias for `install`.
+
+Windows Chrome stable/beta installation refuses ARM64 or undetermined native architecture. Provision native Chrome separately and select `--executable-path` instead of retrying a rejected install. Browser channels are not switched automatically.
+
+Local persistent Firefox with client certificates and a configured proxy is rejected before browser launch. Explicitly choose isolated Firefox or Chromium when suitable; the server does not switch browser, proxy or persistence mode automatically.
 
 **`--caps pdf`:** `browser_pdf_save` - Save page as PDF
 
