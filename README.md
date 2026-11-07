@@ -169,7 +169,8 @@ npx --allow-scripts=re2 mcp-accessibility-scanner            # starts the MCP se
 All of the MCP client configuration examples in this README already use this default mode.
 
 On POSIX systems, stdin closure, SIGINT, SIGTERM and SIGHUP trigger the same
-graceful server cleanup. Locally owned browser processes and temporary browser
+graceful server cleanup for stdio and HTTP. Cleanup flushes pending `--save-session`
+entries and finalizes `--save-trace` files before exit. Locally owned browser processes and temporary browser
 directories are released; caller-supplied persistent-profile directories are
 retained.
 
@@ -594,6 +595,7 @@ Axe returns `incomplete` for checks it cannot decide on its own -- contrast over
 Axe is installed into every frame of the page before the scan runs. A frame that navigates mid-injection, or whose renderer does not answer within a second, is left out -- and its contents then contribute no findings. Rather than let that pass as a clean result, all three scan tools print a `WARNING: Axe could not be installed in N frame(s)` block listing the frame URLs, and `audit_site` and `scan_page_matrix` also record them per page and per variant in their JSON reports (`unscannedFrames`) and in `structuredContent`. A frame that was still loading usually succeeds on a re-run; one that fails consistently has to be audited on its own.
 
 A nested frame is reported when any frame above it went unscanned, even if its own injection succeeded: Axe reaches a nested document only by relaying through the frames above it, so an outer frame without Axe takes everything below it out of the scan.
+Frames hidden from the scan, including frames hidden by an assigned slot, are omitted from the warning.
 
 A frame you scoped out yourself is not reported: with `excludeSelectors: ["iframe.intercom-frame"]` that widget failing to load is the outcome you asked for, not a gap. Scope is resolved through the whole frame chain and across shadow boundaries, so an `includeSelectors` entry naming an ancestor still covers frames nested several levels below it or inside a shadow root, and excluding an outer frame or a shadow host silences everything inside it. Anything the check cannot resolve is reported rather than hidden.
 
@@ -745,6 +747,7 @@ Set default operation timeout for existing tabs.
 #### `browser_snapshot`
 Capture accessibility snapshot of the current page (better than screenshot for analysis).
 Large `data:` URL payloads in snapshot output are truncated to their media type prefix.
+If an encoded comma could start the payload, the preview ends there so it does not expose payload text.
 AI snapshots mark a visually present subtree excluded from accessibility queries with `[aria-hidden]` on its boundary element. Descendants are not marked again.
 - Parameters: `compress` (optional boolean, default false), `boxes` (optional boolean; overrides `snapshot.boxes` for this call)
   - When `compress` is true, repeated non-interactive ARIA snapshot nodes are collapsed in the rendered response when a repeated structural pattern appears more than 100 times. The first 10 examples of each collapsed pattern are kept.

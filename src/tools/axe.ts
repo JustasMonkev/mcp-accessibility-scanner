@@ -241,16 +241,25 @@ type FrameScope = {
 };
 
 function inspectFrameScope(frameElement: Element, scope: { include: string[], exclude: string[] }): FrameScope {
-  function flattenedParentOf(element: Element): Element | null {
-    while (element.assignedSlot)
-      element = element.assignedSlot;
+  function composedParentOf(element: Element): Element | null {
     const root = element.getRootNode();
-    return element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+    return element.assignedSlot ?? element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+  }
+
+  function isShadowSlot(element: Element | null): element is HTMLSlotElement {
+    return element instanceof HTMLSlotElement && element.getRootNode() instanceof ShadowRoot;
+  }
+
+  function flattenedParentOf(element: Element): Element | null {
+    let parent = composedParentOf(element);
+    while (isShadowSlot(parent))
+      parent = composedParentOf(parent);
+    return parent;
   }
 
   function composedAncestorsOf(element: Element): Element[] {
     const ancestors: Element[] = [];
-    for (let current: Element | null = element; current; current = flattenedParentOf(current))
+    for (let current: Element | null = element; current; current = composedParentOf(current))
       ancestors.push(current);
     return ancestors;
   }
@@ -276,9 +285,9 @@ function inspectFrameScope(frameElement: Element, scope: { include: string[], ex
 
   function flattenedChildrenOf(parent: Element): Element[] {
     return [...parent.children].flatMap(child => {
-      if (child.localName !== 'slot')
+      if (!isShadowSlot(child))
         return [child];
-      const assigned = (child as HTMLSlotElement).assignedElements({ flatten: true });
+      const assigned = child.assignedElements({ flatten: true });
       return assigned.length ? assigned : [...child.children];
     });
   }
@@ -291,12 +300,11 @@ function inspectFrameScope(frameElement: Element, scope: { include: string[], ex
   }
 
   function hidesItsSubtree(element: Element): boolean {
-    const parent = flattenedParentOf(element);
     const style = getComputedStyle(element);
     return element.getAttribute('aria-hidden') === 'true'
       || style.display === 'none'
       || element.hasAttribute('inert')
-      || isCollapsedByClosedDetails(element, parent)
+      || (!isShadowSlot(element) && isCollapsedByClosedDetails(element, flattenedParentOf(element)))
       || (element !== frameElement && style.getPropertyValue('content-visibility') === 'hidden');
   }
 

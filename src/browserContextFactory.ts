@@ -728,7 +728,7 @@ async function startTraceServer(config: FullConfig): Promise<string | undefined>
 
 async function doStartTraceServer(config: FullConfig): Promise<string> {
   const tracesDir = await outputFile(config, `traces-${Date.now()}-${createShortGuid()}`);
-  const server = await startTraceViewerServer({ allowedFileRoots: () => [tracesDir] });
+  const server = await startTraceViewerServer({ host: '127.0.0.1', allowedFileRoots: () => [tracesDir] });
   const url = new URL(`${server.urlPrefix('human-readable')}/trace/index.html`);
   // Playwright's directory marker enumerates traces with generated per-context names.
   url.searchParams.set('trace', `file?path=${encodeURIComponent(path.join(tracesDir, 'traces.dir'))}`);

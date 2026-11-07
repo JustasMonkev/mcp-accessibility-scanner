@@ -84,13 +84,13 @@ export class ProxyBackend implements ServerBackend {
     return await this._relay.callTool(this._currentClient!, name, args, requestContext);
   }
 
-  serverClosed?(): void {
+  async serverClosed(): Promise<void> {
     this._relay.close();
     this._backendContext = undefined;
     if (this._ownsCurrentClient)
-      void this._currentClient?.close().catch(errorsDebug);
+      await this._currentClient?.close().catch(errorsDebug);
     else if (this._currentClient)
-      void this._sharedSelection?.slot.release(this._currentClient);
+      await this._sharedSelection?.slot.release(this._currentClient);
   }
 
   private async _callContextSwitchTool(params: any): Promise<CallToolResult> {

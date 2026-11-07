@@ -162,6 +162,7 @@ configureBaseProgram()
     .action(async options => {
       const exitCleanups: Array<() => Promise<void>> = [];
       setupExitWatchdog(async () => {
+        await mcpServer.closeAll();
         for (const cleanup of exitCleanups)
           await cleanup().catch(logUnhandledError);
         await Context.disposeAll();

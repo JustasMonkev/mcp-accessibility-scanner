@@ -24,7 +24,7 @@ Detailed dispositions, original comment links and present-code evidence:
 | Area | Result | Original PRs |
 | --- | --- | --- |
 | Site audits | Keep occurrence fingerprints collision-resistant; reject empty exclusions and sitemap indexes; document RE2 restrictions; keep subdomain crawling on the original port. | #33, #34, #80, #156 |
-| Data URL truncation | Preserve fragments and adjacent encoded query parameters; distinguish commas in MIME parameters from payload delimiters. | #96 |
+| Data URL truncation | Preserve fragments and adjacent encoded query parameters; truncate ambiguous MIME-parameter commas conservatively. | #96 |
 | Interactive CLI | Render tool errors on stderr and resource links with configured URL redaction. Await backend cleanup and flush final session Markdown/snapshots before exit. | #55 |
 | HTTP startup | Empty host defaults to loopback. Wildcard bind logs remain accurate while generated client URLs use loopback addresses accepted by the existing Host guard. | #73 |
 | Mouse input | Reject fractional click counts before dispatch. | #105 |
@@ -45,6 +45,8 @@ Detailed dispositions, original comment links and present-code evidence:
 The detailed reports retain owner-declined suggestions, superseded code, and documented detection limits as distinct dispositions. In particular, the future labeled-site evaluation suggested on #315 remains research work, and native discarded-tab acceptance on #332 remains tracked in #244. This follow-up does not claim either is solved. Directly treating a shadow `<slot>` as an Axe selector anchor was rejected after comparing Axe's actual flattened tree; the separate multiple-projection ancestor bug was reproduced and fixed.
 
 ## Validation
+
+The subsequent [agent-driven MCP regression](reviews/2026-11-07-mcp-regression.md) covers all 45 static tool names and records additional fixes, final checks and known limits.
 
 Regression checks include failing-before/passing-after cases and deliberate mutations for changed logic. Node 24.22.1 and pinned Playwright 1.65.0 were used. Chromium 158.0.8127.18 headless-shell and Firefox 159 probes exercise the changed browser logic.
 

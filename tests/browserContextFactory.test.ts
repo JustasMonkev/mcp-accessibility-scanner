@@ -961,6 +961,7 @@ describe('browserContextFactory', () => {
 
       expect(stderr.mock.calls).toHaveLength(1);
       const viewerUrl = new URL(String(stderr.mock.calls[0][0]).trim().replace(/^Trace viewer listening on /, ''));
+      expect(viewerUrl.hostname).toBe('127.0.0.1');
       const descriptor = await fetch(new URL(viewerUrl.searchParams.get('trace')!, viewerUrl));
       expect(descriptor.status).toBe(200);
       const { entries } = await descriptor.json();

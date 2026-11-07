@@ -207,11 +207,35 @@ describe('Utils', () => {
       expect(truncateDataUrls(text)).toBe('https://api.example/upload?src=data:text/html;base64%2C...&id=123');
     });
 
-    it.each([';name=', ';name%3D', '%3Bname%3D'])('preserves escaped metadata commas after %s', assignment => {
-      const prefix = `data:text/plain${assignment}a%2Cb;base64,`;
-      expect(truncateDataUrl(`${prefix}eA==`)).toBe(`${prefix}...`);
-      expect(truncateDataUrls(`https://api.example/?src=${prefix}eA==&id=123`))
-          .toBe(`https://api.example/?src=${prefix}...&id=123`);
+    it.each([';name=', ';name%3D', '%3Bname%3D'])('preserves the query suffix after a base64 URL with an escaped metadata comma after %s', assignment => {
+      const url = `data:text/plain${assignment}a%2Cb;base64,eA==`;
+      const redacted = `data:text/plain${assignment}a%2C...`;
+      expect(truncateDataUrl(url)).toBe(redacted);
+      expect(truncateDataUrls(`https://api.example/?src=${url}&id=123`))
+          .toBe(`https://api.example/?src=${redacted}&id=123`);
+      expect(truncateDataUrls(`https://api.example/?src=${url.replace('eA==', '%65A==')}&id=123`))
+          .toBe(`https://api.example/?src=${redacted}&id=123`);
+      expect(truncateDataUrls(`https://api.example/?src=${url}#details`))
+          .toBe(`https://api.example/?src=${redacted}#details`);
+    });
+
+    it.each([
+      ['data:text/plain;name=a%2C', 'SECRET,tail'],
+      ['data:text/plain;name=a%2C', 'SECRET;base64,eA=='],
+      ['data:text/plain;name=a%2C', 'SECRET;base64,eA==%23PRIVATE'],
+      ['data%3Atext%2Fplain%3Bcharset%3Dutf-8%2C', 'hello%0Aworld,tail'],
+    ])('redacts everything after an ambiguous encoded delimiter in %s', (prefix, payload) => {
+      expect(truncateDataUrl(`${prefix}${payload}`)).toBe(`${prefix}...`);
+      expect(truncateDataUrls(`https://api.example/?src=${prefix}${payload}`)).toBe(`https://api.example/?src=${prefix}...`);
+    });
+
+    it.each([
+      'data:image/svg+xml;name=a%2C',
+      'data%3Aimage%2Fsvg%2Bxml%3Bname%3Da%2C',
+      'data:text/plain;name=a;base64%2C',
+    ])('consumes raw markup and preserves its outer query suffix after an escaped comma in %s', prefix => {
+      const text = `https://api.example/?src=${prefix}b,<svg viewBox="0 0 1 1"><text>SECRET</text></svg>&id=123`;
+      expect(truncateDataUrls(text)).toBe(`https://api.example/?src=${prefix}...&id=123`);
     });
 
     it('preserves the outer fragment after a data URL', () => {
