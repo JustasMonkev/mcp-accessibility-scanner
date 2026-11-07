@@ -14,16 +14,17 @@
  * limitations under the License.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import WebSocket from 'ws';
 import { chromium, type Browser } from 'playwright';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { contextFactory } from '../src/browserContextFactory.js';
 import { resolveConfig } from '../src/config.js';
@@ -32,6 +33,7 @@ const stageTimeout = 15000;
 const browsers: Browser[] = [];
 const backends: BrowserServerBackend[] = [];
 const processes: ChildProcess[] = [];
+const stoppedProcessTrees = new WeakSet<ChildProcess>();
 const profiles: string[] = [];
 const sockets: WebSocket[] = [];
 const launchPorts: number[] = [];
@@ -56,6 +58,32 @@ async function bounded<T>(operation: Promise<T>): Promise<T> {
   } finally {
     clearTimeout(timer!);
   }
+}
+
+type RunProcessCommand = (command: string, args: string[], options: { timeout: number; windowsHide: boolean }) => Promise<unknown>;
+
+async function stopOwnedProcessTree(child: ChildProcess, platform = process.platform, runCommand: RunProcessCommand = promisify(execFile)) {
+  const pid = child.pid;
+  if (pid === undefined || stoppedProcessTrees.has(child))
+    return;
+  if (platform === 'win32') {
+    if (child.exitCode !== null || child.signalCode !== null)
+      throw new Error('Owned process exited before its Windows process tree could be terminated');
+    const windowsRoot = process.env.SYSTEMROOT || process.env.windir || 'C:\\Windows';
+    if (!path.win32.isAbsolute(windowsRoot))
+      throw new Error('Windows system directory must be absolute');
+    await runCommand(path.win32.join(windowsRoot, 'System32', 'taskkill.exe'), ['/PID', String(pid), '/T', '/F'], { timeout: stageTimeout, windowsHide: true });
+  } else {
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'ESRCH')
+        throw error;
+    }
+  }
+  if (child.exitCode === null && child.signalCode === null)
+    await bounded(once(child, 'exit'));
+  stoppedProcessTrees.add(child);
 }
 
 async function freePort() {
@@ -114,6 +142,7 @@ async function launchWithDiscardedTab() {
     '--no-first-run', '--no-default-browser-check', `${origin}/healthy`,
   ], { detached: true, stdio: 'ignore' });
   processes.push(child);
+  launchPorts.push(port);
   await bounded(once(child, 'spawn'));
   const endpoint = `http://127.0.0.1:${port}`;
   await expect.poll(async () => {
@@ -175,19 +204,14 @@ describe.runIf(process.env.MCP_TEST_HEADED_DISCARD === '1')('CDP attach with a n
   });
 
   afterEach(async () => {
+    const profilesToRemove = profiles.splice(0);
     for (const backend of backends.splice(0))
       backend.serverClosed();
     for (const socket of sockets.splice(0))
       socket.terminate();
     const cleanup = await Promise.allSettled([
       ...browsers.splice(0).map(browser => bounded(browser.close())),
-      ...processes.splice(0).map(async child => {
-        if (child.exitCode !== null || child.signalCode !== null)
-          return;
-        const exited = once(child, 'exit');
-        process.kill(-child.pid!, 'SIGKILL');
-        await bounded(exited);
-      }),
+      ...processes.splice(0).map(child => stopOwnedProcessTree(child)),
     ]);
     const stopped = await Promise.allSettled(launchPorts.splice(0).map(port => expect.poll(async () => {
       try {
@@ -197,8 +221,10 @@ describe.runIf(process.env.MCP_TEST_HEADED_DISCARD === '1')('CDP attach with a n
         return false;
       }
     }, { timeout: stageTimeout }).toBe(false)));
-    const removed = await Promise.allSettled(profiles.splice(0).map(profile => rm(profile, { recursive: true, force: true })));
-    for (const result of [...cleanup, ...stopped, ...removed])
+    for (const result of [...cleanup, ...stopped])
+      expect(result.status, result.status === 'rejected' ? String(result.reason) : '').toBe('fulfilled');
+    const removed = await Promise.allSettled(profilesToRemove.map(profile => rm(profile, { recursive: true, force: true })));
+    for (const result of removed)
       expect(result.status, result.status === 'rejected' ? String(result.reason) : '').toBe('fulfilled');
   });
 
@@ -263,4 +289,97 @@ describe.runIf(process.env.MCP_TEST_HEADED_DISCARD === '1')('CDP attach with a n
       expect(toolText(result)).not.toContain(`${origin}/doomed`);
     });
   }
+});
+
+
+describe('native browser fixture process cleanup', () => {
+  const owned: ChildProcess[] = [];
+
+  afterEach(async () => {
+    await Promise.all(owned.splice(0).map(child => stopOwnedProcessTree(child)));
+  });
+
+  async function startTree(options: { detachedLeaf?: boolean } = {}) {
+    const source = `const { spawn } = require('node:child_process');
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: ${options.detachedLeaf ?? false}, stdio: 'ignore' });
+      console.log(child.pid);
+      setInterval(() => {}, 1000);`;
+    const child = spawn(process.execPath, ['-e', source], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    owned.push(child);
+    const [data] = await bounded(once(child.stdout!, 'data'));
+    const descendantPid = Number(data.toString().trim());
+    expect(Number.isInteger(descendantPid) && descendantPid > 0).toBe(true);
+    return { child, descendantPid };
+  }
+
+  async function expectProcessGone(pid: number) {
+    await expect.poll(() => {
+      try {
+        process.kill(pid, 0);
+        return 'alive';
+      } catch (error) {
+        return error instanceof Error && 'code' in error ? error.code : String(error);
+      }
+    }, { timeout: stageTimeout }).toBe('ESRCH');
+  }
+
+  it('terminates the detached parent and its descendant and tolerates repeated cleanup', async () => {
+    const { child, descendantPid } = await startTree();
+    expect(() => process.kill(descendantPid, 0)).not.toThrow();
+    await stopOwnedProcessTree(child);
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+    await expectProcessGone(descendantPid);
+    await stopOwnedProcessTree(child);
+  });
+
+  it('dispatches Windows cleanup to the system taskkill with tree termination', async () => {
+    const { child } = await startTree();
+    const runCommand = vi.fn(async () => {
+      await stopOwnedProcessTree(child);
+      return { stdout: '', stderr: '' };
+    });
+    await stopOwnedProcessTree(child, 'win32', runCommand);
+    await stopOwnedProcessTree(child, 'win32', runCommand);
+    expect(runCommand).toHaveBeenCalledTimes(1);
+    const windowsRoot = process.env.SYSTEMROOT || process.env.windir || 'C:\\Windows';
+    expect(runCommand).toHaveBeenCalledWith(path.win32.join(windowsRoot, 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], { timeout: stageTimeout, windowsHide: true });
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+  });
+
+  it('reports a failed Windows tree kill even when the root exits first', async () => {
+    const { child, descendantPid } = await startTree({ detachedLeaf: true });
+    const runCommand = vi.fn(async () => {
+      const exited = once(child, 'exit');
+      child.kill('SIGKILL');
+      await bounded(exited);
+      throw new Error('taskkill could not find the root');
+    });
+    try {
+      await expect(stopOwnedProcessTree(child, 'win32', runCommand)).rejects.toThrow('taskkill could not find the root');
+      expect(() => process.kill(descendantPid, 0)).not.toThrow();
+      const alreadyExitedCommand = vi.fn(async () => ({ stdout: '', stderr: '' }));
+      await expect(stopOwnedProcessTree(child, 'win32', alreadyExitedCommand)).rejects.toThrow('Owned process exited before its Windows process tree could be terminated');
+      expect(alreadyExitedCommand).not.toHaveBeenCalled();
+    } finally {
+      if (child.exitCode === null && child.signalCode === null)
+        await stopOwnedProcessTree(child);
+      try {
+        process.kill(descendantPid, 'SIGKILL');
+      } catch (error) {
+        if (!(error instanceof Error) || !('code' in error) || error.code !== 'ESRCH')
+          throw error;
+      }
+      await expectProcessGone(descendantPid);
+      owned.splice(owned.indexOf(child), 1);
+    }
+  });
+
+
+  it.skipIf(process.platform === 'win32')('tolerates a POSIX group that exits before cleanup', async () => {
+    const child = spawn(process.execPath, ['-e', ''], { detached: true, stdio: 'ignore' });
+    owned.push(child);
+    await bounded(once(child, 'exit'));
+    await expect(stopOwnedProcessTree(child)).resolves.toBeUndefined();
+  });
+
 });
