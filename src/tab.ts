@@ -494,7 +494,7 @@ function messageToConsoleMessage(message: playwright.ConsoleMessage): ConsoleMes
   return {
     type: message.type(),
     text: message.text(),
-    toString: () => `[${message.type().toUpperCase()}] ${message.text()} @ ${message.location().url}:${message.location().lineNumber}`,
+    toString: () => `[${message.type().toUpperCase()}] ${message.text()} @ ${message.location().url}:${message.location().lineNumber + 1}`,
   };
 }
 

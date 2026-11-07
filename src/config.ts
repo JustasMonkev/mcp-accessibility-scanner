@@ -287,6 +287,8 @@ function launchOptionsFromCLI(cliOptions: CLIOptions, channel: string | undefine
 }
 
 function contextOptionsFromCLI(cliOptions: CLIOptions): BrowserContextOptions {
+  if (cliOptions.device && !Object.prototype.hasOwnProperty.call(devices, cliOptions.device))
+    throw new Error(`Unknown device "${cliOptions.device}"`);
   const contextOptions: BrowserContextOptions = cliOptions.device ? { ...devices[cliOptions.device] } : {};
   if (cliOptions.storageState)
     contextOptions.storageState = cliOptions.storageState;

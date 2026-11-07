@@ -68,6 +68,31 @@ describe('browser_evaluate tool', () => {
     expect(response.isError()).toBeFalsy();
   });
 
+  it('keeps JSON-compatible results as pretty JSON', async () => {
+    pageEvaluate.mockResolvedValueOnce({ a: [1, 'two', null] });
+
+    await evaluateTool.handle(mockContext, { function: '() => ({})' }, response);
+
+    expect(response.result()).toBe(JSON.stringify({ a: [1, 'two', null] }, null, 2));
+  });
+
+  it.each([
+    ['undefined', undefined, 'undefined'],
+    ['NaN', NaN, 'NaN'],
+    ['Infinity', Infinity, 'Infinity'],
+    ['negative zero', -0, '-0'],
+    ['a bigint', 10n, '10n'],
+    ['a Date', new Date('2026-01-02T03:04:05.000Z'), '2026-01-02T03:04:05.000Z'],
+    ['a nested undefined', { value: undefined }, 'value: undefined'],
+    ['a Map', new Map([['k', 1]]), "'k' => 1"],
+  ])('preserves %s instead of losing it to JSON.stringify', async (_name, value, expected) => {
+    pageEvaluate.mockResolvedValueOnce(value);
+
+    await evaluateTool.handle(mockContext, { function: '() => 0' }, response);
+
+    expect(response.result()).toContain(expected);
+  });
+
   it('forwards the user source to evaluate via Function.toString (no _evaluateFunction)', async () => {
     // Regression guard for #84: playwright-core 1.59 removed _evaluateFunction,
     // so the tool must call the public evaluate() with a toString-overridden

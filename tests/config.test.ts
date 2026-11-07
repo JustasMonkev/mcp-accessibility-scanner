@@ -821,6 +821,13 @@ describe('Config', () => {
           .rejects.toThrow('--mobile is not supported with the Firefox browser.');
     });
 
+    it('rejects unknown device names', async () => {
+      await expect(resolveCLIConfig({ device: 'Unknown Phone' }))
+          .rejects.toThrow('Unknown device "Unknown Phone"');
+      await expect(resolveCLIConfig({ device: 'toString' }))
+          .rejects.toThrow('Unknown device "toString"');
+    });
+
     it('rejects mobile emulation with an explicit device', async () => {
       await expect(resolveCLIConfig({ mobile: true, device: 'iPhone 15' }))
           .rejects.toThrow('Cannot use --mobile together with --device');

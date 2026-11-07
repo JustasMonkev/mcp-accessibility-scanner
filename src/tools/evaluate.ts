@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import { inspect } from 'util';
+
 import { z } from 'zod';
 
 import { defineTabTool } from './tool.js';
@@ -53,10 +55,36 @@ const evaluate = defineTabTool({
     await tab.waitForCompletion(async () => {
       const func = functionSerializingAs(source);
       const result = locator ? await locator.evaluate(func) : await tab.page.evaluate(func);
-      response.addResult(JSON.stringify(result, null, 2) || 'undefined');
+      response.addResult(formatEvaluationResult(result));
     });
   },
 });
+
+function formatEvaluationResult(result: unknown): string {
+  if (isJSONValue(result))
+    return JSON.stringify(result, null, 2);
+  return inspect(result, {
+    depth: null,
+    maxArrayLength: null,
+    maxStringLength: null,
+    compact: false,
+    colors: false,
+    customInspect: false,
+  });
+}
+
+function isJSONValue(value: unknown, seen = new Set<object>()): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean')
+    return true;
+  if (typeof value === 'number')
+    return Number.isFinite(value) && !Object.is(value, -0);
+  if (typeof value !== 'object' || seen.has(value))
+    return false;
+  if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype)
+    return false;
+  seen.add(value);
+  return Object.values(value).every(item => isJSONValue(item, seen));
+}
 
 function functionSerializingAs(source: string): () => void {
   const func = () => {};
