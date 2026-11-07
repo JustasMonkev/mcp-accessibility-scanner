@@ -20,6 +20,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, it, expect, onTestFinished, vi } from 'vitest';
 import { resolveConfig, resolveCLIConfig, outputFile, parseCdpHeaders, resolveOutputDir, uploadDirectoryList } from '../src/config.js';
 import type { Config } from '../config.js';
+import { contextFactory } from '../src/browserContextFactory.js';
 
 async function writeConfigFile(config: Config): Promise<string> {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-config-test-'));
@@ -159,6 +160,60 @@ describe('Config', () => {
       const config = await resolveConfig({ browser: { launchOptions: { proxy: { ...proxy, bypass: 'private.test' } }, contextOptions: { clientCertificates } } });
       expect(config.browser.contextOptions.proxy).toBeUndefined();
       expect(config.browser.launchOptions.proxy?.bypass).toBe('private.test');
+    });
+
+    it.each(['launch', 'context'])('rejects persistent Firefox with certificates and an effective %s proxy before launch', async level => {
+      const config = await resolveConfig({ browser: {
+        browserName: 'firefox',
+        launchOptions: level === 'launch' ? { proxy } : {},
+        contextOptions: { clientCertificates, ...(level === 'context' && { proxy }) },
+      } });
+      expect(() => contextFactory(config)).toThrow('Persistent Firefox does not support clientCertificates together with a proxy');
+    });
+
+    it('validates persistent Firefox after merging file, environment and CLI options', async () => {
+      const config = await writeConfigFile({ browser: { browserName: 'firefox', contextOptions: { clientCertificates } } });
+      vi.stubEnv('PLAYWRIGHT_MCP_PROXY_SERVER', proxy.server);
+      const resolved = await resolveCLIConfig({ config });
+      expect(() => contextFactory(resolved)).toThrow('Persistent Firefox');
+      expect((await resolveCLIConfig({ config, isolated: true })).browser.contextOptions.proxy).toEqual({ server: proxy.server });
+    });
+
+    it.each([undefined, []])('allows persistent Firefox proxies without certificates (%j)', async clientCertificates => {
+      const config = await resolveConfig({ browser: { browserName: 'firefox', launchOptions: { proxy }, contextOptions: { clientCertificates } } });
+      expect(config.browser.launchOptions.proxy).toEqual(proxy);
+      expect(() => contextFactory(config)).not.toThrow();
+    });
+
+    it('preserves the explicit proxy override for isolated Firefox certificates', async () => {
+      const contextProxy = { server: 'http://override.test:3128', bypass: '' };
+      const config = await resolveConfig({ browser: {
+        browserName: 'firefox', isolated: true,
+        launchOptions: { proxy: { ...proxy, bypass: 'private.test' } },
+        contextOptions: { clientCertificates, proxy: contextProxy },
+      } });
+      expect(config.browser.contextOptions.proxy).toEqual(contextProxy);
+      expect(() => contextFactory(config)).not.toThrow();
+    });
+
+    it.each([
+      { remoteEndpoint: 'ws://remote.test' },
+      { cdpEndpoint: 'http://127.0.0.1:9222' },
+      { cdpLaunch: { command: 'fixture-browser' } },
+    ])('does not treat an attached/remote context as a local persistent launch (%j)', async connection => {
+      const config = await resolveConfig({ browser: {
+        browserName: 'firefox', ...connection,
+        launchOptions: { proxy }, contextOptions: { clientCertificates },
+      } });
+      expect(config.browser.contextOptions.proxy).toEqual(proxy);
+      expect(() => contextFactory(config)).not.toThrow();
+    });
+
+    it('allows persistent Firefox certificates without a proxy', async () => {
+      const config = await resolveConfig({ browser: { browserName: 'firefox', contextOptions: { clientCertificates } } });
+      expect(config.browser.contextOptions.clientCertificates).toEqual(clientCertificates);
+      expect(config.browser.contextOptions.proxy).toBeUndefined();
+      expect(() => contextFactory(config)).not.toThrow();
     });
 
     it('allows certificates without a configured proxy', async () => {
