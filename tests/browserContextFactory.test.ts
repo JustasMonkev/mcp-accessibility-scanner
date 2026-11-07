@@ -27,6 +27,8 @@ const { connectOverCDP, spawnMock, startTraceViewerServerMock } = vi.hoisted(() 
   startTraceViewerServerMock: vi.fn(async () => ({ urlPrefix: () => 'http://127.0.0.1:0' })),
 }));
 
+vi.mock('../src/utils/cdpConnection.js', () => ({ connectOverCDP }));
+
 vi.mock('playwright', () => ({
   chromium: {
     connect: vi.fn(),

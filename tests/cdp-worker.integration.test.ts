@@ -16,12 +16,16 @@
 
 import { execFile } from 'node:child_process';
 import { once } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import coreBundle from 'playwright-core/lib/coreBundle';
+import { connectOverCDP } from '../src/utils/cdpConnection.js';
 import http from 'node:http';
 import { promisify } from 'node:util';
 import { WebSocketServer } from 'ws';
 import { chromium, type Browser, type BrowserServer } from 'playwright';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { contextFactory } from '../src/browserContextFactory.js';
 import { resolveConfig } from '../src/config.js';
@@ -70,7 +74,10 @@ it('detaches an orphan worker without terminating the CDP client (#303)', async 
 });
 
 // Strict opt-in: the upstream native Chromium crash is not an expected pass.
-it.skipIf(process.env.MCP_TEST_SHARED_WORKER !== '1')('attaches through MCP after another client inspects a terminated shared worker (#303)', async () => {
+it.skipIf(process.env.MCP_TEST_SHARED_WORKER !== '1').each([
+  { name: 'headless shell', channel: undefined },
+  { name: 'full Chromium', channel: 'chromium' },
+])('attaches through MCP after another client inspects a terminated shared worker (#303): $name', async ({ channel }) => {
   const server = http.createServer((request, response) => {
     if (request.url === '/worker.js') {
       response.setHeader('content-type', 'application/javascript');
@@ -79,6 +86,7 @@ it.skipIf(process.env.MCP_TEST_SHARED_WORKER !== '1')('attaches through MCP afte
       response.setHeader('content-type', 'text/html');
       response.end(request.url === '/owner' ? `<script>window.responsePromise = new Promise(resolve => {
         const worker = new SharedWorker('/worker.js');
+        window.sharedWorker = worker;
         worker.port.onmessage = event => resolve(event.data);
         worker.port.postMessage('hello');
       });</script><h1>Worker owner</h1>` : '<title>Healthy control</title><h1>Shared worker control</h1><input aria-label="Saved note">');
@@ -95,7 +103,8 @@ it.skipIf(process.env.MCP_TEST_SHARED_WORKER !== '1')('attaches through MCP afte
     if (!address || typeof address === 'string')
       throw new Error('Expected TCP fixture server');
     const origin = `http://127.0.0.1:${address.port}`;
-    browserServer = await chromium.launchServer({ args: ['--remote-debugging-port=0', '--enable-automation'], timeout: 10000 });
+    browserServer = await chromium.launchServer({ channel, args: ['--remote-debugging-port=0', '--enable-automation'], timeout: 10000 });
+    process.stdout.write(JSON.stringify({ case: 'native-worker-browser', executable: browserServer.process().spawnfile, args: browserServer.process().spawnargs.slice(0, 3) }) + '\n');
     browserServer.process().on('exit', (code, signal) => { nativeExit = { code, signal }; });
     browser = await chromium.connect(browserServer.wsEndpoint(), { timeout: 5000 });
     const inspector = await browser.newBrowserCDPSession();
@@ -123,6 +132,9 @@ it.skipIf(process.env.MCP_TEST_SHARED_WORKER !== '1')('attaches through MCP afte
       return targetInfos.some(info => info.targetId === worker!.targetId);
     }, { timeout: 5000 }).toBe(false);
     stage = 'worker-terminated';
+    const liveOwner = await browser.newPage();
+    await liveOwner.goto(`${origin}/owner`);
+    expect(await liveOwner.evaluate('window.responsePromise')).toBe('echo:hello');
     expect(await healthy.title()).toBe('Healthy control');
     const config = await resolveConfig({ browser: { cdpEndpoint: endpoint, cdpTimeout: 2000 }, timeouts: { settle: 0 } });
     backend = new BrowserServerBackend(config, contextFactory(config));
@@ -152,6 +164,13 @@ it.skipIf(process.env.MCP_TEST_SHARED_WORKER !== '1')('attaches through MCP afte
     expect(healthy.isClosed()).toBe(false);
     expect(healthy.url()).toBe(`${origin}/healthy`);
     expect(await healthy.getByRole('textbox', { name: 'Saved note' }).inputValue()).toBe('preserve this value');
+    expect(liveOwner.isClosed()).toBe(false);
+    const liveEcho = await liveOwner.evaluate(`new Promise(resolve => {
+      window.sharedWorker.port.onmessage = event => resolve(event.data);
+      window.sharedWorker.port.postMessage('after-attach-and-close');
+    })`);
+    expect(liveEcho).toBe('echo:after-attach-and-close');
+    process.stdout.write(JSON.stringify({ case: 'live-shared-worker-preserved', liveEcho }) + '\n');
     stage = 'passed';
   } finally {
     process.stdout.write(JSON.stringify({ case: 'terminated-shared-worker', stage, browserVersion: browser?.version(), connected: browser?.isConnected(), nativeExit }) + '\n');
@@ -164,3 +183,55 @@ it.skipIf(process.env.MCP_TEST_SHARED_WORKER !== '1')('attaches through MCP afte
     }
   }
 }, 30000);
+
+it.skipIf(process.env.MCP_TEST_SHARED_WORKER !== '1')('preserves remote file-payload uploads and explicit local file-path uploads', async () => {
+  let native: BrowserServer | undefined;
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cdp-relay-upload-'));
+  const file = path.join(directory, 'note.txt');
+  await writeFile(file, 'remote payload survives');
+  try {
+    native = await chromium.launchServer({ args: ['--remote-debugging-port=0', '--enable-automation'] });
+    const owner = await chromium.connect(native.wsEndpoint());
+    const inspector = await owner.newBrowserCDPSession();
+    const commandLine = await inspector.send('Browser.getBrowserCommandLine');
+    const profile = commandLine.arguments.find(argument => argument.startsWith('--user-data-dir='))?.slice('--user-data-dir='.length);
+    if (!profile)
+      throw new Error('Missing fixture profile');
+    const port = (await readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0];
+    const methods: string[] = [];
+    const original = coreBundle.server.WebSocketTransport.connect.bind(coreBundle.server.WebSocketTransport);
+    vi.spyOn(coreBundle.server.WebSocketTransport, 'connect').mockImplementation(async (...args) => {
+      const transport = await original(...args);
+      const send = transport.send.bind(transport);
+      transport.send = message => {
+        if ('method' in message && typeof message.method === 'string')
+          methods.push(message.method);
+        send(message);
+      };
+      return transport;
+    });
+    for (const isLocal of [false, true]) {
+      methods.length = 0;
+      const browser = await connectOverCDP(`http://127.0.0.1:${port}`, { isLocal, timeout: 3000, noDefaults: true });
+      const page = await browser.newPage();
+      await page.setContent('<input type="file">');
+      await page.locator('input').setInputFiles(file);
+      expect(await page.locator('input').evaluate(async element => {
+        if (!(element instanceof HTMLInputElement) || !element.files?.[0])
+          throw new Error('Expected uploaded file');
+        return { name: element.files[0].name, text: await element.files[0].text() };
+      })).toEqual({ name: 'note.txt', text: 'remote payload survives' });
+      expect(methods.includes('DOM.setFileInputFiles')).toBe(isLocal);
+      await page.close();
+      await browser.close();
+    }
+    expect(owner.isConnected()).toBe(true);
+  } finally {
+    try {
+      await native?.kill();
+    } finally {
+      vi.restoreAllMocks();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});

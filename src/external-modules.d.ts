@@ -21,7 +21,25 @@ declare module 'playwright-core/lib/coreBundle' {
   interface Registry {
     findExecutable(channel: string): ExecutableInfo | undefined;
   }
+  interface CdpProgress {
+    readonly signal: AbortSignal;
+    log(message: string): void;
+    race<T>(pending: Promise<T> | Promise<T>[]): Promise<T>;
+  }
+  interface CdpTransport {
+    onmessage?: (message: object) => void;
+    onclose?: (reason?: string) => void;
+    send(message: object): void;
+    close(): void;
+    closeAndWait(): Promise<void>;
+  }
   interface CoreBundle {
+    getUserAgent(): string;
+    readonly utils: {
+      isChromiumChannelName(channel: string): boolean;
+      defaultUserDataDirForChannel(channel: string): string | undefined;
+      httpRequest(options: { url: string; headers: Record<string, string> }, onResponse: (response: import('node:http').IncomingMessage) => void, onError: (error: Error) => void): { cancel(error?: Error): void };
+    };
     readonly iso: {
       asLocator(lang: string, selector: string): string;
       urlMatches(baseURL: string | undefined, urlString: string, match: string): boolean;
@@ -32,6 +50,10 @@ declare module 'playwright-core/lib/coreBundle' {
       readonly registry: Registry;
     };
     readonly server: {
+      readonly nullProgress: CdpProgress;
+      readonly WebSocketTransport: {
+        connect(progress: CdpProgress, endpoint: string, options: { headers: Record<string, string>; followRedirects: boolean }): Promise<CdpTransport>;
+      };
       startTraceViewerServer(): Promise<{
         urlPrefix(type: string): string;
       }>;

@@ -27,6 +27,7 @@ import { errorMessage } from './utils/errors.js';
 import { createGuid, createHash, createShortGuid } from './utils/guid.js';
 import { outputFile } from './config.js';
 import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
+import { connectOverCDP } from './utils/cdpConnection.js';
 import { settleWithin } from './utils/timeout.js';
 import { printToStderr } from './utils/terminal.js';
 
@@ -297,7 +298,7 @@ class CdpContextFactory extends BaseContextFactory {
   }
 
   protected override async _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser> {
-    return playwright.chromium.connectOverCDP(this.config.browser.cdpEndpoint!, {
+    return connectOverCDP(this.config.browser.cdpEndpoint!, {
       headers: cdpConnectHeaders(clientInfo, this.config.browser),
       timeout: this.config.browser.cdpTimeout,
       noDefaults: true,
@@ -463,7 +464,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     for (;;) {
       const remaining = Math.max(1, deadline - Date.now());
       try {
-        return await playwright.chromium.connectOverCDP(endpoint, {
+        return await connectOverCDP(endpoint, {
           headers,
           timeout: cdpTimeout > 0 ? Math.min(cdpTimeout, remaining) : remaining,
           noDefaults: true,
