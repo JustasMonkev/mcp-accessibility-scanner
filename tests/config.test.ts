@@ -876,6 +876,46 @@ describe('Config', () => {
           .rejects.toThrow('--mobile is not supported with the Firefox browser.');
     });
 
+    it('rejects unknown device names', async () => {
+      delete process.env.PLAYWRIGHT_MCP_DEVICE;
+      await expect(resolveCLIConfig({ device: 'Unknown Phone' }))
+          .rejects.toThrow('Unknown device "Unknown Phone"');
+      await expect(resolveCLIConfig({ device: 'toString' }))
+          .rejects.toThrow('Unknown device "toString"');
+    });
+
+    it.each(['Unknown Phone', 'toString'])('rejects an unknown environment device: %s', async device => {
+      process.env.PLAYWRIGHT_MCP_DEVICE = device;
+      await expect(resolveCLIConfig({}))
+          .rejects.toThrow(`Unknown device "${device}"`);
+    });
+
+    it.each(['Unknown Phone', 'toString'])('lets a valid CLI device override an unknown environment device: %s', async device => {
+      process.env.PLAYWRIGHT_MCP_DEVICE = device;
+      const config = await resolveCLIConfig({ device: 'iPhone 15' });
+      expect(config.browser.contextOptions).toMatchObject({
+        screen: { width: 393, height: 852 }, isMobile: true, deviceScaleFactor: 3,
+      });
+    });
+
+    it('rejects an unknown CLI device even with a valid environment device', async () => {
+      process.env.PLAYWRIGHT_MCP_DEVICE = 'iPhone 15';
+      await expect(resolveCLIConfig({ device: 'Unknown Phone' }))
+          .rejects.toThrow('Unknown device "Unknown Phone"');
+    });
+
+    it('does not let an empty CLI device hide an unknown environment device', async () => {
+      process.env.PLAYWRIGHT_MCP_DEVICE = 'Unknown Phone';
+      await expect(resolveCLIConfig({ device: '' }))
+          .rejects.toThrow('Unknown device "Unknown Phone"');
+    });
+
+    it('retains the mobile-device conflict after overriding an unknown environment device', async () => {
+      process.env.PLAYWRIGHT_MCP_DEVICE = 'Unknown Phone';
+      await expect(resolveCLIConfig({ device: 'iPhone 15', mobile: true }))
+          .rejects.toThrow('Cannot use --mobile together with --device');
+    });
+
     it('rejects mobile emulation with an explicit device', async () => {
       await expect(resolveCLIConfig({ mobile: true, device: 'iPhone 15' }))
           .rejects.toThrow('Cannot use --mobile together with --device');
