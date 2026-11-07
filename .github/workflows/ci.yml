@@ -162,6 +162,11 @@ jobs:
           NODE
 
       - run: npm ci
+      - name: Verify owned browser-process cleanup on Windows
+        if: ${{ runner.os == 'Windows' && matrix.channel == 'chromium' }}
+        run: npx vitest run tests/cdp-discard.integration.test.ts
+        env:
+          MCP_TEST_HEADED_DISCARD: '0'
       - id: browser_install
         run: npx playwright install --with-deps ${{ matrix.channel }}
       - run: npx vitest run tests/history-downloads.integration.test.ts
