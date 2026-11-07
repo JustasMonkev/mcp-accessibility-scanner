@@ -168,6 +168,11 @@ npx --allow-scripts=re2 mcp-accessibility-scanner            # starts the MCP se
 
 All of the MCP client configuration examples in this README already use this default mode.
 
+On POSIX systems, stdin closure, SIGINT, SIGTERM and SIGHUP trigger the same
+graceful server cleanup. Locally owned browser processes and temporary browser
+directories are released; caller-supplied persistent-profile directories are
+retained.
+
 ### Interactive REPL (`interactive` subcommand)
 
 For manual terminal use, the `interactive` subcommand starts a readline REPL where you can call any tool directly:
@@ -219,6 +224,12 @@ npx --allow-scripts=re2 mcp-accessibility-scanner list-tools
 `createConnection` returns an MCP `Server` directly, not a wrapper with a `server`
 property. Its type is the SDK's `Server` from `@modelcontextprotocol/server`. Connect it
 with `server.connect(transport)` and release it with `await server.close()`.
+
+Passing a custom context getter transfers that context's lifecycle to the server:
+`browser_close` or client disconnection closes the supplied context. Its parent
+browser and sibling contexts remain open. Supply a dedicated context, not one
+whose tabs or storage must survive the MCP connection. Multiple sessions cannot
+use a custom getter to obtain independent contexts.
 
 ```ts
 import { createConnection } from 'mcp-accessibility-scanner';
@@ -324,6 +335,13 @@ Create a `config.json` file with the following options:
 - `browser.launchOptions.headless`: Run browser in headless mode (default: `true` on Linux without display, `false` otherwise)
 - `browser.launchOptions.channel`: Browser channel (`chrome`, `chrome-beta`, `msedge`, etc.)
 - `browser.contextOptions.clientCertificates`: With client certificates, a configured launch proxy is also applied to fresh contexts unless `browser.contextOptions.proxy` explicitly overrides it. With certificates, Playwright routes every request through its certificate interceptor, which matches `proxy.bypass` entries only as domain suffixes: `example.com` and `.example.com` both bypass `example.com` and its subdomains, and IP addresses match exactly. Entries using browser-specific syntax (wildcards such as `*.example.com`, ports, IP ranges, `<local>`) would be ignored there, so they are rejected before launch. Playwright 1.63.0 ignored every bypass entry in the interceptor; `tests/client-certificate-proxy-probe.mjs` checks bypassed and proxied routes on the pinned version. For a fresh context on a remote browser, configure its proxy explicitly; a proxy inherited only from that browser cannot be inspected. Existing attached contexts retain their current settings.
+
+  Local persistent Firefox cannot combine client certificates with a configured
+  proxy on Playwright 1.65.0: it sends requests without the configured certificate.
+  This combination is rejected before launch. Explicitly use isolated Firefox
+  or Chromium if suitable for your workflow; the server does not change browser,
+  proxy or persistence mode automatically. Firefox without certificates or
+  without a proxy remains supported.
 - `browser.launchOptions.proxy`: Browser proxy (CLI: `--proxy-server`, `--proxy-bypass`; env: `PLAYWRIGHT_MCP_PROXY_SERVER`, `PLAYWRIGHT_MCP_PROXY_BYPASS`). Credentials in a CLI or environment proxy URL, such as `http://user:password@myproxy:3128`, are moved into `proxy.username` and `proxy.password` so the browser can answer `407 Proxy Authentication Required`; percent-encode reserved characters such as `@`, `:` or `/` in them. A proxy set in the config file keeps its explicit `username` and `password` fields.
 
   **Proxy credentials and website authentication:** Playwright 1.65.0 sends proxy credentials only in answer to a proxy `407` challenge, never to a website's `401` challenge ([upstream fix](https://github.com/microsoft/playwright/pull/43482)); Playwright 1.63.0 leaked them, and the server's former startup warning was removed with the upgrade. Use `browser.contextOptions.httpCredentials` for website authentication. Without it, full Chromium fails a website's `401` with `net::ERR_INVALID_AUTH_CREDENTIALS`, with or without a proxy, while Firefox and WebKit show the `401` page. `tests/proxy-credentials.integration.test.ts` checks the credentials reach only the proxy.
@@ -367,9 +385,13 @@ sockets or other browser traffic must be restricted.
 
 CLI equivalents are also available: `--cdp-launch-command`, `--cdp-launch-args`, `--cdp-launch-cwd`, `--cdp-launch-port`, `--cdp-launch-startup-timeout`, `--cdp-endpoint`, `--cdp-header` (repeat for multiple headers, e.g. `--cdp-header "Authorization: Bearer <token>"`), and `--cdp-timeout`. The CDP headers and timeout can also be set via the `PLAYWRIGHT_MCP_CDP_HEADERS` (one `Name: Value` entry per line) and `PLAYWRIGHT_MCP_CDP_TIMEOUT` environment variables.
 
-If CDP attachment times out after the WebSocket connects, an existing tab may be blocking Playwright's browser initialization: a sleeping or unresponsive tab can stall it ([upstream report](https://github.com/microsoft/playwright/issues/42730)). Playwright 1.63.0 also never finished attaching while a tab had no renderer — one whose renderer crashed, or one discarded by Chrome's Memory Saver; the pinned Playwright 1.65.0 attaches and omits that tab ([upstream fix](https://github.com/microsoft/playwright/pull/42936)), as `tests/cdp-attach.integration.test.ts` checks. `--cdp-endpoint` then fails after `--cdp-timeout`, and `--cdp-launch` by `--cdp-launch-startup-timeout` (each attach attempt also stops at `--cdp-timeout`), with an error that names this cause; `--cdp-launch` stops only the application it launched. For `--cdp-endpoint`, use an explicit positive `--cdp-timeout` to bound the attempt; `0` disables it and the attach can then wait forever. Reload or close the affected tab yourself, or attach to a separate disposable browser. `noDefaults` and `--isolated` do not skip initialization of existing tabs; the server does not close or reload your tabs or bypass Playwright's initialization to work around this. See the [verification notes](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#cdp-attach-and-numpad-keys-244).
+If CDP attachment times out after the WebSocket connects, an existing tab may be blocking Playwright initialization ([upstream report](https://github.com/microsoft/playwright/issues/42730)). The pinned Playwright 1.65.0 fixes the crashed-renderer attach hang and omits crashed tabs, as `tests/cdp-attach.integration.test.ts` verifies. A genuine native proactive-discarded tab is different: attachment completes and healthy tabs remain usable, but the discarded tab is still exposed. The strict headed gate in `tests/cdp-discard.integration.test.ts` records that unresolved omission requirement without reloading the tab or changing its native discard state.
+
+For `--cdp-endpoint`, use an explicit positive `--cdp-timeout` to bound initialization; `0` disables it and attachment can wait forever. `--cdp-launch-startup-timeout` bounds the whole launched-application attempt, with each attachment also bounded by `--cdp-timeout`. On failure, launch mode stops only its own application. `noDefaults` and `--isolated` do not skip initialization of existing tabs. If a tab blocks attachment, reload or close it yourself, or attach to a separate disposable browser; the server does not close or reload browser-owned tabs to repair attachment. See the [verification notes](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#cdp-attach-and-numpad-keys-244).
 
 Playwright does not support back/forward-cache (BFCache) restoration: an attached browser with BFCache enabled can return unusable references and omit iframe contents after back navigation. This was reproduced with full Chromium, Chrome, and Edge on Playwright 1.63.0, and again with full Chromium 158 on the pinned Playwright 1.65.0 (`MCP_TEST_ENABLE_BFCACHE=1`). For a browser you launch yourself, include `--disable-back-forward-cache` before attaching, or use the server's normal browser launch mode, which retains Playwright's default flag. The server does not change an attached browser's flags or replace back navigation with a reload. See the [upstream maintainer's explanation](https://github.com/microsoft/playwright/issues/42777#issuecomment-5739095543), [Playwright's BFCache limitation](https://playwright.dev/docs/navigations#backforward-cache-bfcache), and the [verification and reproduction command](https://github.com/JustasMonkev/mcp-accessibility-scanner/blob/main/docs/issue-verification-2026-09.md#history-references-231).
+
+CDP attachment excludes unsupported `shared_worker` targets from Playwright's browser-level auto-attach. Chromium 158 can otherwise crash when another inspector retains a terminated shared worker. Application shared workers keep running; `tests/cdp-worker.integration.test.ts` checks live-worker messages, healthy-tab state and follow-up browsing in both bundled headless shell and full Chromium. A nonce-protected loopback relay retains Playwright's standard URL-based remote file-upload behavior. Channel lookup, HTTP discovery and the upstream WebSocket transport reuse exported internals from the pinned Playwright version, so dependency updates must revalidate these contracts.
 
 HTTP listeners accept `Host` headers for loopback aliases, the bound non-wildcard address, and the configured hostname (`--host`, `server.host`, or `PLAYWRIGHT_MCP_HOST`). A named host must resolve to an address on the server to bind; other hostnames remain forbidden. Wildcard binds (`--host 0.0.0.0` or `--host ::`) do not allow arbitrary hostnames or the wildcard address itself: use a loopback hostname or bind a specific hostname/address. Missing or invalid `Host` returns `400`; disallowed hosts return `403`. When present, `Origin` must use HTTP and exactly match the normalized `Host` hostname and port; HTTPS or a different authority returns `403`. These checks also apply with bearer authentication, which still requires a loopback listener.
 
@@ -803,6 +825,14 @@ Install the configured browser engine (use when browser executable is missing).
 
 Disabled by default. Enable it at server startup with `--caps install`, `PLAYWRIGHT_MCP_CAPS=install`, or `"capabilities": ["install"]` in the config file. Exact-name opt-in via `--allowed-tools browser_install` or `allowedTools` is also supported. Explicit `core-install` settings remain supported as a deprecated alias; use `install` in new configurations. Without this opt-in, the tool is neither listed nor callable; existing browser installations can still be used.
 
+On Windows, Chrome stable/beta installation first queries the native OS
+architecture through PowerShell, with a thirty-second timeout. ARM64 installations
+are refused because Playwright 1.65.0 selects an x64 MSI. Failed or unrecognized
+architecture detection also refuses installation. This does not install native
+ARM64 Chrome: provision it separately, then select its executable with
+`--executable-path` or `browser.launchOptions.executablePath`. Browser channels
+and existing installations are not changed automatically.
+
 This tool invokes Playwright's installer, which downloads executable code. In [Playwright 1.65.0](https://github.com/microsoft/playwright/blob/v1.65.0/packages/playwright-core/src/server/registry/oopDownloadBrowserMain.ts), browser archives still have no checksum or signature verification before extraction; the default download hosts use HTTPS. Only enable installation when you trust the download source and TLS configuration, including any custom `PLAYWRIGHT_DOWNLOAD_HOST`, browser-specific host overrides, or TLS-inspecting proxy. Do not disable TLS certificate validation.
 
 For deployments that require independently verified binaries, provision the browser through your trusted deployment process and use `--executable-path` or an existing browser connection. The capability opt-in limits MCP-triggered installation; it does not add archive verification or change manual, CI, or Docker build downloads.
@@ -875,6 +905,13 @@ Returns credential-redacted request/response headers and body metadata for one r
 - Request and response body contents are never returned because they can contain submitted credentials or private API data. Non-empty bodies are reported as `<redacted, N bytes, mime/type>`; empty bodies remain `<empty>`.
 - A request that failed after its response arrived reports both the status and the failure.
 - Sections that could not be read are reported in place (`<headers unavailable: ...>`, `<body unavailable: ...>`) rather than failing the whole call; reads are bounded by the default timeout, so a still-streaming response cannot hang the tool.
+
+- WebKit 27.2 can report a missing body even after a successful empty response.
+  The tool recovers `<empty>` only when completion, transfer-size metadata and
+  HTTP semantics confirm that result: a HEAD/204/205 response or an unambiguous
+  `Content-Length: 0`. Ambiguous chunked-empty responses can still report
+  `<body unavailable: ...>`; unavailable or evicted data is never assumed empty,
+  and inspecting a response never replays its request.
 
 ### URL redaction coverage
 
@@ -1080,6 +1117,21 @@ on that date. Keep the local `InputRecorder` hub and the existing factory refere
 counts: multiple MCP clients share one client-side browser context, while the hub
 multiplexes session logs and explicit recordings and excludes sibling tool actions.
 A dependency bump alone must not change that ownership model.
+
+Device emulation retains Playwright's device-descriptor `screen` dimensions as
+well as its viewport. Chromium 158 and WebKit 27.2 expose a 393×852
+`window.screen` with device scale factor 3 for `--device "iPhone 15"`.
+Firefox 159's mobile mode instead reports the viewport as the screen, ignoring
+separate screen dimensions. Local Firefox launches therefore reject mobile
+configurations whose explicit screen differs from their viewport, including
+`--browser firefox --device "iPhone 15"`. Choose Chromium or WebKit for that
+descriptor, or explicitly configure matching screen and viewport dimensions.
+Firefox desktop mode still supports a separate screen. Existing supplied
+contexts and remote connections are not subject to this local launch check.
+The server does not drop mobile mode or overwrite screen dimensions in page
+JavaScript. Keeping the descriptor follows Playwright's device configuration
+rather than the host display; screen-based media queries can change after
+upgrading from Playwright 1.63.
 
 Playwright 1.65.0 contains [upstream #42627](https://github.com/microsoft/playwright/pull/42627),
 so the hub uses `_startRecording({ language: 'javascript' }, sink)` / `_stopRecording()`

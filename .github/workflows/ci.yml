@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'codex/issue-*']
 
 permissions:
   contents: read
@@ -94,6 +94,18 @@ jobs:
       - name: Verify client-certificate proxy routing
         run: node tests/client-certificate-proxy-probe.mjs
 
+      - if: ${{ !cancelled() }}
+        name: Strict shared-worker browser survival gate
+        run: npx vitest run tests/cdp-worker.integration.test.ts
+        env:
+          MCP_TEST_SHARED_WORKER: '1'
+
+      - if: ${{ !cancelled() }}
+        name: Verify Firefox mobile screen configuration contracts
+        run: npx vitest run tests/playwright-165-accessibility.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_NAME: firefox
+
   docker-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -109,6 +121,27 @@ jobs:
           git checkout --detach "$CHECKOUT_SHA"
       - name: Test Docker image
         run: npm run test:docker
+      - name: Verify cleanup with a non-reaping Linux PID 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup_container_id=''
+          cleanup_owned_container() {
+            if [ -n "$cleanup_container_id" ]; then
+              docker rm --force "$cleanup_container_id"
+            fi
+          }
+          trap cleanup_owned_container EXIT
+          cleanup_image="${IMAGE_TAG:-mcp-accessibility-scanner:test}"
+          cleanup_container_id="$(docker run -d --entrypoint tail --user root --workdir /tmp/cleanup-no-init \
+            --env NODE_ENV=test --env PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 --env MCP_TEST_HEADED_DISCARD=0 \
+            "$cleanup_image" -f /dev/null)"
+          docker cp "$GITHUB_WORKSPACE/." "$cleanup_container_id:/tmp/cleanup-no-init"
+          docker exec "$cleanup_container_id" node --version
+          docker exec "$cleanup_container_id" sh -c 'echo "PID1=$(cat /proc/1/comm)"'
+          docker exec "$cleanup_container_id" sh -c 'test "$(cat /proc/1/comm)" = tail'
+          docker exec "$cleanup_container_id" npm ci --include=dev --no-audit --no-fund
+          docker exec "$cleanup_container_id" npx vitest run tests/cdp-discard.integration.test.ts
 
   browser-regressions:
     name: Browser regressions (${{ matrix.os }}, ${{ matrix.channel }})
@@ -162,11 +195,27 @@ jobs:
           NODE
 
       - run: npm ci
-      - run: npx playwright install --with-deps ${{ matrix.channel }}
+      - name: Verify CDP connection and process cleanup on Windows
+        if: ${{ runner.os == 'Windows' && matrix.channel == 'chromium' }}
+        run: npx vitest run tests/cdp-discard.integration.test.ts tests/cdpConnection.test.ts
+        env:
+          MCP_TEST_HEADED_DISCARD: '0'
+      - id: browser_install
+        run: npx playwright install --with-deps ${{ matrix.channel }}
       - run: npx vitest run tests/history-downloads.integration.test.ts
         env:
           MCP_TEST_BROWSER_CHANNEL: ${{ matrix.channel }}
           DEBUG: pw:browser,pw:mcp:errors
+      - if: ${{ !cancelled() && runner.os == 'Windows' && steps.browser_install.outcome == 'success' }}
+        name: Verify native Windows architecture through MCP
+        run: npx vitest run tests/windows-architecture.integration.test.ts
+        env:
+          MCP_TEST_EXPECT_NATIVE_MACHINE: ${{ runner.arch }}
+      - if: ${{ !cancelled() && runner.os == 'Windows' && steps.browser_install.outcome == 'success' }}
+        name: Verify Windows networking through MCP
+        run: npx vitest run tests/windows-network.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_CHANNEL: ${{ matrix.channel }}
 
   webkit-regressions:
     runs-on: ubuntu-latest
@@ -226,6 +275,10 @@ jobs:
         run: npx vitest run tests/details-visibility.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: firefox
+      - if: ${{ !cancelled() }}
+        run: npx vitest run tests/network-bodies.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_NAME: webkit
 
   keyboard-controls:
     name: Browser controls (${{ matrix.os }}, ${{ matrix.browser }})
@@ -285,6 +338,11 @@ jobs:
         run: npx vitest run tests/browser-upgrade-controls.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: ${{ matrix.browser }}
+      - if: ${{ !cancelled() && matrix.browser == 'firefox' }}
+        name: Verify Firefox client-certificate proxy combinations
+        run: npx vitest run tests/client-certificates.integration.test.ts
+        env:
+          MCP_TEST_BROWSER_NAME: firefox
 
       - if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' && matrix.browser == 'firefox' }}
         name: Probe crashes only in this disposable runner's Firefox

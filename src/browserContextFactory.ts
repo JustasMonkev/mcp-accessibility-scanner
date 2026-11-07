@@ -27,6 +27,7 @@ import { errorMessage } from './utils/errors.js';
 import { createGuid, createHash, createShortGuid } from './utils/guid.js';
 import { outputFile } from './config.js';
 import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
+import { connectOverCDP } from './utils/cdpConnection.js';
 import { settleWithin } from './utils/timeout.js';
 import { printToStderr } from './utils/terminal.js';
 
@@ -119,8 +120,15 @@ function createContextFactory(config: FullConfig): BrowserContextFactory {
     return new CdpLaunchContextFactory(config);
   if (config.browser.cdpEndpoint)
     return new CdpContextFactory(config);
+  const { isMobile, screen, viewport } = config.browser.contextOptions;
+  if (config.browser.browserName === 'firefox' && isMobile && screen && viewport
+      && (screen.width !== viewport.width || screen.height !== viewport.height))
+    throw new Error('Firefox 159 mobile emulation cannot honor screen dimensions that differ from the viewport (Playwright 1.65.0). Choose Chromium or WebKit, or explicitly configure equal screen and viewport dimensions. No browser was started.');
   if (config.browser.isolated)
     return new IsolatedContextFactory(config);
+  if (config.browser.browserName === 'firefox' && config.browser.contextOptions.clientCertificates?.length
+      && (config.browser.contextOptions.proxy ?? config.browser.launchOptions.proxy))
+    throw new Error('Persistent Firefox does not support clientCertificates together with a proxy: Playwright bypasses the certificate interceptor and omits the client certificate. Use --isolated with Firefox, select Chromium explicitly, or remove the proxy. No browser was started.');
   return new PersistentContextFactory(config);
 }
 
@@ -294,7 +302,7 @@ class CdpContextFactory extends BaseContextFactory {
   }
 
   protected override async _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser> {
-    return playwright.chromium.connectOverCDP(this.config.browser.cdpEndpoint!, {
+    return connectOverCDP(this.config.browser.cdpEndpoint!, {
       headers: cdpConnectHeaders(clientInfo, this.config.browser),
       timeout: this.config.browser.cdpTimeout,
       noDefaults: true,
@@ -460,7 +468,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     for (;;) {
       const remaining = Math.max(1, deadline - Date.now());
       try {
-        return await playwright.chromium.connectOverCDP(endpoint, {
+        return await connectOverCDP(endpoint, {
           headers,
           timeout: cdpTimeout > 0 ? Math.min(cdpTimeout, remaining) : remaining,
           noDefaults: true,
