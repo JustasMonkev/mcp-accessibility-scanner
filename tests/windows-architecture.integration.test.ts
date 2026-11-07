@@ -20,6 +20,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
+import { promisify } from 'node:util';
 import { Client } from '@modelcontextprotocol/client';
 import { expect, it, vi } from 'vitest';
 import playwrightPackage from 'playwright/package.json' with { type: 'json' };
@@ -54,7 +55,13 @@ it.skipIf(!enabled).each(['chrome', 'chrome-beta'])(
         return child;
       });
       syncBuiltinESMExports();
+      const originalDirectory = process.cwd();
       try {
+        await fs.copyFile(process.execPath, path.join(directory, 'powershell.exe'));
+        vi.stubEnv('NoDefaultCurrentDirectoryInExePath', undefined);
+        process.chdir(directory);
+        const decoy = await promisify(childProcess.execFile)('powershell.exe', ['--version'], { encoding: 'utf8', timeout: 15000, windowsHide: true });
+        expect(decoy.stdout.trim()).toBe(process.version);
         await client.connect(await wrapInProcess(backend));
         const started = performance.now();
         const result = await client.callTool({ name: 'browser_install', arguments: {} }, { timeout: 35000 });
@@ -64,7 +71,7 @@ it.skipIf(!enabled).each(['chrome', 'chrome-beta'])(
           expectedNativeMachine, platform: process.platform, release: os.release(), machine: os.machine(),
           node: process.version, nodeArchitecture: process.arch, playwright: playwrightPackage.version,
           playwrightCore: playwrightCorePackage.version, elapsedMs, installerForks: fork.mock.calls.length,
-          installerExecution: 'stubbed; no browser installation attempted', isError: result.isError }) + '\n');
+          installerExecution: 'stubbed; no browser installation attempted', decoyWorkingDirectory: true, isError: result.isError }) + '\n');
         if (expectedNativeMachine === 'ARM64') {
           expect(result.isError, text).toBe(true);
           expect(text).toMatch(/Windows ARM64.*native Chrome.*executablePath/);
@@ -79,6 +86,8 @@ it.skipIf(!enabled).each(['chrome', 'chrome-beta'])(
         expect(followup.isError, JSON.stringify(followup.content)).not.toBe(true);
         expect(JSON.stringify(followup.content)).toContain('Default timeout set to 30000ms');
       } finally {
+        process.chdir(originalDirectory);
+        vi.unstubAllEnvs();
         fork.mockRestore();
         syncBuiltinESMExports();
         try {
@@ -92,4 +101,4 @@ it.skipIf(!enabled).each(['chrome', 'chrome-beta'])(
           }
         }
       }
-    }, 45000);
+    }, 60000);

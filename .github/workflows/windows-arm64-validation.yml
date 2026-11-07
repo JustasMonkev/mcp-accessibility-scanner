@@ -2,7 +2,7 @@ name: Windows ARM64 validation
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'codex/issue-*']
     paths:
       - 'src/tools/install.ts'
       - 'src/browserContextFactory.ts'

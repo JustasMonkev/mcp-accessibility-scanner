@@ -64,8 +64,12 @@ const install = defineTool({
       const workaround = 'Provision native Chrome separately and select it with browser.launchOptions.executablePath (--executable-path).';
       let architecture: string;
       try {
+        const windowsRoot = process.env.SYSTEMROOT || process.env.windir || 'C:\\Windows';
+        if (!path.win32.isAbsolute(windowsRoot))
+          throw new Error('Windows system directory must be absolute');
+        const powershell = path.win32.join(windowsRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
         architecture = await new Promise<string>((resolve, reject) => {
-          execFile('powershell.exe', [
+          execFile(powershell, [
             '-NoProfile', '-NonInteractive', '-Command', windowsArchitectureScript,
           ], { encoding: 'utf8', timeout: 30000, windowsHide: true }, (error, stdout) => {
             if (error)

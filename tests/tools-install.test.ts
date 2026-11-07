@@ -51,6 +51,8 @@ describe('browser_install platform selection', () => {
       return new ChildProcess();
     });
     syncBuiltinESMExports();
+    vi.stubEnv('SYSTEMROOT', 'C:\\Windows');
+    vi.stubEnv('windir', undefined);
     Object.defineProperty(process, 'platform', { value: 'win32' });
     Object.defineProperty(process, 'arch', { value: 'x64' });
   });
@@ -59,6 +61,7 @@ describe('browser_install platform selection', () => {
     Object.defineProperty(process, 'platform', platform);
     Object.defineProperty(process, 'arch', architecture);
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     syncBuiltinESMExports();
   });
 
@@ -124,10 +127,32 @@ describe('browser_install platform selection', () => {
     expect(childProcess.fork).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { systemRoot: 'D:\\Windows with spaces', windir: 'E:\\Windows', expected: 'D:\\Windows with spaces\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' },
+    { systemRoot: undefined, windir: 'E:\\Windows', expected: 'E:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' },
+    { systemRoot: '', windir: 'E:\\Windows', expected: 'E:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' },
+    { systemRoot: undefined, windir: undefined, expected: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' },
+  ])('queries the system PowerShell without searching CWD or PATH (%j)', async ({ systemRoot, windir, expected }) => {
+    vi.stubEnv('SYSTEMROOT', systemRoot);
+    vi.stubEnv('windir', windir);
+    const ctx = context();
+    await expect(install.handle(ctx, {}, new Response(ctx, 'browser_install', {}))).rejects.toThrow(/Windows ARM64/);
+    expect(childProcess.execFile).toHaveBeenCalledWith(expected, expect.any(Array), expect.any(Object), expect.any(Function));
+    expect(childProcess.fork).not.toHaveBeenCalled();
+  });
+
+  it('refuses a relative Windows system directory before executing anything', async () => {
+    vi.stubEnv('SYSTEMROOT', 'workspace\\Windows');
+    const ctx = context();
+    await expect(install.handle(ctx, {}, new Response(ctx, 'browser_install', {}))).rejects.toThrow(/Cannot verify.*Windows/);
+    expect(childProcess.execFile).not.toHaveBeenCalled();
+    expect(childProcess.fork).not.toHaveBeenCalled();
+  });
+
   it('uses a bounded fixed native OS query rather than Node process architecture', async () => {
     const ctx = context();
     await expect(install.handle(ctx, {}, new Response(ctx, 'browser_install', {}))).rejects.toThrow(/Windows ARM64/);
-    expect(childProcess.execFile).toHaveBeenCalledWith('powershell.exe', [
+    expect(childProcess.execFile).toHaveBeenCalledWith('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', [
       '-NoProfile', '-NonInteractive', '-Command', expect.any(String),
     ], { encoding: 'utf8', timeout: 30000, windowsHide: true }, expect.any(Function));
     const script = vi.mocked(childProcess.execFile).mock.calls[0][1]?.[3];
