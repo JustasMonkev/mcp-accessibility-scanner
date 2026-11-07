@@ -16,7 +16,7 @@
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
@@ -312,23 +312,55 @@ describe('native browser fixture process cleanup', () => {
     return { child, descendantPid };
   }
 
-  async function expectProcessGone(pid: number) {
-    await expect.poll(() => {
-      try {
-        process.kill(pid, 0);
-        return 'alive';
-      } catch (error) {
-        return error instanceof Error && 'code' in error ? error.code : String(error);
+  async function isProcessRunning(pid: number, platform = process.platform, readStat: (file: string, encoding: 'utf8') => Promise<string> = readFile) {
+    try {
+      if (platform === 'linux') {
+        const stat = await readStat(`/proc/${pid}/stat`, 'utf8');
+        const state = stat.match(/^\d+ \([\s\S]*\) ([A-Za-z])(?: |$)/)?.[1];
+        if (!state)
+          throw new Error('Invalid Linux process stat');
+        return !['Z', 'X', 'x'].includes(state);
       }
-    }, { timeout: stageTimeout }).toBe('ESRCH');
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && (error.code === 'ESRCH' || error.code === 'ENOENT'))
+        return false;
+      throw error;
+    }
   }
+
+  async function expectProcessTerminated(pid: number) {
+    await expect.poll(() => isProcessRunning(pid), { timeout: stageTimeout }).toBe(false);
+  }
+
+  it('distinguishes terminated Linux states from active states with complex process names', async () => {
+    for (const name of ['node', 'node worker', 'node ) worker', 'node\nworker)']) {
+      for (const [state, running] of [['R', true], ['S', true], ['D', true], ['T', true], ['t', true], ['I', true], ['Z', false], ['X', false], ['x', false]] as const)
+        await expect(isProcessRunning(process.pid, 'linux', async () => `${process.pid} (${name}) ${state} 1 2 3`)).resolves.toBe(running);
+    }
+  });
+
+  it('accepts disappeared processes but preserves Linux read failures', async () => {
+    for (const code of ['ENOENT', 'ESRCH']) {
+      const error = Object.assign(new Error(code), { code });
+      await expect(isProcessRunning(process.pid, 'linux', async () => { throw error; })).resolves.toBe(false);
+    }
+    const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    await expect(isProcessRunning(process.pid, 'linux', async () => { throw denied; })).rejects.toBe(denied);
+  });
+
+  it('rejects malformed Linux process state instead of accepting termination', async () => {
+    for (const stat of ['', `${process.pid} node Z 1`, `${process.pid} (node) ?? 1`, `${process.pid} (node) `])
+      await expect(isProcessRunning(process.pid, 'linux', async () => stat)).rejects.toThrow('Invalid Linux process stat');
+  });
 
   it('terminates the detached parent and its descendant and tolerates repeated cleanup', async () => {
     const { child, descendantPid } = await startTree();
-    expect(() => process.kill(descendantPid, 0)).not.toThrow();
+    await expect(isProcessRunning(descendantPid)).resolves.toBe(true);
     await stopOwnedProcessTree(child);
     expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
-    await expectProcessGone(descendantPid);
+    await expectProcessTerminated(descendantPid);
     await stopOwnedProcessTree(child);
   });
 
@@ -356,7 +388,7 @@ describe('native browser fixture process cleanup', () => {
     });
     try {
       await expect(stopOwnedProcessTree(child, 'win32', runCommand)).rejects.toThrow('taskkill could not find the root');
-      expect(() => process.kill(descendantPid, 0)).not.toThrow();
+      await expect(isProcessRunning(descendantPid)).resolves.toBe(true);
       const alreadyExitedCommand = vi.fn(async () => ({ stdout: '', stderr: '' }));
       await expect(stopOwnedProcessTree(child, 'win32', alreadyExitedCommand)).rejects.toThrow('Owned process exited before its Windows process tree could be terminated');
       expect(alreadyExitedCommand).not.toHaveBeenCalled();
@@ -369,7 +401,7 @@ describe('native browser fixture process cleanup', () => {
         if (!(error instanceof Error) || !('code' in error) || error.code !== 'ESRCH')
           throw error;
       }
-      await expectProcessGone(descendantPid);
+      await expectProcessTerminated(descendantPid);
       owned.splice(owned.indexOf(child), 1);
     }
   });
