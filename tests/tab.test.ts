@@ -96,6 +96,16 @@ describe('Tab', () => {
       expect(tab.consoleMessages()).toHaveLength(1);
     });
 
+    it('reports one-based console source lines', () => {
+      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      mockPage.emit('console', {
+        type: () => 'log',
+        text: () => 'Test message',
+        location: () => ({ url: 'test.js', lineNumber: 0 }),
+      });
+      expect(tab.consoleMessages()[0].toString()).toBe('[LOG] Test message @ test.js:1');
+    });
+
     it('should listen to page error events', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
       const error = new Error('Test error');

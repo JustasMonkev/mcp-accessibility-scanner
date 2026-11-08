@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import { inspect } from 'util';
+
 import { z } from 'zod';
 
 import { defineTabTool } from './tool.js';
@@ -53,10 +55,50 @@ const evaluate = defineTabTool({
     await tab.waitForCompletion(async () => {
       const func = functionSerializingAs(source);
       const result = locator ? await locator.evaluate(func) : await tab.page.evaluate(func);
-      response.addResult(JSON.stringify(result, null, 2) || 'undefined');
+      response.addResult(formatEvaluationResult(result));
     });
   },
 });
+
+function formatEvaluationResult(result: unknown): string {
+  return canFormatAsJSON(result)
+    ? JSON.stringify(result, null, 2)
+    : inspect(result, {
+      depth: null,
+      maxArrayLength: null,
+      maxStringLength: null,
+      compact: false,
+      colors: false,
+      customInspect: false,
+    });
+}
+
+// JSON must preserve the value, not merely accept it without throwing.
+function canFormatAsJSON(value: unknown, parents: readonly object[] = []): boolean {
+  switch (typeof value) {
+    case 'string':
+    case 'boolean':
+      return true;
+    case 'number':
+      // JSON changes NaN/Infinity to null and negative zero to zero.
+      return Number.isFinite(value) && !Object.is(value, -0);
+    case 'object':
+      return value === null || hasJSONContents(value, parents);
+    default:
+      // JSON drops undefined/functions/symbols and rejects bigint.
+      return false;
+  }
+}
+
+function hasJSONContents(value: object, parents: readonly object[]): boolean {
+  const isPlainContainer = Array.isArray(value) || Object.getPrototypeOf(value) === Object.prototype;
+  const isCircular = parents.includes(value);
+  const childParents = [...parents, value];
+
+  // A reference back to a parent is a cycle; shared sibling values are fine.
+  return isPlainContainer && !isCircular
+    && Object.values(value).every(child => canFormatAsJSON(child, childParents));
+}
 
 function functionSerializingAs(source: string): () => void {
   const func = () => {};

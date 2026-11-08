@@ -189,6 +189,7 @@ Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.
 Each line is `<tool-name> <json-arguments>`. Omit the JSON to pass `{}`.
 Global browser connection flags still apply here, for example `npx --allow-scripts=re2 mcp-accessibility-scanner --headless interactive`.
 Use `--mobile` or `PLAYWRIGHT_MCP_MOBILE=1` to emulate a generic mobile device (`Pixel 10` for Chromium, `iPhone 17` for WebKit). It cannot be combined with `--device`, CDP attach/launch modes, remote browser endpoints, or `--extension`.
+Device names supplied through `--device` or `PLAYWRIGHT_MCP_DEVICE` must match a Playwright device descriptor; unknown names fail at startup. An explicit `--device` overrides `PLAYWRIGHT_MCP_DEVICE`.
 
 ### Browser extension mode
 
@@ -799,6 +800,11 @@ Handshake-free HTTP clients must first call `browser_session_open`, then pass it
 
 #### `browser_evaluate`
 Evaluate a JavaScript expression on the page, or on a specific element when a `ref` is provided. The function's return value is serialized back as the result.
+
+JSON-compatible values are returned as pretty-printed JSON, including objects that share references without forming a cycle. Values that JSON cannot faithfully represent, such as `undefined`, `NaN`, `Infinity`, `-0`, `BigInt`, dates, or cyclic objects, use readable JavaScript inspection text instead. This formatting applies to the value transferred by Playwright; it does not add support for transferring other browser-side types.
+
+Inspection text is **not JSON**. Clients must not assume every result can be passed to `JSON.parse`; return JSON-compatible values explicitly when machine-readable JSON is required.
+
 - Parameters: `function` (e.g., `() => document.title` or `(element) => element.textContent`), `element` (optional), `ref` (optional)
 - `element` and `ref` must be supplied together, or not at all; supplying one without the other is rejected.
 - A bare expression is also accepted and is wrapped automatically: `document.title` behaves like `() => document.title`, and, when `element` and `ref` are both given, `element.textContent` behaves like `(element) => element.textContent`. The parameter is always named `element`.
@@ -889,6 +895,7 @@ Sessions that stay idle expire automatically after 30 minutes; the timer is refr
 
 #### `browser_console_messages`
 Returns all console messages from the page.
+Source locations use `url:line` with one-based line numbers, both here and in page snapshot console snippets.
 Large `data:` URL payloads in console messages are truncated to their media type prefix.
 
 #### `browser_network_requests`

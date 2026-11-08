@@ -123,6 +123,9 @@ export async function resolveConfig(config: Config): Promise<FullConfig> {
 export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConfig> {
   const configInFile = await loadConfig(cliOptions.config);
   const envOptions = cliOptionsFromEnv();
+  const device = cliOptions.device || envOptions.device;
+  if (device && !Object.prototype.hasOwnProperty.call(devices, device))
+    throw new Error(`Unknown device "${device}"`);
   const envOverrides = configFromCLIOptions(envOptions, true);
   const noTabGroup = envToBoolean(process.env.PLAYWRIGHT_MCP_NO_TAB_GROUP);
   if (noTabGroup !== undefined)

@@ -111,7 +111,12 @@ it.skipIf(process.env.MCP_TEST_SHARED_WORKER !== '1').each([
     const { arguments: browserArguments } = await inspector.send('Browser.getBrowserCommandLine');
     const profile = browserArguments.find(argument => argument.startsWith('--user-data-dir='))?.slice('--user-data-dir='.length);
     expect(profile).toBeDefined();
-    const port = (await readFile(`${profile}/DevToolsActivePort`, 'utf8')).split('\n')[0];
+    let port = 0;
+    await expect.poll(async () => {
+      const contents = await readFile(`${profile}/DevToolsActivePort`, 'utf8');
+      port = Number(contents.match(/^(\d+)\r?\n/)?.[1]);
+      return Number.isInteger(port) && port > 0 && port <= 65535;
+    }, { timeout: 5000 }).toBe(true);
     const endpoint = `http://127.0.0.1:${port}`;
     const healthy = await browser.newPage();
     await healthy.goto(`${origin}/healthy`);
@@ -197,7 +202,12 @@ it.skipIf(process.env.MCP_TEST_SHARED_WORKER !== '1')('preserves remote file-pay
     const profile = commandLine.arguments.find(argument => argument.startsWith('--user-data-dir='))?.slice('--user-data-dir='.length);
     if (!profile)
       throw new Error('Missing fixture profile');
-    const port = (await readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0];
+    let port = 0;
+    await expect.poll(async () => {
+      const contents = await readFile(path.join(profile, 'DevToolsActivePort'), 'utf8');
+      port = Number(contents.match(/^(\d+)\r?\n/)?.[1]);
+      return Number.isInteger(port) && port > 0 && port <= 65535;
+    }, { timeout: 5000 }).toBe(true);
     const methods: string[] = [];
     const original = coreBundle.server.WebSocketTransport.connect.bind(coreBundle.server.WebSocketTransport);
     vi.spyOn(coreBundle.server.WebSocketTransport, 'connect').mockImplementation(async (...args) => {

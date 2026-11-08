@@ -219,6 +219,8 @@ These tools are always available and work in the interactive REPL.
 | `browser_handle_dialog` | Handle browser dialog: `{"accept": true}` |
 | `browser_evaluate` | Run JavaScript on page: a function or a bare expression such as `{"function": "document.title"}` |
 
+Evaluation results are pretty-printed JSON for JSON-compatible values; other values transferred by Playwright (for example `undefined`, `NaN`, `BigInt`, dates, or cycles) use JavaScript inspection text, which is not JSON. Return JSON-compatible values when the client needs to parse JSON.
+
 ### Tabs & Config
 
 | Tool | Description |
@@ -233,7 +235,7 @@ These tools are always available and work in the interactive REPL.
 
 | Tool | Description |
 |------|-------------|
-| `browser_console_messages` | Get all console messages |
+| `browser_console_messages` | Get all console messages; source locations use one-based line numbers, as in snapshot console snippets |
 | `browser_network_requests` | List requests since explicit navigation with stable tab-local IDs; `{"all": true}` also includes up to 200 earlier requests |
 | `browser_network_request` | Get credential-redacted headers and body metadata using a retained request ID: `{"index": 3}` |
 
