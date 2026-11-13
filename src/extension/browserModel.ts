@@ -103,6 +103,9 @@ export class BrowserModel {
         this._pendingStaleDetaches.set(source.tabId, staleDetaches - 1);
       return;
     }
+    // The extension re-announces the tab with chrome.tabs.onCreated once this
+    // client may attach to it again, so forget it until then.
+    this._knownTabs.delete(source.tabId);
     this._detachTab(source.tabId);
   }
 

@@ -233,6 +233,26 @@ describe('extension protocol v2', () => {
     ]);
   });
 
+  it('forgets a detached tab until the extension announces it again', async () => {
+    const sendCommand = vi.fn(async (method: string, params: any[]) => {
+      if (method === 'chrome.debugger.sendCommand' && params[1] === 'Target.getTargetInfo')
+        return { targetInfo: { targetId: `target-${params[0].tabId}`, type: 'page' } };
+      return {};
+    });
+    const handler = new ExtensionProtocolV2(sendCommand);
+    handler.connectOverCDP(() => {});
+    handler.handleExtensionEvent('chrome.tabs.onCreated', [{ id: 7, index: 0, windowId: 1, active: true, pinned: false }]);
+    await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+
+    // A tab released by the client, for example dragged out of its tab group.
+    handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: 7 }, 'target_closed']);
+    await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: false }, undefined);
+    sendCommand.mockClear();
+    await handler.handleCDPCommand('Target.setAutoAttach', { autoAttach: true }, undefined);
+
+    expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toEqual([]);
+  });
+
   it('discards an attach that a detach cancelled while it was in flight', async () => {
     const tab = { id: 7, index: 0, windowId: 1, url: 'https://example.com', active: true, pinned: false };
     let resolveTargetInfo!: () => void;
