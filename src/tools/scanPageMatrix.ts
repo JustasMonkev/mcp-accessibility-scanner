@@ -121,13 +121,6 @@ function normalizeMedia(variantMedia: z.output<typeof variantSchema>['media'] | 
   };
 }
 
-function countNodesByRule(violations: { id: string; nodes: unknown[] }[]): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const violation of violations)
-    counts[violation.id] = (counts[violation.id] ?? 0) + violation.nodes.length;
-  return counts;
-}
-
 function computeDiffFromBaseline(
   baselineCounts: Record<string, number>,
   variantCounts: Record<string, number>
@@ -183,6 +176,7 @@ async function scanVariant(tab: Tab, variant: Variant, original: PageState, para
 
   const axeResult = await runAxeScan(tab.page, axeScanOptions(params));
   const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
+  const summary = summarizeAxeViolations(violations.deduped);
   return {
     incompleteRuleIds: axeResult.incomplete.map(result => result.id),
     result: {
@@ -192,13 +186,13 @@ async function scanVariant(tab: Tab, variant: Variant, original: PageState, para
         media,
         zoomPercent: variant.zoomPercent ?? null,
       },
-      summary: summarizeAxeViolations(violations.deduped),
+      summary,
       unscannedFrames: axeResult.unscannedFrames,
       violations: violations.trimmed,
       incomplete: params.includeIncomplete
         ? prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation).trimmed
         : [],
-      nodeCountByRuleId: countNodesByRule(violations.deduped),
+      nodeCountByRuleId: summary.byRuleId,
       comparisonIncompleteRuleIds: [],
       diffFromBaseline: null,
     },

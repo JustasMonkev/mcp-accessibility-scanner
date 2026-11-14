@@ -127,6 +127,30 @@ describe('mcp server error mapping', () => {
     });
   });
 
+  it('closes the server when sending the heartbeat ping never settles', async () => {
+    await withPingTimeout('20', async () => {
+      const backend = {
+        listTools: vi.fn(async () => []),
+        callTool: vi.fn(async () => ({ content: [] })),
+        serverClosed: vi.fn(),
+      };
+      const { client, server } = await connectHeartbeatClient(backend, () => ({}));
+      const transport = server.transport!;
+      const send = transport.send.bind(transport);
+      vi.spyOn(transport, 'send').mockImplementation((message, options) => {
+        if ('method' in message && message.method === 'ping')
+          return new Promise<void>(() => {});
+        return send(message, options);
+      });
+      try {
+        await client.callTool({ name: 'some_tool', arguments: {} });
+        await vi.waitFor(() => expect(backend.serverClosed).toHaveBeenCalledTimes(1), { timeout: 1000, interval: 10 });
+      } finally {
+        await client.close();
+      }
+    });
+  });
+
   it('stops heartbeating instead of closing when the client rejects ping as method-not-found', async () => {
     await withPingTimeout('1000', async () => {
       const backend = {
