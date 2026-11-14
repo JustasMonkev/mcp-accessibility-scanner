@@ -31,6 +31,15 @@ export type ToolCapability =
   | 'vision'
   | 'verify';
 
+/**
+ * In JSON config files, relative filesystem paths resolve from the config file's
+ * directory: outputDir; browser.userDataDir, allowedUploadDirs and cdpLaunch.cwd;
+ * launchOptions executablePath, downloadsPath, tracesDir and artifactsDir;
+ * contextOptions storageState (string only), recordHar.path, recordVideo.dir and
+ * clientCertificates certPath, keyPath and pfxPath. Absolute paths and storage
+ * state objects are unchanged. CLI, environment and programmatic paths remain
+ * relative to the server working directory. CLI > environment > config file.
+ */
 export type Config = {
   tabGroup?: boolean;
 

@@ -293,6 +293,21 @@ This controls dispatch by tool name, not equivalent actions through other tools:
 
 #### Configuration Options
 
+Relative filesystem paths in a JSON config file resolve from the directory containing that file, not the server's working directory. This applies only to these fields:
+
+| Config field | Paths resolved from the config directory |
+| --- | --- |
+| Top level | `outputDir` |
+| `browser` | `userDataDir`, each `allowedUploadDirs` entry, `cdpLaunch.cwd` |
+| `browser.launchOptions` | `executablePath`, `downloadsPath`, `tracesDir`, `artifactsDir` |
+| `browser.contextOptions` | String `storageState`, `recordHar.path`, `recordVideo.dir`, each `clientCertificates` entry's `certPath`, `keyPath`, `pfxPath` |
+
+For example, `/project/config/scanner.json` with `"outputDir": "./reports"` writes to `/project/config/reports`, regardless of where the server starts. Session logs and server-managed traces also use `outputDir`. Upload roots must still exist and are canonicalized after merging.
+
+Absolute paths and `storageState` objects are unchanged. Commands such as `browser.cdpLaunch.command`, launch arguments, profile names, URLs and URL filters are not rewritten. Relative CLI and environment paths still use the server's working directory, as do programmatic `Config` paths. Precedence remains **CLI > environment > config file**, so an override is never rebased against the config directory. The `--config` filename itself is still relative to the server's working directory.
+
+**Migration:** Earlier versions resolved file-configured relative paths from the server's working directory. If your config relied on that behavior, adjust those paths relative to the config file's directory or use absolute paths. CLI and environment values need no migration.
+
 Create a `config.json` file with the following options:
 
 ```json

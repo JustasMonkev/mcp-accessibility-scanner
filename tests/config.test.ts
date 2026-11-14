@@ -31,6 +31,144 @@ async function writeConfigFile(config: Config): Promise<string> {
 }
 
 describe('Config', () => {
+  describe('config-file filesystem paths', () => {
+    beforeEach(() => {
+      for (const name of Object.keys(process.env)) {
+        if (name.startsWith('PLAYWRIGHT_MCP_'))
+          vi.stubEnv(name, undefined);
+      }
+    });
+    afterEach(() => vi.unstubAllEnvs());
+
+    it.each(['relative', 'absolute'])('resolves supported %s paths without changing other options', async mode => {
+      const configFile = await writeConfigFile({});
+      const configDir = path.dirname(configFile);
+      const stored = (name: string) => mode === 'absolute' ? `${configDir}/./${name}` : `./${name}`;
+      const expected = (name: string) => mode === 'absolute' ? stored(name) : path.join(configDir, name);
+      await fs.promises.mkdir(path.join(configDir, 'uploads'));
+      const fileConfig: Config = {
+        outputDir: stored('reports'),
+        browser: {
+          userDataDir: stored('profile'),
+          allowedUploadDirs: [stored('uploads')],
+          profileDirName: 'Profile 1',
+          cdpEndpoint: 'http://localhost:9222',
+          cdpLaunch: { command: './app', args: ['./argument'], cwd: stored('app-cwd') },
+          launchOptions: {
+            executablePath: stored('browser'), downloadsPath: stored('downloads'),
+            tracesDir: stored('traces'), artifactsDir: stored('artifacts'),
+            args: ['--load-extension=./extension'], proxy: { server: 'http://proxy.test:3128' },
+          },
+          contextOptions: {
+            storageState: stored('auth.json'),
+            recordHar: { path: stored('network.har'), urlFilter: '**/api/**' },
+            recordVideo: { dir: stored('videos'), size: { width: 640, height: 480 } },
+            clientCertificates: [
+              { origin: 'https://example.com', certPath: stored('cert.pem'), keyPath: stored('key.pem') },
+              { origin: 'https://other.test', pfxPath: stored('client.pfx'), passphrase: './secret' },
+            ],
+          },
+        },
+      };
+      await fs.promises.writeFile(configFile, JSON.stringify(fileConfig));
+      const config = await resolveCLIConfig({ config: path.relative(process.cwd(), configFile) });
+      expect(config).toMatchObject({
+        outputDir: expected('reports'),
+        browser: {
+          userDataDir: expected('profile'),
+          allowedUploadDirs: [await fs.promises.realpath(path.join(configDir, 'uploads'))],
+          profileDirName: 'Profile 1',
+          cdpEndpoint: 'http://localhost:9222',
+          cdpLaunch: { command: './app', args: ['./argument'], cwd: expected('app-cwd') },
+          launchOptions: {
+            executablePath: expected('browser'), downloadsPath: expected('downloads'),
+            tracesDir: expected('traces'), artifactsDir: expected('artifacts'),
+            args: ['--load-extension=./extension'], proxy: { server: 'http://proxy.test:3128' },
+          },
+          contextOptions: {
+            storageState: expected('auth.json'),
+            recordHar: { path: expected('network.har'), urlFilter: '**/api/**' },
+            recordVideo: { dir: expected('videos'), size: { width: 640, height: 480 } },
+            clientCertificates: [
+              { origin: 'https://example.com', certPath: expected('cert.pem'), keyPath: expected('key.pem') },
+              { origin: 'https://other.test', pfxPath: expected('client.pfx'), passphrase: './secret' },
+            ],
+          },
+        },
+      });
+    });
+
+    it.each(['file', 'env', 'cli'])('writes output physically relative to the %s source and preserves override precedence', async source => {
+      const configFile = await writeConfigFile({ outputDir: './reports' });
+      const configDir = path.dirname(configFile);
+      const originalCwd = process.cwd();
+      const launchDir = path.join(configDir, 'client-cwd');
+      await fs.promises.mkdir(launchDir);
+      try {
+        process.chdir(launchDir);
+        if (source !== 'file')
+          vi.stubEnv('PLAYWRIGHT_MCP_OUTPUT_DIR', './env-reports');
+        const config = await resolveCLIConfig({ config: '../config.json', outputDir: source === 'cli' ? './cli-reports' : undefined });
+        const report = await outputFile(config, 'proof.txt', true);
+        await fs.promises.writeFile(report, 'report contents');
+        const expected = source === 'file' ? path.join(configDir, 'reports', 'proof.txt') : path.join(launchDir, `${source}-reports`, 'proof.txt');
+        expect(await fs.promises.realpath(report)).toBe(await fs.promises.realpath(expected));
+        expect(await fs.promises.readFile(expected, 'utf8')).toBe('report contents');
+        expect(fs.existsSync(source === 'file' ? path.join(launchDir, 'reports') : path.join(configDir, 'reports'))).toBe(false);
+      } finally {
+        process.chdir(originalCwd);
+      }
+    });
+
+    it('keeps CLI and environment browser paths cwd-relative with CLI taking precedence', async () => {
+      const configFile = await writeConfigFile({ browser: {
+        userDataDir: './file-profile', allowedUploadDirs: ['./missing-file-uploads'],
+        launchOptions: { executablePath: './file-browser' },
+        contextOptions: { storageState: './file-auth.json' },
+        cdpLaunch: { command: 'file-app', cwd: './file-cwd' },
+      } });
+      const cwd = process.cwd();
+      const uploadDir = path.dirname(configFile);
+      const relativeUploads = path.relative(cwd, uploadDir);
+      vi.stubEnv('PLAYWRIGHT_MCP_USER_DATA_DIR', './env-profile');
+      vi.stubEnv('PLAYWRIGHT_MCP_EXECUTABLE_PATH', './env-browser');
+      vi.stubEnv('PLAYWRIGHT_MCP_STORAGE_STATE', './env-auth.json');
+      vi.stubEnv('PLAYWRIGHT_MCP_ALLOWED_UPLOAD_DIRS', relativeUploads);
+      vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND', 'env-app');
+      vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_CWD', './env-cwd');
+      expect((await resolveCLIConfig({ config: configFile })).browser).toMatchObject({
+        userDataDir: './env-profile', allowedUploadDirs: [await fs.promises.realpath(uploadDir)],
+        launchOptions: { executablePath: './env-browser' }, contextOptions: { storageState: './env-auth.json' },
+        cdpLaunch: { command: 'env-app', cwd: './env-cwd' },
+      });
+      expect((await resolveCLIConfig({ config: configFile, userDataDir: './cli-profile', executablePath: './cli-browser', storageState: './cli-auth.json', allowedUploadDirs: [], cdpLaunchCommand: 'cli-app', cdpLaunchCwd: './cli-cwd' })).browser).toMatchObject({
+        userDataDir: './cli-profile', allowedUploadDirs: [],
+        launchOptions: { executablePath: './cli-browser' }, contextOptions: { storageState: './cli-auth.json' },
+        cdpLaunch: { command: 'cli-app', cwd: './cli-cwd' },
+      });
+    });
+
+    it('preserves storage state objects and leaves programmatic paths unchanged', async () => {
+      const storageState = { cookies: [], origins: [{ origin: 'https://example.com', localStorage: [{ name: 'path', value: './unchanged' }] }] };
+      const input: Config = { outputDir: './reports', browser: { userDataDir: './profile', launchOptions: { executablePath: './browser' }, contextOptions: { storageState } } };
+      const configFile = await writeConfigFile(input);
+      const fromFile = await resolveCLIConfig({ config: configFile });
+      expect(fromFile.browser.contextOptions.storageState).toEqual(storageState);
+      const programmatic = await resolveConfig(input);
+      expect(programmatic).toMatchObject({ outputDir: './reports', browser: { userDataDir: './profile', launchOptions: { executablePath: './browser' } } });
+      expect(programmatic.browser.contextOptions.storageState).toBe(storageState);
+    });
+
+    it.each(['', '   '])('preserves blank file paths for existing validation: %j', async blank => {
+      const outputConfig = await writeConfigFile({ outputDir: blank });
+      await expect(resolveCLIConfig({ config: outputConfig })).rejects.toThrow('outputDir must not be blank');
+      expect((await resolveCLIConfig({ config: outputConfig, outputDir: './override' })).outputDir).toBe('./override');
+      const uploadConfig = await writeConfigFile({ browser: { allowedUploadDirs: [blank] } });
+      await expect(resolveCLIConfig({ config: uploadConfig })).rejects.toThrow('allowedUploadDirs must not contain blank');
+      expect((await resolveCLIConfig({ config: uploadConfig, allowedUploadDirs: [] })).browser.allowedUploadDirs).toEqual([]);
+    });
+  });
+
   describe('URL parameter redaction configuration', () => {
     beforeEach(() => vi.stubEnv('PLAYWRIGHT_MCP_REDACT_URL_PARAMS', undefined));
     afterEach(() => vi.unstubAllEnvs());

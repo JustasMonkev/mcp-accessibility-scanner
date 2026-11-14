@@ -422,9 +422,44 @@ async function loadConfig(configFile: string | undefined): Promise<Config> {
     return {};
 
   try {
-    return JSON.parse(await fs.promises.readFile(configFile, 'utf8'));
+    const config: Config = JSON.parse(await fs.promises.readFile(configFile, 'utf8'));
+    normalizeConfigPaths(config, path.dirname(path.resolve(configFile)));
+    return config;
   } catch (error) {
     throw new Error(`Failed to load config file: ${configFile}, ${error}`);
+  }
+}
+
+function normalizeConfigPaths(config: Config, configDir: string): void {
+  const resolvePath = (value: string) => typeof value === 'string' && value.trim() && !path.isAbsolute(value) ? path.resolve(configDir, value) : value;
+  if (config.outputDir !== undefined)
+    config.outputDir = resolvePath(config.outputDir);
+  const browser = config.browser;
+  if (!browser)
+    return;
+  if (browser.userDataDir !== undefined)
+    browser.userDataDir = resolvePath(browser.userDataDir);
+  if (Array.isArray(browser.allowedUploadDirs))
+    browser.allowedUploadDirs = browser.allowedUploadDirs.map(resolvePath);
+  if (browser.cdpLaunch?.cwd !== undefined)
+    browser.cdpLaunch.cwd = resolvePath(browser.cdpLaunch.cwd);
+  const launchOptions = browser.launchOptions;
+  for (const key of ['executablePath', 'downloadsPath', 'tracesDir', 'artifactsDir'] as const) {
+    if (launchOptions?.[key] !== undefined)
+      launchOptions[key] = resolvePath(launchOptions[key]);
+  }
+  const contextOptions = browser.contextOptions;
+  if (typeof contextOptions?.storageState === 'string')
+    contextOptions.storageState = resolvePath(contextOptions.storageState);
+  if (contextOptions?.recordHar?.path !== undefined)
+    contextOptions.recordHar.path = resolvePath(contextOptions.recordHar.path);
+  if (contextOptions?.recordVideo?.dir !== undefined)
+    contextOptions.recordVideo.dir = resolvePath(contextOptions.recordVideo.dir);
+  for (const certificate of contextOptions?.clientCertificates ?? []) {
+    for (const key of ['certPath', 'keyPath', 'pfxPath'] as const) {
+      if (certificate[key] !== undefined)
+        certificate[key] = resolvePath(certificate[key]);
+    }
   }
 }
 
