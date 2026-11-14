@@ -16,7 +16,8 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/client';
-import { createServer } from '../src/mcp/server.js';
+import { setImmediate } from 'node:timers/promises';
+import { closeAll, createServer } from '../src/mcp/server.js';
 import { InProcessTransport } from '../src/mcp/inProcessTransport.js';
 
 import type { JSONRPCMessage, JSONRPCResultResponse } from '@modelcontextprotocol/server';
@@ -175,4 +176,48 @@ describe('mcp server lazy initialization', () => {
       await client.close();
     }
   });
+});
+
+it('waits for disconnected and active backends before process shutdown', async () => {
+  const disconnectedGate = Promise.withResolvers<void>();
+  const activeGate = Promise.withResolvers<void>();
+  const initializationStarted = Promise.withResolvers<void>();
+  const initializationGate = Promise.withResolvers<void>();
+  const disconnectedBackend = { ...createBackend(), serverClosed: vi.fn(() => disconnectedGate.promise) };
+  const activeBackend = { ...createBackend(), serverClosed: vi.fn(() => activeGate.promise) };
+  activeBackend.initialize.mockImplementation(async () => {
+    initializationStarted.resolve();
+    await initializationGate.promise;
+  });
+  const throwingBackend = { ...createBackend(), serverClosed: vi.fn(() => { throw new Error('cleanup failed'); }) };
+  const disconnected = await startRawClient(disconnectedBackend);
+  const active = await startRawClient(activeBackend);
+  const throwing = await startRawClient(throwingBackend);
+  await Promise.all([disconnected.sendRequest(1, 'tools/list'), throwing.sendRequest(1, 'tools/list')]);
+  void active.sendRequest(1, 'tools/list');
+  await initializationStarted.promise;
+  await disconnected.transport.close();
+  expect(disconnectedBackend.serverClosed).toHaveBeenCalledTimes(1);
+
+  let shutdownFinished = false;
+  const shutdown = closeAll().then(() => { shutdownFinished = true; });
+  try {
+    await setImmediate();
+    expect(activeBackend.serverClosed).not.toHaveBeenCalled();
+    expect(throwingBackend.serverClosed).toHaveBeenCalledTimes(1);
+    expect(shutdownFinished).toBe(false);
+    initializationGate.resolve();
+    await setImmediate();
+    expect(activeBackend.serverClosed).toHaveBeenCalledTimes(1);
+    expect(activeBackend.listTools).not.toHaveBeenCalled();
+    activeGate.resolve();
+    await setImmediate();
+    expect(shutdownFinished).toBe(false);
+  } finally {
+    initializationGate.resolve();
+    activeGate.resolve();
+    disconnectedGate.resolve();
+    await shutdown;
+  }
+  expect(disconnectedBackend.serverClosed).toHaveBeenCalledTimes(1);
 });

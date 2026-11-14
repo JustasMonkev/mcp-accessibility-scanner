@@ -62,30 +62,32 @@ function partCost(part: Part, count: number, missCost: number): number {
   return part.child.best[count];
 }
 
-function mergePart(previous: number[], part: Part, minimum: number, k: number, missCost: number): { row: number[], choice: Uint16Array } {
+type MergePartOptions = { k: number, missCost: number, onRow?: (choice: Uint16Array) => void };
+
+function mergePart(previous: number[], part: Part, minimum: number, { k, missCost, onRow }: MergePartOptions): number[] {
   const limit = Math.min(k, previous.length - 1 + Math.min(k, part.size));
   const row = new Array<number>(limit + 1).fill(Infinity);
-  const choice = new Uint16Array(limit + 1);
+  const choice = onRow && new Uint16Array(limit + 1);
   for (let total = 0; total <= limit; total++) {
     for (let count = Math.max(minimum, total - (previous.length - 1)); count <= Math.min(total, part.size); count++) {
       const value = previous[total - count] + (count === 0 ? part.size * missCost : partCost(part, count, missCost));
       if (value < row[total]) {
         row[total] = value;
-        choice[total] = count;
+        if (choice)
+          choice[total] = count;
       }
     }
   }
-  return { row, choice };
+  if (choice)
+    onRow?.(choice);
+  return row;
 }
 
 function mergeParts(node: TreeNode, nodeParts: Part[], k: number, cover: boolean, onRow?: (choice: Uint16Array) => void): number[] {
-  const missCost = 2 ** -node.depth;
+  const options = { k, missCost: 2 ** -node.depth, onRow };
   let previous = [0];
-  for (const part of nodeParts) {
-    const { row, choice } = mergePart(previous, part, cover ? coveredCount(part) : 0, k, missCost);
-    onRow?.(choice);
-    previous = row;
-  }
+  for (const part of nodeParts)
+    previous = mergePart(previous, part, cover ? coveredCount(part) : 0, options);
   return previous;
 }
 

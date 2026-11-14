@@ -241,15 +241,26 @@ type FrameScope = {
 };
 
 function inspectFrameScope(frameElement: Element, scope: { include: string[], exclude: string[] }): FrameScope {
+  function composedParentOf(element: Element): Element | null {
+    const root = element.getRootNode();
+    return element.assignedSlot ?? element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+  }
+
+  function isShadowSlot(element: Element | null): element is HTMLSlotElement {
+    return element instanceof HTMLSlotElement && element.getRootNode() instanceof ShadowRoot;
+  }
+
+  function flattenedParentOf(element: Element): Element | null {
+    let parent = composedParentOf(element);
+    while (isShadowSlot(parent))
+      parent = composedParentOf(parent);
+    return parent;
+  }
+
   function composedAncestorsOf(element: Element): Element[] {
     const ancestors: Element[] = [];
-    let current: Element | null = element;
-    while (current) {
+    for (let current: Element | null = element; current; current = composedParentOf(current))
       ancestors.push(current);
-      const slotted: Element = current.assignedSlot ?? current;
-      const root = slotted.getRootNode();
-      current = slotted.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
-    }
     return ancestors;
   }
 
@@ -274,9 +285,9 @@ function inspectFrameScope(frameElement: Element, scope: { include: string[], ex
 
   function flattenedChildrenOf(parent: Element): Element[] {
     return [...parent.children].flatMap(child => {
-      if (child.localName !== 'slot')
+      if (!isShadowSlot(child))
         return [child];
-      const assigned = (child as HTMLSlotElement).assignedElements({ flatten: true });
+      const assigned = child.assignedElements({ flatten: true });
       return assigned.length ? assigned : [...child.children];
     });
   }
@@ -289,17 +300,18 @@ function inspectFrameScope(frameElement: Element, scope: { include: string[], ex
   }
 
   function hidesItsSubtree(element: Element): boolean {
-    const parent = element.assignedSlot?.parentElement ?? element.parentElement;
     const style = getComputedStyle(element);
     return element.getAttribute('aria-hidden') === 'true'
       || style.display === 'none'
       || element.hasAttribute('inert')
-      || isCollapsedByClosedDetails(element, parent)
+      || (!isShadowSlot(element) && isCollapsedByClosedDetails(element, flattenedParentOf(element)))
       || (element !== frameElement && style.getPropertyValue('content-visibility') === 'hidden');
   }
 
   const ancestors = composedAncestorsOf(frameElement);
-  const matchesSelector = (selector: string) => ancestors.some(element => element.matches(selector));
+  // Axe resolves flat CSS in the document and omits slot nodes from its scan tree.
+  const matchesSelector = (selector: string) => ancestors.some(element =>
+    element.getRootNode() === document && !(element instanceof HTMLSlotElement) && element.matches(selector));
   const openModals = allDocumentAndShadowRoots().flatMap(root => [...root.querySelectorAll('dialog:modal')].filter(modal => isVisibleOnTop(root, modal)));
   const blockedByModal = openModals.length > 0 && !openModals.some(modal => ancestors.includes(modal));
   const frameVisibility = getComputedStyle(frameElement).visibility;

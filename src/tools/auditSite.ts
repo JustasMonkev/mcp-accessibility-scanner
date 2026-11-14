@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import RE2 from 're2';
 import coreBundle from 'playwright-core/lib/coreBundle';
 import type { Page, Request, Response } from 'playwright';
@@ -134,8 +135,8 @@ const auditSiteSchema = z.object({
   maxDepth: z.number().int().min(0).max(5).default(2).describe('Maximum crawl depth for link strategy.'),
   pageSelection: pageSelectionSchema.default('discovery').describe('Which URLs fill maxPages when strategy is "sitemap" or "provided" lists more. "discovery" takes them in listed order; "representative" builds a tree of URL templates (host, path, query; id-like parts masked). Every branch of a group gets a page when its share of the budget covers its branches (so every top-level section is scanned when maxPages is at least their number); the rest go by exact k-median, which favors populous groups.'),
   sameOriginOnly: z.boolean().default(true).describe('Restrict crawl to the start origin/host.'),
-  includeSubdomains: z.boolean().default(false).describe('Only applies when sameOriginOnly=true. When enabled, also allows subdomains of the start host (e.g. blog.example.com when start host is example.com). Ignored when sameOriginOnly=false.'),
-  excludePathPatterns: z.array(z.string()).default(defaultExcludePathPatterns).describe('Regex patterns applied to pathname+query. Avoid complex nested quantifiers to prevent performance issues.'),
+  includeSubdomains: z.boolean().default(false).describe('Only applies when sameOriginOnly=true. Also allows subdomains of the start host on the same scheme and port.'),
+  excludePathPatterns: z.array(z.string().min(1)).default(defaultExcludePathPatterns).describe('Nonempty RE2 regex patterns applied to pathname+query, up to 200 characters each. Backreferences and lookaround are not supported. Use [] to disable exclusions.'),
   ignoreQueryParams: z.array(z.string()).default(defaultIgnoreQueryParams).describe('Query parameters dropped during URL normalization.'),
   includeIncomplete: z.boolean().default(true).describe('Also collect Axe "incomplete" results — checks Axe could not decide automatically. They are reported separately from violations.'),
   waitAfterNavigationMs: z.number().int().min(0).max(5000).default(250).describe('Extra wait after navigation before scanning.'),
@@ -146,14 +147,14 @@ const auditSiteSchema = z.object({
 }).superRefine((value, context) => {
   if (value.strategy === 'provided' && (!value.urls || !value.urls.length)) {
     context.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: 'custom',
       path: ['urls'],
       message: 'urls is required when strategy="provided"',
     });
   }
   if (value.pageSelection === 'representative' && value.strategy !== 'sitemap' && value.strategy !== 'provided') {
     context.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: 'custom',
       path: ['pageSelection'],
       message: 'pageSelection="representative" requires strategy="sitemap" or strategy="provided"',
     });
@@ -164,22 +165,13 @@ function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
-function fastFingerprint(value: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index++) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16);
-}
-
 function isAllowedByOrigin(candidate: URL, startUrl: URL, sameOriginOnly: boolean, includeSubdomains: boolean): boolean {
   if (!sameOriginOnly)
     return true;
   if (!includeSubdomains)
     return candidate.origin === startUrl.origin;
   const hostMatch = candidate.hostname === startUrl.hostname || candidate.hostname.endsWith(`.${startUrl.hostname}`);
-  return hostMatch && candidate.protocol === startUrl.protocol;
+  return hostMatch && candidate.protocol === startUrl.protocol && candidate.port === startUrl.port;
 }
 
 function buildExcludePathPatterns(patterns: string[]): RE2[] {
@@ -372,6 +364,15 @@ async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: strin
         throw new Error(`Failed to fetch sitemap ${sitemapUrl}: ${response.status} ${response.statusText}`);
       }
       const xmlText = await readSitemapBody(response);
+      for (const [, doctype, tag] of xmlText.matchAll(/<!--[\s\S]*?(?:-->|$)|<\?[\s\S]*?(?:\?>|$)|(<!DOCTYPE)(?=\s)|<(?:[\w.-]+:)?([a-z][\w.-]*)(?=[\s/>])/gi)) {
+        if (doctype)
+          throw new Error('Sitemap document type declarations are not supported. Pass a direct URL sitemap without a DOCTYPE or use the provided URL strategy.');
+        if (!tag)
+          continue;
+        if (tag.toLowerCase() === 'sitemapindex')
+          throw new Error('Sitemap indexes are not supported. Pass a direct URL sitemap in sitemapUrl or use the provided URL strategy.');
+        break;
+      }
       return [...xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)]
           .map(match => decodeSitemapLocation(match[1]).trim()).filter(Boolean);
     }
@@ -425,7 +426,7 @@ function aggregateIntoSummary(
 
     for (const node of violation.nodes) {
       const normalizedHtml = normalizeWhitespace(node.html ?? '');
-      const fingerprint = fastFingerprint(normalizedHtml);
+      const fingerprint = createHash('sha256').update(normalizedHtml, 'utf16le').digest('base64url');
       if (summary.fingerprints.has(fingerprint))
         continue;
       summary.fingerprints.add(fingerprint);

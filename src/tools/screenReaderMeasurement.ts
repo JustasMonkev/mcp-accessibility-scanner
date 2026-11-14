@@ -100,7 +100,13 @@ export function collectElementFacts(
     const left = toPx(args[3] ?? args[1] ?? args[0], width);
     return height - top - bottom <= 0 || width - left - right <= 0;
   };
-  const transformCollapses = (element: Element, transform: string): boolean => {
+  const transformCollapses = (element: Element, { transform, transformStyle }: CSSStyleDeclaration): boolean => {
+    if (transform === 'none')
+      return false;
+    if (Number.isNaN(new DOMMatrixReadOnly(transform).inverse().m11))
+      return true;
+    if (transformStyle === 'preserve-3d')
+      return false;
     const singular = (a: number, b: number, c: number, d: number) => {
       const det = a * d - b * c;
       const component = Math.max(Math.abs(a), Math.abs(b), Math.abs(c), Math.abs(d));
@@ -132,7 +138,7 @@ export function collectElementFacts(
       return true;
     if (style.display === 'contents')
       return false;
-    if (style.transformStyle !== 'preserve-3d' && transformCollapses(element, style.transform))
+    if (transformCollapses(element, style))
       return true;
     if ((style.position === 'absolute' || style.position === 'fixed') && style.clip === 'rect(0px, 0px, 0px, 0px)')
       return true;

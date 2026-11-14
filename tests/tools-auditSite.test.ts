@@ -1044,6 +1044,20 @@ describe('audit_site tool', () => {
     })]);
   });
 
+  it('counts distinct HTML occurrences even when their old 32-bit fingerprints collide', async () => {
+    const { response } = createHarness({ 'https://example.com/': [] });
+    const nodes = ['ptf94o9axe7', 'it56vl3te8'].map(value =>
+      createViolation('label', `<div data-x="${value}"></div>`, [`[data-x="${value}"]`]).nodes[0]);
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/', [
+      { ...createViolation('label', ''), nodes },
+    ]));
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ maxPages: 1, waitAfterNavigationMs: 0 }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.summary.violations[0]).toMatchObject({ totalOccurrences: 2, uniqueOccurrences: 2 });
+  });
+
   it.each([1, 2, 10])('keeps full deduplicated counts when node details are capped at %i', async maxNodesPerViolation => {
     const { response } = createHarness({ 'https://example.com/': [] });
     const imageNodes = ['first', 'second', 'third'].map(id => createViolation('image-alt', `<img id="${id}">`, [`#${id}`]).nodes[0]);
@@ -1090,6 +1104,7 @@ describe('audit_site tool', () => {
     { reachedUrl: 'https://outside.example/landing', includeSubdomains: false },
     { reachedUrl: 'https://sub.example.com/landing', includeSubdomains: false },
     { reachedUrl: 'http://sub.example.com/landing', includeSubdomains: true },
+    { reachedUrl: 'https://sub.example.com:8443/landing', includeSubdomains: true },
     { reachedUrl: 'https://example.com/logout', includeSubdomains: false },
     { reachedUrl: 'https://example.com/landing?signout=1', includeSubdomains: false },
     { reachedUrl: 'about:blank', includeSubdomains: false },
@@ -1255,6 +1270,11 @@ describe('audit_site tool', () => {
       maxNodesPerViolation: 10,
       waitAfterNavigationMs: 0,
     } as any, response)).rejects.toThrow('Invalid regex in excludePathPatterns[0]');
+  });
+
+  it('rejects an empty exclude regex without rejecting an empty list', () => {
+    expect(tool.schema.inputSchema.safeParse({ excludePathPatterns: [''] }).success).toBe(false);
+    expect(tool.schema.inputSchema.parse({ excludePathPatterns: [] }).excludePathPatterns).toEqual([]);
   });
 
   it('rejects excludePathPatterns that exceed maximum length', async () => {
@@ -1534,6 +1554,28 @@ describe('audit_site tool', () => {
     expect(fetchMock).toHaveBeenCalledWith(sitemapUrl, expect.objectContaining({ redirect: 'manual', credentials: 'omit' }));
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     expect(report.pages.map((page: any) => page.url)).toEqual(['https://example.com/one', 'https://example.com/two']);
+  });
+
+  it.each([
+    { preamble: '<!-- <urlset /> -->', error: 'Sitemap indexes are not supported' },
+    { preamble: `<!DOCTYPE s:sitemapindex [<!ENTITY unused '<urlset />'>]>`, error: 'Sitemap document type declarations are not supported' },
+  ])('rejects a sitemap index with $preamble before visiting any child sitemap URL', async ({ preamble, error }) => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const childSitemap = 'https://example.com/pages.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: {
+        [sitemapUrl]: `<?xml version="1.0"?>${preamble}
+          <s:sitemapindex xmlns:s="http://www.sitemaps.org/schemas/sitemap/0.9">
+            <s:sitemap><loc>${childSitemap}</loc></s:sitemap>
+          </s:sitemapindex>`,
+      },
+    });
+
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap', sitemapUrl }), response))
+        .rejects.toThrow(error);
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual([sitemapUrl]);
+    expect(context.newTab).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
   });
 
   it('preserves trailing-slash URLs and decodes sitemap XML references exactly once', async () => {

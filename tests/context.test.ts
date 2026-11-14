@@ -284,6 +284,40 @@ describe('Context', () => {
       expect(mockBrowserContext.tracing.stop).toHaveBeenCalledTimes(1);
     });
 
+    it('waits for a shared trace to stop before starting its replacement', async () => {
+      const stopping = Promise.withResolvers<void>();
+      const stopStarted = Promise.withResolvers<void>();
+      mockBrowserContext.tracing.stop.mockImplementationOnce(async () => {
+        stopStarted.resolve();
+        await stopping.promise;
+      });
+      const createContext = () => new Context({
+        tools: [],
+        config: { ...defaultConfig, saveTrace: true },
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      const first = createContext();
+      const second = createContext();
+      try {
+        await first.newTab();
+        const closing = first.closeBrowserContext();
+        await stopStarted.promise;
+        const opening = second.newTab();
+        try {
+          await new Promise<void>(resolve => setImmediate(resolve));
+          expect(mockBrowserContext.tracing.start).toHaveBeenCalledTimes(1);
+        } finally {
+          stopping.resolve();
+          await Promise.all([opening, closing]);
+        }
+        expect(mockBrowserContext.tracing.start).toHaveBeenCalledTimes(2);
+      } finally {
+        await Promise.all([first.dispose(), second.dispose()]);
+      }
+    });
+
     it('gives each context its own trace name so traces in a shared tracesDir never collide', async () => {
       // With --isolated several sessions' contexts share the browser's one
       // cached tracesDir; a fixed name made every context write the same

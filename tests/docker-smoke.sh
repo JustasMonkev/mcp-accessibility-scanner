@@ -97,8 +97,9 @@ fi
 
 echo "[docker-smoke] Checking SIGTERM forwarding"
 docker stop -t 10 "$CONTAINER_NAME" >/dev/null
-if [[ "$(docker inspect -f '{{.State.ExitCode}}' "$CONTAINER_NAME")" == 137 ]]; then
-  echo "[docker-smoke] Container required SIGKILL after SIGTERM"
+exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$CONTAINER_NAME")"
+if [[ "$exit_code" != 0 ]]; then
+  echo "[docker-smoke] Container exited with status $exit_code after SIGTERM"
   exit 1
 fi
 

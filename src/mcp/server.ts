@@ -30,6 +30,8 @@ export type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotoco
 
 const serverDebug = debug('pw:mcp:server');
 const errorsDebug = debug('pw:mcp:errors');
+const activeServers = new Map<Server, () => Promise<void>>();
+let shuttingDown = false;
 
 export type ClientVersion = { name: string, version: string };
 export type CallToolRequestContext = {
@@ -47,7 +49,7 @@ export interface ServerBackend {
   initialize?(context: ServerBackendContext, clientVersion: ClientVersion): Promise<void>;
   listTools(requestContext?: Partial<Pick<CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]>;
   callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: CallToolRequestContext): Promise<CallToolResult>;
-  serverClosed?(): void;
+  serverClosed?(): void | Promise<void>;
 }
 
 type ServerMetadata = {
@@ -75,6 +77,14 @@ export async function wrapInProcess(backend: ServerBackend): Promise<Transport> 
   return new InProcessTransport(server);
 }
 
+export async function closeAll(): Promise<void> {
+  shuttingDown = true;
+  await Promise.all([...activeServers].map(async ([server, closeBackend]) => {
+    await server.close().catch(errorsDebug);
+    await closeBackend();
+  }));
+}
+
 type ServerOptions = ServerMetadata & { heartbeatReady?: Promise<void> };
 
 export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean, options?: ServerOptions): Server {
@@ -88,11 +98,35 @@ export function createServer(name: string, version: string, backend: ServerBacke
     instructions: options?.instructions,
     ...(!backend.dynamicToolList && options?.toolListCacheHint ? { cacheHints: { 'tools/list': options.toolListCacheHint } } : {}),
   });
-  const ensureInitialized = backendInitializer(server, backend);
+  let initialization: Promise<void> | undefined;
+  let pendingInitialization: Promise<void> | undefined;
+  let backendClose: Promise<void> | undefined;
+  const closeBackend = () => backendClose ??= (async () => {
+    if (pendingInitialization)
+      await pendingInitialization.catch(errorsDebug);
+    await backend.serverClosed?.();
+  })().catch(errorsDebug).finally(() => activeServers.delete(server));
+  const ensureInitialized = () => {
+    if (shuttingDown || backendClose)
+      return Promise.reject(new Error('MCP server is closing.'));
+    if (initialization)
+      return initialization;
+    if (backend.serverClosed)
+      activeServers.set(server, closeBackend);
+    initialization = pendingInitialization = (async () => {
+      const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
+      await backend.initialize?.({ notifyToolListChanged: () => server.sendToolListChanged() }, clientVersion);
+    })();
+    void initialization.then(() => { pendingInitialization = undefined; }, () => {
+      initialization = pendingInitialization = undefined;
+    });
+    return initialization;
+  };
 
   server.setRequestHandler('tools/list', async (_request, ctx) => {
     serverDebug('listTools');
     await ensureInitialized();
+    ctx.mcpReq.signal.throwIfAborted();
     const tools = await backend.listTools({ _meta: ctx.mcpReq._meta, signal: ctx.mcpReq.signal });
     return { tools: redactSecrets ? tools.map(tool => redactToolMetadata(tool, redactSecrets)) : tools };
   });
@@ -101,6 +135,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
   server.setRequestHandler('tools/call', async (request, ctx) => {
     serverDebug('callTool', request);
     await ensureInitialized();
+    ctx.mcpReq.signal.throwIfAborted();
 
     if (runHeartbeat && !heartbeatRunning) {
       heartbeatRunning = true;
@@ -127,26 +162,8 @@ export function createServer(name: string, version: string, backend: ServerBacke
   addServerListener(server, 'initialized', () => {
     ensureInitialized().catch(e => errorsDebug(e));
   });
-  addServerListener(server, 'close', () => backend.serverClosed?.());
+  addServerListener(server, 'close', () => { void closeBackend(); });
   return server;
-}
-
-function backendInitializer(server: Server, backend: ServerBackend): () => Promise<void> {
-  let initialized: Promise<void> | undefined;
-  return () => {
-    if (initialized)
-      return initialized;
-    const initialization = (async () => {
-      const clientVersion = server.getClientVersion() ?? { name: 'unknown', version: 'unknown' };
-      await backend.initialize?.({ notifyToolListChanged: () => server.sendToolListChanged() }, clientVersion);
-    })();
-    initialization.catch(() => {
-      if (initialized === initialization)
-        initialized = undefined;
-    });
-    initialized = initialization;
-    return initialization;
-  };
 }
 
 function redactToolMetadata(tool: Tool, redact: (text: string) => string): Tool {
@@ -221,16 +238,16 @@ export async function start(serverBackendFactory: ServerBackendFactory, options:
     await new Promise<void>(resolve => httpServer.close(() => resolve()));
     throw error;
   }
-  const url = httpAddressToString(httpServer.address());
+  const address = httpServer.address();
 
   const clientConfig: { url: string; headers?: { Authorization: string } } = {
-    url: `${url}/mcp`
+    url: `${httpAddressToString(address, 'client')}/mcp`
   };
   if (options.authToken !== undefined)
     clientConfig.headers = { Authorization: 'Bearer <YOUR_AUTH_TOKEN>' };
   const mcpConfig = { mcpServers: { [serverBackendFactory.nameInConfig]: clientConfig } };
   const message = [
-    `Listening on ${url}`,
+    `Listening on ${httpAddressToString(address)}`,
     options.authToken !== undefined ? 'Put this in your client config and replace <YOUR_AUTH_TOKEN> locally with your configured token:' : 'Put this in your client config:',
     JSON.stringify(mcpConfig, undefined, 2),
   ].join('\n');

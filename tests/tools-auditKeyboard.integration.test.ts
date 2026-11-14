@@ -56,6 +56,18 @@ const server = http.createServer((request, response) => {
       </script>`);
     return;
   }
+  if (url.pathname === '/shadow-spacing') {
+    const neighbor = '<button aria-label="Neighbor" style="position:absolute;left:21px;top:0;width:20px;height:20px;padding:0"></button>';
+    const scope = url.searchParams.get('neighbor');
+    response.end(`<style>body { margin: 0 } #host { position: absolute; left: 0; top: 0; width: 20px; height: 20px }</style>
+      <div id="host" tabindex="0"></div>
+      ${scope === 'document' ? neighbor : ''}
+      <script>
+        document.getElementById('host').attachShadow({ mode: 'open', delegatesFocus: true }).innerHTML =
+          '<button id="target" aria-label="Target" style="display:block;width:20px;height:20px;padding:0"></button>${scope === 'shadow' ? neighbor : ''}';
+      </script>`);
+    return;
+  }
   if (url.pathname === '/trapped-focus') {
     response.end(`<button id="trapped" tabindex="0">Before</button><button tabindex="0">Unreachable</button><script>
       const button = document.getElementById('trapped');
@@ -262,4 +274,25 @@ it.skipIf(!canRun).each([false, true])('checks shadow-tree paint ownership when 
   const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
   expect(report.stops.map((stop: { id: string }) => stop.id)).toEqual(['target']);
   expect(report.focusObscuredIssues.map((stop: { id: string }) => stop.id)).toEqual(covered ? ['target'] : []);
+});
+
+it.skipIf(!canRun).each(['none', 'document', 'shadow'])('counts separate neighbors for delegated shadow focus with neighbor in %s', async scope => {
+  directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-spacing-'));
+  const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory, timeoutSettle: 0 });
+  client = new Client({ name: 'keyboard-spacing-test', version: '1' });
+  await client.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
+  await ok('browser_navigate', { url: `${origin}/shadow-spacing?neighbor=${scope}` });
+  await ok('audit_keyboard', {
+    maxTabs: 1,
+    checkSkipLink: false,
+    checkFocusTrap: false,
+    checkFocusVisibility: false,
+    checkFocusJumps: false,
+    checkTargetSize: true,
+    checkFocusObscured: false,
+    reportFile: 'keyboard.json',
+  });
+  const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
+  expect(report.stops.map((stop: { id: string }) => stop.id)).toEqual(['target']);
+  expect(report.targetSizeIssues.map((stop: { id: string }) => stop.id)).toEqual(scope === 'none' ? [] : ['target']);
 });

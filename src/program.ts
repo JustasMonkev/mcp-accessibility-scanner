@@ -31,13 +31,13 @@ import { assertNetworkPolicySupported } from './networkPolicy.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
 import { filteredTools, serverInstructions } from './tools.js';
 import { logUnhandledError } from './utils/log.js';
-import { createUrlRedactor, redactToolResult } from './utils/urlRedaction.js';
+import { createUrlRedactor } from './utils/urlRedaction.js';
 
 import { runVSCodeTools } from './vscode/host.js';
 import type { MCPProvider, SharedProxySelection } from './mcp/proxyBackend.js';
 import type { FullConfig } from './config.js';
 import type { BrowserContextFactory } from './browserContextFactory.js';
-import { printToStderr, printToStdout } from './utils/terminal.js';
+import { printToolResult, printToStderr, printToStdout } from './utils/terminal.js';
 
 type ProgramContext = {
   config: FullConfig;
@@ -67,7 +67,7 @@ async function resolveProgramContext(options: Record<string, unknown>, extension
   if (options.extension)
     assertStorageStateSupported(config, extensionContextFactory, '--extension attaches to the browser you are already running and uses the context it already has; --isolated does not change that. Drop the storage state and sign in in that browser before auditing.');
   const browserContextFactory = contextFactory(config);
-  if ((options.connectTool || options.vscode) && browserContextFactory instanceof PersistentContextFactory)
+  if (!options.extension && browserContextFactory instanceof PersistentContextFactory)
     assertStorageStateDoesNotResetUserProfile(config, persistentProfileConflictRemedy);
   return { config, browserContextFactory, extensionContextFactory };
 }
@@ -162,6 +162,7 @@ configureBaseProgram()
     .action(async options => {
       const exitCleanups: Array<() => Promise<void>> = [];
       setupExitWatchdog(async () => {
+        await mcpServer.closeAll();
         for (const cleanup of exitCleanups)
           await cleanup().catch(logUnhandledError);
         await Context.disposeAll();
@@ -244,7 +245,10 @@ program
         throw new Error('Interactive mode prints text only. Use --image-responses allow or omit instead of only.');
       const backend = new BrowserServerBackend(config, parentOptions.extension ? extensionContextFactory : browserContextFactory);
       const redactSecrets = createUrlRedactor(config.redactUrlParams);
-      const handleExit = setupExitWatchdog();
+      const handleExit = setupExitWatchdog(async () => {
+        await backend.serverClosed();
+        await Context.disposeAll();
+      });
       await backend.initialize(
           { notifyToolListChanged: async () => {} },
           { name: 'interactive-cli', version: packageJSON.version },
@@ -280,13 +284,7 @@ program
         }
 
         try {
-          const result = redactToolResult(await backend.callTool(toolName, args), redactSecrets);
-          if (result.content) {
-            for (const item of result.content) {
-              if (item.type === 'text')
-                printToStdout(item.text);
-            }
-          }
+          printToolResult(await backend.callTool(toolName, args), redactSecrets);
         } catch (error) {
           printToStderr(`Error: ${String(error)}`);
         }

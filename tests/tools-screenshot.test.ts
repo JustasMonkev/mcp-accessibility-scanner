@@ -60,8 +60,7 @@ describe('Screenshot Tools', () => {
   it('should point vision users to coordinate-based mouse tools', () => {
     const description = screenshotTool.schema.description;
     expect(description).toContain('Use browser_snapshot for actions by default');
-    expect(description).toContain('vision capability');
-    expect(description).toContain('coordinate-based mouse tools');
+    expect(description).toMatch(/vision capability[^.]*viewport screenshot[^.]*scale: css[^.]*coordinate-based mouse tools[^.]*missing from the accessibility snapshot/);
     expect(description).not.toContain("You can't perform actions based on the screenshot");
   });
 
