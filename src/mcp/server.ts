@@ -21,7 +21,6 @@ import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
 import { InProcessTransport } from './inProcessTransport.js';
 import { createUrlRedactor, redactToolResult } from '../utils/urlRedaction.js';
-import { rejectAfterTimeout } from '../utils/timeout.js';
 
 import type { CacheHint, Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
 import { printToStderr } from '../utils/terminal.js';
@@ -172,7 +171,7 @@ const startHeartbeat = (server: Server) => {
     return;
 
   const beat = () => {
-    rejectAfterTimeout(server.request({ method: 'ping' }, { timeout }), timeout, 'ping timeout').then(() => {
+    server.request({ method: 'ping' }, { timeout }).then(() => {
       setTimeout(beat, heartbeatIntervalMs);
     }).catch(error => {
       if (ProtocolError.isInstance(error) && error.code === ProtocolErrorCode.MethodNotFound)
