@@ -37,8 +37,6 @@ export async function createConnection(userConfig: Config = {}, contextGetter?: 
 }
 
 class SimpleBrowserContextFactory implements BrowserContextFactory {
-  name = 'custom';
-  description = 'Connect to a browser using a custom context getter';
   readonly sharedContext = true;
   readonly sessionsUnsupportedReason = 'this server was created with a custom browser context getter, which supplies a single browser context that every session would share.';
 

@@ -113,7 +113,7 @@ const interactionTools: [label: string, tool: string][] = [
   ['tabs', 'browser_tabs'],
 ];
 
-const joinList = (items: string[]) => items.length < 3 ? items.join(' and ') : `${items.slice(0, -1).join(', ')}, and ${items.at(-1)}`;
+const listFormat = new Intl.ListFormat('en');
 
 export function serverInstructions(policy: ToolPolicy): string {
   const usable = (name: string) => !isToolBlocked(policy, name);
@@ -124,7 +124,7 @@ export function serverInstructions(policy: ToolPolicy): string {
   if (canNavigate)
     parts.push('Use `browser_navigate` to load a page first.');
   if (audits.length) {
-    parts.push(`${canNavigate ? 'Then use' : 'Use'} ${joinList(audits)}.`);
+    parts.push(`${canNavigate ? 'Then use' : 'Use'} ${listFormat.format(audits)}.`);
     parts.push('Results are returned as markdown with axe-core rule ids, impact levels, failure summaries and remediation links.');
   }
   if (interaction.length)

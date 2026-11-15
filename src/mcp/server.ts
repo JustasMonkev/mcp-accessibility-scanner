@@ -21,6 +21,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
 import { InProcessTransport } from './inProcessTransport.js';
 import { createUrlRedactor, redactToolResult } from '../utils/urlRedaction.js';
+import { logUnhandledError } from '../utils/log.js';
 
 import type { CacheHint, Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
 import { printToStderr } from '../utils/terminal.js';
@@ -28,7 +29,6 @@ export type { Server } from '@modelcontextprotocol/server';
 export type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/server';
 
 const serverDebug = debug('pw:mcp:server');
-const errorsDebug = debug('pw:mcp:errors');
 
 export type ClientVersion = { name: string, version: string };
 export type CallToolRequestContext = {
@@ -85,7 +85,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
       },
     },
     instructions: options?.instructions,
-    ...(!backend.dynamicToolList && options?.toolListCacheHint ? { cacheHints: { 'tools/list': options.toolListCacheHint } } : {}),
+    cacheHints: !backend.dynamicToolList && options?.toolListCacheHint ? { 'tools/list': options.toolListCacheHint } : undefined,
   });
   const ensureInitialized = backendInitializer(server, backend);
 
@@ -103,7 +103,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
 
     if (runHeartbeat && !heartbeatRunning) {
       heartbeatRunning = true;
-      void (options?.heartbeatReady ?? Promise.resolve()).then(() => startHeartbeat(server)).catch(errorsDebug);
+      void (options?.heartbeatReady ?? Promise.resolve()).then(() => startHeartbeat(server)).catch(logUnhandledError);
     }
 
     const requestContext: CallToolRequestContext = {
@@ -124,7 +124,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
     }
   });
   addServerListener(server, 'initialized', () => {
-    ensureInitialized().catch(e => errorsDebug(e));
+    ensureInitialized().catch(e => logUnhandledError(e));
   });
   addServerListener(server, 'close', () => backend.serverClosed?.());
   return server;

@@ -625,17 +625,15 @@ function parseFilePaths(value: unknown): Config['filePaths'] {
 }
 
 function proxySettingsFromString(proxy: string): NonNullable<LaunchOptions['proxy']> {
-  try {
-    const trimmed = proxy.trim();
-    const url = new URL(/^\w+:\/\//.test(trimmed) ? trimmed : 'http://' + trimmed);
-    if (url.username || url.password) {
-      return {
-        server: url.protocol + '//' + url.host,
-        username: decodeProxyCredential(url.username),
-        password: decodeProxyCredential(url.password),
-      };
-    }
-  } catch {}
+  const trimmed = proxy.trim();
+  const url = URL.parse(/^\w+:\/\//.test(trimmed) ? trimmed : 'http://' + trimmed);
+  if (url && (url.username || url.password)) {
+    return {
+      server: url.protocol + '//' + url.host,
+      username: decodeProxyCredential(url.username),
+      password: decodeProxyCredential(url.password),
+    };
+  }
   return { server: proxy };
 }
 

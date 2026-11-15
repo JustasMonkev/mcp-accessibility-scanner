@@ -24,6 +24,8 @@ import coreBundle from 'playwright-core/lib/coreBundle';
 import { WebSocket, WebSocketServer } from 'ws';
 import { httpAddressToString, parseAuthority } from '../mcp/http.js';
 import { logUnhandledError } from '../utils/log.js';
+import { errorMessage } from '../utils/errors.js';
+import { rejectAfterTimeout, rejectOnAbort } from '../utils/timeout.js';
 import { isHttpUrl } from '../utils/httpUrl.js';
 import { ManualPromise } from '../mcp/manualPromise.js';
 import { ExtensionProtocolV2 } from './cdpRelayV2.js';
@@ -141,34 +143,12 @@ export class CDPRelayServer {
 
   async ensureExtensionConnectionForMCPContext(clientInfo: ClientInfo, abortSignal: AbortSignal, _toolName: string | undefined) {
     debugLogger('Ensuring extension connection for MCP context');
-    if (abortSignal.aborted)
-      throw abortSignal.reason;
-    let abortListener = () => {};
-    let connectionTimer: ReturnType<typeof setTimeout> | undefined;
-    const abortPromise = new Promise<never>((_, reject) => {
-      abortListener = () => reject(abortSignal.reason);
-      abortSignal.addEventListener('abort', abortListener, { once: true });
-    });
-    try {
-      if (!this._extensionConnection)
-        await Promise.race([this._connectBrowser(clientInfo, abortSignal), abortPromise]);
-      debugLogger('Waiting for incoming extension connection');
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        if (this._token) {
-          connectionTimer = setTimeout(() => reject(new Error(
-              'Playwright extension did not connect within 30s after opening the connect page. Make sure the extension is installed in the selected Chrome profile and PLAYWRIGHT_MCP_EXTENSION_TOKEN matches its token.'
-          )), 30_000);
-        }
-      });
-      await Promise.race([
-        Promise.all([this._extensionConnectionPromise, this._handler.ready()]),
-        abortPromise,
-        timeoutPromise,
-      ]);
-    } finally {
-      clearTimeout(connectionTimer);
-      abortSignal.removeEventListener('abort', abortListener);
-    }
+    abortSignal.throwIfAborted();
+    if (!this._extensionConnection)
+      await rejectOnAbort(() => this._connectBrowser(clientInfo, abortSignal), abortSignal);
+    debugLogger('Waiting for incoming extension connection');
+    const ready = rejectOnAbort(() => Promise.all([this._extensionConnectionPromise, this._handler.ready()]), abortSignal);
+    await (this._token ? rejectAfterTimeout(ready, 30_000, 'Playwright extension did not connect within 30s after opening the connect page. Make sure the extension is installed in the selected Chrome profile and PLAYWRIGHT_MCP_EXTENSION_TOKEN matches its token.') : ready);
     debugLogger('Extension connection established');
   }
 
@@ -469,15 +449,15 @@ class ExtensionConnection {
     let parsedJson;
     try {
       parsedJson = JSON.parse(eventData);
-    } catch (e: any) {
-      debugLogger(`<closing ws> Closing websocket due to malformed JSON. eventData=${eventData} e=${e?.message}`);
+    } catch (e) {
+      debugLogger(`<closing ws> Closing websocket due to malformed JSON. eventData=${eventData} e=${errorMessage(e)}`);
       this._ws.close();
       return;
     }
     try {
       this._handleParsedMessage(parsedJson);
-    } catch (e: any) {
-      debugLogger(`<closing ws> Closing websocket due to failed onmessage callback. eventData=${eventData} e=${e?.message}`);
+    } catch (e) {
+      debugLogger(`<closing ws> Closing websocket due to failed onmessage callback. eventData=${eventData} e=${errorMessage(e)}`);
       this._ws.close();
     }
   }

@@ -17,14 +17,14 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 import { dataUrlHeavyText, pages, plainSnapshotText, screenReaderCases } from './fixture.mjs';
 import { verifyScreenReader } from './screen-reader.mjs';
 
-const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const projectRoot = path.resolve(import.meta.dirname, '..');
 const options = parseArgs(process.argv.slice(2));
 
 if (options.compare) {

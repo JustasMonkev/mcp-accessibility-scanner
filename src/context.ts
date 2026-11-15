@@ -14,10 +14,9 @@
  * limitations under the License.
  */
 
-import debug from 'debug';
 import type * as playwright from 'playwright';
 
-import { logUnhandledError } from './utils/log.js';
+import { logUnhandledError, testDebug } from './utils/log.js';
 import { errorMessage } from './utils/errors.js';
 import { createShortGuid } from './utils/guid.js';
 import { Tab } from './tab.js';
@@ -35,7 +34,6 @@ import type { BrowserSessionBroker } from './browserSessions.js';
 import type { SessionLog } from './sessionLog.js';
 import type { RecordedAction, Recording, RecordingTarget } from './inputRecorder.js';
 
-const testDebug = debug('pw:mcp:test');
 const recorderControlTools = new Set(['browser_start_recording', 'browser_stop_recording']);
 const pageCloseTimeoutMs = 5_000;
 const pendingDownloadDrainTimeoutMs = 30_000;
@@ -90,23 +88,7 @@ function releaseOnce(release: () => void): () => void {
   };
 }
 
-class ContextRegistry {
-  private readonly _contexts = new Set<Context>();
-
-  register(context: Context): void {
-    this._contexts.add(context);
-  }
-
-  unregister(context: Context): void {
-    this._contexts.delete(context);
-  }
-
-  async disposeAll(): Promise<void> {
-    await Promise.all([...this._contexts].map(ctx => ctx.dispose()));
-  }
-}
-
-const contextRegistry = new ContextRegistry();
+const liveContexts = new Set<Context>();
 
 type TraceHub = { users: number, ready: Promise<unknown> };
 const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
@@ -216,11 +198,11 @@ export class Context {
     this._browserContextFactory = options.browserContextFactory;
     this._clientInfo = options.clientInfo;
     testDebug('create context');
-    contextRegistry.register(this);
+    liveContexts.add(this);
   }
 
   static async disposeAll() {
-    await contextRegistry.disposeAll();
+    await Promise.all([...liveContexts].map(ctx => ctx.dispose()));
   }
 
   get sessionLog(): SessionLog | undefined {
@@ -325,8 +307,7 @@ export class Context {
 
   async startRecordingOnCurrentTab(): Promise<void> {
     this.assertRecordingCanStart();
-    let finishStart: () => void;
-    const startFinished = new Promise<void>(resolve => finishStart = resolve);
+    const { promise: startFinished, resolve: finishStart } = Promise.withResolvers<void>();
     this._recordingStartFinished = startFinished;
     try {
       const tab = await this.ensureTab();
@@ -335,7 +316,7 @@ export class Context {
     } finally {
       if (this._recordingStartFinished === startFinished)
         this._recordingStartFinished = undefined;
-      finishStart!();
+      finishStart();
       this._scheduleIdleTimeout();
     }
   }
@@ -369,8 +350,7 @@ export class Context {
       return undefined;
     this._recording = undefined;
     recording.target.state.stopping = true;
-    let finishStop: () => void;
-    const stopFinished = new Promise<void>(resolve => finishStop = resolve);
+    const { promise: stopFinished, resolve: finishStop } = Promise.withResolvers<void>();
     this._recordingStops.add(stopFinished);
     try {
       const browserContext = await recording.ready;
@@ -378,7 +358,7 @@ export class Context {
       return recording.target.actions.map(action => action.code.trim()).filter(Boolean);
     } finally {
       this._recordingStops.delete(stopFinished);
-      finishStop!();
+      finishStop();
       this._lastActivityAt = Date.now();
       this._scheduleIdleTimeout();
       this._closeBrowserContextAfterRecording();
@@ -612,7 +592,7 @@ export class Context {
   async dispose() {
     this._abortController.abort('MCP context disposed');
     await this.closeBrowserContext();
-    contextRegistry.unregister(this);
+    liveContexts.delete(this);
   }
 
   private _detachFromBrowserContext() {

@@ -209,11 +209,9 @@ function parseStartUrl(startUrlInput: string | undefined, activeTabUrl: string):
 
 function inferStartUrlFromProvidedUrls(urls: string[] | undefined): string | undefined {
   for (const rawUrl of urls ?? []) {
-    try {
-      const candidate = new URL(rawUrl);
-      if (isHttpUrl(candidate))
-        return candidate.toString();
-    } catch {}
+    const candidate = URL.parse(rawUrl);
+    if (candidate && isHttpUrl(candidate))
+      return candidate.toString();
   }
   return undefined;
 }

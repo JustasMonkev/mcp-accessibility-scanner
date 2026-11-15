@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { z } from 'zod';
 
@@ -97,7 +96,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   async callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
     assertToolNotBlocked(this._config, name);
     if (name === this._contextSwitchTool.name)
-      return this._callContextSwitchTool(args as any, requestContext);
+      return this._callContextSwitchTool(contextSwitchOptions.parse(args ?? {}), requestContext);
     const client = await this._clientForTool(name, args, requestContext);
     return await this._relay.callTool(client, name, args, requestContext);
   }
@@ -181,7 +180,7 @@ export class VSCodeProxyBackend implements ServerBackend {
       cwd: process.cwd(),
       env: { PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE: process.env.PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE ?? '' },
       args: [
-        path.join(fileURLToPath(import.meta.url), '..', 'main.js'),
+        path.join(import.meta.dirname, 'main.js'),
         JSON.stringify({ ...this._config, server: { ...this._config.server, authToken: undefined }, outputDir: resolveOutputDir(this._config) }),
         connectionString,
         lib,

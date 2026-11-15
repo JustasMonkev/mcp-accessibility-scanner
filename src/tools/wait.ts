@@ -71,7 +71,7 @@ async function waitForFirstTextCondition(tab: Tab, conditions: TextCondition[], 
   const cancelLosers = new AbortController();
   const waitSignal = signal ? AbortSignal.any([signal, cancelLosers.signal]) : cancelLosers.signal;
   const waits = conditions.map(async ({ text, state }) => {
-    await tab.page.getByText(text).first().waitFor({ state, ...(timeout ? { timeout } : {}), signal: waitSignal });
+    await tab.page.getByText(text).first().waitFor({ state, timeout, signal: waitSignal });
     return `Waited for ${text}`;
   });
   for (const pendingWait of waits)

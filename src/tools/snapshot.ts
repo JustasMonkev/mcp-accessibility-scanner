@@ -141,7 +141,7 @@ function shadowPathOf(target: unknown[]): string[] | undefined {
   const path: unknown[] = [target[0]].flat(Infinity);
   if (!path.length || !path.every(step => typeof step === 'string'))
     return undefined;
-  return path as string[];
+  return path;
 }
 
 function buildAnnotationPlan(violations: AxeViolation[]) {

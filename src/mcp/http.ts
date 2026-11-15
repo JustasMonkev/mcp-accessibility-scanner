@@ -21,7 +21,7 @@ import { domainToASCII } from 'node:url';
 import crypto from 'node:crypto';
 import { validateAuthToken } from '../config.js';
 
-import debug from 'debug';
+import { testDebug } from '../utils/log.js';
 
 import { createMcpHandler, isInitializeRequest, isJSONRPCRequest, isLegacyRequest, STDIO_DEFAULT_MAX_BUFFER_SIZE } from '@modelcontextprotocol/server';
 import { NodeStreamableHTTPServerTransport, toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
@@ -32,7 +32,6 @@ import * as mcpServer from './server.js';
 import type { NodeMcpRequestHandler } from '@modelcontextprotocol/node';
 import type { ServerBackendFactory } from './server.js';
 
-const testDebug = debug('pw:mcp:test');
 const allowedLoopbackHostnamePattern = /^127(?:\.\d{1,3}){3}$/;
 const configuredHostnames = new WeakMap<http.Server, string>();
 

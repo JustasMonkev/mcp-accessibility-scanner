@@ -42,10 +42,8 @@ class PageActivity {
   private readonly _inFlightRequests = new Set<Request>();
   private _sawRequest = false;
   private _mainFrameNavigated = false;
-  private _markIdle: () => void = () => {};
-  private readonly _idle = new Promise<void>(resolve => { this._markIdle = resolve; });
-  private _markFirstActivity: () => void = () => {};
-  private readonly _firstActivity = new Promise<void>(resolve => { this._markFirstActivity = resolve; });
+  private readonly _idle = Promise.withResolvers<void>();
+  private readonly _firstActivity = Promise.withResolvers<void>();
   private readonly _timeout: ReturnType<typeof setTimeout>;
 
   constructor(tab: Tab) {
@@ -56,16 +54,16 @@ class PageActivity {
     tab.page.on('framenavigated', this._onFrameNavigated);
     this._timeout = setTimeout(() => {
       this.dispose();
-      this._markIdle();
+      this._idle.resolve();
     }, pageActivityTimeoutMs);
   }
 
   async waitUntilIdle(firstActivityWindowMs: number): Promise<void> {
     if (!this._sawRequest && !this._mainFrameNavigated)
-      await settleWithin(this._firstActivity, firstActivityWindowMs);
+      await settleWithin(this._firstActivity.promise, firstActivityWindowMs);
     if (!this._inFlightRequests.size && !this._mainFrameNavigated)
-      this._markIdle();
-    await this._idle;
+      this._idle.resolve();
+    await this._idle.promise;
   }
 
   dispose(): void {
@@ -79,22 +77,22 @@ class PageActivity {
   private _onRequest = (request: Request) => {
     this._sawRequest = true;
     this._inFlightRequests.add(request);
-    this._markFirstActivity();
+    this._firstActivity.resolve();
   };
 
   private _onRequestSettled = (request: Request) => {
     this._inFlightRequests.delete(request);
     if (!this._inFlightRequests.size)
-      this._markIdle();
+      this._idle.resolve();
   };
 
   private _onFrameNavigated = (frame: playwright.Frame) => {
-    this._markFirstActivity();
+    this._firstActivity.resolve();
     if (frame.parentFrame())
       return;
     this._mainFrameNavigated = true;
     this.dispose();
-    void this._tab.waitForLoadState('load').then(this._markIdle);
+    void this._tab.waitForLoadState('load').then(this._idle.resolve);
   };
 }
 

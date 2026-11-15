@@ -17,11 +17,11 @@
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
 import type { JSONSchema7 } from 'json-schema';
-import { toMcpTool, defineToolSchema } from '../src/mcp/tool.js';
+import { toMcpTool } from '../src/mcp/tool.js';
 
 describe('mcp/tool', () => {
   it('toMcpTool converts readOnly tools with annotations', () => {
-    const schema = defineToolSchema({
+    const tool = toMcpTool({
       name: 'test_read',
       title: 'Test Read',
       description: 'Read-only tool',
@@ -31,7 +31,6 @@ describe('mcp/tool', () => {
       type: 'readOnly',
     });
 
-    const tool = toMcpTool(schema);
     expect(tool.name).toBe('test_read');
     expect(tool.title).toBe('Test Read');
     expect(tool.description).toBe('Read-only tool');
@@ -46,7 +45,7 @@ describe('mcp/tool', () => {
   });
 
   it('toMcpTool sets destructiveHint for destructive tools', () => {
-    const schema = defineToolSchema({
+    const tool = toMcpTool({
       name: 'test_write',
       title: 'Test Write',
       description: 'Destructive tool',
@@ -56,7 +55,6 @@ describe('mcp/tool', () => {
       type: 'destructive',
     });
 
-    const tool = toMcpTool(schema);
     expect(tool.annotations?.readOnlyHint).toBe(false);
     expect(tool.annotations?.destructiveHint).toBe(true);
   });
@@ -65,7 +63,7 @@ describe('mcp/tool', () => {
     // A retried stateChanging call duplicates state (e.g. browser_session_open
     // mints another live session), so clients must see it as neither safe to
     // parallelize (readOnly) nor destructive — and never silently retryable.
-    const schema = defineToolSchema({
+    const tool = toMcpTool({
       name: 'state_changing',
       title: 'State changing',
       description: 'State-changing tool',
@@ -73,36 +71,22 @@ describe('mcp/tool', () => {
       type: 'stateChanging',
     });
 
-    const tool = toMcpTool(schema);
     expect(tool.annotations?.readOnlyHint).toBe(false);
     expect(tool.annotations?.destructiveHint).toBe(false);
     expect(tool.annotations?.idempotentHint).toBe(false);
   });
 
   it('allows a state-changing tool to declare idempotent retries', () => {
-    const tool = toMcpTool(defineToolSchema({
+    const tool = toMcpTool({
       name: 'idempotent_state_change',
       title: 'Idempotent state change',
       description: 'Converges to the requested state',
       inputSchema: z.object({}),
       type: 'stateChanging',
       idempotent: true,
-    }));
+    });
 
     expect(tool.annotations?.readOnlyHint).toBe(false);
     expect(tool.annotations?.idempotentHint).toBe(true);
-  });
-
-  it('defineToolSchema is identity helper', () => {
-    const schema = defineToolSchema({
-      name: 'identity',
-      title: 'Identity',
-      description: 'Identity tool',
-      inputSchema: z.object({}),
-      type: 'readOnly',
-    });
-
-    expect(schema.name).toBe('identity');
-    expect(schema.type).toBe('readOnly');
   });
 });

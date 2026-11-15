@@ -68,7 +68,7 @@ export function defineTabTool<Input extends z.Schema>(tool: TabTool<Input>): Too
   };
 }
 
-function modalStateMismatchError(tool: TabTool<any>, tab: Tab): string | undefined {
+function modalStateMismatchError<Input extends z.Schema>(tool: TabTool<Input>, tab: Tab): string | undefined {
   const openModalTypes = tab.modalStates().map(state => state.type);
   if (tool.clearsModalState && !openModalTypes.includes(tool.clearsModalState))
     return `Error: The tool "${tool.schema.name}" can only be used when there is related modal state present.`;

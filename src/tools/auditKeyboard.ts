@@ -592,7 +592,7 @@ function createFocusReader(tab: Tab, options: Pick<KeyboardAuditOptions, 'checkT
         minTargetSize: MIN_TARGET_SIZE_PX,
         maxNeighborTargets,
         maxTextLength: maxFocusTextLength,
-        focusState: focusState as unknown as FocusIdentityState,
+        focusState,
         documentId,
       });
     },

@@ -14,11 +14,9 @@
  * limitations under the License.
  */
 
-import debug from 'debug';
+import { logUnhandledError } from '../utils/log.js';
 
 import type { Client } from '@modelcontextprotocol/client';
-
-const errorsDebug = debug('pw:mcp:errors');
 
 export class SharedClientSlot {
   private _current: Client | undefined;
@@ -41,7 +39,7 @@ export class SharedClientSlot {
     lease.count = Math.max(0, lease.count - 1);
     if (lease.retired && lease.count === 0) {
       this._leases.delete(client);
-      await client.close().catch(errorsDebug);
+      await client.close().catch(logUnhandledError);
     }
   }
 
@@ -58,7 +56,7 @@ export class SharedClientSlot {
           lease.retired = true;
         } else {
           this._leases.delete(previous);
-          await previous.close().catch(errorsDebug);
+          await previous.close().catch(logUnhandledError);
         }
       }
       return next;
@@ -72,7 +70,7 @@ export class SharedClientSlot {
       const clients = [...this._leases.keys()];
       this._leases.clear();
       this._current = undefined;
-      await Promise.all(clients.map(client => client.close().catch(errorsDebug)));
+      await Promise.all(clients.map(client => client.close().catch(logUnhandledError)));
     });
     this._chain = result.catch(() => {});
     return await result;
