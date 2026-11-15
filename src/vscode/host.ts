@@ -95,8 +95,12 @@ export class VSCodeProxyBackend implements ServerBackend {
 
   async callTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
     assertToolNotBlocked(this._config, name);
-    if (name === this._contextSwitchTool.name)
-      return this._callContextSwitchTool(contextSwitchOptions.parse(args ?? {}), requestContext);
+    if (name === this._contextSwitchTool.name) {
+      const parsed = contextSwitchOptions.safeParse(args ?? {});
+      if (!parsed.success)
+        throw new Error(`Invalid input for tool "${name}":\n${z.prettifyError(parsed.error)}`);
+      return this._callContextSwitchTool(parsed.data, requestContext);
+    }
     const client = await this._clientForTool(name, args, requestContext);
     return await this._relay.callTool(client, name, args, requestContext);
   }

@@ -124,7 +124,7 @@ export function createServer(name: string, version: string, backend: ServerBacke
     }
   });
   addServerListener(server, 'initialized', () => {
-    ensureInitialized().catch(e => logUnhandledError(e));
+    ensureInitialized().catch(logUnhandledError);
   });
   addServerListener(server, 'close', () => backend.serverClosed?.());
   return server;

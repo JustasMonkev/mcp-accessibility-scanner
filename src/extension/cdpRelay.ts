@@ -51,6 +51,7 @@ type CDPCommand = {
 type CDPResponse = CDPMessage;
 
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '::1', '127.0.0.1']);
+const EXTENSION_CONNECT_TIMEOUT_MESSAGE = 'Playwright extension did not connect within 30s after opening the connect page. Make sure the extension is installed in the selected Chrome profile and PLAYWRIGHT_MCP_EXTENSION_TOKEN matches its token.';
 
 function validateUpgradeRequest(request: http.IncomingMessage): { statusCode: number, message: string } | undefined {
   const hostHeader = request.headers.host;
@@ -148,7 +149,7 @@ export class CDPRelayServer {
       await rejectOnAbort(() => this._connectBrowser(clientInfo, abortSignal), abortSignal);
     debugLogger('Waiting for incoming extension connection');
     const ready = rejectOnAbort(() => Promise.all([this._extensionConnectionPromise, this._handler.ready()]), abortSignal);
-    await (this._token ? rejectAfterTimeout(ready, 30_000, 'Playwright extension did not connect within 30s after opening the connect page. Make sure the extension is installed in the selected Chrome profile and PLAYWRIGHT_MCP_EXTENSION_TOKEN matches its token.') : ready);
+    await (this._token ? rejectAfterTimeout(ready, 30_000, EXTENSION_CONNECT_TIMEOUT_MESSAGE) : ready);
     debugLogger('Extension connection established');
   }
 

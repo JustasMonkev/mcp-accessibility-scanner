@@ -151,7 +151,7 @@ describe('VSCodeProxyBackend', () => {
     const close = vi.fn(async () => undefined);
     (backend as any)._currentClient = { close };
 
-    await expect(backend.callTool('browser_connect', args)).rejects.toThrow();
+    await expect(backend.callTool('browser_connect', args)).rejects.toThrow(/^Invalid input for tool "browser_connect":\n/);
 
     expect(close).not.toHaveBeenCalled();
     expect(defaultTransportFactory).not.toHaveBeenCalled();

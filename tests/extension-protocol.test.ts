@@ -870,6 +870,7 @@ describe('extension protocol v2', () => {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     const relay = new CDPRelayServer(server, { browserChannel: 'chrome', executablePath: '/tmp/chrome' });
     const controller = new AbortController();
+    const addListener = vi.spyOn(controller.signal, 'addEventListener');
     const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
     // SAFETY: This real relay owns these private fields; the test drives setup without launching Chrome.
     const relayState = relay as unknown as {
@@ -906,7 +907,10 @@ describe('extension protocol v2', () => {
         await failure;
       }
       expect(vi.getTimerCount()).toBe(0);
-      expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+      relay.stop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(addListener).toHaveBeenCalledTimes(2);
+      expect(removeListener.mock.calls).toEqual(addListener.mock.calls.map(([type, listener]) => [type, listener]));
     } finally {
       vi.useRealTimers();
       relay.stop();
