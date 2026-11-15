@@ -21,10 +21,10 @@ import { Response } from '../src/response.js';
 
 describe('tool code generation', () => {
   it.each([
-    ['browser_navigate', { url: `https://example.com/it's` }],
-    ['browser_press_key', { key: `'` }],
-    ['browser_press_key', { key: '\ninvalid javascript }' }],
-  ])('escapes user input for %s', async (toolName, args) => {
+    ['browser_navigate', { url: `https://example.com/it's` }, ['goto', `https://example.com/it's`]],
+    ['browser_press_key', { key: `'` }, ['press', `'`]],
+    ['browser_press_key', { key: '\ninvalid javascript }' }, ['press', '\ninvalid javascript }']],
+  ])('escapes user input for %s', async (toolName, args, expectedCall) => {
     const tab = {
       modalStates: () => [],
       navigate: vi.fn(),
@@ -41,6 +41,13 @@ describe('tool code generation', () => {
 
     await tool.handle(context as any, args as any, response);
 
-    expect(() => new Function('page', `return async () => {\n${response.code()}\n};`)).not.toThrow();
+    const calls: unknown[][] = [];
+    const page = {
+      goto: async (url: string) => { calls.push(['goto', url]); },
+      keyboard: { press: async (key: string) => { calls.push(['press', key]); } },
+    };
+    await new Function('page', `return (async () => {\n${response.code()}\n})();`)(page);
+
+    expect(calls).toEqual([expectedCall]);
   });
 });

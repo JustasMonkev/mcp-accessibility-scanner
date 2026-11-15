@@ -24,19 +24,16 @@ describe('Recorder tools', () => {
   const startTool = recorderTools.find(tool => tool.schema.name === 'browser_start_recording')!;
   const stopTool = recorderTools.find(tool => tool.schema.name === 'browser_stop_recording')!;
   let context: any;
-  let page: any;
 
   beforeEach(() => {
-    page = { bringToFront: vi.fn().mockResolvedValue(undefined) };
     context = {
       config: {},
-      ensureTab: vi.fn().mockResolvedValue({ page }),
       startRecordingOnCurrentTab: vi.fn().mockResolvedValue(undefined),
       stopRecording: vi.fn().mockResolvedValue([]),
     };
   });
 
-  it('starts recording and brings the page forward', async () => {
+  it('starts recording via the context and reports it', async () => {
     const response = new Response(context, startTool.schema.name, {});
 
     await startTool.handle(context, {}, response);
@@ -45,21 +42,18 @@ describe('Recorder tools', () => {
     expect(response.result()).toContain('Recording started');
   });
 
-  it('rejects unsafe stateless recording before opening a tab', async () => {
+  it('propagates the unsafe stateless recording rejection', async () => {
     context.startRecordingOnCurrentTab.mockImplementation(() => { throw new Error('browserSessionId required'); });
 
     await expect(startTool.handle(context, {}, new Response(context, startTool.schema.name, {})))
         .rejects.toThrow('browserSessionId required');
-    expect(context.ensureTab).not.toHaveBeenCalled();
   });
 
-  it('rejects a duplicate start before opening or focusing a tab', async () => {
+  it('propagates the duplicate start rejection', async () => {
     context.startRecordingOnCurrentTab.mockImplementation(() => { throw new Error('Recording is already in progress'); });
 
     await expect(startTool.handle(context, {}, new Response(context, startTool.schema.name, {})))
         .rejects.toThrow('Recording is already in progress');
-    expect(context.ensureTab).not.toHaveBeenCalled();
-    expect(page.bringToFront).not.toHaveBeenCalled();
   });
 
   it('returns recorded JavaScript and includes a snapshot', async () => {

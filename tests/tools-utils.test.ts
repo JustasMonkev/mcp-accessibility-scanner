@@ -21,14 +21,6 @@ import { waitForCompletion, generateLocator, callOnPageNoTrace } from '../src/to
 import type { Tab } from '../src/tab.js';
 import { EventEmitter } from 'events';
 
-vi.mock('playwright-core/lib/coreBundle', () => ({
-  default: {
-    iso: {
-      asLocator: (lang: string, selector: string) => `locator('${selector}')`,
-    },
-  },
-}));
-
 const hasBundledChromium = fs.existsSync(chromium.executablePath());
 async function canLaunchBundledChromium(): Promise<boolean> {
   if (!hasBundledChromium)
@@ -81,16 +73,22 @@ describe('Tool Utils', () => {
     });
 
     it('should wait for pending requests to finish', async () => {
+      const order: string[] = [];
       const callback = vi.fn().mockImplementation(() => {
         const request = { url: 'https://api.example.com' };
         mockPage.emit('request', request);
-        setTimeout(() => mockPage.emit('requestfinished', request), 10);
+        setTimeout(() => {
+          order.push('finished');
+          mockPage.emit('requestfinished', request);
+        }, 10);
         return Promise.resolve('result');
       });
 
       const result = await waitForCompletion(mockTab, callback);
+      order.push('returned');
 
       expect(result).toBe('result');
+      expect(order).toEqual(['finished', 'returned']);
     });
 
     it('should ignore sub-frame navigation', async () => {
@@ -108,23 +106,27 @@ describe('Tool Utils', () => {
 
     it('should timeout after 10 seconds', async () => {
       vi.useFakeTimers();
+      try {
+        const callback = vi.fn().mockImplementation(() => {
+          const request = { url: 'https://slow-api.example.com' };
+          mockPage.emit('request', request);
+          return Promise.resolve('result');
+        });
 
-      const callback = vi.fn().mockImplementation(() => {
-        const request = { url: 'https://slow-api.example.com' };
-        mockPage.emit('request', request);
-        // Never finish the request
-        return Promise.resolve('result');
-      });
+        let settled = false;
+        const promise = waitForCompletion(mockTab, callback).then(result => {
+          settled = true;
+          return result;
+        });
 
-      const promise = waitForCompletion(mockTab, callback);
-
-      vi.advanceTimersByTime(10000);
-
-      await promise;
-
-      expect(callback).toHaveBeenCalled();
-
-      vi.useRealTimers();
+        await vi.advanceTimersByTimeAsync(9_999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(settled).toBe(true);
+        await expect(promise).resolves.toBe('result');
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should use the configured settle delay after a request', async () => {

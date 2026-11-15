@@ -122,8 +122,7 @@ describe('Screenshot Tools', () => {
     const params = screenshotTool.schema.inputSchema.parse({ type: 'webp' });
     await screenshotTool.handle(mockContext, params, response);
 
-    const image = response.images().find(i => i.contentType === 'image/webp');
-    expect(image).toBeDefined();
+    expect(response.images()).toEqual([{ contentType: 'image/webp', data: Buffer.from('fake-image') }]);
   });
 
   it.each(['css', 'device'])('rejects empty WebP captures at %s scale and removes failed files', async scale => {

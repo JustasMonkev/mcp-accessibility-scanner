@@ -67,16 +67,6 @@ describe('Utils', () => {
       expect(id1).not.toBe(id3);
     });
 
-    it('should return strings', () => {
-      const id = createGuid();
-      expect(typeof id).toBe('string');
-    });
-
-    it('should generate non-empty strings', () => {
-      const id = createGuid();
-      expect(id.length).toBeGreaterThan(0);
-    });
-
     it('should generate hex strings', () => {
       const ids = Array.from({ length: 10 }, () => createGuid());
 
@@ -115,10 +105,8 @@ describe('Utils', () => {
   });
 
   describe('createHash', () => {
-    it('should generate hash from data', () => {
-      const hash = createHash('test data');
-      expect(hash).toBeDefined();
-      expect(typeof hash).toBe('string');
+    it('should return the first 7 hex characters of the sha256 digest', () => {
+      expect(createHash('test data')).toBe('916f002');
     });
 
     it('should generate consistent hashes', () => {
@@ -131,11 +119,6 @@ describe('Utils', () => {
       const hash1 = createHash('test1');
       const hash2 = createHash('test2');
       expect(hash1).not.toBe(hash2);
-    });
-
-    it('should generate 7 character hashes', () => {
-      const hash = createHash('test data');
-      expect(hash.length).toBe(7);
     });
   });
 

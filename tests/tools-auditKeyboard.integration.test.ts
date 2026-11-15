@@ -74,6 +74,11 @@ const server = http.createServer((request, response) => {
       <script>document.getElementById('start').focus()</script>`);
     return;
   }
+  if (url.pathname === '/focus-ring') {
+    response.end(`<style>#bare:focus { outline: none; box-shadow: none } #ringed:focus { outline: 2px solid blue }</style>
+      <button id="bare">Bare</button><button id="ringed">Ringed</button>`);
+    return;
+  }
   if (url.pathname === '/labelledby') {
     response.end(`<span id="verb">Save</span><span id="noun">draft</span>
       <button id="labelled" aria-labelledby=" verb\tnoun missing ">Fallback text</button>`);
@@ -208,6 +213,27 @@ it.skipIf(!canRun)('names stops from every aria-labelledby id reference', async 
   const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
   const stop = report.stops.find((s: { id: string | null }) => s.id === 'labelled');
   expect(stop?.name).toBe('Save draft');
+});
+
+it.skipIf(!canRun)('reports only the stop whose focus style draws no ring', async () => {
+  directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-focus-ring-'));
+  const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory, timeoutSettle: 0 });
+  client = new Client({ name: 'keyboard-focus-ring-test', version: '1' });
+  await client.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
+  await ok('browser_navigate', { url: `${origin}/focus-ring` });
+  await ok('audit_keyboard', {
+    maxTabs: 2,
+    checkSkipLink: false,
+    checkFocusTrap: false,
+    checkFocusVisibility: true,
+    checkFocusJumps: false,
+    checkTargetSize: false,
+    checkFocusObscured: false,
+    reportFile: 'keyboard.json',
+  });
+  const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
+  expect(report.stops.map((stop: { id: string }) => stop.id)).toEqual(['bare', 'ringed']);
+  expect(report.focusVisibilityIssues.map((stop: { id: string }) => stop.id)).toEqual(['bare']);
 });
 
 it.skipIf(!canRun).each(['focus-identity', 'shadow-focus', 'reverse-focus', 'trapped-focus'])(

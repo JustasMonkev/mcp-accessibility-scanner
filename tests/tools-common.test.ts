@@ -55,7 +55,6 @@ describe('Common Tools', () => {
 
     it('should exist', () => {
       expect(closeTool).toBeDefined();
-      expect(closeTool.schema.name).toBe('browser_close');
     });
 
     it('should have correct schema', () => {
@@ -81,7 +80,6 @@ describe('Common Tools', () => {
 
     it('should exist', () => {
       expect(resizeTool).toBeDefined();
-      expect(resizeTool.schema.name).toBe('browser_resize');
     });
 
     it('should have correct schema', () => {
