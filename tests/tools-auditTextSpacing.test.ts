@@ -118,6 +118,25 @@ describe('audit_text_spacing screenshot failure handling', () => {
     expect(removals.count).toBe(1);
   });
 
+  it('runs overlapping audits of one page one after another', async () => {
+    const { context } = harness({ apply: 'ok', screenshot: 'ok' });
+    const frame = context.currentTabOrDie().page.mainFrame();
+    const active = { current: 0, max: 0, calls: 0 };
+    const original = frame.evaluate.getMockImplementation();
+    frame.evaluate.mockImplementation(async (fn: unknown, args: unknown) => {
+      if (fn !== measureTextSpacing)
+        return original(fn, args);
+      active.calls++;
+      active.max = Math.max(active.max, ++active.current);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      active.current--;
+      return measurement;
+    });
+    const run = () => tool.handle(context, tool.schema.inputSchema.parse({ screenshot: true }), new Response(context, 'audit_text_spacing', {}));
+    await Promise.all([run(), run(), run()]);
+    expect(active).toEqual({ current: 0, max: 1, calls: 3 });
+  });
+
   it('bounds re-applying the overrides so a stalled frame cannot block cleanup or the report', async () => {
     vi.useFakeTimers();
     const { context, page, removals, written } = harness({ apply: 'hang', screenshot: 'ok' });
@@ -337,6 +356,21 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
   it('ignores overflow on non-replaced inline boxes, which does not clip', async () => {
     const result = await measure(`<div id="card" style="width: 200px; height: 40px; overflow: hidden"><p style="margin: 0"><span id="inline" style="overflow: hidden">A card with two lines of text that fits now.</span></p></div>`);
     expect(result.clipped).toEqual([expect.objectContaining({ selector: '#inline', hiddenPercentBefore: 0, clippedBy: expect.objectContaining({ selector: '#card' }) })]);
+  });
+
+  it('does not treat scrollable paint-contained boxes as losing content', async () => {
+    for (const containment of ['contain: paint', 'content-visibility: auto; contain-intrinsic-size: 300px 40px']) {
+      page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+      await page.setContent(`<!doctype html><body style="font: 16px/1.2 sans-serif"><div style="${containment}; overflow: auto; width: 300px; height: 40px"><p style="margin: 0">First line of text<br>Second line of text</p></div></body>`);
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxOverlapLines: 200, overrides: textSpacingOverrides });
+      expect(result.measured, containment).toBe(1);
+      expect(result.clipped, containment).toEqual([]);
+      await page.close();
+    }
+    // Control: the same paint-contained box without scrolling does lose the content.
+    const clipped = await measure(`<div id="box" style="contain: paint; width: 300px; height: 40px"><p style="margin: 0">First line of text<br>Second line of text</p></div>`);
+    expect(clipped.clipped).toEqual([expect.objectContaining({ clippedBy: expect.objectContaining({ selector: '#box' }) })]);
   });
 
   it('leaves the page exactly as it was', async () => {

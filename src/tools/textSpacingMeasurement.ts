@@ -181,10 +181,11 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     if (current !== document.documentElement && !(current === document.body && bodyPropagates)) {
       const style = getComputedStyle(current);
       const paintContained = paintContains(style);
-      const lossX = paintContained || clips(style.overflowX);
-      const lossY = paintContained || clips(style.overflowY);
-      const paintX = lossX || scrolls(style.overflowX);
-      const paintY = lossY || scrolls(style.overflowY);
+      // Paint containment clips painting, but on a scrollable axis the content stays reachable.
+      const lossX = clips(style.overflowX) || (paintContained && !scrolls(style.overflowX));
+      const lossY = clips(style.overflowY) || (paintContained && !scrolls(style.overflowY));
+      const paintX = paintContained || lossX || scrolls(style.overflowX);
+      const paintY = paintContained || lossY || scrolls(style.overflowY);
       // A display: contents element has no box, and overflow does not apply to non-replaced
       // inline boxes, so neither clips anything (their client box is 0x0 and would hide all text).
       if ((paintX || paintY) && !unclippableDisplays.has(style.display)) {
