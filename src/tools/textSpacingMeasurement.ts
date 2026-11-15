@@ -1,0 +1,511 @@
+/*
+ * Copyright (c) MCP Accessibility Scanner contributors.
+ * Licensed under the Apache License, Version 2.0.
+ */
+
+/**
+ * In-page measurement for the WCAG 1.4.12 Text Spacing stress test.
+ *
+ * Everything in this module that runs in the page (`measureTextSpacing`,
+ * `applyTextSpacing`, `removeTextSpacing`) must stay self-contained: Playwright
+ * serializes the function source, so it cannot reach module-level helpers.
+ */
+
+/** The four user overrides WCAG 1.4.12 requires content to survive. */
+export const textSpacingOverrides = {
+  lineHeight: 1.5,
+  letterSpacingEm: 0.12,
+  wordSpacingEm: 0.16,
+  paragraphSpacingEm: 2,
+} as const;
+
+/** Every constructed stylesheet this tool adopts starts with a layer whose name has this prefix. */
+export const textSpacingLayerPrefix = 'mcp-text-spacing-';
+
+type TextSpacingRect = { x: number; y: number; width: number; height: number };
+
+export type TextSpacingClipper = {
+  selector: string;
+  overflowX: string;
+  overflowY: string;
+  width: string;
+  height: string;
+  maxWidth: string;
+  maxHeight: string;
+  whiteSpace: string;
+  textOverflow: string;
+  lineClamp: string;
+};
+
+export type TextSpacingClip = {
+  selector: string;
+  text: string;
+  fontSizePx: number;
+  hiddenPercentBefore: number;
+  hiddenPercentAfter: number;
+  textBoxBefore: TextSpacingRect;
+  textBoxAfter: TextSpacingRect;
+  clippedBy: TextSpacingClipper | null;
+};
+
+export type TextSpacingOverlap = {
+  selector: string;
+  text: string;
+  otherSelector: string;
+  otherText: string;
+  overlap: TextSpacingRect;
+};
+
+export type TextSpacingBlocked = {
+  selector: string;
+  text: string;
+  properties: string[];
+  inlineImportant: string[];
+};
+
+export type TextSpacingFrameMeasurement = {
+  candidates: number;
+  measured: number;
+  truncated: number;
+  stale: number;
+  clipped: TextSpacingClip[];
+  overlaps: TextSpacingOverlap[];
+  blocked: TextSpacingBlocked[];
+};
+
+export type TextSpacingMeasureArgs = {
+  layerName: string;
+  maxElements: number;
+  maxRectsPerElement: number;
+  overrides: typeof textSpacingOverrides;
+};
+
+/** Runs in the page: measure, apply the overrides, re-measure, and always remove them again. */
+export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<TextSpacingFrameMeasurement> {
+  const { layerName, maxElements, maxRectsPerElement, overrides } = args;
+  const XHTML = 'http://www.w3.org/1999/xhtml';
+  const skippedTags = new Set([
+    'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA', 'SELECT', 'OPTION', 'OPTGROUP', 'DATALIST',
+    'IFRAME', 'FRAME', 'OBJECT', 'EMBED', 'CANVAS', 'VIDEO', 'AUDIO', 'HEAD', 'TITLE',
+  ]);
+  type Box = { left: number; top: number; right: number; bottom: number };
+  type Region = { element: Element; box: Box; clipX: boolean; clipY: boolean };
+  type Phase = { lines: Box[]; visibleLines: Box[]; area: number; hidden: number; regions: Region[] };
+
+  // --- Collect visible text elements in document order, through open shadow roots. ---
+  const roots: (Document | ShadowRoot)[] = [document];
+  const candidates: HTMLElement[] = [];
+  let candidateCount = 0;
+  const hasOwnText = (element: Element) => {
+    for (const child of element.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE && /\S/.test(child.nodeValue ?? ''))
+        return true;
+    }
+    return false;
+  };
+  const isVisible = (element: HTMLElement) => {
+    if (typeof element.checkVisibility === 'function')
+      return element.checkVisibility({ opacityProperty: true, visibilityProperty: true, contentVisibilityAuto: true });
+    const style = getComputedStyle(element);
+    return style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const collect = (root: Document | ShadowRoot) => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+      acceptNode: node => {
+        const element = node as Element;
+        if (element.namespaceURI !== XHTML || skippedTags.has(element.tagName))
+          return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const element = node as HTMLElement;
+      if (hasOwnText(element) && isVisible(element)) {
+        candidateCount++;
+        if (candidates.length < maxElements)
+          candidates.push(element);
+      }
+      if (element.shadowRoot) {
+        roots.push(element.shadowRoot);
+        collect(element.shadowRoot);
+      }
+    }
+  };
+  collect(document);
+
+  // --- Geometry helpers. ---
+  const composedParent = (element: Element): Element | null => {
+    if (element.assignedSlot)
+      return element.assignedSlot;
+    if (element.parentElement)
+      return element.parentElement;
+    const parent = element.parentNode;
+    return parent instanceof ShadowRoot ? parent.host : null;
+  };
+  const htmlOverflowVisible = () => {
+    const style = getComputedStyle(document.documentElement);
+    return style.overflowX === 'visible' && style.overflowY === 'visible';
+  };
+  const clips = (value: string) => value === 'hidden' || value === 'clip';
+  const clippingRegions = (element: HTMLElement): Region[] => {
+    const regions: Region[] = [];
+    // The root element's overflow, and the body's when the root does not set one,
+    // propagates to the viewport and does not clip the element itself.
+    const bodyPropagates = htmlOverflowVisible();
+    for (let current: Element | null = element; current; current = composedParent(current)) {
+      if (current === document.documentElement || (current === document.body && bodyPropagates))
+        continue;
+      const style = getComputedStyle(current);
+      const contain = style.contain;
+      const paintContained = /\b(paint|strict|content)\b/.test(contain);
+      const clipX = paintContained || clips(style.overflowX);
+      const clipY = paintContained || clips(style.overflowY);
+      if (!clipX && !clipY)
+        continue;
+      const rect = current.getBoundingClientRect();
+      const html = current as HTMLElement;
+      const scaleX = html.offsetWidth ? rect.width / html.offsetWidth : 1;
+      const scaleY = html.offsetHeight ? rect.height / html.offsetHeight : 1;
+      const left = rect.left + current.clientLeft * scaleX;
+      const top = rect.top + current.clientTop * scaleY;
+      regions.push({
+        element: current,
+        box: { left, top, right: left + current.clientWidth * scaleX, bottom: top + current.clientHeight * scaleY },
+        clipX,
+        clipY,
+      });
+    }
+    return regions;
+  };
+  const lineBoxes = (element: HTMLElement): Box[] => {
+    const boxes: Box[] = [];
+    const range = document.createRange();
+    for (const child of element.childNodes) {
+      if (child.nodeType !== Node.TEXT_NODE || !/\S/.test(child.nodeValue ?? ''))
+        continue;
+      range.selectNodeContents(child);
+      for (const rect of range.getClientRects()) {
+        if (rect.width > 0.5 && rect.height > 0.5)
+          boxes.push({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
+        if (boxes.length >= maxRectsPerElement)
+          return boxes;
+      }
+    }
+    return boxes;
+  };
+  const area = (box: Box) => Math.max(0, box.right - box.left) * Math.max(0, box.bottom - box.top);
+  const clipTo = (box: Box, regions: Region[]): Box => {
+    let { left, top, right, bottom } = box;
+    for (const region of regions) {
+      if (region.clipX) {
+        left = Math.max(left, region.box.left);
+        right = Math.min(right, region.box.right);
+      }
+      if (region.clipY) {
+        top = Math.max(top, region.box.top);
+        bottom = Math.min(bottom, region.box.bottom);
+      }
+    }
+    return { left, top, right: Math.max(left, right), bottom: Math.max(top, bottom) };
+  };
+  const measurePhase = (element: HTMLElement): Phase => {
+    const lines = lineBoxes(element);
+    const regions = clippingRegions(element);
+    let total = 0;
+    let visible = 0;
+    const visibleLines: Box[] = [];
+    for (const line of lines) {
+      total += area(line);
+      const shown = clipTo(line, regions);
+      visible += area(shown);
+      if (area(shown) > 0)
+        visibleLines.push(shown);
+    }
+    return { lines, visibleLines, area: total, hidden: Math.max(0, total - visible), regions };
+  };
+  const union = (boxes: Box[]): TextSpacingRect => {
+    if (!boxes.length)
+      return { x: 0, y: 0, width: 0, height: 0 };
+    const left = Math.min(...boxes.map(box => box.left));
+    const top = Math.min(...boxes.map(box => box.top));
+    const right = Math.max(...boxes.map(box => box.right));
+    const bottom = Math.max(...boxes.map(box => box.bottom));
+    const round = (value: number) => Math.round(value * 10) / 10;
+    return { x: round(left), y: round(top), width: round(right - left), height: round(bottom - top) };
+  };
+
+  // --- Selectors and text samples. ---
+  const selectorCache = new Map<Element, string>();
+  const segmentSelector = (element: Element): string => {
+    const root = element.getRootNode() as Document | ShadowRoot;
+    const parts: string[] = [];
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      const tag = current.localName;
+      if (current.id && root.querySelectorAll(`#${CSS.escape(current.id)}`).length === 1) {
+        parts.unshift(`#${CSS.escape(current.id)}`);
+        break;
+      }
+      const parent = current.parentElement;
+      const siblings = parent ? Array.from(parent.children).filter(child => child.localName === tag) : [];
+      parts.unshift(siblings.length > 1 ? `${tag}:nth-of-type(${siblings.indexOf(current) + 1})` : tag);
+      if (!parent || current === document.body)
+        break;
+    }
+    return parts.join(' > ');
+  };
+  const selectorFor = (element: Element): string => {
+    const cached = selectorCache.get(element);
+    if (cached !== undefined)
+      return cached;
+    const root = element.getRootNode();
+    const own = segmentSelector(element);
+    const selector = root instanceof ShadowRoot ? `${selectorFor(root.host)} >>> ${own}` : own;
+    selectorCache.set(element, selector);
+    return selector;
+  };
+  const textSample = (element: Element) => {
+    let text = '';
+    for (const child of element.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE)
+        text += child.nodeValue ?? '';
+    }
+    text = text.replace(/\s+/g, ' ').trim();
+    return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+  };
+
+  // --- Overlap detection between different elements' visible text lines. ---
+  const overlapPairs = (phases: (Phase | null)[]): Map<string, Box> => {
+    const entries = phases
+        .map((phase, index) => ({ index, lines: phase?.visibleLines ?? [] }))
+        .filter(entry => entry.lines.length)
+        .map(entry => ({ ...entry, top: Math.min(...entry.lines.map(line => line.top)), bottom: Math.max(...entry.lines.map(line => line.bottom)) }))
+        .sort((a, b) => a.top - b.top);
+    const pairs = new Map<string, Box>();
+    for (let i = 0; i < entries.length; i++) {
+      for (let j = i + 1; j < entries.length && entries[j].top < entries[i].bottom; j++) {
+        let best: Box | null = null;
+        for (const a of entries[i].lines) {
+          for (const b of entries[j].lines) {
+            const box = { left: Math.max(a.left, b.left), top: Math.max(a.top, b.top), right: Math.min(a.right, b.right), bottom: Math.min(a.bottom, b.bottom) };
+            const width = box.right - box.left;
+            const height = box.bottom - box.top;
+            const minLineHeight = Math.min(a.bottom - a.top, b.bottom - b.top);
+            if (width >= 2 && height >= Math.max(1, minLineHeight * 0.3) && (!best || area(box) > area(best)))
+              best = box;
+          }
+        }
+        if (best) {
+          const [first, second] = entries[i].index < entries[j].index ? [entries[i].index, entries[j].index] : [entries[j].index, entries[i].index];
+          pairs.set(`${first}:${second}`, best);
+        }
+      }
+    }
+    return pairs;
+  };
+
+  const waitForLayout = () => new Promise<void>(resolve => {
+    let done = false;
+    const finish = () => {
+      if (!done) {
+        done = true;
+        resolve();
+      }
+    };
+    requestAnimationFrame(() => requestAnimationFrame(finish));
+    // Background tabs throttle animation frames; layout itself is synchronous on read.
+    setTimeout(finish, 150);
+  });
+
+  // --- Baseline. ---
+  const before = candidates.map(element => measurePhase(element));
+
+  // --- Apply the overrides in a cascade layer: layered !important beats unlayered !important author rules. ---
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(`@layer ${layerName} {
+    * { line-height: ${overrides.lineHeight} !important; letter-spacing: ${overrides.letterSpacingEm}em !important; word-spacing: ${overrides.wordSpacingEm}em !important; }
+    p { margin-bottom: ${overrides.paragraphSpacingEm}em !important; }
+  }`);
+  const adopted = roots;
+  try {
+    for (const root of adopted)
+      root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+    await waitForLayout();
+
+    const after: (Phase | null)[] = [];
+    let stale = 0;
+    for (const element of candidates) {
+      if (!element.isConnected) {
+        stale++;
+        after.push(null);
+        continue;
+      }
+      after.push(measurePhase(element));
+    }
+
+    // --- Verify the overrides actually took effect. ---
+    const blocked: TextSpacingBlocked[] = [];
+    candidates.forEach((element, index) => {
+      if (!after[index])
+        return;
+      const style = getComputedStyle(element);
+      const fontSize = parseFloat(style.fontSize);
+      if (!(fontSize > 0))
+        return;
+      const px = (value: string) => value === 'normal' ? 0 : parseFloat(value);
+      const failed: string[] = [];
+      if (!(px(style.letterSpacing) >= fontSize * overrides.letterSpacingEm - 0.1))
+        failed.push('letter-spacing');
+      if (!(px(style.wordSpacing) >= fontSize * overrides.wordSpacingEm - 0.1))
+        failed.push('word-spacing');
+      if (style.lineHeight === 'normal' || !(parseFloat(style.lineHeight) >= fontSize * overrides.lineHeight - 0.5))
+        failed.push('line-height');
+      if (element.localName === 'p' && !(parseFloat(style.marginBottom) >= fontSize * overrides.paragraphSpacingEm - 0.5))
+        failed.push('margin-bottom');
+      if (failed.length) {
+        blocked.push({
+          selector: selectorFor(element),
+          text: textSample(element),
+          properties: failed,
+          inlineImportant: failed.filter(property => element.style.getPropertyPriority(property) === 'important'),
+        });
+      }
+    });
+
+    // --- Newly clipped text. ---
+    const clipped: TextSpacingClip[] = [];
+    candidates.forEach((element, index) => {
+      const base = before[index];
+      const next = after[index];
+      if (!next || !base.area || !next.area)
+        return;
+      const fractionBefore = base.hidden / base.area;
+      const fractionAfter = next.hidden / next.area;
+      const fontSize = parseFloat(getComputedStyle(element).fontSize) || 16;
+      // Report only content the overrides newly hid: at least 2% more of the text and a quarter glyph of area.
+      if (fractionAfter - fractionBefore < 0.02 || next.hidden - base.hidden < fontSize * fontSize * 0.25)
+        return;
+      let worst: Region | null = null;
+      let worstHidden = 0;
+      for (const region of next.regions) {
+        let hidden = 0;
+        for (const line of next.lines)
+          hidden += area(line) - area(clipTo(line, [region]));
+        if (hidden > worstHidden) {
+          worstHidden = hidden;
+          worst = region;
+        }
+      }
+      let clippedBy: TextSpacingClipper | null = null;
+      if (worst) {
+        const style = getComputedStyle(worst.element);
+        clippedBy = {
+          selector: selectorFor(worst.element),
+          overflowX: style.overflowX,
+          overflowY: style.overflowY,
+          width: style.width,
+          height: style.height,
+          maxWidth: style.maxWidth,
+          maxHeight: style.maxHeight,
+          whiteSpace: style.whiteSpace,
+          textOverflow: style.textOverflow,
+          lineClamp: style.getPropertyValue('-webkit-line-clamp') || 'none',
+        };
+      }
+      clipped.push({
+        selector: selectorFor(element),
+        text: textSample(element),
+        fontSizePx: Math.round(fontSize * 10) / 10,
+        hiddenPercentBefore: Math.round(fractionBefore * 1000) / 10,
+        hiddenPercentAfter: Math.round(fractionAfter * 1000) / 10,
+        textBoxBefore: union(base.lines),
+        textBoxAfter: union(next.lines),
+        clippedBy,
+      });
+    });
+
+    // --- Newly overlapping text. ---
+    const baselineOverlaps = overlapPairs(before);
+    const overlaps: TextSpacingOverlap[] = [];
+    for (const [key, box] of overlapPairs(after)) {
+      if (baselineOverlaps.has(key))
+        continue;
+      const [first, second] = key.split(':').map(Number);
+      overlaps.push({
+        selector: selectorFor(candidates[first]),
+        text: textSample(candidates[first]),
+        otherSelector: selectorFor(candidates[second]),
+        otherText: textSample(candidates[second]),
+        overlap: union([box]),
+      });
+    }
+
+    return {
+      candidates: candidateCount,
+      measured: candidates.length - stale,
+      truncated: candidateCount - candidates.length,
+      stale,
+      clipped,
+      overlaps,
+      blocked,
+    };
+  } finally {
+    for (const root of adopted)
+      root.adoptedStyleSheets = root.adoptedStyleSheets.filter(entry => entry !== sheet);
+  }
+}
+
+/** Runs in the page: adopt the overrides (used for the evidence screenshot). Returns the number of roots styled. */
+export function applyTextSpacing(args: { layerName: string; overrides: typeof textSpacingOverrides }): number {
+  const { layerName, overrides } = args;
+  const roots: (Document | ShadowRoot)[] = [document];
+  const visit = (root: Document | ShadowRoot) => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const shadow = (node as Element).shadowRoot;
+      if (shadow) {
+        roots.push(shadow);
+        visit(shadow);
+      }
+    }
+  };
+  visit(document);
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(`@layer ${layerName} {
+    * { line-height: ${overrides.lineHeight} !important; letter-spacing: ${overrides.letterSpacingEm}em !important; word-spacing: ${overrides.wordSpacingEm}em !important; }
+    p { margin-bottom: ${overrides.paragraphSpacingEm}em !important; }
+  }`);
+  for (const root of roots)
+    root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+  return roots.length;
+}
+
+/** Runs in the page: drop every stylesheet this tool adopted (identified by its layer-name prefix). Returns how many were removed. */
+export function removeTextSpacing(layerPrefix: string): number {
+  let removed = 0;
+  const isOurs = (sheet: CSSStyleSheet) => {
+    try {
+      const first = sheet.cssRules[0];
+      return typeof CSSLayerBlockRule !== 'undefined' && first instanceof CSSLayerBlockRule && first.name.startsWith(layerPrefix);
+    } catch {
+      return false;
+    }
+  };
+  const strip = (root: Document | ShadowRoot) => {
+    const kept = root.adoptedStyleSheets.filter(sheet => !isOurs(sheet));
+    if (kept.length !== root.adoptedStyleSheets.length) {
+      removed += root.adoptedStyleSheets.length - kept.length;
+      root.adoptedStyleSheets = kept;
+    }
+  };
+  const visit = (root: Document | ShadowRoot) => {
+    strip(root);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const shadow = (node as Element).shadowRoot;
+      if (shadow)
+        visit(shadow);
+    }
+  };
+  visit(document);
+  return removed;
+}
