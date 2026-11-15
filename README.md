@@ -44,11 +44,12 @@ browser_navigate {"url":"http://localhost:3000"}
 scan_page {"annotateScreenshot":true}
 audit_keyboard {"maxTabs":30}
 audit_screen_reader {}
+audit_text_spacing {}
 ```
 
 These are MCP tool calls, not shell subcommands. For terminal use, see [interactive mode](#interactive-repl-interactive-subcommand).
 
-`scan_page` returns text findings with JSON node details and remediation links. With `annotateScreenshot: true`, it also saves a full-page annotated PNG and returns a file resource link. It does **not** save a JSON report. `audit_keyboard` and `audit_screen_reader` save JSON reports and return summaries and report links; `audit_site` and `scan_page_matrix` also save JSON reports. There is no generated HTML report dashboard. Review incomplete checks, coverage warnings and the page states you haven't tested.
+`scan_page` returns text findings with JSON node details and remediation links. With `annotateScreenshot: true`, it also saves a full-page annotated PNG and returns a file resource link. It does **not** save a JSON report. `audit_keyboard`, `audit_screen_reader` and `audit_text_spacing` save JSON reports and return summaries and report links; `audit_site` and `scan_page_matrix` also save JSON reports. There is no generated HTML report dashboard. Review incomplete checks, coverage warnings and the page states you haven't tested.
 
 To reproduce the screenshot, serve the demo from this repository with `python3 -m http.server 8765 --bind 127.0.0.1 --directory docs/assets`, navigate to `http://127.0.0.1:8765/accessibility-demo.html`, then run `scan_page` with `annotateScreenshot: true`. The screenshot used a 1000×720 viewport (`--viewport-size 1000,720`).
 
@@ -728,6 +729,44 @@ decomposed spellings such as `Café` are treated consistently.
 1. Navigate to the target page and let it fully load
 2. Run audit_screen_reader (optionally raise maxElements for a large page)
 3. Review the accessibility findings and open the generated JSON report path
+```
+
+#### `audit_text_spacing`
+Stress-tests the current page against WCAG 1.4.12 Text Spacing (AA). It applies the four user overrides the criterion requires content to survive, compares text geometry before and after, and reports text that ends up hidden or colliding. It then removes the overrides, so the page is left as it was. Tools like ARC Toolkit and the text-spacing bookmarklet inject the same CSS and leave the judgement to a person. This tool measures the result instead.
+
+**Overrides applied** (the values of the common text-spacing bookmarklet): `line-height: 1.5`, `letter-spacing: 0.12em`, `word-spacing: 0.16em` on every element, and `margin-bottom: 2em` on paragraphs.
+
+**Checks**
+- `text-clipped`: text that the overrides newly hide behind an `overflow: hidden`/`clip` or paint-containment box (including `content-visibility: auto`; overflow on plain inline boxes, which does not clip, is ignored), such as a fixed-height card, a fixed-width button or a one-line `text-overflow: ellipsis` label. Each finding names the element, how much of its text is hidden before and after (`hiddenPercentBefore`, `hiddenPercentAfter`), and the box that cuts it off (`clippedBy`) with the styles responsible: `overflow`, `height`/`max-height`, `width`/`max-width`, `white-space`, `text-overflow` and `-webkit-line-clamp`. The fix text points at that box.
+- `text-overlap`: text of two different elements that overlaps after the overrides but did not before, typically absolutely positioned labels or text in fixed-height rows spilling into the next one.
+
+**Parameters:**
+- `maxElements` (default `1000`, max `5000`): visible text elements measured per frame. Hidden elements (`display: none`, `visibility: hidden`, `opacity: 0`) never count toward it. Elements past the cap are reported as truncated.
+- `maxFindingsPerCheck` (default `20`): findings listed per check; the full counts are always reported.
+- `screenshot` (default `false`): also save a full-page PNG taken while the overrides are applied, returned as a resource link.
+- `reportFile`: JSON report file name (default `audit-text-spacing-{timestamp}-{token}.json`).
+
+**How it measures:** the visible text of each element (including text of `display: contents` elements, which renders in its parent's box) is measured as text line boxes (DOM `Range` rects) and intersected with every clipping ancestor, before and after the overrides, in a single pass inside the page. Clipping ancestors follow the containing-block chain: an absolutely positioned box is clipped only by `overflow` on its containing block and that block's own clipping ancestors, not by an `overflow: hidden` wrapper it escapes, and a fixed box only by ancestors that contain it (a transform, filter, layout/paint containment or `content-visibility`). Every line is checked for clipping. Overlap is compared on the first 200 painted lines of each element; an element with more than that before or after the overrides is counted once in a warning and in `elementsOverlapLinesTruncated`. Only text the overrides *newly* hide is reported: a finding needs at least 2 percentage points more of the element's text hidden, and at least a quarter of a glyph's area. Visually hidden text (a 1px `sr-only` box) and text that was already overlapping are therefore not reported. Text that was already partly truncated is reported only when the overrides hide noticeably more of it; `hiddenPercentBefore` shows how much was cut off already. Wrapping, taller boxes and a new scrollbar are not failures: `overflow: auto`/`scroll` boxes keep their content reachable, so they are not treated as clipping. Lines scrolled out of such a box are not painted outside it either, so they are not compared for overlap with the content around it. This holds for paint-contained boxes too (`contain: paint`, `content-visibility: auto`): with `overflow: auto`/`scroll` their content stays reachable, so only a non-scrolling paint-contained box counts as clipping.
+
+The overrides are applied as a constructed stylesheet (`adoptedStyleSheets`) in a uniquely named cascade layer, adopted by the document and every open shadow root. This means:
+- A page Content-Security-Policy that blocks inline `<style>` does not stop them.
+- They win over the page's own unlayered `!important` rules, whatever their specificity.
+- They cannot win over an inline `style="... !important"` or an `!important` rule in a cascade layer the page declared earlier. Rather than measure those elements as if the overrides had applied, the tool reports them under a `WARNING: the overrides did not take effect` line and in `overridesNotApplied` in the JSON report. Treat this as a gap in the audit's coverage, not a finding: the tool's stylesheet is author-level, and a user stylesheet's `!important` rules outrank author `!important`, so users may still be able to adjust spacing there.
+- Paragraph spacing is verified on every rendered `<p>`, including paragraphs whose text sits only in child elements.
+
+Every frame is measured, cross-origin iframes included, at most four at a time with a 15 s budget for the main frame and 5 s per child frame. A frame that cannot be measured is listed in a warning and in `frames.unmeasured`, and contributes no findings. If the main frame cannot be measured, or the page has no visible text at all, the tool fails instead of reporting a clean page. If the overrides cannot be removed from a frame afterwards, the result says so and asks you to reload. Overlapping `audit_text_spacing` calls on the same page run one after another, so one call never takes another's spaced page as its baseline.
+
+**What it deliberately does not detect**
+- Lost *meaning or function* beyond clipping and overlap: a control pushed under a sticky header, a menu that no longer opens, text that is technically visible but has become unreadable. A result with no findings is "no clipped or overlapping text detected", not a WCAG 1.4.12 pass, so look at the `screenshot` as well.
+- Clipping by the viewport itself (`overflow: hidden` on `html`/`body`, which propagates to the viewport), `clip-path` and masks, and text inside form controls (`<input>`/`<textarea>` values), `<svg>`, `<canvas>` and closed shadow roots.
+- Layout that page scripts would only adjust later: measurement waits two animation frames after applying the overrides, which covers `ResizeObserver` callbacks, but not timers or network-driven re-layout.
+- Shadow DOM selectors are written `host-selector >>> inner-selector`: each part is a CSS path within its own tree. Playwright CSS locators pierce open shadow roots, so the inner part alone usually works as a locator.
+
+**Example flow:**
+```text
+1. Navigate to the target page and let it fully load
+2. Run audit_text_spacing (add screenshot: true to see the page with the overrides applied)
+3. Fix the box named in each finding's clippedBy (min-height instead of height, allow wrapping) and re-run until it reports no findings
 ```
 
 ### Navigation Tools

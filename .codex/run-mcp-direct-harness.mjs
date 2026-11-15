@@ -805,6 +805,31 @@ const tests = [
     }
   }),
 
+  test('audit_text_spacing', async () => {
+    await navigate([
+      '<title>TextSpacing</title><main style="font:16px/1.2 sans-serif">',
+      // Broken markup: a fixed-height box and a one-line truncated button.
+      '<div style="width:200px;height:40px;overflow:hidden"><p style="margin:0">A card with two lines of text that fits now.</p></div>',
+      '<button style="font:16px sans-serif;width:100px;height:28px;padding:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">Buy the plan</button>',
+      // Correct markup: none of these may be flagged.
+      '<p>Flexible paragraph that wraps freely when spacing grows.</p>',
+      '<button style="font:16px sans-serif;padding:4px 8px;min-height:28px">Flexible button</button>',
+      '</main>',
+    ].join(''));
+    const result = await callTool('audit_text_spacing', { maxElements: 100, maxFindingsPerCheck: 10 });
+    const text = resultText(result);
+    assertText(text, /text-clipped \| 2/);
+    assertText(text, /"A card with two lines of text that fits now\."/);
+    assertText(text, /"Buy the plan"/);
+    assertText(text, /JSON report:/);
+    for (const label of ['Flexible paragraph', 'Flexible button']) {
+      if (text.includes(`"${label}`))
+        throw new Error(`Correct markup was flagged: ${label}\n${text.slice(0, 4000)}`);
+    }
+    const restored = resultText(await callTool('browser_evaluate', { function: '() => document.adoptedStyleSheets.length' }));
+    assertText(restored, /\b0\b/);
+  }),
+
   test('browser_install', async () => {
     if (!options.includeInstall)
       throw new SkipError('browser_install skipped by default; rerun with --include-install');

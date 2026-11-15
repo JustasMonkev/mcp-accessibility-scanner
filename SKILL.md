@@ -178,6 +178,18 @@ Audit keyboard tab order, focus visibility, skip links, and focus traps. Writes 
 - `stopOnCycle` (default true) - Stop on focus trap detection
 - `jumpScrollThresholdPx` (default 800) - Scroll delta for jump detection
 
+### audit_text_spacing
+
+Apply the WCAG 1.4.12 text spacing overrides (line-height 1.5, letter-spacing 0.12em, word-spacing 0.16em, paragraph spacing 2em), report text that becomes clipped (`text-clipped`) or overlapping (`text-overlap`), then restore the page. Writes a JSON report; each clipped finding names the clipping box (`clippedBy`) and the styles to change.
+
+```json
+{
+  "maxElements": 1000,
+  "maxFindingsPerCheck": 20,
+  "screenshot": true
+}
+```
+
 ## Violation Tag Reference
 
 **WCAG standards:**
