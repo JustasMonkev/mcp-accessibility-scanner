@@ -210,12 +210,19 @@ const auditTextSpacing = defineTabTool({
     };
 
     let screenshotPath: string | null = null;
+    let screenshotError: string | null = null;
     if (params.screenshot) {
-      screenshotPath = await tab.context.outputFile(`audit-text-spacing-${safeIsoTimestampForFileName()}.png`);
       const styled = outcomes.filter(outcome => outcome.measurement !== null).map(outcome => outcome.frame);
       try {
-        await Promise.all(styled.map(frame => frame.evaluate(applyTextSpacing, { layerName, overrides: textSpacingOverrides }).catch(() => 0)));
-        await tab.page.screenshot({ path: screenshotPath, fullPage: true });
+        const applied = await Promise.all(styled.map(frame => frame.evaluate(applyTextSpacing, { layerName, overrides: textSpacingOverrides }).then(() => true, () => false)));
+        const unstyled = styled.filter((_, index) => !applied[index]).map(frame => frameLabel(frame) ?? 'main frame');
+        if (unstyled.length) {
+          // Never hand out an unstyled page as "overrides applied".
+          screenshotError = `the overrides could not be re-applied to ${unstyled.join(', ')}`;
+        } else {
+          screenshotPath = await tab.context.outputFile(`audit-text-spacing-${safeIsoTimestampForFileName()}.png`);
+          await tab.page.screenshot({ path: screenshotPath, fullPage: true });
+        }
       } finally {
         for (const frame of styled) {
           if (!frame.isDetached() && !await cleanupFrame(frame))
@@ -237,6 +244,7 @@ const auditTextSpacing = defineTabTool({
       frames: { total: frames.length, unmeasured: unmeasuredFrames },
       overridesNotApplied: { count: blocked.length, elements: blocked },
       cleanupFailures,
+      screenshotError,
       countByCheck,
       totalFindings,
       truncatedChecks,
@@ -282,6 +290,7 @@ const auditTextSpacing = defineTabTool({
       ...(totals.stale ? [`WARNING: ${totals.stale} element(s) were removed from the page while it was being measured and were not evaluated; re-run once the page is stable.`] : []),
       ...(unmeasuredFrames.length ? [`WARNING: ${unmeasuredFrames.length} frame(s) could not be measured and contribute no findings:`, ...unmeasuredFrames.map(entry => `- ${entry.frameUrl}: ${entry.error}`)] : []),
       ...(blocked.length ? [`WARNING: the overrides did not take effect on ${blocked.length} element(s) (the page's own styles, e.g. inline !important, won the cascade); their results do not reflect the full text spacing. A user stylesheet would be blocked the same way, which itself prevents users from adjusting spacing:`, ...blocked.slice(0, maxBlockedSamples).map(entry => `- ${entry.selector}${entry.frameUrl ? ` [frame ${entry.frameUrl}]` : ''}: ${entry.properties.join(', ')}${entry.inlineImportant.length ? ` (inline !important: ${entry.inlineImportant.join(', ')})` : ''}`), ...(blocked.length > maxBlockedSamples ? [`- ... ${blocked.length - maxBlockedSamples} more in the JSON report`] : [])] : []),
+      ...(screenshotError ? [`WARNING: no screenshot was saved: ${screenshotError}.`] : []),
       ...(cleanupFailures.length ? [`WARNING: the spacing overrides could not be removed from ${cleanupFailures.join(', ')}; reload the page before further testing.`] : []),
       `Findings: ${totalFindings}`,
       'Check | Findings',

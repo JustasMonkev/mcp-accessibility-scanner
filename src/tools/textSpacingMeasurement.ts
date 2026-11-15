@@ -147,35 +147,50 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     return style.overflowX === 'visible' && style.overflowY === 'visible';
   };
   const clips = (value: string) => value === 'hidden' || value === 'clip';
-  const clippingRegions = (element: HTMLElement): Region[] => {
-    const regions: Region[] = [];
+  // Reset per phase: the overrides change both computed styles and geometry.
+  let regionCache = new Map<Element, Region | null>();
+  let bodyPropagates = htmlOverflowVisible();
+  const regionOf = (current: Element): Region | null => {
+    if (regionCache.has(current))
+      return regionCache.get(current)!;
+    let region: Region | null = null;
     // The root element's overflow, and the body's when the root does not set one,
     // propagates to the viewport and does not clip the element itself.
-    const bodyPropagates = htmlOverflowVisible();
-    for (let current: Element | null = element; current; current = composedParent(current)) {
-      if (current === document.documentElement || (current === document.body && bodyPropagates))
-        continue;
+    if (current !== document.documentElement && !(current === document.body && bodyPropagates)) {
       const style = getComputedStyle(current);
-      const contain = style.contain;
-      const paintContained = /\b(paint|strict|content)\b/.test(contain);
+      const paintContained = /\b(paint|strict|content)\b/.test(style.contain);
       const clipX = paintContained || clips(style.overflowX);
       const clipY = paintContained || clips(style.overflowY);
-      if (!clipX && !clipY)
-        continue;
-      const rect = current.getBoundingClientRect();
-      const html = current as HTMLElement;
-      const scaleX = html.offsetWidth ? rect.width / html.offsetWidth : 1;
-      const scaleY = html.offsetHeight ? rect.height / html.offsetHeight : 1;
-      const left = rect.left + current.clientLeft * scaleX;
-      const top = rect.top + current.clientTop * scaleY;
-      regions.push({
-        element: current,
-        box: { left, top, right: left + current.clientWidth * scaleX, bottom: top + current.clientHeight * scaleY },
-        clipX,
-        clipY,
-      });
+      if (clipX || clipY) {
+        const rect = current.getBoundingClientRect();
+        const html = current as HTMLElement;
+        const scaleX = html.offsetWidth ? rect.width / html.offsetWidth : 1;
+        const scaleY = html.offsetHeight ? rect.height / html.offsetHeight : 1;
+        const left = rect.left + current.clientLeft * scaleX;
+        const top = rect.top + current.clientTop * scaleY;
+        region = {
+          element: current,
+          box: { left, top, right: left + current.clientWidth * scaleX, bottom: top + current.clientHeight * scaleY },
+          clipX,
+          clipY,
+        };
+      }
+    }
+    regionCache.set(current, region);
+    return region;
+  };
+  const clippingRegions = (element: HTMLElement): Region[] => {
+    const regions: Region[] = [];
+    for (let current: Element | null = element; current; current = composedParent(current)) {
+      const region = regionOf(current);
+      if (region)
+        regions.push(region);
     }
     return regions;
+  };
+  const startPhase = () => {
+    regionCache = new Map();
+    bodyPropagates = htmlOverflowVisible();
   };
   const lineBoxes = (element: HTMLElement): Box[] => {
     const boxes: Box[] = [];
@@ -317,6 +332,7 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
   });
 
   // --- Baseline. ---
+  startPhase();
   const before = candidates.map(element => measurePhase(element));
 
   // --- Apply the overrides in a cascade layer: layered !important beats unlayered !important author rules. ---
@@ -330,6 +346,7 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     for (const root of adopted)
       root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
     await waitForLayout();
+    startPhase();
 
     const after: (Phase | null)[] = [];
     let stale = 0;
