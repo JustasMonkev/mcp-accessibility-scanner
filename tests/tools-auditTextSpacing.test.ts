@@ -105,8 +105,12 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
     expect(result.clipped).toEqual([expect.objectContaining({
       selector: '#cta',
       hiddenPercentBefore: 0,
-      clippedBy: expect.objectContaining({ selector: '#cta', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }),
+      clippedBy: expect.objectContaining({ selector: '#cta', whiteSpace: 'nowrap', textOverflow: 'ellipsis', height: 'auto', width: '165px' }),
     })]);
+    // An auto-height box must not be blamed for a fixed height it never had.
+    const [finding] = buildTextSpacingFindings([{ frameUrl: null, measurement: result }]);
+    expect(finding.problem).not.toContain('height:');
+    expect(finding.fix).toBe('On #cta: allow the text to wrap instead of truncating it on one line; or stop hiding the overflow (overflow: visible, or auto if a scrollbar is acceptable).');
   });
 
   it('flags text that newly overlaps other text, but not text that already overlapped', async () => {

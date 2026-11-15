@@ -415,12 +415,22 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
       let clippedBy: TextSpacingClipper | null = null;
       if (worst) {
         const style = getComputedStyle(worst.element);
+        // getComputedStyle resolves `auto` sizes to pixels; the Typed OM keeps the computed
+        // `auto`, so the fix text only blames a height or width the author actually set.
+        const typedSize = (property: 'width' | 'height') => {
+          try {
+            const value = (worst!.element as HTMLElement).computedStyleMap?.().get(property)?.toString();
+            if (value)
+              return value;
+          } catch {}
+          return style[property];
+        };
         clippedBy = {
           selector: selectorFor(worst.element),
           overflowX: style.overflowX,
           overflowY: style.overflowY,
-          width: style.width,
-          height: style.height,
+          width: typedSize('width'),
+          height: typedSize('height'),
           maxWidth: style.maxWidth,
           maxHeight: style.maxHeight,
           whiteSpace: style.whiteSpace,
