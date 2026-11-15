@@ -89,8 +89,18 @@ describe('runKeyboardFocusAudit', () => {
     expect(result.skipLink.step).toBe(1);
     expect(result.focusTrap.detected).toBe(true);
     expect(result.focusTrap.step).toBe(4);
-    expect(result.focusVisibilityIssues.length).toBeGreaterThan(0);
-    expect(result.focusJumpIssues.some(stop => stop.step === 3)).toBe(true);
+    expect(result.focusVisibilityIssues.map(stop => stop.step)).toEqual([2, 4]);
+    expect(result.focusJumpIssues.map(stop => stop.step)).toEqual([3]);
+  });
+
+  it('flags focus jumps past the scroll threshold and stops outside the viewport', async () => {
+    const jumpSteps = async (point: Partial<FocusPoint>) =>
+      (await auditSingleStop(focusPoint(point), { checkFocusJumps: true })).focusJumpIssues.map(stop => stop.step);
+
+    expect(await jumpSteps({ scrollY: 800 })).toEqual([]);
+    expect(await jumpSteps({ scrollY: 801 })).toEqual([1]);
+    expect(await jumpSteps({ inViewport: false })).toEqual([1]);
+    expect(await jumpSteps({ boundingBox: null })).toEqual([1]);
   });
 
   it('serializes detected findings into JSON-safe report shape', async () => {

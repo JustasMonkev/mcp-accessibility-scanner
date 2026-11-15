@@ -522,16 +522,13 @@ export class PersistentContextFactory implements BrowserContextFactory {
   readonly ownsBrowser = true;
   readonly config: FullConfig;
   readonly appliesStorageState = true;
-  readonly name = 'persistent';
-  readonly description = 'Create a new persistent browser context';
 
   private _userDataDirs = new Set<string>();
 
   private _stableProfileClaim: StableProfileClaim | undefined;
 
   private _claimStableProfile(): StableProfileClaim {
-    let resolveReleased!: () => void;
-    const released = new Promise<void>(resolve => { resolveReleased = resolve; });
+    const { promise: released, resolve: resolveReleased } = Promise.withResolvers<void>();
     const claim = {
       closing: false,
       released,

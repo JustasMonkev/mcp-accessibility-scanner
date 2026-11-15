@@ -50,9 +50,9 @@ function toBrowserMcpTool(tool: Tool): mcpServer.Tool {
   return mcpTool;
 }
 
-function parseToolArguments(tool: Tool, rawArguments: mcpServer.CallToolRequest['params']['arguments']): Record<string, any> {
+function parseToolArguments(tool: Tool, rawArguments: mcpServer.CallToolRequest['params']['arguments']): Record<string, unknown> {
   try {
-    return tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, any>;
+    return tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, unknown>;
   } catch (error) {
     if (error instanceof z.ZodError)
       throw new Error(`Invalid input for tool "${tool.schema.name}":\n${z.prettifyError(error)}`);

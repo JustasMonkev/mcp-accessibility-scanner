@@ -14,13 +14,13 @@
  * limitations under the License.
  */
 
-import debug from 'debug';
 import { z } from 'zod';
 
 import { Client } from '@modelcontextprotocol/client';
 
 import { ToolRelay } from './toolRelay.js';
 import { assertToolNotBlocked, isToolBlocked } from './toolPolicy.js';
+import { logUnhandledError } from '../utils/log.js';
 import type { ToolPolicy } from './toolPolicy.js';
 import type { CallToolRequestContext, ServerBackend, ClientVersion, ServerBackendContext, Tool, CallToolResult, CallToolRequest } from './server.js';
 import type { SharedClientSlot } from './sharedClientSlot.js';
@@ -38,8 +38,6 @@ export type SharedProxySelection = {
   providers: MCPProvider[];
 };
 
-const errorsDebug = debug('pw:mcp:errors');
-
 export class ProxyBackend implements ServerBackend {
   readonly dynamicToolList = true;
   private _mcpProviders: MCPProvider[];
@@ -51,7 +49,7 @@ export class ProxyBackend implements ServerBackend {
   private _relay = new ToolRelay(client => {
     if (this._ownsCurrentClient && this._currentClient === client)
       return this._backendContext?.notifyToolListChanged();
-  }, errorsDebug);
+  }, logUnhandledError);
 
   constructor(mcpProviders: MCPProvider[], sharedSelection?: SharedProxySelection, private readonly _toolPolicy: ToolPolicy = {}) {
     this._mcpProviders = mcpProviders;
@@ -88,16 +86,16 @@ export class ProxyBackend implements ServerBackend {
     this._relay.close();
     this._backendContext = undefined;
     if (this._ownsCurrentClient)
-      void this._currentClient?.close().catch(errorsDebug);
+      void this._currentClient?.close().catch(logUnhandledError);
     else if (this._currentClient)
       void this._sharedSelection?.slot.release(this._currentClient);
   }
 
-  private async _callContextSwitchTool(params: any): Promise<CallToolResult> {
+  private async _callContextSwitchTool(params: CallToolRequest['params']['arguments']): Promise<CallToolResult> {
     try {
-      const factory = this._mcpProviders.find(factory => factory.name === params.name);
+      const factory = this._mcpProviders.find(factory => factory.name === params?.name);
       if (!factory)
-        throw new Error('Unknown connection method: ' + params.name);
+        throw new Error('Unknown connection method: ' + params?.name);
 
       factory.validate?.();
       if (this._sharedSelection)
@@ -132,7 +130,7 @@ export class ProxyBackend implements ServerBackend {
     }
     if (previousShared)
       await slot.release(previousShared);
-    await previousOwned?.close().catch(errorsDebug);
+    await previousOwned?.close().catch(logUnhandledError);
   }
 
   private _defineContextSwitchTool(): Tool {
@@ -161,7 +159,7 @@ export class ProxyBackend implements ServerBackend {
     this._currentClient = client;
     this._ownsCurrentClient = true;
     if (notifyOnChange)
-      await this._backendContext?.notifyToolListChanged().catch(errorsDebug);
+      await this._backendContext?.notifyToolListChanged().catch(logUnhandledError);
   }
 
   private async _connectClient(factory: MCPProvider): Promise<Client> {

@@ -145,6 +145,18 @@ describe('VSCodeProxyBackend', () => {
     expect(callTool).toHaveBeenCalledTimes(1);
   });
 
+  it.each([{ lib: 0 }, { connectionString: 123, lib: 'playwright' }])('rejects mistyped browser_connect arguments %o without disconnecting', async args => {
+    const defaultTransportFactory = vi.fn();
+    const backend = new VSCodeProxyBackend(await resolveConfig({}), defaultTransportFactory);
+    const close = vi.fn(async () => undefined);
+    (backend as any)._currentClient = { close };
+
+    await expect(backend.callTool('browser_connect', args)).rejects.toThrow(/^Invalid input for tool "browser_connect":\n/);
+
+    expect(close).not.toHaveBeenCalled();
+    expect(defaultTransportFactory).not.toHaveBeenCalled();
+  });
+
   it('keeps session handles at the host across a browser_connect provider switch', async () => {
     // The switched VS Code provider is a separate server process whose
     // BrowserServerBackend builds its own registry — forwarding handle-routed

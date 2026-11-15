@@ -30,24 +30,22 @@ export function quote(text: string) {
   return escapeWithQuotes(text, '\'');
 }
 
-export function formatObject(value: any, indent = '  '): string {
+export function formatObject(value: unknown, indent = '  '): string {
   if (typeof value === 'string')
     return quote(value);
   if (Array.isArray(value))
     return `[${value.map(o => formatObject(o)).join(', ')}]`;
-  if (typeof value === 'object') {
-    const keys = Object.keys(value).filter(key => value[key] !== undefined).sort();
-    if (!keys.length)
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a < b ? -1 : 1);
+    if (!entries.length)
       return '{}';
-    const tokens: string[] = [];
-    for (const key of keys)
-      tokens.push(`${key}: ${formatObject(value[key])}`);
+    const tokens = entries.map(([key, item]) => `${key}: ${formatObject(item)}`);
     return `{\n${indent}${tokens.join(`,\n${indent}`)}\n}`;
   }
   return String(value);
 }
 
-export function formatObjectOrVoid(value: any, indent = '  '): string {
+export function formatObjectOrVoid(value: unknown, indent = '  '): string {
   const result = formatObject(value, indent);
   return result === '{}' ? '' : result;
 }

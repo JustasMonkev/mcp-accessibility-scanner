@@ -64,7 +64,6 @@ describe('Network Tools', () => {
 
     it('should exist', () => {
       expect(networkTool).toBeDefined();
-      expect(networkTool.schema.name).toBe('browser_network_requests');
     });
 
     it('should have correct schema', () => {

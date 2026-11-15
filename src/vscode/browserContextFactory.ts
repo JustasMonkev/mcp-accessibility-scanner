@@ -24,7 +24,6 @@ export const vscodeProfileConflictRemedy = 'Drop --storage-state and sign in in 
 
 export class VSCodeBrowserContextFactory implements BrowserContextFactory {
   name = 'vscode';
-  description = 'Connect to a browser running in the Playwright VS Code extension';
   readonly sharedContext = true;
   readonly appliesStorageState = true;
   readonly sessionsUnsupportedReason = 'the VS Code extension supplies the browser\'s existing context, which every session would share (same tabs, cookies and storage).';

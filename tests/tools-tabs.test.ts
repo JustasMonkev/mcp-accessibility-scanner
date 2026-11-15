@@ -70,7 +70,6 @@ describe('Tabs Tools', () => {
 
     it('should exist', () => {
       expect(tabsTool).toBeDefined();
-      expect(tabsTool.schema.name).toBe('browser_tabs');
     });
 
     it('should have correct schema', () => {
@@ -87,7 +86,11 @@ describe('Tabs Tools', () => {
 
       expect(mockContext.ensureTab).toHaveBeenCalled();
       const serialized = response.serialize();
-      expect(serialized.content[0].text).toContain('Open tabs');
+      expect(serialized.content[0].text).toContain([
+        '### Open tabs',
+        '- 0: (current) [Example Page] (https://example.com)',
+        '- 1: [Other Page] (https://other.com)',
+      ].join('\n'));
     });
 
     it('should create new tab', async () => {
@@ -140,7 +143,6 @@ describe('Tabs Tools', () => {
 
     it('should exist', () => {
       expect(navTimeoutTool).toBeDefined();
-      expect(navTimeoutTool.schema.name).toBe('browser_navigation_timeout');
     });
 
     it('should set navigation timeout for all tabs', async () => {
@@ -157,7 +159,6 @@ describe('Tabs Tools', () => {
 
     it('should exist', () => {
       expect(defaultTimeoutTool).toBeDefined();
-      expect(defaultTimeoutTool.schema.name).toBe('browser_default_timeout');
     });
 
     it('should set default timeout for all tabs', async () => {

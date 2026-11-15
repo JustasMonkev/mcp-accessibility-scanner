@@ -195,12 +195,14 @@ describe('mcp server error mapping', () => {
         serverClosed: vi.fn(),
       };
 
-      const { client } = await connectHeartbeatClient(backend, () => new Promise<object>(() => {}));
+      const pingHandler = vi.fn(() => new Promise<object>(() => {}));
+      const { client } = await connectHeartbeatClient(backend, pingHandler);
       try {
         await client.callTool({ name: 'some_tool', arguments: {} });
         await new Promise(resolve => setTimeout(resolve, 100));
         await client.callTool({ name: 'some_tool', arguments: {} });
 
+        expect(pingHandler).not.toHaveBeenCalled();
         expect(backend.callTool).toHaveBeenCalledTimes(2);
         expect(backend.serverClosed).not.toHaveBeenCalled();
       } finally {

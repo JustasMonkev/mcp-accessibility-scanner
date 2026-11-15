@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import net from 'node:net';
@@ -74,11 +75,11 @@ import { assertStorageStateDoesNotResetUserProfile, assertStorageStateSupported,
 import { ExtensionContextFactory } from '../src/extension/extensionContextFactory.js';
 import { VSCodeBrowserContextFactory } from '../src/vscode/browserContextFactory.js';
 import { resolveConfig } from '../src/config.js';
-import { createHash } from '../src/utils/guid.js';
 
 // The stable persistent profile is discriminated per workspace by a hash of
 // the server's own working directory (see _createUserDataDir).
-const stableProfileName = () => `mcp-chrome-${createHash(process.cwd())}`;
+const workspaceHash = (cwd: string) => crypto.createHash('sha256').update(cwd).digest('hex').slice(0, 7);
+const stableProfileName = () => `mcp-chrome-${workspaceHash(process.cwd())}`;
 
 function createMockBrowserContext() {
   return {
@@ -897,7 +898,7 @@ describe('browserContextFactory', () => {
       await first.close();
       const second = await contextFactory(await resolveConfig({})).createContext(clientInfo, signal, undefined);
       await second.close();
-      expect(launchedDir(0)).toBe(path.join(profilesDir, `mcp-chrome-${createHash(process.cwd())}`));
+      expect(launchedDir(0)).toBe(path.join(profilesDir, stableProfileName()));
       expect(launchedDir(1)).toBe(launchedDir(0));
 
       // A server launched for another workspace (different cwd) gets its own
@@ -909,7 +910,7 @@ describe('browserContextFactory', () => {
       } finally {
         cwdSpy.mockRestore();
       }
-      expect(launchedDir(2)).toBe(path.join(profilesDir, `mcp-chrome-${createHash(path.join(os.tmpdir(), 'some-other-workspace'))}`));
+      expect(launchedDir(2)).toBe(path.join(profilesDir, `mcp-chrome-${workspaceHash(path.join(os.tmpdir(), 'some-other-workspace'))}`));
       expect(launchedDir(2)).not.toBe(launchedDir(0));
     } finally {
       delete process.env.PWMCP_PROFILES_DIR_FOR_TEST;

@@ -56,7 +56,6 @@ describe('Navigate Tools', () => {
 
     it('should exist', () => {
       expect(navigateTool).toBeDefined();
-      expect(navigateTool.schema.name).toBe('browser_navigate');
     });
 
     it('should have correct schema', () => {
@@ -92,7 +91,6 @@ describe('Navigate Tools', () => {
 
     it('should exist', () => {
       expect(backTool).toBeDefined();
-      expect(backTool.schema.name).toBe('browser_navigate_back');
     });
 
     it('should have correct schema', () => {

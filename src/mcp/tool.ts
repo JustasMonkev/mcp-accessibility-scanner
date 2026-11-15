@@ -45,8 +45,3 @@ export function toMcpTool(tool: ToolSchema<z.Schema>): mcpServer.Tool {
     annotations,
   };
 }
-
-/** @public */
-export function defineToolSchema<Input extends z.Schema>(tool: ToolSchema<Input>): ToolSchema<Input> {
-  return tool;
-}

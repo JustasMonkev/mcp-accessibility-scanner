@@ -60,7 +60,6 @@ describe('Console Tools', () => {
 
     it('should exist', () => {
       expect(consoleTool).toBeDefined();
-      expect(consoleTool.schema.name).toBe('browser_console_messages');
     });
 
     it('should have correct schema', () => {

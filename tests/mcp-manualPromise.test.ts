@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { ManualPromise, LongStandingScope } from '../src/mcp/manualPromise.js';
+import { ManualPromise } from '../src/mcp/manualPromise.js';
 
 describe('mcp/manualPromise', () => {
   describe('ManualPromise', () => {
@@ -31,28 +31,6 @@ describe('mcp/manualPromise', () => {
       p.reject(new Error('boom'));
       await expect(p).rejects.toThrow('boom');
       expect(p.isDone()).toBe(true);
-    });
-  });
-
-  describe('LongStandingScope', () => {
-    it('race resolves with underlying promise', async () => {
-      const scope = new LongStandingScope();
-      const result = await scope.race(Promise.resolve('ok'));
-      expect(result).toBe('ok');
-    });
-
-    it('race rejects when scope is rejected', async () => {
-      const scope = new LongStandingScope();
-      scope.reject(new Error('terminated'));
-      await expect(scope.race(new Promise(() => {}))).rejects.toThrow('terminated');
-    });
-
-    it('safeRace returns default value on close', async () => {
-      const scope = new LongStandingScope();
-      const pending = new Promise<number>(() => {});
-      const raced = scope.safeRace(pending, 7);
-      scope.close(new Error('closed'));
-      await expect(raced).resolves.toBe(7);
     });
   });
 });
