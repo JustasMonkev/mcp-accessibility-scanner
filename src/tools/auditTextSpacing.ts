@@ -47,7 +47,7 @@ type FrameOutcome = { frame: Frame; frameUrl: string | null; measurement: TextSp
 const mainFrameTimeoutMs = 15_000;
 const childFrameTimeoutMs = 5_000;
 const cleanupTimeoutMs = 2_000;
-const maxRectsPerElement = 40;
+const maxOverlapLines = 200;
 const maxBlockedSamples = 20;
 
 function frameLabel(frame: Frame): string | null {
@@ -135,7 +135,7 @@ async function measureFrame(frame: Frame, maxElements: number, layerName: string
   const timeoutMs = frame.parentFrame() === null ? mainFrameTimeoutMs : childFrameTimeoutMs;
   try {
     const measurement = await rejectAfterTimeout(
-        frame.evaluate(measureTextSpacing, { layerName, maxElements, maxRectsPerElement, overrides: textSpacingOverrides }),
+        frame.evaluate(measureTextSpacing, { layerName, maxElements, maxOverlapLines, overrides: textSpacingOverrides }),
         timeoutMs,
         `timed out after ${timeoutMs}ms`,
     );
@@ -207,6 +207,7 @@ const auditTextSpacing = defineTabTool({
       measured,
       truncated: outcomes.reduce((sum, outcome) => sum + (outcome.measurement?.truncated ?? 0), 0),
       stale: outcomes.reduce((sum, outcome) => sum + (outcome.measurement?.stale ?? 0), 0),
+      overlapLinesTruncated: outcomes.reduce((sum, outcome) => sum + (outcome.measurement?.overlapLinesTruncated ?? 0), 0),
     };
 
     let screenshotPath: string | null = null;
@@ -214,14 +215,23 @@ const auditTextSpacing = defineTabTool({
     if (params.screenshot) {
       const styled = outcomes.filter(outcome => outcome.measurement !== null).map(outcome => outcome.frame);
       try {
-        const applied = await Promise.all(styled.map(frame => frame.evaluate(applyTextSpacing, { layerName, overrides: textSpacingOverrides }).then(() => true, () => false)));
+        // Bounded like measurement, so a frame that stops answering cannot hold the cleanup below.
+        const applied = await Promise.all(styled.map(frame => rejectAfterTimeout(
+            frame.evaluate(applyTextSpacing, { layerName, overrides: textSpacingOverrides }),
+            frame.parentFrame() === null ? mainFrameTimeoutMs : childFrameTimeoutMs,
+            'timed out',
+        ).then(() => true, () => false)));
         const unstyled = styled.filter((_, index) => !applied[index]).map(frame => frameLabel(frame) ?? 'main frame');
         if (unstyled.length) {
           // Never hand out an unstyled page as "overrides applied".
           screenshotError = `the overrides could not be re-applied to ${unstyled.join(', ')}`;
         } else {
-          screenshotPath = await tab.context.outputFile(`audit-text-spacing-${safeIsoTimestampForFileName()}.png`);
-          await tab.page.screenshot({ path: screenshotPath, fullPage: true });
+          const path = await tab.context.outputFile(`audit-text-spacing-${safeIsoTimestampForFileName()}.png`);
+          // A failed capture must not throw away the completed measurements: report it and keep going.
+          await tab.page.screenshot({ path, fullPage: true }).then(
+              () => { screenshotPath = path; },
+              error => { screenshotError = `the screenshot could not be captured (${errorMessage(error)})`; },
+          );
         }
       } finally {
         for (const frame of styled) {
@@ -273,6 +283,7 @@ const auditTextSpacing = defineTabTool({
         elementsMeasured: totals.measured,
         elementsTruncated: totals.truncated,
         elementsStale: totals.stale,
+        elementsOverlapLinesTruncated: totals.overlapLinesTruncated,
         framesUnmeasured: unmeasuredFrames.length,
         overridesNotApplied: blocked.length,
         totalFindings,
@@ -287,9 +298,10 @@ const auditTextSpacing = defineTabTool({
     response.addResult([
       `Text spacing overrides (WCAG 1.4.12): line-height ${textSpacingOverrides.lineHeight}, letter-spacing ${textSpacingOverrides.letterSpacingEm}em, word-spacing ${textSpacingOverrides.wordSpacingEm}em, paragraph spacing ${textSpacingOverrides.paragraphSpacingEm}em`,
       `Text elements measured: ${totals.measured}${totals.truncated ? ` (truncated: ${totals.truncated} more visible text elements were not measured; raise maxElements)` : ''}`,
+      ...(totals.overlapLinesTruncated ? [`WARNING: ${totals.overlapLinesTruncated} element(s) have more than ${maxOverlapLines} text lines; overlap was checked on their first ${maxOverlapLines} lines only (clipping was checked on every line).`] : []),
       ...(totals.stale ? [`WARNING: ${totals.stale} element(s) were removed from the page while it was being measured and were not evaluated; re-run once the page is stable.`] : []),
       ...(unmeasuredFrames.length ? [`WARNING: ${unmeasuredFrames.length} frame(s) could not be measured and contribute no findings:`, ...unmeasuredFrames.map(entry => `- ${entry.frameUrl}: ${entry.error}`)] : []),
-      ...(blocked.length ? [`WARNING: the overrides did not take effect on ${blocked.length} element(s) (the page's own styles, e.g. inline !important, won the cascade); their results do not reflect the full text spacing. A user stylesheet would be blocked the same way, which itself prevents users from adjusting spacing:`, ...blocked.slice(0, maxBlockedSamples).map(entry => `- ${entry.selector}${entry.frameUrl ? ` [frame ${entry.frameUrl}]` : ''}: ${entry.properties.join(', ')}${entry.inlineImportant.length ? ` (inline !important: ${entry.inlineImportant.join(', ')})` : ''}`), ...(blocked.length > maxBlockedSamples ? [`- ... ${blocked.length - maxBlockedSamples} more in the JSON report`] : [])] : []),
+      ...(blocked.length ? [`WARNING: the overrides did not take effect on ${blocked.length} element(s) (the page's own styles, e.g. inline !important, won the cascade over this tool's author-level stylesheet), so the audit did not cover the full text spacing there. A user stylesheet's !important rules outrank author !important, so this is a coverage gap, not proof that users cannot adjust spacing:`, ...blocked.slice(0, maxBlockedSamples).map(entry => `- ${entry.selector}${entry.frameUrl ? ` [frame ${entry.frameUrl}]` : ''}: ${entry.properties.join(', ')}${entry.inlineImportant.length ? ` (inline !important: ${entry.inlineImportant.join(', ')})` : ''}`), ...(blocked.length > maxBlockedSamples ? [`- ... ${blocked.length - maxBlockedSamples} more in the JSON report`] : [])] : []),
       ...(screenshotError ? [`WARNING: no screenshot was saved: ${screenshotError}.`] : []),
       ...(cleanupFailures.length ? [`WARNING: the spacing overrides could not be removed from ${cleanupFailures.join(', ')}; reload the page before further testing.`] : []),
       `Findings: ${totalFindings}`,

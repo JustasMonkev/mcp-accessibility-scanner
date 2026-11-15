@@ -68,6 +68,7 @@ export type TextSpacingFrameMeasurement = {
   measured: number;
   truncated: number;
   stale: number;
+  overlapLinesTruncated: number;
   clipped: TextSpacingClip[];
   overlaps: TextSpacingOverlap[];
   blocked: TextSpacingBlocked[];
@@ -76,13 +77,14 @@ export type TextSpacingFrameMeasurement = {
 export type TextSpacingMeasureArgs = {
   layerName: string;
   maxElements: number;
-  maxRectsPerElement: number;
+  /** Text lines per element compared for overlap; clipping always uses every line. */
+  maxOverlapLines: number;
   overrides: typeof textSpacingOverrides;
 };
 
 /** Runs in the page: measure, apply the overrides, re-measure, and always remove them again. */
 export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<TextSpacingFrameMeasurement> {
-  const { layerName, maxElements, maxRectsPerElement, overrides } = args;
+  const { layerName, maxElements, maxOverlapLines, overrides } = args;
   const XHTML = 'http://www.w3.org/1999/xhtml';
   const skippedTags = new Set([
     'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA', 'SELECT', 'OPTION', 'OPTGROUP', 'DATALIST',
@@ -95,7 +97,16 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
   // --- Collect visible text elements in document order, through open shadow roots. ---
   const roots: (Document | ShadowRoot)[] = [document];
   const candidates: HTMLElement[] = [];
+  const paragraphs: HTMLElement[] = [];
   let candidateCount = 0;
+  const composedParent = (element: Element): Element | null => {
+    if (element.assignedSlot)
+      return element.assignedSlot;
+    if (element.parentElement)
+      return element.parentElement;
+    const parent = element.parentNode;
+    return parent instanceof ShadowRoot ? parent.host : null;
+  };
   const hasOwnText = (element: Element) => {
     for (const child of element.childNodes) {
       if (child.nodeType === Node.TEXT_NODE && /\S/.test(child.nodeValue ?? ''))
@@ -103,11 +114,20 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     }
     return false;
   };
-  const isVisible = (element: HTMLElement) => {
-    if (typeof element.checkVisibility === 'function')
-      return element.checkVisibility({ opacityProperty: true, visibilityProperty: true, contentVisibilityAuto: true });
+  // `checkVisibilityProperty` is false for ancestors of a display: contents element: its own
+  // (inherited) visibility decides whether its text paints, not the visibility of the box it renders in.
+  const isVisible = (element: Element, checkVisibilityProperty = true): boolean => {
     const style = getComputedStyle(element);
-    return style.visibility !== 'hidden' && style.display !== 'none';
+    if (style.display === 'contents') {
+      // No box of its own, so checkVisibility() is false, but its text renders in the parent's box.
+      if (style.visibility !== 'visible')
+        return false;
+      const parent = composedParent(element);
+      return !parent || isVisible(parent, false);
+    }
+    if (typeof element.checkVisibility === 'function')
+      return element.checkVisibility({ opacityProperty: true, visibilityProperty: checkVisibilityProperty, contentVisibilityAuto: true });
+    return (!checkVisibilityProperty || style.visibility !== 'hidden') && style.display !== 'none';
   };
   const collect = (root: Document | ShadowRoot) => {
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
@@ -120,6 +140,8 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     });
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       const element = node as HTMLElement;
+      if (element.localName === 'p' && isVisible(element))
+        paragraphs.push(element);
       if (hasOwnText(element) && isVisible(element)) {
         candidateCount++;
         if (candidates.length < maxElements)
@@ -134,14 +156,6 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
   collect(document);
 
   // --- Geometry helpers. ---
-  const composedParent = (element: Element): Element | null => {
-    if (element.assignedSlot)
-      return element.assignedSlot;
-    if (element.parentElement)
-      return element.parentElement;
-    const parent = element.parentNode;
-    return parent instanceof ShadowRoot ? parent.host : null;
-  };
   const htmlOverflowVisible = () => {
     const style = getComputedStyle(document.documentElement);
     return style.overflowX === 'visible' && style.overflowY === 'visible';
@@ -161,7 +175,8 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
       const paintContained = /\b(paint|strict|content)\b/.test(style.contain);
       const clipX = paintContained || clips(style.overflowX);
       const clipY = paintContained || clips(style.overflowY);
-      if (clipX || clipY) {
+      // A display: contents element has no box, so its overflow clips nothing.
+      if ((clipX || clipY) && style.display !== 'contents') {
         const rect = current.getBoundingClientRect();
         const html = current as HTMLElement;
         const scaleX = html.offsetWidth ? rect.width / html.offsetWidth : 1;
@@ -179,12 +194,29 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     regionCache.set(current, region);
     return region;
   };
+  // Ancestors that become the containing block of fixed (and therefore also absolute) descendants.
+  const containsFixed = (style: CSSStyleDeclaration) => style.display !== 'contents' && (
+    style.transform !== 'none' || style.translate !== 'none' || style.rotate !== 'none' || style.scale !== 'none'
+    || style.perspective !== 'none' || style.filter !== 'none' || (style.backdropFilter ?? 'none') !== 'none'
+    || /\b(layout|paint|strict|content)\b/.test(style.contain) || /\b(transform|translate|rotate|scale|perspective|filter)\b/.test(style.willChange));
+  const containsAbsolute = (style: CSSStyleDeclaration) => (style.display !== 'contents' && style.position !== 'static') || containsFixed(style);
+  // Overflow clips a box only when the box's containing-block chain passes through it: an
+  // absolutely positioned box escapes overflow: hidden ancestors below its positioned containing block.
   const clippingRegions = (element: HTMLElement): Region[] => {
     const regions: Region[] = [];
-    for (let current: Element | null = element; current; current = composedParent(current)) {
+    for (let current: Element | null = element; current;) {
       const region = regionOf(current);
       if (region)
         regions.push(region);
+      const style = getComputedStyle(current);
+      const position = style.display === 'contents' ? 'static' : style.position;
+      let next = composedParent(current);
+      if (position === 'absolute' || position === 'fixed') {
+        const contains = position === 'absolute' ? containsAbsolute : containsFixed;
+        while (next && !contains(getComputedStyle(next)))
+          next = composedParent(next);
+      }
+      current = next;
     }
     return regions;
   };
@@ -202,8 +234,6 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
       for (const rect of range.getClientRects()) {
         if (rect.width > 0.5 && rect.height > 0.5)
           boxes.push({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
-        if (boxes.length >= maxRectsPerElement)
-          return boxes;
       }
     }
     return boxes;
@@ -284,14 +314,14 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
       if (child.nodeType === Node.TEXT_NODE)
         text += child.nodeValue ?? '';
     }
-    text = text.replace(/\s+/g, ' ').trim();
+    text = text.replace(/\s+/g, ' ').trim() || (element.textContent ?? '').replace(/\s+/g, ' ').trim();
     return text.length > 80 ? `${text.slice(0, 77)}...` : text;
   };
 
   // --- Overlap detection between different elements' visible text lines. ---
   const overlapPairs = (phases: (Phase | null)[]): Map<string, Box> => {
     const entries = phases
-        .map((phase, index) => ({ index, lines: phase?.visibleLines ?? [] }))
+        .map((phase, index) => ({ index, lines: (phase?.visibleLines ?? []).slice(0, maxOverlapLines) }))
         .filter(entry => entry.lines.length)
         .map(entry => ({ ...entry, top: Math.min(...entry.lines.map(line => line.top)), bottom: Math.max(...entry.lines.map(line => line.bottom)) }))
         .sort((a, b) => a.top - b.top);
@@ -361,6 +391,18 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
 
     // --- Verify the overrides actually took effect. ---
     const blocked: TextSpacingBlocked[] = [];
+    const blockedByElement = new Map<HTMLElement, TextSpacingBlocked>();
+    const recordBlocked = (element: HTMLElement, property: string) => {
+      let entry = blockedByElement.get(element);
+      if (!entry) {
+        entry = { selector: selectorFor(element), text: textSample(element), properties: [], inlineImportant: [] };
+        blockedByElement.set(element, entry);
+        blocked.push(entry);
+      }
+      entry.properties.push(property);
+      if (element.style.getPropertyPriority(property) === 'important')
+        entry.inlineImportant.push(property);
+    };
     candidates.forEach((element, index) => {
       if (!after[index])
         return;
@@ -376,17 +418,19 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
         failed.push('word-spacing');
       if (style.lineHeight === 'normal' || !(parseFloat(style.lineHeight) >= fontSize * overrides.lineHeight - 0.5))
         failed.push('line-height');
-      if (element.localName === 'p' && !(parseFloat(style.marginBottom) >= fontSize * overrides.paragraphSpacingEm - 0.5))
-        failed.push('margin-bottom');
-      if (failed.length) {
-        blocked.push({
-          selector: selectorFor(element),
-          text: textSample(element),
-          properties: failed,
-          inlineImportant: failed.filter(property => element.style.getPropertyPriority(property) === 'important'),
-        });
-      }
+      for (const property of failed)
+        recordBlocked(element, property);
     });
+    // Paragraph spacing is verified on every rendered paragraph, including ones whose
+    // text sits only in child elements (<p><span>...</span></p>).
+    for (const paragraph of paragraphs) {
+      if (!paragraph.isConnected)
+        continue;
+      const style = getComputedStyle(paragraph);
+      const fontSize = parseFloat(style.fontSize);
+      if (fontSize > 0 && !(parseFloat(style.marginBottom) >= fontSize * overrides.paragraphSpacingEm - 0.5))
+        recordBlocked(paragraph, 'margin-bottom');
+    }
 
     // --- Newly clipped text. ---
     const clipped: TextSpacingClip[] = [];
@@ -471,6 +515,7 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
       measured: candidates.length - stale,
       truncated: candidateCount - candidates.length,
       stale,
+      overlapLinesTruncated: after.filter(phase => phase && phase.visibleLines.length > maxOverlapLines).length,
       clipped,
       overlaps,
       blocked,

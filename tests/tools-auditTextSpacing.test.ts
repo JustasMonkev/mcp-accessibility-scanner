@@ -6,10 +6,12 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
-import { buildTextSpacingFindings } from '../src/tools/auditTextSpacing.js';
+import auditTextSpacingTools, { buildTextSpacingFindings } from '../src/tools/auditTextSpacing.js';
+import { Response } from '../src/response.js';
 import {
+  applyTextSpacing,
   measureTextSpacing,
   removeTextSpacing,
   textSpacingLayerPrefix,
@@ -19,7 +21,7 @@ import {
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { resolveConfig } from '../src/config.js';
 
-const emptyMeasurement: TextSpacingFrameMeasurement = { candidates: 1, measured: 1, truncated: 0, stale: 0, clipped: [], overlaps: [], blocked: [] };
+const emptyMeasurement: TextSpacingFrameMeasurement = { candidates: 1, measured: 1, truncated: 0, stale: 0, overlapLinesTruncated: 0, clipped: [], overlaps: [], blocked: [] };
 
 describe('buildTextSpacingFindings', () => {
   it('names the clipping box and tailors the fix to how it clips', () => {
@@ -59,6 +61,77 @@ describe('buildTextSpacingFindings', () => {
   });
 });
 
+describe('audit_text_spacing screenshot failure handling', () => {
+  const tool = auditTextSpacingTools.find(entry => entry.schema.name === 'audit_text_spacing')!;
+  const measurement: TextSpacingFrameMeasurement = { ...emptyMeasurement, candidates: 2, measured: 2 };
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function harness(options: { apply: 'ok' | 'hang'; screenshot: 'ok' | 'reject' }) {
+    const removals = { count: 0 };
+    const frame: any = {
+      parentFrame: () => null,
+      url: () => 'https://example.com/',
+      isDetached: () => false,
+      evaluate: vi.fn(async (fn: unknown) => {
+        if (fn === measureTextSpacing)
+          return measurement;
+        if (fn === applyTextSpacing)
+          return options.apply === 'hang' ? new Promise(() => undefined) : 1;
+        if (fn === removeTextSpacing) {
+          removals.count++;
+          return 1;
+        }
+        throw new Error('unexpected evaluate');
+      }),
+    };
+    const page = {
+      frames: () => [frame],
+      mainFrame: () => frame,
+      url: () => 'https://example.com/',
+      screenshot: vi.fn(async () => {
+        if (options.screenshot === 'reject')
+          throw new Error('Protocol error: capture failed');
+      }),
+    };
+    const tab: any = { page, modalStates: () => [], context: { outputFile: async (name: string) => `/tmp/${name}` } };
+    const context: any = { currentTabOrDie: () => tab, config: {} };
+    const written: string[] = [];
+    vi.spyOn(fs.promises, 'writeFile').mockImplementation(async (file: any) => {
+      written.push(String(file));
+    });
+    return { context, page, removals, written };
+  }
+
+  it('keeps the JSON report and reports the error when the screenshot capture fails', async () => {
+    const { context, removals, written } = harness({ apply: 'ok', screenshot: 'reject' });
+    const response = new Response(context, 'audit_text_spacing', {});
+    await tool.handle(context, tool.schema.inputSchema.parse({ screenshot: true }), response);
+    const text = response.result();
+    expect(text).toContain('WARNING: no screenshot was saved: the screenshot could not be captured (Protocol error: capture failed).');
+    expect(text).not.toContain('Screenshot (overrides applied)');
+    expect(written.some(file => file.includes('audit-text-spacing-') && file.endsWith('.json'))).toBe(true);
+    expect((response.structuredContent() as any).screenshot).toBeNull();
+    expect(removals.count).toBe(1);
+  });
+
+  it('bounds re-applying the overrides so a stalled frame cannot block cleanup or the report', async () => {
+    vi.useFakeTimers();
+    const { context, page, removals, written } = harness({ apply: 'hang', screenshot: 'ok' });
+    const response = new Response(context, 'audit_text_spacing', {});
+    const run = tool.handle(context, tool.schema.inputSchema.parse({ screenshot: true }), response);
+    await vi.advanceTimersByTimeAsync(16_000);
+    await run;
+    expect(response.result()).toContain('WARNING: no screenshot was saved: the overrides could not be re-applied to main frame.');
+    expect(page.screenshot).not.toHaveBeenCalled();
+    expect(removals.count).toBe(1);
+    expect(written.some(file => file.endsWith('.json'))).toBe(true);
+  });
+});
+
 const hasBundledChromium = fs.existsSync(chromium.executablePath());
 
 describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => {
@@ -78,7 +151,7 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
   async function measure(html: string, maxElements = 500) {
     page = await browser.newPage({ viewport: { width: 800, height: 600 } });
     await page.setContent(`<!doctype html><html><body style="font: 16px/1.2 sans-serif; margin: 8px">${html}</body></html>`);
-    return page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements, maxRectsPerElement: 40, overrides: textSpacingOverrides });
+    return page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements, maxOverlapLines: 200, overrides: textSpacingOverrides });
   }
 
   it('reports nothing for content that reflows with the spacing', async () => {
@@ -148,7 +221,7 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
     await page.evaluate(() => {
       document.getElementById('host')!.attachShadow({ mode: 'open' }).innerHTML = '<div class="box" style="height: 18px; width: 300px; overflow: hidden"><span>Shadow text fits on one line</span></div>';
     });
-    const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxRectsPerElement: 40, overrides: textSpacingOverrides });
+    const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxOverlapLines: 200, overrides: textSpacingOverrides });
     expect(result.clipped).toEqual([expect.objectContaining({
       selector: '#host >>> div > span',
       clippedBy: expect.objectContaining({ selector: '#host >>> div' }),
@@ -171,10 +244,56 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
       body: '<!doctype html><body><div id="card" style="height: 40px; width: 200px; overflow: hidden"><p style="margin: 0">A card with two lines of text that fits now.</p></div></body>',
     }));
     await page.goto('http://csp.local/');
-    const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxRectsPerElement: 40, overrides: textSpacingOverrides });
+    const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxOverlapLines: 200, overrides: textSpacingOverrides });
     expect(result.blocked).toEqual([]);
     // The inline style attribute above is itself blocked by the CSP, so the card has no height limit.
     expect(result.measured).toBe(1);
+  });
+
+  it('checks every line for clipping, even past the overlap line limit', async () => {
+    const lines = Array.from({ length: 60 }, (_, index) => `Line ${index + 1}`).join('\n');
+    const result = await measure(`<div style="height: 1000px; overflow: hidden"><div id="long" style="white-space: pre; font: 16px/1 sans-serif">${lines}</div></div>`);
+    // With the old 40-line cap the first 40 spaced lines (960px) still fit, so this went unreported.
+    expect(result.clipped).toEqual([expect.objectContaining({ selector: '#long' })]);
+    expect(result.clipped[0].hiddenPercentBefore).toBeLessThan(1);
+    expect(result.clipped[0].hiddenPercentAfter).toBeGreaterThan(25);
+    expect(result.overlapLinesTruncated).toBe(0);
+  });
+
+  it('counts elements whose overlap check was limited to the first lines', async () => {
+    const lines = Array.from({ length: 250 }, (_, index) => `Line ${index + 1}`).join('\n');
+    const result = await measure(`<div style="white-space: pre; font: 8px/1 sans-serif">${lines}</div><p>Short</p>`);
+    expect(result.overlapLinesTruncated).toBe(1);
+  });
+
+  it('verifies paragraph spacing on paragraphs whose text sits only in child elements', async () => {
+    const result = await measure(`<p id="nested" style="margin-bottom: 0 !important"><span>First paragraph</span></p><p><span>Second</span></p>`);
+    expect(result.blocked).toEqual([{ selector: '#nested', text: 'First paragraph', properties: ['margin-bottom'], inlineImportant: ['margin-bottom'] }]);
+  });
+
+  it('measures text owned by display: contents elements', async () => {
+    const result = await measure(`<div id="box" style="width: 200px; height: 20px; overflow: hidden"><span id="contents" style="display: contents">A label that wraps onto a second line once spaced</span></div>`);
+    expect(result.measured).toBe(1);
+    expect(result.clipped).toEqual([expect.objectContaining({ selector: '#contents', clippedBy: expect.objectContaining({ selector: '#box' }) })]);
+    // A hidden display: contents element still contributes nothing.
+    const hidden = await measure(`<span style="display: contents; visibility: hidden">Hidden</span><p>Visible</p>`);
+    expect(hidden.measured).toBe(1);
+  });
+
+  it('ignores overflow: hidden ancestors an absolutely positioned label escapes', async () => {
+    const escaped = await measure(`
+      <div style="position: relative; width: 600px; height: 60px">
+        <div style="width: 130px; height: 20px; overflow: hidden">
+          <span id="label" style="position: absolute; left: 0; top: 0; white-space: nowrap">Absolutely positioned</span>
+        </div>
+      </div>`);
+    expect(escaped.clipped).toEqual([]);
+    // Control: when the overflow: hidden box is the containing block, it does clip.
+    const contained = await measure(`
+      <div id="wrap" style="position: relative; width: 175px; height: 20px; overflow: hidden">
+        <span id="label" style="position: absolute; left: 0; top: 0; white-space: nowrap">Absolutely positioned</span>
+      </div>`);
+    expect(contained.clipped).toEqual([expect.objectContaining({ selector: '#label', clippedBy: expect.objectContaining({ selector: '#wrap' }) })]);
   });
 
   it('leaves the page exactly as it was', async () => {
