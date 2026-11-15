@@ -91,7 +91,9 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     'IFRAME', 'FRAME', 'OBJECT', 'EMBED', 'CANVAS', 'VIDEO', 'AUDIO', 'HEAD', 'TITLE',
   ]);
   type Box = { left: number; top: number; right: number; bottom: number };
-  type Region = { element: Element; box: Box; clipX: boolean; clipY: boolean };
+  // loss*: overflow hidden/clip loses content on that axis; paint*: any non-visible overflow
+  // (including scrollable auto/scroll) bounds what is painted, which is what can overlap.
+  type Region = { element: Element; box: Box; lossX: boolean; lossY: boolean; paintX: boolean; paintY: boolean };
   type Phase = { lines: Box[]; visibleLines: Box[]; area: number; hidden: number; regions: Region[] };
 
   // --- Collect visible text elements in document order, through open shadow roots. ---
@@ -161,6 +163,7 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     return style.overflowX === 'visible' && style.overflowY === 'visible';
   };
   const clips = (value: string) => value === 'hidden' || value === 'clip';
+  const scrolls = (value: string) => value === 'auto' || value === 'scroll';
   // Reset per phase: the overrides change both computed styles and geometry.
   let regionCache = new Map<Element, Region | null>();
   let bodyPropagates = htmlOverflowVisible();
@@ -173,10 +176,12 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     if (current !== document.documentElement && !(current === document.body && bodyPropagates)) {
       const style = getComputedStyle(current);
       const paintContained = /\b(paint|strict|content)\b/.test(style.contain);
-      const clipX = paintContained || clips(style.overflowX);
-      const clipY = paintContained || clips(style.overflowY);
+      const lossX = paintContained || clips(style.overflowX);
+      const lossY = paintContained || clips(style.overflowY);
+      const paintX = lossX || scrolls(style.overflowX);
+      const paintY = lossY || scrolls(style.overflowY);
       // A display: contents element has no box, so its overflow clips nothing.
-      if ((clipX || clipY) && style.display !== 'contents') {
+      if ((paintX || paintY) && style.display !== 'contents') {
         const rect = current.getBoundingClientRect();
         const html = current as HTMLElement;
         const scaleX = html.offsetWidth ? rect.width / html.offsetWidth : 1;
@@ -186,8 +191,10 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
         region = {
           element: current,
           box: { left, top, right: left + current.clientWidth * scaleX, bottom: top + current.clientHeight * scaleY },
-          clipX,
-          clipY,
+          lossX,
+          lossY,
+          paintX,
+          paintY,
         };
       }
     }
@@ -239,14 +246,15 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     return boxes;
   };
   const area = (box: Box) => Math.max(0, box.right - box.left) * Math.max(0, box.bottom - box.top);
-  const clipTo = (box: Box, regions: Region[]): Box => {
+  // mode 'loss': content the user cannot reach (hidden/clip); mode 'paint': content actually painted.
+  const clipTo = (box: Box, regions: Region[], mode: 'loss' | 'paint' = 'loss'): Box => {
     let { left, top, right, bottom } = box;
     for (const region of regions) {
-      if (region.clipX) {
+      if (mode === 'loss' ? region.lossX : region.paintX) {
         left = Math.max(left, region.box.left);
         right = Math.min(right, region.box.right);
       }
-      if (region.clipY) {
+      if (mode === 'loss' ? region.lossY : region.paintY) {
         top = Math.max(top, region.box.top);
         bottom = Math.min(bottom, region.box.bottom);
       }
@@ -261,10 +269,12 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     const visibleLines: Box[] = [];
     for (const line of lines) {
       total += area(line);
-      const shown = clipTo(line, regions);
-      visible += area(shown);
-      if (area(shown) > 0)
-        visibleLines.push(shown);
+      visible += area(clipTo(line, regions, 'loss'));
+      // Overlap uses painted geometry: lines scrolled out of a scrollport are reachable, not lost,
+      // but they are not painted over the content outside the scroll container either.
+      const painted = clipTo(line, regions, 'paint');
+      if (area(painted) > 0)
+        visibleLines.push(painted);
     }
     return { lines, visibleLines, area: total, hidden: Math.max(0, total - visible), regions };
   };

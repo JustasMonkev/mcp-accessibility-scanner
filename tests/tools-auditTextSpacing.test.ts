@@ -296,6 +296,19 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
     expect(contained.clipped).toEqual([expect.objectContaining({ selector: '#label', clippedBy: expect.objectContaining({ selector: '#wrap' }) })]);
   });
 
+  it('does not report lines scrolled out of a scroll container as lost or overlapping', async () => {
+    const result = await measure(`
+      <div id="scroller" style="width: 300px; height: 60px; overflow: auto"><p style="margin: 0">First line of text<br>Second line of text<br>Third line of text</p></div>
+      <span id="after" style="display: block; margin-top: -2px">Label right below the scroll box</span>`);
+    expect(result.clipped).toEqual([]);
+    expect(result.overlaps).toEqual([]);
+    // Control: the same box with overflow: visible spills over the label.
+    const spilled = await measure(`
+      <div style="width: 300px; height: 60px"><p id="spill" style="margin: 0">First line of text<br>Second line of text<br>Third line of text</p></div>
+      <span id="after" style="display: block; margin-top: -2px">Label right below the box</span>`);
+    expect(spilled.overlaps).toEqual([expect.objectContaining({ selector: '#spill', otherSelector: '#after' })]);
+  });
+
   it('leaves the page exactly as it was', async () => {
     await measure('<p id="p">Some text</p>');
     const state = await page.evaluate(() => ({
