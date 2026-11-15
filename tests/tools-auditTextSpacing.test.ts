@@ -309,6 +309,36 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
     expect(spilled.overlaps).toEqual([expect.objectContaining({ selector: '#spill', otherSelector: '#after' })]);
   });
 
+  it('measures a visible display: contents child of a hidden display: contents parent', async () => {
+    const result = await measure(`<div id="box" style="width: 200px; height: 20px; overflow: hidden"><span style="display: contents; visibility: hidden"><span id="shown" style="display: contents; visibility: visible">A label that wraps onto a second line once spaced</span></span></div>`);
+    expect(result.measured).toBe(1);
+    expect(result.clipped).toEqual([expect.objectContaining({ selector: '#shown', clippedBy: expect.objectContaining({ selector: '#box' }) })]);
+  });
+
+  it('treats content-visibility: auto as a clipping containing block', async () => {
+    page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    await page.setContent(`<!doctype html><html><body style="font: 16px/1.2 sans-serif; margin: 8px">
+      <div id="wrap" style="content-visibility: auto; contain-intrinsic-size: 175px 20px; width: 175px; height: 20px">
+        <span id="label" style="position: absolute; left: 0; top: 0; white-space: nowrap">Absolutely positioned</span>
+      </div></body></html>`);
+    // Whether a content-visibility: auto box is on screen is decided at the next rendering update;
+    // until then its contents are skipped. A loaded page is past that point.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxOverlapLines: 200, overrides: textSpacingOverrides });
+    expect(result.clipped).toEqual([expect.objectContaining({ selector: '#label', clippedBy: expect.objectContaining({ selector: '#wrap' }) })]);
+  });
+
+  it('counts overlap truncation when only the baseline exceeds the line limit', async () => {
+    const lines = Array.from({ length: 250 }, (_, index) => `Line ${index + 1}`).join('\n');
+    const result = await measure(`<div style="height: 2300px; overflow: hidden"><div style="white-space: pre; font: 8px/1 sans-serif">${lines}</div></div>`);
+    expect(result.overlapLinesTruncated).toBe(1);
+  });
+
+  it('ignores overflow on non-replaced inline boxes, which does not clip', async () => {
+    const result = await measure(`<div id="card" style="width: 200px; height: 40px; overflow: hidden"><p style="margin: 0"><span id="inline" style="overflow: hidden">A card with two lines of text that fits now.</span></p></div>`);
+    expect(result.clipped).toEqual([expect.objectContaining({ selector: '#inline', hiddenPercentBefore: 0, clippedBy: expect.objectContaining({ selector: '#card' }) })]);
+  });
+
   it('leaves the page exactly as it was', async () => {
     await measure('<p id="p">Some text</p>');
     const state = await page.evaluate(() => ({

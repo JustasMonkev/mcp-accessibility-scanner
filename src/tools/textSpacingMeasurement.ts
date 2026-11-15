@@ -122,7 +122,8 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     const style = getComputedStyle(element);
     if (style.display === 'contents') {
       // No box of its own, so checkVisibility() is false, but its text renders in the parent's box.
-      if (style.visibility !== 'visible')
+      // Only the text owner's own visibility counts: a descendant may restore visibility: visible.
+      if (checkVisibilityProperty && style.visibility !== 'visible')
         return false;
       const parent = composedParent(element);
       return !parent || isVisible(parent, false);
@@ -163,6 +164,10 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     return style.overflowX === 'visible' && style.overflowY === 'visible';
   };
   const clips = (value: string) => value === 'hidden' || value === 'clip';
+  // content-visibility: auto/hidden applies layout and paint containment.
+  const paintContains = (style: CSSStyleDeclaration) => /\b(paint|strict|content)\b/.test(style.contain) || (style.contentVisibility ?? 'visible') !== 'visible';
+  // Overflow and paint containment do not apply to these boxes (no box, non-replaced inline, table-internal).
+  const unclippableDisplays = new Set(['contents', 'inline', 'table-row', 'table-row-group', 'table-header-group', 'table-footer-group', 'table-column', 'table-column-group']);
   const scrolls = (value: string) => value === 'auto' || value === 'scroll';
   // Reset per phase: the overrides change both computed styles and geometry.
   let regionCache = new Map<Element, Region | null>();
@@ -175,13 +180,14 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     // propagates to the viewport and does not clip the element itself.
     if (current !== document.documentElement && !(current === document.body && bodyPropagates)) {
       const style = getComputedStyle(current);
-      const paintContained = /\b(paint|strict|content)\b/.test(style.contain);
+      const paintContained = paintContains(style);
       const lossX = paintContained || clips(style.overflowX);
       const lossY = paintContained || clips(style.overflowY);
       const paintX = lossX || scrolls(style.overflowX);
       const paintY = lossY || scrolls(style.overflowY);
-      // A display: contents element has no box, so its overflow clips nothing.
-      if ((paintX || paintY) && style.display !== 'contents') {
+      // A display: contents element has no box, and overflow does not apply to non-replaced
+      // inline boxes, so neither clips anything (their client box is 0x0 and would hide all text).
+      if ((paintX || paintY) && !unclippableDisplays.has(style.display)) {
         const rect = current.getBoundingClientRect();
         const html = current as HTMLElement;
         const scaleX = html.offsetWidth ? rect.width / html.offsetWidth : 1;
@@ -205,7 +211,7 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
   const containsFixed = (style: CSSStyleDeclaration) => style.display !== 'contents' && (
     style.transform !== 'none' || style.translate !== 'none' || style.rotate !== 'none' || style.scale !== 'none'
     || style.perspective !== 'none' || style.filter !== 'none' || (style.backdropFilter ?? 'none') !== 'none'
-    || /\b(layout|paint|strict|content)\b/.test(style.contain) || /\b(transform|translate|rotate|scale|perspective|filter)\b/.test(style.willChange));
+    || /\b(layout|paint|strict|content)\b/.test(style.contain) || (style.contentVisibility ?? 'visible') !== 'visible' || /\b(transform|translate|rotate|scale|perspective|filter)\b/.test(style.willChange));
   const containsAbsolute = (style: CSSStyleDeclaration) => (style.display !== 'contents' && style.position !== 'static') || containsFixed(style);
   // Overflow clips a box only when the box's containing-block chain passes through it: an
   // absolutely positioned box escapes overflow: hidden ancestors below its positioned containing block.
@@ -525,7 +531,8 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
       measured: candidates.length - stale,
       truncated: candidateCount - candidates.length,
       stale,
-      overlapLinesTruncated: after.filter(phase => phase && phase.visibleLines.length > maxOverlapLines).length,
+      // Counted once per element when either phase's overlap comparison was limited.
+      overlapLinesTruncated: candidates.filter((_, index) => before[index].visibleLines.length > maxOverlapLines || (after[index]?.visibleLines.length ?? 0) > maxOverlapLines).length,
       clipped,
       overlaps,
       blocked,
