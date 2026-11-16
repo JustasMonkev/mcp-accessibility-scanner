@@ -30,8 +30,16 @@ const server = http.createServer((_request, response) => {
   response.end(`<button id="toggle" aria-expanded="false" onclick="this.setAttribute('aria-expanded','true')">Open</button>
     <form novalidate><label for="email">Email</label><input id="email" aria-describedby="error">
     <button id="submit">Submit</button><p id="error"></p></form>
-    <script>document.querySelector('form').onsubmit = event => {
+    <script>
+    window.interactions = { keys: 0, pointer: 0, submits: 0, value: '' };
+    document.addEventListener('pointerdown', () => window.interactions.pointer++);
+    document.getElementById('email').addEventListener('keydown', event => {
+      if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) window.interactions.keys++;
+    });
+    document.querySelector('form').onsubmit = event => {
       event.preventDefault();
+      window.interactions.submits++;
+      window.interactions.value = document.getElementById('email').value;
       document.getElementById('email').setAttribute('aria-invalid', 'true');
       document.getElementById('error').textContent = 'Enter a valid email';
     };</script>`);
@@ -92,6 +100,26 @@ it('publishes non-idempotent mutation annotations and runs both audits through M
   expect(forms.structuredContent).toMatchObject({ kind: 'audit_form_validation' });
   const formReport = JSON.parse(await fs.readFile(path.join(directory, 'forms.json'), 'utf8'));
   expect(formReport.outcome).toBe('completed');
+  expect(formReport.interactionMode).toBe('keyboard');
   expect(formReport.findings).toEqual([]);
   expect(formReport.observed.fields[0]).toMatchObject({ invalid: true, associatedErrors: ['#error'] });
+  const interaction = await client.callTool({ name: 'browser_evaluate', arguments: {
+    function: '() => window.interactions.keys === 13 && window.interactions.pointer === 0 && window.interactions.submits === 1 && window.interactions.value === "invalid-email"',
+  } });
+  expect(interaction.isError).not.toBe(true);
+  expect(interaction.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('true');
+});
+
+it('accepts text and editing steps through the MCP schema', async () => {
+  await client.callTool({ name: 'browser_navigate', arguments: { url } });
+  const result = await client.callTool({ name: 'audit_keyboard_operation', arguments: {
+    steps: [
+      { key: 'Tab', expect: [{ selector: '#toggle', focused: true }] },
+      { key: 'Tab', expect: [{ selector: '#email', focused: true }] },
+      { text: 'draft', expect: [{ selector: '#email', value: 'draft' }] },
+      { key: 'Backspace', expect: [{ selector: '#email', value: 'draf' }] },
+    ],
+  } });
+  expect(result.isError).not.toBe(true);
+  expect(result.structuredContent).toMatchObject({ status: 'passed' });
 });

@@ -847,6 +847,16 @@ const tests = [
     });
     if (failed.structuredContent?.status !== 'failed' || failed.structuredContent.findings[0]?.property !== 'expanded')
       throw new Error('Keyboard operation did not detect the incorrect expected outcome.');
+    await navigate('<label for="entry">Entry</label><input id="entry">');
+    const typing = await callTool('audit_keyboard_operation', {
+      steps: [
+        { key: 'Tab', expect: [{ selector: '#entry', focused: true }] },
+        { text: 'draft', expect: [{ selector: '#entry', value: 'draft' }] },
+        { key: 'Backspace', expect: [{ selector: '#entry', value: 'draf' }] },
+      ],
+    });
+    if (typing.structuredContent?.status !== 'passed')
+      throw new Error('Keyboard text entry and editing did not complete.');
   }),
 
   test('audit_form_validation', async () => {
@@ -858,7 +868,7 @@ const tests = [
       expectedFeedback: [{ selector: '#error', kind: 'error' }],
       timeoutMs: 100,
     });
-    if (result.structuredContent?.outcome !== 'completed' || result.structuredContent.summary.findingCount !== 0)
+    if (result.structuredContent?.outcome !== 'completed' || result.structuredContent.interactionMode !== 'keyboard' || result.structuredContent.summary.findingCount !== 0)
       throw new Error('Form validation did not recognize the associated error.');
     assertText(result, /JSON report:/);
     assertText(await callTool('browser_evaluate', { function: '() => document.getElementById("email").value' }), /invalid-email/);

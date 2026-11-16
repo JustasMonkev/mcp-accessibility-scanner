@@ -1,0 +1,715 @@
+{
+  "dataset": "InterA11y conformance set, 682 labeled cases; selected pre-run; labels copied unchanged from elements.csv (1=violation, 0=nonviolation).",
+  "upstreamRepo": "https://github.com/jszh/InterA11y",
+  "upstreamCommit": "8dcf06e258df88a8f39a3e37ebfce060c45a1cdd",
+  "manifestSource": "https://raw.githubusercontent.com/jszh/InterA11y/8dcf06e258df88a8f39a3e37ebfce060c45a1cdd/datasets/conformance/elements.csv",
+  "actManifest": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases.json",
+  "fixtureRoot": "/tmp/a11y-external-benchmark/intera11y",
+  "assets": [
+    {
+      "id": "focusable-no-keyboard-trap-helper",
+      "page": "datasets/conformance/assets/192f0179cebe471e/keyboard.js",
+      "urlPath": "/datasets/conformance/assets/192f0179cebe471e/keyboard.js",
+      "sha256": "eac088532912108fb70a71f5ed75b7ec0fce03cccb7d2c9107005905dbff5b2b",
+      "sourceUrl": "https://raw.githubusercontent.com/jszh/InterA11y/8dcf06e258df88a8f39a3e37ebfce060c45a1cdd/datasets/conformance/assets/192f0179cebe471e/keyboard.js"
+    }
+  ],
+  "cases": [
+    {
+      "id": "Tadebabd8958671c2",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/96eb4b26010e8c598cb659108dbc34ca0abd82f9.html",
+      "sc": "2.1.2",
+      "label": 0,
+      "actExpected": "passed",
+      "title": "Passed Example 1",
+      "page": "datasets/conformance/pages/1f0474d09b0d9855.html",
+      "urlPath": "/datasets/conformance/pages/1f0474d09b0d9855.html",
+      "sha256": "d61a36727b74d79246e1a7b8e4230d87ecdb9038059b23ffcf4d7330a4d6cb4e",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "a",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "button",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "body",
+                "focused": true
+              }
+            ]
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "unclassifiable",
+      "note": "Independent review rejected the body-focused oracle: leaving the page can retain document.activeElement. Original pilot results retained; not a valid DOM-only pass/fail mapping."
+    },
+    {
+      "id": "T90c8da2b39e07728",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/fb76f71a94bf95f5cfef22f3db6655e7b0a57b0c.html",
+      "sc": "2.1.2",
+      "label": 0,
+      "actExpected": "passed",
+      "title": "Passed Example 2",
+      "page": "datasets/conformance/pages/4a1dd1ad01eece04.html",
+      "urlPath": "/datasets/conformance/pages/4a1dd1ad01eece04.html",
+      "sha256": "7c6e1f3a1368a3584b412b31fe61d2c09bc38ea97b0a24c37a48cb4a409ace4c",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "div[tabindex=\"1\"]",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "body",
+                "focused": true
+              }
+            ]
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "unclassifiable",
+      "note": "Independent review rejected the body-focused oracle: leaving the page can retain document.activeElement. Original pilot results retained; not a valid DOM-only pass/fail mapping."
+    },
+    {
+      "id": "T27283549bae17780",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/e3902f01b8589702925be6d97f9542895ef3c76d.html",
+      "sc": "2.1.2",
+      "label": 0,
+      "actExpected": "passed",
+      "title": "Passed Example 5",
+      "page": "datasets/conformance/pages/9450ae7d588cd2ec.html",
+      "urlPath": "/datasets/conformance/pages/9450ae7d588cd2ec.html",
+      "sha256": "0bea5ef1a9fabd54aa268525295998d39992874e301cf550f4c4c061a215dec8",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [],
+        "timeoutMs": 500
+      },
+      "disposition": "unclassifiable",
+      "note": "The provided ACT fixture permits escape only with Ctrl+M. audit_keyboard_operation does not support this key chord; a Tab-only failed expectation cannot be interpreted as a violation."
+    },
+    {
+      "id": "T298e2571971efbf2",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/b92b5214d2b2214b89fb9812b389536759701790.html",
+      "sc": "2.1.2",
+      "label": 0,
+      "actExpected": "passed",
+      "title": "Passed Example 6",
+      "page": "datasets/conformance/pages/1f5de7557e6e6df0.html",
+      "urlPath": "/datasets/conformance/pages/1f5de7557e6e6df0.html",
+      "sha256": "c222366ea2df97f75c9edc78066a3774f0fee59a8a69fd3ab7b7ae43322393fb",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [],
+        "timeoutMs": 500
+      },
+      "disposition": "unclassifiable",
+      "note": "The provided ACT fixture permits escape only with Ctrl+M. audit_keyboard_operation does not support this key chord; a Tab-only failed expectation cannot be interpreted as a violation."
+    },
+    {
+      "id": "T01deacf10e6f67ef",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/d2f5325f3fd5ddde38cd677a5ca36ba0d762fb84.html",
+      "sc": "2.1.2",
+      "label": 1,
+      "actExpected": "passed",
+      "title": "Passed Example 7",
+      "page": "datasets/conformance/pages/bf03538bbb08b982.html",
+      "urlPath": "/datasets/conformance/pages/bf03538bbb08b982.html",
+      "sha256": "7b7398dd60a332f10b16ab6bc4330a941ea8e535c524cbf8826f512360f314e6",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "button:nth-of-type(1)",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "button:nth-of-type(2)",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "body",
+                "focused": true
+              }
+            ]
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "label-conflict",
+      "note": "InterA11y label=1 but W3C ACT testcases.json expected=passed. Retain both labels and report separately; exclude from single-label aggregate unless both are shown."
+    },
+    {
+      "id": "T3bacd5faada76adb",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/f5ea9fd3b681971b2af4953fae9bb2d319a203c6.html",
+      "sc": "2.1.2",
+      "label": 1,
+      "actExpected": "failed",
+      "title": "Failed Example 1",
+      "page": "datasets/conformance/pages/3e5ed913aafe1126.html",
+      "urlPath": "/datasets/conformance/pages/3e5ed913aafe1126.html",
+      "sha256": "175a6d2ef8e57a00a52a6a865fd5bfa83e0acf0a64218de545c23496d352f2bd",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "a:nth-of-type(1)",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "button",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "a:nth-of-type(2)",
+                "focused": true
+              }
+            ]
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "included",
+      "note": "Explicit Tab sequence checks whether browser focus proceeds to the next sequential target; outcome is a scenario proxy, not a WCAG verdict."
+    },
+    {
+      "id": "T6b0be0991f4d6a86",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/0ec0e93e7f8ffca39e1eb58a4a8503f1bd4cb145.html",
+      "sc": "2.1.2",
+      "label": 1,
+      "actExpected": "failed",
+      "title": "Failed Example 2",
+      "page": "datasets/conformance/pages/99cec2884cbe4210.html",
+      "urlPath": "/datasets/conformance/pages/99cec2884cbe4210.html",
+      "sha256": "f7e4ff3c5bd1cb00bca8d867bcd3b077ba74ba36dcaecca7b11b2eb2bfb3362f",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "button:nth-of-type(1)",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "button:nth-of-type(2)",
+                "focused": true
+              }
+            ]
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "included",
+      "note": "Explicit Tab sequence checks whether browser focus proceeds to the next sequential target; outcome is a scenario proxy, not a WCAG verdict."
+    },
+    {
+      "id": "T6affcec0fed980ee",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/7dcc4ae00712889d448ecbcba200e032dca59bf0.html",
+      "sc": "2.1.2",
+      "label": 1,
+      "actExpected": "failed",
+      "title": "Failed Example 3",
+      "page": "datasets/conformance/pages/be72e8cbeb794d5c.html",
+      "urlPath": "/datasets/conformance/pages/be72e8cbeb794d5c.html",
+      "sha256": "e19e01474943e0e1dd98e5aed08f078c9303c4bb9aa3b0e01fd4bbd0324a505a",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "#link1",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "#btn1",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "#btn2",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "#link2",
+                "focused": true
+              }
+            ]
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "included",
+      "note": "Explicit Tab sequence checks whether browser focus proceeds to the next sequential target; outcome is a scenario proxy, not a WCAG verdict."
+    },
+    {
+      "id": "Td22512e1defffbc3",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/8fba3918b361f251dab4c19bec8eddc5624218ee.html",
+      "sc": "2.1.2",
+      "label": 1,
+      "actExpected": "failed",
+      "title": "Failed Example 4",
+      "page": "datasets/conformance/pages/4460c2177f01714d.html",
+      "urlPath": "/datasets/conformance/pages/4460c2177f01714d.html",
+      "sha256": "e41b0f1a61132e8f2c2eff6c22cf386b6af3510b89d5b2bdd84667ec489e88ab",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "#link1",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "#btn1",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "#btn2",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "#link2",
+                "focused": true
+              }
+            ]
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "included",
+      "note": "Explicit Tab sequence checks whether browser focus proceeds to the next sequential target; outcome is a scenario proxy, not a WCAG verdict."
+    },
+    {
+      "id": "Tc7afc009105232a4",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/16dddd8ac5c419caba2c709b1b1f49cc5759e63c.html",
+      "sc": "2.1.2",
+      "label": 0,
+      "actExpected": "inapplicable",
+      "title": "Inapplicable Example 1",
+      "page": "datasets/conformance/pages/daa66408416e3694.html",
+      "urlPath": "/datasets/conformance/pages/daa66408416e3694.html",
+      "sha256": "d158939cb134b4673b98b3bce15de65240fc28d48c2e8d565f3b19b6efae2342",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [],
+        "timeoutMs": 500
+      },
+      "disposition": "excluded",
+      "note": "W3C ACT marks inapplicable: no visible keyboard-focusable target (or disabled/hidden targets); excluded from pass/fail metrics."
+    },
+    {
+      "id": "T2bb581483ae521ad",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/6e3dcc2f3612826dd3d8589c4e2951ad7a3e4dd7.html",
+      "sc": "2.1.2",
+      "label": 0,
+      "actExpected": "inapplicable",
+      "title": "Inapplicable Example 2",
+      "page": "datasets/conformance/pages/944e699da5fcd098.html",
+      "urlPath": "/datasets/conformance/pages/944e699da5fcd098.html",
+      "sha256": "1ffaadaa13b42121143ae5df1498bf1732fce6935702a7c2698e82115b4c7411",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [],
+        "timeoutMs": 500
+      },
+      "disposition": "excluded",
+      "note": "W3C ACT marks inapplicable: no visible keyboard-focusable target (or disabled/hidden targets); excluded from pass/fail metrics."
+    },
+    {
+      "id": "Td7a13287237dcf24",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/9d47dcc67abbcb177876ce082ae073947cc7135d.html",
+      "sc": "2.1.2",
+      "label": 0,
+      "actExpected": "inapplicable",
+      "title": "Inapplicable Example 3",
+      "page": "datasets/conformance/pages/f5007921d45112ef.html",
+      "urlPath": "/datasets/conformance/pages/f5007921d45112ef.html",
+      "sha256": "3cb8e24a7e7d09ca821a8a67427ccaf2381be74430eb6ef8772e61fefd4a32ac",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [],
+        "timeoutMs": 500
+      },
+      "disposition": "excluded",
+      "note": "W3C ACT marks inapplicable: no visible keyboard-focusable target (or disabled/hidden targets); excluded from pass/fail metrics."
+    },
+    {
+      "id": "T865207d4490cc7de",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/4b93a866e14ad4c9ed8efa13c080a1e05350fa2f.html",
+      "sc": "2.1.2",
+      "label": 0,
+      "actExpected": "passed",
+      "title": "Passed Example 3",
+      "page": "datasets/conformance/pages/1f9f450c84816332.html",
+      "urlPath": "/datasets/conformance/pages/1f9f450c84816332.html",
+      "sha256": "4b92dd433efa137c4c70fd8725f70a15a2983fd6b8781651a43133244ab193bd",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "body",
+                "focused": true
+              }
+            ]
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "included",
+      "note": "Explicit Tab sequence checks whether browser focus proceeds to the next sequential target; outcome is a scenario proxy, not a WCAG verdict."
+    },
+    {
+      "id": "T40c0e6c4ed1c774a",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/ab24c77ed9daefc8fa1650aedf0d1c6438460243.html",
+      "sc": "2.1.2",
+      "label": 0,
+      "actExpected": "passed",
+      "title": "Passed Example 4",
+      "page": "datasets/conformance/pages/76c131147f708a81.html",
+      "urlPath": "/datasets/conformance/pages/76c131147f708a81.html",
+      "sha256": "879f917d61e7090897b581f35c776149487662fd1477d8523f71efd51510bcb2",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [],
+        "timeoutMs": 500
+      },
+      "disposition": "unclassifiable",
+      "note": "The provided ACT fixture permits escape only with Ctrl+M. audit_keyboard_operation does not support this key chord; a Tab-only failed expectation cannot be interpreted as a violation."
+    },
+    {
+      "id": "Te1b532e4a3fe6126",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/62fd24e73ea55f55ad45de392128a816a6f03526.html",
+      "sc": "2.1.2",
+      "label": 1,
+      "actExpected": "failed",
+      "title": "Failed Example 5",
+      "page": "datasets/conformance/pages/b714ef8ca0d41378.html",
+      "urlPath": "/datasets/conformance/pages/b714ef8ca0d41378.html",
+      "sha256": "473f5a28a58aa3cbd306a73503daa5739d809780efed33d02e2049b32cf85d86",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "#link1",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "#btn1",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "#btn2",
+                "focused": true
+              }
+            ]
+          },
+          {
+            "key": "Tab",
+            "expect": [
+              {
+                "selector": "#link2",
+                "focused": true
+              }
+            ]
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "included",
+      "note": "Explicit Tab sequence checks whether browser focus proceeds to the next sequential target; outcome is a scenario proxy, not a WCAG verdict."
+    },
+    {
+      "id": "T37f0c10fcaefbb98",
+      "source": "ACT-derived/InterA11y",
+      "sourceUrl": "https://www.w3.org/WAI/content-assets/wcag-act-rules/testcases/80af7b/30ffb2991af4d1727223409c9f1235e44acc1c13.html",
+      "sc": "2.1.2",
+      "label": 0,
+      "actExpected": "inapplicable",
+      "title": "Inapplicable Example 4",
+      "page": "datasets/conformance/pages/a0d335fb4742877e.html",
+      "urlPath": "/datasets/conformance/pages/a0d335fb4742877e.html",
+      "sha256": "d382fe533fb3c630af09456bd1d2a97e4248222215f28bc5bf97749a31c92032",
+      "tool": "audit_keyboard_operation",
+      "arguments": {
+        "steps": [],
+        "timeoutMs": 500
+      },
+      "disposition": "excluded",
+      "note": "W3C ACT marks inapplicable: no visible keyboard-focusable target (or disabled/hidden targets); excluded from pass/fail metrics."
+    },
+    {
+      "id": "Tbbf2777cd0463dc6",
+      "source": "InterA11y",
+      "sourceUrl": "https://github.com/jszh/InterA11y/blob/8dcf06e258df88a8f39a3e37ebfce060c45a1cdd/datasets/conformance/pages/10ab9f539da629ca.html",
+      "sc": "3.3.1",
+      "label": 1,
+      "actExpected": null,
+      "page": "datasets/conformance/pages/10ab9f539da629ca.html",
+      "urlPath": "/datasets/conformance/pages/10ab9f539da629ca.html",
+      "sha256": "2ff4f4f9e8b1d7ccd9f4802d631dfab3810ca053e7613e7dfe30f19950811229",
+      "tool": "audit_form_validation",
+      "arguments": {
+        "interactionMode": "keyboard",
+        "fields": [
+          {
+            "selector": "#email",
+            "value": "not-an-email"
+          }
+        ],
+        "submitSelector": "button[type=\"submit\"]",
+        "expectedFeedback": [
+          {
+            "selector": ".summary",
+            "kind": "error"
+          },
+          {
+            "selector": "#email-icon",
+            "kind": "error"
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "included-incomplete-expected",
+      "note": "Pre-rendered error-state fixture, not a live validation workflow. Explicit keyboard submit may navigate/reload; preserve tool outcome as incomplete, not pass/fail, unless it completes naturally. Do not inject handlers or block navigation."
+    },
+    {
+      "id": "T91132b30cad349b0",
+      "source": "InterA11y",
+      "sourceUrl": "https://github.com/jszh/InterA11y/blob/8dcf06e258df88a8f39a3e37ebfce060c45a1cdd/datasets/conformance/pages/ec3eea8be51feb0b.html",
+      "sc": "3.3.1",
+      "label": 1,
+      "actExpected": null,
+      "page": "datasets/conformance/pages/ec3eea8be51feb0b.html",
+      "urlPath": "/datasets/conformance/pages/ec3eea8be51feb0b.html",
+      "sha256": "c23896e4abf21da1708831a40ca86f6829001628e94910494cff7a112ccfffce",
+      "tool": "audit_form_validation",
+      "arguments": {
+        "interactionMode": "keyboard",
+        "fields": [
+          {
+            "selector": "#ship-zip",
+            "value": "bad"
+          },
+          {
+            "selector": "#bill-zip",
+            "value": "bad"
+          }
+        ],
+        "submitSelector": "button[type=\"submit\"]",
+        "expectedFeedback": [
+          {
+            "selector": "#ship-zip-ico",
+            "kind": "error"
+          },
+          {
+            "selector": "#bill-zip-ico",
+            "kind": "error"
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "included-incomplete-expected",
+      "note": "Pre-rendered error-state fixture, not a live validation workflow. Explicit keyboard submit may navigate/reload; preserve tool outcome as incomplete, not pass/fail, unless it completes naturally. Do not inject handlers or block navigation."
+    },
+    {
+      "id": "T275623c59dcb58ae",
+      "source": "InterA11y",
+      "sourceUrl": "https://github.com/jszh/InterA11y/blob/8dcf06e258df88a8f39a3e37ebfce060c45a1cdd/datasets/conformance/pages/3fddbc0380538f5a.html",
+      "sc": "3.3.1",
+      "label": 0,
+      "actExpected": null,
+      "page": "datasets/conformance/pages/3fddbc0380538f5a.html",
+      "urlPath": "/datasets/conformance/pages/3fddbc0380538f5a.html",
+      "sha256": "55f210bf86a5c1a77ea3b51adccccf5adee1f26d55de73af885447918209353c",
+      "tool": "audit_form_validation",
+      "arguments": {
+        "interactionMode": "keyboard",
+        "fields": [
+          {
+            "selector": "#email",
+            "value": "not-an-email"
+          }
+        ],
+        "submitSelector": "button[type=\"submit\"]",
+        "expectedFeedback": [
+          {
+            "selector": ".summary",
+            "kind": "error"
+          },
+          {
+            "selector": "#email-ico",
+            "kind": "error"
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "included-incomplete-expected",
+      "note": "Pre-rendered error-state fixture, not a live validation workflow. Explicit keyboard submit may navigate/reload; preserve tool outcome as incomplete, not pass/fail, unless it completes naturally. Do not inject handlers or block navigation."
+    },
+    {
+      "id": "T09537ba9c551f07b",
+      "source": "InterA11y",
+      "sourceUrl": "https://github.com/jszh/InterA11y/blob/8dcf06e258df88a8f39a3e37ebfce060c45a1cdd/datasets/conformance/pages/7d156b2ec32bca98.html",
+      "sc": "3.3.1",
+      "label": 0,
+      "actExpected": null,
+      "page": "datasets/conformance/pages/7d156b2ec32bca98.html",
+      "urlPath": "/datasets/conformance/pages/7d156b2ec32bca98.html",
+      "sha256": "4d93421f09492115364da6fd3875600de8fc566772de0ef9c12522a11a7648d3",
+      "tool": "audit_form_validation",
+      "arguments": {
+        "interactionMode": "keyboard",
+        "fields": [
+          {
+            "selector": "#email",
+            "value": "invalid"
+          },
+          {
+            "selector": "#dob",
+            "value": "30/02/2001"
+          }
+        ],
+        "submitSelector": "button[type=\"submit\"]",
+        "expectedFeedback": [
+          {
+            "selector": "#email-msg",
+            "kind": "error"
+          },
+          {
+            "selector": "#dob-msg",
+            "kind": "error"
+          }
+        ],
+        "timeoutMs": 500
+      },
+      "disposition": "included-incomplete-expected",
+      "note": "Pre-rendered error-state fixture, not a live validation workflow. Explicit keyboard submit may navigate/reload; preserve tool outcome as incomplete, not pass/fail, unless it completes naturally. Do not inject handlers or block navigation."
+    }
+  ],
+  "mappingReview": "Two browser-chrome focus oracles invalidated after pilot; source labels unchanged. Rerun both revisions with identical audited manifest; pilot retained separately."
+}

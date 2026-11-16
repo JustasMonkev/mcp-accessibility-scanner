@@ -42,7 +42,7 @@ beforeEach(async () => {
   page.on('dialog', dialog => modalStates.push({ type: 'dialog', dialog, description: 'Dialog' }));
   const outputFile = async (name: string) => path.join(directory, name);
   const tab = { page, modalStates: () => modalStates, context: { outputFile } };
-  context = { currentTabOrDie: () => tab, config: { filePaths: 'absolute' } } as Context;
+  context = { currentTabOrDie: () => tab, takeDownloadErrors: () => [], config: { filePaths: 'absolute' } } as Context;
 });
 afterEach(async () => {
   await browserContext?.close();
@@ -89,6 +89,152 @@ it('operates a button, menu, and native dialog with real keys and verifies focus
   expect(report.status).toBe('passed');
   expect(report.steps).toHaveLength(10);
   expect(report.steps.every((step: { status: string }) => step.status === 'passed')).toBe(true);
+});
+
+it('does not pass a transient focus state that is lost before the observation window ends', async () => {
+  await page.setContent(`<button id="start">Start</button><button id="next">Next</button><script>
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Tab' && event.target.id === 'start')
+        setTimeout(() => document.getElementById('start').focus(), 10);
+    });
+  </script>`);
+  const { report } = await audit({ reportFile: 'report.json', timeoutMs: 80, steps: [
+    { key: 'Tab', expect: [{ selector: '#start', focused: true }] },
+    { key: 'Tab', expect: [{ selector: '#next', focused: true }] },
+  ] });
+  expect(report.status).toBe('failed');
+  expect(report.steps.map((step: { status: string }) => step.status)).toEqual(['passed', 'failed']);
+  expect(report.findings).toEqual([expect.objectContaining({ step: 2, selector: '#next', property: 'focused' })]);
+});
+
+it('observes a legitimate asynchronous expected state within the supplied window', async () => {
+  await page.setContent(`<button id="toggle" aria-expanded="false">Toggle</button><script>
+    document.getElementById('toggle').addEventListener('click', () => {
+      setTimeout(() => document.getElementById('toggle').setAttribute('aria-expanded', 'true'), 10);
+    });
+  </script>`);
+  const { report } = await audit({ reportFile: 'report.json', timeoutMs: 80, steps: [
+    { key: 'Tab', expect: [{ selector: '#toggle', focused: true }] },
+    { key: 'Enter', expect: [{ selector: '#toggle', expanded: true }] },
+  ] });
+  expect(report.status).toBe('passed');
+  expect(report.steps.every((step: { status: string }) => step.status === 'passed')).toBe(true);
+});
+
+it('types and edits the focused field through keyboard events without reporting the supplied text', async () => {
+  await page.setContent(`<input id="field"><script>
+    window.events = [];
+    for (const type of ['keydown', 'beforeinput', 'input', 'keyup'])
+      document.getElementById('field').addEventListener(type, event => window.events.push({ type, key: event.key, trusted: event.isTrusted, inputType: event.inputType }));
+  </script>`);
+  const { report, response } = await audit({ reportFile: 'report.json', timeoutMs: 0, steps: [
+    { key: 'Tab', expect: [{ selector: '#field', focused: true }] },
+    { text: 'secret', expect: [{ selector: '#field', value: 'secret' }] },
+    { key: 'Backspace', expect: [{ selector: '#field', value: 'secre' }] },
+    { key: 'ControlOrMeta+A', expect: [{ selector: '#field', focused: true }] },
+    { key: 'Delete', expect: [{ selector: '#field', value: '' }] },
+    { text: 'ok', expect: [{ selector: '#field', value: 'ok' }] },
+  ] });
+  expect(report.status).toBe('passed');
+  expect(report.steps[1]).toEqual({ step: 2, action: 'type', characterCount: 6, status: 'passed', checks: [{ selector: '#field', property: 'value', passed: true }] });
+  expect(report.steps[0]).toEqual({ step: 1, key: 'Tab', status: 'passed', checks: [{ selector: '#field', property: 'focused', passed: true }] });
+  expect(await page.evaluate('window.events')).toEqual(expect.arrayContaining([
+    { type: 'keydown', key: 's', trusted: true },
+    { type: 'beforeinput', trusted: true, inputType: 'insertText' },
+    { type: 'input', trusted: true, inputType: 'insertText' },
+    { type: 'keyup', key: 's', trusted: true },
+    { type: 'input', trusted: true, inputType: 'deleteContentBackward' },
+    { type: 'input', trusted: true, inputType: 'deleteContentForward' },
+  ]));
+  expect(JSON.stringify(report)).not.toContain('secret');
+  expect(JSON.stringify(response.serialize())).not.toContain('secret');
+});
+
+it.each(['focus-theft', 'replacement', 'readonly', 'disabled'])('stops typing into the original identity on %s', async interruption => {
+  const change = {
+    'focus-theft': "document.getElementById('other').focus()",
+    'replacement': 'const replacement = field.cloneNode(); field.replaceWith(replacement); replacement.focus()',
+    'readonly': 'field.readOnly = true',
+    'disabled': 'field.disabled = true',
+  }[interruption];
+  await page.setContent(`<input id="field"><input id="other"><script>
+    const field = document.getElementById('field');
+    field.addEventListener('input', () => { document.body.dataset.typed = field.value; ${change}; }, { once: true });
+  </script>`);
+  const { report, response } = await audit({ reportFile: 'report.json', timeoutMs: 0, steps: [
+    { key: 'Tab', expect: [{ selector: '#field', focused: true }] },
+    { text: 'secret', expect: [{ selector: '#field', value: 'secret' }] },
+    { key: 'Tab', expect: [{ selector: '#other', focused: true }] },
+  ] });
+  expect(report.status).toBe('incomplete');
+  expect(response.isError()).toBe(true);
+  expect(report.steps.map((step: { status: string }) => step.status)).toEqual(['passed', 'incomplete', 'not-run']);
+  expect(await page.locator('body').getAttribute('data-typed')).toBe('s');
+  expect(await page.locator('#field').inputValue()).toBe('s');
+  expect(await page.locator('#other').inputValue()).toBe('');
+  expect(JSON.stringify(report)).not.toContain('secret');
+  expect(JSON.stringify(response.serialize())).not.toContain('secret');
+});
+
+it.each(['cancel', 'modal'])('stops text input on %s before later characters or steps', async interruption => {
+  await page.setContent('<input id="field"><input id="other">');
+  const controller = new AbortController();
+  await page.exposeFunction('cancelTyping', () => controller.abort());
+  await page.evaluate(`document.querySelector('#field').addEventListener('input', () => { ${interruption === 'modal' ? "alert('stop')" : 'void window.cancelTyping()'}; }, { once: true });`);
+  const { report, response } = await audit({ reportFile: 'report.json', timeoutMs: 0, steps: [
+    { key: 'Tab', expect: [{ selector: '#field', focused: true }] },
+    { text: 'secret', expect: [{ selector: '#field', value: 'secret' }] },
+    { key: 'Tab', expect: [{ selector: '#other', focused: true }] },
+  ] }, controller.signal);
+  expect(report.status).toBe('incomplete');
+  expect(response.isError()).toBe(true);
+  expect(report.steps[2].status).toBe('not-run');
+  if (interruption === 'modal') {
+    const modal = context.currentTabOrDie().modalStates().find(state => state.type === 'dialog');
+    await modal?.dialog.dismiss();
+  }
+  expect(await page.locator('#field').inputValue()).toBe('s');
+  expect(await page.locator('#other').inputValue()).toBe('');
+});
+
+it.each(['body', 'button', 'readonly', 'iframe'])('does not redirect text from unsupported %s focus', async target => {
+  await page.setContent('<button id="button">Start</button><input id="readonly" readonly><input id="other"><iframe srcdoc="<input id=inner>"></iframe>');
+  if (target === 'iframe')
+    await page.frameLocator('iframe').locator('input').focus();
+  else if (target !== 'body')
+    await page.locator(`#${target}`).focus();
+  const { report, response } = await audit({ reportFile: 'report.json', timeoutMs: 0, steps: [
+    { text: 'secret', expect: [{ selector: '#other', value: 'secret' }] },
+    { key: 'Tab', expect: [{ selector: '#other', focused: true }] },
+  ] });
+  expect(report.status).toBe('incomplete');
+  expect(response.isError()).toBe(true);
+  expect(report.steps[1].status).toBe('not-run');
+  expect(await page.locator('#other').inputValue()).toBe('');
+  expect(await page.frameLocator('iframe').locator('input').inputValue()).toBe('');
+});
+
+it('types Unicode and newline input into a textarea in an open shadow root', async () => {
+  await page.setContent(`<div id="host"></div><script>
+    document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML = '<textarea id="field"></textarea>';
+  </script>`);
+  const { report } = await audit({ reportFile: 'report.json', timeoutMs: 0, steps: [
+    { key: 'Tab', expect: [{ selector: '#field', focused: true }] },
+    { text: 'a\r\n🙂é', expect: [{ selector: '#field', value: 'a\n🙂é' }] },
+  ] });
+  expect(report.status).toBe('passed');
+  expect(await page.locator('#field').inputValue()).toBe('a\n🙂é');
+  expect(report.steps[1].characterCount).toBe(5);
+});
+
+it('types into the focused contenteditable without selecting a different node', async () => {
+  await page.setContent('<div id="field" contenteditable></div>');
+  const { report } = await audit({ reportFile: 'report.json', timeoutMs: 0, steps: [
+    { key: 'Tab', expect: [{ selector: '#field', focused: true }] },
+    { text: 'editable', expect: [{ selector: '#field', text: 'editable' }] },
+  ] });
+  expect(report.status).toBe('passed');
+  expect(await page.locator('#field').textContent()).toBe('editable');
 });
 
 it.each([
@@ -147,6 +293,9 @@ it('rejects malformed and unbounded input before actions', async () => {
   await page.setContent('<button>Start</button>');
   for (const args of [
     { steps: [] },
+    { steps: [{ text: '', expect: [{ selector: 'input', focused: true }] }] },
+    { steps: [{ text: 'x'.repeat(501), expect: [{ selector: 'input', focused: true }] }] },
+    { steps: [{ key: 'Tab', text: 'x', expect: [{ selector: 'input', focused: true }] }] },
     { steps: [{ key: 'Control+a', expect: [{ selector: 'button', focused: true }] }] },
     { steps: [{ key: 'Enter', expect: [{ selector: 'button' }] }] },
     { steps: [{ key: 'Tab', expect: [{ selector: 'button', typo: true }] }] },

@@ -12,12 +12,18 @@ import tools from '../src/tools/auditFormValidation.js';
 import { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
 
+declare global {
+  interface Window {
+    cancelAudit: () => void;
+  }
+}
+
 const tool = tools[0];
 let browser: Browser;
 let page: Page;
 let directory: string;
 let modalOpen = false;
-const scenario = { fields: [{ selector: '#email', value: 'secret-invalid-value' }], submitSelector: '#submit', expectedFeedback: [{ selector: '#error', kind: 'error' }], timeoutMs: 200 };
+const scenario = { interactionMode: 'direct', fields: [{ selector: '#email', value: 'secret-invalid-value' }], submitSelector: '#submit', expectedFeedback: [{ selector: '#error', kind: 'error' }], timeoutMs: 200 };
 
 async function run(args: unknown = scenario, signal?: AbortSignal) {
   const params = tool.schema.inputSchema.parse(args);
@@ -303,4 +309,98 @@ it('aborts a pending DOM read without leaving a scenario listener', async () => 
     expect(report).toMatchObject({ outcome: 'incomplete', incomplete: ['aborted'] });
     expect(page.listenerCount('framenavigated')).toBe(0);
   } finally { clearTimeout(timer); read.mockRestore(); }
+});
+
+
+describe('keyboard form scenarios', () => {
+  it('uses the default keyboard route from current focus and submits exact replacement values without pointer events', async () => {
+    await fixture(`<button id=start>Start</button><form novalidate><input id=email value=old aria-describedby=error><textarea id=message aria-describedby=error>old</textarea><input id=unrelated value=untouched><button id=submit>Submit</button><p id=error></p></form><script>
+      document.documentElement.dataset.events='[]';
+      for(const type of ['keydown','input','change','blur','pointerdown','mousedown']) document.addEventListener(type,e=>{const events=JSON.parse(document.documentElement.dataset.events); events.push({type,id:e.target.id,key:e.key}); document.documentElement.dataset.events=JSON.stringify(events)},true);
+      start.focus();
+      document.querySelector('form').onsubmit=e=>{e.preventDefault(); document.documentElement.dataset.values=JSON.stringify([email.value,message.value,unrelated.value]); error.textContent='Correct fields';};
+    </script>`);
+    const { report } = await run({ ...scenario, interactionMode: undefined, fields: [scenario.fields[0], { selector: '#message', value: 'Unicode 🌱\nnext' }] });
+    expect(report.outcome).toBe('completed');
+    expect(await page.evaluate(() => JSON.parse(document.documentElement.dataset.values))).toEqual(['secret-invalid-value', 'Unicode 🌱\nnext', 'untouched']);
+    const events = await page.evaluate(() => JSON.parse(document.documentElement.dataset.events));
+    expect(events[0]).toMatchObject({ type: 'keydown', id: 'start', key: 'Tab' });
+    expect(events.filter((event: { type: string }) => ['pointerdown', 'mousedown'].includes(event.type))).toEqual([]);
+    for (const id of ['email', 'message'])
+      expect(events).toEqual(expect.arrayContaining(['keydown', 'input', 'change', 'blur'].map(type => expect.objectContaining({ type, id }))));
+    expect(events).toContainEqual(expect.objectContaining({ type: 'keydown', id: 'submit', key: 'Enter' }));
+  });
+
+  it.each([
+    { attributes: 'tabindex=-1', script: '', reason: 'target-not-reached' },
+    { attributes: 'maxlength=3', script: '', reason: 'field-value-mismatch' },
+    { attributes: '', script: "email.addEventListener('input',()=>other.focus())", reason: 'focus-changed' },
+  ])('does not submit when a keyboard field cannot retain the scenario ($reason)', async ({ attributes, script, reason }) => {
+    await fixture(`<form novalidate><input id=email ${attributes}><input id=other><button id=submit>Submit</button><p id=error></p></form><script>${script}; document.querySelector('form').onsubmit=e=>{e.preventDefault(); document.documentElement.dataset.submitted='yes'};</script>`);
+    const { report } = await run({ ...scenario, interactionMode: undefined });
+    expect(report).toMatchObject({ outcome: 'incomplete', submitAttempted: false, findings: [], incomplete: [reason] });
+    expect(await page.evaluate(() => document.documentElement.dataset.submitted)).toBeUndefined();
+    expect(await page.locator('#other').inputValue()).toBe('');
+  });
+
+  it.each(['\n', '\r'])('rejects a single-line keyboard field value containing %j before mutating or submitting', async newline => {
+    await fixture(`<form novalidate><input id=email value=original><input id=other value=untouched><button id=submit>Submit</button><p id=error></p></form><script>document.querySelector('form').onsubmit=e=>{e.preventDefault();document.documentElement.dataset.submitted='yes'};</script>`);
+    await expect(run({ ...scenario, interactionMode: 'keyboard', fields: [{ selector: '#other', value: 'changed' }, { selector: '#email', value: `invalid${newline}value` }] })).rejects.toThrow('Form audit preflight');
+    expect(await page.locator('#email').inputValue()).toBe('original');
+    expect(await page.locator('#other').inputValue()).toBe('untouched');
+    expect(await page.evaluate(() => document.documentElement.dataset.submitted)).toBeUndefined();
+  });
+
+  it('stops when keyboard input opens a modal without typing into later fields', async () => {
+    await fixture('<input id=email oninput="if(this.value)alert(\'pause\')"><input id=second><button id=submit>Submit</button><p id=error></p>');
+    let dialog: Dialog | undefined;
+    page.once('dialog', current => { dialog = current; });
+    const { report } = await run({ ...scenario, interactionMode: undefined, fields: [...scenario.fields, { selector: '#second', value: 'later' }] });
+    expect(report).toMatchObject({ outcome: 'incomplete', submitAttempted: false, incomplete: ['modal'], findings: [] });
+    await dialog?.dismiss();
+    expect(await page.locator('#second').inputValue()).toBe('');
+  });
+
+  it('stops typing after cancellation without later keys or submission', async () => {
+    await fixture('<form novalidate><input id=email><button id=submit>Submit</button><p id=error></p></form>');
+    const controller = new AbortController();
+    await page.exposeFunction('cancelAudit', () => controller.abort());
+    await page.evaluate(() => {
+      const input = document.querySelector('input');
+      if (input instanceof HTMLInputElement) {
+        input.addEventListener('input', () => {
+          if (input.value)
+            window.cancelAudit();
+        });
+      }
+    });
+    const { report } = await run({ ...scenario, interactionMode: undefined }, controller.signal);
+    expect(report).toMatchObject({ outcome: 'incomplete', submitAttempted: false, incomplete: ['aborted'], findings: [] });
+    const value = await page.locator('#email').inputValue();
+    expect(value.length).toBeGreaterThan(0);
+    expect(value.length).toBeLessThan(scenario.fields[0].value.length);
+    await page.waitForTimeout(50);
+    expect(await page.locator('#email').inputValue()).toBe(value);
+    expect(page.listenerCount('framenavigated')).toBe(0);
+  });
+
+  it('rechecks values after blur before submitting', async () => {
+    await fixture(`<form novalidate><input id=email onblur="this.value='changed'"><button id=submit>Submit</button><p id=error></p></form>`);
+    const { report } = await run({ ...scenario, interactionMode: undefined });
+    expect(report).toMatchObject({ outcome: 'incomplete', submitAttempted: false, incomplete: ['field-value-mismatch'], findings: [] });
+  });
+
+  it('resolves a later field after the page rerenders it', async () => {
+    await fixture(`<form novalidate><input id=email aria-describedby=error><input id=second aria-describedby=error><button id=submit>Submit</button><p id=error></p></form><script>email.onblur=()=>{second.outerHTML='<input id=second aria-describedby=error>'};document.querySelector('form').onsubmit=e=>{e.preventDefault(); document.documentElement.dataset.values=JSON.stringify([email.value,second.value]);error.textContent='Correct fields'};</script>`);
+    const { report } = await run({ ...scenario, interactionMode: undefined, fields: [...scenario.fields, { selector: '#second', value: 'later' }] });
+    expect(report.outcome).toBe('completed');
+    expect(await page.evaluate(() => JSON.parse(document.documentElement.dataset.values))).toEqual([scenario.fields[0].value, 'later']);
+  });
+
+  it('replaces an existing value with empty text in an open shadow root', async () => {
+    await fixture(`<div id=host></div><script>host.attachShadow({mode:'open'}).innerHTML='<form novalidate><input id=email value=old aria-describedby=error><button id=submit>Submit</button><p id=error></p></form>'; const root=host.shadowRoot; root.querySelector('form').onsubmit=e=>{e.preventDefault(); document.documentElement.dataset.submitted=root.querySelector('input').value; root.querySelector('#error').textContent='Required'};</script>`);
+    const { report } = await run({ ...scenario, interactionMode: undefined, fields: [{ selector: '#host #email', value: '' }], submitSelector: '#host #submit', expectedFeedback: [{ selector: '#host #error', kind: 'error' }] });
+    expect(report.outcome).toBe('completed');
+    expect(await page.evaluate(() => document.documentElement.dataset.submitted)).toBe('');
+  });
 });

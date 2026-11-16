@@ -19,6 +19,7 @@ import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { reserveReportPath, writeJsonReport } from './report.js';
 import { rejectAfterTimeout, rejectOnAbort } from '../utils/timeout.js';
+import { typeIntoFocusedElement } from './keyboardInput.js';
 import type { Frame } from 'playwright';
 
 const expectationSchema = z.strictObject({
@@ -35,17 +36,20 @@ const expectationSchema = z.strictObject({
 }).refine(expectation => Object.keys(expectation).length > 1, 'Supply at least one expected outcome.');
 
 const auditKeyboardOperationSchema = z.strictObject({
-  steps: z.array(z.strictObject({
-    key: z.enum(['Tab', 'Shift+Tab', 'Enter', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Escape', 'Home', 'End']),
+  steps: z.array(z.union([z.strictObject({
+    key: z.enum(['Tab', 'Shift+Tab', 'Enter', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Escape', 'Home', 'End', 'Backspace', 'Delete', 'ControlOrMeta+A']),
     expect: z.array(expectationSchema).min(1).max(10),
-  })).min(1).max(20).describe('Explicit keyboard scenario from the current focus. Stops on the first failed or incomplete step; later steps are not run.'),
-  timeoutMs: z.number().int().min(0).max(1000).default(300).describe('Maximum wait for each step\'s expected outcomes, in milliseconds. Zero measures once.'),
+  }), z.strictObject({
+    text: z.string().min(1).max(500).describe('Type into the currently focused editable in the main frame or an open shadow root. CRLF and CR become Enter; Unicode input may not produce physical key events. Stops if the original editable loses focus or becomes unavailable.'),
+    expect: z.array(expectationSchema).min(1).max(10),
+  })])).min(1).max(20).describe('Explicit key or text scenario from the current focus. Stops on the first failed or incomplete step; later steps are not run.'),
+  timeoutMs: z.number().int().min(0).max(1000).default(300).describe('Observation window for each step\'s expected outcomes, in milliseconds; outcomes are measured at its end. Zero measures immediately.'),
   reportFile: z.string().optional().describe('Output JSON report file name.'),
 });
 
 type Expectation = z.output<typeof expectationSchema>;
 type Check = { selector: string; property: string; passed: boolean };
-type StepResult = { step: number; key: string; status: 'not-run' | 'passed' | 'failed' | 'incomplete'; checks: Check[] };
+type StepResult = { step: number; status: 'not-run' | 'passed' | 'failed' | 'incomplete'; checks: Check[] } & ({ key: string } | { action: 'type'; characterCount: number });
 
 function measureExpectation(elements: Element[], expectation: Expectation): { checks: Check[]; error?: string } {
   if (elements.length > 1)
@@ -98,7 +102,7 @@ const auditKeyboardOperation = defineTabTool({
   schema: {
     name: 'audit_keyboard_operation',
     title: 'Audit keyboard operation',
-    description: 'Run a bounded caller-supplied keyboard scenario from current focus using real keys, then verify explicit focus, visibility, text, value, or native/ARIA state outcomes. Main frame and open shadow roots only; 30-second scenario budget. May activate controls, submit forms, or change data; never restores state. Stops on failure, cancellation, navigation, popup, or browser modal. Interrupted in-flight keys cannot be undone. Results cover only the supplied scenario, not WCAG conformance.',
+    description: 'Run a bounded caller-supplied keyboard scenario from current focus using real keys and text input, then verify explicit focus, visibility, text, value, or native/ARIA state outcomes. Text requires one continuously focused editable; supplied text is not reported. Main frame and open shadow roots only; 30-second scenario budget. May activate controls, submit forms, or change data; never restores state. Stops on failure, cancellation, navigation, popup, or browser modal. Interrupted in-flight keys cannot be undone. Results cover only the supplied scenario, not WCAG conformance.',
     inputSchema: auditKeyboardOperationSchema,
     type: 'destructive',
     idempotent: false,
@@ -127,15 +131,20 @@ const auditKeyboardOperation = defineTabTool({
     page.on('filechooser', onModal);
     page.on('close', onClose);
     page.on('popup', onPopup);
-    const steps: StepResult[] = params.steps.map((step, index) => ({ step: index + 1, key: step.key, status: 'not-run', checks: [] }));
+    const steps = params.steps.map((step, index): StepResult => ({ step: index + 1, ...('key' in step ? { key: step.key } : { action: 'type', characterCount: [...step.text].length }), status: 'not-run', checks: [] }));
     let status: 'passed' | 'failed' | 'incomplete' = 'passed';
     let phase = 'Selector validation';
     let current: StepResult | undefined;
-    const bounded = <T>(run: () => Promise<T>) => rejectOnAbort(() => rejectAfterTimeout(run(), 2000, 'Operation timed out.'), operationSignal);
     const checkInterrupted = () => {
       operationSignal.throwIfAborted();
       if (tab.modalStates().length)
         throw new Error('A browser modal interrupted the scenario.');
+    };
+    const bounded = async <T>(run: () => Promise<T>) => {
+      checkInterrupted();
+      const result = await rejectOnAbort(() => rejectAfterTimeout(run(), 2000, 'Operation timed out.'), operationSignal);
+      checkInterrupted();
+      return result;
     };
     try {
       checkInterrupted();
@@ -146,27 +155,40 @@ const auditKeyboardOperation = defineTabTool({
         current = steps[index];
         current.status = 'incomplete';
         phase = 'Keyboard action';
-        await bounded(() => page.keyboard.press(step.key));
-        checkInterrupted();
-        phase = 'Expectation measurement';
-        const deadline = Date.now() + params.timeoutMs;
-        do {
-          const checks: Check[] = [];
-          for (const expectation of step.expect) {
-            checkInterrupted();
-            const measurement = await bounded(() => page.locator(`css=${expectation.selector}`).evaluateAll(measureExpectation, expectation));
-            checkInterrupted();
-            if (measurement.error) {
-              reason = measurement.error;
-              throw new Error(measurement.error);
-            }
-            checks.push(...measurement.checks);
+        if ('key' in step) {
+          await bounded(() => page.keyboard.press(step.key));
+        } else {
+          const focused = await bounded(() => page.evaluateHandle(() => {
+            let element = document.activeElement;
+            while (element?.shadowRoot?.activeElement)
+              element = element.shadowRoot.activeElement;
+            return element;
+          }));
+          try {
+            const target = focused.asElement();
+            if (!target)
+              throw new Error('No editable target is focused.');
+            await typeIntoFocusedElement(page, target, step.text, bounded);
+          } finally {
+            await rejectAfterTimeout(focused.dispose(), 2000, 'Handle cleanup timed out.');
           }
-          current.checks = checks;
-          if (checks.every(check => check.passed) || Date.now() >= deadline)
-            break;
-          await delay(Math.min(25, Math.max(0, deadline - Date.now())), undefined, { signal: operationSignal });
-        } while (true);
+        }
+        phase = 'Expectation measurement';
+        if (params.timeoutMs > 0)
+          await delay(params.timeoutMs, undefined, { signal: operationSignal });
+        checkInterrupted();
+        const checks: Check[] = [];
+        for (const expectation of step.expect) {
+          checkInterrupted();
+          const measurement = await bounded(() => page.locator(`css=${expectation.selector}`).evaluateAll(measureExpectation, expectation));
+          checkInterrupted();
+          if (measurement.error) {
+            reason = measurement.error;
+            throw new Error(measurement.error);
+          }
+          checks.push(...measurement.checks);
+        }
+        current.checks = checks;
         checkInterrupted();
         current.status = current.checks.every(check => check.passed) ? 'passed' : 'failed';
         if (current.status === 'failed') {
