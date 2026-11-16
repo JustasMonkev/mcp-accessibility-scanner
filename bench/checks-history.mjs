@@ -1,3 +1,5 @@
+// Usage: node bench/checks-history.mjs [--range <rev-range>] [--out <file.jsonl>] [--jobs <n>]
+// Runs today's scripts/ checks before and after every first-parent commit in the range (default origin/main).
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -67,6 +69,7 @@ function runCheck(script, cwd) {
   });
 }
 
+// Line numbers and found versions shift between commits without changing the violation, so they are dropped.
 function violationsIn(output) {
   return output.split('\n').filter(line => line.startsWith('  ')).map(line => line.trim()
       .replace(/^([^:\s]+):\d+(?=[:\s])/, '$1')

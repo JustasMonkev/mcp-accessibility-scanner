@@ -41,6 +41,7 @@ function isNonRegistrySpecifier(specifier) {
   return /^(?:workspace:|file:|link:|portal:|git\+|github:|git:|https?:|ssh:)/.test(specifier);
 }
 
+// `npm:name@1.2.3` aliases carry their version after the last `@`.
 function versionOf(specifier) {
   if (!specifier.startsWith('npm:'))
     return specifier;

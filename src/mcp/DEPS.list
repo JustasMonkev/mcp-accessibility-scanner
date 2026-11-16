@@ -1,5 +1,6 @@
 [*]
 
+# Existing exceptions, not a pattern: do not add more without deciding the boundary first.
 [http.ts]
 ../config.js
 ../utils/log.js

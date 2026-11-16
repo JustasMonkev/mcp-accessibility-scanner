@@ -5,6 +5,7 @@ if (!staged.includes('package-lock.json'))
   process.exit(0);
 const before = readLock('HEAD:package-lock.json');
 const after = readLock(':package-lock.json');
+// Without os/cpu/libc, npm ci installs the wrong native binary (PR #139), so ALLOW_LOCKFILE_CHANGE cannot override this.
 const platformLosses = lostPlatformFields(before, after);
 if (platformLosses.length > 0) {
   console.error('package-lock.json drops platform fields from native packages:');

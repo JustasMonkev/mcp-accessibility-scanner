@@ -27,6 +27,7 @@ export function listImports(configPath) {
       const file = resolve(fileName);
       if (file.endsWith('.d.ts') || file.endsWith('.json') || isOutside(projectDirectory, file))
         continue;
+      // `include` only filters roots: an import can pull an excluded file back into the build.
       if (!roots.has(file))
         strayFiles.push(file);
       imports.push(...importsOf(project.program.getSourceFile(fileName), file));
@@ -63,6 +64,7 @@ function importsOf(source, file) {
   return found;
 }
 
+// A bare `import 'x'` runs the module, so only type-only bindings make an import erasable.
 function isTypeOnlyImport(clause) {
   if (!clause)
     return false;
