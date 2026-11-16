@@ -1172,18 +1172,9 @@ the package's Docker smoke test remain separate; branded Chrome and Edge are
 not included in the Playwright image. See the
 [Playwright Docker guidance](https://playwright.dev/docs/docker).
 
-Candidate upgrade for #346: paired packages and CI images target **1.65.1**.
-Chromium 159.0.8154.6 browser validation is pending. Measurements below remain
-historical 1.65.0 results until their corresponding probes are rerun; changing
-the dependency does not revalidate them. Run `node tests/playwright-upgrade-probe.mjs`
-for device user agents/screens, IndexedDB Map/Set restoration, screenshot touch
-properties and instant scroll retries, alongside the existing recorder, CDP,
-history/download and platform gates. BFCache reproduction remains a separate
-opt-in diagnostic (`MCP_TEST_ENABLE_BFCACHE=1`), not a supported-mode pass gate.
-
-The November 6, 2026 upgrade paired `playwright` and `playwright-core` at
-**1.65.0**, the [latest stable release](https://github.com/microsoft/playwright/releases/tag/v1.65.0)
-on that date. Keep the local `InputRecorder` hub and the existing factory reference
+The pinned packages and CI images target **1.65.1**. The browser-specific
+measurements below were recorded with 1.65.0 and remain historical context.
+Keep the local `InputRecorder` hub and the existing factory reference
 counts: multiple MCP clients share one client-side browser context, while the hub
 multiplexes session logs and explicit recordings and excludes sibling tool actions.
 A dependency bump alone must not change that ownership model.

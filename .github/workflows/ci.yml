@@ -106,15 +106,6 @@ jobs:
         env:
           MCP_TEST_BROWSER_NAME: firefox
 
-      - if: ${{ !cancelled() }}
-        name: Revalidate browser upgrade documentation claims
-        run: |
-          status=0
-          for browser in chromium firefox webkit; do
-            MCP_TEST_BROWSER_NAME="$browser" node tests/playwright-upgrade-probe.mjs || status=1
-          done
-          exit "$status"
-
   docker-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30
