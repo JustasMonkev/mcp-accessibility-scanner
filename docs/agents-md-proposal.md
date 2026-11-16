@@ -62,8 +62,9 @@ type) instead of editing `DEPS.list`. Changing `DEPS.list` is an architecture de
   the other audit tools, both proxy adapters) and follow that pattern. If you deviate, say why.
 - One concept per file, named after it. Split by concept, not by size; a second concept is the reason to split. Do not
   add a new concept to a file over 800 lines (`src/tools/auditSite.ts`); extract it.
-- Each exported function gets a one-line doc comment that says what it guarantees. Comments explain a non-obvious why,
-  never what the next line does.
+- Comment only where the code cannot explain itself: a non-obvious why, a format or edge case, a usage line for a
+  script. Never restate what the next line does, and add no doc comments by default. Tool-required comments stay
+  (license headers, `@internal` for knip).
 - Functions longer than about 40 lines need a reason. No boolean parameters that switch behaviour: use two functions
   or a tagged value. (`max-params: 5` is linted.)
 - Use tagged unions for states and results. Results keep clean, partial, failed and unevaluated apart
