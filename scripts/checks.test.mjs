@@ -1,6 +1,6 @@
 // Runs each structural check against a small fixture project and asserts it passes clean code and fails violations.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -89,6 +89,49 @@ describe('check-pinned-deps', () => {
   });
 });
 
+describe('check-lockfile-commit', () => {
+  const lock = packages => JSON.stringify({ name: 'fixture', lockfileVersion: 3, packages });
+  const native = { 'node_modules/binding-linux-x64-gnu': { version: '1.0.0', optional: true, os: ['linux'], cpu: ['x64'], libc: ['glibc'] } };
+
+  test('ignores commits that do not stage package-lock.json', () => {
+    const cwd = repository(lock(native));
+    stage(cwd, 'README.md', 'docs\n');
+    assert.equal(run('check-lockfile-commit.mjs', cwd).status, 0);
+  });
+
+  test('blocks a staged lockfile change unless ALLOW_LOCKFILE_CHANGE is set', () => {
+    const cwd = repository(lock(native));
+    stage(cwd, 'package-lock.json', lock({ ...native, 'node_modules/zod': { version: '4.6.7' } }));
+    const blocked = run('check-lockfile-commit.mjs', cwd);
+    assert.equal(blocked.status, 1);
+    assert.match(blocked.output, /added zod@4\.6\.7/);
+    assert.equal(run('check-lockfile-commit.mjs', cwd, { ALLOW_LOCKFILE_CHANGE: '1' }).status, 0);
+  });
+
+  test('blocks dropped platform fields even when ALLOW_LOCKFILE_CHANGE is set', () => {
+    const cwd = repository(lock(native));
+    const withoutLibc = { version: '1.0.0', optional: true, os: ['linux'], cpu: ['x64'] };
+    stage(cwd, 'package-lock.json', lock({ 'node_modules/binding-linux-x64-gnu': withoutLibc }));
+    const result = run('check-lockfile-commit.mjs', cwd, { ALLOW_LOCKFILE_CHANGE: '1' });
+    assert.equal(result.status, 1);
+    assert.match(result.output, /binding-linux-x64-gnu lost "libc"/);
+  });
+});
+
+function repository(lockfile) {
+  const cwd = project({ 'package-lock.json': lockfile });
+  const git = args => execFileSync('git', args, { cwd, stdio: 'ignore' });
+  git(['init', '-q']);
+  git(['add', '.']);
+  git(['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-q', '--no-verify', '-m', 'base']);
+  return cwd;
+}
+
+function stage(cwd, path, content) {
+  writeFileSync(join(cwd, path), content);
+  execFileSync('git', ['add', path], { cwd });
+}
+
 function project(files, packageJson = manifest) {
   const directory = mkdtempSync(join(tmpdir(), 'scanner-checks-'));
   fixtures.push(directory);
@@ -99,7 +142,7 @@ function project(files, packageJson = manifest) {
   return directory;
 }
 
-function run(script, cwd) {
-  const result = spawnSync(process.execPath, [join(scripts, script)], { cwd, encoding: 'utf8' });
+function run(script, cwd, env = {}) {
+  const result = spawnSync(process.execPath, [join(scripts, script)], { cwd, encoding: 'utf8', env: { ...process.env, ALLOW_LOCKFILE_CHANGE: '', ...env } });
   return { status: result.status, output: result.stdout + result.stderr };
 }

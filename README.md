@@ -1149,6 +1149,14 @@ as well.
 
 `npm run knip` checks the server's sources, tests, benchmarks and tooling.
 
+`npm run check` runs every static check CI runs: oxlint, `tsc`, knip, exact dependency
+versions, runtime imports declared in `dependencies`, and the module boundaries in
+`src/**/DEPS.list`. `npm run test:scripts` tests those check scripts. `npm install`
+enables a pre-commit hook (`.githooks/pre-commit`) that runs `npm run check` and asks
+for `ALLOW_LOCKFILE_CHANGE=1` before a `package-lock.json` change is committed.
+`node bench/checks-history.mjs` replays the checks over `main`'s history; see the
+[checks benchmark](docs/checks-benchmark-2026-11.md).
+
 `npm run test:coverage` enforces 90% statements, branches, functions and lines
 using Vitest's `coverage.thresholds`. It exits nonzero when any target is missed,
 even if every test passes. The current suite is below these targets; this command

@@ -1,7 +1,7 @@
 # AGENTS.md (proposed)
 
-> Draft. Replaces the current `AGENTS.md` once the `npm run check` scripts in "Commands" exist.
-> Lines marked (new) refer to checks that are ported from pi and not yet in this repo.
+> Draft to replace the current `AGENTS.md`. The checks it names exist (`npm run check`, see
+> `docs/checks-benchmark-2026-11.md`).
 
 Node.js + TypeScript (ESM, TypeScript 7, Node `^24.15 || >=26`) MCP server for accessibility audits
 (axe-core 4.14 plus custom audits) and browser automation on Playwright 1.65.1. Published as
@@ -25,7 +25,8 @@ While iterating:
 
 Before reporting any code change (full output, fix every error and warning):
 
-- `npm run check`: oxlint, tsc, knip, and the structural checks below (new)
+- `npm run check`: oxlint, tsc, knip, pinned and runtime dependencies, DEPS.list boundaries
+- `npm run test:scripts` when you change `scripts/`
 - `npm test`
 
 Also run when you touched:
@@ -39,7 +40,7 @@ If you could not run one locally, say so by name. Do not claim it passed.
 
 ## Modules and boundaries
 
-`src/**/DEPS.list` lists what each directory may import. `npm run check:deps` (new) enforces it; type-only imports
+`src/**/DEPS.list` lists what each directory may import. `npm run check:deps-list` enforces it; type-only imports
 are exempt.
 
 | Directory | Owns | May value-import |
@@ -77,8 +78,9 @@ type) instead of editing `DEPS.list`. Changing `DEPS.list` is an architecture de
 - Never remove or downgrade code to fix a type error. Ask before removing behaviour that looks intentional.
 - Use named Playwright type imports for `Request` and `Response`, never `playwright.Request`.
 - Do not rename the package, the binary, or published tool names unless asked.
-- Runtime dependencies are pinned exactly (`check:pinned-deps`, new). Every bare import in `src/` is declared in
-  `dependencies` (`check:runtime-deps`, new). Change `package-lock.json` only when the task is a dependency change.
+- Runtime dependencies are pinned exactly (`check:pinned-deps`). Every bare import in `src/` is declared in
+  `dependencies` (`check:runtime-deps`). Change `package-lock.json` only when the task is a dependency change; the pre-commit hook
+  (`.githooks/pre-commit`) asks for `ALLOW_LOCKFILE_CHANGE=1` and refuses lockfiles that drop `os`, `cpu` or `libc`.
 
 ## Definition of done, by kind of issue
 

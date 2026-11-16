@@ -1,11 +1,23 @@
 // Pre-commit guard: blocks a staged package-lock.json change unless the committer opts in with
-// ALLOW_LOCKFILE_CHANGE=1, after reviewing what changed.
+// ALLOW_LOCKFILE_CHANGE=1, after reviewing what changed. A lockfile that drops a native package's `os`, `cpu` or
+// `libc` field is always blocked: npm ci would then install the wrong binary (it happened in PR #139).
 // Adapted from earendil-works/pi scripts/check-lockfile-commit.mjs (MIT).
 import { execFileSync } from 'node:child_process';
 
 const staged = git(['diff', '--cached', '--name-only']).split('\n').map(line => line.trim());
 if (!staged.includes('package-lock.json'))
   process.exit(0);
+const before = readLock('HEAD:package-lock.json');
+const after = readLock(':package-lock.json');
+const platformLosses = lostPlatformFields(before, after);
+if (platformLosses.length > 0) {
+  console.error('package-lock.json drops platform fields from native packages:');
+  for (const loss of platformLosses.slice(0, 20))
+    console.error(`  - ${loss}`);
+  console.error('Regenerate it with the npm version CI uses (npm --version in .github/workflows/ci.yml), from a clean');
+  console.error('install, so npm keeps the fields. ALLOW_LOCKFILE_CHANGE does not override this.');
+  process.exit(1);
+}
 if (['1', 'true', 'yes'].includes(process.env.ALLOW_LOCKFILE_CHANGE ?? '')) {
   console.error('package-lock.json is staged; ALLOW_LOCKFILE_CHANGE is set, allowing the commit.');
   process.exit(0);
@@ -15,7 +27,7 @@ console.error('package-lock.json is staged. Review it before committing:');
 console.error('  - every added or updated package is intentional');
 console.error('  - no new install scripts appear in the dependency tree');
 console.error('  - playwright and playwright-core stay on the same exact version');
-const changes = summarizeChanges(readLock('HEAD:package-lock.json'), readLock(':package-lock.json'));
+const changes = summarizeChanges(before, after);
 if (changes.length > 0) {
   console.error('\nPackage changes:');
   for (const change of changes.slice(0, 40))
@@ -36,6 +48,12 @@ function readLock(ref) {
   } catch {
     return {};
   }
+}
+
+function lostPlatformFields(before, after) {
+  return Object.entries(before).flatMap(([path, entry]) => ['os', 'cpu', 'libc']
+      .filter(field => field in entry && after[path] && !(field in after[path]))
+      .map(field => `${path} lost "${field}"`));
 }
 
 function summarizeChanges(before, after) {

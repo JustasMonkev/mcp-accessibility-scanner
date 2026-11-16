@@ -23,8 +23,7 @@ if (failures.length > 0) {
   console.error('Registry dependencies must use exact versions:');
   for (const failure of failures)
     console.error(`  ${failure}`);
-  console.error('Fix: set the version package-lock.json resolved (npm ls <name>), then run');
-  console.error('  npm install --package-lock-only --ignore-scripts');
+  console.error('Fix: set the version package-lock.json resolved (npm ls <name>), then run `npm install --package-lock-only --ignore-scripts`.');
   process.exit(1);
 }
 console.log('Registry dependencies are pinned.');
