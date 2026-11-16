@@ -479,7 +479,7 @@ Direct DOM value assignments can bypass application event handlers, and syntheti
 Record a session once with Playwright's codegen, then hand the file to the server:
 
 ```bash
-npx playwright@1.65.0 codegen --save-storage=auth.json https://example.com/login
+npx playwright@1.65.1 codegen --save-storage=auth.json https://example.com/login
 ```
 
 Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.
@@ -1163,7 +1163,7 @@ the removal rationale and validation results.
 ### Playwright upgrade gate
 
 The Linux `test` and `webkit-regressions` CI jobs use the official
-`mcr.microsoft.com/playwright:v1.65.0-noble` image with its preinstalled browsers
+`mcr.microsoft.com/playwright:v1.65.1-noble` image with its preinstalled browsers
 and system dependencies, rather than downloading browsers during each job.
 They run as `pwuser` so Firefox can use GitHub's user-owned home directory.
 Keep both image tags in `.github/workflows/ci.yml` aligned with the pinned
@@ -1172,9 +1172,9 @@ the package's Docker smoke test remain separate; branded Chrome and Edge are
 not included in the Playwright image. See the
 [Playwright Docker guidance](https://playwright.dev/docs/docker).
 
-The November 6, 2026 upgrade pairs `playwright` and `playwright-core` at
-**1.65.0**, the [latest stable release](https://github.com/microsoft/playwright/releases/tag/v1.65.0)
-on that date. Keep the local `InputRecorder` hub and the existing factory reference
+The pinned packages and CI images target **1.65.1**. The browser-specific
+measurements below were recorded with 1.65.0 and remain historical context.
+Keep the local `InputRecorder` hub and the existing factory reference
 counts: multiple MCP clients share one client-side browser context, while the hub
 multiplexes session logs and explicit recordings and excludes sibling tool actions.
 A dependency bump alone must not change that ownership model.
