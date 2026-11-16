@@ -1,10 +1,3 @@
-// Enforces the module boundaries written in src/**/DEPS.list (Playwright's utils/check_deps.js format).
-//
-// A file is governed by the nearest DEPS.list in its directory or an ancestor. `[*]` lists what every governed file
-// may import and `[path/from/DEPS.list.ts]` adds entries for one file. An entry is a path relative to the DEPS.list:
-// a directory (`../utils/`) allows the files directly in it, `dir/**` allows its whole subtree, a file allows that
-// file, and `***` allows anything. Files may always import files in their own directory. Type-only imports are
-// exempt: TypeScript erases them. Package imports are checked by check-runtime-deps.mjs, not here.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { listImports } from './sourceImports.mjs';
@@ -45,7 +38,6 @@ if (failures.length > 0) {
   console.log('Imports respect src/**/DEPS.list.');
 }
 
-// The nearest DEPS.list at or above the directory, within src/.
 function rulesFor(directory) {
   for (let current = directory; current === sourceRoot || current.startsWith(sourceRoot + sep); current = dirname(current)) {
     if (rulesByDirectory.has(current))
@@ -103,7 +95,6 @@ function isAllowed(from, to, entries) {
     || (entry.kind === 'file' && to === entry.path));
 }
 
-// Source imports name the emitted `.js` file; the checked file is the `.ts` beside it, or a directory's index.ts.
 function resolveSourceFile(directory, specifier) {
   const path = resolve(directory, specifier);
   for (const candidate of [path.replace(/\.js$/, '.ts'), path, `${path}.ts`, join(path, 'index.ts')]) {

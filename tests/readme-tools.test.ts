@@ -13,8 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// Structural test: every published tool is documented. Between July 2025 and June 2026, 11 to 30 tools on main
-// were missing from README.md until a documentation audit (PR #97) caught it by hand.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { allTools } from '../src/tools.js';

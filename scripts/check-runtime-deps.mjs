@@ -1,6 +1,3 @@
-// Fails when src/ imports a package at runtime that package.json does not list in dependencies.
-// npm installs only `dependencies` for users, so such an import breaks the published package.
-// Adapted from earendil-works/pi scripts/check-runtime-deps.mjs (MIT).
 import { readFileSync } from 'node:fs';
 import { isBuiltin } from 'node:module';
 import { relative, resolve } from 'node:path';

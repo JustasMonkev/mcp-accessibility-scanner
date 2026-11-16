@@ -1,5 +1,4 @@
 #!/bin/sh
-# Runs before every commit. Enable once per clone (npm install does it): git config core.hooksPath .githooks
 node scripts/check-lockfile-commit.mjs || exit 1
 npm run check || {
   echo "npm run check failed. Fix the errors above before committing."

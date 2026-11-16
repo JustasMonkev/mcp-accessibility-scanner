@@ -1,5 +1,3 @@
-// Fails when a registry dependency in package.json uses a range instead of an exact version.
-// Adapted from earendil-works/pi scripts/check-pinned-deps.mjs (MIT).
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -43,7 +41,6 @@ function isNonRegistrySpecifier(specifier) {
   return /^(?:workspace:|file:|link:|portal:|git\+|github:|git:|https?:|ssh:)/.test(specifier);
 }
 
-// `npm:name@1.2.3` aliases carry their version after the last `@`.
 function versionOf(specifier) {
   if (!specifier.startsWith('npm:'))
     return specifier;

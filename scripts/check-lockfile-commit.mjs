@@ -1,7 +1,3 @@
-// Pre-commit guard: blocks a staged package-lock.json change unless the committer opts in with
-// ALLOW_LOCKFILE_CHANGE=1, after reviewing what changed. A lockfile that drops a native package's `os`, `cpu` or
-// `libc` field is always blocked: npm ci would then install the wrong binary (it happened in PR #139).
-// Adapted from earendil-works/pi scripts/check-lockfile-commit.mjs (MIT).
 import { execFileSync } from 'node:child_process';
 
 const staged = git(['diff', '--cached', '--name-only']).split('\n').map(line => line.trim());

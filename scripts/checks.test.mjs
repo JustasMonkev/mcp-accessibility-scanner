@@ -1,4 +1,3 @@
-// Runs each structural check against a small fixture project and asserts it passes clean code and fails violations.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';

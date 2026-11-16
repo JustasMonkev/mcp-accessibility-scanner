@@ -1,10 +1,3 @@
-// Replays the structural checks in scripts/ over main's history. For every change that landed on main (each
-// first-parent commit), runs each check on the tree before and after it and records the violations the change
-// introduced and removed. Today's check scripts run against each historical tree.
-//
-// Usage: node bench/checks-history.mjs [--range <rev-range>] [--out <file.jsonl>] [--jobs <n>]
-//   --range  commits to replay (default: origin/main, i.e. all of main's history)
-//   --out    JSON lines, one record per landed change (default: stdout)
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,7 +10,6 @@ const checks = {
   'runtime-deps': 'scripts/check-runtime-deps.mjs',
   'deps-list': 'scripts/check-deps-list.mjs',
 };
-// Only these paths decide the checks' results; extracting just them keeps a replay fast.
 const inputs = ['src', 'tsconfig.json', 'package.json'];
 
 const options = parseArgs(process.argv.slice(2));
@@ -75,8 +67,6 @@ function runCheck(script, cwd) {
   });
 }
 
-// Violation lines are indented. Line numbers and found versions change between commits without changing the
-// violation, so they are dropped before comparing.
 function violationsIn(output) {
   return output.split('\n').filter(line => line.startsWith('  ')).map(line => line.trim()
       .replace(/^([^:\s]+):\d+(?=[:\s])/, '$1')

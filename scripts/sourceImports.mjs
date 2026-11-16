@@ -1,5 +1,3 @@
-// Lists the imports of a TypeScript project's source files, using the TypeScript 7 API.
-// The type-only rules follow earendil-works/pi scripts/check-runtime-deps.mjs (MIT).
 import { isAbsolute, relative, resolve } from 'node:path';
 import { SyntaxKind } from 'typescript/unstable/ast';
 import {
@@ -14,17 +12,6 @@ import {
 } from 'typescript/unstable/ast/is';
 import { API } from 'typescript/unstable/sync';
 
-/**
- * @typedef {{ file: string, line: number, specifier: string, typeOnly: boolean }} SourceImport
- * `file` is absolute. `typeOnly` is true when TypeScript erases the import, so it carries no runtime dependency.
- */
-
-/**
- * Returns every static and dynamic import in the project's own `.ts` files, plus the files the program pulls in
- * from inside the project directory although its `include` leaves them out.
- * @param {string} configPath absolute path of a tsconfig.json
- * @returns {{ imports: SourceImport[], strayFiles: string[] }}
- */
 export function listImports(configPath) {
   const projectDirectory = resolve(configPath, '..');
   const api = new API({ cwd: projectDirectory });
@@ -40,7 +27,6 @@ export function listImports(configPath) {
       const file = resolve(fileName);
       if (file.endsWith('.d.ts') || file.endsWith('.json') || isOutside(projectDirectory, file))
         continue;
-      // `include` only filters roots: an import can pull an excluded file back into the build.
       if (!roots.has(file))
         strayFiles.push(file);
       imports.push(...importsOf(project.program.getSourceFile(fileName), file));
@@ -77,7 +63,6 @@ function importsOf(source, file) {
   return found;
 }
 
-// `import type { A }` and `import { type A, type B }` are erased; a bare `import 'x'` or any value binding is not.
 function isTypeOnlyImport(clause) {
   if (!clause)
     return false;

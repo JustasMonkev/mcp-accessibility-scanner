@@ -5,8 +5,6 @@
 ../browserServerBackend.js
 ../browserContextFactory.js
 
-# Imports that predate enforcement by scripts/check-deps-list.mjs (2026-11-16). Each is an
-# exception, not a pattern: decide whether to move the code or widen [*] before adding more.
 [host.ts]
 ../browserSessions.js
 ../networkPolicy.js

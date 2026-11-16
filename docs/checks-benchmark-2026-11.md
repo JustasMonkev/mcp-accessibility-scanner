@@ -17,8 +17,7 @@ what would they have cost, and what do they miss?
 violation. CI runs `npm run check` and `npm run test:scripts` in place of the old typecheck and lint steps.
 
 Not ported: `check-ts-relative-imports.mjs`, because this repo imports `.js` and oxlint already enforces it;
-`biome-check.mjs`, because this repo uses oxlint; `check-package-install.mjs`, which needs more work (see
-improvement 1).
+`biome-check.mjs`, because this repo uses oxlint; `check-package-install.mjs`, skipped by decision.
 
 ## Method
 
@@ -69,7 +68,7 @@ issue they cover.
 
 | Issue | Cause | Caught by |
 | --- | --- | --- |
-| #12 `ERR_MODULE_NOT_FOUND` for `lib/program.js` after `npx` install | The published tarball was broken | Nothing yet. A tarball install test would (improvement 1). |
+| #12 `ERR_MODULE_NOT_FOUND` for `lib/program.js` after `npx` install | The published tarball was broken | Nothing. A tarball install test would; skipped by decision (2026-11-16). |
 | #13 `locator._generateLocatorString is not a function` | `"playwright": "^1.54.1"` let users get a newer Playwright that removed a private API | **pinned-deps.** An exact pin keeps users on the tested version. |
 | #84 `_evaluateFunction is not a function` | A private Playwright API removed in 1.59; the repo was pinned, the upgrade broke it | Nothing yet. A private-API contract test would (improvement 2). |
 | #45 Docker image missing for amd64 | Image publishing | Not a code check |
@@ -89,26 +88,22 @@ Most of the 179 findings need a test or a reviewer. These can be checked mechani
 
 ## What is missing, in priority order
 
-1. **Install the tarball before release (would have caught #12).** `release.yml` runs `npm pack` but never
-   installs the result. Pi's `check-package-install.mjs` installs each packed package into an empty project and
-   runs it. Here: install `release/*.tgz` into a temporary directory, run `npx mcp-accessibility-scanner --help`, and
-   import `index.js`.
-2. **A contract test for private Playwright APIs (would have caught #84; the cause behind #13, #188 and #271).** 13
+1. **A contract test for private Playwright APIs (would have caught #84; the cause behind #13, #188 and #271).** 13
    uses of `playwright-core/lib/coreBundle` in 6 source files are typed by the hand-written `src/external-modules.d.ts`,
    so `tsc` passes even when Playwright removes a member. Add one test that loads `coreBundle` and checks that every
    member that file declares exists with the right kind. The Playwright upgrade playbook then fails right away
    instead of at runtime.
-3. **Run the lockfile platform check in CI too.** The pre-commit hook guards local commits only, and #139 was merged
+2. **Run the lockfile platform check in CI too.** The pre-commit hook guards local commits only, and #139 was merged
    on GitHub. Give the guard a `--base <ref>` mode and run it on pull requests against the base branch.
-4. **Decide the `src/mcp/` boundary.** 8 of the 11 recorded exceptions are `mcp/` importing `utils/log.ts`,
+3. **Decide the `src/mcp/` boundary.** 8 of the 11 recorded exceptions are `mcp/` importing `utils/log.ts`,
    `terminal.ts`, `httpUrl.ts` and `urlRedaction.ts`. Either allow `../utils/` in `src/mcp/DEPS.list` or keep
    `mcp/` free of the app. The new check enforces whichever is chosen.
-5. **Name the issue in regression tests.** 5 of 46 do today. A CI step can require that a PR saying `Closes #N`
+4. **Name the issue in regression tests.** 5 of 46 do today. A CI step can require that a PR saying `Closes #N`
    changes `tests/` and mentions `#N` there, unless it is labelled docs or decision.
-6. **A Stop hook for agents.** Pi relies on its pre-commit hook. Agents here also work through PRs, so a Claude Code
+5. **A Stop hook for agents.** Pi relies on its pre-commit hook. Agents here also work through PRs, so a Claude Code
    `Stop` hook running `npm run check` keeps a session from ending red. The git hook only runs once
    `git config core.hooksPath .githooks` is set (`npm install` does it through `prepare`).
-7. **Keep exact pins on Dependabot updates.** There is no `.github/dependabot.yml`. If version updates are turned on,
+6. **Keep exact pins on Dependabot updates.** There is no `.github/dependabot.yml`. If version updates are turned on,
    set `versioning-strategy: increase` so its PRs keep exact versions and pass `check:pinned-deps`.
 
 ## Limitations
