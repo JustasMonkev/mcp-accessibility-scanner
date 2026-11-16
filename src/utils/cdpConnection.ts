@@ -32,6 +32,7 @@ function isCdpMessage(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** @internal Exported for tests. Prepends a shared-worker exclusion to root `Target.setAutoAttach` requests. */
 export function filterAutoAttach(message: Record<string, unknown>): Record<string, unknown> {
   if (!('method' in message) || message.method !== 'Target.setAutoAttach' || 'sessionId' in message && message.sessionId)
     return message;

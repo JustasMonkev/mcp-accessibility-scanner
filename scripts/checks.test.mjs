@@ -1,0 +1,105 @@
+// Runs each structural check against a small fixture project and asserts it passes clean code and fails violations.
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { after, describe, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+const scripts = dirname(fileURLToPath(import.meta.url));
+const fixtures = [];
+after(() => fixtures.forEach(directory => rmSync(directory, { recursive: true, force: true })));
+
+const tsconfig = JSON.stringify({ compilerOptions: { module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, verbatimModuleSyntax: true, noEmit: true }, include: ['src'] });
+const manifest = { name: 'fixture', version: '1.0.0', type: 'module', dependencies: { zod: '4.6.7' }, devDependencies: { vitest: '5.0.5' } };
+
+describe('check-deps-list', () => {
+  const layout = {
+    'src/DEPS.list': '[*]\n./tools/\n./utils/\n',
+    'src/tools/DEPS.list': '[*]\n../utils/\n',
+    'src/utils/DEPS.list': '[*]\n',
+    'src/tab.ts': 'export class Tab {}\n',
+    'src/utils/log.ts': 'export const log = 1;\n',
+    'src/tools/a.ts': 'export const a = 1;\n',
+  };
+
+  test('allows listed directories, own directory and type-only imports', () => {
+    const result = run('check-deps-list.mjs', project({ ...layout, 'src/tools/b.ts': "import { log } from '../utils/log.js';\nimport { a } from './a.js';\nimport type { Tab } from '../tab.js';\nexport const b: Tab | number = log + a;\n" }));
+    assert.equal(result.status, 0, result.output);
+  });
+
+  test('rejects a value import the nearest DEPS.list does not list, and names the rule', () => {
+    const result = run('check-deps-list.mjs', project({ ...layout, 'src/tools/b.ts': "import { Tab } from '../tab.js';\nexport const b = new Tab();\n" }));
+    assert.equal(result.status, 1);
+    assert.match(result.output, /src\/tools\/b\.ts:1 imports src\/tab\.ts; src\/tools\/DEPS\.list allows \.\.\/utils\//);
+  });
+
+  test('treats a re-export and a dynamic import as value imports', () => {
+    const result = run('check-deps-list.mjs', project({ ...layout, 'src/utils/b.ts': "export { a } from '../tools/a.js';\nexport const load = () => import('../tab.js');\n" }));
+    assert.equal(result.status, 1);
+    assert.match(result.output, /src\/utils\/b\.ts:1 imports src\/tools\/a\.ts/);
+    assert.match(result.output, /src\/utils\/b\.ts:2 imports src\/tab\.ts/);
+  });
+
+  test('a [file] section adds an exception for that file only', () => {
+    const files = { ...layout, 'src/tools/DEPS.list': '[*]\n../utils/\n[b.ts]\n../tab.js\n', 'src/tools/b.ts': "import { Tab } from '../tab.js';\nexport const b = new Tab();\n", 'src/tools/c.ts': "import { Tab } from '../tab.js';\nexport const c = new Tab();\n" };
+    const result = run('check-deps-list.mjs', project(files));
+    assert.equal(result.status, 1);
+    assert.doesNotMatch(result.output, /b\.ts:1/);
+    assert.match(result.output, /src\/tools\/c\.ts:1 imports src\/tab\.ts/);
+  });
+
+  test('reports an entry that matches nothing', () => {
+    const result = run('check-deps-list.mjs', project({ ...layout, 'src/tools/DEPS.list': '[*]\n../utils/\n../gone/\n' }));
+    assert.equal(result.status, 1);
+    assert.match(result.output, /src\/tools\/DEPS\.list: entry \.\.\/gone\/ matches nothing/);
+  });
+});
+
+describe('check-runtime-deps', () => {
+  test('passes declared dependencies, builtins and type-only devDependency imports', () => {
+    const result = run('check-runtime-deps.mjs', project({ 'src/a.ts': "import { z } from 'zod';\nimport { join } from 'node:path';\nimport type { Mock } from 'vitest';\nexport const a = [z, join] as unknown as Mock;\n" }));
+    assert.equal(result.status, 0, result.output);
+  });
+
+  test('rejects a runtime import of a devDependency', () => {
+    const result = run('check-runtime-deps.mjs', project({ 'src/a.ts': "import { vi } from 'vitest';\nexport const a = vi;\n" }));
+    assert.equal(result.status, 1);
+    assert.match(result.output, /src\/a\.ts:1: vitest is only a devDependency/);
+  });
+
+  test('rejects an undeclared package reached through a subpath', () => {
+    const result = run('check-runtime-deps.mjs', project({ 'src/a.ts': "import x from 'playwright-core/lib/coreBundle';\nexport const a = x;\n" }));
+    assert.equal(result.status, 1);
+    assert.match(result.output, /playwright-core\/lib\/coreBundle is not declared/);
+  });
+});
+
+describe('check-pinned-deps', () => {
+  test('passes exact versions and non-registry specifiers', () => {
+    const result = run('check-pinned-deps.mjs', project({}, { ...manifest, devDependencies: { local: 'file:../local', aliased: 'npm:zod@4.6.7' } }));
+    assert.equal(result.status, 0, result.output);
+  });
+
+  test('rejects a range', () => {
+    const result = run('check-pinned-deps.mjs', project({}, { ...manifest, dependencies: { zod: '^4.6.7' } }));
+    assert.equal(result.status, 1);
+    assert.match(result.output, /dependencies\.zod must be pinned, found \^4\.6\.7/);
+  });
+});
+
+function project(files, packageJson = manifest) {
+  const directory = mkdtempSync(join(tmpdir(), 'scanner-checks-'));
+  fixtures.push(directory);
+  for (const [path, content] of Object.entries({ 'tsconfig.json': tsconfig, 'package.json': JSON.stringify(packageJson), ...files })) {
+    mkdirSync(dirname(join(directory, path)), { recursive: true });
+    writeFileSync(join(directory, path), content);
+  }
+  return directory;
+}
+
+function run(script, cwd) {
+  const result = spawnSync(process.execPath, [join(scripts, script)], { cwd, encoding: 'utf8' });
+  return { status: result.status, output: result.stdout + result.stderr };
+}

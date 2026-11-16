@@ -1,1 +1,19 @@
 [*]
+
+# Imports that predate enforcement by scripts/check-deps-list.mjs (2026-11-16). Each is an
+# exception, not a pattern: decide whether to move the code or widen [*] before adding more.
+[http.ts]
+../config.js
+../utils/log.js
+../utils/httpUrl.js
+
+[server.ts]
+../utils/log.js
+../utils/terminal.js
+../utils/urlRedaction.js
+
+[sharedClientSlot.ts]
+../utils/log.js
+
+[proxyBackend.ts]
+../utils/log.js
