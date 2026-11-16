@@ -49,7 +49,7 @@ audit_text_spacing {}
 
 These are MCP tool calls, not shell subcommands. For terminal use, see [interactive mode](#interactive-repl-interactive-subcommand).
 
-`scan_page` returns text findings with JSON node details and remediation links. With `annotateScreenshot: true`, it also saves a full-page annotated PNG and returns a file resource link. It does **not** save a JSON report. `audit_keyboard`, `audit_screen_reader` and `audit_text_spacing` save JSON reports and return summaries and report links; `audit_site` and `scan_page_matrix` also save JSON reports. There is no generated HTML report dashboard. Review incomplete checks, coverage warnings and the page states you haven't tested.
+`scan_page` returns text findings with JSON node details and remediation links. With `annotateScreenshot: true`, it also saves a full-page annotated PNG and returns a file resource link. It does **not** save a JSON report. `audit_keyboard`, `audit_keyboard_operation`, `audit_form_validation`, `audit_screen_reader` and `audit_text_spacing` save JSON reports and return summaries and report links; `audit_site` and `scan_page_matrix` also save JSON reports. There is no generated HTML report dashboard. Review incomplete checks, coverage warnings and the page states you haven't tested.
 
 To reproduce the screenshot, serve the demo from this repository with `python3 -m http.server 8765 --bind 127.0.0.1 --directory docs/assets`, navigate to `http://127.0.0.1:8765/accessibility-demo.html`, then run `scan_page` with `annotateScreenshot: true`. The screenshot used a 1000×720 viewport (`--viewport-size 1000,720`).
 
@@ -694,6 +694,42 @@ Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) wit
 2. Run audit_keyboard with maxTabs: 50
 3. Review focus findings and open the generated JSON report path
 ```
+
+#### `audit_keyboard_operation`
+Exercises a caller-defined keyboard scenario and checks the outcome after each key. Unlike `audit_keyboard`, this tests operation: opening a menu, selecting an option, dismissing a dialog, or returning focus. It does not discover tasks or decide which outcome your application should produce.
+
+Start from a known page state. Supply `steps`, each with a `key` and nonempty `expect` array. Expectations use stable selectors so they can address elements that appear or rerender during the scenario. Actions use real keyboard input, never programmatic focus, clicks, or fills. Use `Tab` steps to reach the control instead of bypassing keyboard reachability.
+
+```json
+{
+  "steps": [
+    { "key": "Tab", "expect": [{ "selector": "#open-menu", "focused": true }] },
+    { "key": "Enter", "expect": [{ "selector": "#open-menu", "expanded": true }, { "selector": "#menu", "visible": true }] },
+    { "key": "Escape", "expect": [{ "selector": "#menu", "visible": false }, { "selector": "#open-menu", "focused": true }] }
+  ]
+}
+```
+
+**Parameters and bounds:** `steps` accepts 1–20 steps, with 1–10 expectations each. Keys are `Tab`, `Shift+Tab`, `Enter`, `Space`, the four arrow keys, `Escape`, `Home` and `End`. Each expectation requires a CSS `selector` and at least one of `focused`, `visible`, `text`, `value`, `expanded`, `checked`, `selected`, `pressed` or `disabled`. Boolean states are exact; `checked` and `pressed` also accept `"mixed"`. Text compares trimmed `textContent`; values compare native form values or `aria-valuenow`. Text/value contents are omitted from reports. Selectors address the main frame and open shadow roots, not iframe contents. An ambiguous selector or unsupported state is incomplete, not a pass. `visible` checks layout boxes and computed visibility, not opacity or visual occlusion; use `audit_keyboard` separately for focus visibility/obscuration heuristics. `timeoutMs` is the per-step outcome wait (0–1000 ms, default 300; zero samples once), within a 30-second overall scenario budget.
+
+This is a **state-changing** tool: a key can submit a form or navigate. It does not undo actions. Use controlled test data and reset the page before repeating a scenario. An assertion mismatch stops the scenario; subsequent steps are not run. An interrupted action or unavailable measurement is not a passing check. JSON reports and structured results distinguish tested outcomes from incomplete work. This supports investigation of WCAG 2.1.1, 2.1.2 and 2.4.3, not certification of keyboard access across the site.
+
+#### `audit_form_validation`
+Exercises one caller-defined invalid-input case: fills the named text inputs/textarea fields, activates the supplied submit control, and inspects the expected error/status feedback. It does not discover forms, choose invalid values, or submit other forms automatically.
+
+```json
+{
+  "fields": [{ "selector": "#email", "value": "invalid-email" }],
+  "submitSelector": "#submit",
+  "expectedFeedback": [{ "selector": "#email-error", "kind": "error" }]
+}
+```
+
+Supply selectors for the fields and feedback in the main document; expected feedback may appear after validation. The audit examines native/ARIA invalid state, same-root error associations, feedback visibility, focus and changes to live-region content. It reports programmatic feedback evidence, **not actual NVDA/VoiceOver announcements**. An associated error does not also have to be a live region; native browser validation and focus-managed feedback must be considered. Human review is still needed to judge whether an error explains the problem and suggests an appropriate correction (WCAG 3.3.1/3.3.3), and whether status feedback is announced usefully (4.1.3).
+
+**Parameters and bounds:** `fields` and `expectedFeedback` each accept 1–20 entries. Field `value` is a string (up to 10,000 characters); supported fields are editable text/email/url/tel/password/search inputs and textareas. CSS selectors are limited to 500 characters and must be unambiguous. Feedback `kind` is `error` or `status`. `timeoutMs` sets the post-click observation window (100–10,000 ms, default 3000); the total scenario budget is that window plus 5 seconds, with individual actions limited to 1 second. Feedback text excludes hidden descendants but retains visually clipped screen-reader-only text. Each target is bounded to 10,000 text nodes and 10,000 exposed characters; exceeding either limit sets `textTruncated` and makes the audit incomplete. Native validation is reported as a possible browser-managed feedback route, not a verified announcement. Findings describe observed gaps; `completed` means the scenario was measured, not that the form conforms to WCAG. Other frames, transient feedback and message quality need separate review.
+
+This is a **state-changing** tool: supplied values are filled and the submit control is activated. An unexpectedly accepted value can submit the form. Use a test environment and reset its state between cases; the audit cannot undo submissions. Reports omit submitted values and feedback text. Both new interaction audits accept `reportFile` for a JSON report, use the normal MCP output directory and never overwrite an existing explicitly named report.
 
 #### `audit_screen_reader`
 Inspects the browser's accessibility tree (`page.ariaSnapshot`), accessible names and element geometry for potential accessibility issues. No actual screen reader is installed or driven, and its announcements and interactions are not tested.

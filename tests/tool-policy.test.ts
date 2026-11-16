@@ -36,6 +36,8 @@ const unusedFactory = { createContext: vi.fn(async () => { throw new Error('unex
 describe('exact-name tool policy', () => {
   it('preserves defaults and adds only the named optional tools', async () => {
     const defaults = filteredTools(await resolveConfig({})).map(tool => tool.schema.name);
+    expect(defaults).toContain('audit_keyboard_operation');
+    expect(defaults).toContain('audit_form_validation');
     expect(defaults).not.toContain('browser_install');
     expect(defaults).not.toContain('browser_pdf_save');
     const cleared = filteredTools(await resolveConfig({ allowedTools: [], blockedTools: [] }));
@@ -45,7 +47,7 @@ describe('exact-name tool policy', () => {
   });
 
   it('lets blocking override core, capabilities, allowed names and the install alias', async () => {
-    const blockedTools = ['browser_navigate', 'audit_site', 'browser_session_open', 'browser_session_close', 'browser_pdf_save', 'browser_install'];
+    const blockedTools = ['browser_navigate', 'audit_site', 'audit_keyboard_operation', 'audit_form_validation', 'browser_session_open', 'browser_session_close', 'browser_pdf_save', 'browser_install'];
     const config = await resolveConfig({ capabilities: ['pdf', 'core-install'], allowedTools: blockedTools, blockedTools });
     const backend = new BrowserServerBackend(config, unusedFactory);
     expect(names(await backend.listTools())).toContain('browser_snapshot');
@@ -93,8 +95,8 @@ describe('server instructions follow the tool policy', () => {
   it('is unchanged when nothing is blocked', () => {
     expect(serverInstructions({})).toBe(intro + ' Use `browser_navigate` to load a page first. Then use `scan_page` to scan the current page for WCAG violations, `audit_site` to crawl and scan multiple pages of a site, '
       + '`scan_page_matrix` to compare the current page across viewport, color-scheme, reduced-motion and zoom variants, `audit_keyboard` to check keyboard navigation, focus visibility and skip links, '
-      + '`audit_screen_reader` to check accessible name quality and reading order, and `audit_text_spacing` to check that text survives the WCAG 1.4.12 text spacing overrides '
-      + 'without being clipped or overlapping. Results are returned as markdown with axe-core rule ids, impact levels, '
+      + '`audit_screen_reader` to check accessible name quality and reading order, `audit_text_spacing` to check that text survives the WCAG 1.4.12 text spacing overrides '
+      + 'without being clipped or overlapping, `audit_keyboard_operation` to exercise caller-defined keyboard steps and check their outcomes, and `audit_form_validation` to check caller-defined form errors and feedback after validation. Results are returned as markdown with axe-core rule ids, impact levels, '
       + 'failure summaries and remediation links. Regular browser interaction tools (click, type, snapshot, screenshot, tabs) are also available for navigating to '
       + 'the state you want to audit. To work with several separate browsers at once, `browser_session_open` returns a browserSessionId that the non-session browser '
       + 'tools accept as an optional argument; omit it to use the default session, and close extra sessions with `browser_session_close` when done. Modes that share '
@@ -102,7 +104,7 @@ describe('server instructions follow the tool policy', () => {
     expect(serverInstructions({ blockedTools: [] })).toBe(serverInstructions({}));
   });
 
-  it.each(['browser_navigate', 'scan_page', 'audit_site', 'scan_page_matrix', 'audit_keyboard', 'audit_screen_reader', 'audit_text_spacing', 'browser_session_open', 'browser_session_close'])(
+  it.each(['browser_navigate', 'scan_page', 'audit_site', 'scan_page_matrix', 'audit_keyboard', 'audit_screen_reader', 'audit_text_spacing', 'audit_keyboard_operation', 'audit_form_validation', 'browser_session_open', 'browser_session_close'])(
       'never names %s once it is blocked', async name => {
         const config = await resolveConfig({ blockedTools: [name] });
         const text = serverInstructions(config);
@@ -121,15 +123,15 @@ describe('server instructions follow the tool policy', () => {
   });
 
   it('keeps the sentences grammatical for partial catalogs', () => {
-    const skipNavigate = serverInstructions({ blockedTools: ['browser_navigate', 'scan_page', 'audit_keyboard', 'audit_screen_reader', 'audit_text_spacing'] });
+    const skipNavigate = serverInstructions({ blockedTools: ['browser_navigate', 'scan_page', 'audit_keyboard', 'audit_screen_reader', 'audit_text_spacing', 'audit_keyboard_operation', 'audit_form_validation'] });
     expect(skipNavigate).toContain('Use `audit_site` to crawl and scan multiple pages of a site and `scan_page_matrix` to compare the current page across viewport, color-scheme, reduced-motion and zoom variants.');
     expect(skipNavigate).not.toContain('Then use');
-    expect(serverInstructions({ blockedTools: ['scan_page', 'audit_site', 'scan_page_matrix', 'audit_keyboard', 'audit_text_spacing'] }))
+    expect(serverInstructions({ blockedTools: ['scan_page', 'audit_site', 'scan_page_matrix', 'audit_keyboard', 'audit_text_spacing', 'audit_keyboard_operation', 'audit_form_validation'] }))
         .toContain('Then use `audit_screen_reader` to check accessible name quality and reading order.');
     const noClose = serverInstructions({ blockedTools: ['browser_session_close'] });
     expect(noClose).toContain('omit it to use the default session. Modes that share');
     expect(noClose).not.toContain('close extra sessions');
-    const noAudits = serverInstructions({ blockedTools: ['scan_page', 'audit_site', 'scan_page_matrix', 'audit_keyboard', 'audit_screen_reader', 'audit_text_spacing'] });
+    const noAudits = serverInstructions({ blockedTools: ['scan_page', 'audit_site', 'scan_page_matrix', 'audit_keyboard', 'audit_screen_reader', 'audit_text_spacing', 'audit_keyboard_operation', 'audit_form_validation'] });
     expect(noAudits).toContain('Use `browser_navigate` to load a page first. Regular browser interaction tools');
     expect(noAudits).not.toContain('Results are returned as markdown');
   });
