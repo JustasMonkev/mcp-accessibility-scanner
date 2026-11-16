@@ -61,6 +61,7 @@ fs.writeFileSync(summaryPath, 'tool\tcategory\tstatus\texit_code\tlog\tevidence\
 fs.writeFileSync(path.join(resultsDir, 'run.json'), JSON.stringify({
   model,
   reasoningEffort,
+  concurrency: options.concurrency,
   serverName,
   prompts: promptsPath,
   startedAt: new Date().toISOString(),
@@ -68,37 +69,42 @@ fs.writeFileSync(path.join(resultsDir, 'run.json'), JSON.stringify({
 
 let passed = 0;
 let failed = 0;
-let activeKill;
+const activeKills = new Set();
+let stopScheduling = false;
+const pending = selected.entries();
 let interrupted = false;
 const needsFixture = selected.some(entry => entry.prompt.includes('__FIXTURE_URL__'));
 const fixture = needsFixture ? await startFixtureServer() : undefined;
 
 const forwardSignal = signal => {
   interrupted = true;
-  activeKill?.(signal);
+  for (const kill of activeKills)
+    kill(signal);
 };
 process.on('SIGINT', forwardSignal);
 process.on('SIGTERM', forwardSignal);
 
-try {
-  for (const [index, entry] of selected.entries()) {
-    if (interrupted)
+async function worker() {
+  for (const [index, entry] of pending) {
+    if (interrupted || stopScheduling)
       break;
     const safeTool = entry.tool.replace(/[^A-Za-z0-9_.-]/g, '_');
     const prefix = `${String(index + 1).padStart(2, '0')}-${safeTool}`;
+    const promptResultsDir = path.join(resultsDir, prefix);
+    fs.mkdirSync(promptResultsDir, { recursive: true });
     const logPath = path.join(resultsDir, `${prefix}.jsonl`);
     const errorPath = path.join(resultsDir, `${prefix}.stderr`);
     const finalPath = path.join(resultsDir, `${prefix}.result.json`);
-    const prompt = `${entry.prompt.replaceAll('__UPLOAD_FILE__', uploadPath).replaceAll('__RESULTS_DIR__', resultsDir).replaceAll('__FIXTURE_URL__', fixture?.url || '')}
+    const prompt = `${entry.prompt.replaceAll('__UPLOAD_FILE__', uploadPath).replaceAll('__RESULTS_DIR__', promptResultsDir).replaceAll('__FIXTURE_URL__', fixture?.url || '')}
 
 Harness result contract (takes precedence over the requested display format): perform the requested MCP calls, then return a JSON object matching the supplied schema. Set status to PASS only when the requested check really passed. Set tool to exactly ${JSON.stringify(entry.tool)}. Put concrete observed output or state in evidence. Set status to FAIL when the check fails.`;
 
-    process.stdout.write(`[${index + 1}/${selected.length}] ${entry.tool} ... `);
+    console.log(`[${index + 1}/${selected.length}] ${entry.tool} ...`);
     const execution = await runCodex(codex, prompt, {
       logPath,
       errorPath,
       finalPath,
-      resultsDir,
+      resultsDir: promptResultsDir,
       uploadPath,
       includeInstall: entry.tool === 'browser_install',
     });
@@ -108,14 +114,26 @@ Harness result contract (takes precedence over the requested display format): pe
 
     if (result.status === 'PASS') {
       passed++;
-      console.log('PASS');
+      console.log(`[${index + 1}/${selected.length}] ${entry.tool} PASS`);
     } else {
       failed++;
-      console.log(`FAIL (${result.status})`);
+      console.log(`[${index + 1}/${selected.length}] ${entry.tool} FAIL (${result.status})`);
       if (options.failFast)
-        break;
+        stopScheduling = true;
     }
   }
+}
+
+try {
+  const workers = await Promise.allSettled(Array.from({ length: Math.min(options.concurrency, selected.length) }, () => worker().catch(error => {
+    stopScheduling = true;
+    for (const kill of activeKills)
+      kill('SIGTERM');
+    throw error;
+  })));
+  const failure = workers.find(result => result.status === 'rejected');
+  if (failure)
+    throw failure.reason;
 } finally {
   process.off('SIGINT', forwardSignal);
   process.off('SIGTERM', forwardSignal);
@@ -136,6 +154,7 @@ if (interrupted) {
 
 function parseArgs(args) {
   const parsed = {
+    concurrency: 1,
     only: '',
     prompts: '',
     includeOptional: true,
@@ -147,7 +166,9 @@ function parseArgs(args) {
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === '--only')
+    if (arg === '--concurrency')
+      parsed.concurrency = positiveInteger(args[++i], '--concurrency');
+    else if (arg === '--only')
       parsed.only = requiredValue(args, ++i, '--only');
      else if (arg === '--skip-optional')
       parsed.includeOptional = false;
@@ -182,7 +203,7 @@ function requiredValue(args, index, flag) {
 
 function positiveInteger(value, flag) {
   const number = Number(value);
-  if (!Number.isInteger(number) || number <= 0)
+  if (!Number.isSafeInteger(number) || number <= 0)
     fail(`${flag} must be a positive integer.`);
   return number;
 }
@@ -299,7 +320,7 @@ async function runCodex(command, prompt, paths) {
     '--output-dir',
     paths.resultsDir,
     '--allowed-upload-dirs',
-    paths.resultsDir,
+    path.dirname(paths.uploadPath),
   ]);
   const args = [
     'exec',
@@ -357,14 +378,15 @@ async function runCodex(command, prompt, paths) {
     }
     child.kill(signal);
   };
-  activeKill = signal => {
+  const kill = signal => {
     killTree(signal);
     if (!killTimer && signal !== 'SIGKILL')
       killTimer = setTimeout(() => killTree('SIGKILL'), 2000);
   };
+  activeKills.add(kill);
   const timer = setTimeout(() => {
     timedOut = true;
-    activeKill?.('SIGTERM');
+    kill('SIGTERM');
   }, options.timeoutSeconds * 1000);
   const streamFailed = error => {
     streamError ||= error;
@@ -384,7 +406,7 @@ async function runCodex(command, prompt, paths) {
   } finally {
     clearTimeout(timer);
     clearTimeout(killTimer);
-    activeKill = undefined;
+    activeKills.delete(kill);
     // Dispose any MCP descendants even when the CLI leader exits normally.
     killTree('SIGKILL');
   }
@@ -494,12 +516,13 @@ xhigh reasoning, a repo-scoped MCP server, structured evidence, and bounded
 cleanup. Results are written to test-results/mcp-tool-loop-results/.
 
 Options:
+  --concurrency N    Run up to N prompts in parallel (default: 1).
   --only TOOL          Run one tool prompt.
   --skip-optional     Skip optional prompts such as browser_install.
   --prompts FILE      Use a custom TSV prompt file.
   --limit N            Run at most N prompts in file order.
   --timeout SECONDS   Bound each Codex process (default: 120).
-  --fail-fast         Stop after the first failed prompt.
+  --fail-fast         Stop scheduling after the first failure; active prompts finish.
   -h, --help          Show this help.
 
 Environment:
