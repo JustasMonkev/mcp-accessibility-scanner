@@ -59,6 +59,8 @@ if (args[0] === 'login' && args[1] === 'status') {
   const emit = event => console.log(JSON.stringify(event));
   const call = (id, tool, status = 'completed') => ({type:'item.completed', item:{id, type:'mcp_tool_call', server:'mcp-accessibility-scanner', tool, status, result:{content:[]}}});
   fs.writeFileSync(process.env.LUNA_PID_FILE, String(process.pid));
+  if (process.env.LUNA_CHILDREN_FILE)
+    fs.appendFileSync(process.env.LUNA_CHILDREN_FILE, process.pid + '\n');
   if (mode === 'hang' || mode === 'log-error') {
     process.on('SIGTERM', () => {});
     process.on('SIGINT', () => {});
@@ -85,7 +87,7 @@ if (args[0] === 'login' && args[1] === 'status') {
       }
       if (mode === 'bad-log') console.log('{broken');
       if (mode !== 'no-completion' && mode !== 'terminal-reconnecting') emit({type:'turn.completed'});
-      fs.writeFileSync(final, JSON.stringify({status:mode === 'model-fail' ? 'FAIL':'PASS', tool:targetTool, evidence: mode === 'bad-result' ? {} : mode === 'fixture-audit' ? 'Scanned pages: 1; Errored pages: 0' : 'Observed target result'}));
+      fs.writeFileSync(final, JSON.stringify({status:(mode === 'model-fail' || mode === 'parallel-fail') ? 'FAIL':'PASS', tool:targetTool, evidence: mode === 'bad-result' ? {} : mode === 'fixture-audit' ? 'Scanned pages: 1; Errored pages: 0' : 'Observed target result'}));
       if (mode === 'nonzero') process.exitCode=1;
     };
     if (mode === 'fixture-audit') {
@@ -112,6 +114,13 @@ if (args[0] === 'login' && args[1] === 'status') {
           process.exitCode = 1;
         });
       }
+    } else if (mode.startsWith('parallel')) {
+      const dir = mcpArgs[mcpArgs.indexOf('--output-dir') + 1];
+      fs.appendFileSync(process.env.LUNA_EVENTS_FILE, JSON.stringify({type: 'start', dir}) + '\n');
+      setTimeout(() => {
+        fs.appendFileSync(process.env.LUNA_EVENTS_FILE, JSON.stringify({type: 'end', dir}) + '\n');
+        finish();
+      }, 300);
     } else {
       finish();
     }
@@ -137,7 +146,8 @@ async function run(mode: string, args: string[] = [], cancel = false, extraEnv: 
   child.stdout.on('data', data => output += data.toString());
   child.stderr.on('data', data => output += data.toString());
   const cancelTimer = cancel ? setInterval(() => {
-    if (fs.existsSync(pidFile)) {
+    const childrenReady = !extraEnv.LUNA_CHILDREN_FILE || (fs.existsSync(extraEnv.LUNA_CHILDREN_FILE) && fs.readFileSync(extraEnv.LUNA_CHILDREN_FILE, 'utf8').trim().split('\n').length === 2);
+    if (fs.existsSync(pidFile) && childrenReady) {
       clearInterval(cancelTimer);
       child.kill('SIGINT');
     }
@@ -174,6 +184,25 @@ describe.skipIf(process.platform === 'win32')('Luna harness CLI', () => {
     expect(result.code).toBe(0);
   });
 
+  it.each([false, true])('runs bounded parallel prompts and respects fail-fast: %s', async failFast => {
+    const promptsPath = path.join(fixtureDir, 'parallel.tsv');
+    const eventsPath = path.join(fixtureDir, `parallel-${failFast}-events.jsonl`);
+    fs.writeFileSync(promptsPath, Array.from({ length: 5 }, () => 'browser_navigate\trequired\tNavigate.').join('\n'));
+    const result = await run(failFast ? 'parallel-fail' : 'parallel', ['--prompts', promptsPath, '--concurrency', '2', ...(failFast ? ['--fail-fast'] : [])], false, { LUNA_EVENTS_FILE: eventsPath });
+    expect(result.code).toBe(failFast ? 1 : 0);
+    expect(result.output).toContain(failFast ? 'Failed: 2' : 'Passed: 5');
+    const events = fs.readFileSync(eventsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    let active = 0;
+    let peak = 0;
+    for (const event of events) {
+      active += event.type === 'start' ? 1 : -1;
+      peak = Math.max(peak, active);
+    }
+    expect(peak).toBe(2);
+    expect(active).toBe(0);
+    expect(new Set(events.filter(event => event.type === 'start').map(event => event.dir)).size).toBe(failFast ? 2 : 5);
+  });
+
   it('enables the install capability only for the install prompt', async () => {
     const result = await run('install', ['--only', 'browser_install']);
     expect(result.output).toContain('Passed: 1');
@@ -192,6 +221,19 @@ describe.skipIf(process.platform === 'win32')('Luna harness CLI', () => {
     expect(result.output).toContain(cancel ? 'Interrupted' : 'TIMEOUT');
     expect(result.pid).toBeDefined();
     expect(() => process.kill(result.pid!, 0)).toThrow();
+  });
+
+  it.each([false, true])('cleans up every parallel child on timeout/cancel: cancel=%s', async cancel => {
+    const promptsPath = path.join(fixtureDir, 'parallel-timeout.tsv');
+    const childrenPath = path.join(fixtureDir, `parallel-pids-${cancel}.txt`);
+    fs.writeFileSync(promptsPath, 'browser_navigate\trequired\tNavigate.\nbrowser_navigate\trequired\tNavigate.\n');
+    const result = await run('hang', ['--prompts', promptsPath, '--concurrency', '2', '--timeout', cancel ? '60' : '1'], cancel, { LUNA_CHILDREN_FILE: childrenPath });
+    expect(result.code).toBe(cancel ? 130 : 1);
+    expect(result.output).toContain(cancel ? 'Interrupted' : 'Failed: 2');
+    const pids = fs.readFileSync(childrenPath, 'utf8').trim().split('\n').map(Number);
+    expect(pids).toHaveLength(2);
+    for (const pid of pids)
+      expect(() => process.kill(pid, 0)).toThrow();
   });
 
   it('bounds a hung CLI preflight', async () => {
@@ -246,7 +288,7 @@ fs.createWriteStream = (file, ...args) => String(file).endsWith('.stderr') ? new
     expect(() => process.kill(result.pid!, 0)).toThrow();
   });
 
-  it.each([['--only'], ['--prompts'], ['--timeout', '0'], ['--limit', '0']])('rejects invalid options: %j', async (...args) => {
+  it.each([['--concurrency'], ['--concurrency', '0'], ['--concurrency', '1.5'], ['--concurrency', 'Infinity'], ['--only'], ['--prompts'], ['--timeout', '0'], ['--limit', '0']])('rejects invalid options: %j', async (...args) => {
     const result = await run('success', args);
     expect(result.code).toBe(2);
     expect(result.pid).toBeUndefined();

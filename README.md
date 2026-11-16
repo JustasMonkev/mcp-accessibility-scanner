@@ -1291,9 +1291,15 @@ structured PASS/FAIL evidence, and a per-prompt timeout:
 
 ```bash
 npm run test:mcp:luna
+npm run test:mcp:luna -- --concurrency 5
 npm run test:mcp:luna -- --only browser_snapshot
 npm run test:mcp:luna -- --skip-optional --limit 1
 ```
+
+The loop script defaults to one prompt at a time; `--concurrency N` runs up to N
+independent Codex processes with isolated browser sessions and output directories.
+The npm wrapper currently selects five. `--fail-fast` stops scheduling new prompts
+after a failure while already-running prompts finish.
 
 The prompt suite covers all 34 core/install tools, including session management,
 media emulation, network request details, drop actions, and screen-reader audits.
