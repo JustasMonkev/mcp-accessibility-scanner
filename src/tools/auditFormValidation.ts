@@ -226,6 +226,7 @@ const auditFormValidation = defineTabTool({
           await target.dispose();
         }
       } else {
+        await verifyFieldValues(tab.page, params.fields, remaining, bounded);
         submitAttempted = true;
         await bounded(() => tab.page.locator(`css=${params.submitSelector}`).click({ timeout: remaining(), noWaitAfter: true }));
       }

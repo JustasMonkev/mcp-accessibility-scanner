@@ -121,6 +121,23 @@ it('observes a legitimate asynchronous expected state within the supplied window
   expect(report.steps.every((step: { status: string }) => step.status === 'passed')).toBe(true);
 });
 
+it.each([true, false])('measures an initially absent progress state at the deadline (becomes available: %s)', async becomesAvailable => {
+  await page.setContent(`<button id="start">Start</button><div id="progress" role="progressbar"></div><script>
+    document.getElementById('start').onclick = () => {
+      if (${becomesAvailable})
+        setTimeout(() => document.getElementById('progress').setAttribute('aria-valuenow', '100'), 10);
+    };
+  </script>`);
+  const { report } = await audit({ reportFile: 'report.json', timeoutMs: 80, steps: [
+    { key: 'Tab', expect: [{ selector: '#start', focused: true }] },
+    { key: 'Enter', expect: [{ selector: '#progress', value: '100' }] },
+    { key: 'Space', expect: [{ selector: '#start', focused: true }] },
+  ] });
+  expect(report.status).toBe(becomesAvailable ? 'passed' : 'incomplete');
+  expect(report.steps[1].status).toBe(becomesAvailable ? 'passed' : 'incomplete');
+  expect(report.steps[2].status).toBe(becomesAvailable ? 'passed' : 'not-run');
+});
+
 it('types and edits the focused field through keyboard events without reporting the supplied text', async () => {
   await page.setContent(`<input id="field"><script>
     window.events = [];

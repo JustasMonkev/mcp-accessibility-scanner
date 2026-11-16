@@ -6,6 +6,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { chromium, type Browser, type Dialog, type Page } from 'playwright';
 import tools from '../src/tools/auditFormValidation.js';
@@ -31,13 +32,13 @@ async function run(args: unknown = scenario, signal?: AbortSignal) {
   const context = { currentTabOrDie: () => tab, config: {} } as Context;
   const response = new Response(context, tool.schema.name, {});
   await tool.handle(context, params, response, signal);
-  const report = JSON.parse(await fs.readFile(response.resourceLinks()[0].uri.replace('file://', ''), 'utf8'));
+  const report = JSON.parse(await fs.readFile(fileURLToPath(response.resourceLinks()[0].uri), 'utf8'));
   expect(JSON.stringify(report)).not.toContain('secret-invalid-value');
   expect(response.code()).not.toContain('secret-invalid-value');
   return { report, response };
 }
 
-beforeAll(async () => { browser = await chromium.launch(); directory = await fs.mkdtemp(path.join(os.tmpdir(), 'form-audit-')); });
+beforeAll(async () => { browser = await chromium.launch(); directory = await fs.mkdtemp(path.join(os.tmpdir(), 'form audit-')); });
 afterAll(async () => {
   await browser?.close();
   if (directory)
@@ -48,6 +49,23 @@ afterEach(async () => { await page?.close(); });
 async function fixture(body: string) { modalOpen = false; page = await browser.newPage(); page.on('dialog', () => { modalOpen = true; }); await page.setContent(body); }
 
 describe('audit_form_validation public tool', () => {
+  it('does not submit a direct fill that synchronously normalizes a requested value', async () => {
+    await fixture(`<form novalidate><input id=email oninput="this.value=this.value.toUpperCase()"><button id=submit onclick="window.clicked=true">Submit</button><p id=error></p></form>`);
+    const { report } = await run({ ...scenario, interactionMode: 'direct' });
+    expect(report).toMatchObject({ outcome: 'incomplete', submitAttempted: false, incomplete: ['field-value-mismatch'] });
+    expect(await page.locator('#email').inputValue()).toBe(scenario.fields[0].value.toUpperCase());
+    expect(await page.evaluate(() => 'clicked' in window)).toBe(false);
+  });
+
+  it('rechecks earlier direct fields after later fills can change them', async () => {
+    await fixture(`<form novalidate><input id=email><input id=second oninput="email.value='overwritten'"><button id=submit onclick="window.clicked=true">Submit</button><p id=error></p></form>`);
+    const { report } = await run({ ...scenario, interactionMode: 'direct', fields: [...scenario.fields, { selector: '#second', value: 'later value' }] });
+    expect(report).toMatchObject({ outcome: 'incomplete', submitAttempted: false, incomplete: ['field-value-mismatch'] });
+    expect(await page.locator('#email').inputValue()).toBe('overwritten');
+    expect(await page.locator('#second').inputValue()).toBe('later value');
+    expect(await page.evaluate(() => 'clicked' in window)).toBe(false);
+  });
+
   it('submits the exact supplied values once and leaves unrelated fields unchanged', async () => {
     await fixture(`<form novalidate><input id=email value=original-email aria-describedby=error><textarea id=message aria-describedby=error>Original message</textarea><input id=unrelated value=untouched><button id=submit>Submit</button><p id=error></p></form><script>
       document.documentElement.dataset.submissions='[]';
@@ -136,6 +154,74 @@ describe('audit_form_validation public tool', () => {
     expect(report.outcome).toBe('completed');
     expect(report.observed.feedback[1]).toMatchObject({ textPresent: true, exposed: true, changed: true, live: 'polite' });
     expect(report.findings).toEqual([]);
+  });
+
+  it('excludes feedback hidden in closed details across shadow ancestry but keeps the first summary exposed', async () => {
+    await fixture(`<div id=host></div><script>
+      host.attachShadow({mode:'open'}).innerHTML='<form novalidate><input id=email aria-describedby=error><button id=submit>Submit</button><details><summary>Errors</summary><p id=error></p></details><div id=status role=status><details><summary>Current status</summary><p id=message>Old status</p></details></div></form>';
+      host.shadowRoot.querySelector('form').onsubmit=e=>{e.preventDefault(); host.shadowRoot.querySelector('#error').textContent='Correct email'; host.shadowRoot.querySelector('#message').textContent='Validation failed';};
+    </script>`);
+    const { report } = await run({ ...scenario, fields: [{ selector: '#host #email', value: scenario.fields[0].value }], submitSelector: '#host #submit', expectedFeedback: [{ selector: '#host #error', kind: 'error' }, { selector: '#host #status', kind: 'status' }] });
+    expect(await page.locator('#host #error').ariaSnapshot()).not.toContain('Correct email');
+    expect(await page.locator('#host #status').ariaSnapshot()).toContain('Current status');
+    expect(await page.locator('#host #status').ariaSnapshot()).not.toContain('Validation failed');
+    expect(report.observed.feedback).toMatchObject([
+      { textPresent: false, exposed: false, changed: false },
+      { textPresent: true, exposed: true, changed: false },
+    ]);
+    expect(report.findings.map((finding: { check: string }) => finding.check)).toEqual(expect.arrayContaining(['feedback-not-exposed', 'status-not-programmatic']));
+  });
+
+  it('keeps feedback in shadow content hosted by the first summary exposed', async () => {
+    await fixture(`<form novalidate><input id=email><button id=submit>Submit</button></form><details><summary><span id=host></span> Account status</summary><p>Collapsed details content</p></details><script>
+      host.attachShadow({mode:'open'}).innerHTML='<p id=feedback role=status></p>';
+      document.querySelector('form').onsubmit=e=>{e.preventDefault(); host.shadowRoot.querySelector('#feedback').textContent='Validation failed';};
+    </script>`);
+    const { report } = await run({ ...scenario, expectedFeedback: [{ selector: '#host #feedback', kind: 'status' }] });
+    expect(report.observed.feedback[0]).toMatchObject({ textPresent: true, exposed: true, changed: true, live: 'polite' });
+    expect(report.findings.map((finding: { check: string }) => finding.check)).not.toEqual(expect.arrayContaining(['feedback-not-exposed', 'status-not-programmatic']));
+  });
+
+  it('reads open-shadow and rendered slot text without counting hidden or unassigned text', async () => {
+    await fixture(`<form novalidate><input id=email><button id=submit>Submit</button></form><div id=shadow-status role=status></div><div id=slot-status role=status><span slot=message>Visible assigned</span><span slot=hidden>Old hidden assigned</span><span slot=unassigned>Old unassigned</span></div><div id=fallback-status role=status></div><div id=text-hidden-status role=status>Old hidden text</div><div id=unassigned-host><p id=unassigned-feedback role=status>Old unassigned feedback</p></div><script>
+      const shadowStatus=document.getElementById('shadow-status'), slotStatus=document.getElementById('slot-status'), fallbackStatus=document.getElementById('fallback-status'), textHiddenStatus=document.getElementById('text-hidden-status'), unassignedHost=document.getElementById('unassigned-host'), unassignedFeedback=document.getElementById('unassigned-feedback');
+      shadowStatus.attachShadow({mode:'open'}).innerHTML='<span>Old shadow message</span>';
+      slotStatus.attachShadow({mode:'open'}).innerHTML='<slot name=message>Fallback message</slot><div aria-hidden=true><slot name=hidden>Hidden fallback</slot></div>';
+      fallbackStatus.attachShadow({mode:'open'}).innerHTML='<slot>Visible fallback status</slot>';
+      textHiddenStatus.attachShadow({mode:'open'}).innerHTML='<div aria-hidden=true><slot></slot></div>';
+      unassignedHost.attachShadow({mode:'open'}).innerHTML='<span>Rendered shadow child</span>';
+      document.querySelector('form').onsubmit=e=>{e.preventDefault(); shadowStatus.shadowRoot.querySelector('span').textContent='New shadow message'; slotStatus.querySelector('[slot=hidden]').textContent='New hidden assigned'; slotStatus.querySelector('[slot=unassigned]').textContent='New unassigned'; textHiddenStatus.textContent='New hidden text'; unassignedFeedback.textContent='New unassigned feedback';};
+    </script>`);
+    const { report } = await run({ ...scenario, expectedFeedback: [{ selector: '#shadow-status', kind: 'status' }, { selector: '#slot-status', kind: 'status' }, { selector: '#fallback-status', kind: 'status' }, { selector: '#text-hidden-status', kind: 'status' }, { selector: '#unassigned-host #unassigned-feedback', kind: 'status' }] });
+    expect(report.observed.feedback).toMatchObject([
+      { textPresent: true, exposed: true, changed: true, live: 'polite' },
+      { textPresent: true, exposed: true, changed: false, live: 'polite' },
+      { textPresent: true, exposed: true, changed: false, live: 'polite' },
+      { textPresent: false, exposed: true, changed: false, live: 'polite' },
+      { textPresent: false, exposed: false, changed: false, live: 'polite' },
+    ]);
+    expect(report.findings.map((finding: { check: string; selector: string }) => [finding.check, finding.selector])).toEqual(expect.arrayContaining([
+      ['status-not-programmatic', '#text-hidden-status'],
+      ['feedback-not-exposed', '#unassigned-host #unassigned-feedback'],
+      ['status-not-programmatic', '#unassigned-host #unassigned-feedback'],
+    ]));
+  });
+
+  it.each([
+    { emptyElements: 9999, truncated: false },
+    { emptyElements: 10000, truncated: true },
+  ])('bounds rendered-node traversal with $emptyElements empty elements', async ({ emptyElements, truncated }) => {
+    await fixture(`<form novalidate><input id=email aria-describedby=error><button id=submit>Submit</button><p id=error></p></form><script>
+      document.querySelector('form').onsubmit=e=>{
+        e.preventDefault();
+        error.append(document.createTextNode('Correct email'));
+        for(let i=0;i<${emptyElements};i++) error.append(document.createElement('span'));
+      };
+    </script>`);
+    const { report } = await run();
+    expect(report.outcome).toBe(truncated ? 'incomplete' : 'completed');
+    expect(report.observed.feedback[0].textTruncated).toBe(truncated);
+    expect(report.incomplete).toEqual(truncated ? ['feedback-text-truncated'] : []);
   });
 
   it.each([

@@ -20,37 +20,64 @@ export async function readFeedback(page: Page, targets: { selector: string }[], 
     result.push(await bounded(() => locator.evaluate(element => {
       function parentElementAcrossShadow(node: Element) {
         const root = node.getRootNode();
-        return node.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+        return node.assignedSlot ?? node.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
       }
-      function isExposed(target: Element) {
+      function isExposed(target: Element, includeContainer = false) {
         const targetStyle = getComputedStyle(target);
         if (targetStyle.visibility === 'hidden' || targetStyle.visibility === 'collapse')
           return false;
+        let firstSummaryDetails: Element | null = null;
         for (let node: Element | null = target; node; node = parentElementAcrossShadow(node)) {
+          if (!node.assignedSlot && node.parentElement?.shadowRoot)
+            return false;
           if (node.getAttribute('aria-hidden')?.toLowerCase() === 'true' || node.hasAttribute('inert') || getComputedStyle(node).display === 'none')
             return false;
+          if (node.localName === 'summary' && node.parentElement?.localName === 'details' && Array.from(node.parentElement.children).find(child => child.localName === 'summary') === node)
+            firstSummaryDetails = node.parentElement;
+          if (node.localName === 'details' && !node.hasAttribute('open')) {
+            if (!(includeContainer && node === target) && firstSummaryDetails !== node)
+              return false;
+          }
         }
         return true;
       }
-      const exposed = isExposed(element);
-      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      const exposed = isExposed(element, true);
+      function renderedChildren(node: Element): ArrayLike<Node> {
+        if (node.shadowRoot)
+          return node.shadowRoot.childNodes;
+        if (node instanceof HTMLSlotElement)
+          return node.assignedNodes({ flatten: true });
+        return node.childNodes;
+      }
       let text = '';
-      let visitedTextNodes = 0;
       let textTruncated = false;
-      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-        if (++visitedTextNodes > 10000) {
-          textTruncated = true;
-          break;
-        }
-        if (!node.parentElement || !isExposed(node.parentElement))
+      let visitedNodes = 0;
+      const stack: { element: Element; children: ArrayLike<Node>; index: number }[] = [{ element, children: renderedChildren(element), index: 0 }];
+      while (stack.length) {
+        const frame = stack[stack.length - 1];
+        if (frame.index >= frame.children.length) {
+          stack.pop();
           continue;
-        const content = node.textContent ?? '';
-        const remainingText = 10000 - text.length;
-        text += content.slice(0, remainingText);
-        if (content.length > remainingText) {
+        }
+        const node = frame.children[frame.index++]!;
+        if (++visitedNodes > 10000) {
           textTruncated = true;
           break;
         }
+        if (node.nodeType === Node.TEXT_NODE) {
+          if (!isExposed(frame.element))
+            continue;
+          const content = node.textContent ?? '';
+          const remainingText = 10000 - text.length;
+          text += content.slice(0, remainingText);
+          if (content.length > remainingText) {
+            textTruncated = true;
+            break;
+          }
+          continue;
+        }
+        if (node instanceof Element)
+          stack.push({ element: node, children: renderedChildren(node), index: 0 });
       }
       let live: string | null = null;
       for (let node: Element | null = element; node; node = parentElementAcrossShadow(node)) {

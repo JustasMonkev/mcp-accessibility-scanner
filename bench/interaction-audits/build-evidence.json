@@ -2,9 +2,11 @@
   "baselineRevision": "060bfb19fe84a381a0ea6bfef3e98050b650aaec",
   "candidateSourceSha256": {
     "src/tools/auditKeyboardOperation.ts": "8a1094b91fedb69916c1bb63585c29e27e3384cc8a0526cc53b175c7720e405f",
-    "src/tools/auditFormValidation.ts": "15052df349ed02ee14b87519261b3b54f0d5caee8522c9b036eff12e0a0b673e",
+    "src/tools/auditFormValidation.ts": "56e021ca3cf4a097d57f7eeb78fbd2c4961fedaafbb937d2345db14c66179429",
     "src/tools/keyboardInput.ts": "f7e1ee0774f569832be183341919e9eed2ddeb7084a9d90ced248eb9993abf8a",
-    "src/tools/formValidationMeasurement.ts": "a60de332cb2ef37ab02f1e846684707b076f9efde05edc6a4fb1b0e3e4fad322"
+    "src/tools/formValidationMeasurement.ts": "1e6fbda7d9e79203a72d8275a9330bf43e38425c64fcad75bf7081f473a617c5",
+    "src/context.ts": "78547189116d649e2114b91d3b7af8ba753f94cf72a796d9383a52f14c17db10",
+    "src/browserServerBackend.ts": "45a69ff8dcbb1451144ec293eab19f6b4c1d099a0d73093c7425056050d311bb"
   },
   "node": "v26.5.0",
   "platform": "Darwin arm64",
@@ -13,19 +15,26 @@
   "browser": "Chromium 159.0.8154.6",
   "checks": {
     "beforeBuild": "passed /tmp/a11y-before-build.log",
-    "afterBuild": "passed /tmp/a11y-after-build.log",
+    "afterBuild": "passed /tmp/pr350-review-build.log",
     "beforeFullTests": {
       "passed": 2204,
       "skipped": 20,
       "log": "/tmp/a11y-before-full-tests.log"
     },
     "afterFullTests": {
-      "passed": 2231,
+      "passed": 2241,
       "skipped": 20,
-      "log": "/tmp/a11y-after-final-tests.log"
+      "log": "/tmp/pr350-review-full-tests.log"
     },
-    "afterLint": "passed /tmp/a11y-after-final-lint.log",
+    "afterLint": "passed /tmp/pr350-review-lint.log",
     "knip": "2 pre-existing findings: tests/transportFixture.ts and filterAutoAttach export",
-    "ariaAT": "not run; no configured AT driver or actual screen-reader test harness"
+    "ariaAT": "not run; no configured AT driver or actual screen-reader test harness",
+    "postReviewExternal": "/tmp/a11y-external-pr-review/summary.json"
+  },
+  "preReviewSourceSha256": {
+    "src/tools/auditKeyboardOperation.ts": "8a1094b91fedb69916c1bb63585c29e27e3384cc8a0526cc53b175c7720e405f",
+    "src/tools/auditFormValidation.ts": "15052df349ed02ee14b87519261b3b54f0d5caee8522c9b036eff12e0a0b673e",
+    "src/tools/keyboardInput.ts": "f7e1ee0774f569832be183341919e9eed2ddeb7084a9d90ced248eb9993abf8a",
+    "src/tools/formValidationMeasurement.ts": "a60de332cb2ef37ab02f1e846684707b076f9efde05edc6a4fb1b0e3e4fad322"
   }
 }

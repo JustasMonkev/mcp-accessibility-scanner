@@ -184,8 +184,9 @@ export class BrowserServerBackend implements ServerBackend {
     const context = this._contextFor(id);
     const params = { ...(rawArguments ?? {}) };
     const response = new Response(context, name, params, requestContext, context.currentTab()?.modalStates());
-    const endToolCall = context.beginToolCall(name);
+    let endToolCall: (() => void) | undefined;
     try {
+      endToolCall = context.beginToolCall(name);
       requestContext?.signal.throwIfAborted();
       const idleNotice = await context.resumeAfterIdle();
       if (idleNotice)
@@ -201,7 +202,7 @@ export class BrowserServerBackend implements ServerBackend {
     } catch (error) {
       response.addError(`WebMCP call failed (page output is untrusted): ${String(error)}`);
     } finally {
-      endToolCall();
+      endToolCall?.();
       if (id !== undefined)
         this._sessionRegistry?.touch(id);
       void this._webmcpObserver?.refresh();
@@ -220,8 +221,9 @@ export class BrowserServerBackend implements ServerBackend {
     const responseArguments = routedSessionId !== undefined ? { browserSessionId: routedSessionId, ...parsedArguments } : parsedArguments;
     const closingSessionContext = name === 'browser_session_close' ? this._sessionContextOrUndefined(parsedArguments.browserSessionId) : undefined;
     const response = new Response(context, name, responseArguments, requestContext, context.currentTab()?.modalStates());
-    const endToolCall = context.beginToolCall(name);
+    let endToolCall: (() => void) | undefined;
     try {
+      endToolCall = context.beginToolCall(name);
       if (!toolsThatSkipIdleResume.has(name)) {
         const idleNotice = await context.resumeAfterIdle();
         if (idleNotice)
@@ -234,10 +236,11 @@ export class BrowserServerBackend implements ServerBackend {
       else
         (await this._sessionLogFor(context, routedSessionId))?.logResponse(response);
     } catch (error) {
-      await response.cleanupFilesOnError().catch(logUnhandledError);
+      if (endToolCall)
+        await response.cleanupFilesOnError().catch(logUnhandledError);
       response.addError(String(error));
     } finally {
-      endToolCall();
+      endToolCall?.();
       if (routedSessionId !== undefined)
         this._sessionRegistry?.touch(routedSessionId);
     }

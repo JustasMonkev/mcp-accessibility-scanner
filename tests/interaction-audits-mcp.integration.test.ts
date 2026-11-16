@@ -25,7 +25,17 @@ import { contextFactory } from '../src/browserContextFactory.js';
 import { resolveCLIConfig } from '../src/config.js';
 import { wrapInProcess } from '../src/mcp/server.js';
 
-const server = http.createServer((_request, response) => {
+const fixtureEvents = new Map<string, () => void>();
+const cancelledAuditAdmissionPollIntervalMs = 25;
+const server = http.createServer((request, response) => {
+  const event = new URL(request.url ?? '/', 'http://localhost').pathname.match(/^\/test-event\/([^/]+)$/)?.[1];
+  if (event) {
+    fixtureEvents.get(event)?.();
+    fixtureEvents.delete(event);
+    response.writeHead(204);
+    response.end();
+    return;
+  }
   response.writeHead(200, { 'content-type': 'text/html' });
   response.end(`<button id="toggle" aria-expanded="false" onclick="this.setAttribute('aria-expanded','true')">Open</button>
     <form novalidate><label for="email">Email</label><input id="email" aria-describedby="error">
@@ -33,6 +43,7 @@ const server = http.createServer((_request, response) => {
     <script>
     window.interactions = { keys: 0, pointer: 0, submits: 0, value: '' };
     document.addEventListener('pointerdown', () => window.interactions.pointer++);
+    document.addEventListener('keydown', () => fetch('/test-event/keyboard'));
     document.getElementById('email').addEventListener('keydown', event => {
       if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) window.interactions.keys++;
     });
@@ -47,6 +58,10 @@ const server = http.createServer((_request, response) => {
 let client: Client;
 let directory: string;
 let url: string;
+
+function waitForFixtureEvent(name: string): Promise<void> {
+  return new Promise(resolve => fixtureEvents.set(name, resolve));
+}
 
 beforeAll(async () => {
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -122,4 +137,92 @@ it('accepts text and editing steps through the MCP schema', async () => {
   } });
   expect(result.isError).not.toBe(true);
   expect(result.structuredContent).toMatchObject({ status: 'passed' });
+});
+
+it('admits interactive audits exclusively per browser context and releases admission after cancellation', async () => {
+  await client.callTool({ name: 'browser_navigate', arguments: { url } });
+  const opened = await client.callTool({ name: 'browser_session_open', arguments: {} });
+  const browserSessionId = opened.structuredContent?.browserSessionId;
+  expect(typeof browserSessionId).toBe('string');
+  await client.callTool({ name: 'browser_navigate', arguments: { url, browserSessionId } });
+
+  const keyboardStarted = waitForFixtureEvent('keyboard');
+  const audit = client.callTool({ name: 'audit_keyboard_operation', arguments: {
+    timeoutMs: 1000,
+    steps: [{ key: 'Tab', expect: [{ selector: '#toggle', focused: true }] }],
+  } });
+  await keyboardStarted;
+
+  const competingMutation = await client.callTool({ name: 'browser_evaluate', arguments: {
+    function: '() => document.querySelector("#toggle").click()',
+  } });
+  expect(competingMutation.isError).toBe(true);
+  expect(competingMutation.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('busy because an interactive audit is running');
+
+  const independentContext = await client.callTool({ name: 'browser_evaluate', arguments: {
+    browserSessionId,
+    function: '() => document.querySelector("#toggle").getAttribute("aria-expanded")',
+  } });
+  expect(independentContext.isError).not.toBe(true);
+  expect(independentContext.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('false');
+
+  const auditResult = await audit;
+  expect(auditResult.isError).not.toBe(true);
+  const afterAudit = await client.callTool({ name: 'browser_evaluate', arguments: {
+    function: '() => document.querySelector("#toggle").getAttribute("aria-expanded")',
+  } });
+  expect(afterAudit.isError).not.toBe(true);
+  expect(afterAudit.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('false');
+
+  const evaluationStarted = waitForFixtureEvent('evaluate');
+  const ordinaryCall = client.callTool({ name: 'browser_evaluate', arguments: {
+    function: '() => { fetch("/test-event/evaluate"); return new Promise(resolve => { window.releaseOrdinaryEvaluation = () => resolve("finished"); }); }',
+  } });
+  await evaluationStarted;
+  try {
+    const concurrentOrdinaryCall = await client.callTool({ name: 'browser_evaluate', arguments: {
+      function: '() => "ordinary concurrency retained"',
+    } });
+    expect(concurrentOrdinaryCall.isError).not.toBe(true);
+    const overlappingAudit = await client.callTool({ name: 'audit_form_validation', arguments: {
+      fields: [{ selector: '#email', value: 'invalid-email' }], submitSelector: '#submit',
+      expectedFeedback: [{ selector: '#error', kind: 'error' }],
+    } });
+    expect(overlappingAudit.isError).toBe(true);
+    expect(overlappingAudit.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('interactive audits require exclusive access');
+  } finally {
+    const release = await client.callTool({ name: 'browser_evaluate', arguments: {
+      function: '() => { window.releaseOrdinaryEvaluation?.(); delete window.releaseOrdinaryEvaluation; return "ordinary evaluation released"; }',
+    } });
+    expect(release.isError).not.toBe(true);
+    await ordinaryCall;
+  }
+
+  const controller = new AbortController();
+  const cancelledAuditStarted = waitForFixtureEvent('keyboard');
+  const cancelledAudit = client.callTool({ name: 'audit_keyboard_operation', arguments: {
+    reportFile: 'cancelled-keyboard.json',
+    timeoutMs: 1000,
+    steps: [{ key: 'Tab', expect: [{ selector: '#toggle', focused: true }] }],
+  } }, { signal: controller.signal });
+  await cancelledAuditStarted;
+  controller.abort();
+  await cancelledAudit.catch(() => undefined);
+  let released = false;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const afterCancellation = await client.callTool({ name: 'browser_evaluate', arguments: {
+      function: '() => "released"',
+    } });
+    if (!afterCancellation.isError) {
+      released = true;
+      break;
+    }
+    await new Promise(resolve => setTimeout(resolve, cancelledAuditAdmissionPollIntervalMs));
+  }
+  expect(released).toBe(true);
+  const cancelledReport = JSON.parse(await fs.readFile(path.join(directory, 'cancelled-keyboard.json'), 'utf8'));
+  expect(cancelledReport.status).toBe('incomplete');
+  expect(cancelledReport.reason).toBe('The scenario was cancelled.');
+  expect(cancelledReport.steps[0].status).toBe('incomplete');
+  await client.callTool({ name: 'browser_session_close', arguments: { browserSessionId } });
 });

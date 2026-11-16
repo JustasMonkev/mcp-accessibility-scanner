@@ -89,6 +89,7 @@ function releaseOnce(release: () => void): () => void {
 }
 
 const liveContexts = new Set<Context>();
+const interactiveAuditTools = new Set(['audit_keyboard_operation', 'audit_form_validation']);
 
 type TraceHub = { users: number, ready: Promise<unknown> };
 const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
@@ -501,6 +502,10 @@ export class Context {
   }
 
   beginToolCall(name: string): () => void {
+    if (interactiveAuditTools.has(name) && this._runningTools.length > 0)
+      throw new Error(`Tool "${name}" is busy because interactive audits require exclusive access to this browser context.`);
+    if (this._runningTools.some(tool => interactiveAuditTools.has(tool)))
+      throw new Error(`Tool "${name}" is busy because an interactive audit is running in this browser context.`);
     this._runningTools.push(name);
     this._scheduleIdleTimeout();
     return releaseOnce(() => {

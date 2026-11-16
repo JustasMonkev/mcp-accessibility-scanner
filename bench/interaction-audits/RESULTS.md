@@ -10,7 +10,7 @@
 | Unreachable field stops before submit | 0/2 | 2/2 |
 | **Total** | **2/8** | **8/8** |
 
-These are actual Luna-driven MCP executions, not subagent opinions. See [Luna evidence](luna-evidence.md) and [machine-readable run evidence](luna-evidence.json). An intermediate changed build scored **7/8**: Luna first sent an out-of-range timeout, then recovered. The harness still counted that run as failed. That run is retained in [intermediate evidence](luna-interim-evidence.md); the final run was performed after the additional delayed-focus fix, not merely retried to improve the score. This small result is not a reliability estimate for the model on arbitrary tasks.
+These are actual Luna-driven MCP executions, not subagent opinions. The review-fixed build also scored **8/8** in a separate single run; the preceding 8/8 build and all earlier runs are retained in the evidence. See [Luna evidence](luna-evidence.md) and [machine-readable run evidence](luna-evidence.json). An intermediate changed build scored **7/8**: Luna first sent an out-of-range timeout, then recovered. The harness still counted that run as failed. That run is retained in [intermediate evidence](luna-interim-evidence.md); the final run was performed after the additional delayed-focus fix, not merely retried to improve the score. This small result is not a reliability estimate for the model on arbitrary tasks.
 
 ## Measured external results
 
@@ -21,7 +21,9 @@ These are actual Luna-driven MCP executions, not subagent opinions. See [Luna ev
 | Nonviolation classified correctly, 1 case × 3 repeats | 3/3 | 3/3 |
 | Static form snapshots classified, 4 cases × 3 repeats | 0/12 | 0/12 |
 | Static form snapshots reported incomplete | 12/12 | 12/12 |
-| Median keyboard-scenario call duration | 520.3 ms | 1,782.5 ms |
+| Median keyboard-scenario call duration | 520.3 ms | 1,798.7 ms |
+
+The latest run includes the PR review fixes. The preceding build’s [18/18 result](external-pre-review.json) is retained.
 
 Evidence: [baseline summary](external-before.json), [final summary](external-after.json). All repetitions are retained, including the baseline's intermittent detection of a delayed trap. The latency is descriptive for these scenarios and this machine, not a throughput benchmark; other verification processes ran concurrently, so it is not an isolated performance comparison; final-state observation intentionally waits longer. The benchmark's 500 ms window is the same in both revisions.
 
@@ -29,7 +31,7 @@ Only **6 of the 20 selected external cases** received a classification: four exe
 
 ## Build and test evidence
 
-Both builds passed. The baseline suite passed **2,204 tests with 20 skipped**; the final suite passed **2,231 with 20 skipped**. Final lint/typecheck and both built-CLI audit harness scenarios passed. Logs and final runtime-source hashes are recorded in [build-evidence.json](build-evidence.json). The active checkout's suite excludes two unrelated ignored archived checkouts; no runner settings or test skips were changed.
+Both builds passed. The baseline suite passed **2,204 tests with 20 skipped**; the final suite passed **2,241 with 20 skipped**. Final lint/typecheck passed. Both direct built-CLI audit harness scenarios passed before the review fixes; the external and Luna MCP runs were repeated on the review-fixed build. Logs and final runtime-source hashes are recorded in [build-evidence.json](build-evidence.json). The active checkout's suite excludes two unrelated ignored archived checkouts; no runner settings or test skips were changed.
 
 Knip retains two pre-existing findings (`tests/transportFixture.ts` and the `filterAutoAttach` export). The simplification scan retained two reviewed findings: a selector-validation catch returns an explicit false that rejects preflight, and a partial `Context` fixture assertion is backed by real browser and MCP tests. Neither is a production success fallback.
 
@@ -104,3 +106,7 @@ Do not retry or change prompts to hide a model/tool failure. The harness treats 
 - [W3C AT-Driver](https://github.com/w3c/at-driver): actual assistive-technology control and speech evidence are a separate layer.
 
 Third-party fixture bytes are downloaded, not vendored into this repository. Source attribution and hashes are in the manifest; the pinned dataset includes its ACT license notice.
+
+## PR review fixes
+
+Six review threads are covered: closed-disclosure feedback, delayed ARIA state, exclusive interactive-audit admission within a routed MCP context, file-URL decoding in the test helper, composed shadow/slot feedback text, and direct-mode value verification immediately before submission. Conflicting calls are rejected, not queued; independent contexts and ordinary-call concurrency remain supported. Added browser/MCP regressions cover cancellation release and both sides of the 10,000-node bound.
