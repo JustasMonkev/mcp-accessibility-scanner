@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     container:
-      image: mcr.microsoft.com/playwright:v1.65.0-noble
+      image: mcr.microsoft.com/playwright:v1.65.1-noble
       options: --user pwuser --init --ipc=host
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
@@ -105,6 +105,15 @@ jobs:
         run: npx vitest run tests/playwright-165-accessibility.integration.test.ts
         env:
           MCP_TEST_BROWSER_NAME: firefox
+
+      - if: ${{ !cancelled() }}
+        name: Revalidate browser upgrade documentation claims
+        run: |
+          status=0
+          for browser in chromium firefox webkit; do
+            MCP_TEST_BROWSER_NAME="$browser" node tests/playwright-upgrade-probe.mjs || status=1
+          done
+          exit "$status"
 
   docker-smoke:
     runs-on: ubuntu-latest
@@ -221,7 +230,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
-      image: mcr.microsoft.com/playwright:v1.65.0-noble
+      image: mcr.microsoft.com/playwright:v1.65.1-noble
       options: --user pwuser --init --ipc=host
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'

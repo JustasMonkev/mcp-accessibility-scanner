@@ -479,7 +479,7 @@ Direct DOM value assignments can bypass application event handlers, and syntheti
 Record a session once with Playwright's codegen, then hand the file to the server:
 
 ```bash
-npx playwright@1.65.0 codegen --save-storage=auth.json https://example.com/login
+npx playwright@1.65.1 codegen --save-storage=auth.json https://example.com/login
 ```
 
 Sign in in the opened browser, then close it — `auth.json` now holds the cookies and local storage.
@@ -1163,7 +1163,7 @@ the removal rationale and validation results.
 ### Playwright upgrade gate
 
 The Linux `test` and `webkit-regressions` CI jobs use the official
-`mcr.microsoft.com/playwright:v1.65.0-noble` image with its preinstalled browsers
+`mcr.microsoft.com/playwright:v1.65.1-noble` image with its preinstalled browsers
 and system dependencies, rather than downloading browsers during each job.
 They run as `pwuser` so Firefox can use GitHub's user-owned home directory.
 Keep both image tags in `.github/workflows/ci.yml` aligned with the pinned
@@ -1172,7 +1172,16 @@ the package's Docker smoke test remain separate; branded Chrome and Edge are
 not included in the Playwright image. See the
 [Playwright Docker guidance](https://playwright.dev/docs/docker).
 
-The November 6, 2026 upgrade pairs `playwright` and `playwright-core` at
+Candidate upgrade for #346: paired packages and CI images target **1.65.1**.
+Chromium 159.0.8154.6 browser validation is pending. Measurements below remain
+historical 1.65.0 results until their corresponding probes are rerun; changing
+the dependency does not revalidate them. Run `node tests/playwright-upgrade-probe.mjs`
+for device user agents/screens, IndexedDB Map/Set restoration, screenshot touch
+properties and instant scroll retries, alongside the existing recorder, CDP,
+history/download and platform gates. BFCache reproduction remains a separate
+opt-in diagnostic (`MCP_TEST_ENABLE_BFCACHE=1`), not a supported-mode pass gate.
+
+The November 6, 2026 upgrade paired `playwright` and `playwright-core` at
 **1.65.0**, the [latest stable release](https://github.com/microsoft/playwright/releases/tag/v1.65.0)
 on that date. Keep the local `InputRecorder` hub and the existing factory reference
 counts: multiple MCP clients share one client-side browser context, while the hub
