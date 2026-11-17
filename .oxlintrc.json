@@ -240,7 +240,8 @@
         "tests/tools-auditSite.integration.test.ts",
         "tests/htmlPatterns.test.ts",
         "tests/representativeUrls.test.ts",
-        "bench/**"
+        "bench/**",
+        "scripts/**"
       ],
       "rules": {
         "notice/notice": "off"
@@ -249,7 +250,8 @@
     {
       "files": [
         ".codex/run-mcp-direct-harness.mjs",
-        ".codex/run-mcp-tool-loop.mjs"
+        ".codex/run-mcp-tool-loop.mjs",
+        "scripts/**"
       ],
       "rules": {
         "no-console": "off"

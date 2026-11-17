@@ -8,15 +8,17 @@
     "tests/*-probe.mjs",
     "utils/copyright.js",
     ".codex/run-mcp-direct-harness.mjs",
-    ".codex/run-mcp-tool-loop.mjs"
+    ".codex/run-mcp-tool-loop.mjs",
+    "scripts/*.mjs"
   ],
   "project": [
     "*.{js,mjs,ts,tsx}!",
     "src/**/*.{js,mjs,ts,tsx}!",
-    "tests/**/*.{js,mjs,ts,tsx}!",
+    "tests/**/*.{js,mjs,ts,tsx}",
     "bench/**/*.{js,mjs,ts,tsx}!",
     "utils/**/*.{js,mjs,ts,tsx}!",
-    ".codex/**/*.{js,mjs,ts,tsx}!"
+    ".codex/**/*.{js,mjs,ts,tsx}!",
+    "scripts/**/*.{js,mjs,ts,tsx}!"
   ],
   "ignore": [".codex/worktrees/**", ".claude/worktrees/**"]
 }

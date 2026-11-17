@@ -73,11 +73,11 @@ jobs:
           }
           NODE
 
-      - name: Run typecheck
-        run: npx tsc --noEmit
+      - name: Run checks (lint, types, knip, pinned and runtime dependencies, DEPS.list)
+        run: npm run check
 
-      - name: Run lint
-        run: npm run lint
+      - name: Test the check scripts
+        run: npm run test:scripts
 
       - name: Run tests
         run: npm test
