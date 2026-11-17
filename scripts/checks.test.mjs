@@ -58,6 +58,20 @@ describe('check-deps-list', () => {
     assert.match(result.output, /src\/tools\/c\.ts:1 imports src\/tab\.ts/);
   });
 
+  test('a dir/** entry allows that subtree, not a sibling directory sharing its prefix', () => {
+    const files = {
+      ...layout,
+      'src/tools/DEPS.list': '[*]\n../utils/**\n',
+      'src/utils/deep/x.ts': 'export const x = 1;\n',
+      'src/utils-extra/y.ts': 'export const y = 1;\n',
+      'src/tools/b.ts': "import { x } from '../utils/deep/x.js';\nimport { y } from '../utils-extra/y.js';\nexport const b = x + y;\n",
+    };
+    const result = run('check-deps-list.mjs', project(files));
+    assert.equal(result.status, 1);
+    assert.doesNotMatch(result.output, /b\.ts:1/);
+    assert.match(result.output, /src\/tools\/b\.ts:2 imports src\/utils-extra\/y\.ts/);
+  });
+
   test('reports an entry that matches nothing', () => {
     const result = run('check-deps-list.mjs', project({ ...layout, 'src/tools/DEPS.list': '[*]\n../utils/\n../gone/\n' }));
     assert.equal(result.status, 1);
@@ -134,6 +148,18 @@ describe('check-lockfile-commit', () => {
     assert.equal(result.status, 1);
     assert.match(result.output, /binding-linux-x64-gnu lost "libc"/);
   });
+
+  test('rejects a staged lockfile that is not JSON, and allows deleting the lockfile', () => {
+    const malformed = repository(lock(native));
+    stage(malformed, 'package-lock.json', '{ "packages": ');
+    const result = run('check-lockfile-commit.mjs', malformed, { ALLOW_LOCKFILE_CHANGE: '1' });
+    assert.equal(result.status, 1);
+    assert.match(result.output, /cannot be read as JSON/);
+
+    const removed = repository(lock(native));
+    execFileSync('git', ['rm', '-q', 'package-lock.json'], { cwd: removed });
+    assert.equal(run('check-lockfile-commit.mjs', removed, { ALLOW_LOCKFILE_CHANGE: '1' }).status, 0);
+  });
 });
 
 function repository(lockfile) {
@@ -141,7 +167,7 @@ function repository(lockfile) {
   const git = args => execFileSync('git', args, { cwd, stdio: 'ignore' });
   git(['init', '-q']);
   git(['add', '.']);
-  git(['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-q', '--no-verify', '-m', 'base']);
+  git(['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-q', '--no-verify', '--no-gpg-sign', '-m', 'base']);
   return cwd;
 }
 

@@ -3,8 +3,13 @@ import { execFileSync } from 'node:child_process';
 const staged = git(['diff', '--cached', '--name-only']).split('\n').map(line => line.trim());
 if (!staged.includes('package-lock.json'))
   process.exit(0);
-const before = readLock('HEAD:package-lock.json');
-const after = readLock(':package-lock.json');
+const before = readLock('HEAD:package-lock.json') ?? {};
+const deleted = git(['diff', '--cached', '--name-only', '--diff-filter=D']).split('\n').includes('package-lock.json');
+const after = deleted ? {} : readLock(':package-lock.json');
+if (!after) {
+  console.error('The staged package-lock.json cannot be read as JSON. Regenerate it with `npm install --package-lock-only`.');
+  process.exit(1);
+}
 // Without os/cpu/libc, npm ci installs the wrong native binary (PR #139), so ALLOW_LOCKFILE_CHANGE cannot override this.
 const platformLosses = lostPlatformFields(before, after);
 if (platformLosses.length > 0) {
@@ -43,7 +48,7 @@ function readLock(ref) {
   try {
     return JSON.parse(git(['show', ref])).packages ?? {};
   } catch {
-    return {};
+    return undefined;
   }
 }
 

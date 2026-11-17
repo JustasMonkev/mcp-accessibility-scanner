@@ -94,7 +94,7 @@ function isAllowed(from, to, entries) {
     return true;
   return entries.some(entry => entry.kind === 'any'
     || (entry.kind === 'directory' && dirname(to) === entry.path)
-    || (entry.kind === 'subtree' && to.startsWith(entry.path))
+    || (entry.kind === 'subtree' && to.startsWith(entry.path + sep))
     || (entry.kind === 'file' && to === entry.path));
 }
 

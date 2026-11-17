@@ -60,20 +60,25 @@ function runCheck(script, cwd) {
     let output = '';
     child.stdout.on('data', chunk => output += chunk);
     child.stderr.on('data', chunk => output += chunk);
-    child.on('close', status => resolvePromise({
-      status,
-      ms: Math.round(performance.now() - started),
-      violations: violationsIn(output),
-      ...(status !== 0 && violationsIn(output).length === 0 ? { error: output.trim().split('\n').slice(-3).join(' | ') } : {}),
-    }));
+    child.on('close', status => {
+      const ms = Math.round(performance.now() - started);
+      const violations = violationsIn(output);
+      // A check that threw prints a stack trace, not violations; so does one that failed without listing any.
+      if (status !== 0 && (violations.length === 0 || /^\s+at .+:\d+:\d+\)?$/m.test(output)))
+        resolvePromise({ status, ms, error: output.trim().split('\n').filter(line => !/^\s+at /.test(line)).slice(-3).join(' | ') });
+      else
+        resolvePromise({ status, ms, violations });
+    });
   });
 }
 
-// Line numbers and found versions shift between commits without changing the violation, so they are dropped.
+// Violations are the lines indented by exactly two spaces. Their identity keeps the file and what it breaks; line
+// numbers, found versions and the DEPS.list allowance shift between commits without changing the violation.
 function violationsIn(output) {
-  return output.split('\n').filter(line => line.startsWith('  ')).map(line => line.trim()
+  return output.split('\n').filter(line => /^ {2}\S/.test(line)).map(line => line.trim()
       .replace(/^([^:\s]+):\d+(?=[:\s])/, '$1')
-      .replace(/, found .*$/, ''));
+      .replace(/, found .*$/, '')
+      .replace(/; \S+ allows .*$/, ''));
 }
 
 function compare(change) {
@@ -87,6 +92,10 @@ function compare(change) {
       record.checks[name] = { skipped: after?.skipped ?? 'no result' };
       continue;
     }
+    if (is.error || was?.error) {
+      record.checks[name] = { skipped: is.error ? 'check failed to run' : 'check failed to run on the base', error: is.error ?? was.error };
+      continue;
+    }
     const old = new Set(was?.violations ?? []);
     const now = new Set(is.violations);
     record.checks[name] = {
@@ -95,7 +104,6 @@ function compare(change) {
       total: now.size,
       introduced: [...now].filter(violation => !old.has(violation)),
       removed: [...old].filter(violation => !now.has(violation)),
-      ...(is.error ? { error: is.error } : {}),
     };
   }
   return record;
