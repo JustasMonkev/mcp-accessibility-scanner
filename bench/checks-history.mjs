@@ -65,7 +65,7 @@ function runCheck(script, cwd) {
       const violations = violationsIn(output);
       // A check that threw prints a stack trace, not violations; so does one that failed without listing any.
       if (status !== 0 && (violations.length === 0 || /^\s+at .+:\d+:\d+\)?$/m.test(output)))
-        resolvePromise({ status, ms, error: output.trim().split('\n').filter(line => !/^\s+at /.test(line)).slice(-3).join(' | ') });
+        resolvePromise({ status, ms, error: output.trim().split('\n').filter(line => !/^\s+at /.test(line)).slice(-3).join(' | ') || `exited ${status} with no output` });
       else
         resolvePromise({ status, ms, violations });
     });
@@ -92,7 +92,7 @@ function compare(change) {
       record.checks[name] = { skipped: after?.skipped ?? 'no result' };
       continue;
     }
-    if (is.error || was?.error) {
+    if (is.error !== undefined || was?.error !== undefined) {
       record.checks[name] = { skipped: is.error ? 'check failed to run' : 'check failed to run on the base', error: is.error ?? was.error };
       continue;
     }
