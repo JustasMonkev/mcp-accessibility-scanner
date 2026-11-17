@@ -68,10 +68,14 @@ describe('Common Tools', () => {
       expect(mockContext.closeBrowserContext).toHaveBeenCalled();
     });
 
-    it('should generate close code', async () => {
+    it('should generate close code that replays with only the page binding', async () => {
       await closeTool.handle(mockContext, {}, response);
 
-      expect(response.code()).toContain('await browser.close();');
+      const closeContext = vi.fn().mockResolvedValue(undefined);
+      const page = { context: () => ({ close: closeContext }) };
+      await new Function('page', `return (async () => { ${response.code()} })();`)(page);
+
+      expect(closeContext).toHaveBeenCalledTimes(1);
     });
   });
 
