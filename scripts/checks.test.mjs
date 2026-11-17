@@ -149,12 +149,18 @@ describe('check-lockfile-commit', () => {
     assert.match(result.output, /binding-linux-x64-gnu lost "libc"/);
   });
 
-  test('rejects a staged lockfile that is not JSON, and allows deleting the lockfile', () => {
+  test('rejects a staged or committed lockfile that is not JSON, and allows deleting the lockfile', () => {
     const malformed = repository(lock(native));
     stage(malformed, 'package-lock.json', '{ "packages": ');
     const result = run('check-lockfile-commit.mjs', malformed, { ALLOW_LOCKFILE_CHANGE: '1' });
     assert.equal(result.status, 1);
     assert.match(result.output, /cannot be read as JSON/);
+
+    const corruptBase = repository('{ "packages": ');
+    stage(corruptBase, 'package-lock.json', lock(native));
+    const unreadableBase = run('check-lockfile-commit.mjs', corruptBase, { ALLOW_LOCKFILE_CHANGE: '1' });
+    assert.equal(unreadableBase.status, 1);
+    assert.match(unreadableBase.output, /at HEAD cannot be read as JSON/);
 
     const removed = repository(lock(native));
     execFileSync('git', ['rm', '-q', 'package-lock.json'], { cwd: removed });
