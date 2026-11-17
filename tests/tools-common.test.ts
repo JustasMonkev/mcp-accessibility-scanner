@@ -71,7 +71,7 @@ describe('Common Tools', () => {
     it('should generate close code', async () => {
       await closeTool.handle(mockContext, {}, response);
 
-      expect(response.code()).toContain('page.close');
+      expect(response.code()).toContain('await browser.close();');
     });
   });
 

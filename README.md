@@ -900,7 +900,7 @@ For deployments that require independently verified binaries, provision the brow
 ### Browser Management
 
 #### `browser_close`
-Close the page.
+Close the browser and all open tabs. To close a single tab, use `browser_tabs` with `action: "close"`.
 
 #### `browser_resize`
 Resize the browser window.

@@ -27,7 +27,7 @@ const close = defineTool({
   schema: {
     name: 'browser_close',
     title: 'Close browser',
-    description: 'Close the page',
+    description: 'Close the browser and all open tabs.',
     inputSchema: z.object({}),
     type: 'readOnly',
   },
@@ -35,7 +35,7 @@ const close = defineTool({
   handle: async (context, params, response) => {
     await context.closeBrowserContext();
     response.setIncludeTabs();
-    response.addCode(`await page.close()`);
+    response.addCode(`await browser.close();`);
   },
 });
 

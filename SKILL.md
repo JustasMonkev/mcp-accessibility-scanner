@@ -208,7 +208,7 @@ These tools are always available and work in the interactive REPL.
 |------|-------------|
 | `browser_navigate` | Navigate to URL: `{"url": "https://..."}` |
 | `browser_navigate_back` | Go back to previous page |
-| `browser_close` | Close the page |
+| `browser_close` | Close the browser and all open tabs |
 | `browser_resize` | Resize window: `{"width": 1280, "height": 720}` |
 | `browser_emulate_media` | Emulate color scheme, reduced motion, forced colors, contrast, or print/screen media |
 | `browser_snapshot` | Capture accessibility snapshot; pass `{"boxes": true}` to include element bounds |
