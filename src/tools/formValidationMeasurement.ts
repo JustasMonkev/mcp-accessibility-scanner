@@ -158,7 +158,8 @@ export async function readFields(page: Page, scenario: { fields: { selector: str
         const nativeInvalid = !!nativeField?.willValidate && !nativeField.validity.valid;
         const nativeSubmit = submitTarget instanceof HTMLButtonElement || submitTarget instanceof HTMLInputElement ? submitTarget : null;
         const form = nativeField?.form;
-        const nativeValidationPossible = nativeInvalid && !!form && !form.noValidate && nativeSubmit?.type === 'submit' && !nativeSubmit.formNoValidate && nativeSubmit.form === form;
+        const submitsForm = nativeSubmit?.type === 'submit' || nativeSubmit?.type === 'image';
+        const nativeValidationPossible = nativeInvalid && !!form && !form.noValidate && submitsForm && !nativeSubmit.formNoValidate && nativeSubmit.form === form;
         return { ariaInvalid, nativeInvalid, invalid: nativeInvalid || ariaIdentified, focused: active === element, associated, nativeValidationPossible };
       }, { expectedTargets, submitTarget }, { timeout }));
       const associatedErrors = errorSelectors.filter((_, index) => associated[index]);

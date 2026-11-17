@@ -107,11 +107,14 @@ describe('audit_form_validation public tool', () => {
     expect(report.observed.feedback[0].live).toBe('off');
   });
 
-  it('accepts native invalidity and browser-managed focus without triggering extra invalid events', async () => {
-    await fixture(`<form><input id=email type=email required><button id=submit>Submit</button><p id=error></p></form><script>document.documentElement.dataset.invalidEvents='0'; email.addEventListener('invalid',()=>document.documentElement.dataset.invalidEvents=String(Number(document.documentElement.dataset.invalidEvents)+1));</script>`);
+  it.each([
+    { control: 'submit button', markup: '<button id=submit>Submit</button>' },
+    { control: 'image input', markup: '<input id=submit type=image alt=Submit width=60 height=30>' },
+  ])('accepts native validation from $control without triggering extra invalid events', async ({ markup }) => {
+    await fixture(`<form><input id=email type=email required>${markup}<p id=error></p></form><script>document.documentElement.dataset.invalidEvents='0'; email.addEventListener('invalid',()=>document.documentElement.dataset.invalidEvents=String(Number(document.documentElement.dataset.invalidEvents)+1));</script>`);
     const { report } = await run();
-    expect(report.observed.fields[0]).toMatchObject({ nativeInvalid: true, focused: true });
-    expect(report.findings.some((f: { check: string }) => f.check === 'error-not-associated')).toBe(false);
+    expect(report.observed.fields[0]).toMatchObject({ nativeInvalid: true, focused: true, nativeValidationPossible: true });
+    expect(report.findings).toEqual([]);
     expect(await page.evaluate(() => Number(document.documentElement.dataset.invalidEvents))).toBe(1);
   });
 
