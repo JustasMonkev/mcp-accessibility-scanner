@@ -900,7 +900,13 @@ For deployments that require independently verified binaries, provision the brow
 ### Browser Management
 
 #### `browser_close`
-Close the page.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:15d2e9c8ba08bbfb0d1be09aa86a08db39abaf81708f5f651c21d94b810cbac0 -->
+
+Close the browser and all open tabs. For non-isolated CDP attachments, disconnect from the browser and leave the existing context’s tabs open. To close a single tab, use `browser_tabs` with `action: "close"`.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 #### `browser_resize`
 Resize the browser window.
