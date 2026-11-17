@@ -18,9 +18,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { reserveReportPath, writeJsonReport } from './report.js';
-import { rejectAfterTimeout, rejectOnAbort } from '../utils/timeout.js';
 import { typeIntoFocusedElement } from './keyboardInput.js';
-import type { Frame } from 'playwright';
+import { scenarioGuard, type Interruption } from './scenarioGuard.js';
 
 const expectationSchema = z.strictObject({
   selector: z.string().min(1).max(500).describe('CSS selector in the main frame, including open shadow roots; must resolve to at most one element. May target a future element.'),
@@ -51,54 +50,61 @@ type Expectation = z.output<typeof expectationSchema>;
 type Check = { selector: string; property: string; passed: boolean };
 type StepResult = { step: number; status: 'not-run' | 'passed' | 'failed' | 'incomplete'; checks: Check[] } & ({ key: string } | { action: 'type'; characterCount: number });
 
+const interruptionReasons: Record<Interruption, string> = {
+  'aborted': 'The scenario was cancelled.',
+  'time-budget': 'The 30-second scenario budget was exhausted.',
+  'navigation': 'Main-frame navigation invalidated the scenario.',
+  'modal': 'A browser modal interrupted the scenario.',
+  'page-closed': 'The page closed during the scenario.',
+  'popup': 'A new page interrupted the scenario.',
+};
+
 function measureExpectation(elements: Element[], expectation: Expectation): { checks: Check[]; error?: string } {
   if (elements.length > 1)
     return { checks: [], error: 'Selector matches multiple elements.' };
+  const { selector, ...states } = expectation;
+  const entries = Object.entries(states);
   const element = elements[0];
+  if (!element)
+    return { checks: entries.map(([property, expected]) => ({ selector, property, passed: property === 'visible' && expected === false })) };
+
   let focused = document.activeElement;
   while (focused?.shadowRoot?.activeElement)
     focused = focused.shadowRoot.activeElement;
+  const disableableElements = [HTMLButtonElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, HTMLOptionElement, HTMLOptGroupElement, HTMLFieldSetElement];
+  const readNative = new Map<string, () => string | boolean | null | undefined>([
+    ['focused', () => focused === element],
+    ['visible', () => element.checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true }) && [...element.getClientRects()].some(rect => rect.width > 0 && rect.height > 0)],
+    ['text', () => element.textContent?.trim() ?? ''],
+    ['value', () => element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement ? element.value : element.getAttribute('aria-valuenow')],
+    ['checked', () => {
+      if (element instanceof HTMLInputElement && ['checkbox', 'radio'].includes(element.type))
+        return element.indeterminate ? 'mixed' : element.checked;
+    }],
+    ['selected', () => element instanceof HTMLOptionElement ? element.selected : undefined],
+    ['disabled', () => {
+      if (disableableElements.some(type => element instanceof type))
+        return element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true';
+    }],
+  ]);
+  const ariaBoolean = new Map([['true', true], ['false', false]]);
   const checks: Check[] = [];
-  for (const [property, expected] of Object.entries(expectation)) {
-    if (property === 'selector')
-      continue;
-    if (!element) {
-      checks.push({ selector: expectation.selector, property, passed: property === 'visible' && expected === false });
-      continue;
-    }
-    let actual: string | boolean | null | undefined;
-    if (property === 'focused') {
-      actual = focused === element;
-    } else if (property === 'visible') {
-      const style = getComputedStyle(element);
-      actual = style.visibility !== 'hidden' && style.visibility !== 'collapse' && [...element.getClientRects()].some(rect => rect.width > 0 && rect.height > 0);
-    } else if (property === 'text') {
-      actual = element.textContent?.trim() ?? '';
-    } else if (property === 'value') {
-      actual = element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement ? element.value : element.getAttribute('aria-valuenow');
-    } else if (property === 'checked' && element instanceof HTMLInputElement && ['checkbox', 'radio'].includes(element.type)) {
-      actual = element.indeterminate ? 'mixed' : element.checked;
-    } else if (property === 'selected' && element instanceof HTMLOptionElement) {
-      actual = element.selected;
-    } else if (property === 'disabled' && (element instanceof HTMLButtonElement || element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement || element instanceof HTMLOptionElement || element instanceof HTMLOptGroupElement || element instanceof HTMLFieldSetElement)) {
-      actual = element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true';
-    } else {
-      const attribute = element.getAttribute(`aria-${property}`);
-      actual = null;
-      if (attribute === 'true' || attribute === 'false')
-        actual = attribute === 'true';
-      else if (attribute === 'mixed' && (property === 'checked' || property === 'pressed'))
-        actual = 'mixed';
+  for (const [property, expected] of entries) {
+    let actual = readNative.get(property)?.();
+    if (actual === undefined) {
+      const attribute = element.getAttribute(`aria-${property}`) ?? '';
+      actual = attribute === 'mixed' && (property === 'checked' || property === 'pressed') ? 'mixed' : ariaBoolean.get(attribute);
     }
     if (actual === null || actual === undefined)
       return { checks, error: `The ${property} state is absent or unsupported on the selected element.` };
-    checks.push({ selector: expectation.selector, property, passed: actual === expected });
+    checks.push({ selector, property, passed: actual === expected });
   }
   return { checks };
 }
 
 const auditKeyboardOperation = defineTabTool({
   capability: 'core',
+  exclusive: true,
   schema: {
     name: 'audit_keyboard_operation',
     title: 'Audit keyboard operation',
@@ -110,49 +116,20 @@ const auditKeyboardOperation = defineTabTool({
   handle: async (tab, params, response, signal) => {
     const reportPath = await reserveReportPath(tab.context, response, params.reportFile, 'audit-keyboard-operation');
     const page = tab.page;
-    const interruption = new AbortController();
-    const operationSignal = signal ? AbortSignal.any([signal, interruption.signal]) : interruption.signal;
-    let reason: string | null = null;
-    const stop = (message: string) => {
-      reason ??= message;
-      interruption.abort(new Error(message));
-    };
-    const budgetTimer = setTimeout(() => stop('The 30-second scenario budget was exhausted.'), 30_000);
-    budgetTimer.unref?.();
-    const onNavigation = (frame: Frame) => {
-      if (frame === page.mainFrame())
-        stop('Main-frame navigation invalidated the scenario.');
-    };
-    const onModal = () => stop('A browser modal interrupted the scenario.');
-    const onClose = () => stop('The page closed during the scenario.');
-    const onPopup = () => stop('A new page interrupted the scenario.');
-    page.on('framenavigated', onNavigation);
-    page.on('dialog', onModal);
-    page.on('filechooser', onModal);
-    page.on('close', onClose);
-    page.on('popup', onPopup);
-    const steps = params.steps.map((step, index): StepResult => ({ step: index + 1, ...('key' in step ? { key: step.key } : { action: 'type', characterCount: [...step.text].length }), status: 'not-run', checks: [] }));
+    const guard = scenarioGuard(tab, signal, 30_000, 2000);
+    const { bounded } = guard;
+    const steps = params.steps.map((step, index): StepResult => {
+      const action = 'key' in step ? { key: step.key } : { action: 'type' as const, characterCount: [...step.text].length };
+      return { step: index + 1, ...action, status: 'not-run', checks: [] };
+    });
     let status: 'passed' | 'failed' | 'incomplete' = 'passed';
+    let reason: string | null = null;
     let phase = 'Selector validation';
-    let current: StepResult | undefined;
-    const checkInterrupted = () => {
-      operationSignal.throwIfAborted();
-      if (tab.modalStates().length)
-        throw new Error('A browser modal interrupted the scenario.');
-    };
-    const bounded = async <T>(run: () => Promise<T>) => {
-      checkInterrupted();
-      const result = await rejectOnAbort(() => rejectAfterTimeout(run(), 2000, 'Operation timed out.'), operationSignal);
-      checkInterrupted();
-      return result;
-    };
     try {
-      checkInterrupted();
       for (const selector of new Set(params.steps.flatMap(step => step.expect.map(expectation => expectation.selector))))
         await bounded(() => page.locator(`css=${selector}`).count());
       for (const [index, step] of params.steps.entries()) {
-        checkInterrupted();
-        current = steps[index];
+        const current = steps[index];
         current.status = 'incomplete';
         phase = 'Keyboard action';
         if ('key' in step) {
@@ -170,18 +147,15 @@ const auditKeyboardOperation = defineTabTool({
               throw new Error('No editable target is focused.');
             await typeIntoFocusedElement(page, target, step.text, bounded);
           } finally {
-            await rejectAfterTimeout(focused.dispose(), 2000, 'Handle cleanup timed out.');
+            await guard.release(focused);
           }
         }
         phase = 'Expectation measurement';
         if (params.timeoutMs > 0)
-          await delay(params.timeoutMs, undefined, { signal: operationSignal });
-        checkInterrupted();
+          await delay(params.timeoutMs, undefined, { signal: guard.signal });
         const checks: Check[] = [];
         for (const expectation of step.expect) {
-          checkInterrupted();
           const measurement = await bounded(() => page.locator(`css=${expectation.selector}`).evaluateAll(measureExpectation, expectation));
-          checkInterrupted();
           if (measurement.error) {
             reason = measurement.error;
             throw new Error(measurement.error);
@@ -189,8 +163,7 @@ const auditKeyboardOperation = defineTabTool({
           checks.push(...measurement.checks);
         }
         current.checks = checks;
-        checkInterrupted();
-        current.status = current.checks.every(check => check.passed) ? 'passed' : 'failed';
+        current.status = checks.every(check => check.passed) ? 'passed' : 'failed';
         if (current.status === 'failed') {
           status = 'failed';
           break;
@@ -198,26 +171,39 @@ const auditKeyboardOperation = defineTabTool({
       }
     } catch {
       status = 'incomplete';
-      reason ??= signal?.aborted ? 'The scenario was cancelled.' : `${phase} failed or could not be completed within its bound.`;
-      if (current)
-        current.status = 'incomplete';
+      const interruption = guard.reason();
+      reason ??= interruption ? interruptionReasons[interruption] : `${phase} failed or could not be completed within its bound.`;
     } finally {
-      clearTimeout(budgetTimer);
-      page.off('framenavigated', onNavigation);
-      page.off('dialog', onModal);
-      page.off('filechooser', onModal);
-      page.off('close', onClose);
-      page.off('popup', onPopup);
+      guard.dispose();
     }
-    const findings = steps.flatMap(step => step.status === 'failed' ? step.checks.filter(check => !check.passed).map(check => ({ step: step.step, selector: check.selector, property: check.property, problem: 'The expected keyboard outcome was not observed.' })) : []);
-    const report = { version: 'v1', status, reason, scope: 'Caller-supplied scenario in the main frame and open shadow roots; not a conformance assessment. Page state is not restored.', steps, findings };
+    const findings = steps.flatMap(step => step.status !== 'failed' ? [] : step.checks.filter(check => !check.passed).map(check => ({
+      step: step.step,
+      selector: check.selector,
+      property: check.property,
+      problem: 'The expected keyboard outcome was not observed.',
+    })));
+    const report = {
+      version: 'v1',
+      status,
+      reason,
+      scope: 'Caller-supplied scenario in the main frame and open shadow roots; not a conformance assessment. Page state is not restored.',
+      steps,
+      findings,
+    };
     const resource = await writeJsonReport(response, reportPath, report, {
       name: 'audit-keyboard-operation-report',
       title: 'Keyboard operation scenario report',
       description: 'Expected-outcome checks for a caller-supplied keyboard scenario.',
     });
     response.setStructuredContent({ kind: 'audit_keyboard_operation', ...report, report: resource, reportUri: resource.uri });
-    const summary = `Keyboard scenario: ${status}. ${steps.filter(step => step.status === 'passed').length}/${steps.length} steps passed; ${findings.length} finding(s). Later steps are not run after a failed or incomplete step. Page state is not restored; interrupted in-flight keys cannot be undone. Results cover only this scenario, not conformance. JSON report: ${resource.path}`;
+    const passedSteps = steps.filter(step => step.status === 'passed').length;
+    const summary = [
+      `Keyboard scenario: ${status}. ${passedSteps}/${steps.length} steps passed; ${findings.length} finding(s).`,
+      'Later steps are not run after a failed or incomplete step.',
+      'Page state is not restored; interrupted in-flight keys cannot be undone.',
+      'Results cover only this scenario, not conformance.',
+      `JSON report: ${resource.path}`,
+    ].join(' ');
     if (status === 'incomplete')
       response.addError(`${summary}\n${reason}`);
     else

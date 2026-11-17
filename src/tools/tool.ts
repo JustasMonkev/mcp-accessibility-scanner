@@ -40,6 +40,7 @@ export type Tool<Input extends z.Schema = z.Schema> = {
   capability: ToolCapability;
   schema: ToolSchema<Input>;
   clearsModalState?: ModalState['type'];
+  exclusive?: boolean;
   handle: (context: Context, params: z.output<Input>, response: Response, signal?: AbortSignal) => Promise<void>;
 };
 
@@ -47,10 +48,7 @@ export function defineTool<Input extends z.Schema>(tool: Tool<Input>): Tool<Inpu
   return tool;
 }
 
-export type TabTool<Input extends z.Schema = z.Schema> = {
-  capability: ToolCapability;
-  schema: ToolSchema<Input>;
-  clearsModalState?: ModalState['type'];
+export type TabTool<Input extends z.Schema = z.Schema> = Omit<Tool<Input>, 'handle'> & {
   handle: (tab: Tab, params: z.output<Input>, response: Response, signal?: AbortSignal) => Promise<void>;
 };
 

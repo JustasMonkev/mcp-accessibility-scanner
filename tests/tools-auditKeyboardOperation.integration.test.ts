@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -39,9 +40,14 @@ beforeEach(async () => {
   browserContext = await browser.newContext();
   page = await browserContext.newPage();
   const modalStates: ModalState[] = [];
-  page.on('dialog', dialog => modalStates.push({ type: 'dialog', dialog, description: 'Dialog' }));
   const outputFile = async (name: string) => path.join(directory, name);
-  const tab = { page, modalStates: () => modalStates, context: { outputFile } };
+  const tab = Object.assign(new EventEmitter(), { page, modalStates: () => modalStates, context: { outputFile } });
+  const setModalState = (modalState: ModalState) => {
+    modalStates.push(modalState);
+    tab.emit('modalState', modalState);
+  };
+  page.on('dialog', dialog => setModalState({ type: 'dialog', dialog, description: 'Dialog' }));
+  page.on('filechooser', fileChooser => setModalState({ type: 'fileChooser', fileChooser, description: 'File chooser' }));
   context = { currentTabOrDie: () => tab, takeDownloadErrors: () => [], config: { filePaths: 'absolute' } } as Context;
 });
 afterEach(async () => {
@@ -204,6 +210,7 @@ it.each(['cancel', 'modal'])('stops text input on %s before later characters or 
     { key: 'Tab', expect: [{ selector: '#other', focused: true }] },
   ] }, controller.signal);
   expect(report.status).toBe('incomplete');
+  expect(report.reason).toBe(interruption === 'modal' ? 'A browser modal interrupted the scenario.' : 'The scenario was cancelled.');
   expect(response.isError()).toBe(true);
   expect(report.steps[2].status).toBe('not-run');
   if (interruption === 'modal') {
@@ -272,6 +279,22 @@ it.each([
   expect(report.findings).toHaveLength(1);
   expect(report.steps.map((step: { status: string }) => step.status)).toEqual(['passed', 'failed', 'not-run']);
   expect(await page.evaluate('window.keyCount')).toBe(2);
+});
+
+it.each([
+  { container: 'closed details', visible: false, markup: '<details><summary>More</summary><p id="content">Collapsed</p></details>' },
+  { container: 'hidden=until-found', visible: false, markup: '<div hidden="until-found"><p id="content">Collapsed</p></div>' },
+  { container: 'open details', visible: true, markup: '<details open><summary>More</summary><p id="content">Expanded</p></details>' },
+])('measures content in $container as visible: $visible', async ({ visible, markup }) => {
+  await page.setContent(`<button id="start">Start</button>${markup}`);
+  const { report } = await audit({ reportFile: 'report.json', timeoutMs: 0, steps: [
+    { key: 'Tab', expect: [{ selector: '#start', focused: true }, { selector: '#content', visible }] },
+  ] });
+  expect(report.status).toBe('passed');
+  expect(report.steps[0].checks).toEqual([
+    { selector: '#start', property: 'focused', passed: true },
+    { selector: '#content', property: 'visible', passed: true },
+  ]);
 });
 
 it('measures native and ARIA state, dynamic future targets, exact text, and values without storing secret values', async () => {
@@ -346,7 +369,11 @@ it.each(['ambiguous', 'unsupported'])('marks %s measurements incomplete instead 
   expect(report.steps.map((step: { status: string }) => step.status)).toEqual(['incomplete', 'not-run']);
 });
 
-it.each(['navigation', 'modal', 'cancel'])('stops the scenario on %s without issuing later keys', async interruption => {
+it.each([
+  { interruption: 'navigation', reason: 'Main-frame navigation invalidated the scenario.' },
+  { interruption: 'modal', reason: 'A browser modal interrupted the scenario.' },
+  { interruption: 'cancel', reason: 'The scenario was cancelled.' },
+])('stops the scenario on $interruption without issuing later keys', async ({ interruption, reason }) => {
   await page.setContent(`<button id="start">Start</button><button id="next">Next</button><script>
     document.getElementById('start').onclick = () => { ${interruption === 'navigation' ? "location.hash = 'changed'" : interruption === 'modal' ? "alert('stop')" : "document.body.dataset.started = 'yes'"} };
     window.keyCount = 0; document.addEventListener('keydown', () => window.keyCount++);
@@ -362,10 +389,28 @@ it.each(['navigation', 'modal', 'cancel'])('stops the scenario on %s without iss
     { key: 'Tab', expect: [{ selector: '#next', focused: true }] },
   ] }, controller.signal);
   expect(report.status).toBe('incomplete');
+  expect(report.reason).toBe(reason);
   expect(response.isError()).toBe(true);
   expect(report.steps[2].status).toBe('not-run');
   if (interruption !== 'modal')
     expect(await page.evaluate('window.keyCount')).toBe(2);
+});
+
+it('stops the scenario when a key opens a file chooser', async () => {
+  await page.setContent(`<button id="start">Upload</button><input id="file" type="file" hidden><button id="next">Next</button><script>
+    document.getElementById('start').onclick = () => document.getElementById('file').click();
+    window.keyCount = 0; document.addEventListener('keydown', () => window.keyCount++);
+  </script>`);
+  const { report, response } = await audit({ reportFile: 'report.json', timeoutMs: 300, steps: [
+    { key: 'Tab', expect: [{ selector: '#start', focused: true }] },
+    { key: 'Enter', expect: [{ selector: '#start', focused: true }] },
+    { key: 'Tab', expect: [{ selector: '#next', focused: true }] },
+  ] });
+  expect(report.status).toBe('incomplete');
+  expect(report.reason).toBe('A browser modal interrupted the scenario.');
+  expect(response.isError()).toBe(true);
+  expect(report.steps.map((step: { status: string }) => step.status)).toEqual(['passed', 'incomplete', 'not-run']);
+  expect(await page.evaluate('window.keyCount')).toBe(2);
 });
 
 it('waits for an explicitly expected asynchronous outcome without storing the observed text', async () => {

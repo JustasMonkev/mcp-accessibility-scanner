@@ -223,7 +223,7 @@ export class BrowserServerBackend implements ServerBackend {
     const response = new Response(context, name, responseArguments, requestContext, context.currentTab()?.modalStates());
     let endToolCall: (() => void) | undefined;
     try {
-      endToolCall = context.beginToolCall(name);
+      endToolCall = context.beginToolCall(name, tool.exclusive);
       if (!toolsThatSkipIdleResume.has(name)) {
         const idleNotice = await context.resumeAfterIdle();
         if (idleNotice)
@@ -236,8 +236,7 @@ export class BrowserServerBackend implements ServerBackend {
       else
         (await this._sessionLogFor(context, routedSessionId))?.logResponse(response);
     } catch (error) {
-      if (endToolCall)
-        await response.cleanupFilesOnError().catch(logUnhandledError);
+      await response.cleanupFilesOnError().catch(logUnhandledError);
       response.addError(String(error));
     } finally {
       endToolCall?.();

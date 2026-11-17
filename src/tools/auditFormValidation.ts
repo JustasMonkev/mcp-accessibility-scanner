@@ -4,52 +4,53 @@
  */
 
 import { setTimeout as delay } from 'node:timers/promises';
-import type { ElementHandle, Frame, Page } from 'playwright';
+import type { ElementHandle, Page } from 'playwright';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { reserveReportPath, writeJsonReport } from './report.js';
-import { rejectAfterTimeout, rejectOnAbort } from '../utils/timeout.js';
-import { readFeedback, readFields, type FieldEvidence, type FeedbackEvidence } from './formValidationMeasurement.js';
+import { readFeedback, readFields, uniqueElement, type FieldEvidence, type FeedbackEvidence } from './formValidationMeasurement.js';
 import { assertFocusedEditable, typeIntoFocusedElement } from './keyboardInput.js';
+import { scenarioGuard, type Bounded, type ScenarioGuard } from './scenarioGuard.js';
 
 const selector = z.string().trim().min(1).max(500);
 const inputSchema = z.object({
-  fields: z.array(z.object({ selector, value: z.string().max(10000) })).min(1).max(20),
-  submitSelector: selector,
-  expectedFeedback: z.array(z.object({ selector, kind: z.enum(['error', 'status']) })).min(1).max(20),
-  timeoutMs: z.number().int().min(100).max(10000).default(3000).describe('Post-submit observation window in milliseconds. Keyboard setup/actions have a 30-second budget; direct scenarios retain this window plus 5 seconds. Each operation has a maximum 1-second timeout.'),
+  fields: z.array(z.object({
+    selector: selector.describe('CSS selector for one enabled text input or textarea in the main frame or an open shadow root.'),
+    value: z.string().max(10000).describe('Text to enter; it is not stored in the report.'),
+  })).min(1).max(20).describe('Fields to fill, in order.'),
+  submitSelector: selector.describe('CSS selector for the single control that submits the form.'),
+  expectedFeedback: z.array(z.object({
+    selector: selector.describe('CSS selector for the feedback element; must match at most one element and may target a future element.'),
+    kind: z.enum(['error', 'status']).describe('Whether the feedback is a field error or a status message.'),
+  })).min(1).max(20).describe('Feedback to inspect after submission.'),
+  timeoutMs: z.number().int().min(100).max(10000).default(3000).describe('Post-submit observation window in milliseconds; feedback is read at its end. Setup has a 30-second budget in keyboard mode, or this window plus 5 seconds in direct mode.'),
   interactionMode: z.enum(['keyboard', 'direct']).default('keyboard').describe('Keyboard follows Tab order from current focus (at most 50 Tabs per target), replaces text with guarded keystrokes, and submits with Enter. Direct uses fill/click.'),
-  reportFile: z.string().optional(),
+  reportFile: z.string().optional().describe('Output JSON report file name.'),
 });
 
 type ScenarioField = { selector: string; value: string };
-type Bounded = <T>(run: () => Promise<T>) => Promise<T>;
 
-async function resolveTarget(page: Page, selector: string, remaining: () => number, bounded: Bounded) {
+function focusedTarget(elements: Element[]) {
+  if (elements.length !== 1)
+    return null;
+  const root = elements[0].getRootNode();
+  return elements[0].isConnected && (root instanceof Document || root instanceof ShadowRoot) && root.activeElement === elements[0];
+}
+
+async function reachWithTabs(page: Page, selector: string, guard: ScenarioGuard) {
   const locator = page.locator(`css=${selector}`);
-  if (await bounded(() => locator.count()) !== 1)
-    throw new Error('target-not-reached');
-  const target = await bounded(() => locator.elementHandle({ timeout: remaining() }));
-  if (!target)
-    throw new Error('target-not-reached');
-  return target;
-}
-
-function isFocused(target: ElementHandle<Element>, bounded: Bounded) {
-  return bounded(() => target.evaluate(element => {
-    const root = element.getRootNode();
-    return element.isConnected && (root instanceof Document || root instanceof ShadowRoot) && root.activeElement === element;
-  }));
-}
-
-async function reachWithTabs(page: Page, selector: string, remaining: () => number, bounded: Bounded) {
   for (let tabs = 0; tabs <= 50; tabs++) {
-    const target = await resolveTarget(page, selector, remaining, bounded);
-    if (await isFocused(target, bounded))
-      return target;
-    await target.dispose();
+    const focused = await guard.bounded(() => locator.evaluateAll(focusedTarget));
+    if (focused === null)
+      break;
+    if (focused) {
+      const target = await uniqueElement(page, selector, guard);
+      if (target)
+        return target;
+      break;
+    }
     if (tabs < 50)
-      await bounded(() => page.keyboard.press('Tab'));
+      await guard.bounded(() => page.keyboard.press('Tab'));
   }
   throw new Error('target-not-reached');
 }
@@ -64,58 +65,57 @@ async function verifyFieldValue(target: ElementHandle<Element>, expected: string
     throw new Error('field-value-mismatch');
 }
 
-async function enterFieldsWithKeyboard(page: Page, fields: ScenarioField[], remaining: () => number, bounded: Bounded) {
+async function enterFieldsWithKeyboard(page: Page, fields: ScenarioField[], guard: ScenarioGuard) {
+  const { bounded } = guard;
   for (const field of fields) {
-    const target = await reachWithTabs(page, field.selector, remaining, bounded);
+    const target = await reachWithTabs(page, field.selector, guard);
     try {
       await assertFocusedEditable(target, bounded);
       await bounded(() => page.keyboard.press('ControlOrMeta+A'));
       await assertFocusedEditable(target, bounded);
       await bounded(() => page.keyboard.press('Backspace'));
-      await assertFocusedEditable(target, bounded);
       await typeIntoFocusedElement(page, target, field.value, bounded);
       await verifyFieldValue(target, field.value, bounded);
     } finally {
-      await target.dispose();
+      await guard.release(target);
     }
   }
 }
 
-async function verifyFieldValues(page: Page, fields: ScenarioField[], remaining: () => number, bounded: Bounded) {
+async function verifyFieldValues(page: Page, fields: ScenarioField[], guard: ScenarioGuard) {
   for (const field of fields) {
-    const target = await resolveTarget(page, field.selector, remaining, bounded);
+    const target = await uniqueElement(page, field.selector, guard);
+    if (!target)
+      throw new Error('target-not-reached');
     try {
-      await verifyFieldValue(target, field.value, bounded);
+      await verifyFieldValue(target, field.value, guard.bounded);
     } finally {
-      await target.dispose();
+      await guard.release(target);
     }
   }
 }
 
-async function validateScenario(page: Page, params: z.infer<typeof inputSchema>, remaining: () => number, bounded: Bounded) {
-  for (const target of [...params.fields, { selector: params.submitSelector }, ...params.expectedFeedback]) {
-    const valid = await bounded(() => page.evaluate(css => {
-      try { document.querySelector(css); return true; } catch { return false; }
-    }, target.selector));
-    if (!valid)
-      throw new Error('Invalid CSS selector in form audit scenario.');
-  }
+async function validateScenario(page: Page, params: z.output<typeof inputSchema>, bounded: Bounded) {
+  const selectors = [params.submitSelector, ...[...params.fields, ...params.expectedFeedback].map(target => target.selector)];
+  await bounded(() => page.evaluate(selectors => {
+    const fragment = document.createDocumentFragment();
+    for (const selector of selectors)
+      fragment.querySelector(selector);
+  }, selectors));
   for (const field of params.fields) {
-    const locator = page.locator(`css=${field.selector}`);
-    if (await bounded(() => locator.count()) !== 1)
-      throw new Error('Each field selector must match exactly one element.');
-    if (params.interactionMode === 'keyboard' && /[\r\n]/.test(field.value)) {
-      const isTextArea = await bounded(() => locator.evaluate(element => element instanceof HTMLTextAreaElement));
-      if (!isTextArea)
-        throw new Error('Single-line keyboard form values cannot contain CR or LF.');
-    }
-    const editable = await bounded(() => locator.evaluate(element => {
-      if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement))
-        return false;
-      return !element.matches(':disabled') && !element.readOnly && (!(element instanceof HTMLInputElement) || ['text', 'email', 'url', 'tel', 'password', 'search'].includes(element.type));
-    }, undefined, { timeout: remaining() }));
-    if (!editable)
-      throw new Error('Fields must be enabled, editable text inputs or textareas.');
+    const problem = await bounded(() => page.locator(`css=${field.selector}`).evaluateAll((elements, multiline) => {
+      if (elements.length !== 1)
+        return 'Each field selector must match exactly one element.';
+      const element = elements[0];
+      if (multiline && !(element instanceof HTMLTextAreaElement))
+        return 'Single-line keyboard form values cannot contain CR or LF.';
+      const textField = element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement && ['text', 'email', 'url', 'tel', 'password', 'search'].includes(element.type);
+      if (!textField || element.matches(':disabled') || element.readOnly)
+        return 'Fields must be enabled, editable text inputs or textareas.';
+      return null;
+    }, params.interactionMode === 'keyboard' && /[\r\n]/.test(field.value)));
+    if (problem)
+      throw new Error(problem);
   }
   if (await bounded(() => page.locator(`css=${params.submitSelector}`).count()) !== 1)
     throw new Error('Submit selector must match exactly one element.');
@@ -129,9 +129,10 @@ function findSemanticGaps(fields: FieldEvidence[], feedback: FeedbackEvidence[])
   const findings: { check: string; selector: string; evidence: string }[] = [];
   const focusedSummary = feedback.some(point => point.kind === 'error' && point.exposed && point.textPresent && point.focused);
   for (const field of fields) {
-    if (!field.invalid && !field.associatedErrors.length && !focusedSummary)
+    const hasErrorRoute = field.associatedErrors.length > 0 || focusedSummary;
+    if (!field.invalid && !hasErrorRoute)
       findings.push({ check: 'invalid-field-not-identified', selector: field.selector, evidence: 'No native or ARIA invalidity, expected associated error text, or focused error summary was observed. Review error identification in context; this is a semantic gap, not a conformance verdict.' });
-    if (!field.nativeValidationPossible && !field.associatedErrors.length && !focusedSummary)
+    if (!field.nativeValidationPossible && !hasErrorRoute)
       findings.push({ check: 'error-not-associated', selector: field.selector, evidence: 'No association to a caller-designated error, focused error summary, or possible browser-managed native validation route.' });
   }
   const nativeOnly = fields.every(field => field.nativeValidationPossible);
@@ -148,6 +149,7 @@ function findSemanticGaps(fields: FieldEvidence[], feedback: FeedbackEvidence[])
 
 const auditFormValidation = defineTabTool({
   capability: 'core',
+  exclusive: true,
   schema: {
     name: 'audit_form_validation',
     title: 'Audit explicit form validation scenario',
@@ -158,127 +160,73 @@ const auditFormValidation = defineTabTool({
   },
   handle: async (tab, params, response, signal) => {
     const reportPath = await reserveReportPath(tab.context, response, params.reportFile, 'audit-form-validation');
-    let deadline = Date.now() + (params.interactionMode === 'keyboard' ? 30000 : params.timeoutMs + 5000);
-    let navigated = false;
-    let popupOpened = false;
-    const onPopup = () => { popupOpened = true; };
-    const onNavigation = (frame: Frame) => {
-      if (frame === tab.page.mainFrame())
-        navigated = true;
-    };
-    const interruption = () => {
-      if (signal?.aborted)
-        return 'aborted';
-      if (tab.modalStates().length)
-        return 'modal';
-      if (navigated)
-        return 'navigation';
-      if (popupOpened)
-        return 'popup';
-      if (tab.page.isClosed())
-        return 'page-closed';
-      return null;
-    };
-    const remaining = () => Math.max(1, Math.min(1000, deadline - Date.now()));
-    const bounded = <T>(run: () => Promise<T>) => {
-      requireScenario();
-      return rejectOnAbort(() => rejectAfterTimeout(run(), remaining(), 'time-budget'), signal);
-    };
+    const page = tab.page;
+    const keyboard = params.interactionMode === 'keyboard';
+    const guard = scenarioGuard(tab, signal, keyboard ? 30000 : params.timeoutMs + 5000, 1000);
+    const { bounded } = guard;
     const incomplete: string[] = [];
     let submitted = false;
     let submitAttempted = false;
-    const fields: FieldEvidence[] = [];
+    let fields: FieldEvidence[] = [];
     let feedback: FeedbackEvidence[] = [];
     let actionsStarted = false;
-    tab.page.on('framenavigated', onNavigation);
-    tab.page.on('popup', onPopup);
-    const requireScenario = () => {
-      const reason = interruption();
-      if (reason)
-        throw new Error(reason);
-      if (Date.now() >= deadline)
-        throw new Error('time-budget');
-    };
     try {
-      requireScenario();
-      await validateScenario(tab.page, params, remaining, bounded);
+      await validateScenario(page, params, bounded);
       actionsStarted = true;
-      if (params.interactionMode === 'keyboard') {
-        await enterFieldsWithKeyboard(tab.page, params.fields, remaining, bounded);
+      if (keyboard) {
+        await enterFieldsWithKeyboard(page, params.fields, guard);
       } else {
         for (const field of params.fields)
-          await bounded(() => tab.page.locator(`css=${field.selector}`).fill(field.value, { timeout: remaining() }));
+          await bounded(timeout => page.locator(`css=${field.selector}`).fill(field.value, { timeout }));
       }
-      requireScenario();
-      const baseline = await readFeedback(tab.page, params.expectedFeedback, remaining, bounded);
+      const baseline = await readFeedback(page, params.expectedFeedback, bounded);
       if (baseline.some(point => point.textTruncated))
         incomplete.push('feedback-text-truncated');
-      requireScenario();
-      if (params.interactionMode === 'keyboard') {
-        const target = await reachWithTabs(tab.page, params.submitSelector, remaining, bounded);
-        try {
-          await verifyFieldValues(tab.page, params.fields, remaining, bounded);
-          if (!await isFocused(target, bounded))
-            throw new Error('focus-changed');
+      const submitTarget = keyboard ? await reachWithTabs(page, params.submitSelector, guard) : null;
+      try {
+        await verifyFieldValues(page, params.fields, guard);
+        if (submitTarget && !await bounded(() => page.evaluate(focusedTarget, [submitTarget])))
+          throw new Error('focus-changed');
+        await bounded(timeout => {
           submitAttempted = true;
-          await bounded(() => tab.page.keyboard.press('Enter'));
-        } finally {
-          await target.dispose();
-        }
-      } else {
-        await verifyFieldValues(tab.page, params.fields, remaining, bounded);
-        submitAttempted = true;
-        await bounded(() => tab.page.locator(`css=${params.submitSelector}`).click({ timeout: remaining(), noWaitAfter: true }));
+          return submitTarget ? page.keyboard.press('Enter') : page.locator(`css=${params.submitSelector}`).click({ timeout, noWaitAfter: true });
+        });
+        submitted = true;
+      } finally {
+        if (submitTarget)
+          await guard.release(submitTarget);
       }
-      submitted = true;
-      const requestedObservationDeadline = Date.now() + params.timeoutMs;
-      if (params.interactionMode === 'keyboard')
-        deadline = requestedObservationDeadline + 1000;
-      const observationDeadline = Math.min(requestedObservationDeadline, deadline - 1000);
-      if (observationDeadline < requestedObservationDeadline)
+      if (keyboard)
+        guard.setBudget(params.timeoutMs + 1000);
+      const observationMs = keyboard ? params.timeoutMs : Math.min(params.timeoutMs, Math.max(0, guard.remaining() - 1000));
+      if (observationMs < params.timeoutMs)
         incomplete.push('observation-window-truncated');
-      for (let sample = 0; sample <= 200; sample++) {
-        requireScenario();
-        const current = await readFeedback(tab.page, params.expectedFeedback, remaining, bounded);
-        if (current.some(point => point.textTruncated) && !incomplete.includes('feedback-text-truncated'))
-          incomplete.push('feedback-text-truncated');
-        feedback = current.map((point, index) => ({
-          selector: params.expectedFeedback[index].selector,
-          kind: params.expectedFeedback[index].kind,
-          present: point.present,
-          textPresent: point.text.trim().length > 0,
-          exposed: point.exposed,
-          focused: point.focused,
-          live: point.live,
-          textTruncated: point.textTruncated,
-          changed: point.present && (point.text !== baseline[index].text || point.exposed !== baseline[index].exposed || !baseline[index].present),
-        }));
-        if (Date.now() >= observationDeadline)
-          break;
-        await delay(Math.min(50, observationDeadline - Date.now()), undefined, { signal });
-      }
-      requireScenario();
-      fields.push(...await readFields(tab.page, {
-        scenarioFields: params.fields,
-        submitSelector: params.submitSelector,
-        expectedFeedback: params.expectedFeedback,
-        feedback,
-        remaining,
-        bounded,
+      await delay(observationMs, undefined, { signal: guard.signal });
+      const current = await readFeedback(page, params.expectedFeedback, bounded);
+      if (current.some(point => point.textTruncated) && !incomplete.includes('feedback-text-truncated'))
+        incomplete.push('feedback-text-truncated');
+      feedback = current.map((point, index) => ({
+        selector: params.expectedFeedback[index].selector,
+        kind: params.expectedFeedback[index].kind,
+        present: point.present,
+        textPresent: point.text.trim().length > 0,
+        exposed: point.exposed,
+        focused: point.focused,
+        live: point.live,
+        textTruncated: point.textTruncated,
+        changed: point.present && (point.text !== baseline[index].text || point.exposed !== baseline[index].exposed || !baseline[index].present),
       }));
+      fields = await readFields(page, params, feedback, guard);
     } catch (error) {
-      const reason = interruption();
+      const reason = guard.reason() ?? (error instanceof Error && ['time-budget', 'target-not-reached', 'field-value-mismatch', 'focus-changed'].includes(error.message) ? error.message : undefined);
       if (reason)
         incomplete.push(reason);
-      else if (error instanceof Error && ['time-budget', 'aborted', 'target-not-reached', 'field-value-mismatch', 'focus-changed'].includes(error.message))
-        incomplete.push(error.message);
       else if (!actionsStarted)
-        throw new Error('Form audit preflight or field filling failed; no submission was attempted. Verify CSS selectors and editable fields; single-line keyboard values cannot contain CR or LF.');
+        throw error;
       else
         incomplete.push('scenario-action-or-observation-failed');
     } finally {
-      tab.page.off('framenavigated', onNavigation);
-      tab.page.off('popup', onPopup);
+      guard.dispose();
     }
     const report = {
       version: 'v1',

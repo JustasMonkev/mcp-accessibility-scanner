@@ -3,6 +3,7 @@
  * Licensed under the Apache License, Version 2.0.
  */
 
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -23,12 +24,11 @@ const tool = tools[0];
 let browser: Browser;
 let page: Page;
 let directory: string;
-let modalOpen = false;
+let tab: EventEmitter & { page: Page; modalStates: () => { type: string }[]; context: { outputFile: (name: string) => Promise<string> } };
 const scenario = { interactionMode: 'direct', fields: [{ selector: '#email', value: 'secret-invalid-value' }], submitSelector: '#submit', expectedFeedback: [{ selector: '#error', kind: 'error' }], timeoutMs: 200 };
 
 async function run(args: unknown = scenario, signal?: AbortSignal) {
   const params = tool.schema.inputSchema.parse(args);
-  const tab = { page, modalStates: () => modalOpen ? [{ type: 'dialog' }] : [], context: { outputFile: async (name: string) => path.join(directory, name) } };
   const context = { currentTabOrDie: () => tab, config: {} } as Context;
   const response = new Response(context, tool.schema.name, {});
   await tool.handle(context, params, response, signal);
@@ -46,7 +46,18 @@ afterAll(async () => {
 });
 afterEach(async () => { await page?.close(); });
 
-async function fixture(body: string) { modalOpen = false; page = await browser.newPage(); page.on('dialog', () => { modalOpen = true; }); await page.setContent(body); }
+async function fixture(body: string) {
+  page = await browser.newPage();
+  const modalStates: { type: string }[] = [];
+  tab = Object.assign(new EventEmitter(), { page, modalStates: () => modalStates, context: { outputFile: async (name: string) => path.join(directory, name) } });
+  const setModalState = (type: string) => {
+    modalStates.push({ type });
+    tab.emit('modalState', modalStates[modalStates.length - 1]);
+  };
+  page.on('dialog', () => setModalState('dialog'));
+  page.on('filechooser', () => setModalState('fileChooser'));
+  await page.setContent(body);
+}
 
 describe('audit_form_validation public tool', () => {
   it('does not submit a direct fill that synchronously normalizes a requested value', async () => {
@@ -125,13 +136,17 @@ describe('audit_form_validation public tool', () => {
   });
 
   it.each([
-    { semantics: 'no live region', status: '<p id=status></p>', live: null },
-    { semantics: 'aria-live off inside a polite ancestor', status: '<div aria-live=polite><p id=status aria-live=off></p></div>', live: 'off' },
-  ])('reports changed exposed unfocused status with $semantics', async ({ status, live }) => {
+    { semantics: 'no recognized live role', status: '<p id=status role=constructor></p>', live: null, programmatic: false },
+    { semantics: 'implicit alert role', status: '<p id=status role=alert></p>', live: 'assertive', programmatic: true },
+    { semantics: 'implicit log role with normalized spelling', status: '<p id=status role=" LOG "></p>', live: 'polite', programmatic: true },
+    { semantics: 'explicit off overriding an alert role and a polite ancestor', status: '<div aria-live=polite><p id=status role=alert aria-live=" OFF "></p></div>', live: 'off', programmatic: false },
+    { semantics: 'implicit timer role overriding a polite ancestor', status: '<div aria-live=polite><p id=status role=timer aria-live=invalid></p></div>', live: 'off', programmatic: false },
+    { semantics: 'implicit marquee role overriding a polite ancestor', status: '<div aria-live=polite><p id=status role=marquee></p></div>', live: 'off', programmatic: false },
+  ])('reports changed exposed unfocused status with $semantics', async ({ status, live, programmatic }) => {
     await fixture(`<form novalidate><input id=email aria-describedby=error><button id=submit>Submit</button><p id=error></p>${status}</form><script>document.querySelector('form').onsubmit=e=>{e.preventDefault(); error.textContent='Correct email'; document.getElementById('status').textContent='Validation failed';}</script>`);
     const { report } = await run({ ...scenario, expectedFeedback: [...scenario.expectedFeedback, { selector: '#status', kind: 'status' }] });
     expect(report.observed.feedback[1]).toMatchObject({ changed: true, exposed: true, focused: false, live });
-    expect(report.findings).toEqual([expect.objectContaining({ check: 'status-not-programmatic', selector: '#status' })]);
+    expect(report.findings).toEqual(programmatic ? [] : [expect.objectContaining({ check: 'status-not-programmatic', selector: '#status' })]);
   });
 
   it.each([
@@ -180,6 +195,54 @@ describe('audit_form_validation public tool', () => {
     const { report } = await run({ ...scenario, expectedFeedback: [{ selector: '#host #feedback', kind: 'status' }] });
     expect(report.observed.feedback[0]).toMatchObject({ textPresent: true, exposed: true, changed: true, live: 'polite' });
     expect(report.findings.map((finding: { check: string }) => finding.check)).not.toEqual(expect.arrayContaining(['feedback-not-exposed', 'status-not-programmatic']));
+  });
+
+  it.each([
+    { hiddenBy: 'a display:contents target in closed details', markup: '<details><summary>More</summary><div id=status role=status style="display:contents"></div></details>' },
+    { hiddenBy: 'a display:contents target in hidden=until-found content', markup: '<div hidden=until-found><div id=status role=status style="display:contents"></div></div>' },
+    { hiddenBy: 'hidden=until-found on the target', markup: '<p id=status role=status hidden=until-found></p>' },
+  ])('does not expose feedback hidden by $hiddenBy', async ({ markup }) => {
+    await fixture(`<form novalidate><input id=email><button id=submit>Submit</button></form>${markup}<script>document.querySelector('form').onsubmit=e=>{e.preventDefault(); document.getElementById('status').textContent='Validation failed';}</script>`);
+    const { report } = await run({ ...scenario, expectedFeedback: [{ selector: '#status', kind: 'status' }] });
+    expect(report.observed.feedback[0]).toMatchObject({ present: true, textPresent: false, exposed: false, changed: false });
+  });
+
+  it('does not count display:contents text in collapsed details content', async () => {
+    await fixture(`<form novalidate><input id=email><button id=submit>Submit</button></form><div id=status role=status><details><summary>Status</summary><span id=hidden style="display:contents"></span></details></div><script>document.querySelector('form').onsubmit=e=>{e.preventDefault(); document.getElementById('hidden').textContent='Validation failed';}</script>`);
+    const { report } = await run({ ...scenario, expectedFeedback: [{ selector: '#status', kind: 'status' }] });
+    expect(report.observed.feedback[0]).toMatchObject({ textPresent: true, exposed: true, changed: false });
+  });
+
+  it('does not count direct text in closed details with no authored summary', async () => {
+    await fixture(`<form novalidate><input id=email><button id=submit>Submit</button></form><details id=status role=status></details><script>document.querySelector('form').onsubmit=e=>{e.preventDefault(); document.getElementById('status').textContent='Validation failed';}</script>`);
+    const { report } = await run({ ...scenario, expectedFeedback: [{ selector: '#status', kind: 'status' }] });
+    expect(await page.locator('#status').textContent()).toBe('Validation failed');
+    expect(report.observed.feedback[0]).toMatchObject({ textPresent: false, exposed: true, changed: false });
+  });
+
+  it.each([
+    '<p id=feedback role=status></p>',
+    '<div style="display:contents"><span id=feedback role=status style="display:contents"></span></div>',
+  ])('does not expose inactive slot fallback %s', async fallback => {
+    await fixture(`<form novalidate><input id=email><button id=submit>Submit</button></form><div id=host><span>Assigned content</span></div><script>
+      host.attachShadow({mode:'open'}).innerHTML='<slot>${fallback}</slot>';
+      document.querySelector('form').onsubmit=e=>{e.preventDefault(); host.shadowRoot.querySelector('#feedback').textContent='Validation failed';};
+    </script>`);
+    const { report } = await run({ ...scenario, expectedFeedback: [{ selector: '#host #feedback', kind: 'status' }] });
+    expect(await page.locator('#host #feedback').textContent()).toBe('Validation failed');
+    expect(await page.locator('#host').ariaSnapshot()).not.toContain('Validation failed');
+    expect(report.observed.feedback[0]).toMatchObject({ present: true, textPresent: false, exposed: false, changed: false });
+    expect(report.findings).toEqual(expect.arrayContaining(['feedback-not-exposed', 'status-not-programmatic'].map(check => expect.objectContaining({ check, selector: '#host #feedback' }))));
+  });
+
+  it('keeps aria-hidden on an intermediate nested slot when sampling its host', async () => {
+    await fixture(`<form novalidate><input id=email><button id=submit>Submit</button></form><div id=host role=status></div><script>
+      host.attachShadow({mode:'open'}).innerHTML='<slot><slot aria-hidden=true><span id=feedback></span></slot></slot>';
+      document.querySelector('form').onsubmit=e=>{e.preventDefault(); host.shadowRoot.querySelector('#feedback').textContent='Validation failed';};
+    </script>`);
+    const { report } = await run({ ...scenario, expectedFeedback: [{ selector: '#host', kind: 'status' }] });
+    expect(await page.locator('#host #feedback').textContent()).toBe('Validation failed');
+    expect(report.observed.feedback[0]).toMatchObject({ exposed: true, textPresent: false, changed: false });
   });
 
   it('reads open-shadow and rendered slot text without counting hidden or unassigned text', async () => {
@@ -299,10 +362,11 @@ describe('audit_form_validation public tool', () => {
     }
   });
 
-  it('rejects invalid future-state selectors before filling or submitting', async () => {
+  it.each(['[', '#email >> nth=0'])('rejects non-CSS feedback selector %s before filling or submitting', async selector => {
     await fixture('<input id=email><button id=submit onclick="window.clicked=true">Submit</button>');
-    await expect(run({ ...scenario, expectedFeedback: [{ selector: '[', kind: 'error' }] })).rejects.toThrow();
+    await expect(run({ ...scenario, expectedFeedback: [{ selector, kind: 'error' }] })).rejects.toThrow('is not a valid selector');
     expect(await page.locator('#email').inputValue()).toBe('');
+    expect(await page.evaluate(() => 'clicked' in window)).toBe(false);
     expect(tool.schema.inputSchema.safeParse({ ...scenario, fields: [] }).success).toBe(false);
     expect(tool.schema.inputSchema.safeParse({ ...scenario, submitSelector: ' ' }).success).toBe(false);
   });
@@ -322,6 +386,27 @@ describe('audit_form_validation public tool', () => {
     const { report } = await run();
     expect(report.outcome).toBe('incomplete');
     expect(report.incomplete).toContain('navigation');
+  });
+
+  it('keeps the first interruption when cancellation follows a submission modal', async () => {
+    await fixture(`<form novalidate><input id=email><button id=submit>Submit</button><p id=error></p></form><script>document.querySelector('form').onsubmit=e=>{e.preventDefault(); alert('pause')}</script>`);
+    const controller = new AbortController();
+    let dialog: Dialog | undefined;
+    page.once('dialog', current => { dialog = current; controller.abort(); });
+    const { report } = await run(scenario, controller.signal);
+    expect(controller.signal.aborted).toBe(true);
+    expect(report).toMatchObject({ outcome: 'incomplete', submitAttempted: true, incomplete: ['modal'], observed: { fields: [], feedback: [] } });
+    await dialog?.dismiss();
+  });
+
+  it.each([
+    { change: 'appears 100ms after submission', script: "setTimeout(()=>{error.textContent='Correct email'},100)", feedback: { present: true, textPresent: true, changed: true } },
+    { change: 'is removed 50ms after submission', script: "error.textContent='Correct email'; setTimeout(()=>error.remove(),50)", feedback: { present: false, textPresent: false, changed: false } },
+  ])('reads feedback at the end of the observation window when it $change', async ({ script, feedback }) => {
+    await fixture(`<form novalidate><input id=email aria-describedby=error><button id=submit>Submit</button><p id=error></p></form><script>document.querySelector('form').onsubmit=e=>{e.preventDefault(); ${script}}</script>`);
+    const { report } = await run({ ...scenario, timeoutMs: 300 });
+    expect(report.outcome).toBe('completed');
+    expect(report.observed.feedback[0]).toMatchObject(feedback);
   });
 });
 
@@ -384,19 +469,41 @@ it('stops at a modal raised by filling without later fields or submission', asyn
   expect(page.listenerCount('framenavigated')).toBe(0);
 });
 
-it('aborts a pending DOM read without leaving a scenario listener', async () => {
-  await fixture('<input id=email><button id=submit>Submit</button><p id=error></p>');
+it('aborts a pending DOM read without waiting for the page or leaving a scenario listener', async () => {
+  await fixture('<input id=email><button id=submit onclick="window.clicked=true">Submit</button><p id=error></p>');
   const controller = new AbortController();
-  const read = vi.spyOn(page, 'evaluate').mockImplementationOnce(() => new Promise(() => {}));
-  const pending = run(scenario, controller.signal);
-  const timer = setTimeout(() => controller.abort(), 20);
-  try {
-    const { report } = await pending;
-    expect(report).toMatchObject({ outcome: 'incomplete', incomplete: ['aborted'] });
-    expect(page.listenerCount('framenavigated')).toBe(0);
-  } finally { clearTimeout(timer); read.mockRestore(); }
+  await page.exposeFunction('cancelAudit', () => controller.abort());
+  await page.evaluate(() => {
+    let reads = 0;
+    Object.defineProperty(document.querySelector('#email'), 'readOnly', { get() {
+      document.documentElement.dataset.readOnlyReads = String(++reads);
+      window.cancelAudit();
+      const end = Date.now() + 1500;
+      while (Date.now() < end) {}
+      return false;
+    } });
+  });
+  const started = Date.now();
+  const { report } = await run(scenario, controller.signal);
+  expect(Date.now() - started).toBeLessThan(700);
+  expect(report).toMatchObject({ outcome: 'incomplete', incomplete: ['aborted'], submitAttempted: false });
+  expect(page.listenerCount('framenavigated')).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.dataset.readOnlyReads)).toBe('1');
+  expect(await page.locator('#email').inputValue()).toBe('');
+  expect(await page.evaluate(() => 'clicked' in window)).toBe(false);
 });
 
+it('bounds a stalled handle cleanup instead of waiting without limit', async () => {
+  await fixture('<form novalidate><input id=email><button id=submit onclick="window.clicked=true">Submit</button><p id=error></p></form>');
+  const probe = await page.locator('#email').elementHandle();
+  await probe?.dispose();
+  const dispose = vi.spyOn(Object.getPrototypeOf(probe), 'dispose').mockImplementation(() => new Promise(() => {}));
+  try {
+    const { report } = await run({ ...scenario, interactionMode: undefined });
+    expect(report).toMatchObject({ outcome: 'incomplete', submitAttempted: false, incomplete: ['scenario-action-or-observation-failed'] });
+    expect(await page.evaluate(() => 'clicked' in window)).toBe(false);
+  } finally { dispose.mockRestore(); }
+}, 10000);
 
 describe('keyboard form scenarios', () => {
   it('uses the default keyboard route from current focus and submits exact replacement values without pointer events', async () => {
@@ -431,7 +538,7 @@ describe('keyboard form scenarios', () => {
 
   it.each(['\n', '\r'])('rejects a single-line keyboard field value containing %j before mutating or submitting', async newline => {
     await fixture(`<form novalidate><input id=email value=original><input id=other value=untouched><button id=submit>Submit</button><p id=error></p></form><script>document.querySelector('form').onsubmit=e=>{e.preventDefault();document.documentElement.dataset.submitted='yes'};</script>`);
-    await expect(run({ ...scenario, interactionMode: 'keyboard', fields: [{ selector: '#other', value: 'changed' }, { selector: '#email', value: `invalid${newline}value` }] })).rejects.toThrow('Form audit preflight');
+    await expect(run({ ...scenario, interactionMode: 'keyboard', fields: [{ selector: '#other', value: 'changed' }, { selector: '#email', value: `invalid${newline}value` }] })).rejects.toThrow('Single-line keyboard form values cannot contain CR or LF.');
     expect(await page.locator('#email').inputValue()).toBe('original');
     expect(await page.locator('#other').inputValue()).toBe('untouched');
     expect(await page.evaluate(() => document.documentElement.dataset.submitted)).toBeUndefined();

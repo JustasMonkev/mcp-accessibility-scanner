@@ -4,11 +4,10 @@
  */
 
 import type { ElementHandle, Page } from 'playwright';
+import type { Bounded } from './scenarioGuard.js';
 
-type Run = <T>(action: () => Promise<T>) => Promise<T>;
-
-export async function assertFocusedEditable(target: ElementHandle<Element>, run: Run): Promise<void> {
-  const editable = await run(() => target.evaluate(element => {
+export async function assertFocusedEditable(target: ElementHandle<Element>, bounded: Bounded): Promise<void> {
+  const editable = await bounded(() => target.evaluate(element => {
     let focused = document.activeElement;
     while (focused?.shadowRoot?.activeElement)
       focused = focused.shadowRoot.activeElement;
@@ -24,10 +23,10 @@ export async function assertFocusedEditable(target: ElementHandle<Element>, run:
     throw new Error('focus-changed');
 }
 
-export async function typeIntoFocusedElement(page: Page, target: ElementHandle<Element>, text: string, run: Run): Promise<void> {
+export async function typeIntoFocusedElement(page: Page, target: ElementHandle<Element>, text: string, bounded: Bounded): Promise<void> {
+  await assertFocusedEditable(target, bounded);
   for (const character of text.replace(/\r\n?/g, '\n')) {
-    await assertFocusedEditable(target, run);
-    await run(() => character === '\n' ? page.keyboard.press('Enter') : page.keyboard.type(character));
-    await assertFocusedEditable(target, run);
+    await bounded(() => character === '\n' ? page.keyboard.press('Enter') : page.keyboard.type(character));
+    await assertFocusedEditable(target, bounded);
   }
 }
