@@ -162,6 +162,17 @@ describe('check-lockfile-commit', () => {
     assert.equal(unreadableBase.status, 1);
     assert.match(unreadableBase.output, /at HEAD cannot be read as JSON/);
 
+    const missingBlob = repository(lock(native));
+    const blob = execFileSync('git', ['rev-parse', 'HEAD:package-lock.json'], { cwd: missingBlob, encoding: 'utf8' }).trim();
+    rmSync(join(missingBlob, '.git', 'objects', blob.slice(0, 2), blob.slice(2)));
+    stage(missingBlob, 'package-lock.json', lock({ ...native, 'node_modules/zod': { version: '4.6.7' } }));
+    assert.equal(run('check-lockfile-commit.mjs', missingBlob, { ALLOW_LOCKFILE_CHANGE: '1' }).status, 1);
+
+    const firstCommit = project({});
+    execFileSync('git', ['init', '-q'], { cwd: firstCommit });
+    stage(firstCommit, 'package-lock.json', lock(native));
+    assert.equal(run('check-lockfile-commit.mjs', firstCommit, { ALLOW_LOCKFILE_CHANGE: '1' }).status, 0);
+
     const removed = repository(lock(native));
     execFileSync('git', ['rm', '-q', 'package-lock.json'], { cwd: removed });
     assert.equal(run('check-lockfile-commit.mjs', removed, { ALLOW_LOCKFILE_CHANGE: '1' }).status, 0);

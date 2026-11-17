@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 const staged = git(['diff', '--cached', '--name-only']).split('\n').map(line => line.trim());
 if (!staged.includes('package-lock.json'))
   process.exit(0);
-const committed = exists('HEAD:package-lock.json');
+const committed = inHeadTree('package-lock.json');
 const before = committed ? readLock('HEAD:package-lock.json') : {};
 if (!before) {
   console.error('The committed package-lock.json at HEAD cannot be read as JSON, so the staged one cannot be compared.');
@@ -49,10 +49,9 @@ function git(args) {
   return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
-function exists(ref) {
+function inHeadTree(path) {
   try {
-    git(['cat-file', '-e', ref]);
-    return true;
+    return git(['ls-tree', '--name-only', 'HEAD', '--', path]).trim() === path;
   } catch {
     return false;
   }
