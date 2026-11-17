@@ -21,6 +21,7 @@ export function listImports(configPath) {
     if (diagnostics.length > 0)
       throw new Error(diagnostics.map(diagnostic => diagnostic.text).join('\n'));
     const roots = new Set(project.rootFiles.map(file => resolve(file)));
+    const verbatim = project.program.getCompilerOptions().verbatimModuleSyntax === true;
     const imports = [];
     const strayFiles = [];
     for (const fileName of project.program.getSourceFileNames()) {
@@ -30,7 +31,7 @@ export function listImports(configPath) {
       // `include` only filters roots: an import can pull an excluded file back into the build.
       if (!roots.has(file))
         strayFiles.push(file);
-      imports.push(...importsOf(project.program.getSourceFile(fileName), file));
+      imports.push(...importsOf(project.program.getSourceFile(fileName), file, verbatim));
     }
     return { imports, strayFiles };
   } finally {
@@ -43,7 +44,7 @@ function isOutside(directory, file) {
   return path.startsWith('..') || isAbsolute(path) || path.split(/[\\/]/).includes('node_modules');
 }
 
-function importsOf(source, file) {
+function importsOf(source, file, verbatim) {
   const found = [];
   const add = (node, typeOnly) => {
     if (!node || !(isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node)))
@@ -53,9 +54,9 @@ function importsOf(source, file) {
   };
   const visit = node => {
     if (isImportDeclaration(node))
-      add(node.moduleSpecifier, isTypeOnlyImport(node.importClause));
+      add(node.moduleSpecifier, isTypeOnlyImport(node.importClause, verbatim));
     else if (isExportDeclaration(node) && node.moduleSpecifier)
-      add(node.moduleSpecifier, isTypeOnlyExport(node));
+      add(node.moduleSpecifier, isTypeOnlyExport(node, verbatim));
     else if (isCallExpression(node) && (node.expression.kind === SyntaxKind.ImportKeyword || (isIdentifier(node.expression) && node.expression.text === 'require')))
       add(node.arguments[0], false);
     node.forEachChild(visit);
@@ -64,19 +65,24 @@ function importsOf(source, file) {
   return found;
 }
 
-// A bare `import 'x'` runs the module, so only type-only bindings make an import erasable.
-function isTypeOnlyImport(clause) {
+// A bare `import 'x'` runs the module. Under verbatimModuleSyntax so does `import { type A } from 'x'`, which is
+// emitted as `import {} from 'x'`: only a whole `import type` or `export type` declaration is erased.
+function isTypeOnlyImport(clause, verbatim) {
   if (!clause)
     return false;
   if (clause.phaseModifier === SyntaxKind.TypeKeyword)
     return true;
+  if (verbatim)
+    return false;
   const bindings = clause.namedBindings;
   return !clause.name && !!bindings && isNamedImports(bindings) && bindings.elements.length > 0 && bindings.elements.every(element => element.isTypeOnly);
 }
 
-function isTypeOnlyExport(node) {
+function isTypeOnlyExport(node, verbatim) {
   if (node.isTypeOnly)
     return true;
+  if (verbatim)
+    return false;
   const clause = node.exportClause;
   return !!clause && isNamedExports(clause) && clause.elements.length > 0 && clause.elements.every(element => element.isTypeOnly);
 }

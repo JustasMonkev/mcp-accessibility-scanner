@@ -20,7 +20,7 @@ for (const { file, line, specifier, typeOnly } of imports) {
   if (declared.has(name))
     continue;
   const where = manifest.devDependencies?.[name] ? 'is only a devDependency' : 'is not declared';
-  failures.push(`${relative('.', file)}:${line}: ${specifier} ${where}. Move it to dependencies, or make the import type-only.`);
+  failures.push(`${relative('.', file)}:${line}: ${specifier} ${where}. Move it to dependencies, or use an \`import type\` declaration.`);
 }
 
 if (failures.length > 0) {

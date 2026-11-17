@@ -10,7 +10,9 @@ const scripts = dirname(fileURLToPath(import.meta.url));
 const fixtures = [];
 after(() => fixtures.forEach(directory => rmSync(directory, { recursive: true, force: true })));
 
-const tsconfig = JSON.stringify({ compilerOptions: { module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, verbatimModuleSyntax: true, noEmit: true }, include: ['src'] });
+const compilerOptions = { module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, verbatimModuleSyntax: true, noEmit: true };
+const tsconfig = JSON.stringify({ compilerOptions, include: ['src'] });
+const tsconfigWithoutVerbatim = JSON.stringify({ compilerOptions: { ...compilerOptions, verbatimModuleSyntax: false }, include: ['src'] });
 const manifest = { name: 'fixture', version: '1.0.0', type: 'module', dependencies: { zod: '4.6.7' }, devDependencies: { vitest: '5.0.5' } };
 
 describe('check-deps-list', () => {
@@ -41,6 +43,13 @@ describe('check-deps-list', () => {
     assert.match(result.output, /src\/utils\/b\.ts:2 imports src\/tab\.ts/);
   });
 
+  test('treats inline type-only imports and re-exports as value imports under verbatimModuleSyntax', () => {
+    const result = run('check-deps-list.mjs', project({ ...layout, 'src/tools/b.ts': "import { type Tab } from '../tab.js';\nexport { type Tab as Other } from '../tab.js';\nexport const b: Tab | undefined = undefined;\n" }));
+    assert.equal(result.status, 1);
+    assert.match(result.output, /src\/tools\/b\.ts:1 imports src\/tab\.ts/);
+    assert.match(result.output, /src\/tools\/b\.ts:2 imports src\/tab\.ts/);
+  });
+
   test('a [file] section adds an exception for that file only', () => {
     const files = { ...layout, 'src/tools/DEPS.list': '[*]\n../utils/\n[b.ts]\n../tab.js\n', 'src/tools/b.ts': "import { Tab } from '../tab.js';\nexport const b = new Tab();\n", 'src/tools/c.ts': "import { Tab } from '../tab.js';\nexport const c = new Tab();\n" };
     const result = run('check-deps-list.mjs', project(files));
@@ -66,6 +75,16 @@ describe('check-runtime-deps', () => {
     const result = run('check-runtime-deps.mjs', project({ 'src/a.ts': "import { vi } from 'vitest';\nexport const a = vi;\n" }));
     assert.equal(result.status, 1);
     assert.match(result.output, /src\/a\.ts:1: vitest is only a devDependency/);
+  });
+
+  test('rejects inline type-only imports and re-exports of a devDependency under verbatimModuleSyntax', () => {
+    const source = "import { type Mock } from 'vitest';\nexport { type Mock as Other } from 'vitest';\nexport const a: Mock | undefined = undefined;\n";
+    const result = run('check-runtime-deps.mjs', project({ 'src/a.ts': source }));
+    assert.equal(result.status, 1);
+    assert.match(result.output, /src\/a\.ts:1: vitest is only a devDependency/);
+    assert.match(result.output, /src\/a\.ts:2: vitest is only a devDependency/);
+    const erased = run('check-runtime-deps.mjs', project({ 'src/a.ts': source, 'tsconfig.json': tsconfigWithoutVerbatim }));
+    assert.equal(erased.status, 0, erased.output);
   });
 
   test('rejects an undeclared package reached through a subpath', () => {

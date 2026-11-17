@@ -40,8 +40,8 @@ If you could not run one locally, say so by name. Do not claim it passed.
 
 ## Modules and boundaries
 
-`src/**/DEPS.list` lists what each directory may import. `npm run check:deps-list` enforces it; type-only imports
-are exempt.
+`src/**/DEPS.list` lists what each directory may import. `npm run check:deps-list` enforces it. Only `import type`
+declarations are exempt: with `verbatimModuleSyntax`, `import { type A }` still loads the module at runtime.
 
 | Directory | Owns | May value-import |
 | --- | --- | --- |

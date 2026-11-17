@@ -9,7 +9,7 @@ what would they have cost, and what do they miss?
 | --- | --- | --- | --- |
 | `npm run check:pinned-deps` | `scripts/check-pinned-deps.mjs` | Every dependency in `package.json` uses an exact version | 0.05 s |
 | `npm run check:runtime-deps` | `scripts/check-runtime-deps.mjs` | Every package `src/` imports at runtime is in `dependencies` | 0.6 s |
-| `npm run check:deps-list` | `scripts/check-entry-graphs.mjs` (the import walker), with Playwright's `DEPS.list` format | `src/**/DEPS.list` module boundaries, type-only imports exempt | 0.6 s |
+| `npm run check:deps-list` | `scripts/check-entry-graphs.mjs` (the import walker), with Playwright's `DEPS.list` format | `src/**/DEPS.list` module boundaries; `import type` declarations are exempt | 0.6 s |
 | `.githooks/pre-commit` | `.husky/pre-commit` and `scripts/check-lockfile-commit.mjs` | Blocks a staged `package-lock.json` unless `ALLOW_LOCKFILE_CHANGE=1`; then runs `npm run check` | under 0.1 s, plus the check |
 | `npm run check` | pi's root `check` script | `oxlint`, `tsc`, `knip --strict`, then the three checks above | 9.5 s |
 

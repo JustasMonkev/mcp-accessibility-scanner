@@ -1,6 +1,6 @@
 // DEPS.list format (Playwright's): the nearest DEPS.list at or above a file governs it. `[*]` lists what every file
 // may import, `[name.ts]` adds entries for one file. `dir/` allows the files directly in it, `dir/**` its subtree,
-// `***` anything. Same-directory and type-only imports are always allowed.
+// `***` anything. Same-directory imports and `import type` declarations are always allowed.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { listImports } from './sourceImports.mjs';
