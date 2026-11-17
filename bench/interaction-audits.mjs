@@ -22,7 +22,8 @@ const repeats = Number(values.repeats);
 if (!Number.isSafeInteger(repeats) || repeats < 1 || repeats > 10)
   throw new Error('--repeats must be 1–10');
 const output = path.resolve(values.output);
-await fs.mkdir(output, { recursive: true });
+await fs.mkdir(path.dirname(output), { recursive: true });
+await fs.mkdir(output);
 const manifestBytes = await fs.readFile(values.manifest);
 const manifest = JSON.parse(manifestBytes);
 const selected = manifest.cases;

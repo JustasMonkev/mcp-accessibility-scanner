@@ -129,6 +129,41 @@ describe('audit_form_validation public tool', () => {
     expect(report.findings).toEqual([]);
   });
 
+  it('flags status text that gains live semantics only after the change', async () => {
+    await fixture(`<form novalidate><input id=email aria-describedby=error><button id=submit>Submit</button><p id=error></p><p id=status></p></form><script>
+      document.querySelector('form').onsubmit = event => {
+        event.preventDefault();
+        error.textContent = 'Correct email';
+        const message = document.getElementById('status');
+        message.textContent = 'Validation failed';
+        message.setAttribute('aria-live', 'polite');
+      };
+    </script>`);
+    const { report } = await run({ ...scenario, expectedFeedback: [...scenario.expectedFeedback, { selector: '#status', kind: 'status' }] });
+    expect(report.observed.feedback[1]).toMatchObject({ changed: true, exposed: true, baselineLive: null, live: 'polite' });
+    expect(report.findings).toEqual([expect.objectContaining({ check: 'status-not-programmatic', selector: '#status' })]);
+  });
+
+  it('distinguishes a replacement live region from new text inside a retained region', async () => {
+    await fixture(`<form novalidate><input id=email aria-describedby=error><button id=submit>Submit</button><p id=error></p>
+      <p id=replaced-region role=status></p><div role=status><p id=replaced-text></p></div></form><script>
+      document.querySelector('form').onsubmit = event => {
+        event.preventDefault();
+        error.textContent = 'Correct email';
+        document.getElementById('replaced-region').outerHTML = '<p id=replaced-region role=status>New region</p>';
+        document.getElementById('replaced-text').outerHTML = '<p id=replaced-text>New text</p>';
+      };
+    </script>`);
+    const { report } = await run({ ...scenario, expectedFeedback: [...scenario.expectedFeedback,
+      { selector: '#replaced-region', kind: 'status' }, { selector: '#replaced-text', kind: 'status' },
+    ] });
+    expect(report.observed.feedback.slice(1)).toMatchObject([
+      { changed: true, baselineLive: null, live: 'polite' },
+      { changed: true, baselineLive: 'polite', live: 'polite' },
+    ]);
+    expect(report.findings).toEqual([expect.objectContaining({ check: 'status-not-programmatic', selector: '#replaced-region' })]);
+  });
+
   it('requires a change, not merely a live attribute on an unchanged status', async () => {
     await fixture(`<form novalidate><input id=email aria-invalid=true aria-describedby=error><button id=submit>Submit</button><p id=error>Error</p><p id=status role=status>Old message</p></form><script>document.querySelector('form').onsubmit=e=>e.preventDefault()</script>`);
     const { report } = await run({ ...scenario, expectedFeedback: [...scenario.expectedFeedback, { selector: '#status', kind: 'status' }] });
@@ -137,6 +172,9 @@ describe('audit_form_validation public tool', () => {
 
   it.each([
     { semantics: 'no recognized live role', status: '<p id=status role=constructor></p>', live: null, programmatic: false },
+    { semantics: 'status as the first concrete role', status: '<p id=status role="made-up section status region"></p>', live: 'polite', programmatic: true },
+    { semantics: 'a recognized non-live role before status', status: '<p id=status role="region status"></p>', live: null, programmatic: false },
+    { semantics: 'explicit off overriding a fallback role list', status: '<p id=status role="status region" aria-live=off></p>', live: 'off', programmatic: false },
     { semantics: 'implicit alert role', status: '<p id=status role=alert></p>', live: 'assertive', programmatic: true },
     { semantics: 'implicit log role with normalized spelling', status: '<p id=status role=" LOG "></p>', live: 'polite', programmatic: true },
     { semantics: 'explicit off overriding an alert role and a polite ancestor', status: '<div aria-live=polite><p id=status role=alert aria-live=" OFF "></p></div>', live: 'off', programmatic: false },

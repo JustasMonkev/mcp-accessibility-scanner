@@ -97,6 +97,41 @@ it('operates a button, menu, and native dialog with real keys and verifies focus
   expect(report.steps.every((step: { status: string }) => step.status === 'passed')).toBe(true);
 });
 
+it('samples expectations together even if focus changes after the first observation', async () => {
+  await page.setContent(`<input id="first" value="one"><button id="second">Two</button><script>
+    const first = document.getElementById('first');
+    const second = document.getElementById('second');
+    Object.defineProperty(first, 'value', {
+      get() {
+        queueMicrotask(() => second.focus());
+        return 'one';
+      },
+    });
+  </script>`);
+  const { report } = await audit({ reportFile: 'report.json', timeoutMs: 0, steps: [
+    { key: 'Tab', expect: [{ selector: '#first', focused: true, value: 'one' }, { selector: '#second', focused: true }] },
+  ] });
+  expect(report.status).toBe('failed');
+  expect(report.findings).toEqual([expect.objectContaining({ selector: '#second', property: 'focused' })]);
+  await expect(page.locator('#second').evaluate(element => element === document.activeElement)).resolves.toBe(true);
+});
+
+it('marks selector matches that change across the observation incomplete', async () => {
+  await page.setContent(`<input id="trigger"><button id="other">Other</button><script>
+    Object.defineProperty(document.getElementById('trigger'), 'value', {
+      get() {
+        queueMicrotask(() => document.getElementById('other').classList.add('appeared'));
+        return 'one';
+      },
+    });
+  </script>`);
+  const { report } = await audit({ reportFile: 'report.json', timeoutMs: 0, steps: [
+    { key: 'Tab', expect: [{ selector: '#trigger', value: 'one' }, { selector: '.appeared', visible: false }] },
+  ] });
+  expect(report.status).toBe('incomplete');
+  expect(report.reason).toBe('A selector changed matches during expectation measurement.');
+});
+
 it('does not pass a transient focus state that is lost before the observation window ends', async () => {
   await page.setContent(`<button id="start">Start</button><button id="next">Next</button><script>
     document.addEventListener('keydown', event => {
@@ -434,7 +469,7 @@ it('reads focus inside open shadow roots and ARIA mixed/pressed/selected states'
     root.getElementById('pressed').onclick = event => event.target.setAttribute('aria-pressed', 'true');
   </script>`);
   const { report } = await audit({ reportFile: 'report.json', timeoutMs: 0, steps: [
-    { key: 'Tab', expect: [{ selector: '#mixed', focused: true, checked: 'mixed' }] },
+    { key: 'Tab', expect: [{ selector: '#host #mixed:visible', focused: true, checked: 'mixed' }] },
     { key: 'Tab', expect: [{ selector: '#pressed', focused: true, pressed: false }] },
     { key: 'Space', expect: [{ selector: '#pressed', pressed: true }] },
     { key: 'Tab', expect: [{ selector: '#selected', focused: true, selected: false }] },

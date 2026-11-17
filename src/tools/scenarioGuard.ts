@@ -4,7 +4,7 @@
  */
 
 import type { Frame, JSHandle } from 'playwright';
-import { TabEvents, type Tab } from '../tab.js';
+import type { Tab } from '../tab.js';
 import { rejectAfterTimeout, rejectOnAbort } from '../utils/timeout.js';
 
 export type Interruption = 'aborted' | 'modal' | 'navigation' | 'popup' | 'page-closed' | 'time-budget';
@@ -36,7 +36,7 @@ export function scenarioGuard(tab: Tab, signal: AbortSignal | undefined, budgetM
   const onPopup = () => stop('popup');
   const onClose = () => stop('page-closed');
   signal?.addEventListener('abort', onAbort);
-  tab.on(TabEvents.modalState, onModal);
+  tab.on('modalState', onModal);
   page.on('framenavigated', onNavigation);
   page.on('popup', onPopup);
   page.on('close', onClose);
@@ -70,7 +70,7 @@ export function scenarioGuard(tab: Tab, signal: AbortSignal | undefined, budgetM
     dispose: () => {
       clearTimeout(budgetTimer);
       signal?.removeEventListener('abort', onAbort);
-      tab.off(TabEvents.modalState, onModal);
+      tab.off('modalState', onModal);
       page.off('framenavigated', onNavigation);
       page.off('popup', onPopup);
       page.off('close', onClose);

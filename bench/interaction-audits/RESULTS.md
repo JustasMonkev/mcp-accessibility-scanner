@@ -73,7 +73,7 @@ The four form fixtures are static post-error snapshots. Their real submit action
 
 ## Reproduce
 
-Build each revision first. The runner does not build implicitly. Use a fresh output directory for every run; report files must not be overwritten.
+Build each revision first. The runner does not build implicitly. Use a new path for `--output` on every run. The runner creates the directory and rejects an existing path before opening the benchmark server.
 
 ```sh
 npm run build

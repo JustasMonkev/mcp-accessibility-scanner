@@ -3,11 +3,12 @@
  * Licensed under the Apache License, Version 2.0.
  */
 
-import type { ElementHandle, Page } from 'playwright';
+import type { ElementHandle, JSHandle, Page } from 'playwright';
+import axe from 'axe-core';
 import type { Bounded, ScenarioGuard } from './scenarioGuard.js';
 
 export type FieldEvidence = { selector: string; ariaInvalid: string | null; nativeInvalid: boolean; invalid: boolean; focused: boolean; nativeValidationPossible: boolean; associatedErrors: string[] };
-export type FeedbackEvidence = { selector: string; kind: 'error' | 'status'; present: boolean; textPresent: boolean; exposed: boolean; focused: boolean; live: string | null; changed: boolean; textTruncated: boolean };
+export type FeedbackEvidence = { selector: string; kind: 'error' | 'status'; present: boolean; textPresent: boolean; exposed: boolean; focused: boolean; live: string | null; baselineLive: string | null; changed: boolean; textTruncated: boolean };
 
 export async function uniqueElement(page: Page, selector: string, guard: ScenarioGuard) {
   const locator = page.locator(`css=${selector}`);
@@ -16,15 +17,25 @@ export async function uniqueElement(page: Page, selector: string, guard: Scenari
   return guard.bounded(timeout => locator.elementHandle({ timeout, signal: guard.signal }));
 }
 
-export async function readFeedback(page: Page, targets: { selector: string }[], bounded: Bounded) {
+const concreteAriaRoles = Object.entries(axe.utils.getStandards().ariaRoles)
+  .filter(([, role]) => role.type !== 'abstract')
+  .map(([name]) => name);
+
+export async function readFeedback(
+  page: Page,
+  targets: { selector: string }[],
+  bounded: Bounded,
+  owners: JSHandle<(Element | null)[]>,
+  stage: 'baseline' | 'current',
+) {
   const result = [];
-  for (const target of targets) {
-    const point = await bounded(() => page.locator(`css=${target.selector}`).evaluateAll(elements => {
+  for (const [index, target] of targets.entries()) {
+    const point = await bounded(() => page.locator(`css=${target.selector}`).evaluateAll((elements, { concreteAriaRoles, owners, index, stage }) => {
       if (elements.length > 1)
         return null;
       const element = elements[0];
       if (!element)
-        return { present: false, text: '', exposed: false, focused: false, live: null, textTruncated: false };
+        return { present: false, text: '', exposed: false, focused: false, live: null, sameLiveRegion: false, textTruncated: false };
       function parentElementAcrossShadow(node: Element) {
         const root = node.getRootNode();
         return node.assignedSlot ?? node.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
@@ -50,10 +61,18 @@ export async function readFeedback(page: Page, targets: { selector: string }[], 
         const parent = parentElementAcrossShadow(node);
         return !parent || !hidesContent(parent, node) && isRendered(parent, false);
       }
-      let accessible = true;
-      for (let node: Element | null = element; node && accessible; node = parentElementAcrossShadow(node))
-        accessible = !hiddenFromAccessibility(node);
-      const exposed = accessible && isRendered(element, true) && getComputedStyle(element).contentVisibility !== 'hidden';
+      function isAccessible(element: Element) {
+        for (let node: Element | null = element; node; node = parentElementAcrossShadow(node)) {
+          if (hiddenFromAccessibility(node))
+            return false;
+        }
+        return true;
+      }
+      function isExposed(node: Element, accessible: boolean) {
+        return accessible && isRendered(node, true) && getComputedStyle(node).contentVisibility !== 'hidden';
+      }
+      const accessible = isAccessible(element);
+      const exposed = isExposed(element, accessible);
       function renderedChildren(node: Element): ArrayLike<Node> {
         if (node.shadowRoot)
           return node.shadowRoot.childNodes;
@@ -92,15 +111,22 @@ export async function readFeedback(page: Page, targets: { selector: string }[], 
         ['alert', 'assertive'], ['status', 'polite'], ['log', 'polite'], ['timer', 'off'], ['marquee', 'off'],
       ]);
       let live: string | undefined;
+      let owner: Element | null = null;
       for (let node: Element | null = element; node && live === undefined; node = parentElementAcrossShadow(node)) {
         const explicit = node.getAttribute('aria-live')?.trim().toLowerCase() ?? '';
-        const role = node.getAttribute('role')?.trim().toLowerCase() ?? '';
-        live = ['off', 'polite', 'assertive'].includes(explicit) ? explicit : liveByRole.get(role);
+        const role = node.getAttribute('role')?.toLowerCase().split(/[\t\n\f\r ]+/).find(token => concreteAriaRoles.includes(token));
+        live = ['off', 'polite', 'assertive'].includes(explicit) ? explicit : liveByRole.get(role ?? '');
+        if (live !== undefined)
+          owner = node;
       }
+      const exposedOwner = owner && isExposed(owner, isAccessible(owner)) ? owner : null;
+      if (stage === 'baseline')
+        owners[index] = exposedOwner;
+      const sameLiveRegion = exposedOwner !== null && exposedOwner === owners[index];
       const root = element.getRootNode();
       const active = root instanceof Document || root instanceof ShadowRoot ? root.activeElement : null;
-      return { present: true, text: text.slice(0, sampleLimit), textTruncated, exposed, focused: !!active && element.contains(active), live: live ?? null };
-    }));
+      return { present: true, text: text.slice(0, sampleLimit), textTruncated, exposed, focused: !!active && element.contains(active), live: live ?? null, sameLiveRegion };
+    }, { concreteAriaRoles, owners, index, stage }));
     if (!point)
       throw new Error('Feedback selector became ambiguous.');
     result.push(point);

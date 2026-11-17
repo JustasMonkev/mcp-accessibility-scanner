@@ -4,7 +4,7 @@
  */
 
 import { setTimeout as delay } from 'node:timers/promises';
-import type { ElementHandle, Page } from 'playwright';
+import type { ElementHandle, JSHandle, Page } from 'playwright';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { reserveReportPath, writeJsonReport } from './report.js';
@@ -125,6 +125,10 @@ async function validateScenario(page: Page, params: z.output<typeof inputSchema>
   }
 }
 
+function announcesChanges(live: string | null) {
+  return live === 'polite' || live === 'assertive';
+}
+
 function findSemanticGaps(fields: FieldEvidence[], feedback: FeedbackEvidence[]) {
   const findings: { check: string; selector: string; evidence: string }[] = [];
   const focusedSummary = feedback.some(point => point.kind === 'error' && point.exposed && point.textPresent && point.focused);
@@ -141,8 +145,8 @@ function findSemanticGaps(fields: FieldEvidence[], feedback: FeedbackEvidence[])
       continue;
     if (!point.present || !point.textPresent || !point.exposed)
       findings.push({ check: 'feedback-not-exposed', selector: point.selector, evidence: 'Expected feedback was absent, empty, hidden, or aria-hidden at the end of observation.' });
-    if (point.kind === 'status' && !(point.exposed && point.textPresent && (point.focused || point.changed && (point.live === 'polite' || point.live === 'assertive'))))
-      findings.push({ check: 'status-not-programmatic', selector: point.selector, evidence: 'No focused status or changed, exposed feedback in an effective live region was observed.' });
+    if (point.kind === 'status' && !(point.exposed && point.textPresent && (point.focused || point.changed && announcesChanges(point.baselineLive) && announcesChanges(point.live))))
+      findings.push({ check: 'status-not-programmatic', selector: point.selector, evidence: 'No focused status or changed, exposed feedback with an active live region at both observations was observed.' });
   }
   return findings;
 }
@@ -153,7 +157,7 @@ const auditFormValidation = defineTabTool({
   schema: {
     name: 'audit_form_validation',
     title: 'Audit explicit form validation scenario',
-    description: 'Enter caller-specified invalid text values via keyboard by default (direct fill/click opt-in), then inspect expected errors/status feedback. Mutates and may submit the page; never discovers forms. Main document and open shadow roots only. Does not certify screen reader announcements.',
+    description: 'Enter caller-specified invalid text values via keyboard by default (direct fill/click opt-in), then inspect expected errors/status feedback. Mutates and may submit the page; never discovers forms. Main document and open shadow roots only. Checks for an active live region before submission and at the end of observation; does not certify screen reader announcements.',
     inputSchema,
     type: 'destructive',
     idempotent: false,
@@ -170,6 +174,7 @@ const auditFormValidation = defineTabTool({
     let fields: FieldEvidence[] = [];
     let feedback: FeedbackEvidence[] = [];
     let actionsStarted = false;
+    let liveOwners: JSHandle<(Element | null)[]> | null = null;
     try {
       await validateScenario(page, params, bounded);
       actionsStarted = true;
@@ -179,11 +184,13 @@ const auditFormValidation = defineTabTool({
         for (const field of params.fields)
           await bounded(timeout => page.locator(`css=${field.selector}`).fill(field.value, { timeout }));
       }
-      const baseline = await readFeedback(page, params.expectedFeedback, bounded);
-      if (baseline.some(point => point.textTruncated))
-        incomplete.push('feedback-text-truncated');
       const submitTarget = keyboard ? await reachWithTabs(page, params.submitSelector, guard) : null;
+      let baseline: Awaited<ReturnType<typeof readFeedback>>;
       try {
+        liveOwners = await bounded(() => page.evaluateHandle((): (Element | null)[] => []));
+        baseline = await readFeedback(page, params.expectedFeedback, bounded, liveOwners, 'baseline');
+        if (baseline.some(point => point.textTruncated))
+          incomplete.push('feedback-text-truncated');
         await verifyFieldValues(page, params.fields, guard);
         if (submitTarget && !await bounded(() => page.evaluate(focusedTarget, [submitTarget])))
           throw new Error('focus-changed');
@@ -202,7 +209,7 @@ const auditFormValidation = defineTabTool({
       if (observationMs < params.timeoutMs)
         incomplete.push('observation-window-truncated');
       await delay(observationMs, undefined, { signal: guard.signal });
-      const current = await readFeedback(page, params.expectedFeedback, bounded);
+      const current = await readFeedback(page, params.expectedFeedback, bounded, liveOwners, 'current');
       if (current.some(point => point.textTruncated) && !incomplete.includes('feedback-text-truncated'))
         incomplete.push('feedback-text-truncated');
       feedback = current.map((point, index) => ({
@@ -213,6 +220,7 @@ const auditFormValidation = defineTabTool({
         exposed: point.exposed,
         focused: point.focused,
         live: point.live,
+        baselineLive: point.sameLiveRegion ? baseline[index].live : null,
         textTruncated: point.textTruncated,
         changed: point.present && (point.text !== baseline[index].text || point.exposed !== baseline[index].exposed || !baseline[index].present),
       }));
@@ -226,7 +234,14 @@ const auditFormValidation = defineTabTool({
       else
         incomplete.push('scenario-action-or-observation-failed');
     } finally {
-      guard.dispose();
+      try {
+        await guard.release(liveOwners);
+      } catch {
+        if (!incomplete.length)
+          incomplete.push('feedback-cleanup-failed');
+      } finally {
+        guard.dispose();
+      }
     }
     const report = {
       version: 'v1',

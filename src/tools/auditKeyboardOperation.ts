@@ -16,10 +16,11 @@
 
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
+import type { Page } from 'playwright';
 import { defineTabTool } from './tool.js';
 import { reserveReportPath, writeJsonReport } from './report.js';
 import { typeIntoFocusedElement } from './keyboardInput.js';
-import { scenarioGuard, type Interruption } from './scenarioGuard.js';
+import { scenarioGuard, type Interruption, type ScenarioGuard } from './scenarioGuard.js';
 
 const expectationSchema = z.strictObject({
   selector: z.string().min(1).max(500).describe('CSS selector in the main frame, including open shadow roots; must resolve to at most one element. May target a future element.'),
@@ -42,7 +43,7 @@ const auditKeyboardOperationSchema = z.strictObject({
     text: z.string().min(1).max(500).describe('Type into the currently focused editable in the main frame or an open shadow root. CRLF and CR become Enter; Unicode input may not produce physical key events. Stops if the original editable loses focus or becomes unavailable.'),
     expect: z.array(expectationSchema).min(1).max(10),
   })])).min(1).max(20).describe('Explicit key or text scenario from the current focus. Stops on the first failed or incomplete step; later steps are not run.'),
-  timeoutMs: z.number().int().min(0).max(1000).default(300).describe('Observation window for each step\'s expected outcomes, in milliseconds; outcomes are measured at its end. Zero measures immediately.'),
+  timeoutMs: z.number().int().min(0).max(1000).default(300).describe('Observation window for each step\'s expected outcomes, in milliseconds; outcomes are measured together at its end. Zero measures immediately.'),
   reportFile: z.string().optional().describe('Output JSON report file name.'),
 });
 
@@ -59,47 +60,85 @@ const interruptionReasons: Record<Interruption, string> = {
   'popup': 'A new page interrupted the scenario.',
 };
 
-function measureExpectation(elements: Element[], expectation: Expectation): { checks: Check[]; error?: string } {
-  if (elements.length > 1)
-    return { checks: [], error: 'Selector matches multiple elements.' };
-  const { selector, ...states } = expectation;
-  const entries = Object.entries(states);
-  const element = elements[0];
-  if (!element)
-    return { checks: entries.map(([property, expected]) => ({ selector, property, passed: property === 'visible' && expected === false })) };
-
+function measureStep({ groups, expectations }: { groups: Element[][]; expectations: Expectation[] }) {
   let focused = document.activeElement;
   while (focused?.shadowRoot?.activeElement)
     focused = focused.shadowRoot.activeElement;
-  const disableableElements = [HTMLButtonElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, HTMLOptionElement, HTMLOptGroupElement, HTMLFieldSetElement];
-  const readNative = new Map<string, () => string | boolean | null | undefined>([
-    ['focused', () => focused === element],
-    ['visible', () => element.checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true }) && [...element.getClientRects()].some(rect => rect.width > 0 && rect.height > 0)],
-    ['text', () => element.textContent?.trim() ?? ''],
-    ['value', () => element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement ? element.value : element.getAttribute('aria-valuenow')],
-    ['checked', () => {
-      if (element instanceof HTMLInputElement && ['checkbox', 'radio'].includes(element.type))
-        return element.indeterminate ? 'mixed' : element.checked;
-    }],
-    ['selected', () => element instanceof HTMLOptionElement ? element.selected : undefined],
-    ['disabled', () => {
-      if (disableableElements.some(type => element instanceof type))
-        return element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true';
-    }],
-  ]);
-  const ariaBoolean = new Map([['true', true], ['false', false]]);
-  const checks: Check[] = [];
-  for (const [property, expected] of entries) {
-    let actual = readNative.get(property)?.();
-    if (actual === undefined) {
-      const attribute = element.getAttribute(`aria-${property}`) ?? '';
-      actual = attribute === 'mixed' && (property === 'checked' || property === 'pressed') ? 'mixed' : ariaBoolean.get(attribute);
+  function measureExpectation(elements: Element[], expectation: Expectation): { checks: Check[]; error?: string } {
+    if (elements.length > 1)
+      return { checks: [], error: 'Selector matches multiple elements.' };
+    const { selector, ...states } = expectation;
+    const entries = Object.entries(states);
+    const element = elements[0];
+    if (!element)
+      return { checks: entries.map(([property, expected]) => ({ selector, property, passed: property === 'visible' && expected === false })) };
+    if (!element.isConnected)
+      return { checks: [], error: 'A selected element detached before measurement.' };
+
+    const disableableElements = [HTMLButtonElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, HTMLOptionElement, HTMLOptGroupElement, HTMLFieldSetElement];
+    const readNative = new Map<string, () => string | boolean | null | undefined>([
+      ['focused', () => focused === element],
+      ['visible', () => element.checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true }) && [...element.getClientRects()].some(rect => rect.width > 0 && rect.height > 0)],
+      ['text', () => element.textContent?.trim() ?? ''],
+      ['value', () => element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement ? element.value : element.getAttribute('aria-valuenow')],
+      ['checked', () => {
+        if (element instanceof HTMLInputElement && ['checkbox', 'radio'].includes(element.type))
+          return element.indeterminate ? 'mixed' : element.checked;
+      }],
+      ['selected', () => element instanceof HTMLOptionElement ? element.selected : undefined],
+      ['disabled', () => {
+        if (disableableElements.some(type => element instanceof type))
+          return element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true';
+      }],
+    ]);
+    const ariaBoolean = new Map([['true', true], ['false', false]]);
+    const checks: Check[] = [];
+    for (const [property, expected] of entries) {
+      let actual = readNative.get(property)?.();
+      if (actual === undefined) {
+        const attribute = element.getAttribute(`aria-${property}`) ?? '';
+        actual = attribute === 'mixed' && (property === 'checked' || property === 'pressed') ? 'mixed' : ariaBoolean.get(attribute);
+      }
+      if (actual === null || actual === undefined)
+        return { checks, error: `The ${property} state is absent or unsupported on the selected element.` };
+      checks.push({ selector, property, passed: actual === expected });
     }
-    if (actual === null || actual === undefined)
-      return { checks, error: `The ${property} state is absent or unsupported on the selected element.` };
-    checks.push({ selector, property, passed: actual === expected });
+    return { checks };
+  }
+  const checks: Check[] = [];
+  for (const [index, expectation] of expectations.entries()) {
+    const measurement = measureExpectation(groups[index], expectation);
+    if (measurement.error)
+      return { error: measurement.error, checks: [] };
+    checks.push(...measurement.checks);
   }
   return { checks };
+}
+
+async function observeStep(page: Page, expectations: Expectation[], guard: ScenarioGuard) {
+  const { bounded } = guard;
+  const groups = await bounded(() => page.evaluateHandle((): Element[][] => []));
+  try {
+    const resolve = (verify: boolean) => bounded(() => Promise.all(expectations.map(({ selector }, index) =>
+      page.locator(`css=${selector}`).evaluateAll((elements, { groups, index, verify }) => {
+        const matches = elements.slice(0, 2);
+        if (verify)
+          return matches.length === groups[index].length && matches.every((element, offset) => element === groups[index][offset]);
+        groups[index] = matches;
+        return true;
+      }, { groups, index, verify }))));
+    await resolve(false);
+    const measurement = await bounded(() => page.evaluate(measureStep, { groups, expectations }));
+    if (measurement.error)
+      return measurement;
+
+    const verified = await resolve(true);
+    if (verified.some(matches => !matches))
+      return { checks: [], error: 'A selector changed matches during expectation measurement.' };
+    return measurement;
+  } finally {
+    await guard.release(groups);
+  }
 }
 
 const auditKeyboardOperation = defineTabTool({
@@ -153,17 +192,13 @@ const auditKeyboardOperation = defineTabTool({
         phase = 'Expectation measurement';
         if (params.timeoutMs > 0)
           await delay(params.timeoutMs, undefined, { signal: guard.signal });
-        const checks: Check[] = [];
-        for (const expectation of step.expect) {
-          const measurement = await bounded(() => page.locator(`css=${expectation.selector}`).evaluateAll(measureExpectation, expectation));
-          if (measurement.error) {
-            reason = measurement.error;
-            throw new Error(measurement.error);
-          }
-          checks.push(...measurement.checks);
+        const measurement = await observeStep(page, step.expect, guard);
+        if (measurement.error) {
+          reason = measurement.error;
+          throw new Error(measurement.error);
         }
-        current.checks = checks;
-        current.status = checks.every(check => check.passed) ? 'passed' : 'failed';
+        current.checks = measurement.checks;
+        current.status = current.checks.every(check => check.passed) ? 'passed' : 'failed';
         if (current.status === 'failed') {
           status = 'failed';
           break;
