@@ -34,7 +34,7 @@ function covers(urls: string[], chosen: string[]): boolean {
     const under = (parts: string[]) => parts.length > 0 && (prefix === '' || key(parts).startsWith(prefix + '\u0000') || key(parts) === prefix);
     const depth = prefix === '' ? 0 : prefix.split('\u0000').length;
     const branch = (parts: string[]) => parts.length === depth ? '' : parts[depth];
-    const branches = new Set(all.filter(under).map(branch));
+    const branches = new Set(all.values().filter(under).map(branch));
     const chosenUnder = picked.filter(under);
     if (chosenUnder.length >= branches.size && new Set(chosenUnder.map(branch)).size < branches.size)
       return false;

@@ -160,13 +160,14 @@ export class BrowserModel {
     });
     if (this._connectPagePrefix) {
       const connectPagePrefix = this._connectPagePrefix;
-      await Promise.allSettled([...this._knownTabs]
+      const connectTabIds = this._knownTabs.entries()
           .filter(([tabId, knownTab]) => tabId !== tab.id && knownTab.url?.startsWith(connectPagePrefix))
-          .map(async ([tabId]) => {
-            const result = await this._sendDebuggerCommand({ tabId }, 'Target.getTargetInfo', undefined);
-            if (result?.targetInfo?.url?.startsWith(connectPagePrefix))
-              await this._sendToExtension('chrome.tabs.remove', [tabId]);
-          }));
+          .map(([tabId]) => tabId).toArray();
+      await Promise.allSettled(connectTabIds.map(async tabId => {
+        const result = await this._sendDebuggerCommand({ tabId }, 'Target.getTargetInfo', undefined);
+        if (result?.targetInfo?.url?.startsWith(connectPagePrefix))
+          await this._sendToExtension('chrome.tabs.remove', [tabId]);
+      }));
     }
     return { targetId: tabSession.targetInfo?.targetId };
   }

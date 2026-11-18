@@ -45,6 +45,7 @@ function makeFactory() {
     browserContext.route = vi.fn().mockResolvedValue(undefined);
     // Only exercised when a test enables --save-session (the input recorder).
     browserContext._startRecording = vi.fn().mockResolvedValue(undefined);
+    browserContext._stopRecording = vi.fn().mockResolvedValue(undefined);
     const close = vi.fn().mockResolvedValue(undefined);
     created.push({ browserContext, close, newPage });
     return { browserContext, close };
