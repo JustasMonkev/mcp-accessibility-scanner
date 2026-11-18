@@ -147,9 +147,18 @@ export class Response {
   async cleanupFilesOnError() {
     const files = [...this._filesToDeleteOnError];
     this._filesToDeleteOnError.clear();
-    await Promise.all(files.map(file => fs.promises.rm(file, { force: true })));
-    const deletedUris = new Set(files.map(file => pathToFileURL(file).toString()));
+    const deletions = await Promise.allSettled(files.map(file => fs.promises.rm(file, { force: true })));
+    const deletedUris = new Set<string>();
+    for (const [index, result] of deletions.entries()) {
+      if (result.status === 'fulfilled')
+        deletedUris.add(pathToFileURL(files[index]).toString());
+      else
+        this._filesToDeleteOnError.add(files[index]);
+    }
     this._resourceLinks = this._resourceLinks.filter(link => !deletedUris.has(link.uri));
+    const failure = deletions.find(result => result.status === 'rejected');
+    if (failure)
+      throw failure.reason;
   }
 
   resourceLinks() {

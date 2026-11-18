@@ -41,20 +41,23 @@ describe('navigation interrupted by a load-time dialog', () => {
     backend = new BrowserServerBackend(config, {
       createContext: async () => {
         browserContext = await browser.newContext();
-        let heldRequest: Route | undefined;
+        const heldRequest = Promise.withResolvers<Route>();
+        let firstDelayedNavigation = true;
         await browserContext.route('http://fixture.local/**', async route => {
           const type = new URL(route.request().url()).pathname.slice(1);
           // 'outgoing' keeps a request open and alerts once it is answered, which
           // happens only when 'delayed' is requested: its dialog opens while the
           // crawl is already navigating away, before 'delayed' commits.
           if (type === 'hold') {
-            heldRequest = route;
+            heldRequest.resolve(route);
             return;
           }
-          if (type === 'delayed') {
-            await heldRequest?.fulfill({ body: '' });
-            heldRequest = undefined;
-            await new Promise(resolve => setTimeout(resolve, 1000));
+          if (type === 'delayed' && firstDelayedNavigation) {
+            firstDelayedNavigation = false;
+            await (await heldRequest.promise).fulfill({ body: '' });
+            // Keep this navigation pending until the outgoing dialog retires
+            // its tab. The retry in a fresh tab receives the destination.
+            return;
           }
           // 'late' opens its dialog once the document is parsed and interactive, so
           // the navigation itself succeeds and only the work after it is frozen.

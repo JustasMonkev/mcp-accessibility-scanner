@@ -243,6 +243,28 @@ describe('audit_site tool', () => {
     expect(context.tabs()).toHaveLength(1);
   });
 
+  it.each(['initial', 'after scan'])('cancels a stalled cookie read (%s) and closes the owned tab', async stage => {
+    const { context, response, cookiesMock } = createHarness({}, { cookiesForUrl: () => [{ name: 'sid' }] });
+    const controller = new AbortController();
+    const readStarted = Promise.withResolvers<void>();
+    const stall = () => {
+      readStarted.resolve();
+      return new Promise<never>(() => {});
+    };
+    if (stage === 'initial')
+      cookiesMock.mockImplementationOnce(stall);
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async () => {
+      cookiesMock.mockImplementationOnce(stall);
+      return createAxeResult('https://example.com/', []);
+    });
+    const audit = auditSiteTool.handle(context, tool.schema.inputSchema.parse({ concurrency: 1 }), response, controller.signal);
+    await readStarted.promise;
+    controller.abort(new Error('cancel cookie read'));
+    await expect(audit).rejects.toThrow('cancel cookie read');
+    expect(context.tabs()).toHaveLength(1);
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
   it('cancels pending dialog initialization without blocking owned-tab cleanup', async () => {
     const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
     const controller = new AbortController();

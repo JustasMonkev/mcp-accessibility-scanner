@@ -257,8 +257,7 @@ async function findCookieLoss(
   page: Page,
   urls: string[],
   baseline: Map<string, CrawlCookie>,
-  requestedUrl: string,
-  urlBeforeNavigation: string
+  url: string
 ): Promise<{ url: string, cookies: string[], identities: string[] } | null> {
   const current = await readCrawlCookies(page, urls).catch(() => null);
   if (!current)
@@ -268,8 +267,6 @@ async function findCookieLoss(
       .filter(([identity, cookie]) => !current.has(identity) && !(cookie.expires > 0 && cookie.expires * 1000 <= now));
   if (!missing.length)
     return null;
-  const reachedUrl = page.url();
-  const url = !/^https?:\/\//i.test(reachedUrl) || reachedUrl === urlBeforeNavigation ? requestedUrl : reachedUrl;
   return {
     url,
     cookies: [...new Set(missing.map(([, cookie]) => cookie.name))],
@@ -704,23 +701,25 @@ class SessionLossDetector {
   readonly losses: SessionLoss[] = [];
   private readonly _scopeUrls: string[];
   private readonly _scope: Set<string>;
+  private readonly _signal?: AbortSignal;
   private readonly _initialIdentities: Set<string>;
   private readonly _baseline: Map<string, CrawlCookie>;
   private readonly _activeSinceCheck = new Map<number, string>();
   private readonly _inFlight = new Set<number>();
   private _checks: Promise<void> = Promise.resolve();
 
-  private constructor(scopeUrls: string[], initialIdentities: Set<string>, baseline: Map<string, CrawlCookie>) {
+  private constructor(scopeUrls: string[], initialIdentities: Set<string>, baseline: Map<string, CrawlCookie>, signal?: AbortSignal) {
+    this._signal = signal;
     this._scopeUrls = scopeUrls;
     this._scope = new Set(scopeUrls);
     this._initialIdentities = initialIdentities;
     this._baseline = baseline;
   }
 
-  static async create(page: Page, scopeUrls: string[]): Promise<SessionLossDetector> {
-    const initialIdentities = new Set((await page.context().cookies().catch(() => [])).map(cookieIdentity));
-    const baseline = await readCrawlCookies(page, scopeUrls);
-    return new SessionLossDetector([...scopeUrls], initialIdentities, baseline);
+  static async create(page: Page, scopeUrls: string[], signal?: AbortSignal): Promise<SessionLossDetector> {
+    const initialIdentities = new Set((await rejectOnAbort(() => page.context().cookies().catch(() => []), signal)).map(cookieIdentity));
+    const baseline = await rejectOnAbort(() => readCrawlCookies(page, scopeUrls), signal);
+    return new SessionLossDetector([...scopeUrls], initialIdentities, baseline, signal);
   }
 
   async widenScope(page: Page, cookieUrl: string): Promise<void> {
@@ -728,7 +727,7 @@ class SessionLossDetector {
       return;
     this._scope.add(cookieUrl);
     this._scopeUrls.push(cookieUrl);
-    const discovered = await readCrawlCookies(page, [cookieUrl]).catch(() => null);
+    const discovered = await rejectOnAbort(() => readCrawlCookies(page, [cookieUrl]).catch(() => null), this._signal);
     for (const [identity, cookie] of discovered ?? []) {
       if (this._initialIdentities.has(identity) && !this._baseline.has(identity))
         this._baseline.set(identity, cookie);
@@ -744,11 +743,11 @@ class SessionLossDetector {
     this._inFlight.delete(sequence);
   }
 
-  check(page: Page, sequence: number, requestedUrl: string, urlBeforeNavigation: string, finished: boolean): Promise<void> {
+  check(page: Page, sequence: number, url: string, finished: boolean): Promise<void> {
     const check = this._checks.then(async () => {
       const activeDuringWindow = [...this._activeSinceCheck];
       if (this._baseline.size) {
-        const loss = await findCookieLoss(page, [...this._scopeUrls], new Map(this._baseline), requestedUrl, urlBeforeNavigation);
+        const loss = await rejectOnAbort(() => findCookieLoss(page, [...this._scopeUrls], new Map(this._baseline), url), this._signal);
         if (loss)
           this._recordLoss(loss, sequence);
       }
@@ -1037,8 +1036,13 @@ class SiteCrawl {
 
   static async open(setup: CrawlSetup): Promise<SiteCrawl> {
     const firstTab = await setup.context.newTab();
-    const session = await SessionLossDetector.create(firstTab.page, setup.frontier.queue.map(item => item.cookieUrl));
-    return new SiteCrawl(setup, firstTab, session);
+    try {
+      const session = await SessionLossDetector.create(firstTab.page, setup.frontier.queue.map(item => item.cookieUrl), setup.signal);
+      return new SiteCrawl(setup, firstTab, session);
+    } catch (error) {
+      await closeTabIfOpen(setup.context, firstTab);
+      throw error;
+    }
   }
 
   private constructor(setup: CrawlSetup, firstTab: Tab, session: SessionLossDetector) {
@@ -1152,8 +1156,17 @@ class SiteCrawl {
     } finally {
       await dialogWatch.stop(this._setup.signal);
       worker.abandoned = dialogWatch.fired();
-      if (!this._setup.signal?.aborted)
-        await this._session.check(tab.page, slot.sequence, retry ? urlBeforeNavigation : item.url, urlBeforeNavigation, !retry);
+      if (!this._setup.signal?.aborted) {
+        // A dialog in the outgoing document predates the destination, even if
+        // the browser updates page.url() while the cookie check is queued.
+        const reachedUrl = tab.page.url();
+        let url = item.url;
+        if (dialogWatch.raisedByOutgoingDocument())
+          url = urlBeforeNavigation;
+        else if (reachedUrl !== urlBeforeNavigation && /^https?:\/\//i.test(reachedUrl))
+          url = reachedUrl;
+        await this._session.check(tab.page, slot.sequence, url, !retry);
+      }
       if (!retry && !this._setup.signal?.aborted)
         await this._reportPageProgress(report, item.url);
     }
