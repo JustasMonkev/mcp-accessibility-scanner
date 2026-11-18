@@ -245,6 +245,9 @@ describe('audit_site tool', () => {
 
   it.each(['initial', 'after scan'])('cancels a stalled cookie read (%s) and closes the owned tab', async stage => {
     const { context, response, cookiesMock } = createHarness({}, { cookiesForUrl: () => [{ name: 'sid' }] });
+    const originalTab = context.currentTabOrDie();
+    const siblingTab = { page: { url: () => 'about:blank' } };
+    context.tabs().push(siblingTab);
     const controller = new AbortController();
     const readStarted = Promise.withResolvers<void>();
     const stall = () => {
@@ -261,7 +264,8 @@ describe('audit_site tool', () => {
     await readStarted.promise;
     controller.abort(new Error('cancel cookie read'));
     await expect(audit).rejects.toThrow('cancel cookie read');
-    expect(context.tabs()).toHaveLength(1);
+    expect(context.tabs()).toEqual([originalTab, siblingTab]);
+    expect(context.selectTab).toHaveBeenLastCalledWith(0);
     expect(writeFileSpy).not.toHaveBeenCalled();
   });
 

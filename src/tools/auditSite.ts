@@ -1071,13 +1071,10 @@ class SiteCrawl {
       throw failures[0];
   }
 
-  async closeTabs(originalTab: Tab): Promise<void> {
+  async closeTabs(): Promise<void> {
     const { context } = this._setup;
     for (const crawlOwnedTab of [...this._workers.map(worker => worker.tab), ...this._retiredTabs])
       await closeTabIfOpen(context, crawlOwnedTab);
-    const originalTabIndex = context.tabs().indexOf(originalTab);
-    if (originalTabIndex !== -1)
-      await context.selectTab(originalTabIndex).catch(logUnhandledError);
   }
 
   aggregatedFindings(): Pick<SummaryReport, 'violations' | 'incomplete'> {
@@ -1231,11 +1228,15 @@ const auditSite = defineTabTool({
     });
 
     signal?.throwIfAborted();
-    const crawl = await SiteCrawl.open({ context, params, scope, frontier, response, signal });
+    let crawl: SiteCrawl | undefined;
     try {
+      crawl = await SiteCrawl.open({ context, params, scope, frontier, response, signal });
       await crawl.run();
     } finally {
-      await crawl.closeTabs(tab);
+      await crawl?.closeTabs();
+      const originalTabIndex = context.tabs().indexOf(tab);
+      if (originalTabIndex !== -1)
+        await context.selectTab(originalTabIndex).catch(logUnhandledError);
     }
 
     signal?.throwIfAborted();
