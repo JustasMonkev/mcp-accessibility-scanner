@@ -142,6 +142,9 @@ screenReaderCases.push({
 });
 
 export const pages = new Map([
+  ['/console-images.html', '<!doctype html><title>Inline image logs</title><input aria-label="Log images" oninput="logImages()"><script>'
+    + 'function logImages() { for (let i = 0; i < 4; i++) console.log("image " + i + ": data:image/png;base64," + "AAAA".repeat(262144) + " end") }'
+    + 'if (!location.search) logImages();</script>'],
   ['/', heavyPage()],
   ['/heavy.html', heavyPage()],
   ...[400, 2000].map(elements => [`/screen-reader-${elements}.html`, screenReaderPage(elements - 1, `sr-${elements}`)]),

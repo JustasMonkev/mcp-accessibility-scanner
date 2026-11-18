@@ -24,8 +24,7 @@ const scheduledWorkWindowMs = 100;
 const pageActivityTimeoutMs = 10_000;
 const targetClosedMessage = /Target (?:page, context or browser has been closed|page closed|closed)/i;
 
-export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>): Promise<R> {
-  const settleMs = tab.context.config.timeouts.settle ?? 500;
+export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>, settleMs = tab.context.config.timeouts.settle ?? 500): Promise<R> {
   const activity = new PageActivity(tab);
   try {
     const result = await callback();

@@ -21,7 +21,8 @@ export default defineConfig({
     environment: 'node',
     // Current and legacy agent worktrees carry their own tests; do not collect
     // those copies alongside the active checkout's suite.
-    exclude: [...configDefaults.exclude, '.codex/worktrees/**', '.claude/worktrees/**'],
+    // scripts/*.test.mjs use node:test and run through `npm run test:scripts`.
+    exclude: [...configDefaults.exclude, '.codex/worktrees/**', '.claude/worktrees/**', 'scripts/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html', 'lcov'],

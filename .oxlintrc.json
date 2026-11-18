@@ -7,11 +7,14 @@
     "builtin": true
   },
   "ignorePatterns": [
-    "**/*.js"
+    "lib/",
+    "coverage/"
   ],
   "plugins": [
     "import",
-    "typescript"
+    "typescript",
+    "promise",
+    "vitest"
   ],
   "jsPlugins": [
     "@stylistic/eslint-plugin",
@@ -219,7 +222,34 @@
         "templateFile": "utils/copyright.js"
       }
     ],
-    "no-console": "error"
+    "no-console": "error",
+    "array-callback-return": "error",
+    "default-case-last": "error",
+    "import/no-absolute-path": "error",
+    "import/no-duplicates": "error",
+    "import/no-empty-named-blocks": "error",
+    "import/no-self-import": "error",
+    "no-case-declarations": "error",
+    "no-constructor-return": "error",
+    "no-empty-pattern": "error",
+    "no-new-wrappers": "error",
+    "no-prototype-builtins": "error",
+    "no-sequences": "error",
+    "no-unmodified-loop-condition": "error",
+    "no-useless-assignment": "error",
+    "no-useless-call": "error",
+    "no-useless-rename": "error",
+    "prefer-promise-reject-errors": "error",
+    "promise/no-multiple-resolved": "error",
+    "promise/no-new-statics": "error",
+    "promise/no-return-in-finally": "error",
+    "promise/valid-params": "error",
+    "typescript/no-import-type-side-effects": "error",
+    "typescript/no-non-null-asserted-nullish-coalescing": "error",
+    "typescript/no-unnecessary-type-constraint": "error",
+    "typescript/no-useless-empty-export": "error",
+    "typescript/no-wrapper-object-types": "error",
+    "typescript/prefer-ts-expect-error": "error"
   },
   "overrides": [
     {
@@ -240,7 +270,8 @@
         "tests/tools-auditSite.integration.test.ts",
         "tests/htmlPatterns.test.ts",
         "tests/representativeUrls.test.ts",
-        "bench/**"
+        "bench/**",
+        "scripts/**"
       ],
       "rules": {
         "notice/notice": "off"
@@ -249,7 +280,8 @@
     {
       "files": [
         ".codex/run-mcp-direct-harness.mjs",
-        ".codex/run-mcp-tool-loop.mjs"
+        ".codex/run-mcp-tool-loop.mjs",
+        "scripts/**"
       ],
       "rules": {
         "no-console": "off"
@@ -273,6 +305,58 @@
           "error",
           {
             "max": 5
+          }
+        ],
+        "typescript/no-misused-promises": "error",
+        "typescript/switch-exhaustiveness-check": [
+          "error",
+          {
+            "considerDefaultExhaustiveForUnions": true
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/tools/**/*.ts",
+        "src/mcp/**/*.ts",
+        "src/utils/**/*.ts"
+      ],
+      "rules": {
+        "typescript/no-explicit-any": "error"
+      }
+    },
+    {
+      "files": [
+        "tests/**/*.test.ts"
+      ],
+      "rules": {
+        "vitest/no-focused-tests": "error",
+        "vitest/no-identical-title": "error",
+        "vitest/no-duplicate-hooks": "error",
+        "vitest/valid-describe-callback": "error",
+        "vitest/valid-title": "error",
+        "vitest/valid-expect-in-promise": "error"
+      }
+    },
+    {
+      "files": [
+        "scripts/*.test.mjs"
+      ],
+      "rules": {
+        "typescript/no-floating-promises": [
+          "error",
+          {
+            "allowForKnownSafeCalls": [
+              {
+                "from": "package",
+                "package": "@types/node",
+                "name": [
+                  "describe",
+                  "test"
+                ]
+              }
+            ]
           }
         ]
       }

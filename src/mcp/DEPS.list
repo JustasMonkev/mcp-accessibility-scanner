@@ -1,1 +1,18 @@
 [*]
+
+# Existing exceptions, not a pattern: do not add more without deciding the boundary first.
+[http.ts]
+../config.js
+../utils/log.js
+../utils/httpUrl.js
+
+[server.ts]
+../utils/log.js
+../utils/terminal.js
+../utils/urlRedaction.js
+
+[sharedClientSlot.ts]
+../utils/log.js
+
+[proxyBackend.ts]
+../utils/log.js

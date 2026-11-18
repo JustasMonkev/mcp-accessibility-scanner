@@ -261,7 +261,7 @@ program
       rl.setPrompt('> ');
       prompt();
 
-      rl.on('line', async (line: string) => {
+      const handleLine = async (line: string) => {
         const trimmed = line.trim();
         if (!trimmed) {
           prompt();
@@ -292,6 +292,9 @@ program
         }
 
         prompt();
+      };
+      rl.on('line', line => {
+        void handleLine(line).catch(logUnhandledError);
       });
 
       rl.on('close', () => {

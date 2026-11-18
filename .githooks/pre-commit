@@ -1,0 +1,6 @@
+#!/bin/sh
+node scripts/check-lockfile-commit.mjs || exit 1
+npm run check || {
+  echo "npm run check failed. Fix the errors above before committing."
+  exit 1
+}

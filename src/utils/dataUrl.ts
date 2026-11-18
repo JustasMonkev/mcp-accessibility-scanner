@@ -14,9 +14,24 @@
  * limitations under the License.
  */
 
+import type { ConsoleMessage } from '../tab.js';
+
 const dataUrlPrefix = 'data:';
 const encodedDataUrlPrefix = 'data%3a';
 const maxDataUrlMetadataLength = 120;
+
+const compactConsoleMessages = new WeakMap<ConsoleMessage, string>();
+
+export function formatConsoleMessage(message: ConsoleMessage): string {
+  const cached = compactConsoleMessages.get(message);
+  if (cached !== undefined)
+    return cached;
+  const raw = message.toString();
+  const formatted = truncateDataUrls(raw);
+  if (formatted.length < raw.length)
+    compactConsoleMessages.set(message, formatted);
+  return formatted;
+}
 
 /** @public */
 export function truncateDataUrl(url: string): string {
@@ -158,7 +173,14 @@ function decodeDataUrlMetadata(metadata: string, isEncoded: boolean): string {
   }
 }
 
+// Raw payloads can contain markup. Base64 payloads have an unconditional set of boundaries.
+const base64PayloadEnd = /[\s"'<>)\]}`:&]|%(?:22|27|29|5d|7d|60)/gi;
 function findDataUrlEnd(text: string, match: DataUrlMatch): number {
+  if (match.isBase64) {
+    base64PayloadEnd.lastIndex = match.payloadStart;
+    return base64PayloadEnd.exec(text)?.index ?? text.length;
+  }
+
   let end = match.payloadStart;
   while (end < text.length) {
     const char = text[end];
@@ -166,15 +188,9 @@ function findDataUrlEnd(text: string, match: DataUrlMatch): number {
       break;
     if (match.isEmbeddedQueryValue && char === '&' && isQueryParamBoundary(text, match, end))
       break;
-    if (match.isBase64 && char === '&')
+    if (match.quote && char === match.quote && isQuotedDataUrlEnd(text, match, end))
       break;
-    if (match.isBase64 && isEncodedPayloadTerminator(text, end))
-      break;
-    if (match.isBase64 && isBase64PayloadTerminator(char))
-      break;
-    if (!match.isBase64 && match.quote && char === match.quote && isQuotedDataUrlEnd(text, match, end))
-      break;
-    if (!match.isBase64 && !match.quote && isRawPayloadSuffixBoundary(text, match, end))
+    if (!match.quote && isRawPayloadSuffixBoundary(text, match, end))
       break;
     end++;
   }
@@ -190,16 +206,6 @@ function isLineBreak(char: string): boolean {
   return char === '\n' || char === '\r';
 }
 
-function isBase64PayloadTerminator(char: string): boolean {
-  switch (char) {
-    case '"': case '\'': case '<': case '>':
-    case ')': case ']': case '}': case '`': case ':':
-      return true;
-    default:
-      return isWhitespace(char);
-  }
-}
-
 function isWhitespace(char: string): boolean {
   return /\s/.test(char);
 }
@@ -207,7 +213,7 @@ function isWhitespace(char: string): boolean {
 function isQueryParamBoundary(text: string, match: DataUrlMatch, ampersand: number): boolean {
   if (!looksLikeQueryParam(text, ampersand + 1))
     return false;
-  return match.isBase64 || isRawPayloadCompleteBefore(text, match.payloadStart, ampersand);
+  return isRawPayloadCompleteBefore(text, match.payloadStart, ampersand);
 }
 
 function isRawPayloadCompleteBefore(text: string, payloadStart: number, end: number): boolean {

@@ -167,6 +167,32 @@ describe('audit_form_validation public tool', () => {
     expect(report.findings).toEqual([expect.objectContaining({ check: 'status-not-programmatic', selector: '#replaced-region' })]);
   });
 
+  it('recognizes inserted status text only inside a retained, exposed live owner', async () => {
+    await fixture(`<form novalidate><input id=email aria-describedby=error><button id=submit>Submit</button><p id=error></p></form>
+      <section id=host></section><div id=replaced role=status></div><div id=hidden role=status hidden></div>
+      <script>
+        const shadow = host.attachShadow({ mode: 'open' });
+        shadow.innerHTML = '<div role=status></div>';
+        document.querySelector('form').onsubmit = event => {
+          event.preventDefault();
+          error.textContent = 'Correct email';
+          shadow.firstElementChild.innerHTML = '<p id=retained-message>Retained</p>';
+          replaced.outerHTML = '<div role=status><p id=replaced-message>Replaced</p></div>';
+          hidden.hidden = false;
+          hidden.innerHTML = '<p id=hidden-message>Revealed</p>';
+        };
+      </script>`);
+    const selectors = ['#retained-message', '#replaced-message', '#hidden-message'];
+    const { report } = await run({ ...scenario, expectedFeedback: [
+      ...scenario.expectedFeedback, ...selectors.map(selector => ({ selector, kind: 'status' })),
+    ] });
+    expect(report.outcome).toBe('completed');
+    expect(report.observed.feedback.slice(1)).toMatchObject([
+      { baselineLive: 'polite', live: 'polite' }, { baselineLive: null, live: 'polite' }, { baselineLive: null, live: 'polite' },
+    ]);
+    expect(report.findings).toEqual(selectors.slice(1).map(selector => expect.objectContaining({ check: 'status-not-programmatic', selector })));
+  });
+
   it('requires a change, not merely a live attribute on an unchanged status', async () => {
     await fixture(`<form novalidate><input id=email aria-invalid=true aria-describedby=error><button id=submit>Submit</button><p id=error>Error</p><p id=status role=status>Old message</p></form><script>document.querySelector('form').onsubmit=e=>e.preventDefault()</script>`);
     const { report } = await run({ ...scenario, expectedFeedback: [...scenario.expectedFeedback, { selector: '#status', kind: 'status' }] });

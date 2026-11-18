@@ -4,11 +4,11 @@
  */
 
 import { setTimeout as delay } from 'node:timers/promises';
-import type { ElementHandle, JSHandle, Page } from 'playwright';
+import type { ElementHandle, Page } from 'playwright';
 import { z } from 'zod';
 import { defineTabTool } from './tool.js';
 import { reserveReportPath, writeJsonReport } from './report.js';
-import { readFeedback, readFields, uniqueElement, type FieldEvidence, type FeedbackEvidence } from './formValidationMeasurement.js';
+import { createFeedbackReader, readFeedback, readFields, uniqueElement, type FieldEvidence, type FeedbackEvidence } from './formValidationMeasurement.js';
 import { assertFocusedEditable, typeIntoFocusedElement } from './keyboardInput.js';
 import { scenarioGuard, type Bounded, type ScenarioGuard } from './scenarioGuard.js';
 
@@ -174,7 +174,7 @@ const auditFormValidation = defineTabTool({
     let fields: FieldEvidence[] = [];
     let feedback: FeedbackEvidence[] = [];
     let actionsStarted = false;
-    let liveOwners: JSHandle<(Element | null)[]> | null = null;
+    let feedbackReader: Awaited<ReturnType<typeof createFeedbackReader>> | null = null;
     try {
       await validateScenario(page, params, bounded);
       actionsStarted = true;
@@ -187,8 +187,8 @@ const auditFormValidation = defineTabTool({
       const submitTarget = keyboard ? await reachWithTabs(page, params.submitSelector, guard) : null;
       let baseline: Awaited<ReturnType<typeof readFeedback>>;
       try {
-        liveOwners = await bounded(() => page.evaluateHandle((): (Element | null)[] => []));
-        baseline = await readFeedback(page, params.expectedFeedback, bounded, liveOwners, 'baseline');
+        feedbackReader = await bounded(() => createFeedbackReader(page));
+        baseline = await readFeedback(page, params.expectedFeedback, bounded, feedbackReader, 'baseline');
         if (baseline.some(point => point.textTruncated))
           incomplete.push('feedback-text-truncated');
         await verifyFieldValues(page, params.fields, guard);
@@ -209,7 +209,7 @@ const auditFormValidation = defineTabTool({
       if (observationMs < params.timeoutMs)
         incomplete.push('observation-window-truncated');
       await delay(observationMs, undefined, { signal: guard.signal });
-      const current = await readFeedback(page, params.expectedFeedback, bounded, liveOwners, 'current');
+      const current = await readFeedback(page, params.expectedFeedback, bounded, feedbackReader, 'current');
       if (current.some(point => point.textTruncated) && !incomplete.includes('feedback-text-truncated'))
         incomplete.push('feedback-text-truncated');
       feedback = current.map((point, index) => ({
@@ -220,7 +220,7 @@ const auditFormValidation = defineTabTool({
         exposed: point.exposed,
         focused: point.focused,
         live: point.live,
-        baselineLive: point.sameLiveRegion ? baseline[index].live : null,
+        baselineLive: point.baselineLive,
         textTruncated: point.textTruncated,
         changed: point.present && (point.text !== baseline[index].text || point.exposed !== baseline[index].exposed || !baseline[index].present),
       }));
@@ -235,7 +235,7 @@ const auditFormValidation = defineTabTool({
         incomplete.push('scenario-action-or-observation-failed');
     } finally {
       try {
-        await guard.release(liveOwners);
+        await guard.release(feedbackReader);
       } catch {
         if (!incomplete.length)
           incomplete.push('feedback-cleanup-failed');

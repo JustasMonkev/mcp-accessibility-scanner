@@ -1,4 +1,4 @@
-import axe from 'axe-core';
+import axe from 'axe-core/axe.min.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 

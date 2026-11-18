@@ -3,7 +3,7 @@
  * Licensed under the Apache License, Version 2.0.
  */
 
-import type { ElementHandle, JSHandle, Page } from 'playwright';
+import type { ElementHandle, Page } from 'playwright';
 import axe from 'axe-core';
 import type { Bounded, ScenarioGuard } from './scenarioGuard.js';
 
@@ -21,56 +21,66 @@ const concreteAriaRoles = Object.entries(axe.utils.getStandards().ariaRoles)
   .filter(([, role]) => role.type !== 'abstract')
   .map(([name]) => name);
 
-export async function readFeedback(
-  page: Page,
-  targets: { selector: string }[],
-  bounded: Bounded,
-  owners: JSHandle<(Element | null)[]>,
-  stage: 'baseline' | 'current',
-) {
-  const result = [];
-  for (const [index, target] of targets.entries()) {
-    const point = await bounded(() => page.locator(`css=${target.selector}`).evaluateAll((elements, { concreteAriaRoles, owners, index, stage }) => {
+export function createFeedbackReader(page: Page) {
+  return page.evaluateHandle(concreteAriaRoles => {
+    function parentElementAcrossShadow(node: Element) {
+      const root = node.getRootNode();
+      return node.assignedSlot ?? node.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+    }
+    function hiddenFromAccessibility(node: Element) {
+      return node.getAttribute('aria-hidden')?.toLowerCase() === 'true' || node.hasAttribute('inert');
+    }
+    function hidesContent(node: Element, child: Element | null) {
+      if (getComputedStyle(node).contentVisibility === 'hidden')
+        return true;
+      return node instanceof HTMLDetailsElement && !node.open && (!child || node.querySelector(':scope > summary') !== child);
+    }
+    function isRendered(node: Element, visibilityProperty: boolean): boolean {
+      const style = getComputedStyle(node);
+      if (style.display !== 'contents')
+        return node.checkVisibility({ visibilityProperty, checkVisibilityCSS: visibilityProperty });
+      if (visibilityProperty && style.visibility !== 'visible')
+        return false;
+      if (!node.assignedSlot && node.parentElement?.shadowRoot)
+        return false;
+      if (node.parentElement instanceof HTMLSlotElement && node.parentElement.assignedNodes().length)
+        return false;
+      const parent = parentElementAcrossShadow(node);
+      return !parent || !hidesContent(parent, node) && isRendered(parent, false);
+    }
+    function isAccessible(element: Element) {
+      for (let node: Element | null = element; node; node = parentElementAcrossShadow(node)) {
+        if (hiddenFromAccessibility(node))
+          return false;
+      }
+      return true;
+    }
+    function isExposed(node: Element, accessible: boolean) {
+      return accessible && isRendered(node, true) && getComputedStyle(node).contentVisibility !== 'hidden';
+    }
+    const liveByRole = new Map([
+      ['alert', 'assertive'], ['status', 'polite'], ['log', 'polite'], ['timer', 'off'], ['marquee', 'off'],
+    ]);
+    function liveValue(node: Element) {
+      const explicit = node.getAttribute('aria-live')?.trim().toLowerCase() ?? '';
+      const role = node.getAttribute('role')?.toLowerCase().split(/[\t\n\f\r ]+/).find(token => concreteAriaRoles.includes(token));
+      return ['off', 'polite', 'assertive'].includes(explicit) ? explicit : liveByRole.get(role ?? '');
+    }
+    const initialOwners: ({ owner: Element | null; live: string | null } | undefined)[] = [];
+    const candidateOwners = new WeakMap<Element, string>();
+    function rememberCandidates(elements: Element[]) {
+      for (const element of elements) {
+        const live = liveValue(element);
+        if (live !== undefined && isExposed(element, isAccessible(element)))
+          candidateOwners.set(element, live);
+      }
+    }
+    function read(elements: Element[], index: number, stage: 'baseline' | 'current') {
       if (elements.length > 1)
         return null;
       const element = elements[0];
       if (!element)
-        return { present: false, text: '', exposed: false, focused: false, live: null, sameLiveRegion: false, textTruncated: false };
-      function parentElementAcrossShadow(node: Element) {
-        const root = node.getRootNode();
-        return node.assignedSlot ?? node.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
-      }
-      function hiddenFromAccessibility(node: Element) {
-        return node.getAttribute('aria-hidden')?.toLowerCase() === 'true' || node.hasAttribute('inert');
-      }
-      function hidesContent(node: Element, child: Element | null) {
-        if (getComputedStyle(node).contentVisibility === 'hidden')
-          return true;
-        return node instanceof HTMLDetailsElement && !node.open && (!child || node.querySelector(':scope > summary') !== child);
-      }
-      function isRendered(node: Element, visibilityProperty: boolean): boolean {
-        const style = getComputedStyle(node);
-        if (style.display !== 'contents')
-          return node.checkVisibility({ visibilityProperty, checkVisibilityCSS: visibilityProperty });
-        if (visibilityProperty && style.visibility !== 'visible')
-          return false;
-        if (!node.assignedSlot && node.parentElement?.shadowRoot)
-          return false;
-        if (node.parentElement instanceof HTMLSlotElement && node.parentElement.assignedNodes().length)
-          return false;
-        const parent = parentElementAcrossShadow(node);
-        return !parent || !hidesContent(parent, node) && isRendered(parent, false);
-      }
-      function isAccessible(element: Element) {
-        for (let node: Element | null = element; node; node = parentElementAcrossShadow(node)) {
-          if (hiddenFromAccessibility(node))
-            return false;
-        }
-        return true;
-      }
-      function isExposed(node: Element, accessible: boolean) {
-        return accessible && isRendered(node, true) && getComputedStyle(node).contentVisibility !== 'hidden';
-      }
+        return { present: false, text: '', exposed: false, focused: false, live: null, baselineLive: null, textTruncated: false };
       const accessible = isAccessible(element);
       const exposed = isExposed(element, accessible);
       function renderedChildren(node: Element): ArrayLike<Node> {
@@ -107,29 +117,49 @@ export async function readFeedback(
         }
       }
       const textTruncated = visitedNodes > sampleLimit || text.length > sampleLimit;
-      const liveByRole = new Map([
-        ['alert', 'assertive'], ['status', 'polite'], ['log', 'polite'], ['timer', 'off'], ['marquee', 'off'],
-      ]);
       let live: string | undefined;
       let owner: Element | null = null;
-      for (let node: Element | null = element; node && live === undefined; node = parentElementAcrossShadow(node)) {
-        const explicit = node.getAttribute('aria-live')?.trim().toLowerCase() ?? '';
-        const role = node.getAttribute('role')?.toLowerCase().split(/[\t\n\f\r ]+/).find(token => concreteAriaRoles.includes(token));
-        live = ['off', 'polite', 'assertive'].includes(explicit) ? explicit : liveByRole.get(role ?? '');
-        if (live !== undefined)
-          owner = node;
+      for (let node: Element | null = element; node; node = parentElementAcrossShadow(node)) {
+        live = liveValue(node);
+        if (live !== undefined) {
+          owner = isExposed(node, isAccessible(node)) ? node : null;
+          break;
+        }
       }
-      const exposedOwner = owner && isExposed(owner, isAccessible(owner)) ? owner : null;
       if (stage === 'baseline')
-        owners[index] = exposedOwner;
-      const sameLiveRegion = exposedOwner !== null && exposedOwner === owners[index];
+        initialOwners[index] = { owner, live: live ?? null };
+      const initial = initialOwners[index];
+      let baselineLive: string | null = null;
+      if (owner && initial?.owner === owner)
+        baselineLive = initial.live;
+      else if (owner && !initial)
+        baselineLive = candidateOwners.get(owner) ?? null;
       const root = element.getRootNode();
       const active = root instanceof Document || root instanceof ShadowRoot ? root.activeElement : null;
-      return { present: true, text: text.slice(0, sampleLimit), textTruncated, exposed, focused: !!active && element.contains(active), live: live ?? null, sameLiveRegion };
-    }, { concreteAriaRoles, owners, index, stage }));
+      return { present: true, text: text.slice(0, sampleLimit), textTruncated, exposed, focused: !!active && element.contains(active), live: live ?? null, baselineLive };
+    }
+    return { read, rememberCandidates };
+  }, concreteAriaRoles);
+}
+
+export async function readFeedback(
+  page: Page,
+  targets: { selector: string }[],
+  bounded: Bounded,
+  reader: Awaited<ReturnType<typeof createFeedbackReader>>,
+  stage: 'baseline' | 'current',
+) {
+  const result = [];
+  for (const [index, target] of targets.entries()) {
+    const point = await bounded(() => page.locator(`css=${target.selector}`).evaluateAll(
+      (elements, { reader, index, stage }) => reader.read(elements, index, stage), { reader, index, stage }));
     if (!point)
       throw new Error('Feedback selector became ambiguous.');
     result.push(point);
+  }
+  if (stage === 'baseline' && result.some(point => !point.present)) {
+    // A future target has no ancestor yet. Remember exposed owners by DOM identity.
+    await bounded(() => page.locator('[role], [aria-live]').evaluateAll((elements, reader) => reader.rememberCandidates(elements), reader));
   }
   return result;
 }

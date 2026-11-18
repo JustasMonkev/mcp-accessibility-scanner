@@ -1,2 +1,6 @@
 [*]
 ../utils/
+
+# Existing exceptions, not a pattern: do not add more without deciding the boundary first.
+[auditSite.ts]
+../tab.js

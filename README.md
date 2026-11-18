@@ -660,6 +660,7 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 #### `audit_keyboard`
 Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) with practical heuristics.
 - Checks skip links, focus visibility, focus jumps, and possible focus traps
+- On pages with synchronous focus changes, pass `settleAfterKeyMs: 0` to sample each stop immediately after the keypress and observed page activity. The default uses the server settle timeout (500 ms). Keep it for focus handlers, timers or animations that update the UI after a keypress.
 - Focus stops distinguish individual DOM elements, including controls in open shadow roots. Alternating Tab/Shift+Tab does not count an intentional return as a cycle; a keypress that cannot move focus can still indicate a trap.
 - Restores the original URL after cross-document skip-link navigation. It uses Back for a single observed history-entry increase, verifies the restored URL, and otherwise replaces the current entry with the original URL. Fragment jumps, same-document history changes, and same-URL reloads do not consume an earlier history entry. When forward history was truncated or an entry was replaced, restoration can reload the audited page rather than recover its previous document state.
 - Checks target size against WCAG 2.2 SC 2.5.8 (`checkTargetSize`, default on)
@@ -729,7 +730,7 @@ Exercises one caller-defined invalid-input case: reaches the named text inputs/t
 
 Text input follows browser key/input event sequences without randomized timing. It does not reproduce human cadence, an operating-system keyboard layout, IME composition, or a screen reader. Some Unicode characters are inserted by the browser without physical-key-equivalent events.
 
-Supply selectors for the fields and feedback in the main document; expected feedback may appear after validation. The audit examines native/ARIA invalid state, same-root error associations, feedback visibility, focus and changes to live-region content. Unfocused status feedback needs a change within the same live region, with polite or assertive semantics in both the pre-submit and post-submit samples. The JSON report records the current region’s pre-submit value as `baselineLive` when the region was exposed. These samples can miss a target inserted into an existing live region or a region that changes between samples. It reports programmatic feedback evidence, **not actual NVDA/VoiceOver announcements**. An associated error does not also have to be a live region; native browser validation and focus-managed feedback must be considered. Human review is still needed to judge whether an error explains the problem and suggests an appropriate correction (WCAG 3.3.1/3.3.3), and whether status feedback is announced usefully (4.1.3).
+Supply selectors for the fields and feedback in the main document; expected feedback may appear after validation. The audit examines native/ARIA invalid state, same-root error associations, feedback visibility, focus and changes to live-region content. Unfocused status feedback needs a change within the same live region, with polite or assertive semantics in both the pre-submit and post-submit samples. The JSON report records the current region’s pre-submit value as `baselineLive` when the region was exposed. A message inserted into a pre-existing, exposed live region counts when that same container survives submission. Changes between samples can still be missed. It reports programmatic feedback evidence, **not actual NVDA/VoiceOver announcements**. An associated error does not also have to be a live region; native browser validation and focus-managed feedback must be considered. Human review is still needed to judge whether an error explains the problem and suggests an appropriate correction (WCAG 3.3.1/3.3.3), and whether status feedback is announced usefully (4.1.3).
 
 **Parameters and bounds:** `fields` and `expectedFeedback` each accept 1–20 entries. Field `value` is a string (up to 10,000 characters); supported fields are editable text/email/url/tel/password/search inputs and textareas. CSS selectors are limited to 500 characters and must be unambiguous. Feedback `kind` is `error` or `status`. `timeoutMs` sets the post-activation observation window (100–10,000 ms, default 3000); feedback is read once at its end. Keyboard actions have a 30-second budget; very long inputs may be incomplete. Direct mode retains its observation window plus 5-second overall budget and 1-second individual action bounds. Feedback text follows rendered descendants through open shadow roots and slots, excludes hidden or collapsed disclosure content and slot fallback replaced by assigned content, and retains visually clipped screen-reader-only text. Each target is bounded to 10,000 visited nodes and 10,000 exposed characters; exceeding either limit sets `textTruncated` and makes the audit incomplete. Native validation is reported as a possible browser-managed feedback route, not a verified announcement. Findings describe observed gaps; `completed` means the scenario was measured, not that the form conforms to WCAG. Other frames, transient feedback and message quality need separate review.
 
@@ -942,7 +943,13 @@ For deployments that require independently verified binaries, provision the brow
 ### Browser Management
 
 #### `browser_close`
-Close the page.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:15d2e9c8ba08bbfb0d1be09aa86a08db39abaf81708f5f651c21d94b810cbac0 -->
+
+Close the browser and all open tabs. For non-isolated CDP attachments, disconnect from the browser and leave the existing context’s tabs open. To close a single tab, use `browser_tabs` with `action: "close"`.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 #### `browser_resize`
 Resize the browser window.
@@ -1189,7 +1196,21 @@ default, so use `npm rebuild re2` to restore a missing binary, provided scripts
 have not been explicitly disabled. Rebuild `re2` after changing Node.js versions
 as well.
 
+Run `npm run lint` before submitting a change. It runs type-aware Oxlint and
+TypeScript. The scanner adopts [selected rules from OpenClaw](https://github.com/openclaw/openclaw/blob/b894fe5e3729482eeab747b5758bd79acb2511d1/.oxlintrc.json).
+Source code must handle promises and cover union members in switches. Tool
+implementations, MCP helpers and shared utilities also reject explicit `any`.
+Vitest checks catch focused tests, duplicate hooks and duplicate test titles.
+
 `npm run knip` checks the server's sources, tests, benchmarks and tooling.
+
+`npm run check` runs every static check CI runs: oxlint, `tsc`, knip, exact dependency
+versions, runtime imports declared in `dependencies`, and the module boundaries in
+`src/**/DEPS.list`. `npm run test:scripts` tests those check scripts. `npm install`
+enables a pre-commit hook (`.githooks/pre-commit`) that runs `npm run check` and asks
+for `ALLOW_LOCKFILE_CHANGE=1` before a `package-lock.json` change is committed.
+`node bench/checks-history.mjs` replays the checks over `main`'s history; see the
+[checks benchmark](docs/checks-benchmark-2026-11.md).
 
 `npm run test:coverage` enforces 90% statements, branches, functions and lines
 using Vitest's `coverage.thresholds`. It exits nonzero when any target is missed,
@@ -1387,6 +1408,8 @@ npm run bench -- --server /tmp/baseline/cli.js --lib /tmp/baseline/lib --out bef
 npm run bench -- --out after.json --label after
 npm run bench:compare -- before.json after.json
 ```
+
+For timings across all built-in tools, run `node .codex/run-mcp-direct-harness.mjs --include-optional --include-install` after the build. Measure the provider switch separately with `--only browser_connect`. Each JSON file under the run’s `calls/` directory records the MCP call duration in `elapsedMs`. This includes failed calls, marked with `isError`. The optional fixtures use Chromium. The installer can download a browser. Set `PLAYWRIGHT_MCP_BROWSER` and `PLAYWRIGHT_MCP_EXECUTABLE_PATH` to select a local binary.
 
 The comparison total uses only end-to-end scenarios present in both reports,
 so adding or removing a scenario does not distort the reported speedup.
