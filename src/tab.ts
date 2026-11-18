@@ -424,8 +424,8 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     }
   }
 
-  async waitForCompletion(callback: () => Promise<void>) {
-    await this._raceAgainstModalStates(() => waitForCompletion(this, callback));
+  async waitForCompletion(callback: () => Promise<void>, settleMs?: number) {
+    await this._raceAgainstModalStates(() => waitForCompletion(this, callback, settleMs));
   }
 
   async refLocator(params: { element: string, ref: string }): Promise<playwright.Locator> {

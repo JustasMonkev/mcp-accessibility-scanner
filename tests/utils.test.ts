@@ -165,6 +165,14 @@ describe('Utils', () => {
       expect(result).not.toContain('<text>');
     });
 
+    it.each(['"', "'", '<', '>', ')', ']', '}', '`', ':', '&', '\u2028', '%22', '%27', '%29', '%5D', '%7d', '%60'])(
+      'preserves a base64 payload boundary %j and the following reference', boundary => {
+        const prefix = 'data:image/png;base64,';
+        const suffix = `${boundary} [ref=e2]`;
+        expect(truncateDataUrls(`${prefix}AAAA%2B%2F%3D${suffix}`)).toBe(`${prefix}...${suffix}`);
+      }
+    );
+
     it('should truncate data URLs whatever the case of the scheme', () => {
       expect(truncateDataUrls('- /url: DATA:TEXT/HTML;BASE64,PHAgLz4=')).toBe('- /url: DATA:TEXT/HTML;BASE64,...');
       expect(truncateDataUrls('?src=Data%3Atext/html;base64%2CPHAgLz4=')).toBe('?src=Data%3Atext/html;base64%2C...');

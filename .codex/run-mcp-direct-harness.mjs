@@ -37,9 +37,18 @@ fs.writeFileSync(uploadFile, 'mcp upload fixture\n');
 const summaryPath = path.join(resultsDir, 'summary.tsv');
 fs.writeFileSync(summaryPath, 'tool\tstatus\tdetail\tlog\n');
 
+const connectOnly = options.only === 'browser_connect';
+const capabilities = [
+  ...(options.includeOptional ? ['vision', 'verify', 'pdf', 'devtools'] : []),
+  ...(options.includeInstall ? ['install'] : []),
+];
 const transport = new StdioClientTransport({
   command: process.execPath,
-  args: ['cli.js', '--headless', '--no-sandbox', '--isolated', ...(options.includeInstall ? ['--caps', 'install'] : [])],
+  args: ['cli.js', '--headless', '--no-sandbox', '--isolated',
+    ...(process.env.PLAYWRIGHT_MCP_BROWSER ? ['--browser', process.env.PLAYWRIGHT_MCP_BROWSER] : []),
+    ...(process.env.PLAYWRIGHT_MCP_EXECUTABLE_PATH ? ['--executable-path', process.env.PLAYWRIGHT_MCP_EXECUTABLE_PATH] : []),
+    ...(capabilities.length ? ['--caps', capabilities.join(',')] : []),
+    ...(connectOnly ? ['--connect-tool'] : [])],
   cwd: projectRoot,
 });
 const client = new Client({ name: 'mcp-accessibility-direct-harness', version: '1.0.0' });
@@ -830,6 +839,42 @@ const tests = [
     assertText(restored, /\b0\b/);
   }),
 
+  ...(connectOnly ? [test('browser_connect', async () => {
+    assertText(await callTool('browser_connect', { name: 'default' }), /Successfully changed connection method/);
+  })] : []),
+  ...(options.includeOptional ? [
+    ...[
+      ['browser_mouse_move_xy', { element: 'page', x: 10, y: 10 }],
+      ['browser_mouse_click_xy', { element: 'page', x: 10, y: 10 }],
+      ['browser_mouse_drag_xy', { element: 'page', startX: 10, startY: 10, endX: 30, endY: 30 }],
+      ['browser_pdf_save', {}],
+      ['browser_verify_element_visible', { role: 'heading', accessibleName: 'Status' }],
+      ['browser_verify_text_visible', { text: 'Status' }],
+    ].map(([name, args]) => test(name, async () => {
+      await navigate('<h1>Status</h1>');
+      await callTool(name, args);
+    })),
+    test('browser_verify_list_visible', async () => {
+      const snapshot = await navigate('<ul aria-label="Tasks"><li>First</li><li>Second</li></ul>');
+      await callTool('browser_verify_list_visible', { element: 'list', ref: refFor(snapshot, 'Tasks'), items: ['First', 'Second'] });
+    }),
+    test('browser_verify_value', async () => {
+      const snapshot = await navigate('<input aria-label="Name" value="Ada">');
+      await callTool('browser_verify_value', { type: 'textbox', element: 'name', ref: refFor(snapshot, 'Name'), value: 'Ada' });
+    }),
+    test('browser_start_recording', async () => {
+      await navigate('<button>Record</button>');
+      await callTool('browser_start_recording', {});
+      await callTool('browser_stop_recording', {});
+    }),
+    test('browser_stop_recording', async () => {
+      await navigate('<button>Record</button>');
+      await callTool('browser_start_recording', {});
+      const result = await callTool('browser_stop_recording', {});
+      assertText(result, /Recording stopped/);
+    }),
+  ] : []),
+
   test('browser_install', async () => {
     if (!options.includeInstall)
       throw new SkipError('browser_install skipped by default; rerun with --include-install');
@@ -927,10 +972,13 @@ function test(name, fn) {
 async function callTool(name, args) {
   if (!state.toolNames.includes(name))
     throw new Error(`Tool is not exposed by MCP server: ${name}`);
+  const start = performance.now();
   const result = await client.callTool({ name, arguments: args });
+  const elapsedMs = performance.now() - start;
   const text = resultText(result);
   const log = {
     tool: name,
+    elapsedMs,
     args,
     isError: result.isError === true,
     content: result.content,
@@ -1170,6 +1218,8 @@ function parseArgs(args) {
     const arg = args[i];
     if (arg === '--only') {
       parsed.only = args[++i] || '';
+    } else if (arg === '--include-optional') {
+      parsed.includeOptional = true;
     } else if (arg === '--include-install') {
       parsed.includeInstall = true;
     } else if (arg === '--fail-fast') {
@@ -1184,6 +1234,7 @@ fixtures. Results are written to test-results/mcp-direct-harness-results/.
 
 Options:
   --only TOOL          Run one tool test.
+  --include-optional  Include vision, PDF, verify and recorder tools (Chromium).
   --include-install   Include browser_install, which may install browsers.
   --fail-fast         Stop after the first failure.
   --list              List covered tools.
