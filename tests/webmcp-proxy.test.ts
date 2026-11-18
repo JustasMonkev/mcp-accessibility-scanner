@@ -19,13 +19,11 @@ import { forwardTransport } from './transportFixture.js';
 import { Client } from '@modelcontextprotocol/client';
 import { describe, it, vi } from 'vitest';
 import { resolveConfig } from '../src/config.js';
-import { wrapInProcess } from '../src/mcp/server.js';
-import type { ServerBackendContext } from '../src/mcp/server.js';
+import { type CallToolRequestContext, type ServerBackendContext, wrapInProcess } from '../src/mcp/server.js';
 import { SharedClientSlot } from '../src/mcp/sharedClientSlot.js';
 import { ToolRelay } from '../src/mcp/toolRelay.js';
 import { ProxyBackend } from '../src/mcp/proxyBackend.js';
 import { VSCodeProxyBackend } from '../src/vscode/host.js';
-import type { CallToolRequestContext } from '../src/mcp/server.js';
 
 async function routingHarness(kind: string, switched = false) {
   const calls: { destination: string, name?: string, args?: unknown, _meta?: CallToolRequestContext['_meta'] }[] = [];

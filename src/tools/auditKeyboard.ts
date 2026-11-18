@@ -727,20 +727,25 @@ const auditKeyboard = defineTabTool({
       return fileName;
     };
 
-    const result = await runKeyboardFocusAudit(auditOptions, {
-      pressKey,
-      ...createSkipLinkNavigation(tab, pressKey),
-      getActiveElementInfo: focusReader.read,
-      onStep: async stop => {
-        await response.reportProgress({
-          progress: stop.step,
-          total: params.maxTabs,
-          message: `Processed keyboard step ${stop.step}/${params.maxTabs}: ${stop.key}`,
-        });
-      },
-      getCurrentUrl: async () => tab.page.url(),
-      captureScreenshot,
-    }).finally(focusReader.dispose);
+    let result: KeyboardAuditResult;
+    try {
+      result = await runKeyboardFocusAudit(auditOptions, {
+        pressKey,
+        ...createSkipLinkNavigation(tab, pressKey),
+        getActiveElementInfo: focusReader.read,
+        onStep: async stop => {
+          await response.reportProgress({
+            progress: stop.step,
+            total: params.maxTabs,
+            message: `Processed keyboard step ${stop.step}/${params.maxTabs}: ${stop.key}`,
+          });
+        },
+        getCurrentUrl: async () => tab.page.url(),
+        captureScreenshot,
+      });
+    } finally {
+      await focusReader.dispose();
+    }
 
     const report = {
       version: 'v1',

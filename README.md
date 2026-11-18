@@ -1154,6 +1154,12 @@ default, so use `npm rebuild re2` to restore a missing binary, provided scripts
 have not been explicitly disabled. Rebuild `re2` after changing Node.js versions
 as well.
 
+Run `npm run lint` before submitting a change. It runs type-aware Oxlint and
+TypeScript. The scanner adopts [selected rules from OpenClaw](https://github.com/openclaw/openclaw/blob/b894fe5e3729482eeab747b5758bd79acb2511d1/.oxlintrc.json).
+Source code must handle promises and cover union members in switches. Tool
+implementations, MCP helpers and shared utilities also reject explicit `any`.
+Vitest checks catch focused tests, duplicate hooks and duplicate test titles.
+
 `npm run knip` checks the server's sources, tests, benchmarks and tooling.
 
 `npm run check` runs every static check CI runs: oxlint, `tsc`, knip, exact dependency

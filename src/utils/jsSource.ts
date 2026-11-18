@@ -36,7 +36,7 @@ function skipAsyncKeyword(source: string): number {
 }
 
 function hasArrowHead(source: string): boolean {
-  let offset = 0;
+  let offset: number;
   if (source[0] === '(') {
     const end = matchingParen(source, 0);
     if (end === -1)

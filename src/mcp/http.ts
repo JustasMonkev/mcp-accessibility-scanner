@@ -72,7 +72,7 @@ export async function installHttpTransport(httpServer: http.Server, serverBacken
     throw new Error('Bearer authentication requires a loopback HTTP listener. Use --host 127.0.0.1 behind a TLS reverse proxy for remote access.');
   const sessions = new SessionStore(serverBackendFactory);
   const authToken = options?.authToken;
-  httpServer.on('request', async (req, res) => {
+  httpServer.on('request', (req, res) => {
     const validationError = validateRequestHeaders(httpServer, req) ?? validateAuthorization(req, authToken) ?? validateRequestRouting(req);
     if (validationError) {
       res.statusCode = validationError.statusCode;
@@ -83,12 +83,10 @@ export async function installHttpTransport(httpServer: http.Server, serverBacken
       res.end(validationError.message);
       return;
     }
-    try {
-      await sessions.handleRequest(req, res);
-    } catch (error) {
+    void sessions.handleRequest(req, res).catch(error => {
       testDebug(error);
       sendInternalError(req, res);
-    }
+    });
   });
 }
 
