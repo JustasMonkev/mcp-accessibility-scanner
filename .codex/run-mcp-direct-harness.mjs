@@ -1040,7 +1040,7 @@ function assertViolationNodeCount(result, ruleId, expected) {
 }
 
 async function assertToolError(name, args, pattern) {
-  let text = '';
+  let text;
   try {
     text = resultText(await callTool(name, args));
   } catch (error) {
