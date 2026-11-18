@@ -235,13 +235,10 @@ export class CDPRelayServer {
     }
     this._playwrightConnection = ws;
     this._handler.connectOverCDP(message => this._sendToPlaywright(message));
-    ws.on('message', async data => {
-      try {
-        const message = JSON.parse(data.toString());
-        await this._handlePlaywrightMessage(message);
-      } catch (error) {
+    ws.on('message', data => {
+      void this._handlePlaywrightMessage(data).catch(error => {
         debugLogger(`Error while handling Playwright message\n${data.toString()}\n`, error);
-      }
+      });
     });
     ws.on('close', () => {
       if (this._playwrightConnection !== ws)
@@ -301,7 +298,8 @@ export class CDPRelayServer {
     this._extensionConnectionPromise.resolve();
   }
 
-  private async _handlePlaywrightMessage(message: CDPCommand): Promise<void> {
+  private async _handlePlaywrightMessage(data: websocket.RawData): Promise<void> {
+    const message: CDPCommand = JSON.parse(data.toString());
     debugLogger('← Playwright:', `${message.method} (id=${message.id})`);
     const { id, sessionId, method, params } = message;
     try {

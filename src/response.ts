@@ -21,7 +21,7 @@ import debug from 'debug';
 
 import { renderModalStates } from './tab.js';
 import { compressAriaSnapshot } from './utils/ariaCompression.js';
-import { truncateDataUrls } from './utils/dataUrl.js';
+import { formatConsoleMessage, truncateDataUrls } from './utils/dataUrl.js';
 
 import type { Tab, TabSnapshot } from './tab.js';
 import type { CallToolResult, ResourceLink } from '@modelcontextprotocol/server';
@@ -280,7 +280,7 @@ function renderTabSnapshot(tabSnapshot: TabSnapshot, formatFilePath: (file: stri
   if (tabSnapshot.consoleMessages.length) {
     lines.push(`### New console messages`);
     for (const message of tabSnapshot.consoleMessages)
-      lines.push(`- ${trim(truncateDataUrls(message.toString()), 100)}`);
+      lines.push(`- ${trim(formatConsoleMessage(message), 100)}`);
     lines.push('');
   }
 

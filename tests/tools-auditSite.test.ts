@@ -2716,6 +2716,42 @@ describe('audit_site concurrent crawl', () => {
     expect(harness.response.result()).toContain('disappeared while loading https://example.com/close-account, or one of the pages loading at the same time: https://example.com/slow.');
   });
 
+  it('retains possible cookie-loss culprits while their checks are queued', async () => {
+    const urls = ['first', 'second', 'third'].map(path => `https://example.com/${path}`);
+    const firstRead = Promise.withResolvers<void>();
+    const releaseFirstRead = Promise.withResolvers<void>();
+    let started = false;
+    let checks = 0;
+    const harness = createConcurrentHarness({}, {
+      beforeCookieRead: async () => {
+        if (started && ++checks === 1) {
+          firstRead.resolve();
+          await releaseFirstRead.promise;
+        }
+      },
+      // The first read returns the old cookie snapshot. The next sees the loss.
+      cookies: () => checks <= 1 ? [{ name: 'sid' }] : [],
+      onNavigate: async url => {
+        if (url === urls[0]) {
+          started = true;
+          return;
+        }
+        await firstRead.promise;
+        if (url === urls[2]) {
+          // Let both later navigations finish and enqueue their checks first.
+          setImmediate(() => releaseFirstRead.resolve());
+        }
+      },
+    });
+    await auditSiteTool.handle(harness.context, auditSiteTool.schema.inputSchema.parse({
+      strategy: 'provided', urls, concurrency: 3, waitAfterNavigationMs: 0,
+    }), harness.response);
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.sessionLosses).toEqual([{
+      url: urls[1], cookies: ['sid'], concurrentUrls: [urls[2]],
+    }]);
+  });
+
   it('includes a culprit that starts while the cookie read is pending', async () => {
     const root = 'https://example.com/';
     const branch = 'https://example.com/branch';

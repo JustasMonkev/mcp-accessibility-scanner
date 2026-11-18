@@ -669,6 +669,7 @@ function renderKeyboardSummary(result: KeyboardAuditResult, response: Response, 
 }
 
 const auditKeyboardSchema = z.object({
+  settleAfterKeyMs: z.number().int().min(0).max(5000).optional().describe('Delay after each audit keypress. Defaults to the server settle timeout. Set to 0 for synchronous focus changes; delayed UI updates can be missed.'),
   maxTabs: z.number().int().min(1).max(200).default(50).describe('Maximum number of Tab keypresses.'),
   includeShiftTab: z.boolean().default(false).describe('Alternate with Shift+Tab during the sequence.'),
   stopOnCycle: z.boolean().default(true).describe('Stop once a focus cycle/trap is detected.'),
@@ -714,13 +715,11 @@ const auditKeyboard = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    const { reportFile, ...auditOptions } = params;
+    const { reportFile, settleAfterKeyMs, ...auditOptions } = params;
     const reportPath = await reserveReportPath(tab.context, response, reportFile, 'audit-keyboard');
     const focusReader = createFocusReader(tab, auditOptions);
     const pressKey = async (key: PressableKey) => {
-      await tab.waitForCompletion(async () => {
-        await tab.page.keyboard.press(key);
-      });
+      await tab.waitForCompletion(() => tab.page.keyboard.press(key), settleAfterKeyMs);
     };
     const captureScreenshot = async (label: string): Promise<string> => {
       const fileName = await tab.context.outputFile(`${sanitizeForFilePath(label)}-${safeIsoTimestampForFileName()}.png`);
@@ -728,20 +727,25 @@ const auditKeyboard = defineTabTool({
       return fileName;
     };
 
-    const result = await runKeyboardFocusAudit(auditOptions, {
-      pressKey,
-      ...createSkipLinkNavigation(tab, pressKey),
-      getActiveElementInfo: focusReader.read,
-      onStep: async stop => {
-        await response.reportProgress({
-          progress: stop.step,
-          total: params.maxTabs,
-          message: `Processed keyboard step ${stop.step}/${params.maxTabs}: ${stop.key}`,
-        });
-      },
-      getCurrentUrl: async () => tab.page.url(),
-      captureScreenshot,
-    }).finally(focusReader.dispose);
+    let result: KeyboardAuditResult;
+    try {
+      result = await runKeyboardFocusAudit(auditOptions, {
+        pressKey,
+        ...createSkipLinkNavigation(tab, pressKey),
+        getActiveElementInfo: focusReader.read,
+        onStep: async stop => {
+          await response.reportProgress({
+            progress: stop.step,
+            total: params.maxTabs,
+            message: `Processed keyboard step ${stop.step}/${params.maxTabs}: ${stop.key}`,
+          });
+        },
+        getCurrentUrl: async () => tab.page.url(),
+        captureScreenshot,
+      });
+    } finally {
+      await focusReader.dispose();
+    }
 
     const report = {
       version: 'v1',

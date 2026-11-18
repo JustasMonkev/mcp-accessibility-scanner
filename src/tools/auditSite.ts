@@ -744,7 +744,7 @@ class SessionLossDetector {
     this._inFlight.delete(sequence);
   }
 
-  check(page: Page, sequence: number, requestedUrl: string, urlBeforeNavigation: string): Promise<void> {
+  check(page: Page, sequence: number, requestedUrl: string, urlBeforeNavigation: string, finished: boolean): Promise<void> {
     const check = this._checks.then(async () => {
       const activeDuringWindow = [...this._activeSinceCheck];
       if (this._baseline.size) {
@@ -752,6 +752,8 @@ class SessionLossDetector {
         if (loss)
           this._recordLoss(loss, sequence);
       }
+      if (finished)
+        this.pageFinished(sequence);
       for (const [other] of activeDuringWindow) {
         if (!this._inFlight.has(other))
           this._activeSinceCheck.delete(other);
@@ -1150,10 +1152,8 @@ class SiteCrawl {
     } finally {
       await dialogWatch.stop(this._setup.signal);
       worker.abandoned = dialogWatch.fired();
-      if (!retry)
-        this._session.pageFinished(slot.sequence);
       if (!this._setup.signal?.aborted)
-        await this._session.check(tab.page, slot.sequence, retry ? urlBeforeNavigation : item.url, urlBeforeNavigation);
+        await this._session.check(tab.page, slot.sequence, retry ? urlBeforeNavigation : item.url, urlBeforeNavigation, !retry);
       if (!retry && !this._setup.signal?.aborted)
         await this._reportPageProgress(report, item.url);
     }

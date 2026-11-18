@@ -205,7 +205,9 @@ export class SessionLog {
     this._pendingEntries.push(entry);
     if (this._flushEntriesTimeout)
       clearTimeout(this._flushEntriesTimeout);
-    this._flushEntriesTimeout = setTimeout(() => this._flushEntries(), 1000);
+    this._flushEntriesTimeout = setTimeout(() => {
+      void this._flushEntries().catch(logUnhandledError);
+    }, 1000);
   }
 
   private async _flushEntries() {
