@@ -1242,11 +1242,13 @@ const auditSite = defineTabTool({
     const sessionLosses = crawl.sessionLosses;
 
     const report = buildSiteReport({ startUrl, params, scanStartedAt, pages, summary, representativeSelection, sessionLosses, crawlTabRestarts });
+    response.deleteFileOnError(reportPath);
     const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'audit-site-report',
       title: 'Audit site JSON report',
       description: 'Aggregated JSON report for the site accessibility crawl.',
     });
+    signal?.throwIfAborted();
     response.setStructuredContent(siteStructuredContent(report, reportResource, pagesWithUnscannedFrames, scannedPagesByViolations));
 
     response.addCode('// Crawled pages in a temporary tab and aggregated Axe violations.');

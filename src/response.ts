@@ -148,6 +148,8 @@ export class Response {
     const files = [...this._filesToDeleteOnError];
     this._filesToDeleteOnError.clear();
     await Promise.all(files.map(file => fs.promises.rm(file, { force: true })));
+    const deletedUris = new Set(files.map(file => pathToFileURL(file).toString()));
+    this._resourceLinks = this._resourceLinks.filter(link => !deletedUris.has(link.uri));
   }
 
   resourceLinks() {

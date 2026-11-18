@@ -229,6 +229,20 @@ describe('audit_site tool', () => {
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
   });
 
+  it.each([undefined, 'chosen.json'])('cleans up a canceled site report write with reportFile=%s', async reportFile => {
+    const { context, response } = createHarness({ 'https://example.com/': [] });
+    const controller = new AbortController();
+    const rm = vi.spyOn(fs.promises, 'rm').mockResolvedValue(undefined);
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/', []));
+    writeFileSpy.mockImplementation(async () => { controller.abort(new Error('cancel site write')); });
+    await expect(auditSiteTool.handle(response.context, tool.schema.inputSchema.parse({ reportFile, concurrency: 1 }), response, controller.signal)).rejects.toThrow('cancel site write');
+    response.addFileResourceLink('/tmp/unrelated.txt');
+    await response.cleanupFilesOnError();
+    expect(response.resourceLinks().map(link => link.uri)).toEqual(['file:///tmp/unrelated.txt']);
+    expect(rm).toHaveBeenCalledExactlyOnceWith('/tmp/audit-site.json', { force: true });
+    expect(context.tabs()).toHaveLength(1);
+  });
+
   it('cancels pending dialog initialization without blocking owned-tab cleanup', async () => {
     const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
     const controller = new AbortController();

@@ -179,6 +179,7 @@ async function scanVariant(tab: Tab, variant: Variant, original: PageState, para
   await setZoom(tab.page, variant.zoomPercent !== undefined ? `${variant.zoomPercent}%` : original.zoom);
   await rejectOnAbort(() => tab.waitForTimeout(params.waitAfterApplyMs), signal);
 
+  signal?.throwIfAborted();
   const axeResult = await runAxeScan(tab.page, axeScanOptions(params));
   signal?.throwIfAborted();
   const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
@@ -343,11 +344,13 @@ const scanPageMatrix = defineTabTool({
 
     signal?.throwIfAborted();
     const report = buildMatrixReport(tab.page.url(), variantResults, params);
+    response.deleteFileOnError(reportPath);
     const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'scan-page-matrix-report',
       title: 'Scan page matrix JSON report',
       description: 'JSON report containing per-variant Axe results and baseline deltas.',
     });
+    signal?.throwIfAborted();
     response.setStructuredContent(matrixStructuredContent(report, reportResource, params.includeIncomplete));
 
     response.addCode('// Applied viewport/media/zoom variants and compared Axe deltas against baseline.');

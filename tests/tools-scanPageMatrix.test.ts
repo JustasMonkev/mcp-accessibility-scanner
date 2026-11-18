@@ -77,6 +77,34 @@ describe('scan_page_matrix tool', () => {
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
   });
 
+  it('checks cancellation after a completed passive wait before starting Axe', async () => {
+    const { context, response } = createMatrixHarness('/tmp/aborted.json');
+    const controller = new AbortController();
+    context.currentTabOrDie().waitForTimeout.mockImplementation(() => {
+      const completed = Promise.resolve();
+      void completed.then(() => controller.abort(new Error('cancel at boundary')));
+      return completed;
+    });
+    const scan = vi.spyOn(axe, 'runAxeScan');
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({}), response, controller.signal)).rejects.toThrow('cancel at boundary');
+    expect(scan).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, 'chosen.json'])('cleans up a canceled report write with reportFile=%s', async reportFile => {
+    const path = '/tmp/canceled-matrix.json';
+    const { response } = createMatrixHarness(path);
+    const controller = new AbortController();
+    const rm = vi.spyOn(fs.promises, 'rm').mockResolvedValue(undefined);
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+    writeFileSpy.mockImplementation(async () => { controller.abort(new Error('cancel write')); });
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ reportFile, variants: [{ name: 'baseline' }] }), response, controller.signal)).rejects.toThrow('cancel write');
+    response.addFileResourceLink('/tmp/unrelated.txt');
+    await response.cleanupFilesOnError();
+    expect(response.resourceLinks().map(link => link.uri)).toEqual(['file:///tmp/unrelated.txt']);
+    expect(rm).toHaveBeenCalledExactlyOnceWith(path, { force: true });
+  });
+
   it('preserves native viewport sizing for non-viewport variants', async () => {
     const { mockPage, response } = createMatrixHarness('/tmp/native.json');
     mockPage.viewportSize.mockReturnValue(null);
