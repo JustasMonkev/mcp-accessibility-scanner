@@ -62,3 +62,7 @@ declare module 'playwright-core/lib/coreBundle' {
   const coreBundle: CoreBundle;
   export default coreBundle;
 }
+
+declare module 'axe-core/axe.min.js' {
+  export { default } from 'axe-core';
+}
