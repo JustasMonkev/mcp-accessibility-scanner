@@ -12,6 +12,7 @@
  *   node bench/mcp-bench.mjs --compare before.json after.json
  */
 
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -120,6 +121,23 @@ const scenarios = [
     setup: () => call('browser_navigate', { url: `${origin}/heavy.html` }),
     run: () => call('browser_find', { text: 'Item 200 link' }),
   },
+  ...['first read', 'after snapshot'].map(mode => ({
+    name: `browser_console_messages (4 inline images, 1 MiB each, ${mode})`,
+    setup: async () => {
+      const url = `${origin}/console-images.html`;
+      if (mode === 'after snapshot')
+        return call('browser_navigate', { url });
+      const snapshot = await call('browser_navigate', { url: `${url}?oninput` });
+      await call('browser_type', { element: 'Log images input', ref: refFor(snapshot, 'Log images'), text: 'emit logs' });
+    },
+    run: () => call('browser_console_messages', {}),
+    verify: result => {
+      const output = textOf(result);
+      for (let index = 0; index < 4; index++)
+        assert.ok(output.includes(`image ${index}: data:image/png;base64,... end`));
+      assert.ok(output.length < 2048);
+    },
+  })),
   {
     name: 'scan_page (axe)',
     setup: () => call('browser_navigate', { url: `${origin}/heavy.html` }),
@@ -129,6 +147,20 @@ const scenarios = [
     name: 'audit_keyboard (12 tabs)',
     setup: () => call('browser_navigate', { url: `${origin}/heavy.html` }),
     run: () => call('audit_keyboard', { maxTabs: 12 }),
+  },
+  {
+    name: 'audit_keyboard (12 tabs, settleAfterKeyMs=0)',
+    supported: async () => (await client.listTools()).tools.some(tool =>
+      tool.name === 'audit_keyboard' && tool.inputSchema.properties?.settleAfterKeyMs),
+    setup: () => call('browser_navigate', { url: `${origin}/heavy.html` }),
+    run: () => call('audit_keyboard', { maxTabs: 12, settleAfterKeyMs: 0 }),
+    verify: result => {
+      const report = JSON.parse(fs.readFileSync(new URL(result.structuredContent.reportUri), 'utf8'));
+      assert.equal(report.metadata.options.settleAfterKeyMs, 0);
+      assert.equal(report.stops.length, 12);
+      assert.equal(report.uniqueFingerprints, 12);
+      assert.equal(report.skipLink.step, 1);
+    },
   },
   {
     name: 'scan_page_matrix (3 variants)',
@@ -171,6 +203,11 @@ try {
   await client.connect(transport);
 
   for (const scenario of selected) {
+    if (scenario.supported && !await scenario.supported()) {
+      if (selected.length === 1)
+        throw new Error(`Unsupported by this server: ${scenario.name}`);
+      continue;
+    }
     const samples = [];
     let state;
     for (let index = 0; index < warmups + iterations; index++) {

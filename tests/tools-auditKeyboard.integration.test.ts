@@ -215,6 +215,18 @@ it.skipIf(!canRun)('names stops from every aria-labelledby id reference', async 
   expect(stop?.name).toBe('Save draft');
 });
 
+it.skipIf(!canRun)('applies the audit key delay when focus handlers update asynchronously', async () => {
+  directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-settle-'));
+  const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory, timeoutSettle: 0 });
+  client = new Client({ name: 'keyboard-settle-test', version: '1' });
+  await client.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
+  const html = `<button onfocus="setTimeout(() => this.textContent = 'Ready', 100)">Waiting</button>`;
+  await ok('browser_navigate', { url: `data:text/html,${encodeURIComponent(html)}` });
+  await ok('audit_keyboard', { maxTabs: 1, settleAfterKeyMs: 200, reportFile: 'keyboard.json' });
+  const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
+  expect(report.stops[0].name).toBe('Ready');
+});
+
 it.skipIf(!canRun)('reports only the stop whose focus style draws no ring', async () => {
   directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-focus-ring-'));
   const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory, timeoutSettle: 0 });
