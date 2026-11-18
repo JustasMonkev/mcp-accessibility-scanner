@@ -51,7 +51,7 @@ function createAxeResult(url: string, violationIds: string[], incompleteIds: str
 function createMatrixHarness(outputFile: string) {
   const mockPage = {
     url: vi.fn(() => 'https://example.com/page'),
-    viewportSize: vi.fn(() => ({ width: 1024, height: 768 })),
+    viewportSize: vi.fn((): { width: number, height: number } | null => ({ width: 1024, height: 768 })),
     setViewportSize: vi.fn(async () => undefined),
     emulateMedia: vi.fn(async () => undefined),
     evaluate: vi.fn().mockResolvedValueOnce(pageState('')).mockResolvedValue(undefined),
@@ -75,6 +75,63 @@ describe('scan_page_matrix tool', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
+  });
+
+  it('preserves native viewport sizing for non-viewport variants', async () => {
+    const { mockPage, response } = createMatrixHarness('/tmp/native.json');
+    mockPage.viewportSize.mockReturnValue(null);
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ variants: [{ name: 'baseline' }], waitAfterApplyMs: 0 }), response);
+    expect(mockPage.setViewportSize).not.toHaveBeenCalled();
+  });
+
+  it('rejects viewport variants before changing a native viewport', async () => {
+    const { mockPage, response } = createMatrixHarness('/tmp/native.json');
+    mockPage.viewportSize.mockReturnValue(null);
+    const scan = vi.spyOn(axe, 'runAxeScan');
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({}), response)).rejects.toThrow('Native viewport sizing cannot be restored');
+    expect(mockPage.setViewportSize).not.toHaveBeenCalled();
+    expect(mockPage.emulateMedia).not.toHaveBeenCalled();
+    expect(scan).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('waits for active Axe before restoring the caller tab on cancellation', async () => {
+    const { mockPage, response } = createMatrixHarness('/tmp/aborted.json');
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const finished = Promise.withResolvers<ReturnType<typeof createAxeResult>>();
+    const scan = vi.spyOn(axe, 'runAxeScan').mockImplementation(() => {
+      started.resolve();
+      return finished.promise;
+    });
+    const work = tool.handle(response.context, tool.schema.inputSchema.parse({}), response, controller.signal);
+    const rejection = expect(work).rejects.toThrow('cancel active scan');
+    await started.promise;
+    controller.abort(new Error('cancel active scan'));
+    // slop-check-ignore no-await-promise-resolve -- flush abort microtasks before checking that restoration has not started
+    await Promise.resolve();
+    expect(mockPage.setViewportSize).toHaveBeenCalledTimes(1);
+    finished.resolve(createAxeResult('https://example.com/page', []));
+    await rejection;
+    expect(mockPage.setViewportSize).toHaveBeenCalledTimes(2);
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('cancels a pending variant wait and restores state without scanning or writing', async () => {
+    const { context, mockPage, response } = createMatrixHarness('/tmp/aborted.json');
+    const controller = new AbortController();
+    context.currentTabOrDie().waitForTimeout.mockImplementation(async () => {
+      controller.abort(new Error('cancel matrix'));
+      await new Promise(() => {});
+    });
+    const scan = vi.spyOn(axe, 'runAxeScan');
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({}), response, controller.signal)).rejects.toThrow('cancel matrix');
+    expect(mockPage.setViewportSize).toHaveBeenLastCalledWith({ width: 1024, height: 768 });
+    expect(mockPage.emulateMedia).toHaveBeenLastCalledWith(defaultMedia);
+    expect(scan).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
   });
 
   it('reserves an explicit report before changing the page', async () => {
@@ -340,7 +397,7 @@ describe('scan_page_matrix tool', () => {
 
     const mockPage = {
       url: vi.fn(() => 'https://example.com/page'),
-      viewportSize: vi.fn(() => ({ width: 1024, height: 768 })),
+      viewportSize: vi.fn((): { width: number, height: number } | null => ({ width: 1024, height: 768 })),
       setViewportSize: vi.fn(async () => undefined),
       emulateMedia: vi.fn(async () => undefined),
       evaluate: evaluateMock,
@@ -600,7 +657,7 @@ describe('scan_page_matrix tool', () => {
 
     const mockPage = {
       url: vi.fn(() => 'https://example.com/page'),
-      viewportSize: vi.fn(() => ({ width: 1024, height: 768 })),
+      viewportSize: vi.fn((): { width: number, height: number } | null => ({ width: 1024, height: 768 })),
       setViewportSize: vi.fn(async () => undefined),
       emulateMedia: vi.fn(async () => undefined),
       evaluate: evaluateMock,
@@ -651,7 +708,7 @@ describe('scan_page_matrix tool', () => {
 
     const mockPage = {
       url: vi.fn(() => 'https://example.com/page'),
-      viewportSize: vi.fn(() => ({ width: 1024, height: 768 })),
+      viewportSize: vi.fn((): { width: number, height: number } | null => ({ width: 1024, height: 768 })),
       setViewportSize: vi.fn(async () => undefined),
       emulateMedia: vi.fn(async () => undefined),
       evaluate: evaluateMock,
@@ -701,7 +758,7 @@ describe('scan_page_matrix tool', () => {
 
     const mockPage = {
       url: vi.fn(() => 'https://example.com/page'),
-      viewportSize: vi.fn(() => ({ width: 1024, height: 768 })),
+      viewportSize: vi.fn((): { width: number, height: number } | null => ({ width: 1024, height: 768 })),
       setViewportSize: vi.fn(async () => undefined),
       emulateMedia: vi.fn(async () => undefined),
       evaluate: evaluateMock,
@@ -794,7 +851,7 @@ describe('scan_page_matrix tool', () => {
 
     const mockPage = {
       url: vi.fn(() => 'https://example.com/page'),
-      viewportSize: vi.fn(() => ({ width: 1024, height: 768 })),
+      viewportSize: vi.fn((): { width: number, height: number } | null => ({ width: 1024, height: 768 })),
       setViewportSize: vi.fn(async () => undefined),
       emulateMedia: vi.fn(async () => undefined),
       evaluate: evaluateMock,
@@ -839,7 +896,7 @@ describe('scan_page_matrix tool', () => {
 
     const mockPage = {
       url: vi.fn(() => 'https://example.com/page'),
-      viewportSize: vi.fn(() => ({ width: 1024, height: 768 })),
+      viewportSize: vi.fn((): { width: number, height: number } | null => ({ width: 1024, height: 768 })),
       setViewportSize: vi.fn(async () => undefined),
       emulateMedia: vi.fn(async () => undefined),
       evaluate: evaluateMock,

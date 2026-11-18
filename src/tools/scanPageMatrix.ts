@@ -1,3 +1,4 @@
+import { rejectOnAbort } from '../utils/timeout.js';
 import { z } from 'zod';
 import type * as playwright from 'playwright';
 import { defineTabTool } from './tool.js';
@@ -142,13 +143,10 @@ function computeDiffFromBaseline(
 
 type Variant = z.output<typeof variantSchema>;
 type ScanPageMatrixParams = z.output<typeof scanPageMatrixSchema>;
-type PageState = { viewport: { width: number, height: number }, zoom: string, media: MediaState };
+type PageState = { viewport: { width: number, height: number } | null, zoom: string, media: MediaState };
 
 async function capturePageState(page: playwright.Page): Promise<PageState> {
-  const viewport = page.viewportSize() ?? await page.evaluate(() => ({
-    width: window.innerWidth,
-    height: window.innerHeight,
-  }));
+  const viewport = page.viewportSize();
   const { zoom, media } = await readPageState(page);
   return { viewport, zoom, media };
 }
@@ -160,21 +158,29 @@ async function setZoom(page: playwright.Page, zoom: string): Promise<void> {
 }
 
 async function restorePageState(page: playwright.Page, original: PageState): Promise<void> {
-  await page.setViewportSize(original.viewport);
+  if (original.viewport)
+    await page.setViewportSize(original.viewport);
   await page.emulateMedia(original.media);
   await setZoom(page, original.zoom);
 }
 
-async function scanVariant(tab: Tab, variant: Variant, original: PageState, params: ScanPageMatrixParams): Promise<{ result: VariantResult, incompleteRuleIds: string[] }> {
-  await tab.page.setViewportSize(variant.viewport ?? original.viewport);
+async function scanVariant(tab: Tab, variant: Variant, original: PageState, params: ScanPageMatrixParams, signal?: AbortSignal): Promise<{ result: VariantResult, incompleteRuleIds: string[] }> {
+  signal?.throwIfAborted();
+  const viewport = variant.viewport ?? original.viewport;
+  if (viewport)
+    await tab.page.setViewportSize(viewport);
+  signal?.throwIfAborted();
   const media = normalizeMedia(variant.media, original.media);
   await tab.page.emulateMedia(media);
+  signal?.throwIfAborted();
   if (params.reloadBetweenVariants)
     await tab.page.reload({ waitUntil: 'domcontentloaded' });
+  signal?.throwIfAborted();
   await setZoom(tab.page, variant.zoomPercent !== undefined ? `${variant.zoomPercent}%` : original.zoom);
-  await tab.waitForTimeout(params.waitAfterApplyMs);
+  await rejectOnAbort(() => tab.waitForTimeout(params.waitAfterApplyMs), signal);
 
   const axeResult = await runAxeScan(tab.page, axeScanOptions(params));
+  signal?.throwIfAborted();
   const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
   const summary = summarizeAxeViolations(violations.deduped);
   return {
@@ -305,18 +311,23 @@ const scanPageMatrix = defineTabTool({
     type: 'destructive',
   },
 
-  handle: async (tab, params, response) => {
+  handle: async (tab, params, response, signal) => {
+    signal?.throwIfAborted();
     assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
 
     const reportPath = await reserveReportPath(tab.context, response, params.reportFile, 'scan-matrix');
     const variants = params.variants ?? defaultVariants;
     const original = await capturePageState(tab.page);
 
+    if (!original.viewport && variants.some(variant => variant.viewport))
+      throw new Error('Viewport variants require a configured viewport (for example --viewport-size=1280,720). Native viewport sizing cannot be restored; use variants without viewport changes on this tab.');
+    signal?.throwIfAborted();
+
     const variantResults: VariantResult[] = [];
     const incompleteRuleIdsByVariant: string[][] = [];
     try {
       for (const variant of variants) {
-        const { result, incompleteRuleIds } = await scanVariant(tab, variant, original, params);
+        const { result, incompleteRuleIds } = await scanVariant(tab, variant, original, params, signal);
         variantResults.push(result);
         incompleteRuleIdsByVariant.push(incompleteRuleIds);
         await response.reportProgress({
@@ -330,6 +341,7 @@ const scanPageMatrix = defineTabTool({
       await restorePageState(tab.page, original);
     }
 
+    signal?.throwIfAborted();
     const report = buildMatrixReport(tab.page.url(), variantResults, params);
     const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'scan-page-matrix-report',

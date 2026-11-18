@@ -229,6 +229,34 @@ describe('audit_site tool', () => {
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
   });
 
+  it('cancels pending dialog initialization without blocking owned-tab cleanup', async () => {
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+    const controller = new AbortController();
+    crawlTab.page.addInitScript.mockImplementation(() => {
+      controller.abort(new Error('cancel initialization'));
+      return new Promise(() => {});
+    });
+    await expect(auditSiteTool.handle(response.context, tool.schema.inputSchema.parse({ concurrency: 1 }), response, controller.signal)).rejects.toThrow('cancel initialization');
+    expect(context.tabs()).toHaveLength(1);
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('cancels pending navigation, closes the crawl tab and does not write a report', async () => {
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+    const controller = new AbortController();
+    crawlTab.navigate.mockImplementation(async () => {
+      controller.abort(new Error('cancel crawl'));
+      await new Promise(() => {});
+    });
+    const scan = vi.spyOn(axe, 'runAxeScan');
+    await expect(auditSiteTool.handle(response.context, tool.schema.inputSchema.parse({ concurrency: 1 }), response, controller.signal)).rejects.toThrow('cancel crawl');
+    expect(context.closeTab).toHaveBeenCalled();
+    expect(context.tabs()).toHaveLength(1);
+    expect(scan).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
   it('reserves an explicit report before opening the crawl tab', async () => {
     const { context, response } = createHarness({ 'https://example.com/': [] });
     context.outputFile.mockRejectedValue(new Error('Output file already exists'));
