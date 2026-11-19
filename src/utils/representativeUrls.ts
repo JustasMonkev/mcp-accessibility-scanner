@@ -4,7 +4,11 @@ type TreeNode = {
   children: Map<string, TreeNode>;
   terminal: number[];
   size: number;
-  best: number[];
+  best: ArrayLike<number>;
+  // Kept from solve() so collect() can replay the choices without merging again.
+  parts?: Part[];
+  free?: Uint16Array[];
+  covered?: Uint16Array[];
 };
 
 const idSegment = /^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?=[a-f]*\d)[0-9a-f]{12,})$/i;
@@ -15,9 +19,17 @@ function templateSegments(url: string): string[] {
   const path = parsed.pathname.split('/').filter(Boolean).map(mask);
   if (!parsed.search)
     return [parsed.host, ...path];
-  parsed.searchParams.sort();
-  const query = [...parsed.searchParams].map(([key, value]) => `?${key}=${mask(value)}`);
+  // Same stable code-unit order as URLSearchParams.sort(), which would also
+  // write the sorted query back into the URL and parse it again.
+  const entries = [...parsed.searchParams].sort(([a], [b]) => compareCodeUnits(a, b));
+  const query = entries.map(([key, value]) => `?${key}=${mask(value)}`);
   return [parsed.host, ...path, ...query];
+}
+
+function compareCodeUnits(a: string, b: string): number {
+  if (a === b)
+    return 0;
+  return a < b ? -1 : 1;
 }
 
 function newNode(depth: number): TreeNode {
@@ -56,36 +68,46 @@ function coveredCount(part: Part): number {
   return part.kind === 'singles' ? part.size : 1;
 }
 
-function partCost(part: Part, count: number, missCost: number): number {
-  if (part.kind === 'terminal')
-    return 0;
-  if (part.kind === 'singles')
-    return (part.size - count) * missCost;
-  return part.child.best[count];
+// Cost of giving `count` selections to the part, for every count it can take.
+function partCosts(part: Part, k: number, missCost: number): Float64Array {
+  const costs = new Float64Array(Math.min(k, part.size) + 1);
+  costs[0] = part.size * missCost;
+  for (let count = 1; count < costs.length; count++) {
+    if (part.kind === 'singles')
+      costs[count] = (part.size - count) * missCost;
+    else if (part.kind === 'child')
+      costs[count] = part.child.best[count];
+  }
+  return costs;
 }
 
-function mergePart(previous: number[], part: Part, minimum: number, k: number, missCost: number): { row: number[], choice: Uint16Array } {
-  const limit = Math.min(k, previous.length - 1 + Math.min(k, part.size));
-  const row = new Array<number>(limit + 1).fill(Infinity);
+function mergePart(previous: Float64Array, costs: Float64Array, minimum: number, k: number): { row: Float64Array, choice: Uint16Array } {
+  const last = previous.length - 1;
+  const limit = Math.min(k, last + costs.length - 1);
+  const row = new Float64Array(limit + 1);
   const choice = new Uint16Array(limit + 1);
   for (let total = 0; total <= limit; total++) {
-    for (let count = Math.max(minimum, total - (previous.length - 1)); count <= Math.min(total, part.size); count++) {
-      const value = previous[total - count] + (count === 0 ? part.size * missCost : partCost(part, count, missCost));
-      if (value < row[total]) {
-        row[total] = value;
-        choice[total] = count;
+    let best = Infinity;
+    let chosen = 0;
+    const end = Math.min(total, costs.length - 1);
+    for (let count = Math.max(minimum, total - last); count <= end; count++) {
+      const value = previous[total - count] + costs[count];
+      if (value < best) {
+        best = value;
+        chosen = count;
       }
     }
+    row[total] = best;
+    choice[total] = chosen;
   }
   return { row, choice };
 }
 
-function mergeParts(node: TreeNode, nodeParts: Part[], k: number, cover: boolean, onRow?: (choice: Uint16Array) => void): number[] {
-  const missCost = 2 ** -node.depth;
-  let previous = [0];
-  for (const part of nodeParts) {
-    const { row, choice } = mergePart(previous, part, cover ? coveredCount(part) : 0, k, missCost);
-    onRow?.(choice);
+function mergeParts(nodeParts: Part[], costs: Float64Array[], k: number, cover: boolean, choices: Uint16Array[]): Float64Array {
+  let previous: Float64Array = new Float64Array(1);
+  for (let index = 0; index < nodeParts.length; index++) {
+    const { row, choice } = mergePart(previous, costs[index], cover ? coveredCount(nodeParts[index]) : 0, k);
+    choices.push(choice);
     previous = row;
   }
   return previous;
@@ -93,7 +115,7 @@ function mergeParts(node: TreeNode, nodeParts: Part[], k: number, cover: boolean
 
 function solve(node: TreeNode, k: number) {
   if (!node.children.size) {
-    node.best = new Array<number>(Math.min(k, node.size) + 1).fill(0);
+    node.best = new Float64Array(Math.min(k, node.size) + 1);
     return;
   }
   for (const child of node.children.values()) {
@@ -106,13 +128,18 @@ function solve(node: TreeNode, k: number) {
     return;
   }
   const nodeParts = parts(node);
-  const free = mergeParts(node, nodeParts, k, false);
+  const missCost = 2 ** -node.depth;
+  const costs = nodeParts.map(part => partCosts(part, k, missCost));
+  node.parts = nodeParts;
+  node.free = [];
+  const free = mergeParts(nodeParts, costs, k, false, node.free);
   const branches = branchCount(node);
   if (branches > k) {
     node.best = free;
     return;
   }
-  const covered = mergeParts(node, nodeParts, k, true);
+  node.covered = [];
+  const covered = mergeParts(nodeParts, costs, k, true, node.covered);
   node.best = free.map((cost, count) => count >= branches ? covered[count] : cost);
 }
 
@@ -127,9 +154,9 @@ function collect(node: TreeNode, count: number, selected: number[]) {
     collect(child, count, selected);
     return;
   }
-  const nodeParts = parts(node);
-  const choices: Uint16Array[] = [];
-  mergeParts(node, nodeParts, count, count >= branchCount(node), choice => choices.push(choice));
+  // Rows merged with a smaller budget are prefixes of the rows solve() merged.
+  const nodeParts = node.parts!;
+  const choices = count >= branchCount(node) ? node.covered! : node.free!;
   let remaining = count;
   for (let index = nodeParts.length - 1; index >= 0; index--) {
     const given = choices[index][remaining];

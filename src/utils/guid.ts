@@ -16,12 +16,28 @@
 
 import crypto from 'node:crypto';
 
+// Draw identifiers from a batch of CSPRNG output, as crypto.randomUUID() does,
+// instead of allocating a Buffer and entering the RNG for every call. Each byte
+// is handed out once; the pool is refilled after it has been consumed.
+const randomPool = Buffer.allocUnsafeSlow(4096);
+let randomOffset = randomPool.length;
+
+function randomHex(bytes: number): string {
+  if (randomOffset + bytes > randomPool.length) {
+    crypto.randomFillSync(randomPool);
+    randomOffset = 0;
+  }
+  const start = randomOffset;
+  randomOffset += bytes;
+  return randomPool.toString('hex', start, randomOffset);
+}
+
 export function createGuid(): string {
-  return crypto.randomBytes(16).toString('hex');
+  return randomHex(16);
 }
 
 export function createShortGuid(): string {
-  return crypto.randomBytes(4).toString('hex');
+  return randomHex(4);
 }
 
 export function createHash(data: string): string {

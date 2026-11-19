@@ -19,7 +19,6 @@ const KEEP_N = 10;
 
 const KEEP_REF_ALL = /\[ref=[^\]]+\]/g;
 const HAS_REF = /\[ref=[^\]]+\]/;
-const HAS_CURSOR_POINTER = /\[cursor=pointer\]/;
 const ROLE_PREFIX_RE = /^\s*-\s*([a-z][a-z0-9-]*)\b/i;
 const PROTECTED_LINE_ROLES = new Set([
   'alert',
@@ -123,11 +122,24 @@ export function compressAriaSnapshot(yaml: string): CompressResult {
     if (newline === -1)
       return { output: yaml, removed: 0 };
   }
+  if (!hasCrowdedParent(yaml))
+    return { output: yaml, removed: 0 };
   const lines = parseSnapshotLines(yaml);
+  // Siblings share a group only under the same parent, so a parent needs more
+  // than FIRE_THRESHOLD candidate children before any of them can be collapsed.
+  const candidates = new Uint32Array(lines.length + 1);
+  let crowded = false;
+  for (const line of lines) {
+    if (isCandidate(line) && ++candidates[line.parentIndex + 1] > FIRE_THRESHOLD)
+      crowded = true;
+  }
+  if (!crowded)
+    return { output: yaml, removed: 0 };
+
   const groups = new Map<string, CompressionGroup>();
   let maxCount = 0;
   for (const line of lines) {
-    if (line.indent === line.text.length || line.protectedLine || line.containsProtectedSubtree)
+    if (!isCandidate(line) || candidates[line.parentIndex + 1] <= FIRE_THRESHOLD)
       continue;
     const key = `${line.parentIndex}:${line.indent}:${signature(line.text)}`;
     let group = groups.get(key);
@@ -184,6 +196,41 @@ export function compressAriaSnapshot(yaml: string): CompressResult {
   return { output: output.join('\n') + note, removed: totalRemoved };
 }
 
+// Mirrors the parent tracking of parseSnapshotLines() on indentation alone,
+// so snapshots without a long sibling list skip per-line parsing.
+function hasCrowdedParent(yaml: string): boolean {
+  const indents: number[] = [];
+  const stack: number[] = [];
+  const children = new Map<number, number>();
+  for (let start = 0; start <= yaml.length;) {
+    let end = yaml.indexOf('\n', start);
+    if (end === -1)
+      end = yaml.length;
+    let indent = start;
+    while (indent < end && yaml.charCodeAt(indent) === 32)
+      indent++;
+    indent -= start;
+    if (start + indent < end) {
+      const code = yaml.charCodeAt(start + indent);
+      if (code <= 32 || code >= 0x80)
+        indent = indentOf(yaml.slice(start, end));
+    }
+    if (start + indent < end) {
+      while (stack.length && indents[stack[stack.length - 1]] >= indent)
+        stack.pop();
+      const parent = stack[stack.length - 1] ?? -1;
+      const count = (children.get(parent) ?? 0) + 1;
+      if (count > FIRE_THRESHOLD)
+        return true;
+      children.set(parent, count);
+      stack.push(indents.length);
+    }
+    indents.push(indent);
+    start = end + 1;
+  }
+  return false;
+}
+
 function parseSnapshotLines(yaml: string): SnapshotLine[] {
   const lines: SnapshotLine[] = [];
   const stack: number[] = [];
@@ -197,8 +244,8 @@ function parseSnapshotLines(yaml: string): SnapshotLine[] {
     const parentIndex = stack[stack.length - 1] ?? -1;
     const parent = lines[parentIndex];
     const role = roleOf(text);
-    const hasRef = HAS_REF.test(text);
-    const hasCursorPointer = hasRef && HAS_CURSOR_POINTER.test(text);
+    const hasRef = text.includes('[ref=') && HAS_REF.test(text);
+    const hasCursorPointer = hasRef && text.includes('[cursor=pointer]');
     const protectedRow = role === 'row' && hasRef && !!parent?.underRowContainer;
     const protectedSubtree = !!parent?.protectedSubtree || protectedRow || shouldKeepSubtree(role) ||
         shouldKeepRefProtectedDescendants(role, hasRef) || hasCursorPointer;
@@ -219,6 +266,10 @@ function parseSnapshotLines(yaml: string): SnapshotLine[] {
       lines[line.parentIndex].containsProtectedSubtree = true;
   }
   return lines;
+}
+
+function isCandidate(line: SnapshotLine): boolean {
+  return line.indent !== line.text.length && !line.protectedLine && !line.containsProtectedSubtree;
 }
 
 function signature(line: string): string {
@@ -254,5 +305,11 @@ function isRowContainerRole(role: string | undefined): boolean {
 }
 
 function indentOf(line: string): number {
-  return line.length - line.trimStart().length;
+  let index = 0;
+  while (index < line.length && line.charCodeAt(index) === 32)
+    index++;
+  // Fall back for tabs and other Unicode whitespace that trimStart() also skips.
+  if (index < line.length && (line.charCodeAt(index) <= 32 || line.charCodeAt(index) >= 0x80))
+    return line.length - line.trimStart().length;
+  return index;
 }

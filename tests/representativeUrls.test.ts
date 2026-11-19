@@ -157,6 +157,16 @@ describe('selectRepresentativeUrls', () => {
     ]);
   });
 
+  it('orders query keys stably by code unit before templating', () => {
+    const url = (query: string) => `https://example.com/list${query}`;
+    // Reordered distinct keys share a template; repeated keys keep their order.
+    expect(selectRepresentativeUrls([url('?b=1&a=x'), url('?a=x&b=2'), url('?a=1&a=x'), url('?a=2&a=x'), url('?a=x&a=1')], 3)).toEqual([
+      url('?b=1&a=x'),
+      url('?a=1&a=x'),
+      url('?a=x&a=1'),
+    ]);
+  });
+
   it('finds the optimal selection under the coverage rule', () => {
     const random = seededRandom(7);
     const words = ['a', 'b', 'c', '1', '2'];

@@ -174,12 +174,16 @@ function decodeDataUrlMetadata(metadata: string, isEncoded: boolean): string {
 
 // Raw payloads can contain markup. Base64 payloads have an unconditional set of boundaries.
 const base64PayloadEnd = /[\s"'<>)\]}`:&]|%(?:22|27|29|5d|7d|60)/gi;
+const base64Alphabet = /[A-Za-z0-9+/=]*/y;
 const quotedPayloadBoundary = /["'\r\n]/g;
 const rawPayloadBoundary = /[\r\n:&)\]}]|[^\S\r\n]+|%(?:22|27|29|5d|7d|60)/gi;
 
 function findDataUrlEnd(text: string, match: DataUrlMatch): number {
   if (match.isBase64) {
-    base64PayloadEnd.lastIndex = match.payloadStart;
+    // Skip the base64 alphabet, which cannot start a boundary, in one cheap pass.
+    base64Alphabet.lastIndex = match.payloadStart;
+    base64Alphabet.test(text);
+    base64PayloadEnd.lastIndex = base64Alphabet.lastIndex;
     return base64PayloadEnd.exec(text)?.index ?? text.length;
   }
 
@@ -213,7 +217,12 @@ function isLineBreak(char: string): boolean {
   return char === '\n' || char === '\r';
 }
 
-function isWhitespace(char: string): boolean {
+function isWhitespace(char: string | undefined): boolean {
+  if (char === undefined)
+    return false;
+  const code = char.charCodeAt(0);
+  if (code < 0x80)
+    return code === 32 || (code >= 9 && code <= 13);
   return /\s/.test(char);
 }
 
@@ -258,6 +267,10 @@ function looksLikeSourceLocationSuffix(text: string, colon: number): boolean {
   return position === text.length || isLineBreak(text[position]) || isWhitespace(text[position]);
 }
 
+const queryParamTerminators = ['&', '#', '"', '\'', '<', '>', ')', '}', '`'];
+const boundarySuffixStarts = ['"', '\'', ')', ']', '}', '`'];
+const wrapperClosers = [')', ']', '}'];
+
 function looksLikeQueryParam(text: string, offset: number): boolean {
   if (offset >= text.length)
     return false;
@@ -265,7 +278,7 @@ function looksLikeQueryParam(text: string, offset: number): boolean {
     const char = text[position];
     if (char === '=')
       return position > offset;
-    if (isLineBreak(char) || isWhitespace(char) || ['&', '#', '"', '\'', '<', '>', ')', '}', '`'].includes(char))
+    if (isLineBreak(char) || isWhitespace(char) || queryParamTerminators.includes(char))
       return false;
   }
   return false;
@@ -286,14 +299,14 @@ function isDataUrlStartBoundary(text: string, start: number): boolean {
 }
 
 function isRawPayloadWrapperBoundary(text: string, match: DataUrlMatch, position: number): boolean {
-  return [')', ']', '}'].includes(text[position]) && (isRawPayloadCompleteBefore(text, match.payloadStart, position) || isRawPayloadBoundarySuffix(text, position + 1));
+  return wrapperClosers.includes(text[position]) && (isRawPayloadCompleteBefore(text, match.payloadStart, position) || isRawPayloadBoundarySuffix(text, position + 1));
 }
 
 function isRawPayloadBoundarySuffix(text: string, offset: number): boolean {
   if (offset >= text.length)
     return true;
   const char = text[offset];
-  return isLineBreak(char) || isWhitespace(char) || ['"', '\'', ')', ']', '}', '`'].includes(char) || (char === '&' && looksLikeQueryParam(text, offset + 1));
+  return isLineBreak(char) || isWhitespace(char) || boundarySuffixStarts.includes(char) || (char === '&' && looksLikeQueryParam(text, offset + 1));
 }
 
 function percentEncodedCharBefore(text: string, position: number): string | undefined {
