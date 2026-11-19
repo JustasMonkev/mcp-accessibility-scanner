@@ -21,47 +21,28 @@ export function isFunctionSource(source: string): boolean {
   let body = source.slice(skipTrivia(source, 0));
   for (;;) {
     const afterAsync = body.slice(skipAsyncKeyword(body));
-    if (/^function\b/.test(afterAsync) || hasArrowHead(afterAsync))
+    if (/^function\b/.test(afterAsync))
       return true;
-    const inner = stripEnclosingParens(body);
-    if (inner === null)
+    if (afterAsync[0] !== '(') {
+      const identifier = identifierStart.exec(afterAsync)?.[0];
+      return identifier !== undefined && afterAsync.startsWith('=>', skipTrivia(afterAsync, identifier.length));
+    }
+
+    const end = matchingDelimiter(afterAsync, 0, '(', ')');
+    if (end === -1)
+      return true;
+    const next = skipTrivia(afterAsync, end + 1);
+    if (afterAsync.startsWith('=>', next))
+      return true;
+    if (body[0] !== '(' || next !== body.length)
       return false;
-    body = inner.slice(skipTrivia(inner, 0));
+    body = body.slice(skipTrivia(body, 1), end);
   }
 }
 
 function skipAsyncKeyword(source: string): number {
   const keyword = /^async\b/.exec(source)?.[0];
   return keyword ? skipTrivia(source, keyword.length) : 0;
-}
-
-function hasArrowHead(source: string): boolean {
-  let offset: number;
-  if (source[0] === '(') {
-    const end = matchingParen(source, 0);
-    if (end === -1)
-      return true;
-    offset = end + 1;
-  } else {
-    const identifier = identifierStart.exec(source)?.[0];
-    if (!identifier)
-      return false;
-    offset = identifier.length;
-  }
-  return source.startsWith('=>', skipTrivia(source, offset));
-}
-
-function stripEnclosingParens(source: string): string | null {
-  if (source[0] !== '(')
-    return null;
-  const end = matchingParen(source, 0);
-  if (end === -1 || skipTrivia(source, end + 1) !== source.length)
-    return null;
-  return source.slice(1, end);
-}
-
-function matchingParen(source: string, start: number): number {
-  return matchingDelimiter(source, start, '(', ')');
 }
 
 function matchingDelimiter(source: string, start: number, open: string, close: string): number {

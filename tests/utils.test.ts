@@ -18,7 +18,7 @@ import fs from 'fs';
 import { chromium, type Browser } from 'playwright';
 import { describe, it, expect } from 'vitest';
 import { createGuid, createHash, createShortGuid } from '../src/utils/guid.js';
-import { safeIsoTimestampForFileName } from '../src/utils/fileUtils.js';
+import { safeIsoTimestampForFileName, truncateToUtf8Bytes } from '../src/utils/fileUtils.js';
 import { compressAriaSnapshot } from '../src/utils/ariaCompression.js';
 import { truncateDataUrl, truncateDataUrls } from '../src/utils/dataUrl.js';
 
@@ -56,6 +56,28 @@ async function compressHtml(html: string) {
 }
 
 describe('Utils', () => {
+  it('clips at code point boundaries and preserves lone surrogates', () => {
+    for (const text of ['short', 'aé€🚀z', 'x\uD800y\uDC00z', '🚀'.repeat(5)]) {
+      for (let budget = 0; budget <= Buffer.byteLength(text) + 1; budget++) {
+        let expected = '';
+        for (const character of text) {
+          if (Buffer.byteLength(expected + character) > budget)
+            break;
+          expected += character;
+        }
+        expect(truncateToUtf8Bytes(text, budget)).toBe(expected);
+      }
+    }
+  });
+
+  it('preserves raw SVG suffixes after internal whitespace runs', () => {
+    const spaces = ' \t\u2003'.repeat(100);
+    const svg = `data:image/svg+xml,<svg><text>x${spaces}y</text></svg>`;
+    expect(truncateDataUrls(`${svg}${spaces}end`)).toBe(`data:image/svg+xml,...${spaces}end`);
+    expect(truncateDataUrls(`"${svg}" [ref=e1]`)).toBe('"data:image/svg+xml,..." [ref=e1]');
+    expect(truncateDataUrls(`data:image/svg+xml,<svg x${spaces}\r\nnext`)).toBe('data:image/svg+xml,...\r\nnext');
+  });
+
   describe('createGuid', () => {
     it('should generate unique identifiers', () => {
       const id1 = createGuid();

@@ -2,7 +2,7 @@
 const maxTokens = 48;
 const distanceRatio = 0.3;
 
-const tokenPattern = /<\/?[a-z][\w:-]*|[^\s"'<>/=]+(?=\s*=)|"[^"]*"|'[^']*'|[^\s"'<>/=]+/gi;
+const tokenPattern = /<\/?[a-z][\w:-]*|"[^"]*"|'[^']*'|[^\s"'<>/=]+/gi;
 
 /** @public */
 export function htmlTokens(html: string): string[] {
@@ -20,19 +20,34 @@ export function htmlTokens(html: string): string[] {
 export function withinEditDistance(a: readonly string[], b: readonly string[], limit: number): boolean {
   if (Math.abs(a.length - b.length) > limit)
     return false;
+  let start = 0;
+  let aEnd = a.length;
+  let bEnd = b.length;
+  while (start < aEnd && start < bEnd && a[start] === b[start])
+    start++;
+  while (aEnd > start && bEnd > start && a[aEnd - 1] === b[bEnd - 1]) {
+    aEnd--;
+    bEnd--;
+  }
+  const rows = aEnd - start;
+  const columns = bEnd - start;
+  if (Math.max(rows, columns) <= limit)
+    return true;
   const over = limit + 1;
-  let previous = new Array<number>(b.length + 1);
-  let current = new Array<number>(b.length + 1);
-  for (let j = 0; j <= b.length; j++)
+  let previous = new Array<number>(columns + 1);
+  let current = new Array<number>(columns + 1);
+  for (let j = 0; j <= columns; j++)
     previous[j] = j <= limit ? j : over;
-  for (let i = 1; i <= a.length; i++) {
+  for (let i = 1; i <= rows; i++) {
     const from = Math.max(1, i - limit);
-    const to = Math.min(b.length, i + limit);
-    current.fill(over);
+    const to = Math.min(columns, i + limit);
+    current[from - 1] = over;
+    if (to < columns)
+      current[to + 1] = over;
     current[0] = i <= limit ? i : over;
     let rowMin = current[0];
     for (let j = from; j <= to; j++) {
-      const substitution = previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1);
+      const substitution = previous[j - 1] + (a[start + i - 1] === b[start + j - 1] ? 0 : 1);
       const value = Math.min(substitution, previous[j] + 1, current[j - 1] + 1, over);
       current[j] = value;
       rowMin = Math.min(rowMin, value);
@@ -41,7 +56,7 @@ export function withinEditDistance(a: readonly string[], b: readonly string[], l
       return false;
     [previous, current] = [current, previous];
   }
-  return previous[b.length] <= limit;
+  return previous[columns] <= limit;
 }
 
 function similar(a: readonly string[], b: readonly string[]): boolean {
@@ -51,8 +66,8 @@ function similar(a: readonly string[], b: readonly string[]): boolean {
 
 const tagName = /^\s*<([a-z][^\s/>]*)/i;
 
-function rootAttributes(html: string, from: number): Map<string, string> {
-  const attributes = new Map<string, string>();
+function rootAttributes(html: string, from: number): { type?: string, role?: string } {
+  const attributes: { type?: string, role?: string } = {};
   const isSpace = (char: string) => char === ' ' || char === '\t' || char === '\n' || char === '\r' || char === '\f';
   let index = from;
   while (index < html.length) {
@@ -67,7 +82,8 @@ function rootAttributes(html: string, from: number): Map<string, string> {
     const name = html.slice(nameStart, index).toLowerCase();
     while (index < html.length && isSpace(html[index]))
       index++;
-    let value = '';
+    let valueStart = index;
+    let valueEnd = index;
     if (html[index] === '=') {
       index++;
       while (index < html.length && isSpace(html[index]))
@@ -75,18 +91,21 @@ function rootAttributes(html: string, from: number): Map<string, string> {
       const quote = html[index];
       if (quote === '"' || quote === '\'') {
         const close = html.indexOf(quote, index + 1);
-        const valueEnd = close === -1 ? html.length : close;
-        value = html.slice(index + 1, valueEnd);
+        valueStart = index + 1;
+        valueEnd = close === -1 ? html.length : close;
         index = valueEnd + 1;
       } else {
-        const valueStart = index;
+        valueStart = index;
         while (index < html.length && !isSpace(html[index]) && html[index] !== '>')
           index++;
-        value = html.slice(valueStart, index);
+        valueEnd = index;
       }
     }
-    if (!attributes.has(name))
-      attributes.set(name, value);
+    if ((name === 'type' || name === 'role') && attributes[name] === undefined) {
+      attributes[name] = html.slice(valueStart, valueEnd).trim().toLowerCase();
+      if (attributes.type !== undefined && attributes.role !== undefined)
+        break;
+    }
   }
   return attributes;
 }
@@ -98,9 +117,8 @@ export function semanticSignature(html: string): string {
     return '';
   const tag = match[1].toLowerCase();
   const attributes = rootAttributes(html, match[0].length);
-  const read = (name: string) => attributes.get(name)?.trim().toLowerCase();
-  const type = read('type') || (tag === 'input' ? 'text' : '');
-  return JSON.stringify([tag, type, read('role') ?? '']);
+  const type = attributes.type || (tag === 'input' ? 'text' : '');
+  return JSON.stringify([tag, type, attributes.role ?? '']);
 }
 
 type Entry<T> = { key: string, signature: string, tokens: string[], item: T };

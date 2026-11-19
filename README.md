@@ -1393,6 +1393,10 @@ Canceling the run exits with status 130.
 
 See [the before/after benchmark report](bench/interaction-audits/RESULTS.md) for pinned external fixtures, GPT-6 Luna scenarios, measured results, exclusions, and reproduction commands. These bounded checks do not establish human-level accessibility accuracy or actual screen-reader interoperability.
 
+### Benchmarking runtime utilities
+
+Build both checkouts, then run `node bench/all-utils.mjs ../baseline .` from the candidate checkout. Add `--callbacks` for a separate replay with nested callback timings. See the [complete utility benchmark report](docs/performance/2026-11-19-all-utils.md) for fixtures, timings, and browser setup.
+
 ### Benchmarking tool latency
 
 `bench/mcp-bench.mjs` measures what a client actually waits for: it serves a fixed

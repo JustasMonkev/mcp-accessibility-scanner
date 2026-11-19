@@ -97,19 +97,17 @@ const PROTECTED_SUBTREE_ROLES = new Set([
   'treeitem',
 ]);
 
+type CompressionGroup = { total: number, seen: number };
+
 type SnapshotLine = {
   text: string;
   indent: number;
   parentIndex: number;
-  role: string | undefined;
-  hasRef: boolean;
-  hasCursorPointer: boolean;
-  signature: string;
-  selfHasProtectedLineRole: boolean;
-  containsProtectedSubtreeRole: boolean;
-  selfHasProtectedSubtreeRole: boolean;
-  insideProtectedSubtree: boolean;
-  hasRowContainerAncestor: boolean;
+  group: CompressionGroup | undefined;
+  protectedLine: boolean;
+  protectedSubtree: boolean;
+  containsProtectedSubtree: boolean;
+  underRowContainer: boolean;
 };
 
 export type CompressResult = {
@@ -118,29 +116,38 @@ export type CompressResult = {
 };
 
 export function compressAriaSnapshot(yaml: string): CompressResult {
-  const lines = parseSnapshotLines(yaml);
-  const preCounts = new Map<string, number>();
-  for (const line of lines) {
-    if (!line.text.trim() || isProtectedLine(line))
-      continue;
-    const key = compressionKey(line);
-    preCounts.set(key, (preCounts.get(key) ?? 0) + 1);
+  // A group needs more than FIRE_THRESHOLD lines before compression can fire.
+  let newline = -1;
+  for (let count = 0; count < FIRE_THRESHOLD; count++) {
+    newline = yaml.indexOf('\n', newline + 1);
+    if (newline === -1)
+      return { output: yaml, removed: 0 };
   }
-
+  const lines = parseSnapshotLines(yaml);
+  const groups = new Map<string, CompressionGroup>();
   let maxCount = 0;
-  for (const value of preCounts.values())
-    maxCount = Math.max(maxCount, value);
+  for (const line of lines) {
+    if (line.indent === line.text.length || line.protectedLine || line.containsProtectedSubtree)
+      continue;
+    const key = `${line.parentIndex}:${line.indent}:${signature(line.text)}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { total: 0, seen: 0 };
+      groups.set(key, group);
+    }
+    line.group = group;
+    maxCount = Math.max(maxCount, ++group.total);
+  }
 
   if (maxCount <= FIRE_THRESHOLD)
     return { output: yaml, removed: 0 };
 
-  const sigCounts = new Map<string, number>();
   const output: string[] = [];
   let totalRemoved = 0;
   let skipBelowIndent: number | undefined;
 
   for (const line of lines) {
-    if (!line.text.trim()) {
+    if (line.indent === line.text.length) {
       if (skipBelowIndent === undefined)
         output.push(line.text);
       else
@@ -156,16 +163,13 @@ export function compressAriaSnapshot(yaml: string): CompressResult {
       continue;
     }
 
-    if (isProtectedLine(line)) {
+    const group = line.group;
+    if (!group) {
       output.push(line.text);
       continue;
     }
 
-    const key = compressionKey(line);
-    const lineCount = (sigCounts.get(key) ?? 0) + 1;
-    sigCounts.set(key, lineCount);
-
-    if (lineCount > KEEP_N && (preCounts.get(key) ?? 0) > FIRE_THRESHOLD) {
+    if (group.total > FIRE_THRESHOLD && ++group.seen > KEEP_N) {
       totalRemoved++;
       skipBelowIndent = line.indent;
     } else {
@@ -181,82 +185,40 @@ export function compressAriaSnapshot(yaml: string): CompressResult {
 }
 
 function parseSnapshotLines(yaml: string): SnapshotLine[] {
-  const lines = yaml.split('\n').map((text): SnapshotLine => {
+  const lines: SnapshotLine[] = [];
+  const stack: number[] = [];
+  for (const text of yaml.split('\n')) {
+    const indent = indentOf(text);
+    const blank = indent === text.length;
+    if (!blank) {
+      while (stack.length && lines[stack[stack.length - 1]].indent >= indent)
+        stack.pop();
+    }
+    const parentIndex = stack[stack.length - 1] ?? -1;
+    const parent = lines[parentIndex];
     const role = roleOf(text);
     const hasRef = HAS_REF.test(text);
-    const hasCursorPointer = HAS_CURSOR_POINTER.test(text);
-    const protectsSubtree = shouldKeepSubtree(role) || shouldKeepRefProtectedDescendants(role, hasRef) || shouldKeepCursorPointerRef(hasRef, hasCursorPointer);
-    return {
-      text,
-      indent: indentOf(text),
-      parentIndex: -1,
-      role,
-      hasRef,
-      hasCursorPointer,
-      signature: signature(text),
-      selfHasProtectedLineRole: shouldKeepLine(role, hasRef, hasCursorPointer),
-      containsProtectedSubtreeRole: protectsSubtree,
-      selfHasProtectedSubtreeRole: protectsSubtree,
-      insideProtectedSubtree: false,
-      hasRowContainerAncestor: false,
-    };
-  });
-
-  const stack: number[] = [];
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index];
-    if (!line.text.trim())
-      continue;
-
-    while (stack.length && lines[stack[stack.length - 1]].indent >= line.indent)
-      stack.pop();
-
-    line.parentIndex = stack[stack.length - 1] ?? -1;
-    const parent = line.parentIndex === -1 ? undefined : lines[line.parentIndex];
-    line.hasRowContainerAncestor = parent !== undefined && (parent.hasRowContainerAncestor || isRowContainerRole(parent.role));
-    stack.push(index);
+    const hasCursorPointer = hasRef && HAS_CURSOR_POINTER.test(text);
+    const protectedRow = role === 'row' && hasRef && !!parent?.underRowContainer;
+    const protectedSubtree = !!parent?.protectedSubtree || protectedRow || shouldKeepSubtree(role) ||
+        shouldKeepRefProtectedDescendants(role, hasRef) || hasCursorPointer;
+    if (!blank)
+      stack.push(lines.length);
+    lines.push({
+      text, indent, parentIndex, protectedSubtree, group: undefined,
+      protectedLine: shouldKeepLine(role, hasRef),
+      containsProtectedSubtree: protectedSubtree,
+      underRowContainer: !!parent?.underRowContainer || isRowContainerRole(role),
+    });
   }
 
-  for (const line of lines) {
-    if (line.role === 'row' && line.hasRef && line.hasRowContainerAncestor) {
-      line.selfHasProtectedLineRole = true;
-      line.containsProtectedSubtreeRole = true;
-      line.selfHasProtectedSubtreeRole = true;
-    }
-  }
-
+  // An ancestor of an interactive subtree must survive even when its siblings repeat.
   for (let index = lines.length - 1; index >= 0; index--) {
     const line = lines[index];
-    if (!line.containsProtectedSubtreeRole || line.parentIndex === -1)
-      continue;
-    lines[line.parentIndex].containsProtectedSubtreeRole = true;
+    if (line.containsProtectedSubtree && line.parentIndex !== -1)
+      lines[line.parentIndex].containsProtectedSubtree = true;
   }
-
-  let protectedIndent: number | undefined;
-  for (const line of lines) {
-    if (!line.text.trim())
-      continue;
-
-    if (protectedIndent !== undefined && line.indent <= protectedIndent)
-      protectedIndent = undefined;
-
-    const insideProtectedSubtree = protectedIndent !== undefined;
-    if (insideProtectedSubtree)
-      line.insideProtectedSubtree = true;
-
-    if (!insideProtectedSubtree && line.selfHasProtectedSubtreeRole)
-      protectedIndent = line.indent;
-  }
-
   return lines;
-}
-
-function isProtectedLine(line: SnapshotLine): boolean {
-  return line.selfHasProtectedLineRole || line.containsProtectedSubtreeRole || line.insideProtectedSubtree;
-}
-
-function compressionKey(line: SnapshotLine): string {
-  return `${line.parentIndex}:${line.indent}:${line.signature}`;
 }
 
 function signature(line: string): string {
@@ -271,9 +233,7 @@ function roleOf(line: string): string | undefined {
   return ROLE_PREFIX_RE.exec(line)?.[1]?.toLowerCase();
 }
 
-function shouldKeepLine(role: string | undefined, hasRef: boolean, hasCursorPointer: boolean): boolean {
-  if (shouldKeepCursorPointerRef(hasRef, hasCursorPointer))
-    return true;
+function shouldKeepLine(role: string | undefined, hasRef: boolean): boolean {
   if (role === undefined)
     return false;
   return PROTECTED_LINE_ROLES.has(role) || hasRef && REF_PROTECTED_LINE_ROLES.has(role);
@@ -285,10 +245,6 @@ function shouldKeepSubtree(role: string | undefined): boolean {
 
 function shouldKeepRefProtectedDescendants(role: string | undefined, hasRef: boolean): boolean {
   return role !== undefined && hasRef && REF_PROTECTED_DESCENDANT_ROLES.has(role);
-}
-
-function shouldKeepCursorPointerRef(hasRef: boolean, hasCursorPointer: boolean): boolean {
-  return hasRef && hasCursorPointer;
 }
 
 const ROW_CONTAINER_ROLES = new Set(['grid', 'treegrid']);
