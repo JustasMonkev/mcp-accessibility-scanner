@@ -839,6 +839,49 @@ const tests = [
     assertText(restored, /\b0\b/);
   }),
 
+  test('audit_keyboard_operation', async () => {
+    await navigate('<button id="toggle" aria-expanded="false" onclick="this.setAttribute(\'aria-expanded\',\'true\')">Open</button>');
+    const result = await callTool('audit_keyboard_operation', {
+      steps: [
+        { key: 'Tab', expect: [{ selector: '#toggle', focused: true }] },
+        { key: 'Enter', expect: [{ selector: '#toggle', expanded: true }] },
+      ],
+    });
+    if (result.structuredContent?.status !== 'passed' || result.structuredContent.steps.length !== 2)
+      throw new Error('Keyboard operation did not verify both steps.');
+    assertText(result, /JSON report:/);
+    const failed = await callTool('audit_keyboard_operation', {
+      timeoutMs: 0,
+      steps: [{ key: 'Enter', expect: [{ selector: '#toggle', expanded: false }] }],
+    });
+    if (failed.structuredContent?.status !== 'failed' || failed.structuredContent.findings[0]?.property !== 'expanded')
+      throw new Error('Keyboard operation did not detect the incorrect expected outcome.');
+    await navigate('<label for="entry">Entry</label><input id="entry">');
+    const typing = await callTool('audit_keyboard_operation', {
+      steps: [
+        { key: 'Tab', expect: [{ selector: '#entry', focused: true }] },
+        { text: 'draft', expect: [{ selector: '#entry', value: 'draft' }] },
+        { key: 'Backspace', expect: [{ selector: '#entry', value: 'draf' }] },
+      ],
+    });
+    if (typing.structuredContent?.status !== 'passed')
+      throw new Error('Keyboard text entry and editing did not complete.');
+  }),
+
+  test('audit_form_validation', async () => {
+    await navigate('<form novalidate onsubmit="event.preventDefault(); document.getElementById(\'error\').textContent=\'Enter a valid email\'">'
+      + '<label for="email">Email</label><input id="email" aria-describedby="error"><button id="submit">Submit</button><p id="error"></p></form>');
+    const result = await callTool('audit_form_validation', {
+      fields: [{ selector: '#email', value: 'invalid-email' }],
+      submitSelector: '#submit',
+      expectedFeedback: [{ selector: '#error', kind: 'error' }],
+      timeoutMs: 100,
+    });
+    if (result.structuredContent?.outcome !== 'completed' || result.structuredContent.interactionMode !== 'keyboard' || result.structuredContent.summary.findingCount !== 0)
+      throw new Error('Form validation did not recognize the associated error.');
+    assertText(result, /JSON report:/);
+    assertText(await callTool('browser_evaluate', { function: '() => document.getElementById("email").value' }), /invalid-email/);
+  }),
   ...(connectOnly ? [test('browser_connect', async () => {
     assertText(await callTool('browser_connect', { name: 'default' }), /Successfully changed connection method/);
   })] : []),

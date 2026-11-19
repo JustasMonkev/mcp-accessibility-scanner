@@ -40,6 +40,8 @@ import scanPageMatrix from './tools/scanPageMatrix.js';
 import auditKeyboard from './tools/auditKeyboard.js';
 import auditScreenReader from './tools/auditScreenReader.js';
 import auditTextSpacing from './tools/auditTextSpacing.js';
+import auditKeyboardOperation from './tools/auditKeyboardOperation.js';
+import auditFormValidation from './tools/auditFormValidation.js';
 
 import type { Tool } from './tools/tool.js';
 import type { FullConfig } from './config.js';
@@ -70,6 +72,8 @@ export const allTools: Tool<any>[] = [
   ...auditKeyboard,
   ...auditScreenReader,
   ...auditTextSpacing,
+  ...auditKeyboardOperation,
+  ...auditFormValidation,
 ];
 
 export function validateToolPolicy(config: ToolPolicy): void {
@@ -106,6 +110,8 @@ const auditGuidance: [tool: string, purpose: string][] = [
   ['audit_keyboard', 'to check keyboard navigation, focus visibility and skip links'],
   ['audit_screen_reader', 'to check accessible name quality and reading order'],
   ['audit_text_spacing', 'to check that text survives the WCAG 1.4.12 text spacing overrides without being clipped or overlapping'],
+  ['audit_keyboard_operation', 'to exercise caller-defined keyboard steps and check their outcomes'],
+  ['audit_form_validation', 'to check caller-defined form errors and feedback after validation'],
 ];
 
 const interactionTools: [label: string, tool: string][] = [

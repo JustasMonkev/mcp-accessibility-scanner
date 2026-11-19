@@ -89,6 +89,25 @@ it.each(['--out', '--server', '--lib', '--only'])('rejects a blank %s value', fl
   expect(result.stderr).toContain('needs a value');
 });
 
+it('preserves interaction benchmark evidence when the output directory is reused', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-interaction-bench-test-'));
+  temporaryDirectories.push(directory);
+  const summary = path.join(directory, 'summary.json');
+  fs.writeFileSync(summary, '{"observations":3}');
+  const result = spawnSync(process.execPath, [
+    'bench/interaction-audits.mjs', '--server-root', directory, '--fixtures', directory,
+    '--manifest', path.join(directory, 'missing.json'), '--output', directory,
+  ], {
+    cwd: path.resolve(import.meta.dirname, '..'),
+    encoding: 'utf8',
+  });
+
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain('EEXIST');
+  expect(fs.readdirSync(directory)).toEqual(['summary.json']);
+  expect(fs.readFileSync(summary, 'utf8')).toBe('{"observations":3}');
+});
+
 it('rejects an invalid report directory before starting the benchmark', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-bench-test-'));
   temporaryDirectories.push(directory);

@@ -1,0 +1,887 @@
+{
+  "schemaVersion": 1,
+  "classification": "custom-regression-prompts; not an external benchmark",
+  "promptFile": "/Users/justas/Desktop/mcp-accessibility-scanner/bench/interaction-audits/luna-prompts.tsv",
+  "promptSha256": "d5ddcc1c7d5e4d5881b2402c0ad54748cb1c33121f53fdd3c3a7f42ab78b9480",
+  "runs": [
+    {
+      "label": "baseline",
+      "runId": "20261116T172153Z-15459-9kcc99",
+      "revision": "pre-change archive / commit 060bfb19fe84a381a0ea6bfef3e98050b650aaec",
+      "model": "gpt-6-luna",
+      "reasoningEffort": "xhigh",
+      "concurrency": 2,
+      "timeoutSeconds": 180,
+      "promptSha256": "d5ddcc1c7d5e4d5881b2402c0ad54748cb1c33121f53fdd3c3a7f42ab78b9480",
+      "startedAt": "2026-11-16T17:21:53.774Z",
+      "finishedAt": "2026-11-16T17:24:35Z",
+      "elapsedSecondsApprox": 161,
+      "harnessStatusCounts": {
+        "PASS": 2,
+        "MCP_TOOL_FAILED": 2,
+        "MODEL_FAIL": 4
+      },
+      "rawRunDirectory": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99",
+      "summaryTsv": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/summary.tsv",
+      "scenarios": [
+        {
+          "repeat": 1,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-existing-key",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Status passed; both steps passed (Tab focused #toggle, Enter set expanded=true). JSON report: /tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/01-audit_keyboard_operation/audit-keyboard-operation.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/01-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/01-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 1,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-text-editing",
+          "harnessStatus": "MCP_TOOL_FAILED",
+          "exitCode": 0,
+          "modelFinalStatus": "FAIL",
+          "modelFinalEvidence": "Navigation succeeded and showed textbox #message with value \"Old draft\". The audit call was rejected: step 2 key \"ControlOrMeta+A\" is unsupported, and step 3 field \"text\" is unrecognized; only Tab and the listed key values are accepted. No steps passed and no JSON report path was returned.",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "failed",
+              "failed": true
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/02-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/02-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 1,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-keyboard-event-trace",
+          "harnessStatus": "MODEL_FAIL",
+          "exitCode": 0,
+          "modelFinalStatus": "FAIL",
+          "modelFinalEvidence": "Audit outcome was completed (findings: 0), and report link returned: file:///tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/03-audit_form_validation/audit-form-validation-2026-11-16T17-22-47-185Z-edb99b01.json. The audit output did not report interactionMode. Browser state: submitted=\"yes\", value=\"invalid-email\", error=\"Enter a valid email\". Observed trace was [\"input:\",\"click:\",\"submit:\"], with no keydown event, so the required keyboard trace check failed.",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "browser_evaluate",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/03-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/03-audit_form_validation.result.json"
+        },
+        {
+          "repeat": 1,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-tabindex-negative",
+          "harnessStatus": "MODEL_FAIL",
+          "exitCode": 0,
+          "modelFinalStatus": "FAIL",
+          "modelFinalEvidence": "The audit reported outcome `completed` with 2 findings and no incomplete outcomes. JSON report: file:///tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/04-audit_form_validation/audit-form-validation-2026-11-16T17-23-09-763Z-b628525b.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/04-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/04-audit_form_validation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-existing-key",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Status: passed; both steps passed (Tab focused #toggle, Enter set expanded=true). JSON report returned: /tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/05-audit_keyboard_operation/audit-keyboard-operation-2026-11-16T17-23-33-822Z-4cde0ae6.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/05-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/05-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-text-editing",
+          "harnessStatus": "MCP_TOOL_FAILED",
+          "exitCode": 0,
+          "modelFinalStatus": "FAIL",
+          "modelFinalEvidence": "Navigation succeeded; the page snapshot showed textbox #message with value \"Old draft\". The audit call was rejected before running: step 2 key \"ControlOrMeta+A\" is unsupported, and step 3's \"text\" field and missing key are invalid. No steps passed, final value was not observed, and no JSON report path was returned.",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "failed",
+              "failed": true
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/06-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/06-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-keyboard-event-trace",
+          "harnessStatus": "MODEL_FAIL",
+          "exitCode": 0,
+          "modelFinalStatus": "FAIL",
+          "modelFinalEvidence": "Audit outcome: completed; Findings: 0. The returned output did not include interactionMode. Observed trace: [\"input:\",\"click:\",\"submit:\"], with no keydown. submitted=\"yes\", value=\"invalid-email\", error=\"Enter a valid email\". Report JSON link returned: file:///tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/07-audit_form_validation/audit-form-validation-2026-11-16T17-24-06-085Z-ee00c185.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "browser_evaluate",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/07-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/07-audit_form_validation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-tabindex-negative",
+          "harnessStatus": "MODEL_FAIL",
+          "exitCode": 0,
+          "modelFinalStatus": "FAIL",
+          "modelFinalEvidence": "The audit reported “Form validation audit: completed. Findings: 2” with outcome=\"completed\", findingCount=2, and incomplete=[]. It did not report outcome incomplete, target-not-reached, or submitAttempted=false. JSON report: file:///tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/08-audit_form_validation/audit-form-validation-2026-11-16T17-24-26-977Z-0edadcbf.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/08-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-baseline-results/mcp-tool-loop-results/20261116T172153Z-15459-9kcc99/08-audit_form_validation.result.json"
+        }
+      ]
+    },
+    {
+      "label": "interim",
+      "runId": "20261116T172600Z-24246-wh59ao",
+      "revision": "interim built changes before final keyboard fix",
+      "model": "gpt-6-luna",
+      "reasoningEffort": "xhigh",
+      "concurrency": 2,
+      "timeoutSeconds": 180,
+      "promptSha256": "d5ddcc1c7d5e4d5881b2402c0ad54748cb1c33121f53fdd3c3a7f42ab78b9480",
+      "startedAt": "2026-11-16T17:26:00.952Z",
+      "finishedAt": "2026-11-16T17:29:35Z",
+      "elapsedSecondsApprox": 214,
+      "harnessStatusCounts": {
+        "PASS": 7,
+        "MCP_TOOL_FAILED": 1
+      },
+      "rawRunDirectory": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao",
+      "summaryTsv": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/summary.tsv",
+      "scenarios": [
+        {
+          "repeat": 1,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-existing-key",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Status: passed. Both steps passed (Tab focused #toggle; Enter set expanded=true). JSON report: /tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/01-audit_keyboard_operation/audit-keyboard-operation-2026-11-16T17-26-29-710Z-995c55aa.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/01-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/01-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 1,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-text-editing",
+          "harnessStatus": "MCP_TOOL_FAILED",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Audit status: passed; all 3 steps passed. Final observed value: Revised 🌿. JSON report: /tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/02-audit_keyboard_operation/keyboard-operation-report.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "failed",
+              "failed": true
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "browser_snapshot",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/02-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/02-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 1,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-keyboard-event-trace",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Audit outcome: completed; interactionMode: keyboard; findings: 0. Report JSON link returned: file:///tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/03-audit_form_validation/audit-form-validation-2026-11-16T17-27-05-953Z-7dbade65.json. Browser state: submitted=\"yes\", value=\"invalid-email\", error=\"Enter a valid email\". Trace included keydown:Tab, input events while typing, and submit:.",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "browser_evaluate",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/03-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/03-audit_form_validation.result.json"
+        },
+        {
+          "repeat": 1,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-tabindex-negative",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Report: file:///tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/04-audit_form_validation/audit-form-validation-2026-11-16T17-27-30-579Z-b75d1983.json. It says outcome=incomplete, incomplete=[\"target-not-reached\"], submitAttempted=false, findings=[], with no fields or feedback observed.",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/04-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/04-audit_form_validation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-existing-key",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "status=passed; 2/2 steps passed: Tab focused #toggle, Enter set #toggle expanded=true. JSON report: /tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/05-audit_keyboard_operation/audit-keyboard-operation-2026-11-16T17-27-47-915Z-942660da.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/05-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/05-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-keyboard-event-trace",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Audit outcome=completed; interactionMode=keyboard; findings=0. JSON report returned: file:///tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/07-audit_form_validation/audit-form-validation-2026-11-16T17-28-22-839Z-7cabe1db.json. Browser state: submitted=yes, value=invalid-email, error=\"Enter a valid email\". Trace included keydown:Tab, input events while typing, and submit:.",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "browser_evaluate",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/07-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/07-audit_form_validation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-text-editing",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Navigation succeeded. Audit status: passed; all 3 steps passed. Final snapshot shows #message focused with value \"Revised 🌿\". JSON report: /tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/06-audit_keyboard_operation/keyboard-operation-report.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "browser_snapshot",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/06-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/06-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-tabindex-negative",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Navigated to the supplied data URL. The keyboard-mode report says outcome incomplete, includes target-not-reached, submitAttempted=false, submitTriggerCompleted=false, and findings=[]. JSON report link: file:///tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/08-audit_form_validation/audit-form-validation-2026-11-16T17-29-09-924Z-455d4dc9.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/08-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-after-results/mcp-tool-loop-results/20261116T172600Z-24246-wh59ao/08-audit_form_validation.result.json"
+        }
+      ]
+    },
+    {
+      "label": "final",
+      "runId": "20261116T173142Z-32170-gdiuip",
+      "revision": "final built changes after keyboard fix",
+      "model": "gpt-6-luna",
+      "reasoningEffort": "xhigh",
+      "concurrency": 2,
+      "timeoutSeconds": 180,
+      "promptSha256": "d5ddcc1c7d5e4d5881b2402c0ad54748cb1c33121f53fdd3c3a7f42ab78b9480",
+      "startedAt": "2026-11-16T17:31:42.791Z",
+      "finishedAt": "2026-11-16T17:34:53Z",
+      "elapsedSecondsApprox": 190,
+      "harnessStatusCounts": {
+        "PASS": 8
+      },
+      "rawRunDirectory": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip",
+      "summaryTsv": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/summary.tsv",
+      "scenarios": [
+        {
+          "repeat": 1,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-existing-key",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "status=passed; 2/2 steps passed (Tab focused #toggle; Enter set expanded=true); JSON report: /tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/01-audit_keyboard_operation/keyboard-operation-report.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/01-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/01-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 1,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-text-editing",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Status passed; all 3 steps passed. The final value check for #message matched \"Revised 🌿\" and focus remained on the input. JSON report: /tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/02-audit_keyboard_operation/audit-keyboard-operation-2026-11-16T17-32-13-540Z-9ffc8e87.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/02-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/02-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 1,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-keyboard-event-trace",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Audit outcome: completed; interactionMode: keyboard; Findings: 0. Report JSON returned: file:///tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/03-audit_form_validation/audit-form-validation-2026-11-16T17-32-42-003Z-13570e73.json. Evaluated state: submitted=\"yes\", value=\"invalid-email\", error=\"Enter a valid email\". Trace included keydown (Tab, Meta+A, Backspace, typing, Enter), input events, and submit.",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "browser_evaluate",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/03-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/03-audit_form_validation.result.json"
+        },
+        {
+          "repeat": 1,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-tabindex-negative",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Report: file:///tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/04-audit_form_validation/audit-form-validation-2026-11-16T17-32-57-539Z-dd49838b.json. Outcome: incomplete; incomplete reason: target-not-reached; submitAttempted: false; findings: none.",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/04-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/04-audit_form_validation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-existing-key",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Status: passed. Both steps passed: Tab focused #toggle; Enter set #toggle expanded=true. JSON report: /tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/05-audit_keyboard_operation/audit-keyboard-operation-2026-11-16T17-33-25-412Z-ab95688f.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/05-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/05-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-text-editing",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Status: passed. All 3 steps passed; final value check for “Revised 🌿” passed. JSON report: /tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/06-audit_keyboard_operation/audit-keyboard-operation-report.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/06-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/06-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-keyboard-event-trace",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Audit outcome: completed; interactionMode: keyboard; findings: 0. Report JSON returned: file:///tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/07-audit_form_validation/audit-form-validation-2026-11-16T17-34-02-912Z-f403a0fc.json. Browser state: submitted=\"yes\", value=\"invalid-email\", error=\"Enter a valid email\". Trace includes keydown:Tab, input:, keydown:Enter, and submit:.",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "browser_evaluate",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/07-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/07-audit_form_validation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-tabindex-negative",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Default keyboard mode returned outcome=incomplete with incomplete=[\"target-not-reached\"], submitAttempted=false, findings=[], and no observed fields or feedback. JSON report: file:///tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/08-audit_form_validation/audit-form-validation-2026-11-16T17-34-25-061Z-78b96e2f.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/08-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-final-results/mcp-tool-loop-results/20261116T173142Z-32170-gdiuip/08-audit_form_validation.result.json"
+        }
+      ]
+    },
+    {
+      "label": "post_review",
+      "runId": "20261116T175201Z-48875-6ttn6f",
+      "revision": "post-review workingtree from 504804c (uncommitted; pending commit)",
+      "model": "gpt-6-luna",
+      "reasoningEffort": "xhigh",
+      "concurrency": 2,
+      "timeoutSeconds": 180,
+      "promptSha256": "d5ddcc1c7d5e4d5881b2402c0ad54748cb1c33121f53fdd3c3a7f42ab78b9480",
+      "startedAt": "2026-11-16T17:52:01.977Z",
+      "finishedAt": "2026-11-16T17:55:19Z",
+      "elapsedSecondsApprox": 197,
+      "harnessStatusCounts": {
+        "PASS": 8
+      },
+      "rawRunDirectory": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f",
+      "summaryTsv": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/summary.tsv",
+      "scenarios": [
+        {
+          "repeat": 1,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-existing-key",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Status: passed. Both steps passed (Tab focused #toggle; Enter expanded #toggle). JSON report: /tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/01-audit_keyboard_operation/audit-keyboard-operation-2026-11-16T17-52-27-687Z-ad2eecbe.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/01-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/01-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 1,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-text-editing",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Status: passed. All 3/3 steps passed. Step 3's value check confirmed the final value was \"Revised 🌿\". JSON report: /tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/02-audit_keyboard_operation/keyboard-operation-report.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/02-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/02-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 1,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-keyboard-event-trace",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Audit outcome: completed; interactionMode: keyboard. Report JSON link returned: file:///tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/03-audit_form_validation/audit-form-validation-2026-11-16T17-53-04-399Z-95a1f26c.json. Browser state: submitted=yes, value=invalid-email, error=\"Enter a valid email\". Trace includes keydown:Tab, input events, and submit:.",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "browser_evaluate",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/03-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/03-audit_form_validation.result.json"
+        },
+        {
+          "repeat": 1,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-tabindex-negative",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Report says outcome incomplete, includes target-not-reached, submitAttempted=false, and findings=[] (0 findings). JSON report: file:///tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/04-audit_form_validation/audit-form-validation-2026-11-16T17-53-19-203Z-1af2b623.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/04-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/04-audit_form_validation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-existing-key",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Status: passed. Both steps passed: Tab focused #toggle; Enter set #toggle expanded=true. JSON report: /tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/05-audit_keyboard_operation/keyboard-operation-report.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/05-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/05-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_keyboard_operation",
+          "category": "custom-regression-text-editing",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Status: passed; all 3 steps passed. Live field value: \"Revised 🌿\". JSON report: /tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/06-audit_keyboard_operation/audit-keyboard-operation-report.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_keyboard_operation",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "browser_evaluate",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/06-audit_keyboard_operation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/06-audit_keyboard_operation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-keyboard-event-trace",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Audit outcome: completed; interactionMode: keyboard; findings: 0. Trace included keydown:Tab, input events, and submit:. submitted: yes; value: invalid-email; error: \"Enter a valid email\". Report JSON returned: file:///tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/07-audit_form_validation/audit-form-validation-2026-11-16T17-54-19-873Z-e03d51bf.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "browser_evaluate",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/07-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/07-audit_form_validation.result.json"
+        },
+        {
+          "repeat": 2,
+          "tool": "audit_form_validation",
+          "category": "custom-regression-tabindex-negative",
+          "harnessStatus": "PASS",
+          "exitCode": 0,
+          "modelFinalStatus": "PASS",
+          "modelFinalEvidence": "Keyboard mode report: outcome incomplete; incomplete includes target-not-reached; submitAttempted=false; findings=[] (0 findings). JSON report: file:///tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/08-audit_form_validation/audit-form-validation-2026-11-16T17-55-01-223Z-1cb806c9.json",
+          "mcpCallOutcomes": [
+            {
+              "tool": "browser_navigate",
+              "status": "completed",
+              "failed": false
+            },
+            {
+              "tool": "audit_form_validation",
+              "status": "completed",
+              "failed": false
+            }
+          ],
+          "rawJsonl": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/08-audit_form_validation.jsonl",
+          "rawCodexFinalJson": "/tmp/mcp-luna-pr-review-results/mcp-tool-loop-results/20261116T175201Z-48875-6ttn6f/08-audit_form_validation.result.json"
+        }
+      ]
+    }
+  ]
+}

@@ -169,7 +169,7 @@ export class Context {
   private _clientInfo: ClientInfo;
 
   private _closeBrowserContextPromise: Promise<void> | undefined;
-  private _runningTools: string[] = [];
+  private _runningTools: { name: string; exclusive: boolean }[] = [];
   private _sessionHolds = 0;
   private _lastToolCallEndedAt = -Infinity;
   private _pendingDownloads = new Set<Promise<unknown>>();
@@ -451,7 +451,7 @@ export class Context {
   }
 
   isRunningToolForRecording(buffered: boolean): boolean {
-    return this._runningTools.some(name => !recorderControlTools.has(name)) || buffered && Date.now() - this._lastToolCallEndedAt <= recorderBufferMs;
+    return this._runningTools.some(({ name }) => !recorderControlTools.has(name)) || buffered && Date.now() - this._lastToolCallEndedAt <= recorderBufferMs;
   }
 
   trackPendingDownload(promise: Promise<unknown>, filename?: string): void {
@@ -500,13 +500,16 @@ export class Context {
     }
   }
 
-  beginToolCall(name: string): () => void {
-    this._runningTools.push(name);
+  beginToolCall(name: string, exclusive = false): () => void {
+    if (exclusive && this._runningTools.length > 0)
+      throw new Error(`Tool "${name}" is busy because interactive audits require exclusive access to this browser context.`);
+    if (this._runningTools.at(-1)?.exclusive)
+      throw new Error(`Tool "${name}" is busy because an interactive audit is running in this browser context.`);
+    const call = { name, exclusive };
+    this._runningTools.push(call);
     this._scheduleIdleTimeout();
     return releaseOnce(() => {
-      const index = this._runningTools.lastIndexOf(name);
-      if (index !== -1)
-        this._runningTools.splice(index, 1);
+      this._runningTools.splice(this._runningTools.indexOf(call), 1);
       if (!recorderControlTools.has(name))
         this._lastToolCallEndedAt = Date.now();
       this._lastActivityAt = Date.now();
@@ -630,7 +633,7 @@ export class Context {
     if (this._closeBrowserContextPromise)
       throw new Error('Another browser context is being closed.');
     assertNetworkPolicySupported(this.config, this._browserContextFactory.ownsBrowser === true);
-    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningTools[this._runningTools.length - 1], { browserSession: this.options.browserSession });
+    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningTools.at(-1)?.name, { browserSession: this.options.browserSession });
     const closingGroup = idleGroups.get(result.browserContext)?.closing;
     if (closingGroup) {
       await result.close();

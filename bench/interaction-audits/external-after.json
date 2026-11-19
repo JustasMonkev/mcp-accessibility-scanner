@@ -1,0 +1,435 @@
+{
+  "serverRoot": "/Users/justas/Desktop/mcp-accessibility-scanner",
+  "manifestSha256": "cd63ace6ec58988c5dadb4fdea79c5f5f030365ab1b9b5cf7692ef49704ddf27",
+  "node": "v26.5.0",
+  "createdAt": "2026-11-16T17:52:24.057Z",
+  "selected": 20,
+  "cases": 10,
+  "skipped": [
+    {
+      "id": "Tadebabd8958671c2",
+      "disposition": "unclassifiable",
+      "note": "Independent review rejected the body-focused oracle: leaving the page can retain document.activeElement. Original pilot results retained; not a valid DOM-only pass/fail mapping."
+    },
+    {
+      "id": "T90c8da2b39e07728",
+      "disposition": "unclassifiable",
+      "note": "Independent review rejected the body-focused oracle: leaving the page can retain document.activeElement. Original pilot results retained; not a valid DOM-only pass/fail mapping."
+    },
+    {
+      "id": "T27283549bae17780",
+      "disposition": "unclassifiable",
+      "note": "The provided ACT fixture permits escape only with Ctrl+M. audit_keyboard_operation does not support this key chord; a Tab-only failed expectation cannot be interpreted as a violation."
+    },
+    {
+      "id": "T298e2571971efbf2",
+      "disposition": "unclassifiable",
+      "note": "The provided ACT fixture permits escape only with Ctrl+M. audit_keyboard_operation does not support this key chord; a Tab-only failed expectation cannot be interpreted as a violation."
+    },
+    {
+      "id": "T01deacf10e6f67ef",
+      "disposition": "label-conflict",
+      "note": "InterA11y label=1 but W3C ACT testcases.json expected=passed. Retain both labels and report separately; exclude from single-label aggregate unless both are shown."
+    },
+    {
+      "id": "Tc7afc009105232a4",
+      "disposition": "excluded",
+      "note": "W3C ACT marks inapplicable: no visible keyboard-focusable target (or disabled/hidden targets); excluded from pass/fail metrics."
+    },
+    {
+      "id": "T2bb581483ae521ad",
+      "disposition": "excluded",
+      "note": "W3C ACT marks inapplicable: no visible keyboard-focusable target (or disabled/hidden targets); excluded from pass/fail metrics."
+    },
+    {
+      "id": "Td7a13287237dcf24",
+      "disposition": "excluded",
+      "note": "W3C ACT marks inapplicable: no visible keyboard-focusable target (or disabled/hidden targets); excluded from pass/fail metrics."
+    },
+    {
+      "id": "T40c0e6c4ed1c774a",
+      "disposition": "unclassifiable",
+      "note": "The provided ACT fixture permits escape only with Ctrl+M. audit_keyboard_operation does not support this key chord; a Tab-only failed expectation cannot be interpreted as a violation."
+    },
+    {
+      "id": "T37f0c10fcaefbb98",
+      "disposition": "excluded",
+      "note": "W3C ACT marks inapplicable: no visible keyboard-focusable target (or disabled/hidden targets); excluded from pass/fail metrics."
+    }
+  ],
+  "repeats": 3,
+  "observations": 30,
+  "tp": 15,
+  "fp": 0,
+  "tn": 3,
+  "fn": 0,
+  "incomplete": 12,
+  "precision": 1,
+  "recallAmongCompleted": 1,
+  "conservativeDetectionRateAllPositives": 0.7142857142857143,
+  "coverage": 0.6,
+  "agreementAllCases": 0.6,
+  "interpretation": "Scenario-outcome proxy against external labels, not full WCAG evaluation or human equivalence. Incomplete/error cases are unclassified, never passes. Repeats are not independent cases.",
+  "results": [
+    {
+      "id": "T3bacd5faada76adb",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 1,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 1535.917375,
+      "error": false,
+      "outcome": "failed",
+      "response": "T3bacd5faada76adb-1.response.json"
+    },
+    {
+      "id": "T6b0be0991f4d6a86",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 1,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 1023.866,
+      "error": false,
+      "outcome": "failed",
+      "response": "T6b0be0991f4d6a86-1.response.json"
+    },
+    {
+      "id": "T6affcec0fed980ee",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 1,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 2055.0603340000002,
+      "error": false,
+      "outcome": "failed",
+      "response": "T6affcec0fed980ee-1.response.json"
+    },
+    {
+      "id": "Td22512e1defffbc3",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 1,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 2056.6167080000005,
+      "error": false,
+      "outcome": "failed",
+      "response": "Td22512e1defffbc3-1.response.json"
+    },
+    {
+      "id": "T865207d4490cc7de",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 1,
+      "label": 0,
+      "prediction": 0,
+      "durationMs": 524.1000830000003,
+      "error": false,
+      "outcome": "passed",
+      "response": "T865207d4490cc7de-1.response.json"
+    },
+    {
+      "id": "Te1b532e4a3fe6126",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 1,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 2056.3175839999994,
+      "error": false,
+      "outcome": "failed",
+      "response": "Te1b532e4a3fe6126-1.response.json"
+    },
+    {
+      "id": "Tbbf2777cd0463dc6",
+      "source": "InterA11y",
+      "sc": "3.3.1",
+      "repeat": 1,
+      "label": 1,
+      "prediction": null,
+      "durationMs": 99.8760000000002,
+      "error": false,
+      "outcome": "incomplete",
+      "response": "Tbbf2777cd0463dc6-1.response.json"
+    },
+    {
+      "id": "T91132b30cad349b0",
+      "source": "InterA11y",
+      "sc": "3.3.1",
+      "repeat": 1,
+      "label": 1,
+      "prediction": null,
+      "durationMs": 79.90849999999955,
+      "error": false,
+      "outcome": "incomplete",
+      "response": "T91132b30cad349b0-1.response.json"
+    },
+    {
+      "id": "T275623c59dcb58ae",
+      "source": "InterA11y",
+      "sc": "3.3.1",
+      "repeat": 1,
+      "label": 0,
+      "prediction": null,
+      "durationMs": 79.1072920000006,
+      "error": false,
+      "outcome": "incomplete",
+      "response": "T275623c59dcb58ae-1.response.json"
+    },
+    {
+      "id": "T09537ba9c551f07b",
+      "source": "InterA11y",
+      "sc": "3.3.1",
+      "repeat": 1,
+      "label": 0,
+      "prediction": null,
+      "durationMs": 160.45924999999988,
+      "error": false,
+      "outcome": "incomplete",
+      "response": "T09537ba9c551f07b-1.response.json"
+    },
+    {
+      "id": "T3bacd5faada76adb",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 2,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 1532.592125000001,
+      "error": false,
+      "outcome": "failed",
+      "response": "T3bacd5faada76adb-2.response.json"
+    },
+    {
+      "id": "T6b0be0991f4d6a86",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 2,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 1024.1924170000002,
+      "error": false,
+      "outcome": "failed",
+      "response": "T6b0be0991f4d6a86-2.response.json"
+    },
+    {
+      "id": "T6affcec0fed980ee",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 2,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 2042.252375,
+      "error": false,
+      "outcome": "failed",
+      "response": "T6affcec0fed980ee-2.response.json"
+    },
+    {
+      "id": "Td22512e1defffbc3",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 2,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 2042.7460419999989,
+      "error": false,
+      "outcome": "failed",
+      "response": "Td22512e1defffbc3-2.response.json"
+    },
+    {
+      "id": "T865207d4490cc7de",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 2,
+      "label": 0,
+      "prediction": 0,
+      "durationMs": 523.0064169999969,
+      "error": false,
+      "outcome": "passed",
+      "response": "T865207d4490cc7de-2.response.json"
+    },
+    {
+      "id": "Te1b532e4a3fe6126",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 2,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 2051.965541999998,
+      "error": false,
+      "outcome": "failed",
+      "response": "Te1b532e4a3fe6126-2.response.json"
+    },
+    {
+      "id": "Tbbf2777cd0463dc6",
+      "source": "InterA11y",
+      "sc": "3.3.1",
+      "repeat": 2,
+      "label": 1,
+      "prediction": null,
+      "durationMs": 88.0983750000014,
+      "error": false,
+      "outcome": "incomplete",
+      "response": "Tbbf2777cd0463dc6-2.response.json"
+    },
+    {
+      "id": "T91132b30cad349b0",
+      "source": "InterA11y",
+      "sc": "3.3.1",
+      "repeat": 2,
+      "label": 1,
+      "prediction": null,
+      "durationMs": 80.82979199999681,
+      "error": false,
+      "outcome": "incomplete",
+      "response": "T91132b30cad349b0-2.response.json"
+    },
+    {
+      "id": "T275623c59dcb58ae",
+      "source": "InterA11y",
+      "sc": "3.3.1",
+      "repeat": 2,
+      "label": 0,
+      "prediction": null,
+      "durationMs": 81.90604200000234,
+      "error": false,
+      "outcome": "incomplete",
+      "response": "T275623c59dcb58ae-2.response.json"
+    },
+    {
+      "id": "T09537ba9c551f07b",
+      "source": "InterA11y",
+      "sc": "3.3.1",
+      "repeat": 2,
+      "label": 0,
+      "prediction": null,
+      "durationMs": 1072.8492499999993,
+      "error": false,
+      "outcome": "incomplete",
+      "response": "T09537ba9c551f07b-2.response.json"
+    },
+    {
+      "id": "T3bacd5faada76adb",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 3,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 1556.377542000002,
+      "error": false,
+      "outcome": "failed",
+      "response": "T3bacd5faada76adb-3.response.json"
+    },
+    {
+      "id": "T6b0be0991f4d6a86",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 3,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 1028.4396670000024,
+      "error": false,
+      "outcome": "failed",
+      "response": "T6b0be0991f4d6a86-3.response.json"
+    },
+    {
+      "id": "T6affcec0fed980ee",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 3,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 2050.678167000002,
+      "error": false,
+      "outcome": "failed",
+      "response": "T6affcec0fed980ee-3.response.json"
+    },
+    {
+      "id": "Td22512e1defffbc3",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 3,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 2057.5541250000024,
+      "error": false,
+      "outcome": "failed",
+      "response": "Td22512e1defffbc3-3.response.json"
+    },
+    {
+      "id": "T865207d4490cc7de",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 3,
+      "label": 0,
+      "prediction": 0,
+      "durationMs": 523.3608750000021,
+      "error": false,
+      "outcome": "passed",
+      "response": "T865207d4490cc7de-3.response.json"
+    },
+    {
+      "id": "Te1b532e4a3fe6126",
+      "source": "ACT-derived/InterA11y",
+      "sc": "2.1.2",
+      "repeat": 3,
+      "label": 1,
+      "prediction": 1,
+      "durationMs": 2041.060166000003,
+      "error": false,
+      "outcome": "failed",
+      "response": "Te1b532e4a3fe6126-3.response.json"
+    },
+    {
+      "id": "Tbbf2777cd0463dc6",
+      "source": "InterA11y",
+      "sc": "3.3.1",
+      "repeat": 3,
+      "label": 1,
+      "prediction": null,
+      "durationMs": 73.10970799999996,
+      "error": false,
+      "outcome": "incomplete",
+      "response": "Tbbf2777cd0463dc6-3.response.json"
+    },
+    {
+      "id": "T91132b30cad349b0",
+      "source": "InterA11y",
+      "sc": "3.3.1",
+      "repeat": 3,
+      "label": 1,
+      "prediction": null,
+      "durationMs": 85.30745799999931,
+      "error": false,
+      "outcome": "incomplete",
+      "response": "T91132b30cad349b0-3.response.json"
+    },
+    {
+      "id": "T275623c59dcb58ae",
+      "source": "InterA11y",
+      "sc": "3.3.1",
+      "repeat": 3,
+      "label": 0,
+      "prediction": null,
+      "durationMs": 75.55174999999872,
+      "error": false,
+      "outcome": "incomplete",
+      "response": "T275623c59dcb58ae-3.response.json"
+    },
+    {
+      "id": "T09537ba9c551f07b",
+      "source": "InterA11y",
+      "sc": "3.3.1",
+      "repeat": 3,
+      "label": 0,
+      "prediction": null,
+      "durationMs": 1080.9686249999977,
+      "error": false,
+      "outcome": "incomplete",
+      "response": "T09537ba9c551f07b-3.response.json"
+    }
+  ]
+}

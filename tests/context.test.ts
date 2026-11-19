@@ -1982,6 +1982,38 @@ describe('Context', () => {
       expect(context.isRunningTool()).toBe(false);
     });
 
+    it('rejects every call while an exclusive call runs', () => {
+      const context = new Context({
+        tools: [],
+        config: defaultConfig,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      const endExclusive = context.beginToolCall('exclusive_tool', true);
+      expect(() => context.beginToolCall('browser_click')).toThrow('Tool "browser_click" is busy because an interactive audit is running in this browser context.');
+      expect(() => context.beginToolCall('other_exclusive_tool', true)).toThrow('Tool "other_exclusive_tool" is busy because interactive audits require exclusive access to this browser context.');
+      endExclusive();
+      context.beginToolCall('browser_click')();
+    });
+
+    it('rejects an exclusive call while any call runs', () => {
+      const context = new Context({
+        tools: [],
+        config: defaultConfig,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      const endClick = context.beginToolCall('browser_click');
+      expect(() => context.beginToolCall('exclusive_tool', true)).toThrow('Tool "exclusive_tool" is busy because interactive audits require exclusive access to this browser context.');
+      context.beginToolCall('browser_snapshot')();
+      endClick();
+      context.beginToolCall('exclusive_tool', true)();
+    });
+
     it('holds a session without suppressing input recording', () => {
       const context = new Context({
         tools: [],
