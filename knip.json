@@ -4,7 +4,7 @@
     "src/index.ts!",
     "src/program.ts!",
     "src/vscode/main.ts!",
-    "bench/*.mjs",
+    "bench/*.{mjs,mts}",
     "tests/*-probe.mjs",
     "utils/copyright.js",
     ".codex/run-mcp-direct-harness.mjs",
@@ -15,7 +15,7 @@
     "*.{js,mjs,ts,tsx}!",
     "src/**/*.{js,mjs,ts,tsx}!",
     "tests/**/*.{js,mjs,ts,tsx}",
-    "bench/**/*.{js,mjs,ts,tsx}!",
+    "bench/**/*.{js,mjs,mts,ts,tsx}!",
     "utils/**/*.{js,mjs,ts,tsx}!",
     ".codex/**/*.{js,mjs,ts,tsx}!",
     "scripts/**/*.{js,mjs,ts,tsx}!"

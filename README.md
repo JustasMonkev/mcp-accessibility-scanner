@@ -1399,6 +1399,8 @@ Build both checkouts, then run `node bench/all-utils.mjs ../baseline .` from the
 
 ### Benchmarking tool latency
 
+To investigate a suspected regression against a healthy commit and verify a repair, see the [latency investigation pilot](docs/performance/performance-factory-poc.md).
+
 `bench/mcp-bench.mjs` measures what a client actually waits for: it serves a fixed
 synthetic site, speaks MCP to the built server over stdio, and times real
 `tools/call` round trips for navigation, interaction, snapshots and every audit
