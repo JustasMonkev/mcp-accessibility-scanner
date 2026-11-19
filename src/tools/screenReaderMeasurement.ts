@@ -342,7 +342,7 @@ export async function measureScreenReaderElements(
   ariaNodes: readonly { ref: string | null }[],
   options: ScreenReaderMeasurementOptions,
 ): Promise<ScreenReaderMeasurement> {
-  const refIndexes = ariaNodes.map((node, index) => node.ref ? index : -1).filter(index => index >= 0);
+  const refIndexes = ariaNodes.flatMap((node, index) => node.ref ? [index] : []);
   type Measured = { index: number; handle: playwright.ElementHandle<SVGElement | HTMLElement> };
   const onlyFrame = page.frames().length === 1 ? page.mainFrame() : null;
   const factsByIndex = new Map<number, ElementFacts>();

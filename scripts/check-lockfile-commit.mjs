@@ -66,9 +66,14 @@ function readLock(ref) {
 }
 
 function lostPlatformFields(before, after) {
-  return Object.entries(before).flatMap(([path, entry]) => ['os', 'cpu', 'libc']
-      .filter(field => field in entry && after[path] && !(field in after[path]))
-      .map(field => `${path} lost "${field}"`));
+  const losses = [];
+  for (const [path, entry] of Object.entries(before)) {
+    for (const field of ['os', 'cpu', 'libc']) {
+      if (field in entry && after[path] && !(field in after[path]))
+        losses.push(`${path} lost "${field}"`);
+    }
+  }
+  return losses;
 }
 
 function summarizeChanges(before, after) {

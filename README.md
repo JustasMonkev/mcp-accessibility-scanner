@@ -1160,6 +1160,13 @@ Source code must handle promises and cover union members in switches. Tool
 implementations, MCP helpers and shared utilities also reject explicit `any`.
 Vitest checks catch focused tests, duplicate hooks and duplicate test titles.
 
+Nine rules from [dmmulroy/anti-slop](https://github.com/dmmulroy/anti-slop/tree/13909c9e07590f5a85d93c62712259fe14a883f7/src)
+live in `tools/oxlint/anti-slop/`. They catch repeated accumulator copies,
+array filter/map chains and types that are widened then asserted back.
+Chained type assertions are rejected in `src/**/*.ts`, and module mocking is
+rejected in `tests/**/*.integration.test.ts`. Oxlint also checks for accumulating
+spreads. When updating Oxlint, keep `@oxlint/plugins` pinned to the same version.
+
 `npm run knip` checks the server's sources, tests, benchmarks and tooling.
 
 `npm run check` runs every static check CI runs: oxlint, `tsc`, knip, exact dependency

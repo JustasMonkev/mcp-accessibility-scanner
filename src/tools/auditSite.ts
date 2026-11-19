@@ -370,8 +370,8 @@ async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: strin
         throw new Error(`Failed to fetch sitemap ${sitemapUrl}: ${response.status} ${response.statusText}`);
       }
       const xmlText = await readSitemapBody(response);
-      return [...xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)]
-          .map(match => decodeSitemapLocation(match[1]).trim()).filter(Boolean);
+      return xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)
+          .map(match => decodeSitemapLocation(match[1]).trim()).filter(Boolean).toArray();
     }
   } finally {
     clearTimeout(timer);
@@ -759,7 +759,7 @@ class SessionLossDetector {
   }
 
   private _recordLoss(loss: { url: string, cookies: string[], identities: string[] }, sequence: number): void {
-    const concurrentUrls = [...this._activeSinceCheck].filter(([other]) => other !== sequence).map(([, url]) => url);
+    const concurrentUrls = this._activeSinceCheck.entries().filter(([other]) => other !== sequence).map(([, url]) => url).toArray();
     this.losses.push(concurrentUrls.length ? { url: loss.url, cookies: loss.cookies, concurrentUrls } : { url: loss.url, cookies: loss.cookies });
     for (const identity of loss.identities) {
       this._baseline.delete(identity);
@@ -1104,7 +1104,7 @@ class SiteCrawl {
     try {
       let item = queuedItem;
       while (await this._attemptPage(worker, item, { pageIndex, sequence }, commitLinks) === 'retry')
-        item = { ...item, retriedAfterOutgoingDialog: true };
+        item = { ...queuedItem, retriedAfterOutgoingDialog: true };
     } finally {
       this._session.pageFinished(sequence);
       commitLinks([]);

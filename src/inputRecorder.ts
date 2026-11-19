@@ -73,6 +73,11 @@ type PlaywrightRecorderControl = {
   _stopRecording(): Promise<void>;
 };
 
+function supportsRecording(context: playwright.BrowserContext): context is playwright.BrowserContext & PlaywrightRecorderControl {
+  return '_startRecording' in context && typeof context._startRecording === 'function'
+      && '_stopRecording' in context && typeof context._stopRecording === 'function';
+}
+
 class RecorderHub {
   readonly recorders = new Set<InputRecorder>();
   readonly recordings = new Map<Context, RecordingTarget>();
@@ -109,7 +114,9 @@ class RecorderHub {
   }
 
   private _control(): PlaywrightRecorderControl {
-    return this._browserContext as unknown as PlaywrightRecorderControl;
+    if (!supportsRecording(this._browserContext))
+      throw new Error('This Playwright browser context does not support input recording.');
+    return this._browserContext;
   }
 
   private async _arm(): Promise<void> {

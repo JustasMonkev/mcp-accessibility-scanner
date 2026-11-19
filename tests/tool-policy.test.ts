@@ -168,7 +168,7 @@ for (const mode of ['browser', 'extension', 'direct proxy', 'VS Code proxy'] as 
       const backend = mode === 'direct proxy'
         ? new ProxyBackend([{ name: 'default', description: 'Default', connect }, { name: 'extension', description: 'Extension', connect }], undefined, config)
         : mode === 'VS Code proxy' ? new VSCodeProxyBackend(config, connect)
-          : new BrowserServerBackend(config, { ...unusedFactory, ...(mode === 'extension' ? { sharedContext: true, attachNeedsUser: true, sessionsUnsupportedReason: 'extension' } : {}) });
+          : new BrowserServerBackend(config, mode === 'extension' ? { ...unusedFactory, sharedContext: true, attachNeedsUser: true, sessionsUnsupportedReason: 'extension' } : unusedFactory);
       const client = new Client({ name: 'tool-policy-test', version: '1' });
       client.setRequestHandler('ping', () => ({}));
       try {

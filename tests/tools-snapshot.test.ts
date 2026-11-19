@@ -966,11 +966,11 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('scan_page annotated 
           animations: document.getAnimations().map(animation => animation.playState),
           pendingPauseAtMeasurement: document.querySelector('#one')?.hasAttribute('data-pending-pause'),
           target: document.querySelector('#one') && rect(document.querySelector('#one')!),
-          boxes: children.filter((_, index) => index % 2 === 0).map((box, index) => ({
-            label: children[index * 2 + 1].textContent,
+          boxes: children.flatMap((box, index) => index % 2 === 0 ? [{
+            label: children[index + 1].textContent,
             rect: rect(box),
-            labelRect: rect(children[index * 2 + 1]),
-          })),
+            labelRect: rect(children[index + 1]),
+          }] : []),
         };
       });
       return screenshot(options);

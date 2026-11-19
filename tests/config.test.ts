@@ -260,7 +260,7 @@ describe('Config', () => {
       const options = { proxy: { ...proxy, bypass: 'private.test, .internal.test,127.0.0.1,' } };
       const config = await resolveConfig({ browser: {
         launchOptions: level === 'launch' ? options : {},
-        contextOptions: { clientCertificates, ...(level === 'context' ? options : {}) },
+        contextOptions: level === 'context' ? { clientCertificates, ...options } : { clientCertificates },
       } });
       expect(config.browser.contextOptions.proxy).toEqual(options.proxy);
     });
@@ -277,7 +277,7 @@ describe('Config', () => {
         const options = { proxy: { ...proxy, bypass: `ok.test,${entry}` } };
         await expect(resolveConfig({ browser: {
           launchOptions: level === 'launch' ? options : {},
-          contextOptions: { clientCertificates, ...(level === 'context' ? options : {}) },
+          contextOptions: level === 'context' ? { clientCertificates, ...options } : { clientCertificates },
         } })).rejects.toThrow(`clientCertificates supports only host and domain entries in proxy.bypass, such as "example.com" or ".example.com"; unsupported: ${JSON.stringify(entry)}.`);
       }
     });

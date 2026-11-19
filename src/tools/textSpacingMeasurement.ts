@@ -337,11 +337,12 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
 
   // --- Overlap detection between different elements' visible text lines. ---
   const overlapPairs = (phases: (Phase | null)[]): Map<string, Box> => {
-    const entries = phases
-        .map((phase, index) => ({ index, lines: (phase?.visibleLines ?? []).slice(0, maxOverlapLines) }))
-        .filter(entry => entry.lines.length)
-        .map(entry => ({ ...entry, top: Math.min(...entry.lines.map(line => line.top)), bottom: Math.max(...entry.lines.map(line => line.bottom)) }))
-        .sort((a, b) => a.top - b.top);
+    const entries = phases.flatMap((phase, index) => {
+      const lines = phase?.visibleLines.slice(0, maxOverlapLines);
+      if (!lines?.length)
+        return [];
+      return [{ index, lines, top: Math.min(...lines.map(line => line.top)), bottom: Math.max(...lines.map(line => line.bottom)) }];
+    }).sort((a, b) => a.top - b.top);
     const pairs = new Map<string, Box>();
     for (let i = 0; i < entries.length; i++) {
       for (let j = i + 1; j < entries.length && entries[j].top < entries[i].bottom; j++) {

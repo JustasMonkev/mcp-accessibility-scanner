@@ -1450,6 +1450,21 @@ describe('Context', () => {
       expect(mockBrowserContextFactory.createContext).not.toHaveBeenCalled();
     });
 
+    it('rejects a context missing the stop hook before starting a recording', async () => {
+      mockBrowserContext._startRecording = vi.fn();
+      delete mockBrowserContext._stopRecording;
+      const context = new Context({
+        tools: [],
+        config: { timeouts: {} } as any,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: async () => ({ logUserAction: vi.fn() }) as any,
+        clientInfo: {},
+      });
+
+      await expect(context.newTab()).rejects.toThrow('does not support input recording');
+      expect(mockBrowserContext._startRecording).not.toHaveBeenCalled();
+    });
+
     it('makes a joining session wait for the in-flight recorder enablement and share its failure', async () => {
       // The first session stores the hub before _startRecording resolves; a
       // session joining meanwhile must not report recording ready while the

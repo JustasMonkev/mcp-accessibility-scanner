@@ -106,6 +106,23 @@ describe('mcp http transport hardening', () => {
   }
 
   async function sendRequest(port: number, options?: { method?: string, path?: string, hostHeader?: string, origin?: string, sessionId?: string, accept?: string, protocolVersion?: string, body?: string, contentLength?: number, authorization?: string, agent?: http.Agent, onSocket?: (socket: Socket) => void }) {
+    const headers: http.OutgoingHttpHeaders = {};
+    if (options?.hostHeader)
+      headers.host = options.hostHeader;
+    if (options?.origin)
+      headers.origin = options.origin;
+    if (options?.sessionId)
+      headers['mcp-session-id'] = options.sessionId;
+    if (options?.accept)
+      headers.accept = options.accept;
+    if (options?.protocolVersion)
+      headers['mcp-protocol-version'] = options.protocolVersion;
+    if (options?.body)
+      headers['content-type'] = 'application/json';
+    if (options?.contentLength !== undefined)
+      headers['content-length'] = String(options.contentLength);
+    if (options?.authorization)
+      headers.authorization = options.authorization;
     const response = await new Promise<{ statusCode: number, headers: http.IncomingHttpHeaders, body: string }>((resolve, reject) => {
       const req = http.request({
         host: '127.0.0.1',
@@ -113,16 +130,7 @@ describe('mcp http transport hardening', () => {
         path: options?.path ?? '/mcp',
         method: options?.method ?? 'GET',
         agent: options?.agent,
-        headers: {
-          ...(options?.hostHeader ? { host: options.hostHeader } : {}),
-          ...(options?.origin ? { origin: options.origin } : {}),
-          ...(options?.sessionId ? { 'mcp-session-id': options.sessionId } : {}),
-          ...(options?.accept ? { accept: options.accept } : {}),
-          ...(options?.protocolVersion ? { 'mcp-protocol-version': options.protocolVersion } : {}),
-          ...(options?.body ? { 'content-type': 'application/json' } : {}),
-          ...(options?.contentLength !== undefined ? { 'content-length': String(options.contentLength) } : {}),
-          ...(options?.authorization ? { authorization: options.authorization } : {}),
-        },
+        headers,
       }, res => {
         const chunks: Buffer[] = [];
         res.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));

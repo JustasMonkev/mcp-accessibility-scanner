@@ -121,8 +121,8 @@ const listFormat = new Intl.ListFormat('en');
 export function serverInstructions(policy: ToolPolicy): string {
   const usable = (name: string) => !isToolBlocked(policy, name);
   const canNavigate = usable('browser_navigate');
-  const audits = auditGuidance.filter(([tool]) => usable(tool)).map(([tool, purpose]) => `\`${tool}\` ${purpose}`);
-  const interaction = interactionTools.filter(([, tool]) => usable(tool)).map(([label]) => label);
+  const audits = auditGuidance.flatMap(([tool, purpose]) => usable(tool) ? [`\`${tool}\` ${purpose}`] : []);
+  const interaction = interactionTools.flatMap(([label, tool]) => usable(tool) ? [label] : []);
   const parts = ['This server runs automated web accessibility audits (axe-core / WCAG) and drives a real browser via Playwright.'];
   if (canNavigate)
     parts.push('Use `browser_navigate` to load a page first.');
