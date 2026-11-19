@@ -101,10 +101,10 @@ function parseDataUrl(text: string, start: number): DataUrlMatch | undefined {
 
   const metadata = text.slice(metadataStart, delimiter.start);
   const isEncodedMetadata = isEncodedPrefix || containsPercentEncoding(metadata);
-  if (!isValidDataUrlMetadata(metadata, isEncodedMetadata))
+  const decodedMetadata = decodeDataUrlMetadata(metadata, isEncodedMetadata);
+  if (!isValidDataUrlMetadata(metadata, decodedMetadata))
     return;
 
-  const decodedMetadata = decodeDataUrlMetadata(metadata, isEncodedMetadata);
   return {
     payloadStart: delimiter.end,
     displayPrefix: dataUrlDisplayPrefix(text, start, delimiter, { raw: metadata, decoded: decodedMetadata, isEncoded: isEncodedMetadata }),
@@ -149,10 +149,9 @@ function encodeDataUrlMetadata(metadata: string, isEncoded: boolean): string {
   return isEncoded ? encodeURIComponent(metadata) : metadata;
 }
 
-function isValidDataUrlMetadata(metadata: string, isEncoded: boolean): boolean {
+function isValidDataUrlMetadata(metadata: string, decodedMetadata: string): boolean {
   if (!metadata)
     return true;
-  const decodedMetadata = decodeDataUrlMetadata(metadata, isEncoded);
   if (!decodedMetadata || /[\r\n]/.test(decodedMetadata) || /[\s"'<>()[\]{}]/.test(metadata))
     return false;
   if (decodedMetadata.startsWith(';'))
@@ -175,26 +174,34 @@ function decodeDataUrlMetadata(metadata: string, isEncoded: boolean): string {
 
 // Raw payloads can contain markup. Base64 payloads have an unconditional set of boundaries.
 const base64PayloadEnd = /[\s"'<>)\]}`:&]|%(?:22|27|29|5d|7d|60)/gi;
+const quotedPayloadBoundary = /["'\r\n]/g;
+const rawPayloadBoundary = /[\r\n:&)\]}]|[^\S\r\n]+|%(?:22|27|29|5d|7d|60)/gi;
+
 function findDataUrlEnd(text: string, match: DataUrlMatch): number {
   if (match.isBase64) {
     base64PayloadEnd.lastIndex = match.payloadStart;
     return base64PayloadEnd.exec(text)?.index ?? text.length;
   }
 
-  let end = match.payloadStart;
-  while (end < text.length) {
-    const char = text[end];
+  const boundary = match.quote ? quotedPayloadBoundary : rawPayloadBoundary;
+  boundary.lastIndex = match.payloadStart;
+  const markup = isRawMarkupPayload(text, match.payloadStart);
+  for (let candidate = boundary.exec(text); candidate; candidate = boundary.exec(text)) {
+    const position = candidate.index;
+    const char = text[position];
     if (isLineBreak(char))
-      break;
-    if (match.isEmbeddedQueryValue && char === '&' && isQueryParamBoundary(text, match, end))
-      break;
-    if (match.quote && char === match.quote && isQuotedDataUrlEnd(text, match, end))
-      break;
-    if (!match.quote && isRawPayloadSuffixBoundary(text, match, end))
-      break;
-    end++;
+      return position;
+    if (match.quote) {
+      if (char === match.quote && (!markup || isRawPayloadCompleteBefore(text, match.payloadStart, position)))
+        return position;
+    } else if (char === '&') {
+      if (match.isEmbeddedQueryValue && isQueryParamBoundary(text, match, position))
+        return position;
+    } else if (isRawPayloadSuffixBoundary(text, match, position, markup)) {
+      return position;
+    }
   }
-  return end;
+  return text.length;
 }
 
 function dataUrlQuoteAt(text: string, start: number): '"' | '\'' | undefined {
@@ -223,23 +230,19 @@ function isRawPayloadCompleteBefore(text: string, payloadStart: number, end: num
   return text[position] === '>' || (position >= payloadStart + 2 && startsWithIgnoreCase(text, position - 2, '%3e'));
 }
 
-function isRawPayloadSuffixBoundary(text: string, match: DataUrlMatch, position: number): boolean {
+function isRawPayloadSuffixBoundary(text: string, match: DataUrlMatch, position: number, markup: boolean): boolean {
   const char = text[position];
   if (isWhitespace(char))
-    return !isRawMarkupPayload(text, match.payloadStart) || isRawPayloadCompleteBefore(text, match.payloadStart, position);
+    return !markup || isRawPayloadCompleteBefore(text, match.payloadStart, position);
   if (isRawPayloadWrapperBoundary(text, match, position))
     return true;
-  if (isEncodedPayloadTerminator(text, position))
+  if (char === '%')
     return isRawPayloadCompleteBefore(text, match.payloadStart, position) || isRawPayloadBoundarySuffix(text, position + 3);
   if (char !== ':')
     return false;
-  if (isRawMarkupPayload(text, match.payloadStart) && !isRawPayloadCompleteBefore(text, match.payloadStart, position))
+  if (markup && !isRawPayloadCompleteBefore(text, match.payloadStart, position))
     return false;
   return looksLikeSourceLocationSuffix(text, position);
-}
-
-function isQuotedDataUrlEnd(text: string, match: DataUrlMatch, quote: number): boolean {
-  return !isRawMarkupPayload(text, match.payloadStart) || isRawPayloadCompleteBefore(text, match.payloadStart, quote);
 }
 
 function isRawMarkupPayload(text: string, payloadStart: number): boolean {
@@ -291,11 +294,6 @@ function isRawPayloadBoundarySuffix(text: string, offset: number): boolean {
     return true;
   const char = text[offset];
   return isLineBreak(char) || isWhitespace(char) || ['"', '\'', ')', ']', '}', '`'].includes(char) || (char === '&' && looksLikeQueryParam(text, offset + 1));
-}
-
-function isEncodedPayloadTerminator(text: string, position: number): boolean {
-  const encodedChar = percentEncodedCharAt(text, position);
-  return !!encodedChar && ['"', '\'', ')', ']', '}', '`'].includes(encodedChar);
 }
 
 function percentEncodedCharBefore(text: string, position: number): string | undefined {

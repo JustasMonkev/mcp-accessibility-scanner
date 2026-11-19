@@ -31,18 +31,39 @@ export function safeIsoTimestampForFileName(): string {
 export function truncateToUtf8Bytes(value: string, maxBytes: number): string {
   if (maxBytes <= 0)
     return '';
-  if (Buffer.byteLength(value, 'utf8') <= maxBytes)
-    return value;
-  let bytes = 0;
-  let result = '';
-  for (const character of value) {
-    const characterBytes = Buffer.byteLength(character, 'utf8');
-    if (bytes + characterBytes > maxBytes)
-      break;
-    result += character;
-    bytes += characterBytes;
+  // Each UTF-16 code unit needs at least one UTF-8 byte.
+  const prefix = value.length > maxBytes ? value.slice(0, maxBytes) : value;
+  if (Buffer.byteLength(prefix, 'utf8') <= maxBytes) {
+    if (value.length === prefix.length)
+      return value;
+    // A slice of maxBytes code units fits only when every unit is ASCII.
+    return copyPrefix(prefix, 'ascii');
   }
-  return result;
+  let bytes = 0;
+  let end = 0;
+  for (const character of value) {
+    const width = utf8Width(character);
+    if (bytes + width > maxBytes)
+      break;
+    bytes += width;
+    end += character.length;
+  }
+  return copyPrefix(value.slice(0, end));
+}
+
+function utf8Width(character: string): number {
+  if (character.length === 2)
+    return 4;
+  const unit = character.charCodeAt(0);
+  if (unit < 0x80)
+    return 1;
+  return unit < 0x800 ? 2 : 3;
+}
+
+// A download error can outlive its source. Detach the small prefix without
+// normalizing lone surrogates, which a UTF-8 encode/decode would replace.
+function copyPrefix(prefix: string, encoding: 'ascii' | 'utf16le' = 'utf16le'): string {
+  return Buffer.from(prefix, encoding).toString(encoding);
 }
 
 export function truncateWithMarker(message: string, maxBytes: number): string {

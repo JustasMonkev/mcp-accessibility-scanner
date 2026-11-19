@@ -142,6 +142,8 @@ screenReaderCases.push({
 });
 
 export const pages = new Map([
+  ['/console-svg.html', '<!doctype html><title>Inline SVG logs</title><input aria-label="Log SVG" oninput="logSvg()"><script>'
+    + 'function logSvg() { for (let i = 0; i < 4; i++) console.log("image " + i + ": data:image/svg+xml,<svg><text>x" + " ".repeat(1024) + "y</text></svg> end") }</script>'],
   ['/console-images.html', '<!doctype html><title>Inline image logs</title><input aria-label="Log images" oninput="logImages()"><script>'
     + 'function logImages() { for (let i = 0; i < 4; i++) console.log("image " + i + ": data:image/png;base64," + "AAAA".repeat(262144) + " end") }'
     + 'if (!location.search) logImages();</script>'],

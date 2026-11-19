@@ -139,6 +139,19 @@ const scenarios = [
     },
   })),
   {
+    name: 'browser_console_messages (raw SVG with internal whitespace, first read)',
+    setup: async () => {
+      const snapshot = await call('browser_navigate', { url: `${origin}/console-svg.html` });
+      await call('browser_type', { element: 'Log SVG input', ref: refFor(snapshot, 'Log SVG'), text: 'emit logs' });
+    },
+    run: () => call('browser_console_messages', {}),
+    verify: result => {
+      const output = textOf(result);
+      for (let index = 0; index < 4; index++)
+        assert.ok(output.includes(`image ${index}: data:image/svg+xml,... end`));
+    },
+  },
+  {
     name: 'scan_page (axe)',
     setup: () => call('browser_navigate', { url: `${origin}/heavy.html` }),
     run: () => call('scan_page', {}),

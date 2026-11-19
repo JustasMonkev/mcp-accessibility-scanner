@@ -13,6 +13,8 @@ function templateSegments(url: string): string[] {
   const parsed = new URL(url);
   const mask = (value: string) => idSegment.test(value) ? ':id' : value;
   const path = parsed.pathname.split('/').filter(Boolean).map(mask);
+  if (!parsed.search)
+    return [parsed.host, ...path];
   parsed.searchParams.sort();
   const query = [...parsed.searchParams].map(([key, value]) => `?${key}=${mask(value)}`);
   return [parsed.host, ...path, ...query];
@@ -90,8 +92,19 @@ function mergeParts(node: TreeNode, nodeParts: Part[], k: number, cover: boolean
 }
 
 function solve(node: TreeNode, k: number) {
-  for (const child of node.children.values())
-    solve(child, k);
+  if (!node.children.size) {
+    node.best = new Array<number>(Math.min(k, node.size) + 1).fill(0);
+    return;
+  }
+  for (const child of node.children.values()) {
+    if (child.size > 1)
+      solve(child, k);
+  }
+  if (!node.terminal.length && node.children.size === 1 && node.size > 1) {
+    const [child] = node.children.values();
+    node.best = child.best;
+    return;
+  }
   const nodeParts = parts(node);
   const free = mergeParts(node, nodeParts, k, false);
   const branches = branchCount(node);
@@ -103,10 +116,20 @@ function solve(node: TreeNode, k: number) {
   node.best = free.map((cost, count) => count >= branches ? covered[count] : cost);
 }
 
-function collect(node: TreeNode, count: number, k: number, selected: number[]) {
+function collect(node: TreeNode, count: number, selected: number[]) {
+  if (!node.children.size) {
+    for (let index = 0; index < count; index++)
+      selected.push(node.terminal[index]);
+    return;
+  }
+  if (!node.terminal.length && node.children.size === 1) {
+    const [child] = node.children.values();
+    collect(child, count, selected);
+    return;
+  }
   const nodeParts = parts(node);
   const choices: Uint16Array[] = [];
-  mergeParts(node, nodeParts, k, count >= branchCount(node), choice => choices.push(choice));
+  mergeParts(node, nodeParts, count, count >= branchCount(node), choice => choices.push(choice));
   let remaining = count;
   for (let index = nodeParts.length - 1; index >= 0; index--) {
     const given = choices[index][remaining];
@@ -117,9 +140,9 @@ function collect(node: TreeNode, count: number, k: number, selected: number[]) {
     if (part.kind === 'terminal')
       selected.push(...part.urls.slice(0, given));
     else if (part.kind === 'singles')
-      part.children.slice(0, given).forEach(child => collect(child, 1, k, selected));
+      part.children.slice(0, given).forEach(child => collect(child, 1, selected));
     else
-      collect(part.child, given, k, selected);
+      collect(part.child, given, selected);
   }
 }
 
@@ -143,6 +166,6 @@ export function selectRepresentativeUrls(urls: readonly string[], k: number): st
   });
   solve(root, k);
   const selected: number[] = [];
-  collect(root, k, k, selected);
+  collect(root, k, selected);
   return selected.sort((first, second) => first - second).map(index => urls[index]);
 }

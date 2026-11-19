@@ -16,11 +16,11 @@
 
 export function escapeWithQuotes(text: string, char: string = '\'') {
   const stringified = JSON.stringify(text);
+  if (char === '"')
+    return stringified;
   const escapedText = stringified.substring(1, stringified.length - 1).replace(/\\"/g, '"');
   if (char === '\'')
     return char + escapedText.replace(/[']/g, '\\\'') + char;
-  if (char === '"')
-    return char + escapedText.replace(/["]/g, '\\"') + char;
   if (char === '`')
     return char + escapedText.replace(/[`]/g, '\\`') + char;
   throw new Error('Invalid escape char');
