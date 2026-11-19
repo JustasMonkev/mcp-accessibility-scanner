@@ -70,6 +70,12 @@ describe('Utils', () => {
     }
   });
 
+  it('clips budgets larger than the shared encode buffer', () => {
+    const text = '€'.repeat(30_000);
+    expect(truncateToUtf8Bytes(text, 70_001)).toBe('€'.repeat(23_333));
+    expect(truncateToUtf8Bytes(text, 90_000)).toBe(text);
+  });
+
   it('preserves raw SVG suffixes after internal whitespace runs', () => {
     const spaces = ' \t\u2003'.repeat(100);
     const svg = `data:image/svg+xml,<svg><text>x${spaces}y</text></svg>`;
@@ -97,6 +103,14 @@ describe('Utils', () => {
         expect(id.length).toBe(32); // 16 bytes = 32 hex chars
       });
     });
+  });
+
+  it('keeps identifiers unique and well formed across random pool refills', () => {
+    // 16 + 4 bytes per round consumes several 4 KiB pools.
+    const ids = Array.from({ length: 1000 }, () => [createGuid(), createShortGuid()]).flat();
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const [index, id] of ids.entries())
+      expect(id).toMatch(index % 2 ? /^[a-f0-9]{8}$/ : /^[a-f0-9]{32}$/);
   });
 
   describe('createShortGuid', () => {
@@ -377,6 +391,19 @@ describe('Utils', () => {
       expect(result.output).not.toContain('Item 150');
       expect(result.output).toContain('# playwright-compress: 140 repeated ARIA nodes collapsed');
       expect(result.output).toContain('browser_evaluate()');
+    });
+
+    it('only groups siblings of the same parent', () => {
+      const items = Array.from({ length: 75 }, (_, index) => `  - paragraph "Item ${index}"`);
+      const snapshot = ['- list:', ...items, '- list:', ...items].join('\n');
+
+      expect(compressAriaSnapshot(snapshot)).toEqual({ output: snapshot, removed: 0 });
+    });
+
+    it('tracks tab and carriage-return indentation like the full parser', () => {
+      const items = Array.from({ length: 150 }, (_, index) => `- paragraph "Item ${index}"`);
+      expect(compressAriaSnapshot(['- heading "Intro"', '\t- text: tab-indented', ...items].join('\n')).removed).toBe(140);
+      expect(compressAriaSnapshot(['- list:', ...items.map(item => `  ${item}\r`)].join('\n')).removed).toBe(140);
     });
 
     it('should not compress snapshots below the safety threshold', () => {

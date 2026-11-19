@@ -7,9 +7,10 @@ const tokenPattern = /<\/?[a-z][\w:-]*|"[^"]*"|'[^']*'|[^\s"'<>/=]+/gi;
 /** @public */
 export function htmlTokens(html: string): string[] {
   const tokens: string[] = [];
-  for (const match of html.matchAll(tokenPattern)) {
+  tokenPattern.lastIndex = 0;
+  for (let match = tokenPattern.exec(html); match; match = tokenPattern.exec(html)) {
     const token = match[0];
-    tokens.push(token.startsWith('<') ? token.toLowerCase() : token);
+    tokens.push(token.charCodeAt(0) === 60 ? token.toLowerCase() : token);
     if (tokens.length === maxTokens)
       break;
   }
@@ -66,9 +67,12 @@ function similar(a: readonly string[], b: readonly string[]): boolean {
 
 const tagName = /^\s*<([a-z][^\s/>]*)/i;
 
+function isSpace(char: string): boolean {
+  return char === ' ' || char === '\t' || char === '\n' || char === '\r' || char === '\f';
+}
+
 function rootAttributes(html: string, from: number): { type?: string, role?: string } {
   const attributes: { type?: string, role?: string } = {};
-  const isSpace = (char: string) => char === ' ' || char === '\t' || char === '\n' || char === '\r' || char === '\f';
   let index = from;
   while (index < html.length) {
     while (index < html.length && (isSpace(html[index]) || html[index] === '/'))
