@@ -229,6 +229,74 @@ describe('audit_site tool', () => {
     writeFileSpy = vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
   });
 
+  it.each([undefined, 'chosen.json'])('cleans up a canceled site report write with reportFile=%s', async reportFile => {
+    const { context, response } = createHarness({ 'https://example.com/': [] });
+    const controller = new AbortController();
+    const rm = vi.spyOn(fs.promises, 'rm').mockResolvedValue(undefined);
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/', []));
+    writeFileSpy.mockImplementation(async () => { controller.abort(new Error('cancel site write')); });
+    await expect(auditSiteTool.handle(response.context, tool.schema.inputSchema.parse({ reportFile, concurrency: 1 }), response, controller.signal)).rejects.toThrow('cancel site write');
+    response.addFileResourceLink('/tmp/unrelated.txt');
+    await response.cleanupFilesOnError();
+    expect(response.resourceLinks().map(link => link.uri)).toEqual(['file:///tmp/unrelated.txt']);
+    expect(rm).toHaveBeenCalledExactlyOnceWith('/tmp/audit-site.json', { force: true });
+    expect(context.tabs()).toHaveLength(1);
+  });
+
+  it.each(['initial', 'after scan'])('cancels a stalled cookie read (%s) and closes the owned tab', async stage => {
+    const { context, response, cookiesMock } = createHarness({}, { cookiesForUrl: () => [{ name: 'sid' }] });
+    const originalTab = context.currentTabOrDie();
+    const siblingTab = { page: { url: () => 'about:blank' } };
+    context.tabs().push(siblingTab);
+    const controller = new AbortController();
+    const readStarted = Promise.withResolvers<void>();
+    const stall = () => {
+      readStarted.resolve();
+      return new Promise<never>(() => {});
+    };
+    if (stage === 'initial')
+      cookiesMock.mockImplementationOnce(stall);
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async () => {
+      cookiesMock.mockImplementationOnce(stall);
+      return createAxeResult('https://example.com/', []);
+    });
+    const audit = auditSiteTool.handle(context, tool.schema.inputSchema.parse({ concurrency: 1 }), response, controller.signal);
+    await readStarted.promise;
+    controller.abort(new Error('cancel cookie read'));
+    await expect(audit).rejects.toThrow('cancel cookie read');
+    expect(context.tabs()).toEqual([originalTab, siblingTab]);
+    expect(context.selectTab).toHaveBeenLastCalledWith(0);
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('cancels pending dialog initialization without blocking owned-tab cleanup', async () => {
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+    const controller = new AbortController();
+    crawlTab.page.addInitScript.mockImplementation(() => {
+      controller.abort(new Error('cancel initialization'));
+      return new Promise(() => {});
+    });
+    await expect(auditSiteTool.handle(response.context, tool.schema.inputSchema.parse({ concurrency: 1 }), response, controller.signal)).rejects.toThrow('cancel initialization');
+    expect(context.tabs()).toHaveLength(1);
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('cancels pending navigation, closes the crawl tab and does not write a report', async () => {
+    const { context, response, crawlTab } = createHarness({ 'https://example.com/': [] });
+    const controller = new AbortController();
+    crawlTab.navigate.mockImplementation(async () => {
+      controller.abort(new Error('cancel crawl'));
+      await new Promise(() => {});
+    });
+    const scan = vi.spyOn(axe, 'runAxeScan');
+    await expect(auditSiteTool.handle(response.context, tool.schema.inputSchema.parse({ concurrency: 1 }), response, controller.signal)).rejects.toThrow('cancel crawl');
+    expect(context.closeTab).toHaveBeenCalled();
+    expect(context.tabs()).toHaveLength(1);
+    expect(scan).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
   it('reserves an explicit report before opening the crawl tab', async () => {
     const { context, response } = createHarness({ 'https://example.com/': [] });
     context.outputFile.mockRejectedValue(new Error('Output file already exists'));
@@ -2672,6 +2740,42 @@ describe('audit_site concurrent crawl', () => {
       concurrentUrls: ['https://example.com/slow'],
     }]);
     expect(harness.response.result()).toContain('disappeared while loading https://example.com/close-account, or one of the pages loading at the same time: https://example.com/slow.');
+  });
+
+  it('retains possible cookie-loss culprits while their checks are queued', async () => {
+    const urls = ['first', 'second', 'third'].map(path => `https://example.com/${path}`);
+    const firstRead = Promise.withResolvers<void>();
+    const releaseFirstRead = Promise.withResolvers<void>();
+    let started = false;
+    let checks = 0;
+    const harness = createConcurrentHarness({}, {
+      beforeCookieRead: async () => {
+        if (started && ++checks === 1) {
+          firstRead.resolve();
+          await releaseFirstRead.promise;
+        }
+      },
+      // The first read returns the old cookie snapshot. The next sees the loss.
+      cookies: () => checks <= 1 ? [{ name: 'sid' }] : [],
+      onNavigate: async url => {
+        if (url === urls[0]) {
+          started = true;
+          return;
+        }
+        await firstRead.promise;
+        if (url === urls[2]) {
+          // Let both later navigations finish and enqueue their checks first.
+          setImmediate(() => releaseFirstRead.resolve());
+        }
+      },
+    });
+    await auditSiteTool.handle(harness.context, auditSiteTool.schema.inputSchema.parse({
+      strategy: 'provided', urls, concurrency: 3, waitAfterNavigationMs: 0,
+    }), harness.response);
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.sessionLosses).toEqual([{
+      url: urls[1], cookies: ['sid'], concurrentUrls: [urls[2]],
+    }]);
   });
 
   it('includes a culprit that starts while the cookie read is pending', async () => {

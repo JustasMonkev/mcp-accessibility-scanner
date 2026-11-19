@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Response } from '../src/response.js';
@@ -69,6 +70,25 @@ describe('Response', () => {
         imageResponses: 'allow',
       },
     } as any;
+  });
+
+  it('removes only successfully deleted resource links and can retry failed deletions', async () => {
+    const response = new Response(mockContext, 'test', {});
+    for (const file of ['removed.json', 'busy.json', 'unrelated.json'])
+      response.addFileResourceLink(file);
+    response.deleteFileOnError('removed.json');
+    response.deleteFileOnError('busy.json');
+    const remove = vi.spyOn(fs.promises, 'rm').mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('file busy')).mockResolvedValue(undefined);
+    try {
+      await expect(response.cleanupFilesOnError()).rejects.toThrow('file busy');
+      expect(response.resourceLinks().map(link => link.name)).toEqual(['busy.json', 'unrelated.json']);
+      await response.cleanupFilesOnError();
+      expect(response.resourceLinks().map(link => link.name)).toEqual(['unrelated.json']);
+      expect(remove.mock.calls.map(([file]) => file)).toEqual(['removed.json', 'busy.json', 'busy.json']);
+    } finally {
+      remove.mockRestore();
+    }
   });
 
   it.each([undefined, 'relative', 'absolute'] as const)('renders completed downloads with policy %s without changing stored paths', async filePaths => {

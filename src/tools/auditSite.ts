@@ -1,3 +1,4 @@
+import { rejectOnAbort } from '../utils/timeout.js';
 import RE2 from 're2';
 import coreBundle from 'playwright-core/lib/coreBundle';
 import type { Page, Request, Response } from 'playwright';
@@ -256,8 +257,7 @@ async function findCookieLoss(
   page: Page,
   urls: string[],
   baseline: Map<string, CrawlCookie>,
-  requestedUrl: string,
-  urlBeforeNavigation: string
+  url: string
 ): Promise<{ url: string, cookies: string[], identities: string[] } | null> {
   const current = await readCrawlCookies(page, urls).catch(() => null);
   if (!current)
@@ -267,8 +267,6 @@ async function findCookieLoss(
       .filter(([identity, cookie]) => !current.has(identity) && !(cookie.expires > 0 && cookie.expires * 1000 <= now));
   if (!missing.length)
     return null;
-  const reachedUrl = page.url();
-  const url = !/^https?:\/\//i.test(reachedUrl) || reachedUrl === urlBeforeNavigation ? requestedUrl : reachedUrl;
   return {
     url,
     cookies: [...new Set(missing.map(([, cookie]) => cookie.name))],
@@ -351,12 +349,12 @@ async function readSitemapBody(response: globalThis.Response): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: string, base: URL) => string): Promise<string[]> {
+async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: string, base: URL) => string, signal?: AbortSignal): Promise<string[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
     for (let redirects = 0; ; redirects++) {
-      const response = await fetch(sitemapUrl, { redirect: 'manual', signal: controller.signal, credentials: 'omit' });
+      const response = await fetch(sitemapUrl, { redirect: 'manual', signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal, credentials: 'omit' });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         await response.body?.cancel();
         const location = response.headers.get('location');
@@ -550,9 +548,11 @@ function watchForDialog(tab: Tab, requestedUrl: string) {
     guard: <T>(work: Promise<T>): Promise<T> => Promise.race([work, failed]),
     fired: () => fired,
     raisedByOutgoingDocument: () => raisedByOutgoingDocument,
-    stop: async () => {
-      if (!fired)
-        await Promise.race([initScript.then(script => script.dispose()).catch(logUnhandledError), failed]).catch(() => {});
+    stop: async (signal?: AbortSignal) => {
+      if (!fired) {
+        const disposal = initScript.then(script => script.dispose()).catch(logUnhandledError);
+        await rejectOnAbort(() => Promise.race([disposal, failed]), signal).catch(() => {});
+      }
       tab.page.off('response', onResponse);
       if (listener)
         tab.off(TabEvents.modalState, listener);
@@ -701,23 +701,25 @@ class SessionLossDetector {
   readonly losses: SessionLoss[] = [];
   private readonly _scopeUrls: string[];
   private readonly _scope: Set<string>;
+  private readonly _signal?: AbortSignal;
   private readonly _initialIdentities: Set<string>;
   private readonly _baseline: Map<string, CrawlCookie>;
   private readonly _activeSinceCheck = new Map<number, string>();
   private readonly _inFlight = new Set<number>();
   private _checks: Promise<void> = Promise.resolve();
 
-  private constructor(scopeUrls: string[], initialIdentities: Set<string>, baseline: Map<string, CrawlCookie>) {
+  private constructor(scopeUrls: string[], initialIdentities: Set<string>, baseline: Map<string, CrawlCookie>, signal?: AbortSignal) {
+    this._signal = signal;
     this._scopeUrls = scopeUrls;
     this._scope = new Set(scopeUrls);
     this._initialIdentities = initialIdentities;
     this._baseline = baseline;
   }
 
-  static async create(page: Page, scopeUrls: string[]): Promise<SessionLossDetector> {
-    const initialIdentities = new Set((await page.context().cookies().catch(() => [])).map(cookieIdentity));
-    const baseline = await readCrawlCookies(page, scopeUrls);
-    return new SessionLossDetector([...scopeUrls], initialIdentities, baseline);
+  static async create(page: Page, scopeUrls: string[], signal?: AbortSignal): Promise<SessionLossDetector> {
+    const initialIdentities = new Set((await rejectOnAbort(() => page.context().cookies().catch(() => []), signal)).map(cookieIdentity));
+    const baseline = await rejectOnAbort(() => readCrawlCookies(page, scopeUrls), signal);
+    return new SessionLossDetector([...scopeUrls], initialIdentities, baseline, signal);
   }
 
   async widenScope(page: Page, cookieUrl: string): Promise<void> {
@@ -725,7 +727,7 @@ class SessionLossDetector {
       return;
     this._scope.add(cookieUrl);
     this._scopeUrls.push(cookieUrl);
-    const discovered = await readCrawlCookies(page, [cookieUrl]).catch(() => null);
+    const discovered = await rejectOnAbort(() => readCrawlCookies(page, [cookieUrl]).catch(() => null), this._signal);
     for (const [identity, cookie] of discovered ?? []) {
       if (this._initialIdentities.has(identity) && !this._baseline.has(identity))
         this._baseline.set(identity, cookie);
@@ -741,14 +743,16 @@ class SessionLossDetector {
     this._inFlight.delete(sequence);
   }
 
-  check(page: Page, sequence: number, requestedUrl: string, urlBeforeNavigation: string): Promise<void> {
+  check(page: Page, sequence: number, url: string, finished: boolean): Promise<void> {
     const check = this._checks.then(async () => {
       const activeDuringWindow = [...this._activeSinceCheck];
       if (this._baseline.size) {
-        const loss = await findCookieLoss(page, [...this._scopeUrls], new Map(this._baseline), requestedUrl, urlBeforeNavigation);
+        const loss = await rejectOnAbort(() => findCookieLoss(page, [...this._scopeUrls], new Map(this._baseline), url), this._signal);
         if (loss)
           this._recordLoss(loss, sequence);
       }
+      if (finished)
+        this.pageFinished(sequence);
       for (const [other] of activeDuringWindow) {
         if (!this._inFlight.has(other))
           this._activeSinceCheck.delete(other);
@@ -777,7 +781,8 @@ function assertSitemapFetchSupported(context: Tab['context']): void {
     throw new Error('Sitemap fetches do not support browser proxies. Use the provided URL strategy when a proxy is required.');
 }
 
-async function seedFrontier(frontier: CrawlFrontier, scope: CrawlScope, params: AuditSiteParams, context: Tab['context']): Promise<void> {
+async function seedFrontier(frontier: CrawlFrontier, scope: CrawlScope, params: AuditSiteParams, context: Tab['context'], signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   const startUrl = scope.startUrl;
   if (params.strategy === 'provided') {
     frontier.enqueueListed(params.urls ?? [], null, params.pageSelection);
@@ -787,7 +792,7 @@ async function seedFrontier(frontier: CrawlFrontier, scope: CrawlScope, params: 
     assertSitemapFetchSupported(context);
     const validateUrl = (input: string, base: URL) => parseSitemapUrl(input, base, scope, context.config);
     const sitemapUrl = validateUrl(params.sitemapUrl ?? new URL('sitemap.xml', startUrl).toString(), startUrl);
-    frontier.enqueueListed(await extractSitemapUrls(sitemapUrl, validateUrl), sitemapUrl, params.pageSelection);
+    frontier.enqueueListed(await extractSitemapUrls(sitemapUrl, validateUrl, signal), sitemapUrl, params.pageSelection);
     return;
   }
   frontier.enqueue(startUrl.toString(), 0, null);
@@ -820,20 +825,23 @@ type PageFindings = { violations: AxeViolation[], incomplete: AxeViolation[] | n
 type DialogWatch = ReturnType<typeof watchForDialog>;
 type PageVisit = { tab: Tab, item: CrawlItem, report: PageReport, dialogWatch: DialogWatch };
 
-async function scanCrawledPage({ tab, item, report, dialogWatch }: PageVisit, scope: CrawlScope, params: AuditSiteParams, commitLinks: (links: string[]) => void): Promise<PageFindings> {
-  await dialogWatch.ready();
-  await dialogWatch.guard(tab.navigate(item.url));
-  await dialogWatch.guard(tab.waitForTimeout(params.waitAfterNavigationMs));
+async function scanCrawledPage({ tab, item, report, dialogWatch }: PageVisit, scope: CrawlScope, params: AuditSiteParams, commitLinks: (links: string[]) => void, signal?: AbortSignal): Promise<PageFindings> {
+  signal?.throwIfAborted();
+  await rejectOnAbort(() => dialogWatch.ready(), signal);
+  await rejectOnAbort(() => dialogWatch.guard(tab.navigate(item.url)), signal);
+  await rejectOnAbort(() => dialogWatch.guard(tab.waitForTimeout(params.waitAfterNavigationMs)), signal);
 
   const reachedUrl = tab.page.url();
   if (!scope.admit(reachedUrl))
     throw new Error(`Requested URL "${item.url}" reached "${truncateDataUrls(reachedUrl)}", which is outside the allowed crawl scope or matches excludePathPatterns. The destination was not audited.`);
 
-  const { title, links } = await dialogWatch.guard(readPage(tab.page, linkSelectorFor(params, item.depth)));
+  const { title, links } = await rejectOnAbort(() => dialogWatch.guard(readPage(tab.page, linkSelectorFor(params, item.depth))), signal);
+  signal?.throwIfAborted();
   report.title = title;
   commitLinks(links);
 
-  const axeResult = await dialogWatch.guard(runAxeScan(tab.page, axeScanOptions(params)));
+  const axeResult = await rejectOnAbort(() => dialogWatch.guard(runAxeScan(tab.page, axeScanOptions(params))), signal);
+  signal?.throwIfAborted();
   const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
   report.status = 'scanned';
   report.unscannedFrames = axeResult.unscannedFrames;
@@ -1008,6 +1016,7 @@ type CrawlSetup = {
   scope: CrawlScope;
   frontier: CrawlFrontier;
   response: ToolResponse;
+  signal?: AbortSignal;
 };
 
 type CrawlWorker = { tab: Tab | undefined, abandoned: boolean };
@@ -1027,8 +1036,13 @@ class SiteCrawl {
 
   static async open(setup: CrawlSetup): Promise<SiteCrawl> {
     const firstTab = await setup.context.newTab();
-    const session = await SessionLossDetector.create(firstTab.page, setup.frontier.queue.map(item => item.cookieUrl));
-    return new SiteCrawl(setup, firstTab, session);
+    try {
+      const session = await SessionLossDetector.create(firstTab.page, setup.frontier.queue.map(item => item.cookieUrl), setup.signal);
+      return new SiteCrawl(setup, firstTab, session);
+    } catch (error) {
+      await closeTabIfOpen(setup.context, firstTab);
+      throw error;
+    }
   }
 
   private constructor(setup: CrawlSetup, firstTab: Tab, session: SessionLossDetector) {
@@ -1057,13 +1071,10 @@ class SiteCrawl {
       throw failures[0];
   }
 
-  async closeTabs(originalTab: Tab): Promise<void> {
+  async closeTabs(): Promise<void> {
     const { context } = this._setup;
     for (const crawlOwnedTab of [...this._workers.map(worker => worker.tab), ...this._retiredTabs])
       await closeTabIfOpen(context, crawlOwnedTab);
-    const originalTabIndex = context.tabs().indexOf(originalTab);
-    if (originalTabIndex !== -1)
-      await context.selectTab(originalTabIndex).catch(logUnhandledError);
   }
 
   aggregatedFindings(): Pick<SummaryReport, 'violations' | 'incomplete'> {
@@ -1081,12 +1092,13 @@ class SiteCrawl {
   }
 
   private async _runWorker(worker: CrawlWorker): Promise<void> {
-    const { frontier, params } = this._setup;
+    const { frontier, params, signal } = this._setup;
     while (!this._stopped) {
+      signal?.throwIfAborted();
       if (!frontier.queue.length) {
         if (this._linkCommits.allCommitted)
           return;
-        await this._linkCommits.waitForCommit();
+        await rejectOnAbort(() => this._linkCommits.waitForCommit(), signal);
         continue;
       }
       if (this.pages.length >= params.maxPages)
@@ -1129,8 +1141,9 @@ class SiteCrawl {
     const dialogWatch = watchForDialog(tab, item.url);
     let retry = false;
     try {
-      this._pageFindings.set(report, await scanCrawledPage({ tab, item, report, dialogWatch }, this._setup.scope, this._setup.params, commitLinks));
+      this._pageFindings.set(report, await scanCrawledPage({ tab, item, report, dialogWatch }, this._setup.scope, this._setup.params, commitLinks, this._setup.signal));
     } catch (error) {
+      this._setup.signal?.throwIfAborted();
       retry = !item.retriedAfterOutgoingDialog && dialogWatch.raisedByOutgoingDocument();
       if (!retry) {
         this.erroredPages++;
@@ -1138,12 +1151,20 @@ class SiteCrawl {
         report.error = errorMessage(error);
       }
     } finally {
-      await dialogWatch.stop();
+      await dialogWatch.stop(this._setup.signal);
       worker.abandoned = dialogWatch.fired();
-      if (!retry)
-        this._session.pageFinished(slot.sequence);
-      await this._session.check(tab.page, slot.sequence, retry ? urlBeforeNavigation : item.url, urlBeforeNavigation);
-      if (!retry)
+      if (!this._setup.signal?.aborted) {
+        // A dialog in the outgoing document predates the destination, even if
+        // the browser updates page.url() while the cookie check is queued.
+        const reachedUrl = tab.page.url();
+        let url = item.url;
+        if (dialogWatch.raisedByOutgoingDocument())
+          url = urlBeforeNavigation;
+        else if (reachedUrl !== urlBeforeNavigation && /^https?:\/\//i.test(reachedUrl))
+          url = reachedUrl;
+        await this._session.check(tab.page, slot.sequence, url, !retry);
+      }
+      if (!retry && !this._setup.signal?.aborted)
         await this._reportPageProgress(report, item.url);
     }
     return retry ? 'retry' : 'done';
@@ -1187,7 +1208,8 @@ const auditSite = defineTabTool({
     type: 'destructive',
   },
 
-  handle: async (tab, params, response) => {
+  handle: async (tab, params, response, signal) => {
+    signal?.throwIfAborted();
     assertRuleOptionsValid({ rules: params.withRules, disableRules: params.disableRules });
 
     const context = tab.context;
@@ -1196,21 +1218,28 @@ const auditSite = defineTabTool({
     const startUrl = parseStartUrl(requestedStartUrl(params), tab.page.url());
     const scope = new CrawlScope(startUrl, params);
     const frontier = new CrawlFrontier(scope, params.maxPages);
-    await seedFrontier(frontier, scope, params, context);
+    await seedFrontier(frontier, scope, params, context, signal);
 
+    signal?.throwIfAborted();
     await response.reportProgress({
       progress: 0,
       total: params.maxPages,
       message: `Initialized site audit with ${frontier.queue.length} queued URL(s).`,
     });
 
-    const crawl = await SiteCrawl.open({ context, params, scope, frontier, response });
+    signal?.throwIfAborted();
+    let crawl: SiteCrawl | undefined;
     try {
+      crawl = await SiteCrawl.open({ context, params, scope, frontier, response, signal });
       await crawl.run();
     } finally {
-      await crawl.closeTabs(tab);
+      await crawl?.closeTabs();
+      const originalTabIndex = context.tabs().indexOf(tab);
+      if (originalTabIndex !== -1)
+        await context.selectTab(originalTabIndex).catch(logUnhandledError);
     }
 
+    signal?.throwIfAborted();
     const { pages, crawlTabRestarts } = crawl;
     const pagesWithUnscannedFrames = pages.filter(page => page.unscannedFrames.length);
     const scannedPagesByViolations = sortScannedPagesByViolations(pages);
@@ -1227,11 +1256,13 @@ const auditSite = defineTabTool({
     const sessionLosses = crawl.sessionLosses;
 
     const report = buildSiteReport({ startUrl, params, scanStartedAt, pages, summary, representativeSelection, sessionLosses, crawlTabRestarts });
+    response.deleteFileOnError(reportPath);
     const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'audit-site-report',
       title: 'Audit site JSON report',
       description: 'Aggregated JSON report for the site accessibility crawl.',
     });
+    signal?.throwIfAborted();
     response.setStructuredContent(siteStructuredContent(report, reportResource, pagesWithUnscannedFrames, scannedPagesByViolations));
 
     response.addCode('// Crawled pages in a temporary tab and aggregated Axe violations.');

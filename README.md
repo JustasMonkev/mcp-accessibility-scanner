@@ -641,6 +641,8 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 ```
 
 #### `scan_page_matrix`
+
+Viewport variants require a configured viewport (for example `--viewport-size=1280,720`). On native-sized browser tabs, use variants without viewport changes; the tool rejects viewport changes rather than permanently converting the tab to a fixed viewport. Cancellation waits for an active Axe scan or page mutation to finish, then stops subsequent variants and restores viewport, media and zoom. Site-audit cancellation stops the crawl and closes its owned tabs. Canceled runs do not write a completed report.
 Runs Axe scans on the same page across viewport/media/zoom variants and compares deltas against baseline.
 - Default variants: baseline, mobile, desktop, forced-colors, reduced-motion, zoom-200
 - Supports custom variants and optional reload between variants
