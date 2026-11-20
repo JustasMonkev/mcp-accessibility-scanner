@@ -28,7 +28,7 @@
 		"build": "tsc --project tsconfig.json",
 		"docker:build:multiarch": "docker buildx build --platform linux/amd64,linux/arm64 -t ${IMAGE:-ghcr.io/justasmonkev/mcp-accessibility-scanner}:latest -t ${IMAGE:-ghcr.io/justasmonkev/mcp-accessibility-scanner}:$npm_package_version --push .",
 		"lint": "oxlint --type-aware . && npm run typecheck",
-		"typecheck": "tsc --noEmit --project tsconfig.json && tsc --project bench/tsconfig.latency.json",
+		"typecheck": "tsc --noEmit --project tsconfig.json",
 		"check": "npm run lint && npm run knip && npm run check:pinned-deps && npm run check:runtime-deps && npm run check:deps-list",
 		"check:pinned-deps": "node scripts/check-pinned-deps.mjs",
 		"check:runtime-deps": "node scripts/check-runtime-deps.mjs",

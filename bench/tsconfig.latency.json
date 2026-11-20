@@ -1,5 +1,0 @@
-{
-  "extends": "../tsconfig.json",
-  "compilerOptions": { "rootDir": "..", "types": ["node"], "noEmit": true, "allowImportingTsExtensions": true },
-  "include": ["latency-case.mts", "../tests/latency-case.test.ts"]
-}

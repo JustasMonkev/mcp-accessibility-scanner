@@ -1399,7 +1399,7 @@ Build both checkouts, then run `node bench/all-utils.mjs ../baseline .` from the
 
 ### Benchmarking tool latency
 
-To investigate a suspected regression against a healthy commit and verify a repair, see the [latency investigation pilot](docs/performance/performance-factory-poc.md).
+To check whether a utility change speeds up an MCP call, run the same scenario against both builds, alternate their launch order, and compare per-launch medians. For an example that isolated a console slowdown to one file, see [the investigation in PR #360](https://github.com/JustasMonkev/mcp-accessibility-scanner/pull/360).
 
 `bench/mcp-bench.mjs` measures what a client actually waits for: it serves a fixed
 synthetic site, speaks MCP to the built server over stdio, and times real
