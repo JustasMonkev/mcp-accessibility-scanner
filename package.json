@@ -36,7 +36,6 @@
 		"test:scripts": "node --test scripts/*.test.mjs",
 		"prepare": "node -e \"try{require('node:child_process').execFileSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'})}catch{}\"",
 		"watch": "tsc --watch --project tsconfig.json",
-		"run-server": "node lib/browserServer.js",
 		"clean": "rm -rf lib",
 		"npm-publish": "npm run clean && npm run build && npm publish",
 		"test": "vitest run",

@@ -46,8 +46,6 @@ const contextSwitchOptions = z.object({
 /** @public */
 export class VSCodeProxyBackend implements ServerBackend {
   readonly dynamicToolList = true;
-  name = 'Playwright MCP Client Switcher';
-  version = packageJSON.version;
 
   private _currentClient: Client | undefined;
   private _ownsCurrentClient = true;

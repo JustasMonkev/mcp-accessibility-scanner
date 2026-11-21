@@ -142,7 +142,7 @@ export class CDPRelayServer {
     return `${this._wsHost}${this._extensionPath}`;
   }
 
-  async ensureExtensionConnectionForMCPContext(clientInfo: ClientInfo, abortSignal: AbortSignal, _toolName: string | undefined) {
+  async ensureExtensionConnectionForMCPContext(clientInfo: ClientInfo, abortSignal: AbortSignal) {
     debugLogger('Ensuring extension connection for MCP context');
     abortSignal.throwIfAborted();
     if (!this._extensionConnection)
@@ -160,7 +160,7 @@ export class CDPRelayServer {
       version: clientInfo.version,
     };
     url.searchParams.set('client', JSON.stringify(client));
-    url.searchParams.set('protocolVersion', process.env.PWMCP_TEST_PROTOCOL_VERSION ?? protocol.VERSION.toString());
+    url.searchParams.set('protocolVersion', protocol.VERSION.toString());
     if (this._browser.tabGroup === false)
       url.searchParams.set('tabGroup', 'false');
     if (this._token)

@@ -33,17 +33,6 @@ export function formatConsoleMessage(message: ConsoleMessage): string {
   return formatted;
 }
 
-/** @public */
-export function truncateDataUrl(url: string): string {
-  if (!startsWithIgnoreCase(url, 0, dataUrlPrefix) && !startsWithIgnoreCase(url, 0, encodedDataUrlPrefix))
-    return url;
-
-  const match = parseDataUrl(url, 0);
-  if (!match)
-    return url;
-  return `${match.displayPrefix}...`;
-}
-
 export function truncateDataUrls(text: string): string {
   let start = findDataUrlStart(text, 0);
   if (start === -1)

@@ -218,6 +218,55 @@ describe('Tool Utils', () => {
       // Still no top-level load state: a sub-frame navigation never produces one.
       expect(mockTab.waitForLoadState).not.toHaveBeenCalled();
     });
+
+    it('should skip waitForTimeout when settle delay is zero while still awaiting in-flight requests', async () => {
+      mockTab.context.config.timeouts.settle = 0;
+      const order: string[] = [];
+      const callback = vi.fn().mockImplementation(() => {
+        const request = { url: 'https://api.example.com' };
+        mockPage.emit('request', request);
+        setTimeout(() => {
+          order.push('finished');
+          mockPage.emit('requestfinished', request);
+        }, 10);
+        return Promise.resolve('result');
+      });
+
+      const result = await waitForCompletion(mockTab, callback, 0);
+      order.push('returned');
+
+      expect(result).toBe('result');
+      expect(order).toEqual(['finished', 'returned']);
+      expect(mockTab.waitForTimeout).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])('awaits requests delivered after a zero-settle callback (earlier request already finished: %s)', async earlierRequest => {
+      const order: string[] = [];
+      const finished = Promise.withResolvers<void>();
+      const result = await waitForCompletion(mockTab, async () => {
+        if (earlierRequest) {
+          const request = { url: 'https://api.example.com/early' };
+          mockPage.emit('request', request);
+          mockPage.emit('requestfinished', request);
+        }
+        setImmediate(() => {
+          const request = { url: 'https://api.example.com/late' };
+          mockPage.emit('request', request);
+          setImmediate(() => {
+            order.push('finished');
+            mockPage.emit('requestfinished', request);
+            finished.resolve();
+          });
+        });
+        return 'result';
+      }, 0);
+      order.push('returned');
+      await finished.promise;
+
+      expect(result).toBe('result');
+      expect(order).toEqual(['finished', 'returned']);
+      expect(mockTab.waitForTimeout).not.toHaveBeenCalled();
+    });
   });
 
   describe('generateLocator', () => {

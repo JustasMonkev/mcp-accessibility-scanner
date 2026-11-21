@@ -28,6 +28,7 @@ export type ElementFacts = {
 type ScreenReaderMeasurementOptions = {
   maxElements: number;
   checkNames: boolean;
+  needsName?: (nodeIndex: number) => boolean;
   reportProgress?: (progress: { progress: number; total: number; message: string }) => Promise<void>;
 };
 
@@ -40,6 +41,7 @@ type ScreenReaderMeasurement = {
     unmeasuredNames: number;
     truncatedElements: number;
     stoppedAtFrameWorkLimit: number | null;
+    stoppedAtRefWorkLimit: number | null;
   };
 };
 
@@ -47,12 +49,26 @@ const measureChunkSize = 200;
 
 const refResolutionTimeoutMs = 1000;
 
-/** @public */
-export function collectElementFacts(
-  input: (SVGElement | HTMLElement)[] | { elements: (SVGElement | HTMLElement)[]; measureNames: boolean }
-): ElementFacts[] {
+type CollectElementFactsInput =
+  | (SVGElement | HTMLElement)[]
+  | {
+    elements: (SVGElement | HTMLElement)[];
+    measureNames: boolean;
+    measureNameMask?: boolean[];
+  };
+
+type ReadElementFactsInput =
+  | playwright.ElementHandle<SVGElement | HTMLElement>[]
+  | {
+    elements: playwright.ElementHandle<SVGElement | HTMLElement>[];
+    measureNames: boolean;
+    measureNameMask?: boolean[];
+  };
+
+function collectElementFacts(input: CollectElementFactsInput): ElementFacts[] {
   const elements = Array.isArray(input) ? input : input.elements;
   const measureNames = Array.isArray(input) ? true : input.measureNames;
+  const measureNameMask = Array.isArray(input) ? undefined : input.measureNameMask;
   const memoize = <V>(compute: (element: Element) => V) => {
     const cache = new Map<Element, V>();
     return (element: Element): V => {
@@ -64,6 +80,12 @@ export function collectElementFacts(
   const getStyle = memoize(element => window.getComputedStyle(element));
   const getRect = memoize(element => element.getBoundingClientRect());
   const textCache = new Map<Element, string>();
+  const ariaHiddenCache = new Map<Element, boolean>();
+  const ancestorHiddenCache = {
+    none: new Map<Element, boolean>(),
+    absolute: new Map<Element, boolean>(),
+    fixed: new Map<Element, boolean>(),
+  };
   const referenceBoxSize = (element: Element, style: CSSStyleDeclaration, box: string): { width: number, height: number } => {
     const px = (value: string) => parseFloat(value) || 0;
     if (!(element instanceof HTMLElement))
@@ -88,6 +110,8 @@ export function collectElementFacts(
     }
   };
   const insetClipsEverything = (clipPath: string, element: Element, style: CSSStyleDeclaration): boolean => {
+    if (clipPath === 'none' || !clipPath.startsWith('inset('))
+      return false;
     const match = /^inset\(([^)]*)\)(?:\s+([a-z-]+))?/.exec(clipPath);
     if (!match)
       return false;
@@ -101,6 +125,8 @@ export function collectElementFacts(
     return height - top - bottom <= 0 || width - left - right <= 0;
   };
   const transformCollapses = (element: Element, transform: string): boolean => {
+    if (transform === 'none')
+      return false;
     const singular = (a: number, b: number, c: number, d: number) => {
       const det = a * d - b * c;
       const component = Math.max(Math.abs(a), Math.abs(b), Math.abs(c), Math.abs(d));
@@ -169,26 +195,44 @@ export function collectElementFacts(
     const outOfFlow = (style: CSSStyleDeclaration): 'absolute' | 'fixed' | null =>
       style.position === 'absolute' || style.position === 'fixed' ? style.position : null;
     let escapingPosition = outOfFlow(getStyle(element));
+    const trail: [Map<Element, boolean>, Element][] = [];
+    let hidden = false;
     for (let node = parentInComposedTree(element); node; node = parentInComposedTree(node)) {
+      const stateMap = ancestorHiddenCache[escapingPosition ?? 'none'];
+      const cached = stateMap.get(node);
+      if (cached !== undefined) {
+        hidden = cached;
+        break;
+      }
+      trail.push([stateMap, node]);
       const style = getStyle(node);
       const decided = nonGeometricHidden(node, style);
-      if (decided)
-        return true;
+      if (decided) {
+        hidden = true;
+        break;
+      }
       if (decided === null) {
-        if (insetClipsEverything(style.clipPath, node, style))
-          return true;
+        if (insetClipsEverything(style.clipPath, node, style)) {
+          hidden = true;
+          break;
+        }
         const containingBlock = style.position !== 'static' || style.transform !== 'none';
         const fixedContainingBlock = style.transform !== 'none' || style.perspective !== 'none' || style.filter !== 'none';
         const bindsEscape = escapingPosition === 'fixed' ? fixedContainingBlock : containingBlock;
-        if (collapsedClippingBox(style, node) && (!escapingPosition || bindsEscape))
-          return true;
-        if (outOfFlow(style))
-          escapingPosition = outOfFlow(style);
+        if (collapsedClippingBox(style, node) && (!escapingPosition || bindsEscape)) {
+          hidden = true;
+          break;
+        }
+        const nodeOutOfFlow = outOfFlow(style);
+        if (nodeOutOfFlow)
+          escapingPosition = nodeOutOfFlow;
         else if (bindsEscape)
           escapingPosition = null;
       }
     }
-    return false;
+    for (const [stateMap, visited] of trail)
+      stateMap.set(visited, hidden);
+    return hidden;
   };
   const renderedChildren = (element: Element): ArrayLike<Node> & Iterable<Node> => {
     if (element.shadowRoot)
@@ -246,11 +290,23 @@ export function collectElementFacts(
 
   const buttonInputTypes = ['submit', 'button', 'reset'];
   const isAriaHiddenInComposedTree = (element: Element): boolean => {
+    const trail: Element[] = [];
+    let hidden = false;
     for (let node: Element | null = element; node; node = parentInComposedTree(node)) {
-      if (node.getAttribute('aria-hidden')?.toLowerCase() === 'true')
-        return true;
+      const cached = ariaHiddenCache.get(node);
+      if (cached !== undefined) {
+        hidden = cached;
+        break;
+      }
+      trail.push(node);
+      if (node.getAttribute('aria-hidden')?.toLowerCase() === 'true') {
+        hidden = true;
+        break;
+      }
     }
-    return false;
+    for (const visited of trail)
+      ariaHiddenCache.set(visited, hidden);
+    return hidden;
   };
   const visibleTextOf = (element: SVGElement | HTMLElement): string => {
     if (subtreeHidden(element) || ancestorSubtreeHidden(element))
@@ -260,7 +316,8 @@ export function collectElementFacts(
     return sightedText(element);
   };
 
-  const axe = measureNames ? window.__mcpAccessibilityScannerAxe : undefined;
+  const shouldMeasureAnyName = measureNames && (!measureNameMask || measureNameMask.some(Boolean));
+  const axe = shouldMeasureAnyName ? window.__mcpAccessibilityScannerAxe : undefined;
   let measureName = (_element: Element): { accessibleName: string | null; nameMeasured: boolean } => ({ accessibleName: null, nameMeasured: false });
   let ownsAxeTree = false;
   if (typeof axe?.setup === 'function' && typeof axe?.commons?.text?.accessibleText === 'function') {
@@ -277,16 +334,19 @@ export function collectElementFacts(
     } catch {}
   }
 
-  const collect = (element: SVGElement | HTMLElement): ElementFacts => {
+  const collect = (element: SVGElement | HTMLElement, index: number): ElementFacts => {
     const rect = getRect(element);
     const style = getStyle(element);
     const text = visibleTextOf(element);
+    const nameResult = measureNames && (!measureNameMask || measureNameMask[index])
+      ? measureName(element)
+      : { accessibleName: null, nameMeasured: false };
     return {
       tagName: element.tagName.toLowerCase(),
       selector: `${element.tagName.toLowerCase()}${element.id ? `#${element.id}` : ''}${element.classList[0] ? `.${element.classList[0]}` : ''}`,
       visibleText: text ? text.slice(0, 200) : null,
       href: element instanceof HTMLAnchorElement && element.hasAttribute('href') ? element.href : null,
-      ...measureName(element),
+      ...nameResult,
       rect: {
         x: rect.x + window.scrollX,
         y: rect.y + window.scrollY,
@@ -308,33 +368,73 @@ export function collectElementFacts(
   }
 }
 
-type FrameWork = {
+/** @public */
+export async function readElementFacts(
+  target: Pick<playwright.Frame, 'evaluate'>,
+  input: ReadElementFactsInput,
+): Promise<ElementFacts[]> {
+  return target.evaluate(collectElementFacts, input);
+}
+
+type WorkPool = {
+  limit: number;
   inFlight: number;
   timedOut: number;
   waiters: Set<() => void>;
 };
 
-const frameWorkByPage = new WeakMap<playwright.Page, FrameWork>();
+type WorkResult<T> =
+  | { state: 'complete'; value: T }
+  | { state: 'timedOut'; pending: Promise<T> }
+  | { state: 'saturated' };
 
-function wakeFrameWork(frameWork: FrameWork) {
-  for (const wake of [...frameWork.waiters])
-    wake();
+const workPoolsByPage = new WeakMap<playwright.Page, { frames: WorkPool; refs: WorkPool }>();
+const workDeadline = Symbol('screen-reader work deadline');
+
+function createWorkPool(limit: number): WorkPool {
+  return { limit, inFlight: 0, timedOut: 0, waiters: new Set() };
 }
 
-async function reserveFrameWork(frameWork: FrameWork): Promise<boolean> {
-  while (frameWork.inFlight >= frameConcurrency) {
-    if (frameWork.timedOut >= frameConcurrency)
-      return false;
-    await new Promise<void>(resolve => {
-      const wake = () => {
-        frameWork.waiters.delete(wake);
-        resolve();
-      };
-      frameWork.waiters.add(wake);
-    });
+function wakeWorkPool(pool: WorkPool) {
+  for (const wake of pool.waiters)
+    wake();
+  pool.waiters.clear();
+}
+
+async function runBoundedWork<T>(
+  pool: WorkPool,
+  start: () => Promise<T>,
+  fallback: T,
+  timeoutMs: number,
+): Promise<WorkResult<T>> {
+  while (pool.inFlight >= pool.limit) {
+    if (pool.timedOut >= pool.limit)
+      return { state: 'saturated' };
+    await new Promise<void>(resolve => pool.waiters.add(resolve));
   }
-  frameWork.inFlight++;
-  return true;
+
+  pool.inFlight++;
+  let settled = false;
+  let timedOut = false;
+  const pending = Promise.resolve().then(start).catch(() => fallback).then(value => {
+    settled = true;
+    pool.inFlight--;
+    if (timedOut)
+      pool.timedOut--;
+    wakeWorkPool(pool);
+    return value;
+  });
+
+  const result = await withFrameTimeout<T | typeof workDeadline>(pending, workDeadline, timeoutMs);
+  if (result !== workDeadline)
+    return { state: 'complete', value: result };
+  if (!settled) {
+    timedOut = true;
+    pool.timedOut++;
+    if (pool.timedOut === pool.limit)
+      wakeWorkPool(pool);
+  }
+  return { state: 'timedOut', pending };
 }
 
 export async function measureScreenReaderElements(
@@ -344,70 +444,63 @@ export async function measureScreenReaderElements(
 ): Promise<ScreenReaderMeasurement> {
   const refIndexes = ariaNodes.flatMap((node, index) => node.ref ? [index] : []);
   type Measured = { index: number; handle: playwright.ElementHandle<SVGElement | HTMLElement> };
-  const onlyFrame = page.frames().length === 1 ? page.mainFrame() : null;
   const factsByIndex = new Map<number, ElementFacts>();
   const axeByFrame = new Map<playwright.Frame, boolean>();
   const unavailableFrames = new Set<playwright.Frame>();
   let unmeasuredNames = 0;
-  const analyzedIndexes: number[] = [];
+  let analyzedElements = 0;
   let resolvedCount = 0;
   let reachable = 0;
-  const frameWork = frameWorkByPage.get(page) ?? { inFlight: 0, timedOut: 0, waiters: new Set() };
-  frameWorkByPage.set(page, frameWork);
+  const pools = workPoolsByPage.get(page) ?? { frames: createWorkPool(frameConcurrency), refs: createWorkPool(measureChunkSize) };
+  workPoolsByPage.set(page, pools);
   let frameWorkSaturated = false;
+  let refWorkSaturated = false;
 
-  const runFrameWork = async <T>(
-    start: () => Promise<T>,
-    fallback: T,
-    frame: playwright.Frame,
-    onSettled?: (value: T, timedOut: boolean) => void,
-  ) => {
-    if (!await reserveFrameWork(frameWork)) {
-      frameWorkSaturated = true;
-      return { value: fallback, timedOut: false, started: false };
-    }
-    let settled = false;
-    let timedOut = false;
-    const work = Promise.resolve().then(start).catch(() => fallback).then(value => {
-      settled = true;
-      frameWork.inFlight--;
-      if (timedOut)
-        frameWork.timedOut--;
-      wakeFrameWork(frameWork);
-      onSettled?.(value, timedOut);
-      return value;
-    });
-    const value = await withFrameTimeout(work, fallback, frameReadTimeoutMs(frame));
-    if (!settled) {
-      timedOut = true;
-      frameWork.timedOut++;
-      wakeFrameWork(frameWork);
-    }
-    return { value, timedOut: !settled, started: true };
+  const runFrameWork = async <T>(start: () => Promise<T>, fallback: T, frame: playwright.Frame) => {
+    const result = await runBoundedWork(pools.frames, start, fallback, frameReadTimeoutMs(frame));
+    frameWorkSaturated ||= result.state === 'saturated';
+    return result;
   };
 
   const disposeHandles = (handles: readonly playwright.ElementHandle[]) => {
     void Promise.all(handles.map(handle => handle.dispose().catch(() => undefined)));
   };
 
-  const resolveRefHandles = (chunk: number[]) => Promise.all(chunk.map(index =>
-    page.locator(`aria-ref=${ariaNodes[index].ref}`).elementHandle({ timeout: refResolutionTimeoutMs }).catch(() => null)));
+  const resolveRefHandle = async (ref: string) => {
+    const lookup = await runBoundedWork(pools.refs, () => {
+      analyzedElements++;
+      return page.$(`aria-ref=${ref}`);
+    }, null, refResolutionTimeoutMs);
+    if (lookup.state === 'complete')
+      return lookup.value;
+    if (lookup.state === 'timedOut') {
+      void lookup.pending.then(handle => {
+        if (handle)
+          disposeHandles([handle]);
+      });
+    } else {
+      refWorkSaturated = true;
+    }
+    return null;
+  };
+
+  const resolveRefHandles = (chunk: number[]) => Promise.all(chunk.map(index => resolveRefHandle(ariaNodes[index].ref!)));
 
   const ownerFramesOf = async (handles: (playwright.ElementHandle<SVGElement | HTMLElement> | null)[]) => {
-    if (onlyFrame)
-      return handles.map(handle => handle ? onlyFrame : null);
-    return await withConcurrency(handles, async handle => {
+    const mainFrame = page.mainFrame();
+    if (page.frames().length === 1)
+      return handles.map(handle => handle ? mainFrame : null);
+    return withConcurrency(handles, async handle => {
       if (!handle)
         return null;
-      const lookup = await runFrameWork(
-          () => handle.ownerFrame(), null, page.mainFrame(),
-          (owner, timedOut) => {
-            if (!owner || timedOut)
-              disposeHandles([handle]);
-          });
-      if (!lookup.started)
+      const lookup = await runFrameWork(() => handle.ownerFrame(), null, mainFrame);
+      if (lookup.state === 'complete' && lookup.value)
+        return lookup.value;
+      if (lookup.state === 'timedOut')
+        void lookup.pending.then(() => disposeHandles([handle]));
+      else
         disposeHandles([handle]);
-      return lookup.started && !lookup.timedOut ? lookup.value : null;
+      return null;
     });
   };
 
@@ -428,19 +521,16 @@ export async function measureScreenReaderElements(
     const known = axeByFrame.get(frame);
     if (known !== undefined)
       return known;
-    const installation = await runFrameWork(
-        () => injectAxeForNames(frame), false, frame,
-        (installed, timedOut) => {
-          if (timedOut) {
-            axeByFrame.set(frame, installed);
-            unavailableFrames.delete(frame);
-          }
-        });
-    if (!installation.started || installation.timedOut) {
-      if (installation.timedOut)
-        unavailableFrames.add(frame);
-      return undefined;
+    const installation = await runFrameWork(() => injectAxeForNames(frame), false, frame);
+    if (installation.state === 'timedOut') {
+      unavailableFrames.add(frame);
+      void installation.pending.then(installed => {
+        axeByFrame.set(frame, installed);
+        unavailableFrames.delete(frame);
+      });
     }
+    if (installation.state !== 'complete')
+      return undefined;
     axeByFrame.set(frame, installation.value);
     return installation.value;
   };
@@ -451,31 +541,34 @@ export async function measureScreenReaderElements(
       disposeHandles(batchHandles);
       return;
     }
-    const measureNames = options.checkNames ? await ensureAxeForNames(frame) : false;
+    const nameMask = options.checkNames
+      ? batch.map(entry => options.needsName ? options.needsName(entry.index) : true)
+      : undefined;
+    const batchNeedsNames = !!nameMask?.some(Boolean);
+    const measureNames = batchNeedsNames ? await ensureAxeForNames(frame) : false;
     if (measureNames === undefined) {
       disposeHandles(batchHandles);
       return;
     }
-    const collected = await runFrameWork(
-        () => frame.evaluate(collectElementFacts, { elements: batchHandles, measureNames }), null, frame,
-        (facts, timedOut) => {
-          if (facts && timedOut)
-            unavailableFrames.delete(frame);
-          disposeHandles(batchHandles);
-        });
-    if (!collected.started) {
-      disposeHandles(batchHandles);
-      return;
-    }
-    if (collected.timedOut) {
+    const input = measureNames && nameMask
+      ? { elements: batchHandles, measureNames, measureNameMask: nameMask }
+      : { elements: batchHandles, measureNames };
+    const collected = await runFrameWork(() => readElementFacts(frame, input), null, frame);
+    if (collected.state === 'timedOut') {
       unavailableFrames.add(frame);
+      void collected.pending.then(facts => {
+        if (facts)
+          unavailableFrames.delete(frame);
+        disposeHandles(batchHandles);
+      });
       return;
     }
-    const facts = collected.value;
+    disposeHandles(batchHandles);
+    const facts = collected.state === 'complete' ? collected.value : null;
     if (!facts)
       return;
-    if (options.checkNames)
-      unmeasuredNames += facts.filter(fact => !fact.nameMeasured).length;
+    if (batchNeedsNames && nameMask)
+      unmeasuredNames += facts.filter((fact, position) => nameMask[position] && !fact.nameMeasured).length;
     batch.forEach((entry, position) => factsByIndex.set(entry.index, facts[position]));
     resolvedCount += batch.length;
     reachable += facts.filter(fact => !fact.ariaHidden).length;
@@ -489,28 +582,32 @@ export async function measureScreenReaderElements(
     const handles = await resolveRefHandles(chunk);
     const owners = await ownerFramesOf(handles);
     await withConcurrency([...groupByFrame(chunk, handles, owners)], measureFrameBatch);
-    analyzedIndexes.push(...chunk);
     await options.reportProgress?.({
-      progress: analyzedIndexes.length,
+      progress: analyzedElements,
       total: measureCeiling,
-      message: `Measured ${analyzedIndexes.length} accessibility tree elements (${Math.min(reachable, options.maxElements)}/${options.maxElements} screen-reader-reachable)`,
+      message: `Measured ${analyzedElements} accessibility tree elements (${Math.min(reachable, options.maxElements)}/${options.maxElements} screen-reader-reachable)`,
     });
-    if (frameWorkSaturated)
+    if (frameWorkSaturated || refWorkSaturated)
       break;
   }
 
-  const unresolvedCount = analyzedIndexes.length - resolvedCount;
-  if (analyzedIndexes.length && !resolvedCount)
-    throw new Error(`None of the ${analyzedIndexes.length} accessibility tree elements could be resolved to DOM nodes — the page re-rendered between the snapshot and measurement, or stopped answering, so nothing was evaluated. Wait for the page to settle (or trigger the rerender first) and run audit_screen_reader again.`);
+  const unresolvedCount = analyzedElements - resolvedCount;
+  if (!analyzedElements && refWorkSaturated)
+    throw new Error(`Timed-out ref lookups reached the ${pools.refs.limit}-operation limit. No new lookups could start, so nothing was evaluated. Re-run audit_screen_reader once the page is responding.`);
+  if (analyzedElements && !resolvedCount) {
+    const refLimit = refWorkSaturated ? ` Timed-out ref lookups reached the ${pools.refs.limit}-operation limit.` : '';
+    throw new Error(`None of the ${analyzedElements} accessibility tree elements could be resolved to DOM nodes — the page re-rendered between the snapshot and measurement, or stopped answering, so nothing was evaluated.${refLimit} Wait for the page to settle (or trigger the rerender first) and run audit_screen_reader again.`);
+  }
   return {
     factsByIndex,
     totalElements: refIndexes.length,
-    analyzedElements: analyzedIndexes.length,
+    analyzedElements,
     limitations: {
       unresolvedElements: unresolvedCount,
       unmeasuredNames,
-      truncatedElements: refIndexes.length - analyzedIndexes.length,
-      stoppedAtFrameWorkLimit: frameWorkSaturated ? frameConcurrency : null,
+      truncatedElements: refIndexes.length - analyzedElements,
+      stoppedAtFrameWorkLimit: frameWorkSaturated ? pools.frames.limit : null,
+      stoppedAtRefWorkLimit: refWorkSaturated ? pools.refs.limit : null,
     },
   };
 }

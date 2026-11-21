@@ -29,7 +29,6 @@ import type { ModalState } from './tools/tool.js';
 
 import type { Context } from './context.js';
 
-/** @public */
 export const TabEvents = {
   modalState: 'modalState'
 };
@@ -50,8 +49,8 @@ export type TabSnapshot = {
 
 class StaleAriaSnapshotError extends Error {}
 
-const defaultActionTimeoutMs = 6000;
-const defaultNavigationTimeoutMs = 30000;
+const defaultActionTimeoutMs = 5000;
+const defaultNavigationTimeoutMs = 60000;
 const fallbackOperationTimeoutMs = 5000;
 const maxRetainedRequests = 200;
 const maxDownloadErrorBytes = 2000;

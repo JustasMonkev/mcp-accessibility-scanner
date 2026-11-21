@@ -406,13 +406,13 @@ function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize,
       if (candidate === element)
         continue;
       const other = candidate.getBoundingClientRect();
-      if (!isPointerTarget(candidate, other))
+      if (other.width <= 0 || other.height <= 0)
         continue;
       const outOfRange = other.right < rect.left - reach
         || other.left > rect.right + reach
         || other.bottom < rect.top - reach
         || other.top > rect.bottom + reach;
-      if (outOfRange)
+      if (outOfRange || candidate.matches(':disabled'))
         continue;
       neighbors.push({ x: other.x, y: other.y, width: other.width, height: other.height });
       if (neighbors.length >= maxNeighborTargets)
@@ -566,35 +566,37 @@ function createFocusReader(tab: Tab, options: Pick<KeyboardAuditOptions, 'checkT
   let focusState: JSHandle<FocusIdentityState> | undefined;
   let documentId = 0;
 
-  const discardStateIfDocumentChanged = async () => {
-    if (!focusState)
-      return;
-    try {
-      await focusState.evaluate(() => true);
-    } catch (error) {
-      if (!(error instanceof Error) || !executionContextGone.test(error.message))
-        throw error;
-      await focusState.dispose();
-      focusState = undefined;
+  const ensureFocusState = async () => {
+    if (!focusState) {
+      focusState = await tab.page.evaluateHandle(() => ({ identities: new WeakMap<Element, number>(), nextId: 0 }));
+      documentId++;
     }
+    return focusState;
   };
+
+  const evaluateFocusPoint = (state: JSHandle<FocusIdentityState>) => tab.page.evaluate(collectFocusPoint, {
+    checkTargetSize: options.checkTargetSize,
+    checkFocusObscured: options.checkFocusObscured,
+    minTargetSize: MIN_TARGET_SIZE_PX,
+    maxNeighborTargets,
+    maxTextLength: maxFocusTextLength,
+    focusState: state,
+    documentId,
+  });
 
   return {
     read: async (): Promise<FocusPoint> => {
-      await discardStateIfDocumentChanged();
-      if (!focusState) {
-        focusState = await tab.page.evaluateHandle(() => ({ identities: new WeakMap<Element, number>(), nextId: 0 }));
-        documentId++;
+      const reused = !!focusState;
+      const state = await ensureFocusState();
+      try {
+        return await evaluateFocusPoint(state);
+      } catch (error) {
+        if (!reused || !(error instanceof Error) || (!executionContextGone.test(error.message) && !documentReplaced.test(error.message)))
+          throw error;
+        await focusState?.dispose().catch(() => undefined);
+        focusState = undefined;
+        return await evaluateFocusPoint(await ensureFocusState());
       }
-      return await tab.page.evaluate(collectFocusPoint, {
-        checkTargetSize: options.checkTargetSize,
-        checkFocusObscured: options.checkFocusObscured,
-        minTargetSize: MIN_TARGET_SIZE_PX,
-        maxNeighborTargets,
-        maxTextLength: maxFocusTextLength,
-        focusState,
-        documentId,
-      });
     },
     dispose: async () => {
       await focusState?.dispose();

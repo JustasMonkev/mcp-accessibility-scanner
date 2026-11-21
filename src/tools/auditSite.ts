@@ -702,7 +702,7 @@ class SessionLossDetector {
   private readonly _scopeUrls: string[];
   private readonly _scope: Set<string>;
   private readonly _signal?: AbortSignal;
-  private readonly _initialIdentities: Set<string>;
+  private readonly _untrackedInitialIdentities: Set<string>;
   private readonly _baseline: Map<string, CrawlCookie>;
   private readonly _activeSinceCheck = new Map<number, string>();
   private readonly _inFlight = new Set<number>();
@@ -712,7 +712,7 @@ class SessionLossDetector {
     this._signal = signal;
     this._scopeUrls = scopeUrls;
     this._scope = new Set(scopeUrls);
-    this._initialIdentities = initialIdentities;
+    this._untrackedInitialIdentities = new Set([...initialIdentities].filter(identity => !baseline.has(identity)));
     this._baseline = baseline;
   }
 
@@ -727,9 +727,11 @@ class SessionLossDetector {
       return;
     this._scope.add(cookieUrl);
     this._scopeUrls.push(cookieUrl);
+    if (!this._untrackedInitialIdentities.size)
+      return;
     const discovered = await rejectOnAbort(() => readCrawlCookies(page, [cookieUrl]).catch(() => null), this._signal);
     for (const [identity, cookie] of discovered ?? []) {
-      if (this._initialIdentities.has(identity) && !this._baseline.has(identity))
+      if (this._untrackedInitialIdentities.delete(identity))
         this._baseline.set(identity, cookie);
     }
   }
@@ -767,7 +769,7 @@ class SessionLossDetector {
     this.losses.push(concurrentUrls.length ? { url: loss.url, cookies: loss.cookies, concurrentUrls } : { url: loss.url, cookies: loss.cookies });
     for (const identity of loss.identities) {
       this._baseline.delete(identity);
-      this._initialIdentities.delete(identity);
+      this._untrackedInitialIdentities.delete(identity);
     }
   }
 }
@@ -775,8 +777,8 @@ class SessionLossDetector {
 function assertSitemapFetchSupported(context: Tab['context']): void {
   const browser = context.config.browser;
   const factory = context.options.browserContextFactory;
-  if (browser.remoteEndpoint || browser.cdpEndpoint || ('name' in factory && factory.name === 'vscode'))
-    throw new Error('Sitemap fetches run on the MCP host and do not support remoteEndpoint, cdpEndpoint, or browser_connect providers. Use the provided URL strategy with an attached browser.');
+  if (browser.remoteEndpoint || browser.cdpEndpoint || factory.sharedContext || ('name' in factory && factory.name === 'vscode'))
+    throw new Error('Sitemap fetches run on the MCP host and do not support remoteEndpoint, cdpEndpoint, --extension, browser_connect providers, or custom contexts from createConnection(config, contextGetter). Use the provided URL strategy instead.');
   if (browser.launchOptions.proxy || browser.contextOptions.proxy)
     throw new Error('Sitemap fetches do not support browser proxies. Use the provided URL strategy when a proxy is required.');
 }

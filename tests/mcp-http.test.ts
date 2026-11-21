@@ -73,6 +73,21 @@ describe('mcp http transport hardening', () => {
     expect(['127.0.0.1', '::1']).toContain(address.address);
   });
 
+  it('rejects immediately when startHttpServer receives an aborted signal and cleans up the abort listener after listen', async () => {
+    const preAborted = new AbortController();
+    preAborted.abort();
+    await expect(startHttpServer({ port: 0 }, preAborted.signal)).rejects.toThrow('Aborted');
+
+    const controller = new AbortController();
+    const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
+    const server = await startHttpServer({ port: 0 }, controller.signal);
+    servers.add(server);
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+
+    controller.abort();
+    expect(server.listening).toBe(true);
+  });
+
   it('reports wildcard bind addresses without rewriting them to localhost', () => {
     expect(httpAddressToString({ address: '0.0.0.0', family: 'IPv4', port: 1234 })).toBe('http://0.0.0.0:1234');
     expect(httpAddressToString({ address: '::', family: 'IPv6', port: 1234 })).toBe('http://[::]:1234');
@@ -1211,7 +1226,7 @@ describe('mcp http transport hardening', () => {
         const result = resultOf(response, 1);
         expect(result.isError).not.toBe(true);
         expect(createBrowserContext).toHaveBeenCalledTimes(1);
-        expect(createBrowserContext.mock.calls[0][3]).toMatchObject({ browserSession: true });
+        expect(createBrowserContext.mock.calls[0][2]).toMatchObject({ browserSession: true });
       } finally {
         await Context.disposeAll();
       }
@@ -1355,6 +1370,25 @@ describe('mcp http transport hardening', () => {
       // Backends with a runtime-mutable tool list (proxy context switch,
       // VS Code host) advertise no hint, which must surface as ttlMs: 0.
       const { port } = await startServer(probeFactory);
+
+      const { statusCode, json } = await modernPost(port,
+          { jsonrpc: '2.0', id: 1, method: 'tools/list', params: { _meta: envelope } },
+          { 'Mcp-Method': 'tools/list', 'Mcp-Name': 'raw-modern' });
+
+      expect(statusCode).toBe(200);
+      expect(json.result.ttlMs).toBe(0);
+      expect(json.result.cacheScope).toBe('private');
+    });
+
+    it('suppresses toolListCacheHint when the backend declares dynamicToolList', async () => {
+      const { port } = await startServer({
+        ...probeFactory,
+        toolListCacheHint: { ttlMs: 3600000, cacheScope: 'private' },
+        create: () => ({
+          ...probeFactory.create(),
+          dynamicToolList: true,
+        }),
+      });
 
       const { statusCode, json } = await modernPost(port,
           { jsonrpc: '2.0', id: 1, method: 'tools/list', params: { _meta: envelope } },

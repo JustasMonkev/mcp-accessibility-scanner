@@ -39,13 +39,12 @@ const versions = {
 // Only the measured paired pin may retain these upstream deviations. An upgrade
 // must pass the intended behavior instead of inheriting a known failure.
 const paired = versions.playwright === versions.playwrightCore ? versions.playwright : undefined;
-const pinned = paired === '1.63.0';
 // Still present on 1.65.0: Linux WebKit lost aborts reproduced there, and
 // 1.65.0 keeps macOS 14 on the frozen r2251 bundle while still sending the
 // PushAPIEnabled setting that bundle rejects.
 const knownOn = (...measured: string[]) => paired !== undefined && measured.includes(paired);
 const mac14WebKit = browserName === 'webkit' && process.platform === 'darwin' && os.release().startsWith('23.');
-const knownPageSetupFailure = knownOn('1.63.0', '1.65.0') && mac14WebKit;
+const knownPageSetupFailure = knownOn('1.65.0') && mac14WebKit;
 let browser: playwright.Browser | undefined;
 let backend: BrowserServerBackend | undefined;
 let directory: string | undefined;
@@ -115,11 +114,8 @@ it.skipIf(browserName !== 'chromium')('measures actual fonts and layout across M
     await page.reload();
     expect(await fontMetrics(page)).toEqual(before);
   }
-  // Installed fonts vary even within one OS/channel. The affected pin reports
-  // its actual changes; an upgrade must preserve every sampled font/geometry.
-  process.stdout.write(JSON.stringify({ changedFontFamilies: changed, pinnedFontDiagnostic: pinned }) + '\n');
-  if (!pinned)
-    expect(changed).toEqual([]);
+  process.stdout.write(JSON.stringify({ changedFontFamilies: changed }) + '\n');
+  expect(changed).toEqual([]);
 });
 
 it.skipIf(knownPageSetupFailure)('records Option-key text insertion and focused/unfocused nested frames (#42958)', async () => {
@@ -154,9 +150,8 @@ it.skipIf(knownPageSetupFailure)('records Option-key text insertion and focused/
   await nested.locator('input').focus();
   const nestedFocused = await focus();
   process.stdout.write(JSON.stringify({ typed, events, topFocused, childFocused, nestedFocused }) + '\n');
-  const knownOptionInsertion = pinned && browserName === 'firefox' && process.platform === 'darwin';
-  expect(typed).toBe(knownOptionInsertion ? 'a' : '');
-  expect(events.some((event: { type: string }) => event.type === 'input')).toBe(knownOptionInsertion);
+  expect(typed).toBe('');
+  expect(events.some((event: { type: string }) => event.type === 'input')).toBe(false);
   expect(topFocused).toEqual([true, false, false]);
   expect(childFocused).toEqual([true, true, false]);
   expect(nestedFocused).toEqual([true, true, true]);
@@ -211,7 +206,7 @@ it.skipIf(knownPageSetupFailure)('delivers navigation errors, bounds stalled loa
             // Linux WebKit with 1.63.0 and still reproduces with 1.65.0. Only its
             // served-but-uncommitted signature may time out; a containing fix
             // must deliver cancellation promptly.
-            const knownTimeout = knownOn('1.63.0', '1.65.0') && process.platform === 'linux' && error instanceof playwright.errors.TimeoutError;
+            const knownTimeout = knownOn('1.65.0') && process.platform === 'linux' && error instanceof playwright.errors.TimeoutError;
             const deliveredAbort = error instanceof Error && error.message.startsWith('page.goto: Load request cancelled');
             if (!knownTimeout && !deliveredAbort)
               throw error;

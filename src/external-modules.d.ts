@@ -41,7 +41,6 @@ declare module 'playwright-core/lib/coreBundle' {
       httpRequest(options: { url: string; headers: Record<string, string> }, onResponse: (response: import('node:http').IncomingMessage) => void, onError: (error: Error) => void): { cancel(error?: Error): void };
     };
     readonly iso: {
-      asLocator(lang: string, selector: string): string;
       urlMatches(baseURL: string | undefined, urlString: string, match: string): boolean;
       getMimeTypeForPath(path: string): string | null;
     };

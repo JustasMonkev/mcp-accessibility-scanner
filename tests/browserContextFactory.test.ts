@@ -65,7 +65,6 @@ vi.mock('playwright-core/lib/coreBundle', async () => {
     default: {
       registry: { registryDirectory: path.join(os.tmpdir(), 'mcp-a11y-test-registry'), registry: {} },
       server: { startTraceViewerServer: startTraceViewerServerMock },
-      iso: { asLocator: () => '' },
     },
   };
 });
@@ -175,7 +174,7 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     await result.close();
 
@@ -196,7 +195,7 @@ describe('browserContextFactory', () => {
     // Cookie-only states are also unsafe: capture can visit previously seen origins.
     for (const storageState of ['/missing/auth.json', { cookies: [], origins: [] }]) {
       const config = await resolveConfig({ browser: { ...browserOptions, contextOptions: { storageState } } });
-      await expect(contextFactory(config).createContext({ name: 'vitest' }, new AbortController().signal, undefined))
+      await expect(contextFactory(config).createContext({ name: 'vitest' }, new AbortController().signal))
           .rejects.toThrow(/Cannot apply --storage-state.*existing browser context.*No storage snapshot or reset/);
     }
     expect(browserContext.storageState).not.toHaveBeenCalled();
@@ -223,7 +222,7 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     expect(connectOverCDP).toHaveBeenCalledWith('http://127.0.0.1:9222', {
       headers: {
@@ -256,7 +255,7 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     expect(connectOverCDP).toHaveBeenLastCalledWith('http://127.0.0.1:9222', {
       headers: {
@@ -294,7 +293,7 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     expect(spawnMock).toHaveBeenCalledWith('open', ['-a', 'Slack', '--args', '--remote-debugging-port=9222'], expect.objectContaining({
       cwd: '/tmp/slack',
@@ -335,7 +334,7 @@ describe('browserContextFactory', () => {
 
     const factory = contextFactory(config);
 
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow('Timed out waiting for CDP endpoint http://127.0.0.1:9222.');
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal)).rejects.toThrow('Timed out waiting for CDP endpoint http://127.0.0.1:9222.');
     expect(childProcess.kill).toHaveBeenCalledWith('SIGTERM');
   });
 
@@ -351,7 +350,7 @@ describe('browserContextFactory', () => {
       spawnMock.mockReturnValue(createMockChildProcess());
       connectOverCDP.mockResolvedValue(createMockBrowser(createMockBrowserContext()));
       const factory = contextFactory(await resolveConfig({ browser: { cdpTimeout, cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs } } }));
-      await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+      await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
       const timeout = connectOverCDP.mock.calls[0][1].timeout;
       expect(timeout).toBeGreaterThan(0);
       check(timeout);
@@ -370,7 +369,7 @@ describe('browserContextFactory', () => {
     ])('%s an endpoint attach timeout', async (_label, callLog, explained) => {
       connectOverCDP.mockRejectedValue(timeoutError(callLog));
       const factory = contextFactory(await resolveConfig({ browser: { cdpEndpoint: 'http://127.0.0.1:9222', cdpTimeout: 1000 } }));
-      const error = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined).catch(error => error);
+      const error = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal).catch(error => error);
       expect(error.name).toBe('TimeoutError');
       expect(error.message).toContain('Timeout 1000ms exceeded.');
       expect(error.message.includes(attachHint)).toBe(explained);
@@ -379,7 +378,7 @@ describe('browserContextFactory', () => {
     it('leaves other endpoint errors unchanged', async () => {
       connectOverCDP.mockRejectedValue(new Error('browserType.connectOverCDP: connect ECONNREFUSED 127.0.0.1:9222'));
       const factory = contextFactory(await resolveConfig({ browser: { cdpEndpoint: 'http://127.0.0.1:9222' } }));
-      await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow(/^browserType\.connectOverCDP: connect ECONNREFUSED 127\.0\.0\.1:9222$/);
+      await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal)).rejects.toThrow(/^browserType\.connectOverCDP: connect ECONNREFUSED 127\.0\.0\.1:9222$/);
     });
 
     it.each([
@@ -393,7 +392,7 @@ describe('browserContextFactory', () => {
       const [firstError, lastError] = Array.isArray(errors) ? errors : [errors, errors];
       connectOverCDP.mockRejectedValueOnce(firstError).mockRejectedValue(lastError);
       const factory = contextFactory(await resolveConfig({ browser: { cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 10 } } }));
-      const error = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined).catch(error => error);
+      const error = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal).catch(error => error);
       expect(error.message.startsWith('Timed out waiting for CDP endpoint http://127.0.0.1:9222.')).toBe(true);
       expect(error.message.includes(attachHint)).toBe(explained);
       expect(childProcess.kill).toHaveBeenCalledWith('SIGTERM');
@@ -441,10 +440,10 @@ describe('browserContextFactory', () => {
       const clientInfo = { name: 'vitest', version: '1.0.0' };
       const signal = new AbortController().signal;
 
-      const pendingA = factory.createContext(clientInfo, signal, undefined);
+      const pendingA = factory.createContext(clientInfo, signal);
       await vi.waitFor(() => expect(connectOverCDP).toHaveBeenCalledWith('http://127.0.0.1:9400', expect.anything()));
 
-      const sessionB = await factory.createContext(clientInfo, signal, undefined);
+      const sessionB = await factory.createContext(clientInfo, signal);
       releaseA!(browserA);
       const sessionA = await pendingA;
 
@@ -487,11 +486,11 @@ describe('browserContextFactory', () => {
       const clientInfo = { name: 'vitest', version: '1.0.0' };
       const signal = new AbortController().signal;
 
-      const first = await factory.createContext(clientInfo, signal, undefined);
+      const first = await factory.createContext(clientInfo, signal);
       await first.close();
       // The same port coming back from the OS after the first session is done
       // must be usable again, not skipped as still-reserved.
-      const second = await factory.createContext(clientInfo, signal, undefined);
+      const second = await factory.createContext(clientInfo, signal);
       expect(spawnMock).toHaveBeenCalledTimes(2);
       expect(spawnMock).toHaveBeenLastCalledWith('open', ['--remote-debugging-port=9400'], expect.anything());
       await second.close();
@@ -524,8 +523,8 @@ describe('browserContextFactory', () => {
     const clientInfo = { name: 'vitest', version: '1.0.0' };
     const signal = new AbortController().signal;
 
-    const first = await factory.createContext(clientInfo, signal, undefined);
-    await expect(factory.createContext(clientInfo, signal, undefined))
+    const first = await factory.createContext(clientInfo, signal);
+    await expect(factory.createContext(clientInfo, signal))
         .rejects.toThrow(/pinned --cdp-launch-port 9222 already serves a launched application/);
     // The doomed launch was refused before spawning another child.
     expect(spawnMock).toHaveBeenCalledTimes(1);
@@ -534,7 +533,7 @@ describe('browserContextFactory', () => {
     // serves the next context again.
     await first.close();
     expect(childA.kill).toHaveBeenCalledWith('SIGTERM');
-    const second = await factory.createContext(clientInfo, signal, undefined);
+    const second = await factory.createContext(clientInfo, signal);
     expect(spawnMock).toHaveBeenCalledTimes(2);
     await second.close();
   });
@@ -550,11 +549,11 @@ describe('browserContextFactory', () => {
     }));
     const clientInfo = { name: 'vitest', version: '1.0.0' };
     const signal = new AbortController().signal;
-    const first = await factory.createContext(clientInfo, signal, undefined);
+    const first = await factory.createContext(clientInfo, signal);
     await first.close();
     let settled = false;
     let second: Awaited<ReturnType<typeof factory.createContext>> | undefined;
-    const pending = factory.createContext(clientInfo, signal, undefined).then(result => {
+    const pending = factory.createContext(clientInfo, signal).then(result => {
       second = result;
       settled = true;
       return null;
@@ -588,13 +587,13 @@ describe('browserContextFactory', () => {
     }));
     const clientInfo = { name: 'vitest', version: '1.0.0' };
     const signal = new AbortController().signal;
-    const first = await factory.createContext(clientInfo, signal, undefined);
+    const first = await factory.createContext(clientInfo, signal);
     let second: Awaited<ReturnType<typeof factory.createContext>> | undefined;
     try {
       expect(() => childA.emit('error', new Error('spawn failed'))).not.toThrow();
-      second = await factory.createContext(clientInfo, signal, undefined);
+      second = await factory.createContext(clientInfo, signal);
       await first.close();
-      await expect(factory.createContext(clientInfo, signal, undefined))
+      await expect(factory.createContext(clientInfo, signal))
           .rejects.toThrow(/pinned --cdp-launch-port 9222 already serves a launched application/);
       expect(spawnMock).toHaveBeenCalledTimes(2);
     } finally {
@@ -614,7 +613,7 @@ describe('browserContextFactory', () => {
 
     const factory = contextFactory(config);
 
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
         .rejects.toThrow('Browser specified in your config is not installed; expected executable at /ms-playwright/chromium-1234/chrome-linux/chrome. Either install it (likely) or change the config.');
   });
 
@@ -625,7 +624,7 @@ describe('browserContextFactory', () => {
 
     const factory = contextFactory(config);
 
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
         .rejects.toThrow('Browser specified in your config is not installed; expected executable at /ms-playwright/chromium-1234/chrome-linux/chrome. Either install it (likely) or change the config.');
   });
 
@@ -636,7 +635,7 @@ describe('browserContextFactory', () => {
 
     const factory = contextFactory(config);
 
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
         .rejects.toThrow('Browser specified in your config is not installed. Either install it (likely) or change the config.');
   });
 
@@ -654,7 +653,7 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     expect(vi.mocked(playwright.chromium.launchPersistentContext).mock.calls[0][1]).not.toHaveProperty('storageState');
     expect(browserContext.setStorageState).toHaveBeenCalledWith('/tmp/auth.json');
@@ -667,7 +666,7 @@ describe('browserContextFactory', () => {
 
     // One server can hold several live sessions: a second context must get its
     // own profile, or its setup would destroy the first one's running browser.
-    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
     const secondDir = vi.mocked(playwright.chromium.launchPersistentContext).mock.calls[1][0];
     expect(secondDir).not.toBe(userDataDir);
 
@@ -696,9 +695,9 @@ describe('browserContextFactory', () => {
 
       const clientInfo = { name: 'vitest', version: '1.0.0' };
       const signal = new AbortController().signal;
-      const defaultResult = await factory.createContext(clientInfo, signal, undefined);
-      const first = await factory.createContext(clientInfo, signal, undefined, { browserSession: true });
-      const second = await factory.createContext(clientInfo, signal, undefined, { browserSession: true });
+      const defaultResult = await factory.createContext(clientInfo, signal);
+      const first = await factory.createContext(clientInfo, signal, { browserSession: true });
+      const second = await factory.createContext(clientInfo, signal, { browserSession: true });
 
       const dirs = vi.mocked(playwright.chromium.launchPersistentContext).mock.calls.map(([directory]) => directory);
       // The default context keeps the stable profile so sign-in state still
@@ -746,8 +745,8 @@ describe('browserContextFactory', () => {
       // Two concurrent default contexts: both must succeed instead of one
       // erroring on the profile lock.
       const [first, second] = await Promise.all([
-        factory.createContext(clientInfo, signal, undefined),
-        factory.createContext(clientInfo, signal, undefined),
+        factory.createContext(clientInfo, signal),
+        factory.createContext(clientInfo, signal),
       ]);
 
       const stableDir = path.join(profilesDir, stableProfileName());
@@ -761,7 +760,7 @@ describe('browserContextFactory', () => {
       const stableHolder = dirs[0] === stableDir ? first : second;
       const disposableHolder = stableHolder === first ? second : first;
       await stableHolder.close();
-      const third = await factory.createContext(clientInfo, signal, undefined);
+      const third = await factory.createContext(clientInfo, signal);
       expect(launchedDirs.get(third.browserContext)).toBe(stableDir);
 
       // The fallback profile is disposable and removed with its context; the
@@ -798,7 +797,7 @@ describe('browserContextFactory', () => {
       const signal = new AbortController().signal;
       const stableDir = path.join(profilesDir, stableProfileName());
 
-      const holder = await factory.createContext(clientInfo, signal, undefined);
+      const holder = await factory.createContext(clientInfo, signal);
       expect(launchedDirs.get(holder.browserContext)).toBe(stableDir);
       expect(holder.closeStarting).toBeDefined();
 
@@ -812,7 +811,7 @@ describe('browserContextFactory', () => {
       // A default claimant arriving mid-close is a successor, not genuine
       // concurrency: it must wait for the release instead of launching into
       // a disposable profile...
-      const pendingSuccessor = factory.createContext(clientInfo, signal, undefined);
+      const pendingSuccessor = factory.createContext(clientInfo, signal);
       for (let i = 0; i < 10; i++)
         await Promise.resolve();
       expect(vi.mocked(playwright.chromium.launchPersistentContext).mock.calls).toHaveLength(1);
@@ -856,12 +855,12 @@ describe('browserContextFactory', () => {
       const signal = new AbortController().signal;
 
       vi.spyOn(fs.promises, 'mkdir').mockRejectedValueOnce(new Error('EIO: volume unavailable'));
-      await expect(factory.createContext(clientInfo, signal, undefined)).rejects.toThrow('EIO: volume unavailable');
+      await expect(factory.createContext(clientInfo, signal)).rejects.toThrow('EIO: volume unavailable');
 
       // The failed attempt released both: the next default context allocates
       // the same port again (instead of spinning on a leaked reservation) and
       // gets the stable profile (instead of a -concurrent- fallback).
-      const result = await factory.createContext(clientInfo, signal, undefined);
+      const result = await factory.createContext(clientInfo, signal);
       expect(vi.mocked(playwright.chromium.launchPersistentContext).mock.calls[0][0])
           .toBe(path.join(profilesDir, stableProfileName()));
       await result.close();
@@ -894,9 +893,9 @@ describe('browserContextFactory', () => {
       // Restart parity: a fresh factory built from the same config in the
       // same workspace resolves to the same directory, so the profile's
       // sign-in state survives a server restart.
-      const first = await contextFactory(await resolveConfig({})).createContext(clientInfo, signal, undefined);
+      const first = await contextFactory(await resolveConfig({})).createContext(clientInfo, signal);
       await first.close();
-      const second = await contextFactory(await resolveConfig({})).createContext(clientInfo, signal, undefined);
+      const second = await contextFactory(await resolveConfig({})).createContext(clientInfo, signal);
       await second.close();
       expect(launchedDir(0)).toBe(path.join(profilesDir, stableProfileName()));
       expect(launchedDir(1)).toBe(launchedDir(0));
@@ -905,7 +904,7 @@ describe('browserContextFactory', () => {
       // profile: no ProcessSingleton contention, no inherited cookies.
       const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(path.join(os.tmpdir(), 'some-other-workspace'));
       try {
-        const other = await contextFactory(await resolveConfig({})).createContext(clientInfo, signal, undefined);
+        const other = await contextFactory(await resolveConfig({})).createContext(clientInfo, signal);
         await other.close();
       } finally {
         cwdSpy.mockRestore();
@@ -932,9 +931,9 @@ describe('browserContextFactory', () => {
       const clientInfo = { name: 'vitest', version: '1.0.0' };
       const signal = new AbortController().signal;
 
-      const first = await factory.createContext(clientInfo, signal, undefined, { browserSession: true });
+      const first = await factory.createContext(clientInfo, signal, { browserSession: true });
       await first.close();
-      const second = await factory.createContext(clientInfo, signal, undefined, { browserSession: true });
+      const second = await factory.createContext(clientInfo, signal, { browserSession: true });
       await second.close();
 
       expect(startTraceViewerServerMock).toHaveBeenCalledTimes(1);
@@ -970,8 +969,8 @@ describe('browserContextFactory', () => {
 
       // Both sessions allocate their port and reach the (gated) launch before
       // either resolves — the overwrite window of the old shared-config path.
-      const pendingA = factory.createContext(clientInfo, signal, undefined, { browserSession: true });
-      const pendingB = factory.createContext(clientInfo, signal, undefined, { browserSession: true });
+      const pendingA = factory.createContext(clientInfo, signal, { browserSession: true });
+      const pendingB = factory.createContext(clientInfo, signal, { browserSession: true });
       await vi.waitFor(() => expect(launchGates.length).toBe(2));
 
       const ports = vi.mocked(playwright.chromium.launchPersistentContext).mock.calls
@@ -1042,7 +1041,7 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     expect(startup.close).toHaveBeenCalledTimes(1);
     expect(startup.close.mock.invocationCallOrder[0]).toBeLessThan(browserContext.setStorageState.mock.invocationCallOrder[0]);
@@ -1066,7 +1065,7 @@ describe('browserContextFactory', () => {
 
     const factory = contextFactory(config);
 
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
         .rejects.toThrow('Browser specified in your config is not installed');
     const userDataDir = vi.mocked(playwright.chromium.launchPersistentContext).mock.calls[0][0];
     expect(userDataDir).toMatch(/-storage-state-[0-9a-f]+$/);
@@ -1082,7 +1081,7 @@ describe('browserContextFactory', () => {
     const config = await resolveConfig({});
     const factory = contextFactory(config);
 
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
         .rejects.toThrow('Browser specified in your config is not installed');
     expect(rmSpy).not.toHaveBeenCalled();
   });
@@ -1099,7 +1098,7 @@ describe('browserContextFactory', () => {
 
     const factory = contextFactory(config);
 
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
         .rejects.toThrow('--storage-state and --user-data-dir contradict each other');
     expect(playwright.chromium.launchPersistentContext).not.toHaveBeenCalled();
   });
@@ -1117,7 +1116,7 @@ describe('browserContextFactory', () => {
 
     const factory = contextFactory(config);
 
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
         .rejects.toThrow('ENOENT');
     expect(browserContext.close).toHaveBeenCalledTimes(1);
   });
@@ -1134,8 +1133,8 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
+    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     await second.close();
     expect(browser.close).not.toHaveBeenCalled();
@@ -1158,11 +1157,11 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     // The second session's context creation fails; the first session's live
     // connection must survive that cleanup.
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
         .rejects.toThrow('Target.createBrowserContext');
     expect(browser.close).not.toHaveBeenCalled();
   });
@@ -1183,14 +1182,14 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
     expect(first.browserContext).toBe(context1);
 
     // The created context closes externally; the memo must let go of it.
     const onClose = context1.on.mock.calls.find((call: any[]) => call[0] === 'close')?.[1];
     onClose?.();
 
-    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
     expect(browser.newContext).toHaveBeenCalledTimes(2);
     expect(second.browserContext).toBe(context2);
   });
@@ -1211,8 +1210,8 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
+    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     await first.close();
     expect(context1.close).toHaveBeenCalledTimes(1);
@@ -1239,13 +1238,13 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    const stale = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const stale = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     // The connection drops externally; the factory's cached browser resets.
     const disconnected = browser1.on.mock.calls.find((call: any[]) => call[0] === 'disconnected')?.[1];
     disconnected?.();
 
-    const fresh = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const fresh = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
     expect(fresh.browserContext).toBe(context2);
 
     // The fresh session is the new browser's only user — closing it must
@@ -1278,11 +1277,11 @@ describe('browserContextFactory', () => {
 
     const factory = contextFactory(config);
     // Session A is creating a fresh fallback context.
-    const pendingA = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const pendingA = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
     await vi.waitFor(() => expect(browser.newContext).toHaveBeenCalled());
 
     // Session B fails context creation while A is still in flight.
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
         .rejects.toThrow('Cannot apply --storage-state');
     expect(browser.close).not.toHaveBeenCalled();
 
@@ -1307,7 +1306,7 @@ describe('browserContextFactory', () => {
 
     const config = await resolveConfig({ browser: { cdpEndpoint: 'http://127.0.0.1:9222', isolated: true } });
     const factory = contextFactory(config);
-    const sessionA = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const sessionA = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     // A is the last holder: its close starts disconnecting browser1 and
     // blocks inside browser.close().
@@ -1316,7 +1315,7 @@ describe('browserContextFactory', () => {
 
     // A session arriving mid-disconnect must get a fresh connection, not the
     // closing one.
-    const sessionB = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const sessionB = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
     expect(connectOverCDP).toHaveBeenCalledTimes(2);
     expect(sessionB.browserContext).toBe(context2);
 
@@ -1347,12 +1346,12 @@ describe('browserContextFactory', () => {
     const clientInfo = { name: 'vitest', version: '1.0.0' };
     const signal = new AbortController().signal;
 
-    const sessionA = await factory.createContext(clientInfo, signal, undefined);
+    const sessionA = await factory.createContext(clientInfo, signal);
     const closingA = sessionA.close();
     await vi.waitFor(() => expect(browser1.close).toHaveBeenCalledTimes(1));
 
     // B arrives mid-close and obtains the fresh connection.
-    const sessionB = await factory.createContext(clientInfo, signal, undefined);
+    const sessionB = await factory.createContext(clientInfo, signal);
     expect(sessionB.browserContext).toBe(context2);
 
     // A's close settles and its browser's 'disconnected' finally fires.
@@ -1363,7 +1362,7 @@ describe('browserContextFactory', () => {
 
     // The stale event must not have evicted B's browser: a third session
     // reuses it instead of opening another connection.
-    const sessionC = await factory.createContext(clientInfo, signal, undefined);
+    const sessionC = await factory.createContext(clientInfo, signal);
     expect(connectOverCDP).toHaveBeenCalledTimes(2);
     expect(sessionC.browserContext).toBe(context2);
 
@@ -1394,8 +1393,8 @@ describe('browserContextFactory', () => {
 
     const config = await resolveConfig({ browser: { isolated: true } });
     const factory = contextFactory(config);
-    const sessionA = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-    const pendingB = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const sessionA = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
+    const pendingB = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
     await vi.waitFor(() => expect(browser.newContext).toHaveBeenCalledTimes(2));
 
     // A closes while B's newContext() is still in flight: the shared browser
@@ -1436,10 +1435,10 @@ describe('browserContextFactory', () => {
     const clientInfo = { name: 'vitest', version: '1.0.0' };
     const signal = new AbortController().signal;
 
-    const sessionA = await factory.createContext(clientInfo, signal, undefined);
+    const sessionA = await factory.createContext(clientInfo, signal);
     // B starts createContext and A closes within the same synchronous
     // continuation — B has completed no awaits yet.
-    const pendingB = factory.createContext(clientInfo, signal, undefined);
+    const pendingB = factory.createContext(clientInfo, signal);
     await sessionA.close();
     expect(contextA.close).toHaveBeenCalledTimes(1);
     expect(browser.close).not.toHaveBeenCalled();
@@ -1468,8 +1467,8 @@ describe('browserContextFactory', () => {
     const clientInfo = { name: 'vitest', version: '1.0.0' };
     const signal = new AbortController().signal;
 
-    const sessionA = await factory.createContext(clientInfo, signal, undefined);
-    const pendingB = factory.createContext(clientInfo, signal, undefined);
+    const sessionA = await factory.createContext(clientInfo, signal);
+    const pendingB = factory.createContext(clientInfo, signal);
     await sessionA.close();
     expect(browser.close).not.toHaveBeenCalled();
 
@@ -1500,8 +1499,8 @@ describe('browserContextFactory', () => {
 
     const config = await resolveConfig({ browser: { isolated: true } });
     const factory = contextFactory(config);
-    const sessionA = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-    const pendingB = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const sessionA = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
+    const pendingB = factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
     await vi.waitFor(() => expect(browser.newContext).toHaveBeenCalledTimes(2));
 
     await sessionA.close();
@@ -1527,8 +1526,8 @@ describe('browserContextFactory', () => {
       contextA.close.mockImplementation(() => new Promise<void>(resolve => { finishCleanup = resolve; }));
       const factory = contextFactory(await resolveConfig({ browser: browserOptions }));
       const signal = new AbortController().signal;
-      const first = await factory.createContext({}, signal, undefined);
-      const second = await factory.createContext({}, signal, undefined);
+      const first = await factory.createContext({}, signal);
+      const second = await factory.createContext({}, signal);
 
       const closingFirst = first.close();
       expect(contextA.close).toHaveBeenCalledTimes(1);
@@ -1557,16 +1556,16 @@ describe('browserContextFactory', () => {
       contextA.close.mockImplementation(() => new Promise<void>(resolve => { finishCleanup = resolve; }));
       const factory = contextFactory(await resolveConfig({ browser: browserOptions }));
       const signal = new AbortController().signal;
-      const first = await factory.createContext({}, signal, undefined);
+      const first = await factory.createContext({}, signal);
 
       const closingFirst = first.close();
       expect(contextA.close).toHaveBeenCalledTimes(1);
       expect(browserA.close).not.toHaveBeenCalled();
-      const second = await factory.createContext({}, signal, undefined);
+      const second = await factory.createContext({}, signal);
       expect(second.browserContext).toBe(contextB);
       const staleDisconnect = browserA.on.mock.calls.find(call => call[0] === 'disconnected')[1];
       staleDisconnect();
-      const third = await factory.createContext({}, signal, undefined);
+      const third = await factory.createContext({}, signal);
       expect(third.browserContext).toBe(contextC);
       expect(obtain).toHaveBeenCalledTimes(2);
 
@@ -1588,8 +1587,8 @@ describe('browserContextFactory', () => {
       vi.mocked(obtain).mockResolvedValue(browser);
       const factory = contextFactory(await resolveConfig({ browser: browserOptions }));
       const signal = new AbortController().signal;
-      const first = await factory.createContext({}, signal, undefined);
-      const creating = factory.createContext({}, signal, undefined);
+      const first = await factory.createContext({}, signal);
+      const creating = factory.createContext({}, signal);
       await vi.waitFor(() => expect(browser.newContext).toHaveBeenCalledTimes(2));
 
       await first.close();
@@ -1606,8 +1605,8 @@ describe('browserContextFactory', () => {
       vi.mocked(obtain).mockRejectedValueOnce(new Error('Connection failed')).mockResolvedValue(browser);
       const factory = contextFactory(await resolveConfig({ browser: browserOptions }));
       const signal = new AbortController().signal;
-      const pendingA = factory.createContext({}, signal, undefined);
-      const pendingB = factory.createContext({}, signal, undefined);
+      const pendingA = factory.createContext({}, signal);
+      const pendingB = factory.createContext({}, signal);
       await Promise.all([
         expect(pendingA).rejects.toThrow('Connection failed'),
         expect(pendingB).rejects.toThrow('Connection failed'),
@@ -1615,7 +1614,7 @@ describe('browserContextFactory', () => {
       expect(obtain).toHaveBeenCalledTimes(1);
       expect(browser.newContext).not.toHaveBeenCalled();
 
-      const recovered = await factory.createContext({}, signal, undefined);
+      const recovered = await factory.createContext({}, signal);
       expect(recovered.browserContext).toBe(browserContext);
       expect(obtain).toHaveBeenCalledTimes(2);
       await recovered.close();
@@ -1641,8 +1640,8 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
-    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const first = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
+    const second = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     expect(browser.newContext).toHaveBeenCalledTimes(1);
     expect(first.browserContext).toBe(second.browserContext);
@@ -1664,8 +1663,8 @@ describe('browserContextFactory', () => {
 
     const factory = contextFactory(config);
     const [first, second] = await Promise.all([
-      factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined),
-      factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined),
+      factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal),
+      factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal),
     ]);
 
     expect(browser.newContext).toHaveBeenCalledTimes(1);
@@ -1690,7 +1689,7 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     // The fresh context receives the configured options — storage state
     // included — directly; the reuse-path apply has nothing to run on.
@@ -1714,7 +1713,7 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    const result = await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({ storageState: '/tmp/auth.json' }));
     expect(browserContext.setStorageState).not.toHaveBeenCalled();
@@ -1741,7 +1740,7 @@ describe('browserContextFactory', () => {
 
     const factory = contextFactory(config);
 
-    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined))
+    await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
         .rejects.toThrow('ENOENT');
     expect(browser.close).toHaveBeenCalledTimes(1);
     expect(childProcess.kill).toHaveBeenCalledWith('SIGTERM');
@@ -1761,7 +1760,7 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({ storageState: '/tmp/auth.json' }));
   });
@@ -1781,7 +1780,7 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({ storageState: '/tmp/auth.json' }));
   });
@@ -1799,7 +1798,7 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({ storageState: '/tmp/auth.json' }));
   });
@@ -1817,7 +1816,7 @@ describe('browserContextFactory', () => {
     });
 
     const factory = contextFactory(config);
-    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal, undefined);
+    await factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal);
 
     expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({ storageState: '/tmp/auth.json' }));
   });

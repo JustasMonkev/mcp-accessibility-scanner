@@ -300,13 +300,8 @@ export class Context {
     return this._currentTab!;
   }
 
-  async startRecording(): Promise<void> {
-    this.assertRecordingCanStart();
-    await this._startRecording();
-  }
-
   async startRecordingOnCurrentTab(): Promise<void> {
-    this.assertRecordingCanStart();
+    this._assertRecordingCanStart();
     const { promise: startFinished, resolve: finishStart } = Promise.withResolvers<void>();
     this._recordingStartFinished = startFinished;
     try {
@@ -342,7 +337,7 @@ export class Context {
   }
 
   async stopRecording(): Promise<string[] | undefined> {
-    this.assertRecordingCanPersist();
+    this._assertRecordingCanPersist();
     if (this._recordingStartFinished)
       await this._recordingStartFinished;
     const recording = this._recording;
@@ -374,13 +369,13 @@ export class Context {
       this._recording.lastActivityAt = Date.now();
   }
 
-  assertRecordingCanPersist(): void {
+  private _assertRecordingCanPersist(): void {
     if (this.options.browserSession && !this.options.browserSessionId)
       throw new Error('Recording over stateless HTTP requires a browserSessionId. Call browser_session_open, then pass its browserSessionId to browser_start_recording and browser_stop_recording. Shared-context modes that cannot open browser sessions require a stateful MCP connection.');
   }
 
-  assertRecordingCanStart(): void {
-    this.assertRecordingCanPersist();
+  private _assertRecordingCanStart(): void {
+    this._assertRecordingCanPersist();
     if (this._recording || this._recordingStartFinished)
       throw new Error('Recording is already in progress.');
   }
@@ -633,7 +628,7 @@ export class Context {
     if (this._closeBrowserContextPromise)
       throw new Error('Another browser context is being closed.');
     assertNetworkPolicySupported(this.config, this._browserContextFactory.ownsBrowser === true);
-    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, this._runningTools.at(-1)?.name, { browserSession: this.options.browserSession });
+    const result = await this._browserContextFactory.createContext(this._clientInfo, this._abortController.signal, { browserSession: this.options.browserSession });
     const closingGroup = idleGroups.get(result.browserContext)?.closing;
     if (closingGroup) {
       await result.close();

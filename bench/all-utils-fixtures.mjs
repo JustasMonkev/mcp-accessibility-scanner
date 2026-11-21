@@ -25,7 +25,8 @@ export function fixtures(modules, { tab, endpoint, output, importMetadata }) {
   const aria = modules.ariaCompression;
   const line = '  - gridcell "Item 123" [ref=e2]';
   cases('ariaCompression', {
-    compressAriaSnapshot: [snapshot], signature: [line], roleOf: [line], shouldKeepLine: ['gridcell', true, false],
+    compressAriaSnapshot: [snapshot], hasCrowdedParent: [snapshot], isCandidate: [aria.parseSnapshotLines(line)[0]],
+    signature: [line], roleOf: [line], shouldKeepLine: ['gridcell', true, false],
     shouldKeepSubtree: ['button'], shouldKeepRefProtectedDescendants: ['gridcell', true],
     shouldKeepCursorPointerRef: [true, true], isRowContainerRole: ['grid'], indentOf: [line],
     compressionKey: [aria.parseSnapshotLines(line)[0]], isProtectedLine: [aria.parseSnapshotLines(line)[0]],
@@ -37,13 +38,15 @@ export function fixtures(modules, { tab, endpoint, output, importMetadata }) {
   cases('codegen', { escapeWithQuotes: ['Send "now"', '"'], quote: ["cart's item"], formatObject: [label], formatObjectOrVoid: [label] });
   cases('errors', { errorMessage: [error] });
   cases('httpUrl', { isHttpUrl: [new URL('https://local.test/a')] });
-  cases('fileUtils', { sanitizeForFilePath: ['unsafe / report?.txt'], truncateToUtf8Bytes: ['é🚀'.repeat(4096), 2000],
+  cases('fileUtils', { sanitizeForFilePath: ['unsafe / report?.txt'], sanitize: ['unsafe / report?'], truncateToUtf8Bytes: ['é🚀'.repeat(4096), 2000],
     truncateWithMarker: ['error 🚀 '.repeat(400), 2000], copyPrefix: ['abc🚀'], utf8Width: ['🚀'] });
   add('fileUtils', 'safeIsoTimestampForFileName', () => modules.fileUtils.safeIsoTimestampForFileName(), {
     project: result => assert.match(result, /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z-[a-f0-9]{8}$/),
   });
-  for (const [name, length] of [['createGuid', 32], ['createShortGuid', 8]])
-    add('guid', name, () => modules.guid[name](), { project: result => assert.match(result, new RegExp(`^[a-f0-9]{${length}}$`)) });
+  for (const [name, length, args] of [['createGuid', 32, []], ['createShortGuid', 8, []], ['randomHex', 32, [16]]]) {
+    if (modules.guid[name])
+      add('guid', name, () => modules.guid[name](...args), { project: result => assert.match(result, new RegExp(`^[a-f0-9]{${length}}$`)) });
+  }
   cases('guid', { createHash: ['a11y scan fingerprint'] });
 
   const d = modules.dataUrl;
@@ -78,7 +81,7 @@ export function fixtures(modules, { tab, endpoint, output, importMetadata }) {
   const tokens = h.htmlTokens(html);
   const other = tokens.with(-1, '"other"');
   cases('htmlPatterns', { htmlTokens: [html], similar: [tokens, other], withinEditDistance: [tokens, other, 3],
-    byKey: [{ key: 'a' }, { key: 'b' }], semanticSignature: [html] });
+    byKey: [{ key: 'a' }, { key: 'b' }], semanticSignature: [html], isSpace: ['\t'] });
   add('htmlPatterns', 'rootAttributes', () => h.rootAttributes(html, 6), {
     project: attrs => attrs instanceof Map ? [attrs.get('type'), attrs.get('role')] : [attrs.type, attrs.role],
   });
@@ -106,7 +109,8 @@ export function fixtures(modules, { tab, endpoint, output, importMetadata }) {
   r.solve(tree, 3);
   const parts = r.parts(tree);
   cases('representativeUrls', { templateSegments: [urls[0]], newNode: [1], parts: [tree], branchCount: [tree],
-    coveredCount: [parts[1]], partCost: [parts[0], 1, 1], mergePart: [[0, 0], parts[1], 0, 3, 1],
+    compareCodeUnits: ['docs', 'help'], coveredCount: [parts[1]], partCost: [parts[0], 1, 1], partCosts: [parts[0], 3, 1],
+    mergePart: [[0, 0], parts[1], 0, 3, 1],
     mergeParts: [tree, parts, 3, false], selectRepresentativeUrls: [urls, 12] });
   // Private DP storage differs across builds. Validate the allocation and selected URL indices.
   add('representativeUrls', 'parts', () => r.parts(tree), { project: list => list.map(p => [p.kind, p.size]) });

@@ -37,8 +37,8 @@ export class ExtensionContextFactory implements BrowserContextFactory {
     this._browser = browser;
   }
 
-  async createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<ContextHandle> {
-    const browser = await this._obtainBrowser(clientInfo, abortSignal, toolName);
+  async createContext(clientInfo: ClientInfo, abortSignal: AbortSignal): Promise<ContextHandle> {
+    const browser = await this._obtainBrowser(clientInfo, abortSignal);
     return {
       browserContext: browser.contexts()[0],
       close: async () => {
@@ -48,10 +48,10 @@ export class ExtensionContextFactory implements BrowserContextFactory {
     };
   }
 
-  private async _obtainBrowser(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined): Promise<playwright.Browser> {
+  private async _obtainBrowser(clientInfo: ClientInfo, abortSignal: AbortSignal): Promise<playwright.Browser> {
     const relay = await this._startRelay(abortSignal);
     try {
-      await relay.ensureExtensionConnectionForMCPContext(clientInfo, abortSignal, toolName);
+      await relay.ensureExtensionConnectionForMCPContext(clientInfo, abortSignal);
       const browser = await playwright.chromium.connectOverCDP(relay.cdpEndpoint());
       browser.on('disconnected', () => relay.stop());
       return browser;
@@ -62,11 +62,8 @@ export class ExtensionContextFactory implements BrowserContextFactory {
   }
 
   private async _startRelay(abortSignal: AbortSignal) {
-    const httpServer = await startHttpServer({});
-    if (abortSignal.aborted) {
-      httpServer.close();
-      throw new Error(abortSignal.reason);
-    }
+    abortSignal.throwIfAborted();
+    const httpServer = await startHttpServer({}, abortSignal);
     const cdpRelayServer = new CDPRelayServer(httpServer, this._browser);
     const stop = () => cdpRelayServer.stop();
     abortSignal.addEventListener('abort', stop, { once: true });

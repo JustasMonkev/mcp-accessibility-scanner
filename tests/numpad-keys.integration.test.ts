@@ -26,21 +26,6 @@ if (browserName !== 'chromium' && browserName !== 'firefox' && browserName !== '
 const require = createRequire(import.meta.url);
 const playwrightVersion: string = require('playwright/package.json').version;
 const playwrightCoreVersion: string = require('playwright-core/package.json').version;
-const characterizedBrowsers = {
-  chromium: [
-    { version: '141.0.7390.37', platform: 'linux' },
-    { version: '153.0.8010.12', platform: 'linux' },
-    { version: '153.0.8010.12', platform: 'darwin' },
-  ],
-  firefox: [
-    { version: '155.0', platform: 'linux' },
-    { version: '155.0', platform: 'darwin' },
-  ],
-  webkit: [
-    { version: '26.6', platform: 'linux' },
-    { version: '26.6', platform: 'darwin' },
-  ],
-};
 
 // Playwright's US layout: unshifted numpad keys act with NumLock off, Shift
 // yields the digit or decimal point, and every event is at the numpad location.
@@ -51,30 +36,6 @@ const presses = [
   { press: 'Shift+Numpad1', key: '1', code: 'Numpad1', typed: '1' },
   { press: 'Shift+NumpadDecimal', key: '.', code: 'NumpadDecimal', typed: '.' },
 ];
-
-// Deviations recorded on the paired pins and browser/platform combinations
-// above (microsoft/playwright#42913 and #42927, merged after 1.63.0).
-// Unmeasured combinations must deliver every key as modeled above.
-const knownDeviations: Record<string, string[]> = {
-  '1.63.0/chromium': [
-    'NumpadSubtract keyup location is not numpad',
-    'NumpadDecimal keydown key "\\u0000"',
-    'NumpadDecimal keyup key "\\u0000"',
-    'NumpadDecimal keyup location is not numpad',
-    'Shift+Numpad1 keyup location is not numpad',
-    'Shift+Numpad1 typed ""',
-    'Shift+NumpadDecimal keyup location is not numpad',
-    'Shift+NumpadDecimal typed ""',
-  ],
-  '1.63.0/firefox': [
-    'NumpadDecimal keydown key "\\u0000"',
-    'NumpadDecimal keyup key "\\u0000"',
-  ],
-  '1.63.0/webkit': [
-    'NumpadDecimal keydown key "\\u0000"',
-    'NumpadDecimal keyup key "\\u0000"',
-  ],
-};
 
 type RecordedEvent = { type: string, key: string, code: string, location: number, keyCode: number };
 
@@ -138,12 +99,6 @@ it(`records numpad key events delivered by browser_press_key (${browserName}, #2
   }
   const pin = `${playwrightCoreVersion}/${browserName}`;
   const browserVersion = browser.version();
-  const characterized = playwrightVersion === '1.63.0' && playwrightCoreVersion === '1.63.0' &&
-    characterizedBrowsers[browserName].some(({ version, platform }) => version === browserVersion && platform === process.platform);
-  const expectedDeviations = characterized ? [...knownDeviations[pin]] : [];
-  // The pinned macOS WebKit also inserts NUL; the same Linux build only emits it as an event key.
-  if (characterized && browserName === 'webkit' && process.platform === 'darwin')
-    expectedDeviations.push('NumpadDecimal typed "\\u0000"');
   process.stdout.write(JSON.stringify({ pin, playwrightVersion, browserVersion, platform: process.platform, found, observed }) + '\n');
-  expect(found).toEqual(expectedDeviations);
+  expect(found).toEqual([]);
 });
