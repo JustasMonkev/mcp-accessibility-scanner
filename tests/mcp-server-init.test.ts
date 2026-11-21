@@ -49,6 +49,28 @@ async function startRawClient(backend: unknown) {
   return { transport, sendRequest };
 }
 
+describe('in-process MCP transport', () => {
+  it('rejects requests outside the connection lifetime and closes the server once', async () => {
+    const serverClosed = vi.fn();
+    const backend = { ...createBackend(), callTool: async () => ({ content: [] }), serverClosed };
+    const transport = new InProcessTransport(createServer('Test', '1.0.0', backend, false));
+    const request = { jsonrpc: '2.0', id: 1, method: 'tools/list' } as const;
+
+    await expect(transport.send(request)).rejects.toThrow('Transport not connected');
+    await transport.start();
+    try {
+      await expect(transport.start()).rejects.toThrow('already started');
+    } finally {
+      await transport.close();
+    }
+
+    await transport.close();
+    expect(serverClosed).toHaveBeenCalledTimes(1);
+    await expect(transport.send(request)).rejects.toThrow('Transport not connected');
+    expect(backend.listTools).not.toHaveBeenCalled();
+  });
+});
+
 describe('mcp server lazy initialization', () => {
   it('serves tools/call without any handshake instead of hanging', async () => {
     const backend = createBackend();
