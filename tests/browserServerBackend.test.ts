@@ -184,6 +184,6 @@ describe('BrowserServerBackend.callTool', () => {
     await expect(backend.callTool('browser_default_timeout', { timeout: 30000 }))
         .rejects.toThrow(/Initialize the browser backend before running browser tools/);
     await expect(backend.callTool('browser_default_timeout', { timeout: 30000, browserSessionId: 'bs_1' }))
-        .rejects.toThrow(/Initialize the browser backend before running session tools/);
+        .rejects.toThrow(/Initialize the browser backend before running browser tools/);
   });
 });
