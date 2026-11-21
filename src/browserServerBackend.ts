@@ -37,12 +37,12 @@ import type * as mcpServer from './mcp/server.js';
 const sessionManagementTools: ReadonlySet<string> = new Set(['browser_session_open', 'browser_session_close']);
 const toolsThatSkipIdleResume: ReadonlySet<string> = new Set(['browser_close', ...sessionManagementTools]);
 
-type ToolInputSchemaProperty = NonNullable<mcpServer.Tool['inputSchema']['properties']>[string];
+type ToolArguments = mcpServer.CallToolRequest['params']['arguments'];
 
 const browserSessionIdProperty = {
   type: 'string',
   description: 'Browser session to run this tool in, as returned by browser_session_open. Omit to use the default session.',
-} as const satisfies ToolInputSchemaProperty;
+} as const;
 
 function toBrowserMcpTool(tool: Tool): mcpServer.Tool {
   const mcpTool = toMcpTool(tool.schema);
@@ -51,11 +51,20 @@ function toBrowserMcpTool(tool: Tool): mcpServer.Tool {
   return mcpTool;
 }
 
-function parseToolArguments(tool: Tool, rawArguments: mcpServer.CallToolRequest['params']['arguments']): Record<string, unknown> {
+function parseToolArguments(tool: Tool, rawArguments: ToolArguments): Record<string, unknown> {
   const result = tool.schema.inputSchema.safeParse(rawArguments ?? {});
   if (!result.success)
     throw new Error(`Invalid input for tool "${tool.schema.name}":\n${z.prettifyError(result.error)}`, { cause: result.error });
   return result.data;
+}
+
+function getRoutedSessionId(name: string, rawArguments: ToolArguments): string | undefined {
+  if (sessionManagementTools.has(name))
+    return undefined;
+  const id = rawArguments?.['browserSessionId'];
+  if (id !== undefined && typeof id !== 'string')
+    throw new Error('Invalid browserSessionId: expected a string handle returned by browser_session_open.');
+  return id;
 }
 
 export class BrowserServerBackend implements mcpServer.ServerBackend {
@@ -184,7 +193,7 @@ export class BrowserServerBackend implements mcpServer.ServerBackend {
     return tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
   }
 
-  private async _callWebMCP(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext): Promise<mcpServer.CallToolResult> {
+  private async _callWebMCP(name: string, rawArguments: ToolArguments, requestContext?: mcpServer.CallToolRequestContext): Promise<mcpServer.CallToolResult> {
     if (!name.startsWith('webmcp_'))
       throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Tool "${name}" not found`);
     const id = webMCPSessionId(requestContext?._meta);
@@ -217,12 +226,12 @@ export class BrowserServerBackend implements mcpServer.ServerBackend {
     return response.serialize();
   }
 
-  async callTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext): Promise<mcpServer.CallToolResult> {
+  async callTool(name: string, rawArguments: ToolArguments, requestContext?: mcpServer.CallToolRequestContext): Promise<mcpServer.CallToolResult> {
     assertToolNotBlocked(this._config, name);
     const tool = this._toolsByName.get(name);
     if (!tool)
       return this._callWebMCP(name, rawArguments, requestContext);
-    const routedSessionId = this._routedSessionId(name, rawArguments);
+    const routedSessionId = getRoutedSessionId(name, rawArguments);
     const parsedArguments = parseToolArguments(tool, rawArguments);
     const context = this._contextFor(routedSessionId);
     const responseArguments = routedSessionId !== undefined ? { browserSessionId: routedSessionId, ...parsedArguments } : parsedArguments;
@@ -277,17 +286,6 @@ export class BrowserServerBackend implements mcpServer.ServerBackend {
     } catch (error) {
       logUnhandledError(error);
     }
-  }
-
-  private _routedSessionId(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments']): string | undefined {
-    if (sessionManagementTools.has(name))
-      return undefined;
-    const id = rawArguments?.['browserSessionId'];
-    if (id === undefined)
-      return undefined;
-    if (typeof id !== 'string')
-      throw new Error('Invalid browserSessionId: expected a string handle returned by browser_session_open.');
-    return id;
   }
 
   serverClosed(): void {
