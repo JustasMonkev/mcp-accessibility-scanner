@@ -43,18 +43,9 @@ export type ToolCapability =
 export type Config = {
   tabGroup?: boolean;
 
-  /**
-   * The browser to use.
-   */
   browser?: {
-    /**
-     * Use browser agent (experimental).
-     */
     browserAgent?: string;
 
-    /**
-     * The type of browser to use.
-     */
     browserName?: 'chromium' | 'firefox' | 'webkit';
 
     /**
@@ -157,17 +148,6 @@ export type Config = {
     authToken?: string;
   },
 
-  /**
-   * List of enabled tool capabilities. Possible values:
-   *   - 'core': Core browser automation features.
-   *   - 'tabs': Tab management features.
-   *   - 'pdf': PDF generation and manipulation.
-   *   - 'history': Browser history access.
-   *   - 'wait': Wait and timing utilities.
-   *   - 'files': File upload/download support.
-   *   - 'install': Browser installation utilities.
-   *   - 'devtools': Browser recording utilities.
-   */
   capabilities?: ToolCapability[];
 
   /** Exact tool names enabled in addition to core and capability tools. Not a whitelist. */
@@ -178,9 +158,6 @@ export type Config = {
 
   redactUrlParams?: string[];
 
-  /**
-   * Run server that uses screenshots (Aria snapshots are used by default).
-   */
   vision?: boolean;
 
   /**
@@ -188,14 +165,8 @@ export type Config = {
    */
   saveTrace?: boolean;
 
-  /**
-   * Whether to persist session logs for the current run.
-   */
   saveSession?: boolean;
 
-  /**
-   * The directory to save output files.
-   */
   outputDir?: string;
 
   /**
@@ -234,9 +205,6 @@ export type Config = {
     boxes?: boolean;
   };
 
-  /**
-   * Timeout settings for Playwright operations.
-   */
   timeouts?: {
     /**
      * Maximum time in milliseconds for page navigation. Defaults to 60000ms (60 seconds).

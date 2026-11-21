@@ -1154,8 +1154,6 @@ class SiteCrawl {
       await dialogWatch.stop(this._setup.signal);
       worker.abandoned = dialogWatch.fired();
       if (!this._setup.signal?.aborted) {
-        // A dialog in the outgoing document predates the destination, even if
-        // the browser updates page.url() while the cookie check is queued.
         const reachedUrl = tab.page.url();
         let url = item.url;
         if (dialogWatch.raisedByOutgoingDocument())
