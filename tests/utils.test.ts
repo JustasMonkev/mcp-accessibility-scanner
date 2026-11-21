@@ -20,7 +20,7 @@ import { describe, it, expect } from 'vitest';
 import { createGuid, createHash, createShortGuid } from '../src/utils/guid.js';
 import { safeIsoTimestampForFileName, truncateToUtf8Bytes } from '../src/utils/fileUtils.js';
 import { compressAriaSnapshot } from '../src/utils/ariaCompression.js';
-import { truncateDataUrl, truncateDataUrls } from '../src/utils/dataUrl.js';
+import { truncateDataUrls } from '../src/utils/dataUrl.js';
 
 const hasBundledChromium = fs.existsSync(chromium.executablePath());
 async function canLaunchBundledChromium(): Promise<boolean> {
@@ -160,17 +160,16 @@ describe('Utils', () => {
 
   describe('data URL truncation', () => {
     it('should truncate direct data URL payloads', () => {
-      expect(truncateDataUrl('data:text/html;base64,PHAgLz4=')).toBe('data:text/html;base64,...');
+      expect(truncateDataUrls('data:text/html;base64,PHAgLz4=')).toBe('data:text/html;base64,...');
     });
 
     it('should not truncate ordinary prose that starts with data:', () => {
       expect(truncateDataUrls('data: total, average')).toBe('data: total, average');
-      expect(truncateDataUrl('data: total, average')).toBe('data: total, average');
     });
 
     it.each([' ', '\t', '\n', '\r', '\v', '\f', '\u00a0', '\u1680', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200a', '\u2028', '\u2029', '\u202f', '\u205f', '\u3000', '\ufeff', '"', "'", '<', '>', '(', ')', '[', ']', '{', '}'])('preserves invalid metadata containing %j and still finds later URLs', character => {
       const malformed = `data:text/plain;name=bad${character}value`;
-      expect(truncateDataUrl(`${malformed},payload`)).toBe(`${malformed},payload`);
+      expect(truncateDataUrls(`${malformed},payload`)).toBe(`${malformed},payload`);
       expect(truncateDataUrls(`${malformed} data:text/plain;base64,eA==`)).toBe(`${malformed} data:text/plain;base64,...`);
     });
 
@@ -186,7 +185,7 @@ describe('Utils', () => {
     });
 
     it('should not truncate direct strings without a data URL prefix', () => {
-      expect(truncateDataUrl('12345image/png,payload')).toBe('12345image/png,payload');
+      expect(truncateDataUrls('12345image/png,payload')).toBe('12345image/png,payload');
     });
 
     it('should truncate raw SVG data URL payloads without leaking markup', () => {
@@ -335,14 +334,14 @@ describe('Utils', () => {
       const payload = Buffer.from('<p>hello</p>').toString('base64');
       const text = `data:text/plain;name=hello%20world;base64,${payload}`;
 
-      expect(truncateDataUrl(text)).toBe('data:text/plain;name=hello%20world;base64,...');
+      expect(truncateDataUrls(text)).toBe('data:text/plain;name=hello%20world;base64,...');
     });
 
     it('should cap oversized data URL metadata before the ellipsis', () => {
       const largeParameter = 'a'.repeat(1024);
 
-      expect(truncateDataUrl(`data:text/html;name=${largeParameter},x`)).toBe('data:text/html,...');
-      expect(truncateDataUrl(`data:text/html;name=${largeParameter};base64,eA==`)).toBe('data:text/html;base64,...');
+      expect(truncateDataUrls(`data:text/html;name=${largeParameter},x`)).toBe('data:text/html,...');
+      expect(truncateDataUrls(`data:text/html;name=${largeParameter};base64,eA==`)).toBe('data:text/html;base64,...');
     });
 
     it('should preserve snapshot refs after raw data URLs in accessible names', () => {

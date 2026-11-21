@@ -85,6 +85,13 @@ describe('Tab', () => {
       expect(mockPage.setDefaultTimeout).toHaveBeenCalledWith(6000);
     });
 
+    it('falls back to the documented timeout defaults when config timeouts are omitted', () => {
+      const contextWithoutTimeouts = { ...mockContext, config: { timeouts: {} } } as any;
+      new Tab(contextWithoutTimeouts, mockPage as any, onPageClose);
+      expect(mockPage.setDefaultNavigationTimeout).toHaveBeenCalledWith(60000);
+      expect(mockPage.setDefaultTimeout).toHaveBeenCalledWith(5000);
+    });
+
     it('should listen to console events', () => {
       const tab = new Tab(mockContext, mockPage as any, onPageClose);
       const consoleMessage = {

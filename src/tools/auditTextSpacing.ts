@@ -30,11 +30,9 @@ import type {
   TextSpacingOverlap,
 } from './textSpacingMeasurement.js';
 
-/** @public */
-export type TextSpacingCheck = 'text-clipped' | 'text-overlap';
+type TextSpacingCheck = 'text-clipped' | 'text-overlap';
 
-/** @public */
-export type TextSpacingFinding = {
+type TextSpacingFinding = {
   check: TextSpacingCheck;
   wcag: '1.4.12';
   frameUrl: string | null;

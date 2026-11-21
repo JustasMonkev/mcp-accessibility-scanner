@@ -19,8 +19,7 @@ export const EXTENSION_ID = 'mmlmfjhmonkocbjadbfplnigmagldckm';
 
 export type Debuggee = { tabId?: number; extensionId?: string; targetId?: string };
 export type DebuggerSession = Debuggee & { sessionId?: string };
-/** @public */
-export type TabCreateProperties = {
+type TabCreateProperties = {
   active?: boolean;
   index?: number;
   openerTabId?: number;
@@ -38,8 +37,7 @@ export type Tab = {
   active: boolean;
   pinned: boolean;
 };
-/** @public */
-export type TabRemoveInfo = { windowId: number; isWindowClosing: boolean };
+type TabRemoveInfo = { windowId: number; isWindowClosing: boolean };
 
 export type ExtensionCommandV2 = {
   'chrome.debugger.attach': {

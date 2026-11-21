@@ -16,7 +16,7 @@
 
 import { Client } from '@modelcontextprotocol/client';
 import { chromium } from 'playwright';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { createConnection } from '../src/index.js';
 import { InProcessTransport } from '../src/mcp/inProcessTransport.js';
 
@@ -48,6 +48,34 @@ it.each(['browser_close', 'disconnect'] as const)('releases a supplied context o
         if (result.status === 'rejected')
           throw result.reason;
       }
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+it('rejects host sitemap fetching for createConnection with a custom context getter', async () => {
+  const browser = await chromium.launch();
+  try {
+    const context = await browser.newContext();
+    const server = await createConnection({}, async () => context);
+    const client = new Client({ name: 'custom-context-sitemap-test', version: '1' });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Unexpected host fetch'));
+    try {
+      await client.connect(new InProcessTransport(server));
+      const navigation = await client.callTool({ name: 'browser_navigate', arguments: { url: 'data:text/html,<h1>Supplied context</h1>' } });
+      expect(navigation.isError).not.toBe(true);
+      const result = await client.callTool({
+        name: 'audit_site',
+        arguments: { strategy: 'sitemap', startUrl: 'https://example.test/' },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('createConnection(config, contextGetter)');
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      fetchMock.mockRestore();
+      await client.close();
+      await server.close();
     }
   } finally {
     await browser.close();

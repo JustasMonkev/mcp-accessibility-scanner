@@ -38,11 +38,6 @@ if (!['chromium', 'firefox', 'webkit'].includes(browser))
 const canRun = !!requestedBrowser || existsSync(chromium.executablePath());
 const require = createRequire(import.meta.url);
 const versions = { playwright: require('playwright/package.json').version, playwrightCore: require('playwright-core/package.json').version };
-// Playwright 1.63.0's injected WebKit visibility fallback checks only the
-// nearest details/summary, so an open details nested in a closed one exposes
-// its contents (microsoft/playwright#42951, #246). Only this exact pin may
-// verify that known defect; any other version must hide the nested contents.
-const knownWebKitLeak = browser === 'webkit' && versions.playwright === '1.63.0' && versions.playwrightCore === '1.63.0';
 const fixture = `<title>Nested details</title>
 <details>
   <summary>Outer section</summary>
@@ -102,11 +97,7 @@ async function expectDiscoverable(snapshot: string) {
   expect(await ok('browser_verify_text_visible', { text: 'Hidden action' })).toContain('Done');
 }
 
-const title = knownWebKitLeak
-  ? 'reproduces the known WebKit leak of an open details nested in a closed details'
-  : 'hides an open details nested in a closed details from snapshots, find and verify';
-
-it.skipIf(!canRun)(`${title} (${browser}) #246`, async () => {
+it.skipIf(!canRun)(`hides an open details nested in a closed details from snapshots, find and verify (${browser}) #246`, async () => {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-details-visibility-'));
   const config = await resolveCLIConfig({ browser, caps: ['verify'], headless: true, isolated: true, outputDir: directory });
   client = new Client({ name: 'details-visibility-test', version: '1' });
@@ -116,20 +107,15 @@ it.skipIf(!canRun)(`${title} (${browser}) #246`, async () => {
   const outerRef = closed.match(/"Outer section" \[ref=([^\]]+)\]/)?.[1];
   expect(outerRef, closed).toBeDefined();
 
-  if (knownWebKitLeak) {
-    await expectDiscoverable(closed);
-    process.stdout.write('known-webkit-nested-details-leak\n');
-  } else {
-    expect(closed).not.toContain('Inner section');
-    expect(closed).not.toContain('Hidden action');
-    expect(await ok('browser_find', { text: 'Hidden action' })).toContain('No matches found for "Hidden action".');
-    const verify = await call('browser_verify_element_visible', { role: 'button', accessibleName: 'Hidden action' });
-    expect(verify.isError, verify.text).toBe(true);
-    expect(verify.text).toContain('Element with role "button" and accessible name "Hidden action" not found');
-    const verifyText = await call('browser_verify_text_visible', { text: 'Hidden action' });
-    expect(verifyText.isError, verifyText.text).toBe(true);
-    expect(verifyText.text).toContain('Text not found');
-  }
+  expect(closed).not.toContain('Inner section');
+  expect(closed).not.toContain('Hidden action');
+  expect(await ok('browser_find', { text: 'Hidden action' })).toContain('No matches found for "Hidden action".');
+  const verify = await call('browser_verify_element_visible', { role: 'button', accessibleName: 'Hidden action' });
+  expect(verify.isError, verify.text).toBe(true);
+  expect(verify.text).toContain('Element with role "button" and accessible name "Hidden action" not found');
+  const verifyText = await call('browser_verify_text_visible', { text: 'Hidden action' });
+  expect(verifyText.isError, verifyText.text).toBe(true);
+  expect(verifyText.text).toContain('Text not found');
 
   const opened = await ok('browser_click', { element: 'Outer section', ref: outerRef });
   expect(opened).toContain('Outer section');

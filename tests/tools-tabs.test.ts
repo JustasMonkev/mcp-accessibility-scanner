@@ -58,7 +58,7 @@ describe('Tabs Tools', () => {
       ensureTab: vi.fn().mockResolvedValue(mockTab1),
       takeDownloadErrors: vi.fn().mockReturnValue([]),
       config: {
-        imageResponses: 'include',
+        imageResponses: 'allow',
       },
     } as any;
 

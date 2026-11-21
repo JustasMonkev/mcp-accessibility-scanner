@@ -150,7 +150,7 @@ export interface BrowserContextFactory {
   readonly attachNeedsUser?: boolean;
   readonly appliesStorageState?: boolean;
   readonly sessionsUnsupportedReason?: string;
-  createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined, options?: CreateContextOptions): Promise<ContextHandle>;
+  createContext(clientInfo: ClientInfo, abortSignal: AbortSignal, options?: CreateContextOptions): Promise<ContextHandle>;
 }
 
 abstract class BaseContextFactory implements BrowserContextFactory {
@@ -552,7 +552,7 @@ export class PersistentContextFactory implements BrowserContextFactory {
     return undefined;
   }
 
-  async createContext(clientInfo: ClientInfo, _abortSignal?: AbortSignal, _toolName?: string, options?: CreateContextOptions): Promise<ContextHandle> {
+  async createContext(clientInfo: ClientInfo, _abortSignal?: AbortSignal, options?: CreateContextOptions): Promise<ContextHandle> {
     testDebug('create browser context (persistent)');
     const { storageState, ...contextOptions } = this.config.browser.contextOptions ?? {};
     assertStorageStateDoesNotResetUserProfile(this.config, persistentProfileConflictRemedy);

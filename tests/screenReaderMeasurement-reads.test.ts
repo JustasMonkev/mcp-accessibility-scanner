@@ -5,7 +5,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser } from 'playwright';
-import { collectElementFacts } from '../src/tools/screenReaderMeasurement.js';
+import { readElementFacts } from '../src/tools/screenReaderMeasurement.js';
 
 describe('screen-reader DOM reads', () => {
   let browser: Browser;
@@ -16,6 +16,23 @@ describe('screen-reader DOM reads', () => {
 
   afterAll(async () => {
     await browser?.close();
+  });
+
+  it('returns facts even when the page defines Array.prototype.toJSON', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent('<button>Save</button>');
+      const handles = await page.$$('button');
+      await page.evaluate(() => {
+        Object.defineProperty(Array.prototype, 'toJSON', { value: () => 'page-controlled' });
+      });
+
+      const facts = await readElementFacts(page, { elements: handles, measureNames: false });
+
+      expect(facts).toMatchObject([{ tagName: 'button', visibleText: 'Save' }]);
+    } finally {
+      await page.close();
+    }
   });
 
   it('shares reads within a batch, skips irrelevant ancestor geometry, and refreshes the next batch', async () => {
@@ -54,7 +71,7 @@ describe('screen-reader DOM reads', () => {
         };
       });
 
-      const first = await page.evaluate(collectElementFacts, { elements: handles, measureNames: false });
+      const first = await readElementFacts(page, { elements: handles, measureNames: false });
       expect(first.map(fact => fact.visibleText)).toEqual(['First detail', 'detail', 'Second']);
       expect(first.every(fact => !fact.ariaHidden && !fact.nameMeasured)).toBe(true);
       const reads = await tracker.evaluate(value => value.reads());
@@ -78,7 +95,7 @@ describe('screen-reader DOM reads', () => {
       await page.locator('#detail').evaluate(element => {
         element.textContent = 'Changed';
       });
-      const hidden = await page.evaluate(collectElementFacts, { elements: handles, measureNames: false });
+      const hidden = await readElementFacts(page, { elements: handles, measureNames: false });
       expect(hidden.map(fact => fact.visibleText)).toEqual([null, null, null]);
       expect(hidden[0].rect?.width).toBe(200);
       expect(hidden[0].rect?.width).not.toBe(first[0].rect?.width);
@@ -86,7 +103,7 @@ describe('screen-reader DOM reads', () => {
       await page.locator('#shared').evaluate(element => {
         element.style.opacity = '1';
       });
-      const visible = await page.evaluate(collectElementFacts, { elements: handles, measureNames: false });
+      const visible = await readElementFacts(page, { elements: handles, measureNames: false });
       expect(visible.map(fact => fact.visibleText)).toEqual(['First Changed', 'Changed', 'Second']);
     } finally {
       await page.close();

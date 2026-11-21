@@ -25,13 +25,6 @@ import { resolveConfig, type FullConfig } from '../src/config.js';
 
 const require = createRequire(import.meta.url);
 const playwrightCoreVersion: string = require('playwright-core/package.json').version;
-// Playwright 1.63.0 never finishes attaching while an existing tab has no
-// renderer (microsoft/playwright#42936, unreleased when this was recorded).
-// Any other version must attach and omit that tab: an upgrade does not
-// inherit the known hang, it has to prove the fix.
-const knownAttachHang = playwrightCoreVersion === '1.63.0';
-// Far below Playwright's 30s default, so an ignored configured timeout fails.
-const attachBound = 15000;
 
 const browsers: Browser[] = [];
 const backends: BrowserServerBackend[] = [];
@@ -44,7 +37,7 @@ const server = http.createServer((request, response) => {
 beforeAll(async () => {
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   origin = `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
-  process.stdout.write(JSON.stringify({ platform: process.platform, node: process.version, playwrightCore: playwrightCoreVersion, knownAttachHang }) + '\n');
+  process.stdout.write(JSON.stringify({ platform: process.platform, node: process.version, playwrightCore: playwrightCoreVersion }) + '\n');
 });
 
 afterEach(async () => {
@@ -61,16 +54,6 @@ async function freePort(): Promise<number> {
   const { port } = probe.address() as net.AddressInfo;
   await new Promise<void>(resolve => probe.close(() => resolve()));
   return port;
-}
-
-function isListening(port: number): Promise<boolean> {
-  return new Promise(resolve => {
-    const socket = net.connect(port, '127.0.0.1', () => {
-      socket.destroy();
-      resolve(true);
-    });
-    socket.on('error', () => resolve(false));
-  });
 }
 
 /** A disposable browser with one healthy tab and one whose renderer crashed. */
@@ -103,48 +86,33 @@ async function listTabsThroughMcp(config: FullConfig) {
   const backend = new BrowserServerBackend(config, contextFactory(config));
   backends.push(backend);
   await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'vitest', version: '1.0.0' });
-  const started = Date.now();
   const result = await backend.callTool('browser_tabs', { action: 'list' });
   const text = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
-  return { result, text, elapsed: Date.now() - started };
+  return { result, text };
 }
 
 describe('CDP attach with a tab without a renderer (#244)', () => {
-  it('pins Playwright\'s own attach behavior', async () => {
+  it('attaches over CDP and omits crashed tabs', async () => {
     const { endpoint, tabs } = await launchWithCrashedTab();
-    const attached = await chromium.connectOverCDP(endpoint, { timeout: 2000 }).catch((error: Error) => error);
-    if (knownAttachHang) {
-      expect(attached).toBeInstanceOf(Error);
-      expect((attached as Error).name).toBe('TimeoutError');
-      expect((attached as Error).message).toContain('<ws connected>');
-    } else {
-      const browser = attached as Browser;
+    const browser = await chromium.connectOverCDP(endpoint, { timeout: 2000 });
+    try {
       expect(browser.contexts()[0].pages().map(page => page.url())).toEqual([`${origin}/healthy`]);
+    } finally {
       await browser.close();
     }
     expect(await listTabs(endpoint)).toEqual(tabs);
   });
 
-  it('bounds and explains a blocked --cdp-endpoint attach without touching the user\'s tabs', async () => {
+  it('attaches via --cdp-endpoint without touching the user\'s tabs', async () => {
     const { endpoint, tabs } = await launchWithCrashedTab();
     const config = await resolveConfig({ browser: { cdpEndpoint: endpoint, cdpTimeout: 2000 }, timeouts: { settle: 50 } });
-    const { result, text, elapsed } = await listTabsThroughMcp(config);
-    if (knownAttachHang) {
-      expect(result.isError, text).toBe(true);
-      expect(text).toContain('Timeout 2000ms exceeded');
-      expect(text).toContain('Playwright did not finish attaching before the timeout');
-      expect(text).toContain('on Playwright 1.63.0 so did a tab without a renderer (crashed, or discarded by Memory Saver)');
-      expect(elapsed).toBeLessThan(attachBound);
-    } else {
-      expect(result.isError, text).not.toBe(true);
-      expect(text).toContain(`${origin}/healthy`);
-    }
+    const { result, text } = await listTabsThroughMcp(config);
+    expect(result.isError, text).not.toBe(true);
+    expect(text).toContain(`${origin}/healthy`);
     expect(await listTabs(endpoint)).toEqual(tabs);
   });
 
-  // A --cdp-timeout above the startup budget, or 0 (disabled), must not let a
-  // hung attach outlast --cdp-launch-startup-timeout.
-  it.each([1000, 0])('bounds and explains a blocked --cdp-launch attach (cdpTimeout %i), then stops only the launched app', async cdpTimeout => {
+  it.each([1000, 0])('attaches via --cdp-launch (cdpTimeout %i) without touching the user\'s tabs', async cdpTimeout => {
     const { endpoint, port, tabs } = await launchWithCrashedTab();
     // The "launched application" forwards its CDP port to the prepared
     // browser, so the tab has crashed before the launch path's first attach.
@@ -164,19 +132,9 @@ describe('CDP attach with a tab without a renderer (#244)', () => {
       },
       timeouts: { settle: 50 },
     });
-    const { result, text, elapsed } = await listTabsThroughMcp(config);
-    if (knownAttachHang) {
-      expect(result.isError, text).toBe(true);
-      expect(text).toContain(`Timed out waiting for CDP endpoint http://127.0.0.1:${launchPort}.`);
-      expect(text).toContain('Playwright did not finish attaching before the timeout');
-      expect(elapsed).toBeLessThan(attachBound);
-      // The launched app is the server's own to stop; the browser behind it
-      // keeps every tab.
-      await expect.poll(() => isListening(launchPort), { timeout: 10000 }).toBe(false);
-    } else {
-      expect(result.isError, text).not.toBe(true);
-      expect(text).toContain(`${origin}/healthy`);
-    }
+    const { result, text } = await listTabsThroughMcp(config);
+    expect(result.isError, text).not.toBe(true);
+    expect(text).toContain(`${origin}/healthy`);
     expect(await listTabs(endpoint)).toEqual(tabs);
   });
 });

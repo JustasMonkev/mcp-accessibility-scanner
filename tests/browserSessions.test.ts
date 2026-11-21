@@ -157,10 +157,10 @@ describe('browser sessions', () => {
 
     const id = await openSession(backend);
     await backend.callTool('browser_tabs', { action: 'list', browserSessionId: id });
-    expect(createContext.mock.calls[0][3]).toMatchObject({ browserSession: true });
+    expect(createContext.mock.calls[0][2]).toMatchObject({ browserSession: true });
 
     await backend.callTool('browser_tabs', { action: 'list' });
-    expect(createContext.mock.calls[1][3]?.browserSession).toBeFalsy();
+    expect(createContext.mock.calls[1][2]?.browserSession).toBeFalsy();
   });
 
   it('mints sessions with the opening backend\'s identity, not the last initializer\'s', async () => {
