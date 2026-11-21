@@ -1225,13 +1225,21 @@ for `ALLOW_LOCKFILE_CHANGE=1` before a `package-lock.json` change is committed.
 using Vitest's `coverage.thresholds`. It exits nonzero when any target is missed,
 even if every test passes. The current suite is below these targets. Coverage
 includes runtime TypeScript under `src/`, including the browser tools, MCP
-transports and editor providers. Run `npm run test:coverage -- --coverage.reportOnFailure`
-to write reports when test failures occur. `npm test` runs the tests without
-enforcing coverage.
+transports and editor providers. To write reports when tests fail, run
+`npx vitest run --coverage.enabled --coverage.reportOnFailure`.
+`npm test` runs the tests without enforcing coverage.
+
+The default report measures code in Vitest's test workers. `src/program.ts` and
+`src/vscode/main.ts` can show 0% because the built entry points run in child
+processes. `tests/program.test.ts` exercises the CLI and starts the VS Code child
+in its `--vscode` provider-switch test.
 
 Browser and provider coverage depends on the environment. The Linux CI browser
-image exercises full Chromium launches, including CDP attach and profile cleanup
-in `tests/cdp-attach.integration.test.ts` and `tests/shutdown.integration.test.ts`.
+image exercises full Chromium launches in `tests/cdp-attach.integration.test.ts`
+and `tests/shutdown.integration.test.ts`, including CDP attach, profile cleanup
+and shutdown. Restricted Linux runners that deny Unix socket creation can block
+Chromium startup and cause these suites to fail.
+
 The Windows ARM64 workflow exercises native Chrome in
 `tests/native-chrome.integration.test.ts`. The extension relay and VS Code host
 are exercised by `tests/extension-protocol.test.ts` and `tests/vscode-host*.test.ts`
