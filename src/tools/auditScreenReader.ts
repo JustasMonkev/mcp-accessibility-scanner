@@ -6,8 +6,6 @@ import { reserveReportPath, writeJsonReport } from './report.js';
 import type { ElementFacts, Rect } from './screenReaderMeasurement.js';
 
 /** @public */
-export { collectElementFacts } from './screenReaderMeasurement.js';
-/** @public */
 export type { ElementFacts, Rect } from './screenReaderMeasurement.js';
 
 type AriaTreeNode = {
@@ -465,6 +463,7 @@ const auditScreenReader = defineTabTool({
     const measurement = await measureScreenReaderElements(tab.page, ariaNodes, {
       maxElements: params.maxElements,
       checkNames: params.checkNames,
+      needsName: index => ariaNodes[index].name === null && namedRoles.has(ariaNodes[index].role),
       reportProgress: progress => response.reportProgress(progress),
     });
     const { factsByIndex, totalElements, analyzedElements, limitations } = measurement;

@@ -28,6 +28,7 @@ export type ElementFacts = {
 type ScreenReaderMeasurementOptions = {
   maxElements: number;
   checkNames: boolean;
+  needsName?: (nodeIndex: number) => boolean;
   reportProgress?: (progress: { progress: number; total: number; message: string }) => Promise<void>;
 };
 
@@ -47,12 +48,26 @@ const measureChunkSize = 200;
 
 const refResolutionTimeoutMs = 1000;
 
-/** @public */
-export function collectElementFacts(
-  input: (SVGElement | HTMLElement)[] | { elements: (SVGElement | HTMLElement)[]; measureNames: boolean }
-): ElementFacts[] {
+type CollectElementFactsInput =
+  | (SVGElement | HTMLElement)[]
+  | {
+    elements: (SVGElement | HTMLElement)[];
+    measureNames: boolean;
+    measureNameMask?: boolean[];
+  };
+
+type ReadElementFactsInput =
+  | playwright.ElementHandle<SVGElement | HTMLElement>[]
+  | {
+    elements: playwright.ElementHandle<SVGElement | HTMLElement>[];
+    measureNames: boolean;
+    measureNameMask?: boolean[];
+  };
+
+function collectSerializedElementFacts(input: CollectElementFactsInput): string {
   const elements = Array.isArray(input) ? input : input.elements;
   const measureNames = Array.isArray(input) ? true : input.measureNames;
+  const measureNameMask = Array.isArray(input) ? undefined : input.measureNameMask;
   const memoize = <V>(compute: (element: Element) => V) => {
     const cache = new Map<Element, V>();
     return (element: Element): V => {
@@ -64,6 +79,12 @@ export function collectElementFacts(
   const getStyle = memoize(element => window.getComputedStyle(element));
   const getRect = memoize(element => element.getBoundingClientRect());
   const textCache = new Map<Element, string>();
+  const ariaHiddenCache = new Map<Element, boolean>();
+  const ancestorHiddenCache = {
+    none: new Map<Element, boolean>(),
+    absolute: new Map<Element, boolean>(),
+    fixed: new Map<Element, boolean>(),
+  };
   const referenceBoxSize = (element: Element, style: CSSStyleDeclaration, box: string): { width: number, height: number } => {
     const px = (value: string) => parseFloat(value) || 0;
     if (!(element instanceof HTMLElement))
@@ -88,6 +109,8 @@ export function collectElementFacts(
     }
   };
   const insetClipsEverything = (clipPath: string, element: Element, style: CSSStyleDeclaration): boolean => {
+    if (clipPath === 'none' || !clipPath.startsWith('inset('))
+      return false;
     const match = /^inset\(([^)]*)\)(?:\s+([a-z-]+))?/.exec(clipPath);
     if (!match)
       return false;
@@ -101,6 +124,8 @@ export function collectElementFacts(
     return height - top - bottom <= 0 || width - left - right <= 0;
   };
   const transformCollapses = (element: Element, transform: string): boolean => {
+    if (transform === 'none')
+      return false;
     const singular = (a: number, b: number, c: number, d: number) => {
       const det = a * d - b * c;
       const component = Math.max(Math.abs(a), Math.abs(b), Math.abs(c), Math.abs(d));
@@ -169,26 +194,44 @@ export function collectElementFacts(
     const outOfFlow = (style: CSSStyleDeclaration): 'absolute' | 'fixed' | null =>
       style.position === 'absolute' || style.position === 'fixed' ? style.position : null;
     let escapingPosition = outOfFlow(getStyle(element));
+    const trail: [Map<Element, boolean>, Element][] = [];
+    let hidden = false;
     for (let node = parentInComposedTree(element); node; node = parentInComposedTree(node)) {
+      const stateMap = ancestorHiddenCache[escapingPosition ?? 'none'];
+      const cached = stateMap.get(node);
+      if (cached !== undefined) {
+        hidden = cached;
+        break;
+      }
+      trail.push([stateMap, node]);
       const style = getStyle(node);
       const decided = nonGeometricHidden(node, style);
-      if (decided)
-        return true;
+      if (decided) {
+        hidden = true;
+        break;
+      }
       if (decided === null) {
-        if (insetClipsEverything(style.clipPath, node, style))
-          return true;
+        if (insetClipsEverything(style.clipPath, node, style)) {
+          hidden = true;
+          break;
+        }
         const containingBlock = style.position !== 'static' || style.transform !== 'none';
         const fixedContainingBlock = style.transform !== 'none' || style.perspective !== 'none' || style.filter !== 'none';
         const bindsEscape = escapingPosition === 'fixed' ? fixedContainingBlock : containingBlock;
-        if (collapsedClippingBox(style, node) && (!escapingPosition || bindsEscape))
-          return true;
-        if (outOfFlow(style))
-          escapingPosition = outOfFlow(style);
+        if (collapsedClippingBox(style, node) && (!escapingPosition || bindsEscape)) {
+          hidden = true;
+          break;
+        }
+        const nodeOutOfFlow = outOfFlow(style);
+        if (nodeOutOfFlow)
+          escapingPosition = nodeOutOfFlow;
         else if (bindsEscape)
           escapingPosition = null;
       }
     }
-    return false;
+    for (const [stateMap, visited] of trail)
+      stateMap.set(visited, hidden);
+    return hidden;
   };
   const renderedChildren = (element: Element): ArrayLike<Node> & Iterable<Node> => {
     if (element.shadowRoot)
@@ -246,11 +289,23 @@ export function collectElementFacts(
 
   const buttonInputTypes = ['submit', 'button', 'reset'];
   const isAriaHiddenInComposedTree = (element: Element): boolean => {
+    const trail: Element[] = [];
+    let hidden = false;
     for (let node: Element | null = element; node; node = parentInComposedTree(node)) {
-      if (node.getAttribute('aria-hidden')?.toLowerCase() === 'true')
-        return true;
+      const cached = ariaHiddenCache.get(node);
+      if (cached !== undefined) {
+        hidden = cached;
+        break;
+      }
+      trail.push(node);
+      if (node.getAttribute('aria-hidden')?.toLowerCase() === 'true') {
+        hidden = true;
+        break;
+      }
     }
-    return false;
+    for (const visited of trail)
+      ariaHiddenCache.set(visited, hidden);
+    return hidden;
   };
   const visibleTextOf = (element: SVGElement | HTMLElement): string => {
     if (subtreeHidden(element) || ancestorSubtreeHidden(element))
@@ -260,7 +315,8 @@ export function collectElementFacts(
     return sightedText(element);
   };
 
-  const axe = measureNames ? window.__mcpAccessibilityScannerAxe : undefined;
+  const shouldMeasureAnyName = measureNames && (!measureNameMask || measureNameMask.some(Boolean));
+  const axe = shouldMeasureAnyName ? window.__mcpAccessibilityScannerAxe : undefined;
   let measureName = (_element: Element): { accessibleName: string | null; nameMeasured: boolean } => ({ accessibleName: null, nameMeasured: false });
   let ownsAxeTree = false;
   if (typeof axe?.setup === 'function' && typeof axe?.commons?.text?.accessibleText === 'function') {
@@ -277,16 +333,19 @@ export function collectElementFacts(
     } catch {}
   }
 
-  const collect = (element: SVGElement | HTMLElement): ElementFacts => {
+  const collect = (element: SVGElement | HTMLElement, index: number): ElementFacts => {
     const rect = getRect(element);
     const style = getStyle(element);
     const text = visibleTextOf(element);
+    const nameResult = measureNames && (!measureNameMask || measureNameMask[index])
+      ? measureName(element)
+      : { accessibleName: null, nameMeasured: false };
     return {
       tagName: element.tagName.toLowerCase(),
       selector: `${element.tagName.toLowerCase()}${element.id ? `#${element.id}` : ''}${element.classList[0] ? `.${element.classList[0]}` : ''}`,
       visibleText: text ? text.slice(0, 200) : null,
       href: element instanceof HTMLAnchorElement && element.hasAttribute('href') ? element.href : null,
-      ...measureName(element),
+      ...nameResult,
       rect: {
         x: rect.x + window.scrollX,
         y: rect.y + window.scrollY,
@@ -301,11 +360,24 @@ export function collectElementFacts(
   };
 
   try {
-    return elements.map(collect);
+    return JSON.stringify(elements.map(collect));
   } finally {
     if (ownsAxeTree)
       axe!.teardown();
   }
+}
+
+/** @public */
+export async function readElementFacts(
+  target: Pick<playwright.Frame, 'evaluate'>,
+  input: ReadElementFactsInput,
+): Promise<ElementFacts[]> {
+  return JSON.parse(await target.evaluate(collectSerializedElementFacts, input)) as ElementFacts[];
+}
+
+function framePrefixOf(ref: string): string | null {
+  const match = /^(f\d+)?e\d+$/.exec(ref);
+  return match ? (match[1] ?? '') : null;
 }
 
 type FrameWork = {
@@ -346,6 +418,7 @@ export async function measureScreenReaderElements(
   type Measured = { index: number; handle: playwright.ElementHandle<SVGElement | HTMLElement> };
   const onlyFrame = page.frames().length === 1 ? page.mainFrame() : null;
   const factsByIndex = new Map<number, ElementFacts>();
+  const ownerFrameByPrefix = new Map<string, playwright.Frame>();
   const axeByFrame = new Map<playwright.Frame, boolean>();
   const unavailableFrames = new Set<playwright.Frame>();
   let unmeasuredNames = 0;
@@ -390,15 +463,48 @@ export async function measureScreenReaderElements(
     void Promise.all(handles.map(handle => handle.dispose().catch(() => undefined)));
   };
 
-  const resolveRefHandles = (chunk: number[]) => Promise.all(chunk.map(index =>
-    page.locator(`aria-ref=${ariaNodes[index].ref}`).elementHandle({ timeout: refResolutionTimeoutMs }).catch(() => null)));
+  const resolveRefHandle = async (ref: string): Promise<playwright.ElementHandle<SVGElement | HTMLElement> | null> => {
+    const pending = page.$(`aria-ref=${ref}`).catch(() => null);
+    const handle = await withFrameTimeout(pending, null, refResolutionTimeoutMs);
+    if (!handle)
+      void pending.then(late => late?.dispose().catch(() => undefined));
+    return handle;
+  };
 
-  const ownerFramesOf = async (handles: (playwright.ElementHandle<SVGElement | HTMLElement> | null)[]) => {
+  const resolveRefHandles = (chunk: number[]) => Promise.all(chunk.map(index => resolveRefHandle(ariaNodes[index].ref!)));
+
+  const ownerFramesOf = async (chunk: number[], handles: (playwright.ElementHandle<SVGElement | HTMLElement> | null)[]) => {
     if (onlyFrame)
       return handles.map(handle => handle ? onlyFrame : null);
-    return await withConcurrency(handles, async handle => {
+    const owners: (playwright.Frame | null)[] = new Array<playwright.Frame | null>(handles.length).fill(null);
+    const uncachedByPrefix = new Map<string, number[]>();
+    const unprefixedPositions: number[] = [];
+
+    for (let position = 0; position < handles.length; position++) {
+      const handle = handles[position];
       if (!handle)
-        return null;
+        continue;
+      const prefix = framePrefixOf(ariaNodes[chunk[position]].ref!);
+      if (prefix === null) {
+        unprefixedPositions.push(position);
+        continue;
+      }
+      const cached = ownerFrameByPrefix.get(prefix);
+      if (cached) {
+        if (!cached.isDetached?.()) {
+          owners[position] = cached;
+          continue;
+        }
+        ownerFrameByPrefix.delete(prefix);
+      }
+      const group = uncachedByPrefix.get(prefix);
+      if (group)
+        group.push(position);
+      else
+        uncachedByPrefix.set(prefix, [position]);
+    }
+
+    const lookupOwnerFrame = async (handle: playwright.ElementHandle<SVGElement | HTMLElement>) => {
       const lookup = await runFrameWork(
           () => handle.ownerFrame(), null, page.mainFrame(),
           (owner, timedOut) => {
@@ -407,8 +513,37 @@ export async function measureScreenReaderElements(
           });
       if (!lookup.started)
         disposeHandles([handle]);
-      return lookup.started && !lookup.timedOut ? lookup.value : null;
-    });
+      return lookup;
+    };
+
+    const resolveSingleHandle = async (position: number) => {
+      const lookup = await lookupOwnerFrame(handles[position]!);
+      if (lookup.started && !lookup.timedOut)
+        owners[position] = lookup.value;
+    };
+
+    const resolvePrefixGroup = async (prefix: string, positions: number[]) => {
+      for (let index = 0; index < positions.length; index++) {
+        const lookup = await lookupOwnerFrame(handles[positions[index]]!);
+        if (!lookup.started || lookup.timedOut) {
+          disposeHandles(positions.slice(index + 1).map(pos => handles[pos]!));
+          return;
+        }
+        if (lookup.value) {
+          ownerFrameByPrefix.set(prefix, lookup.value);
+          for (let rest = index; rest < positions.length; rest++)
+            owners[positions[rest]] = lookup.value;
+          return;
+        }
+      }
+    };
+
+    const tasks: (() => Promise<void>)[] = [
+      ...[...uncachedByPrefix.entries()].map(([prefix, positions]) => () => resolvePrefixGroup(prefix, positions)),
+      ...unprefixedPositions.map(position => () => resolveSingleHandle(position)),
+    ];
+    await withConcurrency(tasks, task => task());
+    return owners;
   };
 
   const groupByFrame = (chunk: number[], handles: (playwright.ElementHandle<SVGElement | HTMLElement> | null)[], owners: (playwright.Frame | null)[]) => {
@@ -451,13 +586,20 @@ export async function measureScreenReaderElements(
       disposeHandles(batchHandles);
       return;
     }
-    const measureNames = options.checkNames ? await ensureAxeForNames(frame) : false;
+    const nameMask = options.checkNames
+      ? batch.map(entry => options.needsName ? options.needsName(entry.index) : true)
+      : undefined;
+    const batchNeedsNames = !!nameMask?.some(Boolean);
+    const measureNames = batchNeedsNames ? await ensureAxeForNames(frame) : false;
     if (measureNames === undefined) {
       disposeHandles(batchHandles);
       return;
     }
+    const input = measureNames && nameMask
+      ? { elements: batchHandles, measureNames, measureNameMask: nameMask }
+      : { elements: batchHandles, measureNames };
     const collected = await runFrameWork(
-        () => frame.evaluate(collectElementFacts, { elements: batchHandles, measureNames }), null, frame,
+        () => readElementFacts(frame, input), null, frame,
         (facts, timedOut) => {
           if (facts && timedOut)
             unavailableFrames.delete(frame);
@@ -474,8 +616,8 @@ export async function measureScreenReaderElements(
     const facts = collected.value;
     if (!facts)
       return;
-    if (options.checkNames)
-      unmeasuredNames += facts.filter(fact => !fact.nameMeasured).length;
+    if (batchNeedsNames && nameMask)
+      unmeasuredNames += facts.filter((fact, position) => nameMask[position] && !fact.nameMeasured).length;
     batch.forEach((entry, position) => factsByIndex.set(entry.index, facts[position]));
     resolvedCount += batch.length;
     reachable += facts.filter(fact => !fact.ariaHidden).length;
@@ -487,7 +629,7 @@ export async function measureScreenReaderElements(
     const chunk = refIndexes.slice(start, start + size);
     start += size;
     const handles = await resolveRefHandles(chunk);
-    const owners = await ownerFramesOf(handles);
+    const owners = await ownerFramesOf(chunk, handles);
     await withConcurrency([...groupByFrame(chunk, handles, owners)], measureFrameBatch);
     analyzedIndexes.push(...chunk);
     await options.reportProgress?.({

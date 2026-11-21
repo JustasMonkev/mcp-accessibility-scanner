@@ -3,7 +3,6 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chromium, type Browser } from 'playwright';
 import auditScreenReaderTools, {
   analyzeScreenReader,
-  collectElementFacts,
   parseAriaSnapshot,
   type ElementFacts,
   type Rect,
@@ -12,7 +11,7 @@ import auditScreenReaderTools, {
 } from '../src/tools/auditScreenReader.js';
 import { Response } from '../src/response.js';
 import { injectAxeForNames } from '../src/tools/axe.js';
-import { measureScreenReaderElements } from '../src/tools/screenReaderMeasurement.js';
+import { measureScreenReaderElements, readElementFacts } from '../src/tools/screenReaderMeasurement.js';
 
 function node(overrides: Partial<ScreenReaderNode>): ScreenReaderNode {
   return {
@@ -685,7 +684,7 @@ function createToolHarness(options: {
   const installs = { count: 0 };
   const frames: any[] = Array.from({ length: options.frameCount ?? 1 }, (_, frameIndex) => ({
     parentFrame: () => options.childFrames || frameIndex > 0 ? ({}) : null,
-    evaluate: vi.fn(async (collect: unknown, input: { elements: { ref: string }[]; measureNames: boolean }) => {
+    evaluate: vi.fn(async (collect: unknown, input: { elements: { ref: string }[]; measureNames: boolean; measureNameMask?: boolean[] }) => {
       frameConcurrency.current++;
       try {
         frameConcurrency.max = Math.max(frameConcurrency.max, frameConcurrency.current);
@@ -696,7 +695,12 @@ function createToolHarness(options: {
           if (delay)
             await new Promise(resolve => setTimeout(resolve, delay));
           const measured = input.measureNames && installs.count > 0 && (options.installAxe ?? 'accept') === 'accept';
-          return input.elements.map(handle => ({ ...baseFacts, nameMeasured: measured, ...options.factsFor?.(handle.ref) }));
+          const facts = input.elements.map((handle, position) => ({
+            ...baseFacts,
+            nameMeasured: measured && (!input.measureNameMask || input.measureNameMask[position]),
+            ...options.factsFor?.(handle.ref),
+          }));
+          return JSON.stringify(facts);
         }
         installs.count++;
         const installDelay = options.installAxeDelayFor?.(frameIndex);
@@ -713,40 +717,43 @@ function createToolHarness(options: {
     }),
   }));
   const frame = frames[0];
+  const resolveRef = async (selector: string) => {
+    const ref = selector.replace('aria-ref=', '');
+    const stale = options.staleRefs?.(ref) ?? false;
+    concurrency.current++;
+    concurrency.max = Math.max(concurrency.max, concurrency.current);
+    await new Promise(resolve => setTimeout(resolve, stale ? options.staleDelayMs ?? 0 : 0));
+    concurrency.current--;
+    const frameIndexMatch = /^f(\d+)e\d+$/.exec(ref);
+    const owner = frames[(frameIndexMatch ? Number(frameIndexMatch[1]) : Number(ref.replace(/\D/g, ''))) % frames.length];
+    return stale ? null : {
+      ref,
+      ownerFrame: async () => {
+        ownerFrames.calls++;
+        ownerFrames.current++;
+        frameConcurrency.current++;
+        try {
+          ownerFrames.max = Math.max(ownerFrames.max, ownerFrames.current);
+          frameConcurrency.max = Math.max(frameConcurrency.max, frameConcurrency.current);
+          if (options.ownerFrameDelayMs)
+            await new Promise(resolve => setTimeout(resolve, options.ownerFrameDelayMs));
+          return owner;
+        } finally {
+          ownerFrames.current--;
+          frameConcurrency.current--;
+        }
+      },
+      dispose: async () => { disposals.count++; },
+    };
+  };
   const page: any = {
     ariaSnapshot: vi.fn(async () => options.snapshot),
     frames: vi.fn(() => frames),
     mainFrame: vi.fn(() => frame),
     url: vi.fn(() => 'https://example.com/'),
+    $: vi.fn(resolveRef),
     locator: vi.fn((selector: string) => ({
-      elementHandle: async () => {
-        const ref = selector.replace('aria-ref=', '');
-        const stale = options.staleRefs?.(ref) ?? false;
-        concurrency.current++;
-        concurrency.max = Math.max(concurrency.max, concurrency.current);
-        await new Promise(resolve => setTimeout(resolve, stale ? options.staleDelayMs ?? 0 : 0));
-        concurrency.current--;
-        const owner = frames[Number(ref.replace(/\D/g, '')) % frames.length];
-        return stale ? null : {
-          ref,
-          ownerFrame: async () => {
-            ownerFrames.calls++;
-            ownerFrames.current++;
-            frameConcurrency.current++;
-            try {
-              ownerFrames.max = Math.max(ownerFrames.max, ownerFrames.current);
-              frameConcurrency.max = Math.max(frameConcurrency.max, frameConcurrency.current);
-              if (options.ownerFrameDelayMs)
-                await new Promise(resolve => setTimeout(resolve, options.ownerFrameDelayMs));
-              return owner;
-            } finally {
-              ownerFrames.current--;
-              frameConcurrency.current--;
-            }
-          },
-          dispose: async () => { disposals.count++; },
-        };
-      },
+      elementHandle: () => resolveRef(selector),
     })),
   };
   const outputFile = vi.fn(async (name: string) => `/tmp/${name}`);
@@ -1279,6 +1286,70 @@ describe('audit_screen_reader tool measurement', () => {
       vi.useRealTimers();
     }
   });
+
+  it('caches ownerFrame lookups per Playwright aria-ref prefix across chunks', async () => {
+    const entries = [
+      ...Array.from({ length: 120 }, (_, index) => ({ role: 'button', ref: `e${index + 1}` })),
+      ...Array.from({ length: 120 }, (_, index) => ({ role: 'button', ref: `f1e${index + 1}` })),
+      ...Array.from({ length: 120 }, (_, index) => ({ role: 'button', ref: `f2e${index + 1}` })),
+    ];
+    const harness = createToolHarness({
+      snapshot: snapshotOf(entries),
+      frameCount: 3,
+    });
+
+    const result = await run(harness, 360, false);
+    expect(result).toContain('Elements analyzed: 360');
+    expect(harness.ownerFrames.calls).toBe(3);
+    expect(harness.disposals.count).toBe(360);
+  });
+
+  it('skips axe installation on frames whose nodes already carry snapshot names or are not named controls', async () => {
+    const snapshot = [
+      '- main [ref=e1]:',
+      '  - button "Save" [ref=e2]',
+      '  - iframe [ref=e3]:',
+      '    - button [ref=f1e1]',
+      '    - button "Cancel" [ref=f1e2]',
+    ].join('\n');
+    const harness = createToolHarness({
+      snapshot,
+      frameCount: 2,
+      installAxe: 'reject',
+    });
+
+    const result = await run(harness, 50, true);
+    expect(harness.installs.count).toBe(1);
+    expect(result).toContain('WARNING: accessible names could not be measured for 1 of these');
+  });
+
+  it('probes the next handle in a frame prefix group when the first ownerFrame lookup returns null', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf([
+        { role: 'button', ref: 'f1e1' },
+        { role: 'button', ref: 'f1e2' },
+        { role: 'button', ref: 'f1e3' },
+      ]),
+      frameCount: 2,
+    });
+    const baseResolve = harness.context.currentTabOrDie().page.$.getMockImplementation()!;
+    let firstDetached = true;
+    harness.context.currentTabOrDie().page.$.mockImplementation(async (selector: string) => {
+      const handle = await baseResolve(selector);
+      if (handle && selector === 'aria-ref=f1e1' && firstDetached) {
+        firstDetached = false;
+        return { ...handle, ownerFrame: async () => null };
+      }
+      return handle;
+    });
+
+    const result = await run(harness, 10, true);
+    expect(result).toContain('Elements analyzed: 3');
+    expect(result).toContain('WARNING: 1 of these went stale before measurement');
+    expect(result).toContain('missing-accessible-name | 2');
+    expect(harness.ownerFrames.calls).toBe(1);
+    expect(harness.disposals.count).toBe(3);
+  });
 });
 
 describe('collectElementFacts in a real page', () => {
@@ -1294,7 +1365,7 @@ describe('collectElementFacts in a real page', () => {
     const page = await browser!.newPage();
     await page.setContent(html);
     const handles = await Promise.all(selectors.map(selector => page.$(selector)));
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
     await page.close();
     return facts.map(fact => fact.visibleText);
   }
@@ -1338,9 +1409,9 @@ describe('collectElementFacts in a real page', () => {
         .filter(entry => entry.role === 'link' || entry.role === 'button');
     const handles = await Promise.all(['#docs', '#save', '#empty'].map(selector => page.$(selector)));
     // Until axe is in the page nothing is measured and the snapshot stands.
-    const bare = await page.evaluate(collectElementFacts, handles as any);
+    const bare = await readElementFacts(page, handles as any);
     await injectAxeForNames(page.mainFrame());
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
     await page.close();
 
     // The link's name is distilled into its strong child; the button keeps its
@@ -1370,11 +1441,11 @@ describe('collectElementFacts in a real page', () => {
     await page.evaluate(() => { (window as any).axe = { theirs: true }; });
     expect(await injectAxeForNames(page.mainFrame())).toBe(true);
     expect(await page.evaluate(() => (window as any).axe)).toEqual({ theirs: true });
-    const [facts] = await page.evaluate(collectElementFacts, [handle] as any);
+    const [facts] = await readElementFacts(page, [handle] as any);
     expect(facts.accessibleName).toBe('Docs');
 
     // Told not to measure, the collector leaves the copy alone even though it is there.
-    const [unmeasured] = await page.evaluate(collectElementFacts, { elements: [handle], measureNames: false } as any);
+    const [unmeasured] = await readElementFacts(page, { elements: [handle], measureNames: false } as any);
     expect([unmeasured.accessibleName, unmeasured.nameMeasured]).toEqual([null, false]);
     await page.close();
   });
@@ -1388,9 +1459,9 @@ describe('collectElementFacts in a real page', () => {
       if (!control)
         throw new Error('Expected the fixture button');
 
-      const [first] = await page.evaluate(collectElementFacts, [control]);
+      const [first] = await readElementFacts(page, [control]);
       await control.evaluate(element => { element.textContent = 'Updated name'; });
-      const [second] = await page.evaluate(collectElementFacts, [control]);
+      const [second] = await readElementFacts(page, [control]);
 
       expect([first.accessibleName, first.nameMeasured]).toEqual(['First name', true]);
       expect([second.accessibleName, second.nameMeasured]).toEqual(['Updated name', true]);
@@ -1412,7 +1483,7 @@ describe('collectElementFacts in a real page', () => {
 
     expect(await injectAxeForNames(page.mainFrame())).toBe(false);
     expect(await page.evaluate(() => [(window as any).axe, typeof (window as any).__mcpAccessibilityScannerAxe])).toEqual([{ theirs: true }, 'undefined']);
-    const [facts] = await page.evaluate(collectElementFacts, [handle] as any);
+    const [facts] = await readElementFacts(page, [handle] as any);
     expect([facts.accessibleName, facts.nameMeasured]).toEqual([null, false]);
     await page.close();
   });
@@ -1430,7 +1501,7 @@ describe('collectElementFacts in a real page', () => {
     const button = snapshot.findIndex(entry => entry.role === 'button');
     const handle = await page.$('#b');
     await injectAxeForNames(page.mainFrame());
-    const [facts] = await page.evaluate(collectElementFacts, [handle] as any);
+    const [facts] = await readElementFacts(page, [handle] as any);
     await page.close();
 
     expect(snapshot[button].name).toBeNull();
@@ -1457,7 +1528,7 @@ describe('collectElementFacts in a real page', () => {
     const handles = await Promise.all(['#send', '#clear', '#bare', '#text', '#save', '#icon']
         .map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // #bare has no value: the UA renders "Submit" but exposes no label to copy,
     // and #text holds user input rather than a label.
@@ -1480,7 +1551,7 @@ describe('collectElementFacts in a real page', () => {
       </script>`);
     const handles = await Promise.all(['#host', '#empty'].map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // The icon-only host still has no visible label to mismatch against.
     expect(facts.map(fact => fact.visibleText)).toEqual(['Send', null]);
@@ -1495,7 +1566,7 @@ describe('collectElementFacts in a real page', () => {
       <div aria-hidden="false"><button id="shown">Shown</button></div>`);
     const handles = await Promise.all(['#upper', '#lower', '#shown'].map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // aria-hidden="TRUE" removes the subtree from the accessibility tree exactly
     // like "true"; a case-sensitive selector reported its content as reachable.
@@ -1512,7 +1583,7 @@ describe('collectElementFacts in a real page', () => {
       <button id="shown" aria-label="Submit">Send</button>`);
     const handles = await Promise.all(['#ghost', '#gone', '#folded', '#shown'].map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // A fully invisible control shows no label at all, so its child text must
     // not feed a label-in-name mismatch; only #shown really displays "Send".
@@ -1540,7 +1611,7 @@ describe('collectElementFacts in a real page', () => {
       </script>`);
     const handles = await Promise.all(['#slotted', '#noslot', '#fallback'].map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // A shadow tree replaces the host's light children: only slot-assigned
     // nodes render. "Ghost" has no slot to land in, so it shows nowhere; an
@@ -1556,7 +1627,7 @@ describe('collectElementFacts in a real page', () => {
       <button id="inherited" style="visibility:hidden" aria-label="Submit"><span>Send</span></button>`);
     const handles = await Promise.all(['#restored', '#inherited'].map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // visibility, unlike display/opacity/clip, is restorable below a hidden
     // ancestor: the first span renders, so "Send" really is the visible label;
@@ -1585,7 +1656,7 @@ describe('collectElementFacts in a real page', () => {
     const inner = await hostHandle!.evaluateHandle(host => host.shadowRoot!.getElementById('inner'));
     const handles = [...await Promise.all(['#labelled', '#attr', '#dangling'].map(selector => page.$(selector))), inner];
     await injectAxeForNames(page.mainFrame());
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
     await page.close();
 
     // Reference order rather than document order, hidden text skipped, alt
@@ -1604,7 +1675,7 @@ describe('collectElementFacts in a real page', () => {
       <div id="clipped" style="width:1px;height:1px;overflow:hidden">Send</div>`);
     const handles = await Promise.all(['#contents', '#contents-clip', '#overflowing', '#clipped'].map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // display:contents has a 0x0 rect but renders its content in the parent's
     // box — with no box there is nothing for a clip-path to clip either, even
@@ -1622,7 +1693,7 @@ describe('collectElementFacts in a real page', () => {
       <div id="positioned-clip" style="position: absolute; clip: rect(0 0 0 0)">Send</div>`);
     const handles = await Promise.all(['#static-clip', '#positioned-clip'].map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // clip is inert on statically positioned boxes — that text really renders —
     // while the classic sr-only shape (absolute + clip) hides everything.
@@ -1638,7 +1709,7 @@ describe('collectElementFacts in a real page', () => {
       <div><button id="in-visible" aria-label="Submit">Send</button></div>`);
     const handles = await Promise.all(['#in-opacity', '#in-sronly', '#in-visible'].map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // opacity is not inherited and a clipping wrapper leaves the child's rect
     // untouched, so neither shows up in the control's own computed style — the
@@ -1655,7 +1726,7 @@ describe('collectElementFacts in a real page', () => {
       <div id="swallowed" style="clip-path: inset(0 0 100% 0); width:100px; height:100px">Send</div>`);
     const handles = await Promise.all(['#sr-only', '#half', '#swallowed'].map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // inset(50% 0 0 0) computes to "inset(50% 0px 0px)" — the same prefix as
     // the sr-only inset(50%) — yet paints the whole bottom half; only insets
@@ -1681,7 +1752,7 @@ describe('collectElementFacts in a real page', () => {
     const handles = await Promise.all(
         ['#in-hidden-wrapper span', '#in-visible-wrapper span'].map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // A slotted element renders where its slot sits: its flat-tree ancestors
     // are the slot and the shadow-tree wrapper around it, not the host's light
@@ -1700,7 +1771,7 @@ describe('collectElementFacts in a real page', () => {
       <div style="transform: scale(0)"><button id="in-scale0" aria-label="Submit">Send</button></div>`);
     const handles = await Promise.all(['#scale0', '#scalex0', '#rotated', '#in-scale0'].map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // A singular transform collapses the painted area — overflow included, so
     // the collapsed-box exception for visible overflow must not apply. A
@@ -1860,7 +1931,7 @@ describe('collectElementFacts in a real page', () => {
       page.$('#shown-host button'),
     ]);
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     // closest() stops at the shadow boundary, so an aria-hidden host used to
     // leave its shadow content marked reachable; the composed-tree walk sees
@@ -1883,7 +1954,7 @@ describe('collectElementFacts in a real page', () => {
     const handles = await Promise.all(['#relative', '#absolute', '#other', '#nohref']
         .map(selector => page.$(selector)));
 
-    const facts = await page.evaluate(collectElementFacts, handles as any);
+    const facts = await readElementFacts(page, handles as any);
 
     expect(facts[0].href).toBe(facts[1].href);
     expect(facts[2].href).not.toBe(facts[0].href);

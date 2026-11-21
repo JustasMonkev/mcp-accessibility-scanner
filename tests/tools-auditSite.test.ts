@@ -1684,6 +1684,23 @@ describe('audit_site tool', () => {
     expect(context.newTab).not.toHaveBeenCalled();
   });
 
+  it('rejects sitemap strategy for shared-context extension providers', async () => {
+    const sitemapUrl = 'https://example.com/sitemap.xml';
+    const { context, response, fetchMock } = createHarness({}, {
+      sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+    });
+    context.options.browserContextFactory = { sharedContext: true };
+
+    await expect(tool.handle(context as any, tool.schema.inputSchema.parse({
+      strategy: 'sitemap',
+      sitemapUrl,
+      sameOriginOnly: false,
+    }), response)).rejects.toThrow(/Use the provided URL strategy/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.newTab).not.toHaveBeenCalled();
+  });
+
   it.each([
     { remoteEndpoint: 'ws://remote.example/browser' },
     { cdpEndpoint: 'https://remote.example:9222' },

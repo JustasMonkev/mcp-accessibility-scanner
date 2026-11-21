@@ -58,7 +58,7 @@ class PageActivity {
   }
 
   async waitUntilIdle(firstActivityWindowMs: number): Promise<void> {
-    if (!this._sawRequest && !this._mainFrameNavigated)
+    if (firstActivityWindowMs > 0 && !this._sawRequest && !this._mainFrameNavigated)
       await settleWithin(this._firstActivity.promise, firstActivityWindowMs);
     if (!this._inFlightRequests.size && !this._mainFrameNavigated)
       this._idle.resolve();
@@ -96,7 +96,7 @@ class PageActivity {
 }
 
 async function waitForDomOnlyWork(tab: Tab, settleMs: number): Promise<void> {
-  if (tab.page.isClosed())
+  if (settleMs <= 0 || tab.page.isClosed())
     return;
   try {
     await tab.waitForTimeout(settleMs);
