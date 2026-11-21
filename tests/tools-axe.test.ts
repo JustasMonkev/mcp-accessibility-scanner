@@ -11,18 +11,10 @@ import { assertRuleOptionsValid, axeRuleSchemaShape, axeTagValues, defaultAxeTag
 import type { AddressInfo } from 'node:net';
 import type { Frame, Page } from 'playwright';
 
-// The scan drives each frame itself: it installs axe-core, asks it which child
-// frames to visit (axe.utils.getFrameContexts, with their elements captured in
-// the same call) and for that frame's partial result (axe.runPartial), then
-// merges everything with axe.finishRun in Node. The fake frames below answer
-// those calls; finishRun is the real one.
 type ScanCall = { url: string; context: any; options: any };
 type Behavior = 'ok' | 'throws' | 'hangs';
 type FakeFrame = ReturnType<typeof makeFrame>;
-// element: 'missing' models a selector that no longer resolved at capture.
 type FakeChild = { selector: string | string[]; frame: FakeFrame | null; context?: unknown; lookup?: Behavior; element?: 'missing' };
-// closedShadow: the in-page verdict for a frame axe did not visit, given the
-// caller's scope; frameElement: whether its element can be read at all.
 type FakeFrameOptions = {
   name?: string,
   injection?: Behavior,
@@ -60,15 +52,10 @@ const frameSpec = (child: FakeChild) => {
 
 function makeFrame(url = 'https://example.com/', options: FakeFrameOptions = {}) {
   const children = options.children ?? [];
-  // Every element handle the frame hands out, and every array-slot handle of
-  // every scan result, to check disposal.
   const handles: { dispose: ReturnType<typeof vi.fn> }[] = [];
   const propertyHandles: Map<string, { dispose: ReturnType<typeof vi.fn> }>[] = [];
   const evaluateHandle = vi.fn(async (_script: unknown, arg: any) => {
     scanCalls.push({ url, context: arg.context, options: arg.options });
-    // The page hands back [run info, payload, ...iframe elements] as one array
-    // handle. With no child frames, the top frame may answer with a finished
-    // plain axe.run report instead of a partial result.
     const plainRun = arg.allowPlainRun && !children.length;
     const info = {
       childFrames: children.map(child => ({
@@ -78,14 +65,9 @@ function makeFrame(url = 'https://example.com/', options: FakeFrameOptions = {})
       frameCount: children.length,
       plainRun,
     };
-    // Only the initiating (top) frame carries environment data; partial.frames
-    // holds one serialized element per selected child frame, as runPartial
-    // reports it; the marker lets tests read back which frame a partial is.
     const payload = JSON.stringify(plainRun
       ? { url, violations: [], incomplete: [], passes: [], inapplicable: [] }
       : { results: [], frames: children.map(frameSpec), environmentData: arg.context.initiator === false ? undefined : environmentData(url), marker: url });
-    // Every array slot is a handle of its own; a captured iframe element is
-    // its own asElement(), the strings and nulls are not elements.
     const valueHandle = (value: unknown) => ({ jsonValue: async () => value, asElement: () => null, dispose: vi.fn(async () => undefined) });
     const properties = new Map<string, unknown>([['0', valueHandle(info)], ['1', valueHandle(payload)]]);
     children.forEach((child, index) => {
@@ -111,24 +93,19 @@ function makeFrame(url = 'https://example.com/', options: FakeFrameOptions = {})
     propertyHandles,
     evaluateHandle,
     childFrames: () => [...children.flatMap(child => child.frame ? [child.frame] : []), ...(options.unvisited ?? [])],
-    // The iframe element in the parent document, read for frames axe skipped.
     frameElement: () => behave(options.frameElement ?? 'ok', {
       evaluate: async (_script: unknown, scope: { include: string[], exclude: string[] }) => options.closedShadow?.(scope) ?? false,
       dispose: async () => undefined,
     }),
     evaluate: async (script: unknown, arg?: any) => {
-      // Installing axe: the axe-core source wrapped in a plain string.
       if (typeof script === 'string')
         return behave(options.injection ?? 'ok', undefined);
-      // The liveness probe: does a zero-delay timer fire in this frame?
       return behave(options.liveness ?? 'ok', true);
     },
   };
   return frame;
 }
 
-// No frames() here on purpose: which frames get scanned is axe's call, made
-// from getFrameContexts, never a walk over Playwright's frame list.
 function fakePage(countBySelector: Record<string, number> = {}, main = makeFrame()) {
   return {
     mainFrame: () => main,
@@ -140,7 +117,6 @@ function child(selector: string, frame: FakeFrame | null, extra: Partial<FakeChi
   return { selector, frame, ...extra };
 }
 
-// Which frame each partial handed to finishRun came from, by its marker.
 const markersOf = (finishRun: { mock: { calls: unknown[][] } }) =>
   (finishRun.mock.calls[0][0] as ({ marker: string } | null)[]).map(partial => partial?.marker ?? null);
 
@@ -347,9 +323,6 @@ describe('axe helpers', () => {
   });
 
   it('validates rule ids against the exact axe-core build it injects', async () => {
-    // The rule catalogue, the injected source and the Node-side finishRun are
-    // the same module, and the exact pin keeps a lockfile-less install from
-    // resolving a different one.
     const [ownPackage, installedAxeCore] = await Promise.all([
       import('../package.json', { with: { type: 'json' } }),
       import('axe-core/package.json', { with: { type: 'json' } }),
@@ -415,8 +388,6 @@ describe('axe helpers', () => {
     await runAxeScan(fakePage({}, main));
 
     expect(main.evaluateHandle.mock.calls[0][1]).toMatchObject({ hasChildFrames: true, allowPlainRun: true });
-    // Only the top frame's report can stand alone; a child always runs
-    // runPartial, but a leaf child still skips the lookup.
     expect(leafFrame.evaluateHandle.mock.calls[0][1]).toMatchObject({ hasChildFrames: false, allowPlainRun: false });
   });
 
@@ -439,8 +410,6 @@ describe('axe helpers', () => {
   ] as const)('reports a child frame whose %s, and passes finishRun a null in its place', async (_label, behavior) => {
     resetScan();
     const finishRun = vi.spyOn(axeCore, 'finishRun');
-    // A frame that navigates mid-scan contributes no violations, and a report
-    // that stays silent about it reads as a clean scan of the whole page.
     const broken = makeFrame('https://example.com/widget', behavior);
     const main = makeFrame('https://example.com/', { children: [child('iframe', broken)] });
     const result = await runAxeScan(fakePage({}, main));
@@ -482,8 +451,6 @@ describe('axe helpers', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     const result = await scan;
 
-    // The run budget covers one frame's own runPartial, so the outer frame,
-    // which finished, keeps its results; only the nested frame is a gap.
     expect(result.unscannedFrames).toEqual(['https://example.com/nested']);
     expect(markersOf(finishRun)).toEqual(['https://example.com/', 'https://example.com/outer', null, 'https://example.com/sibling']);
     expect(vi.getTimerCount()).toBe(0);
@@ -492,9 +459,6 @@ describe('axe helpers', () => {
   it('resolves each child through the element captured with its slot, never by re-querying a selector', async () => {
     resetScan();
     const finishRun = vi.spyOn(axeCore, 'finishRun');
-    // Positional selectors like iframe:nth-child(2) can point at another frame
-    // once an earlier sibling is removed. The element captured during
-    // selection cannot, so the only page call per frame is its own scan.
     const first = makeFrame('https://example.com/first');
     const second = makeFrame('https://example.com/second');
     const main = makeFrame('https://example.com/', { children: [child('iframe:nth-child(1)', first), child('iframe:nth-child(2)', second)] });
@@ -507,8 +471,6 @@ describe('axe helpers', () => {
   it('omits the descendants of a frame that failed, as finishRun requires', async () => {
     resetScan();
     const finishRun = vi.spyOn(axeCore, 'finishRun');
-    // The outer frame never ran, so axe never named its children: the scan
-    // cannot reach them and must not invent results for them either.
     const nested = makeFrame('https://example.com/nested');
     const outer = makeFrame('https://example.com/outer', { run: 'throws', children: [child('iframe', nested)] });
     const sibling = makeFrame('https://example.com/sibling');
@@ -569,12 +531,9 @@ describe('axe helpers', () => {
     const main = makeFrame('https://example.com/', { children: [child('#widget', widget), child('#gone', null, { element: 'missing' })] });
     await runAxeScan(fakePage({}, main));
 
-    // The two JSON strings and the null slot are released right after they
-    // are read: left alone, Playwright would hold each scan's partial result.
     const [slots] = main.propertyHandles;
     for (const key of ['0', '1', '3'])
       expect(slots.get(key)!.dispose).toHaveBeenCalledTimes(1);
-    // The iframe element is released exactly once, after it is resolved.
     expect(slots.get('2')!.dispose).toHaveBeenCalledTimes(1);
   });
 
@@ -629,8 +588,6 @@ describe('axe helpers', () => {
 
   it('checks for closed-shadow frames on a page scanned without the frame walk too', async () => {
     resetScan();
-    // getFrameContexts names no frame here, so the page takes the plain
-    // axe.run path, yet the frame in the closed shadow root is still a gap.
     const hiddenFromAxe = makeFrame('https://widget.example/closed', { closedShadow: () => true });
     const main = makeFrame('https://example.com/', { unvisited: [hiddenFromAxe] });
 
@@ -650,8 +607,6 @@ describe('axe helpers', () => {
     const main = makeFrame('https://example.com/', { children: [child('#outer', outer)], unvisited: [topClosed] });
     await runAxeScan(fakePage({ '#main': 1, '.ad': 1 }, main), { include: ['#main'], exclude: ['.ad'] });
 
-    // The caller's selectors name elements in the top document; inside a frame
-    // axe already scanned, everything is in scope.
     expect(scopes).toEqual(expect.arrayContaining([
       { url: 'top', scope: { include: ['#main'], exclude: ['.ad'] } },
       { url: 'nested', scope: { include: [], exclude: [] } },
@@ -661,8 +616,6 @@ describe('axe helpers', () => {
   it.each(['throws', 'hangs'] as const)('does not list an unvisited frame whose element read %s', async frameElement => {
     resetScan();
     vi.useFakeTimers();
-    // Usually a frame that detached mid-scan; most unvisited frames are ones
-    // axe skipped on purpose, so an unreadable one is not called a gap.
     const unreadable = makeFrame('https://example.com/gone', { frameElement, closedShadow: () => true });
     const main = makeFrame('https://example.com/', { unvisited: [unreadable] });
     const scan = runAxeScan(fakePage({}, main));
@@ -780,8 +733,6 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
 
       const scan = await runAxeScan(page, options);
 
-      // The reference: the integration this replaced, with axe.run in the top
-      // frame relaying to every other frame over postMessage.
       const source = `${axeCore.source};axe.configure({ allowedOrigins: ['<unsafe_all_origins>'], branding: { application: 'playwright' } });`;
       await Promise.all(page.frames().map(frame => frame.evaluate(source)));
       const reference = await page.evaluate(async tags => {
@@ -793,8 +744,6 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
       expect(scan.violations).toEqual(reference.violations);
       expect(scan.incomplete).toEqual(reference.incomplete);
       expect(scan.unscannedFrames).toEqual([]);
-      // Spot-check the cross-frame parts: nested targets, and heading-order's
-      // after-check, which only works once every frame's results are merged.
       expect(targetsOf(scan.violations, 'image-alt')).toEqual([['img'], ['#a', 'img'], ['#a', 'iframe', 'img']]);
       expect(targetsOf(scan.violations, 'heading-order')).toEqual([['#a', 'h3']]);
     });
@@ -805,12 +754,9 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
       const body = '<main><h1>Title</h1><h4>Skipped</h4><img src="a.png"><a href="#"></a><input></main>';
       await page.setContent(`<html><title>Paths</title>${body}</html>`);
       const plainRun = await runAxeScan(page);
-      // An empty, titled frame adds no findings, but sends the scan down the
-      // runPartial walk and through finishRun in Node.
       await setContentWithFrames(page, `<html><title>Paths</title>${body}<iframe title="Empty" srcdoc="<html lang=en><title>Empty</title></html>"></iframe></html>`, 1);
       const partialRun = await runAxeScan(page);
 
-      // The root element's snippet differs only by the added iframe markup.
       const withoutRootHtml = (rules: typeof plainRun.violations) => rules.map(rule => ({
         ...rule,
         nodes: rule.nodes.map(node => JSON.stringify(node.target) === '["html"]' ? { ...node, html: '<html>' } : node),
@@ -842,8 +788,6 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
 
         expect(targetsOf(result.violations, 'image-alt')).toEqual([['iframe', '#cross-origin-image']]);
         expect(result.unscannedFrames).toEqual([]);
-        // Nothing in either document was told to accept axe messages from
-        // arbitrary origins, and the page's own `axe` global stays untouched.
         expect(await page.evaluate(() => 'axe' in window)).toBe(false);
       });
     } finally {
@@ -870,9 +814,6 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
 
   it('reports a frame axe selected but cannot run script in', async () => {
     await withPage(async page => {
-      // A sandbox without allow-scripts accepts injected code but never fires
-      // its timers, so axe.runPartial would never settle there. axe.run would
-      // have skipped it silently once its ping timed out.
       await setContentWithFrames(page, '<iframe id="locked" sandbox srcdoc="<img src=x.png>"></iframe><iframe id="open" srcdoc="<img src=y.png>"></iframe>', 2);
 
       const started = Date.now();
@@ -895,8 +836,6 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
 
       const result = await runAxeScan(page, { rules: ['image-alt'], exclude: ['iframe.chat-widget'] });
 
-      // Excluded, hidden and aria-hidden frames cannot run script either, yet
-      // none of them is a coverage gap: axe would not have scanned them.
       expect(result.unscannedFrames).toEqual([]);
       expect(targetsOf(result.violations, 'image-alt')).toEqual([['#kept', 'img'], ['#kept', 'iframe', 'img']]);
     });
@@ -914,8 +853,6 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
 
   type ClosedFrameWindow = { attachClosedFrame: (host: Element, name: string) => void };
 
-  // Defines window.attachClosedFrame(host, name) in a document: it builds an
-  // `<iframe name=…>` inside a new closed shadow root on host.
   const installAttachClosedFrame = (frame: Page | Frame) => frame.evaluate(() => {
     (window as unknown as ClosedFrameWindow).attachClosedFrame = (host, name) => {
       const iframe = document.createElement('iframe');
@@ -926,7 +863,6 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
   });
 
   async function waitForSrcdocFrames(page: Page, names: string[]) {
-    // Attached is not enough: the label comes from the committed srcdoc URL.
     await expect.poll(() => names.map(name => page.frames().find(frame => frame.name() === name)?.url())).toEqual(names.map(() => 'about:srcdoc'));
   }
 
@@ -952,8 +888,6 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
         ] as const)
           attachClosedFrame(host(markup), name);
 
-        // Hidden only on the composed path: the frame's host is slotted into
-        // an aria-hidden or inert wrapper inside another shadow root.
         for (const [wrapper, name] of [['<div aria-hidden="true"><slot></slot></div>', 'slot-aria-hidden'], ['<div inert><slot></slot></div>', 'slot-inert']] as const) {
           const outer = host('<div></div>');
           outer.attachShadow({ mode: 'open' }).innerHTML = wrapper;
@@ -962,15 +896,10 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
           attachClosedFrame(slotted, name);
         }
 
-        // `.ad` matches only a wrapper inside the closed shadow root, which the
-        // top-document selector cannot reach: it scopes nothing out.
         const adRoot = host('<div></div>').attachShadow({ mode: 'closed' });
         adRoot.innerHTML = '<div class="ad"></div>';
         attachClosedFrame(adRoot.querySelector('.ad')!, 'shadow-ad');
 
-        // A <summary> slotted into a closed <details> through a <slot> is not
-        // the details' own summary (its first child is the slot), so it stays
-        // collapsed and unrendered: checkVisibility() is false.
         const details = host('<div></div>');
         details.attachShadow({ mode: 'closed' }).innerHTML = '<details><slot></slot></details>';
         const summary = document.createElement('summary');
@@ -983,8 +912,6 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
 
       const result = await runAxeScan(page, { rules: ['image-alt'], exclude: ['#chat', '.ad'] });
 
-      // Hidden, aria-hidden, inert, collapsed and excluded hosts take their
-      // frames out of scope; the rest are gaps axe would never have mentioned.
       expect(result.unscannedFrames.sort()).toEqual(['about:srcdoc (name="inner")', 'about:srcdoc (name="shadow-ad")', 'about:srcdoc (name="visible")']);
       expect(result.violations).toEqual([]);
     });
@@ -1002,8 +929,6 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
       });
       await waitForSrcdocFrames(page, ['behind-modal', 'inside-modal']);
 
-      // The modal leaves everything behind it inert, with no attribute to say
-      // so; the frame inside the modal is still a gap.
       expect((await runAxeScan(page, { rules: ['image-alt'] })).unscannedFrames).toEqual(['about:srcdoc (name="inside-modal")']);
     });
   });

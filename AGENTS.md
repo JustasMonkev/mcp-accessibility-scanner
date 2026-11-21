@@ -26,5 +26,6 @@
 - Reuse existing helpers before introducing new abstractions.
 - Prefer targeted validation first, then broader checks if needed.
 - When touching build, lint, or test behavior, run the relevant npm script before finalizing.
+- Do not add comments to files covered by the `comments/no-comments` rule in `.oxlintrc.json`: record decisions in `docs/decisions/`, file issues for workarounds, and run the `/delete-comment` skill (`.agents/skills/delete-comment/SKILL.md`) to clean files up and tighten the ratchet.
 - Before committing or pushing, self-review your diff against `.codex/skills/pre-push-review/SKILL.md` — a checklist of the recurring defect patterns automated PR review keeps finding in this repo.
 - Avoid introducing ignored or generated artifacts into version control; `.gitignore` already excludes `lib/`, `coverage/`, Playwright reports, and similar outputs.

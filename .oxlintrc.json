@@ -21,7 +21,8 @@
   "jsPlugins": [
     "@stylistic/eslint-plugin",
     "eslint-plugin-notice",
-    "./tools/oxlint/anti-slop/index.ts"
+    "./tools/oxlint/anti-slop/index.ts",
+    "./tools/oxlint/comments/index.ts"
   ],
   "rules": {
     "import/extensions": [
@@ -263,6 +264,24 @@
     "anti-slop/no-widen-then-assert": "error"
   },
   "overrides": [
+    {
+      "files": [
+        "src/tools/axe.ts",
+        "src/tools/axeFrameTree.ts",
+        "tests/tools-axe.test.ts",
+        "tests/tools-axeFrameTree.test.ts"
+      ],
+      "rules": {
+        "comments/no-comments": [
+          "error",
+          {
+            "baseline": {
+              "tests/tools-axe.test.ts": 29
+            }
+          }
+        ]
+      }
+    },
     {
       "files": [
         "src/tools/axe.ts",
