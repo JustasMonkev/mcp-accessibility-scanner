@@ -242,9 +242,11 @@ export class Context {
         await closePage(page, pageCloseTimeoutMs).catch(logUnhandledError);
         throw contextClosedWhileOpeningTabError();
       }
-      // oxlint-disable-next-line typescript/no-non-null-assertion
-      this._currentTab = this._tabs.find(t => t.page === page)!;
-      return this._currentTab;
+      const tab = this.tabForPage(page);
+      if (!tab)
+        throw new Error('Failed to register the newly opened tab.');
+      this._currentTab = tab;
+      return tab;
     });
     this._openingPages.add(opening);
     try {
@@ -298,8 +300,7 @@ export class Context {
           this._openingTab = undefined;
       }
     }
-    // oxlint-disable-next-line typescript/no-non-null-assertion
-    return this._currentTab!;
+    return this.currentTabOrDie();
   }
 
   async startRecordingOnCurrentTab(): Promise<void> {

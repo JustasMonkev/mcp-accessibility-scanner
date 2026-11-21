@@ -31,7 +31,12 @@ import { VSCodeProxyBackend } from '../src/vscode/host.js';
 function makeFakeContextFactory(sessionsUnsupportedReason?: string) {
   const createContext = vi.fn(async (..._args: any[]) => {
     const browserContext: any = new EventEmitter();
-    browserContext.newPage = vi.fn().mockResolvedValue({});
+    browserContext.newPage = vi.fn(async () => {
+      // Like Playwright, announce the page through 'page' so its tab registers.
+      const page = Object.assign(new EventEmitter(), { setDefaultNavigationTimeout: vi.fn(), setDefaultTimeout: vi.fn(), url: () => 'about:blank' });
+      browserContext.emit('page', page);
+      return page;
+    });
     browserContext.pages = vi.fn().mockReturnValue([]);
     browserContext.route = vi.fn().mockResolvedValue(undefined);
     return { browserContext, close: vi.fn().mockResolvedValue(undefined) };

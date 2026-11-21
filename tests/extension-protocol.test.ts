@@ -329,7 +329,7 @@ describe('extension protocol v2', () => {
     expect(messages[0]).toMatchObject({ method: 'Target.attachedToTarget', params: { sessionId: 'pw-tab-1' } });
   });
 
-  it('keeps the first failure as the cause when the auto-attach retry also fails', async () => {
+  it('keeps the retry failure as the cause and both failures in the message when the auto-attach retry also fails', async () => {
     let chromeAttached = false;
     let targetInfoCalls = 0;
     const sendCommand = vi.fn(async (method: string, params: any[]) => {
@@ -365,7 +365,8 @@ describe('extension protocol v2', () => {
     // for Playwright to see why the attach started failing.
     expect(error.message).toContain('Target.getTargetInfo timed out (call 2)');
     expect(error.message).toContain('Target.getTargetInfo timed out (call 1)');
-    expect(`${error.cause}`).toContain('Target.getTargetInfo timed out (call 1)');
+    expect(`${error.cause}`).toContain('Target.getTargetInfo timed out (call 2)');
+    expect(`${error.cause}`).not.toContain('call 1');
     expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(2);
     expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.detach')).toHaveLength(2);
   });
@@ -787,7 +788,8 @@ describe('extension protocol v2', () => {
     const error = failure as Error;
     expect(error.message).toContain('Target.getTargetInfo timed out (call 2)');
     expect(error.message).toContain('Target.getTargetInfo timed out (call 1)');
-    expect(`${error.cause}`).toContain('Target.getTargetInfo timed out (call 1)');
+    expect(`${error.cause}`).toContain('Target.getTargetInfo timed out (call 2)');
+    expect(`${error.cause}`).not.toContain('call 1');
     expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.attach')).toHaveLength(2);
     expect(sendCommand.mock.calls.filter(([method]) => method === 'chrome.debugger.detach')).toHaveLength(2);
   });
