@@ -762,7 +762,7 @@ describe('audit_site tool', () => {
       waitAfterNavigationMs: 0,
     } as any, response);
 
-    expect(response.result()).toContain('WARNING: Axe could not be installed in frames on 1 page(s)');
+    expect(response.result()).toContain('WARNING: Axe could not scan frames on 1 page(s)');
     expect(response.result()).toContain('- https://example.com/embedded: https://widget.example/embed');
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
@@ -792,7 +792,7 @@ describe('audit_site tool', () => {
       waitAfterNavigationMs: 0,
     } as any, response);
 
-    expect(response.result()).not.toContain('could not be installed');
+    expect(response.result()).not.toContain('Axe could not scan');
     expect(response.structuredContent()!.pagesWithUnscannedFrames).toEqual([]);
   });
 

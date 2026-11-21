@@ -3,7 +3,7 @@
  * Licensed under the Apache License, Version 2.0.
  */
 
-import { frameConcurrency, frameReadTimeoutMs, injectAxeForNames, withConcurrency, withFrameTimeout } from './axe.js';
+import { frameConcurrency, frameReadTimeoutMs, injectAxe, withConcurrency, withFrameTimeout } from './axe.js';
 
 import type * as playwright from 'playwright';
 
@@ -429,7 +429,7 @@ export async function measureScreenReaderElements(
     if (known !== undefined)
       return known;
     const installation = await runFrameWork(
-        () => injectAxeForNames(frame), false, frame,
+        () => injectAxe(frame), false, frame,
         (installed, timedOut) => {
           if (timedOut) {
             axeByFrame.set(frame, installed);

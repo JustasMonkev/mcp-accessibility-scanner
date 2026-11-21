@@ -637,7 +637,7 @@ describe('Snapshot Tools', () => {
         maxNodesPerViolation: 10,
       } as any, response as any);
 
-      expect(text()).toContain('WARNING: Axe could not be installed in 2 frame(s)');
+      expect(text()).toContain('WARNING: Axe could not scan 2 frame(s)');
       expect(text()).toContain('- https://widget.example/embed');
       expect(text()).toContain('- about:blank (name="promo")');
     });
@@ -652,7 +652,7 @@ describe('Snapshot Tools', () => {
         maxNodesPerViolation: 10,
       } as any, response as any);
 
-      expect(text()).not.toContain('could not be installed');
+      expect(text()).not.toContain('Axe could not scan');
     });
 
     it('reports the rule id and flags truncated node lists', async () => {

@@ -42,10 +42,7 @@ type UnscannedFrame = {
 
 export type FrameOutcome = ScannedFrame | UnscannedFrame;
 
-export function scannedFrame(partial: SerializedPartial, children: readonly FrameOutcome[], unseenFrames: readonly string[] = []): ScannedFrame {
-  // partial.frames lists the child frames this run selected, in the order
-  // finishRun will pair them with the partials that follow. One outcome per
-  // selected frame is what keeps that pairing honest.
+export function scannedFrame(partial: SerializedPartial, children: readonly FrameOutcome[], unseenFrames: readonly string[]): ScannedFrame {
   if (partial.frameCount !== children.length)
     throw new Error(`Axe selected ${partial.frameCount} child frame(s) but ${children.length} outcome(s) were recorded; refusing to merge results that would be attributed to the wrong frames.`);
   return { scanned: true, partial, children, unseenFrames };
