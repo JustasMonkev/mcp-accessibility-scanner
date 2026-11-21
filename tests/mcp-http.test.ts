@@ -1203,7 +1203,12 @@ describe('mcp http transport hardening', () => {
       const config = await resolveConfig({});
       const createBrowserContext = vi.fn(async (..._args: any[]) => {
         const browserContext: any = new EventEmitter();
-        browserContext.newPage = vi.fn().mockResolvedValue({});
+        browserContext.newPage = vi.fn(async () => {
+          // Like Playwright, announce the page through 'page' so its tab registers.
+          const page = Object.assign(new EventEmitter(), { setDefaultNavigationTimeout: vi.fn(), setDefaultTimeout: vi.fn(), url: () => 'about:blank' });
+          browserContext.emit('page', page);
+          return page;
+        });
         browserContext.pages = vi.fn().mockReturnValue([]);
         browserContext.route = vi.fn().mockResolvedValue(undefined);
         return { browserContext, close: vi.fn().mockResolvedValue(undefined) };
@@ -1240,7 +1245,12 @@ describe('mcp http transport hardening', () => {
       const config = await resolveConfig({});
       const createBrowserContext = vi.fn(async () => {
         const browserContext: any = new EventEmitter();
-        browserContext.newPage = vi.fn().mockResolvedValue({});
+        browserContext.newPage = vi.fn(async () => {
+          // Like Playwright, announce the page through 'page' so its tab registers.
+          const page = Object.assign(new EventEmitter(), { setDefaultNavigationTimeout: vi.fn(), setDefaultTimeout: vi.fn(), url: () => 'about:blank' });
+          browserContext.emit('page', page);
+          return page;
+        });
         browserContext.pages = vi.fn().mockReturnValue([]);
         browserContext.route = vi.fn().mockResolvedValue(undefined);
         return { browserContext, close: vi.fn().mockResolvedValue(undefined) };

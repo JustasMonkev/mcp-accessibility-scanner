@@ -131,10 +131,28 @@ describe('Context', () => {
   let mockBrowserContext: any;
   let defaultConfig: Awaited<ReturnType<typeof resolveConfig>>;
 
+  // Like Playwright, a newly opened page is announced through the context's
+  // 'page' event before newPage() resolves; that event is what registers its tab.
+  function createMockPage() {
+    const page = new EventEmitter() as any;
+    page.setDefaultNavigationTimeout = vi.fn();
+    page.setDefaultTimeout = vi.fn();
+    page.url = () => 'about:blank';
+    return page;
+  }
+
+  function newPageRegisteringTab(browserContext: EventEmitter) {
+    return vi.fn(async () => {
+      const page = createMockPage();
+      browserContext.emit('page', page);
+      return page;
+    });
+  }
+
   beforeEach(async () => {
     defaultConfig = await resolveConfig({});
     mockBrowserContext = new EventEmitter();
-    mockBrowserContext.newPage = vi.fn().mockResolvedValue({});
+    mockBrowserContext.newPage = newPageRegisteringTab(mockBrowserContext);
     mockBrowserContext.pages = vi.fn().mockReturnValue([]);
     mockBrowserContext.route = vi.fn().mockResolvedValue(undefined);
     mockBrowserContext._stopRecording = vi.fn().mockResolvedValue(undefined);
@@ -290,7 +308,7 @@ describe('Context', () => {
       // trace.trace/trace.network files concurrently.
       const makeMockContext = () => {
         const browserContext: any = new EventEmitter();
-        browserContext.newPage = vi.fn().mockResolvedValue({});
+        browserContext.newPage = newPageRegisteringTab(browserContext);
         browserContext.pages = vi.fn().mockReturnValue([]);
         browserContext.route = vi.fn().mockResolvedValue(undefined);
         browserContext.tracing = {
@@ -347,6 +365,23 @@ describe('Context', () => {
       await context.closeBrowserContext();
 
       expect(close).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('newTab', () => {
+    it('reports a clear error when the opened page never registers as a tab', async () => {
+      const context = new Context({
+        tools: [],
+        config: defaultConfig,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      // newPage resolves without the 'page' event that registers the tab.
+      mockBrowserContext.newPage = vi.fn().mockResolvedValue({});
+      await expect(context.newTab()).rejects.toThrow('Failed to register the newly opened tab.');
+      expect(context.currentTab()).toBeUndefined();
     });
   });
 
@@ -514,11 +549,14 @@ describe('Context', () => {
         tools: [], config: defaultConfig, browserContextFactory: mockBrowserContextFactory,
         sessionLog: undefined, clientInfo: {},
       });
-      await context.newTab();
       const page = Object.assign(new EventEmitter(), {
         setDefaultNavigationTimeout: vi.fn(), setDefaultTimeout: vi.fn(), url: () => 'https://fixture.local/',
       });
-      mockBrowserContext.emit('page', page);
+      mockBrowserContext.newPage = vi.fn(async () => {
+        mockBrowserContext.emit('page', page);
+        return page;
+      });
+      await context.newTab();
       expect(context.tabs()).toHaveLength(1);
       vi.spyOn(context, 'outputFile').mockResolvedValue('/tmp/not-created.txt');
       const save = Promise.withResolvers<void>();
@@ -560,14 +598,6 @@ describe('Context', () => {
   });
 
   describe('shared context observers', () => {
-    function createMockPage() {
-      const page = new EventEmitter() as any;
-      page.setDefaultNavigationTimeout = vi.fn();
-      page.setDefaultTimeout = vi.fn();
-      page.url = () => 'about:blank';
-      return page;
-    }
-
     it('removes its page observers and tab wrappers from the context on close', async () => {
       // A non-isolated CDP context is shared and survives this session's
       // close; the session's 'page' listener and its tabs' page listeners
@@ -580,10 +610,12 @@ describe('Context', () => {
         sessionLog: undefined,
         clientInfo: {},
       });
-      await context.newTab();
-
       const page = createMockPage();
-      mockBrowserContext.emit('page', page);
+      mockBrowserContext.newPage = vi.fn(async () => {
+        mockBrowserContext.emit('page', page);
+        return page;
+      });
+      await context.newTab();
       expect(context.tabs()).toHaveLength(1);
       expect(page.listenerCount('console')).toBeGreaterThan(0);
 
@@ -1685,7 +1717,7 @@ describe('Context', () => {
     });
 
     it('keeps a shared page for a caller that is still waiting', async () => {
-      const opened = Promise.withResolvers<{ close: () => Promise<void> }>();
+      const opened = Promise.withResolvers<any>();
       mockBrowserContext.newPage = vi.fn(() => opened.promise);
       vi.mocked(mockBrowserContextFactory.createContext).mockResolvedValue({ browserContext: mockBrowserContext, close: vi.fn().mockResolvedValue(undefined) });
       const context = createContext();
@@ -1693,7 +1725,9 @@ describe('Context', () => {
       const pending = Promise.allSettled([context.ensureTab(cancelled.signal), context.ensureTab()]);
       await vi.waitFor(() => expect(mockBrowserContext.newPage).toHaveBeenCalled());
       cancelled.abort(new Error('cancelled'));
-      const page = { close: vi.fn().mockResolvedValue(undefined) };
+      const page = Object.assign(createMockPage(), { close: vi.fn().mockResolvedValue(undefined) });
+      // Playwright announces the page before newPage() resolves; that registers its tab.
+      mockBrowserContext.emit('page', page);
       opened.resolve(page);
       const [, waiting] = await pending;
       expect(waiting.status).toBe('fulfilled');

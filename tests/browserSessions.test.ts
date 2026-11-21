@@ -39,7 +39,12 @@ function makeFactory() {
   const created: FakeBrowserContext[] = [];
   const createContext = vi.fn(async (..._args: any[]) => {
     const browserContext: any = new EventEmitter();
-    const newPage = vi.fn().mockResolvedValue({});
+    const newPage = vi.fn(async () => {
+      // Like Playwright, announce the page through 'page' so its tab registers.
+      const page = Object.assign(new EventEmitter(), { setDefaultNavigationTimeout: vi.fn(), setDefaultTimeout: vi.fn(), url: () => 'about:blank' });
+      browserContext.emit('page', page);
+      return page;
+    });
     browserContext.newPage = newPage;
     browserContext.pages = vi.fn().mockReturnValue([]);
     browserContext.route = vi.fn().mockResolvedValue(undefined);
@@ -562,7 +567,12 @@ describe('browser sessions', () => {
 
     // Gate the next newPage call so the tool hangs mid-run.
     let releaseNewPage = () => {};
-    const gate = new Promise<any>(resolve => releaseNewPage = () => resolve({}));
+    const gate = new Promise<any>(resolve => releaseNewPage = () => {
+      // Announce the page through 'page' like Playwright, so its tab registers.
+      const page = Object.assign(new EventEmitter(), { setDefaultNavigationTimeout: vi.fn(), setDefaultTimeout: vi.fn(), url: () => 'about:blank' });
+      created[0].browserContext.emit('page', page);
+      resolve(page);
+    });
     created[0].newPage.mockImplementationOnce(() => gate);
     const running = backend.callTool('browser_tabs', { action: 'new', browserSessionId: id });
     // Wait for the tool to reach the gated newPage call.
@@ -596,9 +606,17 @@ describe('browser sessions', () => {
     await backend.callTool('browser_tabs', { action: 'list', browserSessionId: id });
 
     let releaseFirst = () => {};
-    const firstGate = new Promise<any>(resolve => releaseFirst = () => resolve({}));
+    const firstGate = new Promise<any>(resolve => releaseFirst = () => {
+      const page = Object.assign(new EventEmitter(), { setDefaultNavigationTimeout: vi.fn(), setDefaultTimeout: vi.fn(), url: () => 'about:blank' });
+      created[0].browserContext.emit('page', page);
+      resolve(page);
+    });
     let releaseSecond = () => {};
-    const secondGate = new Promise<any>(resolve => releaseSecond = () => resolve({}));
+    const secondGate = new Promise<any>(resolve => releaseSecond = () => {
+      const page = Object.assign(new EventEmitter(), { setDefaultNavigationTimeout: vi.fn(), setDefaultTimeout: vi.fn(), url: () => 'about:blank' });
+      created[0].browserContext.emit('page', page);
+      resolve(page);
+    });
     created[0].newPage
         .mockImplementationOnce(() => firstGate)
         .mockImplementationOnce(() => secondGate);
@@ -634,7 +652,12 @@ describe('browser sessions', () => {
     await backend.callTool('browser_tabs', { action: 'list', browserSessionId: id });
 
     let releaseNewPage = () => {};
-    const gate = new Promise<any>(resolve => releaseNewPage = () => resolve({}));
+    const gate = new Promise<any>(resolve => releaseNewPage = () => {
+      // Announce the page through 'page' like Playwright, so its tab registers.
+      const page = Object.assign(new EventEmitter(), { setDefaultNavigationTimeout: vi.fn(), setDefaultTimeout: vi.fn(), url: () => 'about:blank' });
+      created[0].browserContext.emit('page', page);
+      resolve(page);
+    });
     created[0].newPage.mockImplementationOnce(() => gate);
     const running = backend.callTool('browser_tabs', { action: 'new', browserSessionId: id });
     for (let i = 0; i < 100 && !created[0].newPage.mock.calls.length; i++)
