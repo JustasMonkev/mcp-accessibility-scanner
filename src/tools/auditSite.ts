@@ -145,7 +145,7 @@ const auditSiteSchema = z.object({
   ...axeScopeSchemaShape,
   ...axeRuleSchemaShape,
 }).superRefine((value, context) => {
-  if (value.strategy === 'provided' && (!value.urls || !value.urls.length)) {
+  if (value.strategy === 'provided' && !value.urls?.length) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['urls'],
@@ -190,7 +190,7 @@ function buildExcludePathPatterns(patterns: string[]): RE2[] {
     try {
       return new RE2(pattern, 'i');
     } catch (error) {
-      throw new Error(`Invalid regex in excludePathPatterns[${index}] ("${pattern}"): ${errorMessage(error)}`);
+      throw new Error(`Invalid regex in excludePathPatterns[${index}] ("${pattern}"): ${errorMessage(error)}`, { cause: error });
     }
   });
 }
@@ -638,8 +638,7 @@ class CrawlFrontier {
   }
 
   takeUnvisited(): CrawlItem | undefined {
-    while (this.queue.length) {
-      const item = this.queue.shift()!;
+    for (let item = this.queue.shift(); item; item = this.queue.shift()) {
       this._queued.delete(item.url);
       if (!this.visited.has(item.url)) {
         this.visited.add(item.url);

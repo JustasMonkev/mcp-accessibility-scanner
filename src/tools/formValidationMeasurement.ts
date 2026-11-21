@@ -105,7 +105,7 @@ export function createFeedbackReader(page: Page) {
           stack.pop();
           continue;
         }
-        const node = frame.children[frame.index++]!;
+        const node = frame.children[frame.index++];
         if (++visitedNodes > sampleLimit)
           break;
         if (node instanceof Element)

@@ -242,6 +242,7 @@ export class Context {
         await closePage(page, pageCloseTimeoutMs).catch(logUnhandledError);
         throw contextClosedWhileOpeningTabError();
       }
+      // oxlint-disable-next-line typescript/no-non-null-assertion
       this._currentTab = this._tabs.find(t => t.page === page)!;
       return this._currentTab;
     });
@@ -297,6 +298,7 @@ export class Context {
           this._openingTab = undefined;
       }
     }
+    // oxlint-disable-next-line typescript/no-non-null-assertion
     return this._currentTab!;
   }
 

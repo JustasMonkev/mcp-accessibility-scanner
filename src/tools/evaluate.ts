@@ -47,7 +47,7 @@ const evaluate = defineTabTool({
   handle: async (tab, params, response) => {
     response.setIncludeSnapshot();
 
-    const locator = params.ref ? await tab.refLocator({ ref: params.ref, element: params.element! }) : undefined;
+    const locator = params.ref && params.element ? await tab.refLocator({ ref: params.ref, element: params.element }) : undefined;
     const source = toFunctionSource(params.function, !!locator);
     const target = locator ? `page.${await generateLocator(locator)}` : 'page';
     response.addCode(`await ${target}.evaluate(${javascript.quote(source)});`);

@@ -260,7 +260,14 @@
     "anti-slop/no-reflect-apply": "error",
     "anti-slop/no-reflect-get": "error",
     "anti-slop/no-unknown-type-aliases": "error",
-    "anti-slop/no-widen-then-assert": "error"
+    "anti-slop/no-widen-then-assert": "error",
+    "no-useless-catch": "error",
+    "preserve-caught-error": "error",
+    "typescript/no-inferrable-types": "error",
+    "typescript/no-unnecessary-boolean-literal-compare": "error",
+    "typescript/no-unnecessary-type-arguments": "error",
+    "typescript/no-unnecessary-type-assertion": "error",
+    "typescript/prefer-optional-chain": "error"
   },
   "overrides": [
     {
@@ -312,6 +319,7 @@
       ],
       "rules": {
         "no-nested-ternary": "error",
+        "typescript/no-non-null-assertion": "error",
         "max-params": [
           "error",
           {

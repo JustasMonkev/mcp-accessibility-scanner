@@ -206,7 +206,7 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
       .flatMap(check => findings.filter(finding => finding.check === check).slice(0, params.maxFindingsPerCheck));
 
   const blocked: (TextSpacingBlocked & { frameUrl: string | null })[] = outcomes.flatMap(outcome => (outcome.measurement?.blocked ?? []).map(entry => ({ ...entry, frameUrl: outcome.frameUrl })));
-  const unmeasuredFrames = outcomes.filter(outcome => outcome.error !== null).map(outcome => ({ frameUrl: outcome.frameUrl ?? 'main frame', error: outcome.error! }));
+  const unmeasuredFrames = outcomes.flatMap(outcome => outcome.error === null ? [] : [{ frameUrl: outcome.frameUrl ?? 'main frame', error: outcome.error }]);
   const totals = {
     candidates: outcomes.reduce((sum, outcome) => sum + (outcome.measurement?.candidates ?? 0), 0),
     measured,

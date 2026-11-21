@@ -162,8 +162,8 @@ describe('BrowserServerBackend.callTool', () => {
       // Flush the log's debounced buffer deterministically.
       const sessionLog = await (opener as any)._sessionLog;
       expect(sessionLog).toBeDefined();
-      await (sessionLog as any)._flushEntries();
-      await (sessionLog as any)._sessionFileQueue;
+      await (sessionLog)._flushEntries();
+      await (sessionLog)._sessionFileQueue;
 
       const sessionFolders = fs.readdirSync(outputDir).filter(name => name.startsWith('session-'));
       // The routing backend minted no log of its own.
@@ -176,5 +176,14 @@ describe('BrowserServerBackend.callTool', () => {
     } finally {
       fs.rmSync(outputDir, { recursive: true, force: true });
     }
+  });
+
+  it('rejects tool calls before initialize with a clear error', async () => {
+    const config = await resolveConfig({});
+    const backend = new BrowserServerBackend(config, unusedFactory);
+    await expect(backend.callTool('browser_default_timeout', { timeout: 30000 }))
+        .rejects.toThrow(/Initialize the browser backend before running browser tools/);
+    await expect(backend.callTool('browser_default_timeout', { timeout: 30000, browserSessionId: 'bs_1' }))
+        .rejects.toThrow(/Initialize the browser backend before running browser tools/);
   });
 });

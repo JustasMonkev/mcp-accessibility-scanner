@@ -19,7 +19,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { createServer } from '../src/mcp/server.js';
 import { InProcessTransport } from '../src/mcp/inProcessTransport.js';
 
-import type { JSONRPCMessage, JSONRPCResultResponse } from '@modelcontextprotocol/server';
+import type { JSONRPCResultResponse } from '@modelcontextprotocol/server';
 
 function createBackend() {
   return {
@@ -43,7 +43,7 @@ async function startRawClient(backend: unknown) {
   await transport.start();
   const sendRequest = (id: number, method: string, params?: Record<string, unknown>) => {
     const response = new Promise<JSONRPCResultResponse>(resolve => pending.set(id, resolve));
-    void transport.send({ jsonrpc: '2.0', id, method, params } as JSONRPCMessage);
+    void transport.send({ jsonrpc: '2.0', id, method, params });
     return response;
   };
   return { transport, sendRequest };

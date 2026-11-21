@@ -420,7 +420,7 @@ describe('audit_site tool', () => {
       script.dispose.mockImplementation(blockWithDialog);
       return script;
     });
-    const replacement = { ...crawlTab, navigate: vi.fn(crawlTab.navigate.getMockImplementation()!), on: vi.fn(), off: vi.fn() };
+    const replacement = { ...crawlTab, navigate: vi.fn(crawlTab.navigate.getMockImplementation()), on: vi.fn(), off: vi.fn() };
     const tabs = context.tabs();
     context.newTab.mockImplementationOnce(async () => {
       tabs.push(crawlTab);

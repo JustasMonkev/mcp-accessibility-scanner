@@ -74,26 +74,26 @@ describe('Tab', () => {
 
   describe('constructor', () => {
     it('should create a tab with page and context', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       expect(tab.context).toBe(mockContext);
       expect(tab.page).toBe(mockPage);
     });
 
     it('should set default timeouts', () => {
-      new Tab(mockContext, mockPage as any, onPageClose);
+      new Tab(mockContext, mockPage, onPageClose);
       expect(mockPage.setDefaultNavigationTimeout).toHaveBeenCalledWith(30000);
       expect(mockPage.setDefaultTimeout).toHaveBeenCalledWith(6000);
     });
 
     it('falls back to the documented timeout defaults when config timeouts are omitted', () => {
       const contextWithoutTimeouts = { ...mockContext, config: { timeouts: {} } } as any;
-      new Tab(contextWithoutTimeouts, mockPage as any, onPageClose);
+      new Tab(contextWithoutTimeouts, mockPage, onPageClose);
       expect(mockPage.setDefaultNavigationTimeout).toHaveBeenCalledWith(60000);
       expect(mockPage.setDefaultTimeout).toHaveBeenCalledWith(5000);
     });
 
     it('should listen to console events', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const consoleMessage = {
         type: () => 'log',
         text: () => 'Test message',
@@ -104,7 +104,7 @@ describe('Tab', () => {
     });
 
     it('reports one-based console source lines', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.emit('console', {
         type: () => 'log',
         text: () => 'Test message',
@@ -114,7 +114,7 @@ describe('Tab', () => {
     });
 
     it('should listen to page error events', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const error = new Error('Test error');
       mockPage.emit('pageerror', error);
       expect(tab.consoleMessages()).toHaveLength(1);
@@ -123,12 +123,12 @@ describe('Tab', () => {
 
   describe('modalStates', () => {
     it('should return empty array initially', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       expect(tab.modalStates()).toEqual([]);
     });
 
     it('should add modal state', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const modalState = {
         type: 'dialog' as const,
         description: 'Test dialog',
@@ -139,7 +139,7 @@ describe('Tab', () => {
     });
 
     it('should clear modal state', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const modalState = {
         type: 'dialog' as const,
         description: 'Test dialog',
@@ -158,14 +158,14 @@ describe('Tab', () => {
     }) as any;
 
     it('sets a dialog modal state when a dialog opens', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.emit('dialog', makeDialog());
       expect(tab.modalStates()).toHaveLength(1);
       expect(tab.modalStates()[0].type).toBe('dialog');
     });
 
     it('clears the dialog modal state when the dialog closes out of band', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const dialog = makeDialog();
       mockPage.emit('dialog', dialog);
       expect(tab.modalStates()).toHaveLength(1);
@@ -175,7 +175,7 @@ describe('Tab', () => {
     });
 
     it('unblocks snapshots after the dialog closes out of band', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const dialog = makeDialog();
       mockPage.emit('dialog', dialog);
 
@@ -191,7 +191,7 @@ describe('Tab', () => {
     });
 
     it('only clears the state of the dialog that actually closed', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const first = makeDialog('first');
       const second = makeDialog('second');
       mockPage.emit('dialog', first);
@@ -204,7 +204,7 @@ describe('Tab', () => {
     });
 
     it('ignores a close event for a dialog it never tracked', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const tracked = makeDialog();
       mockPage.emit('dialog', tracked);
 
@@ -213,7 +213,7 @@ describe('Tab', () => {
     });
 
     it('leaves non-dialog modal states alone', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.emit('filechooser', {});
       const dialog = makeDialog();
       mockPage.emit('dialog', dialog);
@@ -224,13 +224,13 @@ describe('Tab', () => {
     });
 
     it('is a no-op when no modal states exist', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       expect(() => mockPage.emit('dialogclosed', makeDialog())).not.toThrow();
       expect(tab.modalStates()).toEqual([]);
     });
 
     it('stops listening after dispose', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const dialog = makeDialog();
       mockPage.emit('dialog', dialog);
       expect(mockPage.listenerCount('dialogclosed')).toBe(1);
@@ -245,13 +245,13 @@ describe('Tab', () => {
 
   describe('isCurrentTab', () => {
     it('should return true when tab is current', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockContext.currentTab = vi.fn().mockReturnValue(tab);
       expect(tab.isCurrentTab()).toBe(true);
     });
 
     it('should return false when tab is not current', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const otherTab = {} as any;
       mockContext.currentTab = vi.fn().mockReturnValue(otherTab);
       expect(tab.isCurrentTab()).toBe(false);
@@ -263,7 +263,7 @@ describe('Tab', () => {
       vi.useFakeTimers();
       mockContext.config.timeouts.defaultTimeout = 25;
       mockPage.title = vi.fn().mockReturnValue(new Promise(() => {}));
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       const updatePromise = tab.updateTitle();
       await vi.advanceTimersByTimeAsync(25);
@@ -276,7 +276,7 @@ describe('Tab', () => {
       vi.useFakeTimers();
       mockContext.config.timeouts.defaultTimeout = 30_000;
       mockPage.title = vi.fn().mockReturnValue(new Promise(() => {}));
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       let finished = false;
 
       const updatePromise = tab.updateTitle().then(() => {
@@ -295,7 +295,7 @@ describe('Tab', () => {
       vi.useFakeTimers();
       mockContext.config.timeouts.defaultTimeout = 25;
       mockPage.title = vi.fn().mockReturnValue(new Promise(() => {}));
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       let finished = false;
 
       tab.setDefaultTimeout(75);
@@ -494,7 +494,7 @@ describe('Tab', () => {
     it('does not wait for a download after an unrelated aborted navigation', async () => {
       mockPage.goto = vi.fn().mockRejectedValue(new Error('page.goto: net::ERR_ABORTED'));
       mockPage.waitForEvent = vi.fn().mockReturnValue(new Promise(() => {}));
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       await expect(tab.navigate('chrome://crash', { returnOnDialog: true })).rejects.toThrow('net::ERR_ABORTED');
       expect(tab.listenerCount('modalState')).toBe(0);
@@ -510,7 +510,7 @@ describe('Tab', () => {
         mockPage.emit('download', download);
         throw new Error('Download is starting');
       });
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       await expect(tab.navigate('https://example.com/download', { returnOnDialog: true })).resolves.toBeUndefined();
       expect(download.saveAs).toHaveBeenCalledWith('/tmp/download');
@@ -520,7 +520,7 @@ describe('Tab', () => {
     it('rethrows when an explicitly reported download never arrives', async () => {
       vi.useFakeTimers();
       mockPage.goto = vi.fn().mockRejectedValue(new Error('Download is starting'));
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       const result = expect(tab.navigate('https://example.com/download', { returnOnDialog: true })).rejects.toThrow('Download is starting');
       await vi.advanceTimersByTimeAsync(6000);
@@ -557,7 +557,7 @@ describe('Tab', () => {
     it('saves two downloads suggesting the same name to distinct files, keeping the name recognizable', async () => {
       // Sessions share one output directory; saving under the suggested name
       // alone let two concurrent "report.pdf" downloads overwrite each other.
-      new Tab(mockContext, mockPage as any, onPageClose);
+      new Tab(mockContext, mockPage, onPageClose);
       const first = makeDownload('report.pdf');
       const second = makeDownload('report.pdf');
       mockPage.emit('download', first);
@@ -576,7 +576,7 @@ describe('Tab', () => {
     });
 
     it('suffixes an extensionless download name at the end', async () => {
-      new Tab(mockContext, mockPage as any, onPageClose);
+      new Tab(mockContext, mockPage, onPageClose);
       const download = makeDownload('LICENSE');
       mockPage.emit('download', download);
       await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
@@ -584,7 +584,7 @@ describe('Tab', () => {
     });
 
     it('falls back to a generic name when the page suggests none', async () => {
-      new Tab(mockContext, mockPage as any, onPageClose);
+      new Tab(mockContext, mockPage, onPageClose);
       const download = makeDownload('');
       mockPage.emit('download', download);
       await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
@@ -608,7 +608,7 @@ describe('Tab', () => {
       // A long but valid Content-Disposition name plus the uniqueness suffix
       // used to exceed the filesystem's 255-byte component cap and fail
       // saveAs() with ENAMETOOLONG.
-      new Tab(mockContext, mockPage as any, onPageClose);
+      new Tab(mockContext, mockPage, onPageClose);
       const download = makeDownload('a'.repeat(300) + '.pdf');
       mockPage.emit('download', download);
       await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
@@ -620,7 +620,7 @@ describe('Tab', () => {
     });
 
     it('truncates multibyte names by whole code points, not mid-sequence', async () => {
-      new Tab(mockContext, mockPage as any, onPageClose);
+      new Tab(mockContext, mockPage, onPageClose);
       // 120 x 3-byte code points = 360 bytes before the suffix.
       const download = makeDownload('€'.repeat(120) + '.bin');
       mockPage.emit('download', download);
@@ -634,7 +634,7 @@ describe('Tab', () => {
     });
 
     it('caps an extensionless long name too', async () => {
-      new Tab(mockContext, mockPage as any, onPageClose);
+      new Tab(mockContext, mockPage, onPageClose);
       const download = makeDownload('b'.repeat(300));
       mockPage.emit('download', download);
       await vi.waitFor(() => expect(download.saveAs).toHaveBeenCalledTimes(1));
@@ -647,7 +647,7 @@ describe('Tab', () => {
     it('registers the in-flight save with the context so disposal can wait for it', async () => {
       // The save outlives the tool call; untracked, context disposal closed
       // the browser mid-stream and the reported file never materialized.
-      new Tab(mockContext, mockPage as any, onPageClose);
+      new Tab(mockContext, mockPage, onPageClose);
       let finishSave = () => {};
       const download = {
         suggestedFilename: vi.fn().mockReturnValue('report.pdf'),
@@ -668,7 +668,7 @@ describe('Tab', () => {
 
   describe('captureSnapshot', () => {
     it('should capture page snapshot', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const snapshot = await tab.captureSnapshot();
       expect(snapshot.url).toBe('https://example.com');
       expect(snapshot.title).toBe('Example Page');
@@ -677,7 +677,7 @@ describe('Tab', () => {
     });
 
     it('should include element boxes when requested', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       await tab.captureSnapshot(true);
 
@@ -685,7 +685,7 @@ describe('Tab', () => {
     });
 
     it('should include console messages in snapshot', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.emit('console', {
         type: () => 'log',
         text: () => 'Test message',
@@ -697,7 +697,7 @@ describe('Tab', () => {
     });
 
     it('should clear recent console messages after capture', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.emit('console', {
         type: () => 'log',
         text: () => 'Test message',
@@ -713,7 +713,7 @@ describe('Tab', () => {
       vi.useFakeTimers();
       mockContext.config.timeouts.defaultTimeout = 25;
       mockPage.title = vi.fn().mockReturnValue(new Promise(() => {}));
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       const snapshotPromise = tab.captureSnapshot();
       await vi.advanceTimersByTimeAsync(25);
@@ -728,7 +728,7 @@ describe('Tab', () => {
       vi.useFakeTimers();
       mockContext.config.timeouts.defaultTimeout = 25;
       mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(() => {}));
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       const snapshotPromise = tab.captureSnapshot();
       await vi.advanceTimersByTimeAsync(25);
@@ -745,7 +745,7 @@ describe('Tab', () => {
       mockContext.config.timeouts.defaultTimeout = 25;
       let resolveSnapshot!: (snapshot: string) => void;
       mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(resolve => { resolveSnapshot = resolve; }));
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       const snapshotPromise = tab.captureSnapshot();
       await vi.advanceTimersByTimeAsync(25);
@@ -763,7 +763,7 @@ describe('Tab', () => {
     it('does not return an accessibility snapshot captured before navigation', async () => {
       let resolveSnapshot!: (snapshot: string) => void;
       mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(resolve => { resolveSnapshot = resolve; }));
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       const snapshotPromise = tab.captureSnapshot();
       mockPage.emit('framenavigated', { parentFrame: () => null });
@@ -780,7 +780,7 @@ describe('Tab', () => {
       mockPage.ariaSnapshot = vi.fn()
           .mockReturnValueOnce(new Promise(resolve => { resolveOld = resolve; }))
           .mockReturnValueOnce(new Promise(resolve => { resolveFresh = resolve; }));
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       const oldCapture = tab.captureSnapshot();
       mockPage.emit('framenavigated', { parentFrame: () => null });
@@ -802,7 +802,7 @@ describe('Tab', () => {
       mockPage.ariaSnapshot = vi.fn()
           .mockReturnValueOnce(new Promise(() => {}))
           .mockResolvedValueOnce('button "Fresh page" [ref=2]');
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       const oldCapture = tab.captureSnapshot();
       const freshCapture = tab.captureSnapshot();
@@ -819,7 +819,7 @@ describe('Tab', () => {
     it('does not cache a snapshot completed after a modal interrupts capture', async () => {
       let resolveSnapshot!: (snapshot: string) => void;
       mockPage.ariaSnapshot = vi.fn().mockReturnValue(new Promise(resolve => { resolveSnapshot = resolve; }));
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       const pending = tab.captureSnapshot();
       const modal = { type: 'dialog', description: 'Dialog', dialog: {} } as any;
@@ -840,7 +840,7 @@ describe('Tab', () => {
       mockPage.ariaSnapshot = vi.fn()
           .mockReturnValueOnce(new Promise(resolve => { resolveFirst = resolve; }))
           .mockReturnValueOnce(new Promise(resolve => { resolveSecond = resolve; }));
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       const first = tab.captureSnapshot();
       const second = tab.captureSnapshot();
@@ -858,7 +858,7 @@ describe('Tab', () => {
     it('keeps data URL payloads in captured accessibility snapshots for session logs', async () => {
       const payload = '<svg viewBox="0 0 10 10"><text>Hello</text></svg>';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- link "Example" [ref=e1]:\n  - /url: data:image/svg+xml,${payload}`);
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       const snapshot = await tab.captureSnapshot();
 
@@ -868,14 +868,14 @@ describe('Tab', () => {
 
   describe('refLocator', () => {
     it('should get locator for ref', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       await tab.refLocator({ element: 'Submit button', ref: '1' });
       expect(mockPage.locator).toHaveBeenCalledWith('aria-ref=1');
       expect(mockPage.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai', boxes: undefined });
     });
 
     it('should throw error if ref not found', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Other"');
 
       await expect(
@@ -887,7 +887,7 @@ describe('Tab', () => {
 
   describe('refLocators', () => {
     it('should get multiple locators', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1] button "Cancel" [ref=2]');
 
       const locators = await tab.refLocators([
@@ -902,7 +902,7 @@ describe('Tab', () => {
     });
 
     it('resolves refs against the snapshot already returned to the caller', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
       await tab.captureSnapshot();
       expect(mockPage.ariaSnapshot).toHaveBeenCalledTimes(1);
@@ -915,7 +915,7 @@ describe('Tab', () => {
     });
 
     it('reuses refs from boxed snapshots without treating geometry as semantics', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- 'button "Submit" [ref=1] [box=10,20,80,30]'`);
       locatorSnapshot = `- 'button "Submit" [ref=1]'`;
       await tab.captureSnapshot(true);
@@ -926,7 +926,7 @@ describe('Tab', () => {
     });
 
     it('reuses a boxed ref whose YAML key has an inline value', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- 'heading "Welcome" [ref=1] [box=10,20,80,30]': Label`);
       locatorSnapshot = `- 'heading "Welcome" [ref=1]': Label`;
       await tab.captureSnapshot(true);
@@ -940,7 +940,7 @@ describe('Tab', () => {
       // The element was removed after the snapshot went out: the ref is still in
       // the cached text, but it matches nothing, and handing back that locator
       // would fail as an action timeout instead of a useful message.
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
       await tab.captureSnapshot();
       locatorSnapshot = undefined;
@@ -953,7 +953,7 @@ describe('Tab', () => {
     });
 
     it('re-captures when a cached ref has different accessible semantics', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       await tab.captureSnapshot();
       locatorSnapshot = 'button "Delete" [ref=2]';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Delete" [ref=2]');
@@ -965,7 +965,7 @@ describe('Tab', () => {
     });
 
     it('re-captures when the page navigates during cached ref validation', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       await tab.captureSnapshot();
       let resolveValidation!: (snapshot: string) => void;
       mockPage.locator = vi.fn().mockReturnValue({
@@ -983,7 +983,7 @@ describe('Tab', () => {
     });
 
     it('does not accept a generated locator that only partially matches the old name', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Save" [ref=1]');
       await tab.captureSnapshot();
       locatorSnapshot = 'button "Save 2" [ref=2]';
@@ -996,7 +996,7 @@ describe('Tab', () => {
     });
 
     it('revalidates YAML-quoted snapshot entries without a full-page capture', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       locatorSnapshot = `- 'button "Warning: Delete" [ref=1]'`;
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue(`- 'button "Warning: Delete" [ref=1]'`);
       await tab.captureSnapshot();
@@ -1007,7 +1007,7 @@ describe('Tab', () => {
     });
 
     it('accepts Playwright synthetic roles when the public ARIA role is empty', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       locatorSnapshot = 'generic [ref=1]';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('generic [ref=1]');
       await tab.captureSnapshot();
@@ -1018,7 +1018,7 @@ describe('Tab', () => {
     });
 
     it('reuses a cached aria-hidden ref when validation carries the same marker', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       locatorSnapshot = 'generic [aria-hidden] [ref=1]';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('generic [aria-hidden] [ref=1]');
       await tab.captureSnapshot();
@@ -1029,7 +1029,7 @@ describe('Tab', () => {
     });
 
     it('reuses a cached ref whose long name is omitted from the snapshot', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       locatorSnapshot = 'button [ref=1]';
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button [ref=1]');
       await tab.captureSnapshot();
@@ -1041,7 +1041,7 @@ describe('Tab', () => {
     });
 
     it('re-captures when an omitted long name changes the Playwright ref', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button [ref=1]');
       await tab.captureSnapshot();
       locatorSnapshot = 'button [ref=2]';
@@ -1053,7 +1053,7 @@ describe('Tab', () => {
     });
 
     it('re-reads the page for a ref the last snapshot does not hold', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
       await tab.captureSnapshot();
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1] button "Added" [ref=2]');
@@ -1065,7 +1065,7 @@ describe('Tab', () => {
     });
 
     it('stops trusting the cached snapshot once the tab navigates', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
       await tab.captureSnapshot();
       mockPage.goto = vi.fn().mockResolvedValue(undefined);
@@ -1081,7 +1081,7 @@ describe('Tab', () => {
     it('stops trusting the cached snapshot after any main-frame navigation', async () => {
       // goBack(), page.reload() and a page-driven location change never reach
       // Tab.navigate(), so the cache is keyed on the navigation event itself.
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
       await tab.captureSnapshot();
 
@@ -1092,7 +1092,7 @@ describe('Tab', () => {
     });
 
     it('keeps the cached snapshot when only a sub-frame navigates', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.ariaSnapshot = vi.fn().mockResolvedValue('button "Submit" [ref=1]');
       await tab.captureSnapshot();
 
@@ -1105,7 +1105,7 @@ describe('Tab', () => {
 
   describe('consoleMessages', () => {
     it('should track console messages', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       mockPage.emit('console', {
         type: () => 'log',
@@ -1234,7 +1234,7 @@ describe('Tab', () => {
     });
 
     it('should track network requests', () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
 
       const mockRequest = { url: () => 'https://api.example.com', isNavigationRequest: () => false } as any;
       const mockResponse = { status: () => 200, request: () => mockRequest } as any;
@@ -1247,7 +1247,7 @@ describe('Tab', () => {
     });
 
     it('tracks only the final main-document HTTP status', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const redirectedRequest = {
         isNavigationRequest: () => true,
         redirectedTo: () => ({}),
@@ -1278,7 +1278,7 @@ describe('Tab', () => {
     });
 
     it('clears main-document status before history navigation', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       const request = {
         isNavigationRequest: () => true,
         redirectedTo: () => null,
@@ -1303,7 +1303,7 @@ describe('Tab', () => {
 
   describe('waitForTimeout', () => {
     it('delegates to page.waitForTimeout when JavaScript is not blocked', async () => {
-      const tab = new Tab(mockContext, mockPage as any, onPageClose);
+      const tab = new Tab(mockContext, mockPage, onPageClose);
       await tab.waitForTimeout(2750);
       expect(mockPage.waitForTimeout).toHaveBeenCalledWith(2750);
     });

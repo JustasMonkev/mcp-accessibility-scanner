@@ -306,7 +306,7 @@ describe('native browser fixture process cleanup', () => {
       setInterval(() => {}, 1000);`;
     const child = spawn(process.execPath, ['-e', source], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
     owned.push(child);
-    const [data] = await bounded(once(child.stdout!, 'data'));
+    const [data] = await bounded(once(child.stdout, 'data'));
     const descendantPid = Number(data.toString().trim());
     expect(Number.isInteger(descendantPid) && descendantPid > 0).toBe(true);
     return { child, descendantPid };

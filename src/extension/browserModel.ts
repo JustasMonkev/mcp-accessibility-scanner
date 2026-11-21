@@ -125,6 +125,7 @@ export class BrowserModel {
           try {
             await attachIgnoringCancellation(tabId);
           } catch (retryError) {
+            // oxlint-disable-next-line preserve-caught-error
             throw new Error(`Failed to attach tab ${tabId}: ${retryError} (first attempt: ${firstError})`, { cause: firstError });
           }
         }
@@ -153,6 +154,7 @@ export class BrowserModel {
       try {
         return await this._attachTab(tab.id);
       } catch (retryError) {
+        // oxlint-disable-next-line preserve-caught-error
         throw new Error(`Failed to attach tab ${tab.id}: ${retryError} (first attempt: ${firstError})`, { cause: firstError });
       }
     });

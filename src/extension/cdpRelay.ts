@@ -93,7 +93,7 @@ export class CDPRelayServer {
   private _playwrightConnection: WebSocket | null = null;
   private _extensionConnection: ExtensionConnection | null = null;
   private _handler!: ExtensionProtocolV2;
-  private _extensionConnectionPromise!: ManualPromise<void>;
+  private _extensionConnectionPromise!: ManualPromise;
 
   constructor(server: http.Server, browser: ExtensionBrowserOptions) {
     this._server = server;
@@ -263,7 +263,7 @@ export class CDPRelayServer {
 
   private _resetExtensionConnection() {
     this._extensionConnection = null;
-    this._extensionConnectionPromise = new ManualPromise<void>();
+    this._extensionConnectionPromise = new ManualPromise();
     void this._extensionConnectionPromise.catch(logUnhandledError);
     this._handler = new ExtensionProtocolV2((method, params) => {
       if (!this._extensionConnection)
@@ -462,8 +462,8 @@ class ExtensionConnection {
   }
 
   private _handleParsedMessage(object: ExtensionResponse) {
-    if (object.id && this._callbacks.has(object.id)) {
-      const callback = this._callbacks.get(object.id)!;
+    const callback = object.id ? this._callbacks.get(object.id) : undefined;
+    if (object.id && callback) {
       this._callbacks.delete(object.id);
       if (object.error) {
         const error = callback.error;
@@ -475,7 +475,7 @@ class ExtensionConnection {
     } else if (object.id) {
       debugLogger('← Extension: unexpected response', object);
     } else {
-      this.onmessage?.(object.method! as keyof ExtensionEventsV2, object.params);
+      this.onmessage?.(object.method as keyof ExtensionEventsV2, object.params);
     }
   }
 

@@ -23,7 +23,7 @@ import type { ExtensionEventsV2 } from './protocol.js';
 
 export class ExtensionProtocolV2 {
   private _model: BrowserModel;
-  private _ready = new ManualPromise<void>();
+  private _ready = new ManualPromise();
 
   constructor(sendCommand: SendCommand, connectPagePrefix?: string) {
     this._model = new BrowserModel(sendCommand, connectPagePrefix);

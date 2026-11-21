@@ -138,7 +138,7 @@ function validateAuthorization(req: http.IncomingMessage, authToken: string | un
     return { statusCode: 401, message: 'Unauthorized: invalid token.' };
 }
 
-type StatefulSession = { transport: NodeStreamableHTTPServerTransport, eventStreamReady: ManualPromise<void> };
+type StatefulSession = { transport: NodeStreamableHTTPServerTransport, eventStreamReady: ManualPromise };
 
 class SessionStore {
   private readonly _sessions = new Map<string, StatefulSession>();
@@ -266,7 +266,7 @@ class SessionStore {
   }
 
   private async _createSession(req: http.IncomingMessage, res: http.ServerResponse, parsedBody: unknown): Promise<void> {
-    const eventStreamReady = new ManualPromise<void>();
+    const eventStreamReady = new ManualPromise();
     const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: sessionId => {

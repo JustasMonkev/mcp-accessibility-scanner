@@ -57,7 +57,7 @@ async function makeBackend(factory: any) {
   const config = await resolveConfig({});
   const backend = new BrowserServerBackend(config, factory);
   await backend.initialize(
-      { notifyToolListChanged: async () => {} } as any,
+      { notifyToolListChanged: async () => {} },
       { name: 'vitest', version: 'browser-sessions' },
   );
   return backend;
@@ -175,7 +175,7 @@ describe('browser sessions', () => {
     const makeSharedBackend = async (clientName: string) => {
       const backend = new BrowserServerBackend(config, factory, registry);
       await backend.initialize(
-          { notifyToolListChanged: async () => {} } as any,
+          { notifyToolListChanged: async () => {} },
           { name: clientName, version: '1.0.0' },
       );
       return backend;
@@ -218,7 +218,7 @@ describe('browser sessions', () => {
       factory.sessionsUnsupportedReason = 'this connection attaches to the browser\'s existing context. Add --isolated.';
       const backend = new BrowserServerBackend(config, factory);
       await backend.initialize(
-          { notifyToolListChanged: async () => {} } as any,
+          { notifyToolListChanged: async () => {} },
           { name: 'vitest', version: 'browser-sessions' },
       );
 
@@ -274,7 +274,7 @@ describe('browser sessions', () => {
       const { factory } = makeFactory();
       const backend = new BrowserServerBackend(config, factory);
       await backend.initialize(
-          { notifyToolListChanged: async () => {} } as any,
+          { notifyToolListChanged: async () => {} },
           { name: 'vitest', version: 'browser-sessions' },
       );
 
@@ -306,7 +306,7 @@ describe('browser sessions', () => {
       const { factory, created } = makeFactory();
       const backend = new BrowserServerBackend(config, factory);
       await backend.initialize(
-          { notifyToolListChanged: async () => {} } as any,
+          { notifyToolListChanged: async () => {} },
           { name: 'vitest', version: 'browser-sessions' },
       );
 
@@ -351,7 +351,7 @@ describe('browser sessions', () => {
       const makeSharedBackend = async () => {
         const backend = new BrowserServerBackend(config, factory, registry);
         await backend.initialize(
-            { notifyToolListChanged: async () => {} } as any,
+            { notifyToolListChanged: async () => {} },
             { name: 'vitest', version: 'browser-sessions' },
         );
         return backend;
@@ -396,7 +396,7 @@ describe('browser sessions', () => {
       const makeSharedBackend = async () => {
         const backend = new BrowserServerBackend(config, factory, registry);
         await backend.initialize(
-            { notifyToolListChanged: async () => {} } as any,
+            { notifyToolListChanged: async () => {} },
             { name: 'vitest', version: 'browser-sessions' },
         );
         return backend;
@@ -439,7 +439,7 @@ describe('browser sessions', () => {
       const makeSharedBackend = async () => {
         const backend = new BrowserServerBackend(config, factory, registry);
         await backend.initialize(
-            { notifyToolListChanged: async () => {} } as any,
+            { notifyToolListChanged: async () => {} },
             { name: 'vitest', version: 'browser-sessions' },
         );
         return backend;
@@ -481,7 +481,7 @@ describe('browser sessions', () => {
       const { factory } = makeFactory();
       const backend = new BrowserServerBackend(config, factory);
       await backend.initialize(
-          { notifyToolListChanged: async () => {} } as any,
+          { notifyToolListChanged: async () => {} },
           { name: 'vitest', version: 'browser-sessions' },
       );
 

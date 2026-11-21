@@ -478,7 +478,7 @@ describe('WebMCP proxy call cancellation', () => {
           ++invocations;
           assert.deepEqual(received, args);
           assert.equal(request?._meta?.browserSessionId, 'bs_host');
-          const signal = request!.signal;
+          const signal = request.signal;
           const stop = () => finished.resolve();
           signal.addEventListener('abort', stop, { once: true });
           started.resolve(signal);

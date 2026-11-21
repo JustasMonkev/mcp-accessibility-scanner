@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-export function escapeWithQuotes(text: string, char: string = '\'') {
+export function escapeWithQuotes(text: string, char = '\'') {
   const stringified = JSON.stringify(text);
   if (char === '"')
     return stringified;

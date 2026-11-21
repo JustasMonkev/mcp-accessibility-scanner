@@ -212,7 +212,7 @@ function groupBy<T, K>(items: Iterable<T>, keyOf: (item: T) => K | undefined): M
   return groups;
 }
 
-function isLayoutRelevant(node: ScreenReaderNode): boolean {
+function isLayoutRelevant(node: ScreenReaderNode): node is ScreenReaderNode & { rect: Rect } {
   if (!node.ref || !node.rect || node.positionFixed || node.floating || node.ariaHidden)
     return false;
   if (!/[\p{L}\p{N}]/u.test(node.visibleText ?? ''))
@@ -358,12 +358,12 @@ function visitsBackwards(rects: Rect[], axis: ReadingAxis): boolean {
 }
 
 function checkReadingOrder(nodes: ScreenReaderNode[], push: (finding: ScreenReaderFinding) => void) {
-  const childrenByParent = groupBy(nodes, node => node.parent !== null && isLayoutRelevant(node) ? node.parent : undefined);
+  const childrenByParent = groupBy(nodes.filter(isLayoutRelevant), node => node.parent ?? undefined);
 
   for (const [parentIndex, siblings] of childrenByParent) {
     if (siblings.length < 2)
       continue;
-    const rects = siblings.map(node => node.rect!);
+    const rects = siblings.map(node => node.rect);
     const rows = countBands(rects, 'y');
     const columns = countBands(rects, 'x');
     const horizontal = rows === 1 && columns > 1;
@@ -378,7 +378,7 @@ function checkReadingOrder(nodes: ScreenReaderNode[], push: (finding: ScreenRead
     if (!visitsBackwards(rects, axis))
       continue;
 
-    const visualOrder = [...siblings].sort((a, b) => axis.sortKey(a.rect!) - axis.sortKey(b.rect!));
+    const visualOrder = [...siblings].sort((a, b) => axis.sortKey(a.rect) - axis.sortKey(b.rect));
     const label = (list: ScreenReaderNode[]) => list.slice(0, 6).map(node => describe(node)).join(' -> ')
         + (list.length > 6 ? ` -> ... (+${list.length - 6})` : '');
     push({

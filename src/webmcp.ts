@@ -21,7 +21,7 @@ import { truncateDataUrls } from './utils/dataUrl.js';
 import { errorMessage } from './utils/errors.js';
 import { fromJsonSchema, specTypeSchemas } from '@modelcontextprotocol/server';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/server/validators/ajv';
-import type { JsonSchemaType, StandardSchemaWithJSON, Tool } from '@modelcontextprotocol/server';
+import type { StandardSchemaWithJSON, Tool } from '@modelcontextprotocol/server';
 import type * as playwright from 'playwright';
 import type { Response } from './response.js';
 import type { Tab } from './tab.js';
@@ -191,13 +191,15 @@ function compiledSchema(schema: Tool['inputSchema'], key = JSON.stringify(schema
     isSupportedInputSchema(validated, node => {
       delete node.format;
     });
-    compiled = fromJsonSchema<Record<string, unknown>>(validated as JsonSchemaType, new AjvJsonSchemaValidator());
+    compiled = fromJsonSchema<Record<string, unknown>>(validated, new AjvJsonSchemaValidator());
   } catch {
     compiled = undefined;
   }
   compiledSchemas.set(key, compiled);
-  if (compiledSchemas.size > 2 * limits.tools)
-    compiledSchemas.delete(compiledSchemas.keys().next().value!);
+  if (compiledSchemas.size > 2 * limits.tools) {
+    const [oldest] = compiledSchemas.keys();
+    compiledSchemas.delete(oldest);
+  }
   return compiled;
 }
 
@@ -426,7 +428,7 @@ function validateArguments(compiled: StandardSchemaWithJSON<Record<string, unkno
     return validationScript.runInContext(validationContext, { timeout: validationTimeoutMs }) as ReturnType<typeof compiled['~standard']['validate']>;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ERR_SCRIPT_EXECUTION_TIMEOUT')
-      throw new Error(`WebMCP argument validation exceeded ${validationTimeoutMs} ms.`);
+      throw new Error(`WebMCP argument validation exceeded ${validationTimeoutMs} ms.`, { cause: error });
     throw error;
   } finally {
     validationContext.validate = undefined;

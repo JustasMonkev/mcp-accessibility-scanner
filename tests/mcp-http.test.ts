@@ -1211,8 +1211,8 @@ describe('mcp http transport hardening', () => {
       const sessionRegistry = new BrowserSessionRegistry();
       const factory: ServerBackendFactory = {
         ...testBackendFactory,
-        create: () => new BrowserServerBackend(config, { createContext: createBrowserContext } as any, sessionRegistry),
-        createStateless: () => new BrowserServerBackend(config, { createContext: createBrowserContext } as any, sessionRegistry, { ephemeralDefaultContext: true }),
+        create: () => new BrowserServerBackend(config, { createContext: createBrowserContext }, sessionRegistry),
+        createStateless: () => new BrowserServerBackend(config, { createContext: createBrowserContext }, sessionRegistry, { ephemeralDefaultContext: true }),
       };
       const { port } = await startServer(factory);
 
@@ -1248,7 +1248,7 @@ describe('mcp http transport hardening', () => {
       const sessionRegistry = new BrowserSessionRegistry();
       const factory: ServerBackendFactory = {
         ...testBackendFactory,
-        create: () => new BrowserServerBackend(config, { createContext: createBrowserContext } as any, sessionRegistry),
+        create: () => new BrowserServerBackend(config, { createContext: createBrowserContext }, sessionRegistry),
       };
       const { port } = await startServer(factory);
 
@@ -1304,7 +1304,7 @@ describe('mcp http transport hardening', () => {
         },
         body: JSON.stringify(body),
       });
-      return { statusCode: response.status, json: await response.json() as any };
+      return { statusCode: response.status, json: await response.json() };
     }
 
     it.each([0, ''])('preserves SDK modern setup-error correlation for request ID %j', async id => {

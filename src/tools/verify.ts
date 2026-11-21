@@ -96,7 +96,7 @@ const verifyList = defineTabTool({
         response.addError(`Item "${item}" not found`);
         return;
       }
-      itemTexts.push((await itemLocator.textContent())!);
+      itemTexts.push(await itemLocator.textContent() ?? '');
     }
     const ariaSnapshot = `\`
 - list:

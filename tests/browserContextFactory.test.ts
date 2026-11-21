@@ -1019,7 +1019,7 @@ describe('browserContextFactory', () => {
     const extension = new ExtensionContextFactory({ browserChannel: 'chrome' });
     expect(extension.sessionsUnsupportedReason).toContain('--extension');
 
-    const vscode = new VSCodeBrowserContextFactory(await resolveConfig({}), playwright as any, 'ws://127.0.0.1:1234');
+    const vscode = new VSCodeBrowserContextFactory(await resolveConfig({}), playwright, 'ws://127.0.0.1:1234');
     expect(vscode.sessionsUnsupportedReason).toContain('VS Code');
   });
 

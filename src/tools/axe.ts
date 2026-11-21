@@ -97,8 +97,8 @@ let knownRuleIds: Set<string> | undefined;
 function assertRuleIdsExist(ruleIds: readonly string[], label: 'withRules' | 'disableRules') {
   if (!ruleIds.length)
     return;
-  knownRuleIds ??= new Set(axe.getRules().map(rule => rule.ruleId));
-  const unknown = ruleIds.filter(ruleId => !knownRuleIds!.has(ruleId));
+  const known = knownRuleIds ??= new Set(axe.getRules().map(rule => rule.ruleId));
+  const unknown = ruleIds.filter(ruleId => !known.has(ruleId));
   if (unknown.length)
     throw new Error(`Unknown Axe rule id(s) in ${label}: ${unknown.join(', ')}. See https://dequeuniversity.com/rules/axe/ for valid ids.`);
 }
@@ -335,10 +335,11 @@ async function isFrameInScope(
   exclude: readonly string[]
 ): Promise<boolean> {
   let includeMatched = !include.length;
-  for (let current = frame; current.parentFrame(); current = current.parentFrame()!) {
+  let current = frame;
+  for (let parent = current.parentFrame(); parent; parent = current.parentFrame()) {
     const matches = await readFrameElement<FrameScope | null>(current, null, element => element.evaluate(
         inspectFrameScope,
-        current.parentFrame() === mainFrame
+        parent === mainFrame
           ? { include: [...include], exclude: [...exclude] }
           : { include: [], exclude: [] },
     ));
@@ -349,6 +350,7 @@ async function isFrameInScope(
     if (matches.excluded)
       return false;
     includeMatched ||= matches.included;
+    current = parent;
   }
   return includeMatched;
 }
@@ -388,9 +390,12 @@ async function injectAxeIntoFrames(
 
   const stableFrameIds = new Map<Frame, number>();
   const frameId = (frame: Frame) => {
-    if (!stableFrameIds.has(frame))
-      stableFrameIds.set(frame, stableFrameIds.size);
-    return stableFrameIds.get(frame)!;
+    let id = stableFrameIds.get(frame);
+    if (id === undefined) {
+      id = stableFrameIds.size;
+      stableFrameIds.set(frame, id);
+    }
+    return id;
   };
   let previousSignature: string | undefined;
   for (let round = 0; round < maxCoverageCheckRounds; round++) {
@@ -437,7 +442,9 @@ async function hasReachableAxe(frame: Frame, token: string): Promise<boolean> {
 }
 
 async function runAxeInPage({ context, options }: { context: axe.ElementContext | null, options: axe.RunOptions }) {
-  const results = await window.axe!.run(context ?? document, options);
+  if (!window.axe)
+    throw new Error('axe-core is not loaded in this frame.');
+  const results = await window.axe.run(context ?? document, options);
   const findings = (rules: axe.Result[]) => rules.map(rule => ({
     id: rule.id,
     impact: rule.impact,

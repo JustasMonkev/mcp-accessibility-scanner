@@ -1089,7 +1089,7 @@ async function assertToolError(name, args, pattern) {
   } catch (error) {
     if (pattern.test(error.message))
       return;
-    throw new Error(`Expected ${name} to fail matching ${pattern}, got:\n${error.message}`);
+    throw new Error(`Expected ${name} to fail matching ${pattern}, got:\n${error.message}`, { cause: error });
   }
   throw new Error(`Expected ${name} to fail matching ${pattern}, but it succeeded:\n${text.slice(0, 2000)}`);
 }

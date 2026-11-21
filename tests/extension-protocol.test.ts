@@ -1348,7 +1348,7 @@ describe('extension protocol v2', () => {
     const scan = new Promise<void>(resolve => finishScan = resolve);
     const readdir = vi.spyOn(fs, 'readdir').mockImplementationOnce(async () => {
       await scan;
-      return [] as any;
+      return [];
     });
     const server = http.createServer();
     await new Promise<void>((resolve, reject) => {

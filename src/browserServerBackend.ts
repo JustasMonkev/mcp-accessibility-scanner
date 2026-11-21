@@ -38,6 +38,8 @@ import type { ServerBackend } from './mcp/server.js';
 const sessionManagementTools = new Set(['browser_session_open', 'browser_session_close']);
 const toolsThatSkipIdleResume = new Set(['browser_close', ...sessionManagementTools]);
 
+type ToolArguments = mcpServer.CallToolRequest['params']['arguments'];
+
 const browserSessionIdProperty = {
   type: 'string',
   description: 'Browser session to run this tool in, as returned by browser_session_open. Omit to use the default session.',
@@ -50,14 +52,11 @@ function toBrowserMcpTool(tool: Tool): mcpServer.Tool {
   return mcpTool;
 }
 
-function parseToolArguments(tool: Tool, rawArguments: mcpServer.CallToolRequest['params']['arguments']): Record<string, unknown> {
-  try {
-    return tool.schema.inputSchema.parse(rawArguments || {}) as Record<string, unknown>;
-  } catch (error) {
-    if (error instanceof z.ZodError)
-      throw new Error(`Invalid input for tool "${tool.schema.name}":\n${z.prettifyError(error)}`);
-    throw error;
-  }
+function parseToolArguments(tool: Tool, rawArguments: ToolArguments): Record<string, unknown> {
+  const result = tool.schema.inputSchema.safeParse(rawArguments ?? {});
+  if (!result.success)
+    throw new Error(`Invalid input for tool "${tool.schema.name}":\n${z.prettifyError(result.error)}`, { cause: result.error });
+  return result.data;
 }
 
 export class BrowserServerBackend implements ServerBackend {
@@ -129,8 +128,6 @@ export class BrowserServerBackend implements ServerBackend {
     const id = webMCPSessionId(requestContext?._meta);
     if (!this._context && id === undefined)
       return this._mcpTools;
-    if (id !== undefined && !this._sessionRegistry)
-      throw new Error('Initialize the browser backend before listing session tools.');
     const context = this._contextFor(id);
     const signal = requestContext?.signal;
     const endSessionHold = context.beginSessionHold();
@@ -154,7 +151,9 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   private _contextFor(browserSessionId: string | undefined): Context {
-    return browserSessionId === undefined ? this._context! : this._sessionRegistry!.resolve(browserSessionId);
+    if (!this._context || !this._sessionRegistry)
+      throw new Error('Initialize the browser backend before running browser tools.');
+    return browserSessionId === undefined ? this._context : this._sessionRegistry.resolve(browserSessionId);
   }
 
   private async _listWebMCPToolsForListing(context: Context, signal: AbortSignal | undefined): Promise<WebMCPToolDefinition[]> {
@@ -177,7 +176,7 @@ export class BrowserServerBackend implements ServerBackend {
     return tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
   }
 
-  private async _callWebMCP(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext) {
+  private async _callWebMCP(name: string, rawArguments: ToolArguments, requestContext?: mcpServer.CallToolRequestContext) {
     if (!name.startsWith('webmcp_'))
       throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Tool "${name}" not found`);
     const id = webMCPSessionId(requestContext?._meta);
@@ -210,14 +209,14 @@ export class BrowserServerBackend implements ServerBackend {
     return response.serialize();
   }
 
-  async callTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'], requestContext?: mcpServer.CallToolRequestContext) {
+  async callTool(name: string, rawArguments: ToolArguments, requestContext?: mcpServer.CallToolRequestContext) {
     assertToolNotBlocked(this._config, name);
     const tool = this._toolsByName.get(name);
     if (!tool)
       return this._callWebMCP(name, rawArguments, requestContext);
     const routedSessionId = this._routedSessionId(name, rawArguments);
-    const context = this._contextFor(routedSessionId);
     const parsedArguments = parseToolArguments(tool, rawArguments);
+    const context = this._contextFor(routedSessionId);
     const responseArguments = routedSessionId !== undefined ? { browserSessionId: routedSessionId, ...parsedArguments } : parsedArguments;
     const closingSessionContext = name === 'browser_session_close' ? this._sessionContextOrUndefined(parsedArguments.browserSessionId) : undefined;
     const response = new Response(context, name, responseArguments, requestContext, context.currentTab()?.modalStates());
@@ -255,7 +254,7 @@ export class BrowserServerBackend implements ServerBackend {
     if (typeof browserSessionId !== 'string')
       return undefined;
     try {
-      return this._sessionRegistry!.resolve(browserSessionId);
+      return this._sessionRegistry?.resolve(browserSessionId);
     } catch {
       return undefined;
     }
@@ -272,7 +271,7 @@ export class BrowserServerBackend implements ServerBackend {
     }
   }
 
-  private _routedSessionId(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments']): string | undefined {
+  private _routedSessionId(name: string, rawArguments: ToolArguments): string | undefined {
     if (sessionManagementTools.has(name))
       return undefined;
     const id = rawArguments?.browserSessionId;

@@ -874,7 +874,7 @@ describe('audit_screen_reader tool measurement', () => {
       checkReadingOrder,
       maxElements,
       maxFindingsPerCheck: 20,
-    } as any, response);
+    }, response);
     return response.result();
   }
 
@@ -1272,7 +1272,7 @@ describe('audit_screen_reader tool measurement', () => {
     const result = await run(harness, 401);
     const collects = harness.frame.evaluate.mock.calls.filter(([collect]: [unknown]) => typeof collect !== 'string');
     expect(collects.length).toBeGreaterThan(1);
-    expect(collects.every(([, input]: [unknown, { measureNames: boolean }]) => input.measureNames === false)).toBe(true);
+    expect(collects.every(([, input]: [unknown, { measureNames: boolean }]) => ! input.measureNames)).toBe(true);
     expect(result).toContain('WARNING: accessible names could not be measured for 401 of these');
   });
 

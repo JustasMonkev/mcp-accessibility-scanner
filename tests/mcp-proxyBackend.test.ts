@@ -32,7 +32,7 @@ describe('ProxyBackend', () => {
       name: 'default',
       description: 'Default provider',
       connect: vi.fn(),
-    } as any]);
+    }]);
 
     const sendNotification = vi.fn(async () => undefined);
     const callTool = vi.fn(async (_params: any, options?: { onprogress?: (params: { progress: number; total?: number; message?: string }) => void }) => {
@@ -97,7 +97,7 @@ describe('ProxyBackend', () => {
     vi.spyOn(Client.prototype, 'connect').mockResolvedValue(undefined);
     const nextListTools = vi.spyOn(Client.prototype, 'listTools').mockResolvedValue({
       tools: [{ name: 'scan_page' }] as any[],
-    } as any);
+    });
 
     await (backend as any)._setCurrentClient((backend as any)._mcpProviders[1], true);
 
@@ -121,7 +121,7 @@ describe('ProxyBackend', () => {
     vi.spyOn(Client.prototype, 'connect').mockResolvedValue(undefined);
     const listTools = vi.spyOn(Client.prototype, 'listTools');
 
-    await backend.initialize(context as any, { name: 'vitest', version: '1' });
+    await backend.initialize(context, { name: 'vitest', version: '1' });
 
     expect(listTools).not.toHaveBeenCalled();
     expect(context.notifyToolListChanged).not.toHaveBeenCalled();
@@ -198,7 +198,7 @@ describe('ProxyBackend', () => {
           connect: async () => {
             const inner = makeInnerBackend('tool_default');
             defaults.push(inner);
-            return wrapInProcess(inner as any);
+            return wrapInProcess(inner);
           },
         },
         {
@@ -207,14 +207,14 @@ describe('ProxyBackend', () => {
           connect: async () => {
             const inner = makeInnerBackend('tool_alternate');
             alternates.push(inner);
-            return wrapInProcess(inner as any);
+            return wrapInProcess(inner);
           },
         },
       ];
-      const shared: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders() as any };
+      const shared: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders() };
       const backendContext = { notifyToolListChanged: vi.fn(async () => undefined) };
       const clientVersion = { name: 'vitest', version: '1.0.0' };
-      const makeRequestBackend = () => new ProxyBackend(makeProviders() as any, shared);
+      const makeRequestBackend = () => new ProxyBackend(makeProviders(), shared);
       return { shared, defaults, alternates, backendContext, clientVersion, makeRequestBackend };
     }
 
@@ -222,7 +222,7 @@ describe('ProxyBackend', () => {
       const { alternates, backendContext, clientVersion, makeRequestBackend } = makeSharedSetup();
 
       const request1 = makeRequestBackend();
-      await request1.initialize(backendContext as any, clientVersion);
+      await request1.initialize(backendContext, clientVersion);
       const switched = await request1.callTool('browser_connect', { name: 'alternate' });
       expect(switched.isError).not.toBe(true);
       // Response cleanup of the switching request must not tear down the
@@ -232,7 +232,7 @@ describe('ProxyBackend', () => {
       expect(alternates[0].closed).toBe(0);
 
       const request2 = makeRequestBackend();
-      await request2.initialize(backendContext as any, clientVersion);
+      await request2.initialize(backendContext, clientVersion);
       const tools = await request2.listTools();
       expect(tools.map(tool => tool.name)).toContain('tool_alternate');
       const result = await request2.callTool('tool_alternate', {});
@@ -249,12 +249,12 @@ describe('ProxyBackend', () => {
       const { defaults, alternates, backendContext, clientVersion, makeRequestBackend } = makeSharedSetup();
 
       const request1 = makeRequestBackend();
-      await request1.initialize(backendContext as any, clientVersion);
+      await request1.initialize(backendContext, clientVersion);
       await request1.callTool('browser_connect', { name: 'alternate' });
       request1.serverClosed?.();
 
       const request2 = makeRequestBackend();
-      await request2.initialize(backendContext as any, clientVersion);
+      await request2.initialize(backendContext, clientVersion);
       const back = await request2.callTool('browser_connect', { name: 'default' });
       expect(back.isError).not.toBe(true);
       expect(alternates[0].closed).toBe(1);
@@ -266,7 +266,7 @@ describe('ProxyBackend', () => {
       expect(alternates[0].closed).toBe(1);
 
       const request3 = makeRequestBackend();
-      await request3.initialize(backendContext as any, clientVersion);
+      await request3.initialize(backendContext, clientVersion);
       expect((await request3.listTools()).map(tool => tool.name)).toContain('tool_default');
       // Per-request default clients again: request2's and request3's.
       expect(defaults.length).toBeGreaterThanOrEqual(2);
@@ -292,27 +292,27 @@ describe('ProxyBackend', () => {
         },
       };
       const makeProviders = () => [
-        { name: 'default', description: 'd', connect: async () => wrapInProcess(makeInnerBackend('tool_default') as any) },
-        { name: 'alternate', description: 'a', connect: async () => wrapInProcess(alternateInner as any) },
+        { name: 'default', description: 'd', connect: async () => wrapInProcess(makeInnerBackend('tool_default')) },
+        { name: 'alternate', description: 'a', connect: async () => wrapInProcess(alternateInner) },
       ];
-      const shared: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders() as any };
-      const makeRequestBackend = () => new ProxyBackend(makeProviders() as any, shared);
+      const shared: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders() };
+      const makeRequestBackend = () => new ProxyBackend(makeProviders(), shared);
 
       const request1 = makeRequestBackend();
-      await request1.initialize(backendContext as any, clientVersion);
+      await request1.initialize(backendContext, clientVersion);
       await request1.callTool('browser_connect', { name: 'alternate' });
       request1.serverClosed?.();
 
       // request2 adopts the shared client and starts a long tool call.
       const request2 = makeRequestBackend();
-      await request2.initialize(backendContext as any, clientVersion);
+      await request2.initialize(backendContext, clientVersion);
       const inFlight = request2.callTool('tool_alternate', {});
       await vi.waitFor(() => expect(releaseCall).toBeDefined());
 
       // request3 switches back to default while request2's call is still in
       // flight: the outgoing client must stay open for it.
       const request3 = makeRequestBackend();
-      await request3.initialize(backendContext as any, clientVersion);
+      await request3.initialize(backendContext, clientVersion);
       const back = await request3.callTool('browser_connect', { name: 'default' });
       expect(back.isError).not.toBe(true);
       expect(alternateInner.closed).toBe(0);
@@ -341,7 +341,7 @@ describe('ProxyBackend', () => {
       const alternates: ReturnType<typeof makeInnerBackend>[] = [];
       const gateRef: { gate?: Promise<void> } = {};
       const makeProviders = () => [
-        { name: 'default', description: 'd', connect: async () => wrapInProcess(makeInnerBackend('tool_default') as any) },
+        { name: 'default', description: 'd', connect: async () => wrapInProcess(makeInnerBackend('tool_default')) },
         {
           name: 'alternate',
           description: 'a',
@@ -350,15 +350,15 @@ describe('ProxyBackend', () => {
               await gateRef.gate;
             const inner = makeInnerBackend('tool_alternate');
             alternates.push(inner);
-            return wrapInProcess(inner as any);
+            return wrapInProcess(inner);
           },
         },
       ];
-      const shared: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders() as any };
-      const makeRequestBackend = () => new ProxyBackend(makeProviders() as any, shared);
+      const shared: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders() };
+      const makeRequestBackend = () => new ProxyBackend(makeProviders(), shared);
 
       const request1 = makeRequestBackend();
-      await request1.initialize(backendContext as any, clientVersion);
+      await request1.initialize(backendContext, clientVersion);
       await request1.callTool('browser_connect', { name: 'alternate' });
       request1.serverClosed?.();
 
@@ -367,12 +367,12 @@ describe('ProxyBackend', () => {
       let releaseGate: () => void;
       gateRef.gate = new Promise<void>(resolve => { releaseGate = resolve; });
       const request2 = makeRequestBackend();
-      await request2.initialize(backendContext as any, clientVersion);
+      await request2.initialize(backendContext, clientVersion);
       const switching = request2.callTool('browser_connect', { name: 'alternate' });
 
       // request3 arrives mid-switch and adopts the still-published old client.
       const request3 = makeRequestBackend();
-      await request3.initialize(backendContext as any, clientVersion);
+      await request3.initialize(backendContext, clientVersion);
 
       releaseGate!();
       const switched = await switching;
@@ -392,7 +392,7 @@ describe('ProxyBackend', () => {
       request2.serverClosed?.();
 
       const request4 = makeRequestBackend();
-      await request4.initialize(backendContext as any, clientVersion);
+      await request4.initialize(backendContext, clientVersion);
       const late = await request4.callTool('tool_alternate', {});
       expect((late.content?.[0] as any).text).toBe('tool_alternate');
       expect(alternates[1].calls).toContain('tool_alternate');
@@ -405,12 +405,12 @@ describe('ProxyBackend', () => {
       const { alternates, backendContext, clientVersion, shared, makeRequestBackend } = makeSharedSetup();
 
       const request1 = makeRequestBackend();
-      await request1.initialize(backendContext as any, clientVersion);
+      await request1.initialize(backendContext, clientVersion);
       await request1.callTool('browser_connect', { name: 'alternate' });
       request1.serverClosed?.();
 
       const request2 = makeRequestBackend();
-      await request2.initialize(backendContext as any, clientVersion);
+      await request2.initialize(backendContext, clientVersion);
 
       await shared.slot.dispose();
       expect(alternates[0].closed).toBe(1);
@@ -425,7 +425,7 @@ describe('ProxyBackend', () => {
       const { alternates, backendContext, clientVersion, shared, makeRequestBackend } = makeSharedSetup();
 
       const request1 = makeRequestBackend();
-      await request1.initialize(backendContext as any, clientVersion);
+      await request1.initialize(backendContext, clientVersion);
       await request1.callTool('browser_connect', { name: 'alternate' });
       request1.serverClosed?.();
 
@@ -437,15 +437,15 @@ describe('ProxyBackend', () => {
         providers: [
           { name: 'default', description: 'd', connect: vi.fn() },
           { name: 'alternate', description: 'a', connect: vi.fn(async () => { throw new Error('connect exploded'); }) },
-        ] as any,
+        ],
       });
-      await failing.initialize(backendContext as any, clientVersion);
+      await failing.initialize(backendContext, clientVersion);
       const result = await failing.callTool('browser_connect', { name: 'alternate' });
       expect(result.isError).toBe(true);
       // The previously shared client was neither closed nor replaced.
       expect(alternates[0].closed).toBe(0);
       const request2 = makeRequestBackend();
-      await request2.initialize(backendContext as any, clientVersion);
+      await request2.initialize(backendContext, clientVersion);
       expect((await request2.listTools()).map(tool => tool.name)).toContain('tool_alternate');
     });
   });

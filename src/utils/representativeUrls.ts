@@ -150,8 +150,10 @@ function collect(node: TreeNode, count: number, selected: number[]) {
     collect(child, count, selected);
     return;
   }
-  const nodeParts = node.parts!;
-  const choices = count >= branchCount(node) ? node.covered! : node.free!;
+  const nodeParts = node.parts;
+  const choices = count >= branchCount(node) ? node.covered : node.free;
+  if (!nodeParts || !choices)
+    throw new Error('Representative URL tree was not prepared before collecting.');
   let remaining = count;
   for (let index = nodeParts.length - 1; index >= 0; index--) {
     const given = choices[index][remaining];

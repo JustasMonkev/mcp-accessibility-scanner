@@ -27,7 +27,7 @@ describe('mcp/manualPromise', () => {
     });
 
     it('rejects and tracks completion', async () => {
-      const p = new ManualPromise<void>();
+      const p = new ManualPromise();
       p.reject(new Error('boom'));
       await expect(p).rejects.toThrow('boom');
       expect(p.isDone()).toBe(true);

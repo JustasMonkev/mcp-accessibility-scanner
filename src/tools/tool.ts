@@ -36,7 +36,9 @@ type DialogModalState = {
 
 export type ModalState = FileUploadModalState | DialogModalState;
 
-export type Tool<Input extends z.Schema = z.Schema> = {
+type ToolInputSchema = z.Schema<Record<string, unknown>>;
+
+export type Tool<Input extends ToolInputSchema = ToolInputSchema> = {
   capability: ToolCapability;
   schema: ToolSchema<Input>;
   clearsModalState?: ModalState['type'];
@@ -44,15 +46,15 @@ export type Tool<Input extends z.Schema = z.Schema> = {
   handle: (context: Context, params: z.output<Input>, response: Response, signal?: AbortSignal) => Promise<void>;
 };
 
-export function defineTool<Input extends z.Schema>(tool: Tool<Input>): Tool<Input> {
+export function defineTool<Input extends ToolInputSchema>(tool: Tool<Input>): Tool<Input> {
   return tool;
 }
 
-export type TabTool<Input extends z.Schema = z.Schema> = Omit<Tool<Input>, 'handle'> & {
+export type TabTool<Input extends ToolInputSchema = ToolInputSchema> = Omit<Tool<Input>, 'handle'> & {
   handle: (tab: Tab, params: z.output<Input>, response: Response, signal?: AbortSignal) => Promise<void>;
 };
 
-export function defineTabTool<Input extends z.Schema>(tool: TabTool<Input>): Tool<Input> {
+export function defineTabTool<Input extends ToolInputSchema>(tool: TabTool<Input>): Tool<Input> {
   return {
     ...tool,
     handle: async (context, params, response, signal) => {
@@ -66,7 +68,7 @@ export function defineTabTool<Input extends z.Schema>(tool: TabTool<Input>): Too
   };
 }
 
-function modalStateMismatchError<Input extends z.Schema>(tool: TabTool<Input>, tab: Tab): string | undefined {
+function modalStateMismatchError<Input extends ToolInputSchema>(tool: TabTool<Input>, tab: Tab): string | undefined {
   const openModalTypes = tab.modalStates().map(state => state.type);
   if (tool.clearsModalState && !openModalTypes.includes(tool.clearsModalState))
     return `Error: The tool "${tool.schema.name}" can only be used when there is related modal state present.`;

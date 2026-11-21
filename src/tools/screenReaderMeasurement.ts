@@ -74,7 +74,7 @@ function collectElementFacts(input: CollectElementFactsInput): ElementFacts[] {
     return (element: Element): V => {
       if (!cache.has(element))
         cache.set(element, compute(element));
-      return cache.get(element)!;
+      return cache.get(element) as V;
     };
   };
   const getStyle = memoize(element => window.getComputedStyle(element));
@@ -364,7 +364,7 @@ function collectElementFacts(input: CollectElementFactsInput): ElementFacts[] {
     return elements.map(collect);
   } finally {
     if (ownsAxeTree)
-      axe!.teardown();
+      axe?.teardown();
   }
 }
 
@@ -466,7 +466,9 @@ export async function measureScreenReaderElements(
     void Promise.all(handles.map(handle => handle.dispose().catch(() => undefined)));
   };
 
-  const resolveRefHandle = async (ref: string) => {
+  const resolveRefHandle = async (ref: string | null) => {
+    if (!ref)
+      return null;
     const lookup = await runBoundedWork(pools.refs, () => {
       analyzedElements++;
       return page.$(`aria-ref=${ref}`);
@@ -484,7 +486,7 @@ export async function measureScreenReaderElements(
     return null;
   };
 
-  const resolveRefHandles = (chunk: number[]) => Promise.all(chunk.map(index => resolveRefHandle(ariaNodes[index].ref!)));
+  const resolveRefHandles = (chunk: number[]) => Promise.all(chunk.map(index => resolveRefHandle(ariaNodes[index].ref)));
 
   const ownerFramesOf = async (handles: (playwright.ElementHandle<SVGElement | HTMLElement> | null)[]) => {
     const mainFrame = page.mainFrame();

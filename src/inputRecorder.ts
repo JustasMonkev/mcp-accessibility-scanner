@@ -295,7 +295,7 @@ export class InputRecorder {
     this._lastActions.set(page, { action, sequence });
     const tab = this._context.tabForPage(page);
     if (tab)
-      this._context.sessionLog!.logUserAction(action, tab, code, false);
+      this._context.sessionLog?.logUserAction(action, tab, code, false);
   }
 
   logActionUpdated(page: playwright.Page, action: actions.Action, code: string, sequence: number) {
@@ -304,7 +304,7 @@ export class InputRecorder {
     this._lastActions.set(page, { action, sequence });
     const tab = this._context.tabForPage(page);
     if (tab)
-      this._context.sessionLog!.logUserAction(action, tab, code, true);
+      this._context.sessionLog?.logUserAction(action, tab, code, true);
   }
 
   logSignalAdded(page: playwright.Page, signal: actions.Signal, code: string, sequence?: number) {
@@ -313,7 +313,7 @@ export class InputRecorder {
       return;
     const tab = this._context.tabForPage(page);
     if (signal.name !== 'navigation' && tab && code && lastAction)
-      this._context.sessionLog!.logUserAction(lastAction.action, tab, code, true);
+      this._context.sessionLog?.logUserAction(lastAction.action, tab, code, true);
     if (signal.name !== 'navigation')
       return;
     const navigateAction: actions.Action = {
@@ -322,6 +322,6 @@ export class InputRecorder {
       signals: [],
     };
     if (tab)
-      this._context.sessionLog!.logUserAction(navigateAction, tab, `await page.goto('${signal.url}');`, false);
+      this._context.sessionLog?.logUserAction(navigateAction, tab, `await page.goto('${signal.url}');`, false);
   }
 }

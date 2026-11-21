@@ -571,7 +571,7 @@ describe('scan_page_matrix tool', () => {
         .mockResolvedValueOnce({
           ...createAxeResult('https://example.com/page', ['color-contrast']),
           unscannedFrames: ['https://widget.example/'],
-        } as any);
+        });
 
     await tool.handle(context as any, {
       variants: [{ name: 'baseline' }, { name: 'mobile', viewport: { width: 375, height: 812 } }],
@@ -607,7 +607,7 @@ describe('scan_page_matrix tool', () => {
         .mockResolvedValueOnce({
           ...createAxeResult('https://example.com/page', ['color-contrast']),
           unscannedFrames: ['https://widget.example/'],
-        } as any)
+        })
         .mockResolvedValueOnce(createAxeResult('https://example.com/page', ['color-contrast']));
 
     await tool.handle(context as any, {
@@ -950,7 +950,7 @@ describe('scan_page_matrix tool', () => {
       sendNotification,
       signal: new AbortController().signal,
       requestId: 1,
-    } as any);
+    });
 
     vi.spyOn(axe, 'runAxeScan')
         .mockResolvedValueOnce(createAxeResult('https://example.com/page', ['color-contrast']))

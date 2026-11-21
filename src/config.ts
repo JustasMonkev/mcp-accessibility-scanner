@@ -422,7 +422,7 @@ async function loadConfig(configFile: string | undefined): Promise<Config> {
     normalizeConfigPaths(config, path.dirname(path.resolve(configFile)));
     return config;
   } catch (error) {
-    throw new Error(`Failed to load config file: ${configFile}, ${error}`);
+    throw new Error(`Failed to load config file: ${configFile}, ${error}`, { cause: error });
   }
 }
 
@@ -585,7 +585,7 @@ function newlineSeparatedList(value: string | undefined): string[] | undefined {
 
 /** @public */
 export function parseCdpHeaders(entries: string[] | undefined): Record<string, string> | undefined {
-  if (!entries || !entries.length)
+  if (!entries?.length)
     return undefined;
   const headers: Record<string, string> = {};
   for (const entry of entries) {
