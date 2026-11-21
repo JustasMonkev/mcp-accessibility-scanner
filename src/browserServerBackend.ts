@@ -52,13 +52,10 @@ function toBrowserMcpTool(tool: Tool): mcpServer.Tool {
 }
 
 function parseToolArguments(tool: Tool, rawArguments: mcpServer.CallToolRequest['params']['arguments']): Record<string, unknown> {
-  try {
-    return tool.schema.inputSchema.parse(rawArguments ?? {});
-  } catch (error) {
-    if (error instanceof z.ZodError)
-      throw new Error(`Invalid input for tool "${tool.schema.name}":\n${z.prettifyError(error)}`, { cause: error });
-    throw error;
-  }
+  const result = tool.schema.inputSchema.safeParse(rawArguments ?? {});
+  if (!result.success)
+    throw new Error(`Invalid input for tool "${tool.schema.name}":\n${z.prettifyError(result.error)}`, { cause: result.error });
+  return result.data;
 }
 
 export class BrowserServerBackend implements mcpServer.ServerBackend {
@@ -92,30 +89,27 @@ export class BrowserServerBackend implements mcpServer.ServerBackend {
     this._notifyToolListChanged = serverContext.notifyToolListChanged;
     const registry = this._sharedSessionRegistry ?? new BrowserSessionRegistry();
     this._sessionRegistry = registry;
-    const createContext = (browserSession?: boolean, browserSessionId?: string): Context => {
-      const contextOptions: ConstructorParameters<typeof Context>[0] = {
-        tools: this._tools,
-        modalStateTools: allTools.filter(tool => tool.clearsModalState),
-        config: this._config,
-        browserContextFactory: this._browserContextFactory,
-        sessionLog: () => this._ensureSessionLog(),
-        clientInfo: { ...clientVersion },
-        browserSessions: {
-          open: async () => {
-            BrowserSessionRegistry.checkSessionsSupported(this._browserContextFactory.sessionsUnsupportedReason);
-            await this._ensureSessionLog();
-            return registry.open(id => createContext(true, id), this._browserContextFactory.sessionsUnsupportedReason);
-          },
-          close: id => registry.close(id),
+    const createContext = (session: { browserSession?: true; browserSessionId?: string }): Context => new Context({
+      ...session,
+      tools: this._tools,
+      modalStateTools: allTools.filter(tool => tool.clearsModalState),
+      config: this._config,
+      browserContextFactory: this._browserContextFactory,
+      sessionLog: () => this._ensureSessionLog(),
+      clientInfo: { ...clientVersion },
+      browserSessions: {
+        open: async () => {
+          BrowserSessionRegistry.checkSessionsSupported(this._browserContextFactory.sessionsUnsupportedReason);
+          await this._ensureSessionLog();
+          return registry.open(
+              browserSessionId => createContext({ browserSession: true, browserSessionId }),
+              this._browserContextFactory.sessionsUnsupportedReason,
+          );
         },
-      };
-      if (browserSession !== undefined)
-        contextOptions.browserSession = browserSession;
-      if (browserSessionId !== undefined)
-        contextOptions.browserSessionId = browserSessionId;
-      return new Context(contextOptions);
-    };
-    this._context = createContext(this._ephemeralDefaultContext || undefined);
+        close: id => registry.close(id),
+      },
+    });
+    this._context = createContext(this._ephemeralDefaultContext ? { browserSession: true } : {});
   }
 
   private _ensureSessionLog(): Promise<SessionLog | undefined> {
