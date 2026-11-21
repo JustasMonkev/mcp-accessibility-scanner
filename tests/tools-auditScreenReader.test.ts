@@ -10,7 +10,7 @@ import auditScreenReaderTools, {
   type ScreenReaderNode,
 } from '../src/tools/auditScreenReader.js';
 import { Response } from '../src/response.js';
-import { injectAxeForNames } from '../src/tools/axe.js';
+import { injectAxe } from '../src/tools/axe.js';
 import { measureScreenReaderElements, readElementFacts } from '../src/tools/screenReaderMeasurement.js';
 
 function node(overrides: Partial<ScreenReaderNode>): ScreenReaderNode {
@@ -1548,7 +1548,7 @@ describe('collectElementFacts in a real page', () => {
     const handles = await Promise.all(['#docs', '#save', '#empty'].map(selector => page.$(selector)));
     // Until axe is in the page nothing is measured and the snapshot stands.
     const bare = await readElementFacts(page, handles as any);
-    await injectAxeForNames(page.mainFrame());
+    await injectAxe(page.mainFrame());
     const facts = await readElementFacts(page, handles as any);
     await page.close();
 
@@ -1570,14 +1570,14 @@ describe('collectElementFacts in a real page', () => {
     const handle = await page.$('#docs');
 
     // A page with no axe of its own does not gain one.
-    expect(await injectAxeForNames(page.mainFrame())).toBe(true);
+    expect(await injectAxe(page.mainFrame())).toBe(true);
     expect(await page.evaluate(() => 'axe' in window)).toBe(false);
     // The literal is the one collectElementFacts reads; a measured name below proves they agree.
     expect(await page.evaluate(() => typeof (window as any).__mcpAccessibilityScannerAxe)).toBe('object');
 
     // A page that carries its own keeps it, and names are still measured.
     await page.evaluate(() => { (window as any).axe = { theirs: true }; });
-    expect(await injectAxeForNames(page.mainFrame())).toBe(true);
+    expect(await injectAxe(page.mainFrame())).toBe(true);
     expect(await page.evaluate(() => (window as any).axe)).toEqual({ theirs: true });
     const [facts] = await readElementFacts(page, [handle] as any);
     expect(facts.accessibleName).toBe('Docs');
@@ -1592,7 +1592,7 @@ describe('collectElementFacts in a real page', () => {
     const page = await browser!.newPage();
     try {
       await page.setContent('<button id="control">First name</button>');
-      expect(await injectAxeForNames(page.mainFrame())).toBe(true);
+      expect(await injectAxe(page.mainFrame())).toBe(true);
       const control = await page.$('#control');
       if (!control)
         throw new Error('Expected the fixture button');
@@ -1608,10 +1608,7 @@ describe('collectElementFacts in a real page', () => {
     }
   });
 
-  it('does not take a page\'s own axe for its copy when the build cannot replace it', async () => {
-    // The build assigns window.axe in sloppy mode; on a page whose axe is not
-    // writable that assignment does nothing, and the page's object must not
-    // be trusted for names.
+  it('measures names with its own copy, never the page\'s, when the page\'s axe cannot be replaced', async () => {
     const page = await browser!.newPage();
     await page.setContent(`<a id="docs" href="/docs"><strong>Docs</strong></a>`);
     await page.evaluate(() => {
@@ -1619,10 +1616,10 @@ describe('collectElementFacts in a real page', () => {
     });
     const handle = await page.$('#docs');
 
-    expect(await injectAxeForNames(page.mainFrame())).toBe(false);
-    expect(await page.evaluate(() => [(window as any).axe, typeof (window as any).__mcpAccessibilityScannerAxe])).toEqual([{ theirs: true }, 'undefined']);
+    expect(await injectAxe(page.mainFrame())).toBe(true);
+    expect(await page.evaluate(() => [(window as any).axe, typeof (window as any).__mcpAccessibilityScannerAxe?.commons])).toEqual([{ theirs: true }, 'object']);
     const [facts] = await readElementFacts(page, [handle] as any);
-    expect([facts.accessibleName, facts.nameMeasured]).toEqual([null, false]);
+    expect([facts.accessibleName, facts.nameMeasured]).toEqual(['Docs', true]);
     await page.close();
   });
 
@@ -1638,7 +1635,7 @@ describe('collectElementFacts in a real page', () => {
     const snapshot = parseAriaSnapshot(await page.ariaSnapshot({ mode: 'ai' }));
     const button = snapshot.findIndex(entry => entry.role === 'button');
     const handle = await page.$('#b');
-    await injectAxeForNames(page.mainFrame());
+    await injectAxe(page.mainFrame());
     const [facts] = await readElementFacts(page, [handle] as any);
     await page.close();
 
@@ -1793,7 +1790,7 @@ describe('collectElementFacts in a real page', () => {
     const hostHandle = await page.$('#host');
     const inner = await hostHandle!.evaluateHandle(host => host.shadowRoot!.getElementById('inner'));
     const handles = [...await Promise.all(['#labelled', '#attr', '#dangling'].map(selector => page.$(selector))), inner];
-    await injectAxeForNames(page.mainFrame());
+    await injectAxe(page.mainFrame());
     const facts = await readElementFacts(page, handles as any);
     await page.close();
 

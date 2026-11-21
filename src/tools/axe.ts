@@ -3,14 +3,16 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 import { truncateDataUrls } from '../utils/dataUrl.js';
+import { finishFrameTree, scannedFrame, unscannedFrame, unscannedFramesOf } from './axeFrameTree.js';
 
-import type { ElementHandle, Frame, Page } from 'playwright';
+import type { FrameOutcome, ScannedFrame, SerializedPartial } from './axeFrameTree.js';
+import type { ElementHandle, Frame, JSHandle, Page } from 'playwright';
 
 declare global {
   interface Window {
-    axe?: typeof axe;
     __mcpAccessibilityScannerAxe?: typeof axe;
-    __mcpAccessibilityScannerAxeReady?: string;
+    __mcpAccessibilityScannerProjectReport?: (results: axe.AxeResults) => Omit<AxeScanResult, 'unscannedFrames'>;
+    __mcpAccessibilityScannerLiveness?: string;
   }
 }
 
@@ -147,48 +149,76 @@ async function assertScopeSelectorsResolve(
     throw new Error(`No elements matched includeSelectors: ${unmatched.join(', ')}. The scan would have silently covered less of the page than requested.`);
 }
 
-const axeReadyMarker = '__mcpAccessibilityScannerAxeReady';
-let axeReadySequence = 0;
-const axeReadyNonce = randomUUID();
+type ScanFindings = Omit<AxeScanResult, 'unscannedFrames'>;
 
-const axeConfigureSource = `;axe.configure({ allowedOrigins: ['<unsafe_all_origins>'], branding: { application: 'playwright' } });`;
-
-async function injectAxe(frame: Frame, source: string): Promise<void> {
-  await frame.evaluate(source);
+function projectReport(results: axe.AxeResults): ScanFindings {
+  const findings = (rules: axe.Result[]) => rules.map(rule => ({
+    id: rule.id,
+    impact: rule.impact,
+    tags: rule.tags,
+    help: rule.help,
+    helpUrl: rule.helpUrl,
+    description: rule.description,
+    nodes: rule.nodes.map(node => ({
+      target: node.target,
+      html: node.html,
+      failureSummary: node.failureSummary ?? null,
+    })),
+  }));
+  return {
+    url: results.url,
+    violations: findings(results.violations),
+    incomplete: findings(results.incomplete),
+    passes: results.passes.map(rule => ({ id: rule.id })),
+    inapplicable: results.inapplicable.map(rule => ({ id: rule.id })),
+  };
 }
 
-const axeForNamesGlobal = '__mcpAccessibilityScannerAxe';
-const axeForNamesSource = [
+const axePrivateGlobal = '__mcpAccessibilityScannerAxe' satisfies keyof Window;
+const projectReportGlobal = '__mcpAccessibilityScannerProjectReport' satisfies keyof Window;
+const axePrivateSource = [
   '(() => {',
+  'const module = { exports: {} };',
+  'const define = undefined;',
   'const hadAxe = \'axe\' in window;',
   'const pageAxe = window.axe;',
-  'let installed;',
   'try {',
   axe.source,
-  'installed = window.axe;',
   '} finally {',
-  'if (hadAxe) window.axe = pageAxe; else delete window.axe;',
+  'try { if (!hadAxe) delete window.axe; else if (window.axe !== pageAxe) window.axe = pageAxe; } catch {}',
   '}',
-  `if (!installed || installed === pageAxe) throw new Error('axe-core was not installed');`,
-  `window[${JSON.stringify(axeForNamesGlobal)}] = installed;`,
+  'const installed = module.exports;',
+  `if (typeof installed.runPartial !== 'function') throw new Error('axe-core was not installed');`,
+  'installed.frameMessenger({ open() {}, post() { return false; } });',
+  `installed.configure({ branding: { application: 'playwright' } });`,
+  `window[${JSON.stringify(axePrivateGlobal)}] = installed;`,
+  `window[${JSON.stringify(projectReportGlobal)}] = ${projectReport.toString()};`,
   '})();',
 ].join('\n');
 
+axe.configure({ branding: { application: 'playwright' } });
+
 const mainFrameInjectionTimeoutMs = 10_000;
-const childFrameInjectionTimeoutMs = 1000;
-const maxCoverageCheckRounds = 4;
+const childFrameCallTimeoutMs = 1000;
+const childFrameLivenessTimeoutMs = 500;
+const livenessPollMs = 25;
+const childFrameRunTimeoutMs = 60_000;
 
 export const frameConcurrency = 4;
 
 export function frameReadTimeoutMs(frame: Frame): number {
-  return frame.parentFrame() === null ? mainFrameInjectionTimeoutMs : childFrameInjectionTimeoutMs;
+  return frame.parentFrame() === null ? mainFrameInjectionTimeoutMs : childFrameCallTimeoutMs;
 }
 
-export async function injectAxeForNames(frame: Frame): Promise<boolean> {
-  return injectAxe(frame, axeForNamesSource).then(() => true, () => false);
+async function installAxe(frame: Frame): Promise<void> {
+  await frame.evaluate(axePrivateSource);
 }
 
-export async function withFrameTimeout<T>(work: Promise<T>, fallback: T, timeoutMs = childFrameInjectionTimeoutMs): Promise<T> {
+export async function injectAxe(frame: Frame): Promise<boolean> {
+  return installAxe(frame).then(() => true, () => false);
+}
+
+export async function withFrameTimeout<T>(work: Promise<T>, fallback: T, timeoutMs: number): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -217,6 +247,28 @@ export async function withConcurrency<T, R>(items: readonly T[], run: (item: T) 
   return results;
 }
 
+type WorkLimit = <T>(work: () => Promise<T>) => Promise<T>;
+
+function createWorkLimit(limit: number): WorkLimit {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  return async work => {
+    if (active < limit)
+      active++;
+    else
+      await new Promise<void>(resolve => waiting.push(resolve));
+    try {
+      return await work();
+    } finally {
+      const next = waiting.shift();
+      if (next)
+        next();
+      else
+        active--;
+    }
+  };
+}
+
 const maxFrameNameLength = 80;
 const maxFrameUrlLength = 2048;
 
@@ -227,237 +279,281 @@ function describeFrame(frame: Frame): string {
   return name ? `${url} (name="${name}")` : url;
 }
 
-async function hasAxe(frame: Frame, token: string): Promise<boolean> {
-  return withFrameTimeout(
-      frame.evaluate(({ marker, token }) => window[marker] === token, { marker: axeReadyMarker, token } as const),
-      false,
-  );
-}
+type ScanContext = axe.SerialContextObject | axe.FrameContextObject;
 
-type FrameScope = {
-  included: boolean;
-  excluded: boolean;
-  hidden: boolean;
+type SelectedChild = {
+  context: axe.FrameContext;
+  element: ElementHandle | null;
 };
 
-function inspectFrameScope(frameElement: Element, scope: { include: string[], exclude: string[] }): FrameScope {
-  function composedAncestorsOf(element: Element): Element[] {
-    const ancestors: Element[] = [];
-    let current: Element | null = element;
-    while (current) {
-      ancestors.push(current);
-      const slotted: Element = current.assignedSlot ?? current;
-      const root = slotted.getRootNode();
-      current = slotted.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
-    }
-    return ancestors;
-  }
+type FrameScan = {
+  partial: SerializedPartial;
+  children: SelectedChild[];
+};
 
-  function allDocumentAndShadowRoots(): (Document | ShadowRoot)[] {
-    const roots: (Document | ShadowRoot)[] = [document];
+type PlainReport = { report: ScanFindings };
+
+type FrameRunInfo = {
+  childFrames: axe.FrameContext[];
+  frameCount: number;
+  plainRun: boolean;
+};
+
+type UserScope = { include: string[], exclude: string[] };
+const noScope: UserScope = { include: [], exclude: [] };
+
+type FrameWalk = { options: axe.RunOptions, limit: WorkLimit };
+
+async function scanInPage({ context, options, allowPlainRun }: { context: ScanContext, options: axe.RunOptions, allowPlainRun: boolean }): Promise<[FrameRunInfo, string, ...(Element | null)[]]> {
+  const instance = window.__mcpAccessibilityScannerAxe!;
+  const mayContainFrames = () => {
+    if (window.length)
+      return true;
+    const roots: ParentNode[] = [document];
     for (const root of roots) {
       for (const element of root.querySelectorAll('*')) {
-        if (element.shadowRoot)
-          roots.push(element.shadowRoot);
+        if (!element.shadowRoot)
+          continue;
+        if (element.shadowRoot.querySelector('iframe, frame'))
+          return true;
+        roots.push(element.shadowRoot);
       }
     }
-    return roots;
-  }
+    return false;
+  };
+  const followAncestry = (selector: axe.CrossTreeSelector) => {
+    let root: Document | ShadowRoot | null = document;
+    let element: Element | null = null;
+    for (const treeSelector of [selector].flat()) {
+      let children: Element[] = root ? [...root.children] : [];
+      element = null;
+      for (const step of String(treeSelector).split(' > ')) {
+        const [, escapedName, position] = /^(.+?)(?::nth-child\((\d+)\))?$/.exec(step.trim()) ?? [];
+        const name = escapedName?.replace(/\\(.)/g, '$1').toLowerCase();
+        const candidate: Element | undefined = position ? children[Number(position) - 1] : children.find(child => child.nodeName.toLowerCase() === name);
+        if (!name || candidate?.nodeName.toLowerCase() !== name)
+          return null;
+        element = candidate;
+        children = [...candidate.children];
+      }
+      root = element?.shadowRoot ?? null;
+    }
+    return element;
+  };
+  const selectFrame = (selector: axe.CrossTreeSelector) => {
+    const element = followAncestry(selector);
+    return element && ['iframe', 'frame'].includes(element.localName.toLowerCase()) ? element : null;
+  };
 
-  function isVisibleOnTop(root: Document | ShadowRoot, modal: Element): boolean {
-    const style = getComputedStyle(modal);
-    const rect = modal.getBoundingClientRect();
-    const visible = modal.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) ??
-      (style.display !== 'none' && !['hidden', 'collapse'].includes(style.visibility) && style.opacity !== '0');
-    return visible && rect.width > 0 && rect.height > 0 && root.elementsFromPoint(rect.left + 1, rect.top + 1).includes(modal);
+  const childFrames = mayContainFrames() ? instance.utils.getFrameContexts(context, options) : [];
+  if (allowPlainRun && !childFrames.length) {
+    const report = window.__mcpAccessibilityScannerProjectReport!(await instance.run(context, { ...options, iframes: false }));
+    return [{ childFrames, frameCount: 0, plainRun: true }, JSON.stringify(report)];
   }
-
-  function flattenedChildrenOf(parent: Element): Element[] {
-    return [...parent.children].flatMap(child => {
-      if (child.localName !== 'slot')
-        return [child];
-      const assigned = (child as HTMLSlotElement).assignedElements({ flatten: true });
-      return assigned.length ? assigned : [...child.children];
-    });
-  }
-
-  function isCollapsedByClosedDetails(element: Element, parent: Element | null): boolean {
-    if (parent?.localName !== 'details' || parent.hasAttribute('open'))
-      return false;
-    const isSummaryOfDetails = element.localName === 'summary' && flattenedChildrenOf(parent).find(child => child.localName === 'summary') === element;
-    return !isSummaryOfDetails;
-  }
-
-  function hidesItsSubtree(element: Element): boolean {
-    const parent = element.assignedSlot?.parentElement ?? element.parentElement;
-    const style = getComputedStyle(element);
-    return element.getAttribute('aria-hidden') === 'true'
-      || style.display === 'none'
-      || element.hasAttribute('inert')
-      || isCollapsedByClosedDetails(element, parent)
-      || (element !== frameElement && style.getPropertyValue('content-visibility') === 'hidden');
-  }
-
-  const ancestors = composedAncestorsOf(frameElement);
-  const matchesSelector = (selector: string) => ancestors.some(element => element.matches(selector));
-  const openModals = allDocumentAndShadowRoots().flatMap(root => [...root.querySelectorAll('dialog:modal')].filter(modal => isVisibleOnTop(root, modal)));
-  const blockedByModal = openModals.length > 0 && !openModals.some(modal => ancestors.includes(modal));
-  const frameVisibility = getComputedStyle(frameElement).visibility;
-  const hidden = blockedByModal
-    || ancestors.some(hidesItsSubtree)
-    || frameVisibility === 'hidden'
-    || frameVisibility === 'collapse';
-  return { included: scope.include.some(matchesSelector), excluded: scope.exclude.some(matchesSelector), hidden };
+  const frameElements = childFrames.map(({ frameSelector }) => selectFrame(frameSelector));
+  const partial = await instance.runPartial(context, options);
+  return [{ childFrames, frameCount: partial.frames.length, plainRun: false }, JSON.stringify(partial), ...frameElements];
 }
 
-async function readFrameElement<T>(
-  frame: Frame,
-  fallback: T,
-  read: (element: ElementHandle) => Promise<T>
-): Promise<T> {
+function isInScopeClosedShadowFrame(frameElement: Element, scope: UserScope): boolean {
+  const parentOf = (element: Element) => {
+    const root = element.getRootNode();
+    return element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+  };
+  const pathFrom = (next: (element: Element) => Element | null) => {
+    const path: Element[] = [];
+    for (let current: Element | null = frameElement; current; current = next(current))
+      path.push(current);
+    return path;
+  };
+  const treePath = pathFrom(parentOf);
+  const ownRoots = treePath.map(element => element.getRootNode()).filter(root => root instanceof ShadowRoot);
+  if (!ownRoots.some(root => root.host.shadowRoot !== root) || !frameElement.checkVisibility({ checkVisibilityCSS: true }))
+    return false;
+
+  const composedPath = pathFrom(element => element.assignedSlot ?? parentOf(element));
+  if (composedPath.some(element => element.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true'))
+    return false;
+  const enclosingModal = composedPath.findIndex(element => element.matches('dialog:modal'));
+  const inertCandidates = enclosingModal === -1 ? composedPath : composedPath.slice(0, enclosingModal + 1);
+  if (inertCandidates.some(element => element.hasAttribute('inert')))
+    return false;
+
+  const roots: (Document | ShadowRoot)[] = [document, ...new Set(ownRoots)];
+  for (const root of roots) {
+    for (const element of root.querySelectorAll('*')) {
+      if (element.shadowRoot && !roots.includes(element.shadowRoot))
+        roots.push(element.shadowRoot);
+    }
+  }
+  const modals = roots.flatMap(root => [...root.querySelectorAll('dialog:modal')]);
+  const enclosingModals = modals.filter(modal => composedPath.includes(modal));
+  if (modals.length && !enclosingModals.length)
+    return false;
+  const composedContains = (container: Element, node: Element) => {
+    for (let current: Element | null = node; current; current = current.assignedSlot ?? parentOf(current)) {
+      if (current === container)
+        return true;
+    }
+    return false;
+  };
+  const isCoveredByAnotherModal = (modal: Element) => {
+    const box = modal.getBoundingClientRect();
+    if (!box.width || !box.height)
+      return false;
+    const [hit] = (modal.getRootNode() as Document | ShadowRoot).elementsFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return !!hit && !composedContains(modal, hit) && modals.some(other => other !== modal && composedContains(other, hit));
+  };
+  if (modals.length > 1 && enclosingModals.every(isCoveredByAnotherModal))
+    return false;
+
+  const closestMatch = (selectors: string[]) => {
+    const matches = new Set(selectors.flatMap(selector => [...document.querySelectorAll(selector)]));
+    const depth = treePath.findIndex(element => matches.has(element));
+    return depth === -1 ? Infinity : depth;
+  };
+  const include = scope.include.length ? closestMatch(scope.include) : treePath.length;
+  return include !== Infinity && include <= closestMatch(scope.exclude);
+}
+
+async function readFrameElement<T>(frame: Frame, fallback: T, read: (element: ElementHandle) => Promise<T>): Promise<T> {
   const elementPromise = frame.frameElement().catch(() => null);
-  const element = await withFrameTimeout(elementPromise, null);
+  const element = await withFrameTimeout(elementPromise, null, childFrameCallTimeoutMs);
   if (!element) {
     void elementPromise.then(late => late?.dispose().catch(() => {}));
     return fallback;
   }
   try {
-    return await withFrameTimeout(read(element), fallback);
+    return await withFrameTimeout(read(element), fallback, childFrameCallTimeoutMs);
   } finally {
     await element.dispose().catch(() => {});
   }
 }
 
-async function isFrameInScope(
-  frame: Frame,
-  mainFrame: Frame,
-  include: readonly string[],
-  exclude: readonly string[]
-): Promise<boolean> {
-  let includeMatched = !include.length;
-  for (let current = frame; current.parentFrame(); current = current.parentFrame()!) {
-    const matches = await readFrameElement<FrameScope | null>(current, null, element => element.evaluate(
-        inspectFrameScope,
-        current.parentFrame() === mainFrame
-          ? { include: [...include], exclude: [...exclude] }
-          : { include: [], exclude: [] },
-    ));
-    if (!matches)
-      return true;
-    if (matches.hidden)
-      return false;
-    if (matches.excluded)
-      return false;
-    includeMatched ||= matches.included;
-  }
-  return includeMatched;
+async function closedShadowFrames(frame: Frame, visited: ReadonlySet<Frame>, scope: UserScope, limit: WorkLimit): Promise<string[]> {
+  const unvisited = frame.childFrames().filter(child => !visited.has(child));
+  const gaps = await Promise.all(unvisited.map(child => limit(() => readFrameElement(child, false, element => element.evaluate(isInScopeClosedShadowFrame, scope)))));
+  return unvisited.filter((_, index) => gaps[index]).map(describeFrame);
 }
 
-function findFramesMissedByAxe(
-  frames: readonly Frame[],
-  covered: readonly boolean[],
-  mainFrame: Frame
-): Frame[] {
-  const withoutAxe = new Set(frames.filter((_, index) => !covered[index]));
-  return frames.filter(frame => {
-    for (let current: Frame | null = frame; current && current !== mainFrame; current = current.parentFrame()) {
-      if (withoutAxe.has(current))
-        return true;
+function scanIn(frame: Frame, context: ScanContext, options: axe.RunOptions): Promise<FrameScan>;
+function scanIn(frame: Frame, context: ScanContext, options: axe.RunOptions, allowPlainRun: true): Promise<FrameScan | PlainReport>;
+async function scanIn(frame: Frame, context: ScanContext, options: axe.RunOptions, allowPlainRun = false): Promise<FrameScan | PlainReport> {
+  const result = await frame.evaluateHandle(scanInPage, { context, options, allowPlainRun });
+  let properties: Map<string, JSHandle>;
+  try {
+    properties = await result.getProperties();
+  } finally {
+    await result.dispose().catch(() => {});
+  }
+  let children: SelectedChild[] = [];
+  try {
+    const { childFrames, frameCount, plainRun } = await properties.get('0')!.jsonValue() as FrameRunInfo;
+    const json = await properties.get('1')!.jsonValue() as string;
+    if (plainRun)
+      return { report: JSON.parse(json) as ScanFindings };
+    children = childFrames.map((context, index) => ({ context, element: properties.get(String(index + 2))?.asElement() ?? null }));
+    return { partial: { json, frameCount }, children };
+  } finally {
+    const kept = new Set<unknown>(children.map(child => child.element));
+    for (const handle of properties.values()) {
+      if (!kept.has(handle))
+        void handle.dispose().catch(() => {});
     }
-    return false;
+  }
+}
+
+type ChildRun = {
+  outcome: FrameOutcome;
+  frame?: Frame;
+};
+
+type OwnScan = { frame: Frame, scan: FrameScan };
+
+async function scanDescendants(frame: Frame, scan: FrameScan, walk: FrameWalk, scope: UserScope): Promise<ScannedFrame> {
+  const children = await Promise.all(scan.children.map(child => runChildFrame(frame, child, walk)));
+  const visited = new Set(children.flatMap(run => run.frame ? [run.frame] : []));
+  return scannedFrame(scan.partial, children.map(run => run.outcome), await closedShadowFrames(frame, visited, scope, walk.limit));
+}
+
+function armLivenessProbe(token: string): boolean {
+  window.__mcpAccessibilityScannerLiveness = undefined;
+  setTimeout(() => {
+    window.__mcpAccessibilityScannerLiveness = token;
   });
+  return true;
 }
 
-function haveSameFrames(left: readonly Frame[], right: readonly Frame[]): boolean {
-  return left.length === right.length && left.every((frame, index) => frame === right[index]);
+function livenessProbeFired(token: string): boolean {
+  return window.__mcpAccessibilityScannerLiveness === token;
 }
 
-async function injectAxeIntoFrames(
-  page: Page,
-  include: readonly string[],
-  exclude: readonly string[]
-): Promise<string[]> {
-  const token = `${axe.version}:${axeReadyNonce}:${++axeReadySequence}`;
-  const source = `${axe.source}${axeConfigureSource}window[${JSON.stringify(axeReadyMarker)}]=${JSON.stringify(token)};`;
-  const mainFrame = page.mainFrame();
-  await injectAxe(mainFrame, source);
-  await withConcurrency(
-      childFramesOf(page),
-      frame => withFrameTimeout(injectAxe(frame, source), undefined),
-  );
-
-  const stableFrameIds = new Map<Frame, number>();
-  const frameId = (frame: Frame) => {
-    if (!stableFrameIds.has(frame))
-      stableFrameIds.set(frame, stableFrameIds.size);
-    return stableFrameIds.get(frame)!;
-  };
-  let previousSignature: string | undefined;
-  for (let round = 0; round < maxCoverageCheckRounds; round++) {
-    const frames = childFramesOf(page);
-    const covered = await withConcurrency(frames, frame => hasReachableAxe(frame, token));
-    const missed = findFramesMissedByAxe(frames, covered, mainFrame);
-    const scopeResults = await withConcurrency(missed, frame => isFrameInScope(frame, mainFrame, include, exclude));
-    const inScope = new Set(missed.filter((_, index) => scopeResults[index]));
-    if (!haveSameFrames(frames, childFramesOf(page))) {
-      previousSignature = undefined;
-      continue;
-    }
-    if (!missed.length)
-      return [];
-    const signature = frames.map((frame, index) => `${frameId(frame)}:${covered[index] ? 1 : 0}:${inScope.has(frame) ? 1 : 0}`).join(',');
-    if (signature === previousSignature)
-      return missed.filter(frame => inScope.has(frame)).map(describeFrame);
-    previousSignature = signature;
-  }
-  throw new Error('The frame tree kept changing while Axe coverage was checked. Retry the scan once the page settles.');
-}
-
-function childFramesOf(page: Page): Frame[] {
-  const mainFrame = page.mainFrame();
-  return page.frames().filter(frame => frame !== mainFrame);
-}
-
-function isFrameElementReachable(element: Element): boolean {
-  for (let current = element; ;) {
-    const root = current.getRootNode();
-    if (!(root instanceof ShadowRoot))
-      return true;
-    if (root.host.shadowRoot !== root)
-      return false;
-    current = root.host;
-  }
-}
-
-async function hasReachableAxe(frame: Frame, token: string): Promise<boolean> {
-  if (!await hasAxe(frame, token))
+async function timersFire(frame: Frame): Promise<boolean> {
+  const token = randomUUID();
+  if (!await withFrameTimeout(frame.evaluate(armLivenessProbe, token), false, childFrameCallTimeoutMs))
     return false;
-  const reachable = await readFrameElement(frame, false, element => element.evaluate(isFrameElementReachable));
-  return reachable && await hasAxe(frame, token);
+  const deadline = Date.now() + childFrameLivenessTimeoutMs;
+  do {
+    if (await withFrameTimeout(frame.evaluate(livenessProbeFired, token), false, childFrameCallTimeoutMs))
+      return true;
+    await new Promise(resolve => setTimeout(resolve, livenessPollMs));
+  } while (Date.now() < deadline);
+  return false;
 }
 
-async function runAxeInPage({ context, options }: { context: axe.ElementContext | null, options: axe.RunOptions }) {
-  const results = await window.axe!.run(context ?? document, options);
-  const findings = (rules: axe.Result[]) => rules.map(rule => ({
-    id: rule.id,
-    impact: rule.impact,
-    tags: rule.tags,
-    help: rule.help,
-    helpUrl: rule.helpUrl,
-    description: rule.description,
-    nodes: rule.nodes.map(node => ({
-      target: node.target,
-      html: node.html,
-      failureSummary: node.failureSummary ?? null,
-    })),
-  }));
-  return {
-    url: results.url,
-    violations: findings(results.violations),
-    incomplete: findings(results.incomplete),
-    passes: results.passes.map(rule => ({ id: rule.id })),
-    inapplicable: results.inapplicable.map(rule => ({ id: rule.id })),
-  };
+async function canRunAxe(frame: Frame): Promise<boolean> {
+  return await withFrameTimeout(injectAxe(frame), false, childFrameCallTimeoutMs) && await timersFire(frame);
+}
+
+async function contentFrameOf(parent: Frame, element: ElementHandle): Promise<Frame | null> {
+  const direct = await element.contentFrame();
+  if (direct)
+    return direct;
+  for (const candidate of parent.childFrames()) {
+    const owner = await candidate.frameElement().catch(() => null);
+    if (!owner)
+      continue;
+    try {
+      if (await element.evaluate((node, other) => node === other, owner))
+        return candidate;
+    } finally {
+      await owner.dispose().catch(() => {});
+    }
+  }
+  return null;
+}
+
+async function scanOwnFrame(parent: Frame, { context, element }: SelectedChild, options: axe.RunOptions): Promise<ChildRun | OwnScan> {
+  const child = element && await withFrameTimeout(contentFrameOf(parent, element), null, childFrameCallTimeoutMs);
+  void element?.dispose().catch(() => {});
+  if (!child)
+    return { outcome: unscannedFrame(`${describeFrame(parent)} > ${[context.frameSelector].flat().join(' >>> ')}`) };
+  const failed: ChildRun = { outcome: unscannedFrame(describeFrame(child)), frame: child };
+  if (!await canRunAxe(child))
+    return failed;
+  const pending = scanIn(child, context.frameContext, options);
+  const scan = await withFrameTimeout<FrameScan | null>(pending, null, childFrameRunTimeoutMs);
+  if (!scan) {
+    void pending.then(late => late.children.forEach(({ element }) => void element?.dispose().catch(() => {})), () => {});
+    return failed;
+  }
+  return { frame: child, scan };
+}
+
+async function runChildFrame(parent: Frame, child: SelectedChild, walk: FrameWalk): Promise<ChildRun> {
+  const own = await walk.limit(() => scanOwnFrame(parent, child, walk.options));
+  if ('outcome' in own)
+    return own;
+  return { outcome: await scanDescendants(own.frame, own.scan, walk, noScope), frame: own.frame };
+}
+
+async function scanFrameTree(mainFrame: Frame, context: ScanContext, options: axe.RunOptions, scope: UserScope): Promise<ScanFindings & { unscannedFrames: string[] }> {
+  const limit = createWorkLimit(frameConcurrency);
+  const scan = await scanIn(mainFrame, context, options, true);
+  if ('report' in scan)
+    return { ...scan.report, unscannedFrames: await closedShadowFrames(mainFrame, new Set(), scope, limit) };
+  const top = await scanDescendants(mainFrame, scan, { options, limit }, scope);
+  return { ...projectReport(await finishFrameTree(top, options)), unscannedFrames: unscannedFramesOf(top) };
 }
 
 export async function runAxeScan(page: Page, options: AxeScanOptions = {}): Promise<AxeScanResult> {
@@ -473,11 +569,12 @@ export async function runAxeScan(page: Page, options: AxeScanOptions = {}): Prom
     axeOptions.rules = Object.fromEntries(options.disableRules.map(rule => [rule, { enabled: false }]));
   axeOptions.resultTypes = ['violations', 'incomplete'];
 
-  const context = include.length || exclude.length ? { include: [...include], exclude: [...exclude] } : null;
+  const scope: UserScope = { include: [...include], exclude: [...exclude] };
+  const context: ScanContext = include.length || exclude.length ? scope : { exclude: [] };
 
-  const unscannedFrames = await injectAxeIntoFrames(page, include, exclude);
-  const results = await page.evaluate(runAxeInPage, { context, options: axeOptions });
-  return { ...results, unscannedFrames };
+  const mainFrame = page.mainFrame();
+  await installAxe(mainFrame);
+  return scanFrameTree(mainFrame, context, axeOptions, scope);
 }
 
 export function unscannedFrameLines(
@@ -490,8 +587,8 @@ export function unscannedFrameLines(
   return [
     ...(options.unit ? [] : ['']),
     options.unit
-      ? `WARNING: Axe could not be installed in frames on ${frames.length} ${options.unit}; their contents were not scanned and contribute no findings below.`
-      : `WARNING: Axe could not be installed in ${frames.length} frame(s), whose contents were not scanned and contribute no findings above:`,
+      ? `WARNING: Axe could not scan frames on ${frames.length} ${options.unit}; their contents contribute no findings below.`
+      : `WARNING: Axe could not scan ${frames.length} frame(s), whose contents contribute no findings above:`,
     ...entries.map(frame => `- ${frame}`),
     ...(options.trailingLines ?? ['A frame that is still loading may succeed on a re-run; one that consistently fails must be audited on its own.']),
   ];
