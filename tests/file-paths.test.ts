@@ -37,6 +37,37 @@ describe('output path rendering with real files', () => {
   });
   afterAll(async () => { await browser?.close(); });
 
+  it('writes a PDF to a distinct generated filename for each call', async () => {
+    const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-pdf-output-'));
+    const page = await browser.newPage();
+    try {
+      const config = await resolveConfig({ outputDir, filePaths: 'absolute' });
+      const tab = { page, context: { outputFile: (name: string, exclusive: boolean) => outputFile(config, name, exclusive) }, modalStates: () => [] };
+      const context = { config, currentTabOrDie: () => tab } as Context;
+      const tool = pdfTools[0];
+      await page.setContent('<h1>PDF output</h1>');
+
+      const results: string[] = [];
+      for (let call = 0; call < 2; call++) {
+        const response = new Response(context, tool.schema.name, {});
+        await tool.handle(context, tool.schema.inputSchema.parse({}), response);
+        results.push(response.result());
+      }
+
+      const files = await fs.readdir(outputDir);
+      expect(files).toHaveLength(2);
+      expect(results.toSorted()).toEqual(files.toSorted().map(file => `Saved page as ${path.join(outputDir, file)}`));
+      for (const file of files) {
+        expect(file).toMatch(/^page-.*-[a-f0-9]{8}\.pdf$/);
+        const content = await fs.readFile(path.join(outputDir, file));
+        expect(content.subarray(0, 5).toString()).toBe('%PDF-');
+      }
+    } finally {
+      await page.close();
+      await fs.rm(outputDir, { recursive: true, force: true });
+    }
+  });
+
   for (const filePaths of [undefined, 'relative', 'absolute'] satisfies Config['filePaths'][]) {
     it.each(['relative output directory', 'default temp directory'])('%s with policy ' + filePaths, async directory => {
       const configuredDir = directory === 'relative output directory'

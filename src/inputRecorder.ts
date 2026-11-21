@@ -66,8 +66,6 @@ type RecorderSink = {
   signalAdded: (page: playwright.Page, data: actions.Signal | actions.SignalInContext, code: string) => void;
 };
 
-// Playwright starts one programmatic recording per client connection, always in
-// 'recording' mode with call tracking omitted; starting a second one throws.
 type PlaywrightRecorderControl = {
   _startRecording(params: typeof recorderParams, sink: RecorderSink): Promise<void>;
   _stopRecording(): Promise<void>;

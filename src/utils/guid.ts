@@ -16,9 +16,6 @@
 
 import crypto from 'node:crypto';
 
-// Draw identifiers from a batch of CSPRNG output, as crypto.randomUUID() does,
-// instead of allocating a Buffer and entering the RNG for every call. Each byte
-// is handed out once; the pool is refilled after it has been consumed.
 const randomPool = Buffer.allocUnsafeSlow(4096);
 let randomOffset = randomPool.length;
 

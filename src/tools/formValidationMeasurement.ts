@@ -157,10 +157,8 @@ export async function readFeedback(
       throw new Error('Feedback selector became ambiguous.');
     result.push(point);
   }
-  if (stage === 'baseline' && result.some(point => !point.present)) {
-    // A future target has no ancestor yet. Remember exposed owners by DOM identity.
+  if (stage === 'baseline' && result.some(point => !point.present))
     await bounded(() => page.locator('[role], [aria-live]').evaluateAll((elements, reader) => reader.rememberCandidates(elements), reader));
-  }
   return result;
 }
 

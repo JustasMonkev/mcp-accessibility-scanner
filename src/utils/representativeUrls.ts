@@ -5,7 +5,6 @@ type TreeNode = {
   terminal: number[];
   size: number;
   best: ArrayLike<number>;
-  // Kept from solve() so collect() can replay the choices without merging again.
   parts?: Part[];
   free?: Uint16Array[];
   covered?: Uint16Array[];
@@ -19,8 +18,6 @@ function templateSegments(url: string): string[] {
   const path = parsed.pathname.split('/').filter(Boolean).map(mask);
   if (!parsed.search)
     return [parsed.host, ...path];
-  // Same stable code-unit order as URLSearchParams.sort(), which would also
-  // write the sorted query back into the URL and parse it again.
   const entries = [...parsed.searchParams].sort(([a], [b]) => compareCodeUnits(a, b));
   const query = entries.map(([key, value]) => `?${key}=${mask(value)}`);
   return [parsed.host, ...path, ...query];
@@ -68,7 +65,6 @@ function coveredCount(part: Part): number {
   return part.kind === 'singles' ? part.size : 1;
 }
 
-// Cost of giving `count` selections to the part, for every count it can take.
 function partCosts(part: Part, k: number, missCost: number): Float64Array {
   const costs = new Float64Array(Math.min(k, part.size) + 1);
   costs[0] = part.size * missCost;
@@ -154,7 +150,6 @@ function collect(node: TreeNode, count: number, selected: number[]) {
     collect(child, count, selected);
     return;
   }
-  // Rows merged with a smaller budget are prefixes of the rows solve() merged.
   const nodeParts = node.parts!;
   const choices = count >= branchCount(node) ? node.covered! : node.free!;
   let remaining = count;

@@ -172,7 +172,6 @@ function decodeDataUrlMetadata(metadata: string, isEncoded: boolean): string {
   }
 }
 
-// Raw payloads can contain markup. Base64 payloads have an unconditional set of boundaries.
 const base64PayloadEnd = /[\s"'<>)\]}`:&]|%(?:22|27|29|5d|7d|60)/gi;
 const base64Alphabet = /[A-Za-z0-9+/=]*/y;
 const quotedPayloadBoundary = /["'\r\n]/g;
@@ -180,7 +179,6 @@ const rawPayloadBoundary = /[\r\n:&)\]}]|[^\S\r\n]+|%(?:22|27|29|5d|7d|60)/gi;
 
 function findDataUrlEnd(text: string, match: DataUrlMatch): number {
   if (match.isBase64) {
-    // Skip the base64 alphabet, which cannot start a boundary, in one cheap pass.
     base64Alphabet.lastIndex = match.payloadStart;
     base64Alphabet.test(text);
     base64PayloadEnd.lastIndex = base64Alphabet.lastIndex;

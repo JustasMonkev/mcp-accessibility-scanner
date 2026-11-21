@@ -156,7 +156,6 @@ const auditTextSpacingSchema = z.object({
 
 const pageLocks = new WeakMap<Page, Promise<void>>();
 
-/** Runs `run` after every earlier audit of the same page has finished, measurement and screenshot included. */
 async function withPageLock<T>(page: Page, run: () => Promise<T>): Promise<T> {
   const previous = pageLocks.get(page) ?? Promise.resolve();
   let release!: () => void;
@@ -184,7 +183,6 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
     return outcome;
   });
 
-  // A frame whose evaluation failed or timed out may still carry the overrides; strip them.
   const cleanupFailures: string[] = [];
   for (const outcome of outcomes.filter(entry => entry.error !== null)) {
     if (!outcome.frame.isDetached() && !await cleanupFrame(outcome.frame))
@@ -224,7 +222,6 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
   if (params.screenshot) {
     const styled = outcomes.filter(outcome => outcome.measurement !== null).map(outcome => outcome.frame);
     try {
-      // Bounded like measurement, so a frame that stops answering cannot hold the cleanup below.
       const applied = await Promise.all(styled.map(frame => rejectAfterTimeout(
           frame.evaluate(applyTextSpacing, { layerName, overrides: textSpacingOverrides }),
           frame.parentFrame() === null ? mainFrameTimeoutMs : childFrameTimeoutMs,
@@ -232,11 +229,9 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
       ).then(() => true, () => false)));
       const unstyled = styled.filter((_, index) => !applied[index]).map(frame => frameLabel(frame) ?? 'main frame');
       if (unstyled.length) {
-        // Never hand out an unstyled page as "overrides applied".
         screenshotError = `the overrides could not be re-applied to ${unstyled.join(', ')}`;
       } else {
         const path = await tab.context.outputFile(`audit-text-spacing-${safeIsoTimestampForFileName()}.png`);
-        // A failed capture must not throw away the completed measurements: report it and keep going.
         await tab.page.screenshot({ path, fullPage: true }).then(
             () => { screenshotPath = path; },
             error => { screenshotError = `the screenshot could not be captured (${errorMessage(error)})`; },
@@ -340,7 +335,6 @@ const auditTextSpacing = defineTabTool({
 
   handle: async (tab, params, response) => {
     const reportPath = await reserveReportPath(tab.context, response, params.reportFile, 'audit-text-spacing');
-    // Overlapping audits of one page would measure each other's overrides as the baseline.
     await withPageLock(tab.page, () => runTextSpacingAudit(tab, params, response, reportPath));
   },
 });

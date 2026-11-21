@@ -121,6 +121,38 @@ describe('session log folders', () => {
     }
   });
 
+  it('persists a snapshot and a late action update with default file storage', async () => {
+    const folder = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-a11y-session-log-'));
+    vi.useFakeTimers();
+    try {
+      const log = new SessionLog(folder);
+      const tab = {
+        context: { options: {} },
+        page: { url: () => 'https://fixture.test/' },
+      } as Parameters<SessionLog['logUserAction']>[1];
+      const sessionFile = path.join(folder, 'session.md');
+
+      log.logUserAction({ name: 'fill', text: 'draft', ariaSnapshot: '- textbox' } as Parameters<SessionLog['logUserAction']>[0], tab, '', false);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.waitFor(async () => {
+        expect(await fs.promises.readFile(sessionFile, 'utf8')).toContain('"text": "draft"');
+        expect(await fs.promises.readFile(path.join(folder, '001.snapshot.yml'), 'utf8')).toBe('- textbox');
+      });
+
+      log.logUserAction({ name: 'fill', text: 'final' } as Parameters<SessionLog['logUserAction']>[0], tab, '', true);
+      await vi.waitFor(async () => {
+        const content = await fs.promises.readFile(sessionFile, 'utf8');
+        expect(content).toContain('"text": "final"');
+        expect(content).not.toContain('"text": "draft"');
+        expect(content.match(/### User action: fill/g)).toHaveLength(1);
+        expect(content).toContain('- Snapshot: 001.snapshot.yml');
+      });
+    } finally {
+      vi.useRealTimers();
+      await fs.promises.rm(folder, { recursive: true, force: true });
+    }
+  });
+
   it('replaces a flushed action and its arguments with a late update', async () => {
     vi.useFakeTimers();
     try {
