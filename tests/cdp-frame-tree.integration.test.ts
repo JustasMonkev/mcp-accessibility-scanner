@@ -134,7 +134,7 @@ it.each(['endpoint', 'launch'] as const)('characterizes the top document when at
         await attached?.close();
       }
     } finally {
-      if (child && child.exitCode === null && child.signalCode === null) {
+      if (child?.exitCode === null && child.signalCode === null) {
         const ownedChild = child;
         const exited = once(ownedChild, 'exit');
         const deadline = setTimeout(() => ownedChild.kill('SIGKILL'), 5000);

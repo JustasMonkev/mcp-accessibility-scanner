@@ -20,15 +20,15 @@ export class ManualPromise<T = void> extends Promise<T> {
   private _isDone: boolean;
 
   constructor() {
-    let resolve: (t: T) => void;
-    let reject: (e: Error) => void;
+    let resolve: (t: T) => void = () => {};
+    let reject: (e: Error) => void = () => {};
     super((f, r) => {
       resolve = f;
       reject = r;
     });
     this._isDone = false;
-    this._resolve = resolve!;
-    this._reject = reject!;
+    this._resolve = resolve;
+    this._reject = reject;
   }
 
   isDone() {

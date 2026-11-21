@@ -752,7 +752,7 @@ describe('scan_page annotated screenshots', () => {
 
   it('should report nodes that were truncated, hidden, or inside an iframe', async () => {
     const nodes = Array.from({ length: 60 }, (_, index) => ({ target: [`#n${index}`], html: `<img id="n${index}">` }));
-    nodes.push({ target: ['iframe', '#inner'], html: '<img id="inner">' } as any);
+    nodes.push({ target: ['iframe', '#inner'], html: '<img id="inner">' });
     const harness = scanHarness({
       violations: [{ id: 'image-alt', tags: ['wcag2a'], nodes }],
       markedNodes: 48,
@@ -946,7 +946,7 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('scan_page annotated 
     await page.setContent(html);
     vi.spyOn(axe, 'runAxeScan').mockResolvedValue({
       url: 'https://example.com/', violations, incomplete: [], passes: [], inapplicable: [], unscannedFrames: [],
-    } as any);
+    });
     const screenshot = page.screenshot.bind(page);
     let drawn: any;
     vi.spyOn(page, 'screenshot').mockImplementation(async (options: any) => {
@@ -1138,7 +1138,7 @@ function scanHarness(options: { violations?: any[], markedNodes?: number, screen
     passes: [],
     inapplicable: [],
     unscannedFrames: [],
-  } as any);
+  });
 
   const evaluate = vi.fn(async () => {
     const isDraw = !order.includes('draw');

@@ -162,8 +162,8 @@ describe('BrowserServerBackend.callTool', () => {
       // Flush the log's debounced buffer deterministically.
       const sessionLog = await (opener as any)._sessionLog;
       expect(sessionLog).toBeDefined();
-      await (sessionLog as any)._flushEntries();
-      await (sessionLog as any)._sessionFileQueue;
+      await (sessionLog)._flushEntries();
+      await (sessionLog)._sessionFileQueue;
 
       const sessionFolders = fs.readdirSync(outputDir).filter(name => name.startsWith('session-'));
       // The routing backend minted no log of its own.

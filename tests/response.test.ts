@@ -368,7 +368,7 @@ describe('Response', () => {
         sendNotification,
         signal: new AbortController().signal,
         requestId: 1,
-      } as any);
+      });
 
       await response.reportProgress({
         progress: 2,
@@ -394,7 +394,7 @@ describe('Response', () => {
         sendNotification,
         signal: new AbortController().signal,
         requestId: 1,
-      } as any);
+      });
 
       await response.reportProgress({
         progress: 1,
@@ -411,7 +411,7 @@ describe('Response', () => {
         sendNotification,
         signal: new AbortController().signal,
         requestId: 1,
-      } as any);
+      });
 
       await expect(response.reportProgress({
         progress: 1,
@@ -749,7 +749,7 @@ describe('Response', () => {
         sendNotification,
         signal: new AbortController().signal,
         requestId: 1,
-      } as any);
+      });
 
       await response.reportProgress({ progress: 1, total: 2, message: 'Working' });
 

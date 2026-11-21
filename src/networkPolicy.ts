@@ -52,7 +52,7 @@ export function ensureNetworkPolicyRoutes(config: FullConfig, context: BrowserCo
 async function installPolicy(config: FullConfig, context: BrowserContext): Promise<void> {
   assertNetworkPolicySupported(config);
   const browser = context.browser();
-  if (!browser || browser.browserType().name() !== 'chromium')
+  if (browser?.browserType().name() !== 'chromium')
     throw new Error('Origin restrictions require a locally launched Chromium browser.');
   let installation = browserPolicies.get(browser);
   if (!installation) {

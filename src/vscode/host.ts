@@ -107,8 +107,11 @@ export class VSCodeProxyBackend implements ServerBackend {
     const sessionTraffic = name.startsWith('webmcp_')
       ? requestContext?._meta?.browserSessionId !== undefined
       : name === 'browser_session_open' || name === 'browser_session_close' || typeof args?.browserSessionId === 'string';
-    if (!sessionTraffic || this._currentClientIsDefault)
-      return this._currentClient!;
+    if (!sessionTraffic || this._currentClientIsDefault) {
+      if (!this._currentClient)
+        throw new Error('Initialize the VS Code backend before running tools.');
+      return this._currentClient;
+    }
     if (!this._sessionClient) {
       const creation = (async () => this._connectClient(await this._defaultTransportFactory()))();
       creation.catch(() => {
@@ -134,7 +137,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   private async _callContextSwitchTool(params: z.infer<typeof contextSwitchOptions>, _requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
     if (!params.connectionString || !params.lib) {
       if (this._sharedSlot)
-        await this._switchSharedClient(undefined);
+        await this._switchSharedClient(this._sharedSlot, undefined);
       else
         await this._setCurrentClient(await this._defaultTransportFactory(), true, true);
       return {
@@ -167,10 +170,11 @@ export class VSCodeProxyBackend implements ServerBackend {
       };
     }
 
+    const { connectionString, lib } = params;
     if (this._sharedSlot)
-      await this._switchSharedClient(() => this._createSwitchTransport(params.connectionString!, params.lib!));
+      await this._switchSharedClient(this._sharedSlot, () => this._createSwitchTransport(connectionString, lib));
     else
-      await this._setCurrentClient(await this._createSwitchTransport(params.connectionString, params.lib), true, false);
+      await this._setCurrentClient(await this._createSwitchTransport(connectionString, lib), true, false);
     return {
       content: [{ type: 'text', text: '### Result\nSuccessfully connected.\n' }],
     };
@@ -190,10 +194,10 @@ export class VSCodeProxyBackend implements ServerBackend {
     });
   }
 
-  private async _switchSharedClient(createTransport: (() => Promise<Transport>) | undefined): Promise<void> {
+  private async _switchSharedClient(sharedSlot: SharedClientSlot, createTransport: (() => Promise<Transport>) | undefined): Promise<void> {
     const previousOwned = this._ownsCurrentClient ? this._currentClient : undefined;
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
-    const shared = await this._sharedSlot!.replace(createTransport ? async () => this._connectClient(await createTransport()) : undefined);
+    const shared = await sharedSlot.replace(createTransport ? async () => this._connectClient(await createTransport()) : undefined);
     if (shared) {
       this._currentClient = shared;
       this._ownsCurrentClient = false;
@@ -204,7 +208,7 @@ export class VSCodeProxyBackend implements ServerBackend {
       this._currentClientIsDefault = true;
     }
     if (previousShared)
-      await this._sharedSlot!.release(previousShared);
+      await sharedSlot.release(previousShared);
     await previousOwned?.close().catch(logUnhandledError);
   }
 
@@ -241,7 +245,9 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   private async _connectClient(transport: Transport): Promise<Client> {
-    const client = new Client(this._clientVersion!);
+    if (!this._clientVersion)
+      throw new Error('Initialize the VS Code backend before connecting a client.');
+    const client = new Client(this._clientVersion);
     client.setRequestHandler('ping', () => ({}));
     this._relay.observe(client);
 

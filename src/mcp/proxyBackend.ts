@@ -69,8 +69,7 @@ export class ProxyBackend implements ServerBackend {
   }
 
   async listTools(requestContext?: Partial<Pick<CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]> {
-    const client = this._currentClient!;
-    const downstreamTools = await this._relay.listTools(client, requestContext);
+    const downstreamTools = await this._relay.listTools(this._client(), requestContext);
     const tools = this._mcpProviders.length === 1 ? downstreamTools : [...downstreamTools, this._contextSwitchTool];
     return tools.filter(tool => !isToolBlocked(this._toolPolicy, tool.name));
   }
@@ -79,7 +78,13 @@ export class ProxyBackend implements ServerBackend {
     assertToolNotBlocked(this._toolPolicy, name);
     if (name === this._contextSwitchTool.name)
       return this._callContextSwitchTool(args);
-    return await this._relay.callTool(this._currentClient!, name, args, requestContext);
+    return await this._relay.callTool(this._client(), name, args, requestContext);
+  }
+
+  private _client(): Client {
+    if (!this._currentClient)
+      throw new Error('Initialize the proxy backend before running tools.');
+    return this._currentClient;
   }
 
   serverClosed?(): void {
@@ -99,7 +104,7 @@ export class ProxyBackend implements ServerBackend {
 
       factory.validate?.();
       if (this._sharedSelection)
-        await this._switchSharedClient(factory.name);
+        await this._switchSharedClient(this._sharedSelection, factory.name);
       else
         await this._setCurrentClient(factory, true);
       return {
@@ -113,8 +118,7 @@ export class ProxyBackend implements ServerBackend {
     }
   }
 
-  private async _switchSharedClient(name: string): Promise<void> {
-    const { slot, providers } = this._sharedSelection!;
+  private async _switchSharedClient({ slot, providers }: SharedProxySelection, name: string): Promise<void> {
     const provider = providers.find(factory => factory.name === name);
     if (!provider)
       throw new Error('Unknown connection method: ' + name);

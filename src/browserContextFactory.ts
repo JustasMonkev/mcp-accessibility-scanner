@@ -201,7 +201,7 @@ abstract class BaseContextFactory implements BrowserContextFactory {
             testDebug(`close browser context (${this._logName})`);
             await context.close().catch(logUnhandledError);
           }
-          const remaining = this._handoutCounts.get(browser)! - 1;
+          const remaining = (this._handoutCounts.get(browser) ?? 0) - 1;
           this._handoutCounts.set(browser, remaining);
           if (remaining === 0 && !this._pendingAcquisitions.has(obtainedPromise)) {
             this._evictBrowser(obtainedPromise);
@@ -211,7 +211,7 @@ abstract class BaseContextFactory implements BrowserContextFactory {
         },
       };
     } finally {
-      const pending = this._pendingAcquisitions.get(obtainedPromise)! - 1;
+      const pending = (this._pendingAcquisitions.get(obtainedPromise) ?? 0) - 1;
       if (pending > 0)
         this._pendingAcquisitions.set(obtainedPromise, pending);
       else
@@ -302,7 +302,10 @@ class CdpContextFactory extends BaseContextFactory {
   }
 
   protected override async _doObtainBrowser(clientInfo: ClientInfo): Promise<playwright.Browser> {
-    return connectOverCDP(this.config.browser.cdpEndpoint!, {
+    const { cdpEndpoint } = this.config.browser;
+    if (!cdpEndpoint)
+      throw new Error('CDP connection requires browser.cdpEndpoint.');
+    return connectOverCDP(cdpEndpoint, {
       headers: cdpConnectHeaders(clientInfo, this.config.browser),
       timeout: this.config.browser.cdpTimeout,
       noDefaults: true,
@@ -344,7 +347,10 @@ class RemoteContextFactory extends BaseContextFactory {
   }
 
   protected override async _doObtainBrowser(): Promise<playwright.Browser> {
-    const url = new URL(this.config.browser.remoteEndpoint!);
+    const { remoteEndpoint } = this.config.browser;
+    if (!remoteEndpoint)
+      throw new Error('Remote connection requires browser.remoteEndpoint.');
+    const url = new URL(remoteEndpoint);
     url.searchParams.set('browser', this.config.browser.browserName);
     if (this.config.browser.launchOptions)
       url.searchParams.set('launch-options', JSON.stringify(this.config.browser.launchOptions));
@@ -375,13 +381,15 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
   }
 
   async createContext(clientInfo: ClientInfo): Promise<ContextHandle> {
-    const cdpLaunch = this.config.browser.cdpLaunch!;
+    const { cdpLaunch } = this.config.browser;
+    if (!cdpLaunch)
+      throw new Error('CDP launch requires browser.cdpLaunch.');
     if (cdpLaunch.port !== undefined) {
       await this._waitForClosingPinnedPortHolder(cdpLaunch);
       this._assertPinnedPortFree(cdpLaunch);
     }
-    const allocatedPort = cdpLaunch.port === undefined ? await findFreePort({ reserve: true }) : undefined;
-    const port = cdpLaunch.port ?? allocatedPort!;
+    const port = cdpLaunch.port ?? await findFreePort({ reserve: true });
+    const allocatedPort = cdpLaunch.port === undefined ? port : undefined;
     const endpoint = `http://127.0.0.1:${port}`;
     const args = (cdpLaunch.args ?? []).map(arg => arg.replaceAll('{port}', String(port)));
     let browser: playwright.Browser;
@@ -478,7 +486,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
         attachTimedOut ||= isCdpAttachTimeout(error);
         if (Date.now() >= deadline) {
           childProcess.kill('SIGTERM');
-          throw new Error(`Timed out waiting for CDP endpoint ${endpoint}.${attachTimedOut ? ` ${cdpAttachTimeoutHint}` : ''}`);
+          throw new Error(`Timed out waiting for CDP endpoint ${endpoint}.${attachTimedOut ? ` ${cdpAttachTimeoutHint}` : ''}`, { cause: error });
         }
         await new Promise(resolve => setTimeout(resolve, 50));
       }

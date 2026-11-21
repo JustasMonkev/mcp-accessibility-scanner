@@ -254,7 +254,7 @@ export class BrowserServerBackend implements ServerBackend {
     if (typeof browserSessionId !== 'string')
       return undefined;
     try {
-      return this._sessionRegistry!.resolve(browserSessionId);
+      return this._sessionRegistry?.resolve(browserSessionId);
     } catch {
       return undefined;
     }

@@ -63,7 +63,7 @@ describe('VSCodeProxyBackend', () => {
     vi.spyOn(Client.prototype, 'connect').mockResolvedValue(undefined);
     const nextListTools = vi.spyOn(Client.prototype, 'listTools').mockResolvedValue({
       tools: [{ name: 'audit_site' }] as any[],
-    } as any);
+    });
 
     await (backend as any)._setCurrentClient({ id: 'alternate-transport' } as any, true);
 
@@ -172,7 +172,7 @@ describe('VSCodeProxyBackend', () => {
         async () => wrapInProcess(new BrowserServerBackend(config, factory, registry)),
     );
     await backend.initialize(
-        { notifyToolListChanged: async () => {} } as any,
+        { notifyToolListChanged: async () => {} },
         { name: 'vitest', version: '1.0.0' },
     );
 
@@ -247,7 +247,7 @@ describe('VSCodeProxyBackend', () => {
       const defaultTransportFactory = async () => {
         const inner = makeInnerBackend('tool_default');
         defaults.push(inner);
-        return await wrapInProcess(inner as any);
+        return await wrapInProcess(inner);
       };
       const backendContext = { notifyToolListChanged: vi.fn(async () => undefined) };
       const clientVersion = { name: 'vitest', version: '1.0.0' };
@@ -260,8 +260,8 @@ describe('VSCodeProxyBackend', () => {
       const child = makeInnerBackend('tool_child');
 
       const request1 = makeRequestBackend();
-      await request1.initialize(backendContext as any, clientVersion);
-      vi.spyOn(request1 as any, '_createSwitchTransport').mockImplementation(() => wrapInProcess(child as any));
+      await request1.initialize(backendContext, clientVersion);
+      vi.spyOn(request1 as any, '_createSwitchTransport').mockImplementation(() => wrapInProcess(child));
       const switched = await request1.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' });
       expect(switched.isError).not.toBe(true);
       // Response cleanup of the switching request must not tear down the
@@ -270,7 +270,7 @@ describe('VSCodeProxyBackend', () => {
       expect(child.closed).toBe(0);
 
       const request2 = makeRequestBackend();
-      await request2.initialize(backendContext as any, clientVersion);
+      await request2.initialize(backendContext, clientVersion);
       const result = await request2.callTool('tool_child', {});
       expect((result.content?.[0] as any).text).toBe('tool_child');
       expect(child.calls).toContain('tool_child');
@@ -280,7 +280,7 @@ describe('VSCodeProxyBackend', () => {
       // Disconnecting closes the shared child exactly once and returns later
       // requests to the per-request default provider.
       const request3 = makeRequestBackend();
-      await request3.initialize(backendContext as any, clientVersion);
+      await request3.initialize(backendContext, clientVersion);
       const disconnected = await request3.callTool('browser_connect', {});
       expect(disconnected.isError).not.toBe(true);
       expect(child.closed).toBe(1);
@@ -288,7 +288,7 @@ describe('VSCodeProxyBackend', () => {
       expect(child.closed).toBe(1);
 
       const request4 = makeRequestBackend();
-      await request4.initialize(backendContext as any, clientVersion);
+      await request4.initialize(backendContext, clientVersion);
       await request4.callTool('tool_default', {});
       expect(defaults.at(-1)!.calls).toContain('tool_default');
     });
@@ -298,8 +298,8 @@ describe('VSCodeProxyBackend', () => {
       const child = makeInnerBackend('tool_child');
       child.listTools = vi.fn(async () => { throw new Error('browser endpoint is not live yet'); });
       const request = makeRequestBackend();
-      await request.initialize(backendContext as any, clientVersion);
-      vi.spyOn(request as any, '_createSwitchTransport').mockImplementation(() => wrapInProcess(child as any));
+      await request.initialize(backendContext, clientVersion);
+      vi.spyOn(request as any, '_createSwitchTransport').mockImplementation(() => wrapInProcess(child));
 
       const switched = await request.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:9/never-connected', lib: 'playwright' });
 

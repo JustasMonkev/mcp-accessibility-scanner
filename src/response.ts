@@ -320,7 +320,7 @@ function renderTabSnapshot(tabSnapshot: TabSnapshot, formatFilePath: (file: stri
   return lines.join('\n');
 }
 
-function renderTabsMarkdown(tabs: Tab[], force: boolean = false): string[] {
+function renderTabsMarkdown(tabs: Tab[], force = false): string[] {
   if (tabs.length === 1 && !force)
     return [];
 

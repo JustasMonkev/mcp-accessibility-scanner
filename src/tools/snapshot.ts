@@ -204,7 +204,7 @@ async function annotateAndScreenshot(tab: Tab, violations: AxeViolation[], respo
 
 async function removeAnnotations(page: playwright.Page, layerId: string): Promise<void> {
   await page.evaluate(id => {
-    const layer = document.getElementById(id) as (HTMLElement & { mcpPausedAnimations?: Animation[] }) | null;
+    const layer: (HTMLElement & { mcpPausedAnimations?: Animation[] }) | null = document.getElementById(id);
     layer?.mcpPausedAnimations?.forEach(animation => animation.play());
     layer?.remove();
   }, layerId);
@@ -349,7 +349,9 @@ function findMatcher(params: { text?: string, regex?: string }): { query: string
     const { regex, display } = compileRegex(params.regex);
     return { query: display, matches: line => regex.test(line) };
   }
-  const needle = params.text!.toLowerCase();
+  if (params.text === undefined)
+    throw new Error('Provide either text or regex.');
+  const needle = params.text.toLowerCase();
   return { query: `"${params.text}"`, matches: line => line.toLowerCase().includes(needle) };
 }
 

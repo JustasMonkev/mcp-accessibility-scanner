@@ -150,8 +150,9 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
   let regionCache = new Map<Element, Region | null>();
   let bodyPropagates = htmlOverflowVisible();
   const regionOf = (current: Element): Region | null => {
-    if (regionCache.has(current))
-      return regionCache.get(current)!;
+    const cached = regionCache.get(current);
+    if (cached !== undefined)
+      return cached;
     let region: Region | null = null;
     if (current !== document.documentElement && !(current === document.body && bodyPropagates)) {
       const style = getComputedStyle(current);
@@ -435,7 +436,7 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
         const style = getComputedStyle(worst.element);
         const typedSize = (property: 'width' | 'height') => {
           try {
-            const value = (worst!.element as HTMLElement).computedStyleMap?.().get(property)?.toString();
+            const value = (worst.element as HTMLElement).computedStyleMap?.().get(property)?.toString();
             if (value)
               return value;
           } catch {}

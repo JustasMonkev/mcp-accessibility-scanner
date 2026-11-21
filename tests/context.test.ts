@@ -148,7 +148,7 @@ describe('Context', () => {
         browserContext: mockBrowserContext,
         close: vi.fn().mockResolvedValue(undefined),
       }),
-    } as any;
+    };
   });
 
   afterEach(async () => {

@@ -19,7 +19,7 @@ import type { JSONRPCMessage, MessageExtraInfo, Server, Transport, TransportSend
 export class InProcessTransport implements Transport {
   private _server: Server;
   private _serverTransport: InProcessServerTransport;
-  private _connected: boolean = false;
+  private _connected = false;
 
   constructor(server: Server) {
     this._server = server;

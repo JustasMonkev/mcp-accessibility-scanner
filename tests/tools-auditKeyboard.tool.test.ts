@@ -160,7 +160,7 @@ describe('audit_keyboard tool', () => {
       focusPoint({ role: 'button', name: 'One', tagName: 'BUTTON', id: 'one' }),
     ]);
 
-    await tool.handle(context as any, {
+    await tool.handle(context, {
       maxTabs: 1,
       includeShiftTab: false,
       stopOnCycle: true,
@@ -177,7 +177,7 @@ describe('audit_keyboard tool', () => {
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
       reportFile: 'my-keyboard-audit.json',
-    } as any, response);
+    }, response);
 
     expect(writeFileSpy).toHaveBeenCalledWith('/tmp/my-keyboard-audit.json', expect.any(String), 'utf-8');
     expect(response.result()).toContain('JSON report: /tmp/my-keyboard-audit.json');
@@ -193,7 +193,7 @@ describe('audit_keyboard tool', () => {
 
     context.config.filePaths = filePaths;
 
-    await tool.handle(context as any, {
+    await tool.handle(context, {
       maxTabs: 2,
       includeShiftTab: false,
       stopOnCycle: false,
@@ -209,7 +209,7 @@ describe('audit_keyboard tool', () => {
       jumpScrollThresholdPx: 10,
       screenshotOnIssue: true,
       maxIssueScreenshots: 1,
-    } as any, response);
+    }, response);
 
     expect(page.screenshot).toHaveBeenCalledTimes(1);
     expect(response.result()).toContain('Issue screenshots:');
@@ -242,7 +242,7 @@ describe('audit_keyboard tool', () => {
       }),
     ]);
 
-    await tool.handle(context as any, {
+    await tool.handle(context, {
       maxTabs: 3,
       includeShiftTab: false,
       stopOnCycle: false,
@@ -258,7 +258,7 @@ describe('audit_keyboard tool', () => {
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
-    } as any, response);
+    }, response);
 
     const text = response.result();
     expect(text).toContain('Target size below 24x24 CSS px');
@@ -302,7 +302,7 @@ describe('audit_keyboard tool', () => {
       }),
     ]);
 
-    await tool.handle(context as any, {
+    await tool.handle(context, {
       maxTabs: 4,
       includeShiftTab: false,
       stopOnCycle: false,
@@ -318,7 +318,7 @@ describe('audit_keyboard tool', () => {
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
-    } as any, response);
+    }, response);
 
     const text = response.result();
     expect(text).toContain('Editable region hidden behind div#panel');
@@ -347,7 +347,7 @@ describe('audit_keyboard tool', () => {
       }),
     ]);
 
-    await tool.handle(context as any, {
+    await tool.handle(context, {
       maxTabs: 2,
       includeShiftTab: false,
       stopOnCycle: false,
@@ -363,7 +363,7 @@ describe('audit_keyboard tool', () => {
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
-    } as any, response);
+    }, response);
 
     const text = response.result();
     expect(text).toContain('Tiny editor is 12x12 CSS px');
@@ -385,7 +385,7 @@ describe('audit_keyboard tool', () => {
       requestId: 1,
     });
 
-    await tool.handle(context as any, {
+    await tool.handle(context, {
       maxTabs: 2,
       includeShiftTab: false,
       stopOnCycle: false,
@@ -401,7 +401,7 @@ describe('audit_keyboard tool', () => {
       jumpScrollThresholdPx: 800,
       screenshotOnIssue: false,
       maxIssueScreenshots: 3,
-    } as any, response);
+    }, response);
 
     expect(sendNotification).toHaveBeenCalledTimes(2);
     expect(sendNotification).toHaveBeenNthCalledWith(1, expect.objectContaining({
