@@ -1198,7 +1198,7 @@ default, so use `npm rebuild re2` to restore a missing binary, provided scripts
 have not been explicitly disabled. Rebuild `re2` after changing Node.js versions
 as well.
 
-Run `npm run lint` before submitting a change. It runs type-aware Oxlint and
+Run `npm run lint` before submitting a change. It runs the comment ratchet, type-aware Oxlint and
 TypeScript. The scanner adopts [selected rules from OpenClaw](https://github.com/openclaw/openclaw/blob/b894fe5e3729482eeab747b5758bd79acb2511d1/.oxlintrc.json).
 Source code must handle promises and cover union members in switches. Tool
 implementations, MCP helpers and shared utilities also reject explicit `any`.
@@ -1211,9 +1211,16 @@ Chained type assertions are rejected in `src/**/*.ts`, and module mocking is
 rejected in `tests/**/*.integration.test.ts`. Oxlint also checks for accumulating
 spreads. When updating Oxlint, keep `@oxlint/plugins` pinned to the same version.
 
+Run `npm run lint:comments` to check first-party JavaScript and TypeScript comments.
+Existing prose can be deleted. Added, rewritten or duplicated comments fail, including
+in tests and new files. The check compares each path with the merge base with
+`origin/main` (or `HEAD` in a standalone checkout). CI supplies the PR base via
+`COMMENT_BASE_REF`. Standard license notices and exact visibility tags are allowed.
+Use the [delete-comment skill](.agents/skills/delete-comment/SKILL.md) to classify a batch.
+
 `npm run knip` checks the server's sources, tests, benchmarks and tooling.
 
-`npm run check` runs every static check CI runs: oxlint, `tsc`, knip, exact dependency
+`npm run check` runs every static check CI runs: the comment ratchet, oxlint, `tsc`, knip, exact dependency
 versions, runtime imports declared in `dependencies`, and the module boundaries in
 `src/**/DEPS.list`. `npm run test:scripts` tests those check scripts. `npm install`
 enables a pre-commit hook (`.githooks/pre-commit`) that runs `npm run check` and asks

@@ -19,9 +19,6 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    // Current and legacy agent worktrees carry their own tests; do not collect
-    // those copies alongside the active checkout's suite.
-    // scripts/*.test.mjs use node:test and run through `npm run test:scripts`.
     exclude: [...configDefaults.exclude, '.codex/worktrees/**', '.claude/worktrees/**', 'scripts/**'],
     coverage: {
       provider: 'v8',
@@ -33,19 +30,18 @@ export default defineConfig({
         '**/*.config.*',
         '**/mockData/**',
         'tests/**',
-        'src/extension/**', // Extension code typically needs browser context
-        'src/vscode/**', // VSCode specific code
-        'src/browserServerBackend.ts', // Complex backend initialization
-        'src/program.ts', // CLI program entry point
-        'src/index.ts', // Entry point
-        'src/browserContextFactory.ts', // Requires real Playwright browser launch
-        'src/sessionLog.ts', // File system operations
-        'src/tools.ts', // Server initialization
-        'src/config.ts', // Requires file system reading and environment parsing
-        'src/context.ts', // Requires complex async Playwright browser lifecycle
-        'src/tab.ts', // Requires complex Playwright page navigation and lifecycle
-        'src/mcp/**', // MCP server infrastructure requires server setup
-        // Tools requiring complex Playwright mocking or integration tests
+        'src/extension/**',
+        'src/vscode/**',
+        'src/browserServerBackend.ts',
+        'src/program.ts',
+        'src/index.ts',
+        'src/browserContextFactory.ts',
+        'src/sessionLog.ts',
+        'src/tools.ts',
+        'src/config.ts',
+        'src/context.ts',
+        'src/tab.ts',
+        'src/mcp/**',
         'src/tools/dialogs.ts',
         'src/tools/evaluate.ts',
         'src/tools/files.ts',
@@ -58,9 +54,9 @@ export default defineConfig({
         'src/tools/snapshot.ts',
         'src/tools/verify.ts',
         'src/tools/wait.ts',
-        'src/utils/codegen.ts', // Code generation utilities
-        'src/utils/package.ts', // Simple package.json wrapper
-        'src/utils/fileUtils.ts', // File system operations
+        'src/utils/codegen.ts',
+        'src/utils/package.ts',
+        'src/utils/fileUtils.ts',
       ],
       include: ['src/**/*.ts'],
       thresholds: {

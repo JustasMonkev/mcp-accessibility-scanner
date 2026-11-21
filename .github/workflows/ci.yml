@@ -29,7 +29,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git init .
           git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
-          git fetch --no-tags --depth=1 origin "$CHECKOUT_SHA"
+          git fetch --no-tags --depth=2 origin "$CHECKOUT_SHA"
           git checkout --detach "$CHECKOUT_SHA"
 
       - name: Select installed supported Node.js
@@ -74,6 +74,8 @@ jobs:
           NODE
 
       - name: Run checks (lint, types, knip, pinned and runtime dependencies, DEPS.list)
+        env:
+          COMMENT_BASE_REF: ${{ github.event.pull_request.base.sha }}
         run: npm run check
 
       - name: Test the check scripts

@@ -115,7 +115,6 @@ export type CompressResult = {
 };
 
 export function compressAriaSnapshot(yaml: string): CompressResult {
-  // A group needs more than FIRE_THRESHOLD lines before compression can fire.
   let newline = -1;
   for (let count = 0; count < FIRE_THRESHOLD; count++) {
     newline = yaml.indexOf('\n', newline + 1);
@@ -125,8 +124,6 @@ export function compressAriaSnapshot(yaml: string): CompressResult {
   if (!hasCrowdedParent(yaml))
     return { output: yaml, removed: 0 };
   const lines = parseSnapshotLines(yaml);
-  // Siblings share a group only under the same parent, so a parent needs more
-  // than FIRE_THRESHOLD candidate children before any of them can be collapsed.
   const candidates = new Uint32Array(lines.length + 1);
   let crowded = false;
   for (const line of lines) {
@@ -196,8 +193,6 @@ export function compressAriaSnapshot(yaml: string): CompressResult {
   return { output: output.join('\n') + note, removed: totalRemoved };
 }
 
-// Mirrors the parent tracking of parseSnapshotLines() on indentation alone,
-// so snapshots without a long sibling list skip per-line parsing.
 function hasCrowdedParent(yaml: string): boolean {
   const indents: number[] = [];
   const stack: number[] = [];
@@ -259,7 +254,6 @@ function parseSnapshotLines(yaml: string): SnapshotLine[] {
     });
   }
 
-  // An ancestor of an interactive subtree must survive even when its siblings repeat.
   for (let index = lines.length - 1; index >= 0; index--) {
     const line = lines[index];
     if (line.containsProtectedSubtree && line.parentIndex !== -1)
@@ -308,7 +302,6 @@ function indentOf(line: string): number {
   let index = 0;
   while (index < line.length && line.charCodeAt(index) === 32)
     index++;
-  // Fall back for tabs and other Unicode whitespace that trimStart() also skips.
   if (index < line.length && (line.charCodeAt(index) <= 32 || line.charCodeAt(index) >= 0x80))
     return line.length - line.trimStart().length;
   return index;
