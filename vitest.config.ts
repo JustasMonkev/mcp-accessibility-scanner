@@ -30,9 +30,6 @@ export default defineConfig({
         '**/*.config.*',
         '**/mockData/**',
         'tests/**',
-        'src/extension/**',
-        'src/vscode/**',
-        'src/mcp/**',
       ],
       include: ['src/**/*.ts'],
       thresholds: {

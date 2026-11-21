@@ -1223,10 +1223,20 @@ for `ALLOW_LOCKFILE_CHANGE=1` before a `package-lock.json` change is committed.
 
 `npm run test:coverage` enforces 90% statements, branches, functions and lines
 using Vitest's `coverage.thresholds`. It exits nonzero when any target is missed,
-even if every test passes. The current suite is below these targets; this command
-reports that coverage debt rather than silently succeeding. The exclusions in
-`vitest.config.ts` mean the percentages describe only the included source files,
-not the entire package. `npm test` runs the tests without enforcing coverage.
+even if every test passes. The current suite is below these targets. Coverage
+includes runtime TypeScript under `src/`, including the browser tools, MCP
+transports and editor providers. Run `npm run test:coverage -- --coverage.reportOnFailure`
+to write reports when test failures occur. `npm test` runs the tests without
+enforcing coverage.
+
+Browser and provider coverage depends on the environment. The Linux CI browser
+image exercises full Chromium launches, including CDP attach and profile cleanup
+in `tests/cdp-attach.integration.test.ts` and `tests/shutdown.integration.test.ts`.
+The Windows ARM64 workflow exercises native Chrome in
+`tests/native-chrome.integration.test.ts`. The extension relay and VS Code host
+are exercised by `tests/extension-protocol.test.ts` and `tests/vscode-host*.test.ts`
+using simulated providers. Live editor and extension sessions require their
+respective host applications.
 
 Tests use Node or Playwright rather than `happy-dom`, and Chrome protocol types are
 defined locally. See the [dependency review](docs/dependency-review-2026-10.md) for
