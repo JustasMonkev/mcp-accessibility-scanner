@@ -49,7 +49,7 @@ export function fixtures(modules, { tab, endpoint, output, importMetadata }) {
   const d = modules.dataUrl;
   const match = d.parseDataUrl(raw, 0);
   cases('dataUrl', {
-    truncateDataUrl: [encoded], truncateDataUrls: [raw + ' after message'], findDataUrlStart: ['ordinary prefix ' + raw, 0],
+    truncateDataUrls: [raw + ' after message'], findDataUrlStart: ['ordinary prefix ' + raw, 0],
     dataUrlPrefixLengthAt: [encoded, 0], parseDataUrl: [encoded, 0], findDataUrlDelimiter: [encoded, 7],
     dataUrlDisplayPrefix: [raw, 0, { start: 18, end: 19 }, { raw: 'image/svg+xml', decoded: 'image/svg+xml', isEncoded: false }],
     compactDataUrlMetadata: ['image/png;name=file;base64'], encodeDataUrlMetadata: ['image/svg+xml', true],

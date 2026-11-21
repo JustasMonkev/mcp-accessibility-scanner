@@ -600,6 +600,18 @@ describe('Context', () => {
   });
 
   describe('shared context recorder', () => {
+    beforeEach(() => {
+      mockBrowserContext.newPage = vi.fn().mockImplementation(async () => {
+        const page = new EventEmitter() as any;
+        page.setDefaultNavigationTimeout = vi.fn();
+        page.setDefaultTimeout = vi.fn();
+        page.bringToFront = vi.fn().mockResolvedValue(undefined);
+        page.url = () => 'about:blank';
+        mockBrowserContext.emit('page', page);
+        return page;
+      });
+    });
+
     it('multiplexes recorder events so a departing session does not silence the survivor', async () => {
       // Playwright's _startRecording supports one sink per context; a second
       // session used to replace the first session's callbacks, and a closing
@@ -722,8 +734,8 @@ describe('Context', () => {
       });
       const context1 = makeContext();
       const context2 = makeContext();
-      await context1.startRecording();
-      await context2.startRecording();
+      await context1.startRecordingOnCurrentTab();
+      await context2.startRecordingOnCurrentTab();
       expect(mockBrowserContext._startRecording.mock.calls[0][0]).toEqual({ language: 'javascript' });
       // Playwright rejects a second programmatic recording on the same client
       // context, so the shared hub must not restart an armed recorder.
@@ -753,7 +765,7 @@ describe('Context', () => {
         });
         const recordingContext = makeContext();
         const siblingContext = makeContext();
-        await recordingContext.startRecording();
+        await recordingContext.startRecordingOnCurrentTab();
         await siblingContext.newTab();
         const sink = mockBrowserContext._startRecording.mock.calls[0][1];
 
@@ -782,7 +794,7 @@ describe('Context', () => {
       });
       const recordingContext = makeContext();
       const siblingContext = makeContext();
-      await recordingContext.startRecording();
+      await recordingContext.startRecordingOnCurrentTab();
       await siblingContext.newTab();
       const sink = mockBrowserContext._startRecording.mock.calls[0][1];
 
@@ -803,7 +815,7 @@ describe('Context', () => {
         sessionLog: () => Promise.resolve(sessionLog),
         clientInfo: {},
       });
-      await context.startRecording();
+      await context.startRecordingOnCurrentTab();
       const page = new EventEmitter() as any;
       page.setDefaultNavigationTimeout = vi.fn();
       page.setDefaultTimeout = vi.fn();
@@ -873,7 +885,7 @@ describe('Context', () => {
           sessionLog: undefined,
           clientInfo: {},
         });
-        const starting = recordingContext.startRecording();
+        const starting = recordingContext.startRecordingOnCurrentTab();
         await vi.advanceTimersByTimeAsync(500);
         await starting;
         await siblingContext.newTab();
@@ -927,7 +939,7 @@ describe('Context', () => {
           sessionLog: () => Promise.resolve(sessionLog),
           clientInfo: {},
         });
-        const starting = context.startRecording();
+        const starting = context.startRecordingOnCurrentTab();
         await vi.advanceTimersByTimeAsync(500);
         await starting;
         const page = new EventEmitter() as any;
@@ -973,7 +985,7 @@ describe('Context', () => {
         });
         const recordingContext = makeContext();
         const siblingContext = makeContext();
-        await recordingContext.startRecording();
+        await recordingContext.startRecordingOnCurrentTab();
         await siblingContext.newTab();
         const sink = mockBrowserContext._startRecording.mock.calls[0][1];
         const page = {} as any;
@@ -1002,14 +1014,14 @@ describe('Context', () => {
         sessionLog: undefined,
         clientInfo: {},
       });
-      await context.startRecording();
+      await context.startRecordingOnCurrentTab();
       const sink = mockBrowserContext._startRecording.mock.calls[0][1];
       const page = {} as any;
       sink.actionAdded(page, { action: { name: 'click' } }, 'old code');
 
       expect(await context.stopRecording()).toEqual(['old code']);
 
-      await context.startRecording();
+      await context.startRecordingOnCurrentTab();
       sink.actionAdded({} as any, { action: { name: 'fill' } }, 'new code');
       expect(await context.stopRecording()).toEqual(['new code']);
       expect(mockBrowserContext._startRecording).toHaveBeenCalledTimes(2);
@@ -1025,7 +1037,7 @@ describe('Context', () => {
         sessionLog: undefined,
         clientInfo: {},
       });
-      await context.startRecording();
+      await context.startRecordingOnCurrentTab();
       const sink = mockBrowserContext._startRecording.mock.calls[0][1];
       sink.actionAdded({} as any, { name: 'press', signals: [] }, "await page.press('Enter');");
 
@@ -1041,7 +1053,7 @@ describe('Context', () => {
         sessionLog: undefined,
         clientInfo: {},
       });
-      await recordingContext.startRecording();
+      await recordingContext.startRecordingOnCurrentTab();
       await recordingContext.stopRecording();
       expect(mockBrowserContext._stopRecording).toHaveBeenCalledTimes(1);
 
@@ -1069,12 +1081,12 @@ describe('Context', () => {
           sessionLog: undefined,
           clientInfo: {},
         });
-        await context.startRecording();
+        await context.startRecordingOnCurrentTab();
         const firstStop = context.stopRecording();
         await vi.advanceTimersByTimeAsync(500);
         expect(mockBrowserContext._stopRecording).toHaveBeenCalledTimes(1);
 
-        const secondStart = context.startRecording();
+        const secondStart = context.startRecordingOnCurrentTab();
         await vi.advanceTimersByTimeAsync(500);
         expect(mockBrowserContext._startRecording).toHaveBeenCalledTimes(1);
         finishStandby!();
@@ -1103,7 +1115,7 @@ describe('Context', () => {
           sessionLog: undefined,
           clientInfo: {},
         });
-        await context.startRecording();
+        await context.startRecordingOnCurrentTab();
         const sink = mockBrowserContext._startRecording.mock.calls[0][1];
         const firstPage = {} as any;
         const secondPage = {} as any;
@@ -1120,7 +1132,7 @@ describe('Context', () => {
           "await page1.getByText('Next').click();",
         ]);
 
-        const starting = context.startRecording();
+        const starting = context.startRecordingOnCurrentTab();
         await vi.advanceTimersByTimeAsync(500);
         await starting;
         sink.actionAdded(firstPage, { name: 'closePage', signals: [] }, 'await page.close();');
@@ -1137,7 +1149,7 @@ describe('Context', () => {
         ]);
 
         const thirdPage = {} as any;
-        const restarting = context.startRecording();
+        const restarting = context.startRecordingOnCurrentTab();
         await vi.advanceTimersByTimeAsync(500);
         await restarting;
         mockBrowserContext.pages.mockReturnValue([firstPage, thirdPage]);
@@ -1165,7 +1177,7 @@ describe('Context', () => {
           sessionLog: undefined,
           clientInfo: {},
         });
-        await context.startRecording();
+        await context.startRecordingOnCurrentTab();
         const sink = mockBrowserContext._startRecording.mock.calls[0][1];
         const firstPage = {} as any;
         const secondPage = {} as any;
@@ -1192,13 +1204,13 @@ describe('Context', () => {
           sessionLog: undefined,
           clientInfo: {},
         });
-        await context.startRecording();
+        await context.startRecordingOnCurrentTab();
         let stopping = context.stopRecording();
         await vi.advanceTimersByTimeAsync(500);
         await stopping;
 
         const sink = mockBrowserContext._startRecording.mock.calls[0][1];
-        const starting = context.startRecording();
+        const starting = context.startRecordingOnCurrentTab();
         await vi.advanceTimersByTimeAsync(499);
         sink.actionAdded({} as any, { action: { name: 'click' } }, 'before start');
         await vi.advanceTimersByTimeAsync(1);
@@ -1219,6 +1231,7 @@ describe('Context', () => {
         const page = new EventEmitter() as any;
         page.setDefaultNavigationTimeout = vi.fn();
         page.setDefaultTimeout = vi.fn();
+        page.bringToFront = vi.fn().mockResolvedValue(undefined);
         page.url = () => 'about:blank';
         mockBrowserContext.pages.mockReturnValue([page]);
         mockBrowserContext._startRecording = vi.fn().mockResolvedValue(undefined);
@@ -1231,7 +1244,7 @@ describe('Context', () => {
           sessionLog: undefined,
           clientInfo: {},
         });
-        await context.startRecording();
+        await context.startRecordingOnCurrentTab();
         const sink = mockBrowserContext._startRecording.mock.calls[0][1];
 
         const stopping = context.stopRecording();
@@ -1261,7 +1274,7 @@ describe('Context', () => {
           sessionLog: undefined,
           clientInfo: {},
         });
-        await context.startRecording();
+        await context.startRecordingOnCurrentTab();
         const sink = mockBrowserContext._startRecording.mock.calls[0][1];
 
         const stopping = context.stopRecording();
@@ -1283,6 +1296,7 @@ describe('Context', () => {
       const page = new EventEmitter() as any;
       page.setDefaultNavigationTimeout = vi.fn();
       page.setDefaultTimeout = vi.fn();
+      page.bringToFront = vi.fn().mockResolvedValue(undefined);
       page.url = () => 'about:blank';
       mockBrowserContext.pages.mockReturnValue([page]);
       let rejectEnable: (error: Error) => void;
@@ -1297,7 +1311,7 @@ describe('Context', () => {
         clientInfo: {},
       });
 
-      const starting = context.startRecording();
+      const starting = context.startRecordingOnCurrentTab();
       await vi.waitFor(() => expect(mockBrowserContext._startRecording).toHaveBeenCalledTimes(1));
       page.emit('close');
       rejectEnable!(new Error('recorder unavailable'));
@@ -1315,9 +1329,9 @@ describe('Context', () => {
         sessionLog: undefined,
         clientInfo: {},
       });
-      await context.startRecording();
+      await context.startRecordingOnCurrentTab();
 
-      await expect(context.startRecording()).rejects.toThrow('Recording is already in progress');
+      await expect(context.startRecordingOnCurrentTab()).rejects.toThrow('Recording is already in progress');
     });
 
     it('reserves a focused start and lets an overlapping stop wait for it', async () => {
@@ -1385,7 +1399,7 @@ describe('Context', () => {
           sessionLog: undefined,
           clientInfo: {},
         });
-        await context.startRecording();
+        await context.startRecordingOnCurrentTab();
         const sink = mockBrowserContext._startRecording.mock.calls[0][1];
 
         const stopping = context.stopRecording();
@@ -1403,10 +1417,7 @@ describe('Context', () => {
     it('does not let an in-flight stop remove a replacement recording', async () => {
       vi.useFakeTimers();
       try {
-        let resolveEnable: () => void;
-        mockBrowserContext._startRecording = vi.fn()
-            .mockImplementationOnce(() => new Promise<void>(resolve => { resolveEnable = resolve; }))
-            .mockResolvedValue(undefined);
+        mockBrowserContext._startRecording = vi.fn().mockResolvedValue(undefined);
         const context = new Context({
           tools: [],
           config: { timeouts: {} } as any,
@@ -1415,12 +1426,9 @@ describe('Context', () => {
           clientInfo: {},
         });
 
-        const firstStart = context.startRecording();
-        await vi.advanceTimersByTimeAsync(0);
+        await context.startRecordingOnCurrentTab();
         const firstStop = context.stopRecording();
-        const secondStart = context.startRecording();
-        resolveEnable!();
-        await firstStart;
+        const secondStart = context.startRecordingOnCurrentTab();
         await vi.advanceTimersByTimeAsync(500);
         await secondStart;
         await firstStop;
@@ -1445,7 +1453,7 @@ describe('Context', () => {
         browserSession: true,
       });
 
-      await expect(context.startRecording()).rejects.toThrow(/browserSessionId/);
+      await expect(context.startRecordingOnCurrentTab()).rejects.toThrow(/browserSessionId/);
       await expect(context.stopRecording()).rejects.toThrow(/browserSessionId/);
       expect(mockBrowserContextFactory.createContext).not.toHaveBeenCalled();
     });
@@ -1876,9 +1884,15 @@ describe('Context', () => {
     });
 
     it('keeps explicit recordings alive and rearms after the recorder stops', async () => {
+      const page = new EventEmitter() as any;
+      page.setDefaultNavigationTimeout = vi.fn();
+      page.setDefaultTimeout = vi.fn();
+      page.bringToFront = vi.fn().mockResolvedValue(undefined);
+      page.url = () => 'about:blank';
+      mockBrowserContext.pages.mockReturnValue([page]);
       mockBrowserContext._startRecording = vi.fn().mockResolvedValue(undefined);
       const context = await createContext();
-      await context.startRecording();
+      await context.startRecordingOnCurrentTab();
       await vi.advanceTimersByTimeAsync(10_000);
       expect(close).not.toHaveBeenCalled();
       const stopping = context.stopRecording();

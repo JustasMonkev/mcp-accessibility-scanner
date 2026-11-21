@@ -806,13 +806,13 @@ describe('extension protocol v2', () => {
       const first = new WebSocket(relay.extensionEndpoint());
       await once(first, 'open');
       first.send(JSON.stringify({ method: 'extension.initialized', params: [] }));
-      await relay.ensureExtensionConnectionForMCPContext(clientInfo, new AbortController().signal, undefined);
+      await relay.ensureExtensionConnectionForMCPContext(clientInfo, new AbortController().signal);
 
       first.close();
       await once(first, 'close');
       await vi.waitFor(() => expect((relay as any)._extensionConnection).toBeNull());
 
-      const reconnecting = relay.ensureExtensionConnectionForMCPContext(clientInfo, new AbortController().signal, undefined);
+      const reconnecting = relay.ensureExtensionConnectionForMCPContext(clientInfo, new AbortController().signal);
       let reconnected = false;
       void reconnecting.then(() => reconnected = true);
       expect(spawn).toHaveBeenCalledTimes(1);
@@ -856,10 +856,10 @@ describe('extension protocol v2', () => {
 
     const factory = new ExtensionContextFactory({ browserChannel: 'chrome', executablePath: '/tmp/chrome' });
     await expect(factory.createContext(
-        { name: 'test-client', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow('attach failed');
+        { name: 'test-client', version: '1.0.0' }, new AbortController().signal)).rejects.toThrow('attach failed');
     expect(stop).toHaveBeenCalledTimes(1);
     await expect(factory.createContext(
-        { name: 'test-client', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow('attach failed');
+        { name: 'test-client', version: '1.0.0' }, new AbortController().signal)).rejects.toThrow('attach failed');
     expect(stop).toHaveBeenCalledTimes(2);
     expect(ensure.mock.instances[1]).not.toBe(ensure.mock.instances[0]);
   });
@@ -882,7 +882,7 @@ describe('extension protocol v2', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       const connecting = relay.ensureExtensionConnectionForMCPContext(
-          { name: 'test-client', version: '1.0.0' }, controller.signal, undefined);
+          { name: 'test-client', version: '1.0.0' }, controller.signal);
       let settled = false;
       void connecting.then(() => settled = true, () => settled = true);
       await vi.advanceTimersByTimeAsync(0);
@@ -934,7 +934,7 @@ describe('extension protocol v2', () => {
       const aborted = new AbortController();
       aborted.abort(new Error('cancelled'));
       await expect(relay.ensureExtensionConnectionForMCPContext(
-          { name: 'test-client', version: '1.0.0' }, aborted.signal, undefined)).rejects.toThrow('cancelled');
+          { name: 'test-client', version: '1.0.0' }, aborted.signal)).rejects.toThrow('cancelled');
       expect(spawn).not.toHaveBeenCalled();
 
       const connecting = relay.ensureExtensionConnectionForMCPContext(
@@ -975,7 +975,7 @@ describe('extension protocol v2', () => {
     vi.mocked(spawn).mockClear();
     const controller = new AbortController();
     const factory = new ExtensionContextFactory({ browserChannel: 'chrome', executablePath: '/tmp/chrome', tabGroup: false });
-    const connecting = factory.createContext({ name: 'test-client', version: '1.0.0' }, controller.signal, undefined);
+    const connecting = factory.createContext({ name: 'test-client', version: '1.0.0' }, controller.signal);
     const failure = expect(connecting).rejects.toThrow('cancelled');
     try {
       await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
@@ -1134,9 +1134,7 @@ describe('extension protocol v2', () => {
     try {
       const connecting = relay.ensureExtensionConnectionForMCPContext(
           { name: 'test-client', version: '1.0.0' },
-          controller.signal,
-          undefined,
-      );
+          controller.signal);
       await expect(connecting).rejects.toThrow('Playwright Extension is not installed in profile "Profile 1"');
       expect(spawn).not.toHaveBeenCalled();
     } finally {
@@ -1192,9 +1190,7 @@ describe('extension protocol v2', () => {
     try {
       const connecting = relay.ensureExtensionConnectionForMCPContext(
           { name: 'test-client', version: '1.0.0' },
-          controller.signal,
-          undefined,
-      );
+          controller.signal);
       await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
       controller.abort(new Error('done asserting'));
       await expect(connecting).rejects.toThrow('done asserting');
@@ -1225,9 +1221,7 @@ describe('extension protocol v2', () => {
     try {
       const connecting = relay.ensureExtensionConnectionForMCPContext(
           { name: 'test-client', version: '1.0.0' },
-          controller.signal,
-          undefined,
-      );
+          controller.signal);
       await expect(connecting).rejects.toThrow('Playwright Extension is not installed in profile "Profile 1"');
       expect(spawn).not.toHaveBeenCalled();
     } finally {
@@ -1297,9 +1291,7 @@ describe('extension protocol v2', () => {
       const controller = new AbortController();
       const connecting = relay.ensureExtensionConnectionForMCPContext(
           { name: 'test-client', version: '1.0.0' },
-          controller.signal,
-          undefined,
-      );
+          controller.signal);
       await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
       expect(vi.mocked(spawn).mock.calls[0][1]).toContain('--profile-directory=Default');
 
@@ -1345,9 +1337,7 @@ describe('extension protocol v2', () => {
       const controller = new AbortController();
       const connecting = relay.ensureExtensionConnectionForMCPContext(
           { name: 'test-client', version: '1.0.0' },
-          controller.signal,
-          undefined,
-      );
+          controller.signal);
       await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
       expect(vi.mocked(spawn).mock.calls[0][1].some(arg => /^--profile-directory=/.test(arg))).toBe(false);
 
@@ -1378,9 +1368,7 @@ describe('extension protocol v2', () => {
       const controller = new AbortController();
       const connecting = relay.ensureExtensionConnectionForMCPContext(
           { name: 'test-client', version: '1.0.0' },
-          controller.signal,
-          undefined,
-      );
+          controller.signal);
       await vi.waitFor(() => expect(readdir).toHaveBeenCalled());
       controller.abort(new Error('cancelled during profile discovery'));
 

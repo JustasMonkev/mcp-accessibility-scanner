@@ -72,8 +72,6 @@ async function resolveProgramContext(options: Record<string, unknown>, extension
   return { config, browserContextFactory, extensionContextFactory };
 }
 
-const toolListCacheTtlMs = 3_600_000;
-
 function browserBackendFactory(
   config: FullConfig,
   browserContextFactory: BrowserContextFactory,
@@ -85,7 +83,6 @@ function browserBackendFactory(
     version: packageJSON.version,
     instructions: serverInstructions(config),
     redactUrlParams: config.redactUrlParams,
-    toolListCacheHint: { ttlMs: toolListCacheTtlMs, cacheScope: 'private' },
     create: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry),
     createStateless: () => new BrowserServerBackend(config, browserContextFactory, sessionRegistry, { ephemeralDefaultContext: true }),
   };

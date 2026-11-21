@@ -16,7 +16,6 @@
 
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { createRequire } from 'node:module';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
@@ -26,9 +25,6 @@ import { chromium } from 'playwright';
 import { contextFactory } from '../src/browserContextFactory.js';
 import { resolveConfig } from '../src/config.js';
 import { runAxeScan } from '../src/tools/axe.js';
-
-const require = createRequire(import.meta.url);
-const pinned = require('playwright/package.json').version === '1.63.0' && require('playwright-core/package.json').version === '1.63.0';
 
 it.each(['endpoint', 'launch'] as const)('characterizes the top document when attaching through %s to a preloaded frame tree (#42955)', async mode => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-cdp-frame-tree-'));
@@ -92,7 +88,7 @@ it.each(['endpoint', 'launch'] as const)('characterizes the top document when at
       ? { cdpEndpoint: endpoint, cdpTimeout: 5000 }
       : { cdpLaunch: { command: process.execPath, args: ['-e', forwarder, '{port}'], startupTimeoutMs: 10000 }, cdpTimeout: 5000 },
     });
-    attached = await contextFactory(config).createContext({}, new AbortController().signal, undefined);
+    attached = await contextFactory(config).createContext({}, new AbortController().signal);
     const context = attached.browserContext;
     // Target attachment is racy: the preloaded page may register after attach.
     await expect.poll(() => context.pages().length, { timeout: 5000 }).toBeGreaterThan(0);
@@ -105,31 +101,13 @@ it.each(['endpoint', 'launch'] as const)('characterizes the top document when at
     } finally {
       await cdp.detach();
     }
-    const document = await page.evaluate(() => ({ url: location.href, top: window.top === window })).catch((error: Error) => error.message);
-    const topCount = await page.locator('#top').count().catch((error: Error) => error.message);
-    const scan = await runAxeScan(page, { rules: ['image-alt'], include: ['#missing-alt'] }).catch((error: Error) => error.message);
+    const document = await page.evaluate(() => ({ url: location.href, top: window.top === window }));
+    const topCount = await page.locator('#top').count();
+    const scan = await runAxeScan(page, { rules: ['image-alt'], include: ['#missing-alt'] });
     process.stdout.write(JSON.stringify({ mode, document, topCount, scan }) + '\n');
-    if (pinned) {
-      // Target attachment is racy: evaluation can still reach the top document
-      // before the later locator/scan is redirected. Accept only observed
-      // corruption signatures, or a healthy operation, never arbitrary errors.
-      if (typeof document === 'string')
-        expect(document).toContain('Execution context was destroyed');
-      else
-        expect([{ url: `${origin}/`, top: true }, { url: 'about:srcdoc', top: false }]).toContainEqual(document);
-      if (typeof topCount === 'string')
-        expect(topCount).toContain('Execution context was destroyed');
-      else
-        expect([0, 1]).toContain(topCount);
-      if (typeof scan === 'string')
-        expect(scan).toMatch(/Execution context was destroyed|^No elements matched includeSelectors: #missing-alt\./);
-      else
-        expect(scan).toMatchObject({ url: `${origin}/`, violations: [{ id: 'image-alt', nodes: [{ target: ['#missing-alt'] }] }] });
-    } else {
-      expect(document).toEqual({ url: `${origin}/`, top: true });
-      expect(topCount).toBe(1);
-      expect(scan).toMatchObject({ url: `${origin}/`, violations: [{ id: 'image-alt', nodes: [{ target: ['#missing-alt'] }] }] });
-    }
+    expect(document).toEqual({ url: `${origin}/`, top: true });
+    expect(topCount).toBe(1);
+    expect(scan).toMatchObject({ url: `${origin}/`, violations: [{ id: 'image-alt', nodes: [{ target: ['#missing-alt'] }] }] });
     const controlContext = await attached.browserContext.browser()!.newContext();
     try {
       const control = await controlContext.newPage();

@@ -31,21 +31,6 @@ const channel = process.env.MCP_TEST_BROWSER_CHANNEL || 'chromium';
 const enableBFCache = process.env.MCP_TEST_ENABLE_BFCACHE === '1';
 const require = createRequire(import.meta.url);
 const versions = { playwright: require('playwright/package.json').version, playwrightCore: require('playwright-core/package.json').version };
-// Exact native crash controls captured in CI runs 35692199642, 36224901523,
-// 37364186991 and 37364651745, and on local macOS. New versions must prove
-// saved bytes; they do not inherit an assumed browser limitation.
-const observedNativeCrashes = new Set([
-  'darwin/chromium/153.0.8010.12',
-  'linux/chromium/153.0.8010.12',
-  'win32/chromium/153.0.8010.12',
-  'win32/chrome/153.0.8010.53',
-  'win32/chrome/154.0.8037.58',
-  'win32/chrome/154.0.8037.93',
-  'win32/chrome/154.0.8037.98',
-  'win32/msedge/153.0.4234.48',
-  'win32/msedge/154.0.4258.37',
-  'win32/msedge/154.0.4258.62',
-]);
 const restoreProbe = '<script>addEventListener("pageshow", e => document.body.dataset.restored = String(e.persisted))</script>';
 const downloadBytes = Buffer.from('Local download: verified after profile reuse.\n');
 // Distinct bytes per launch prove that each saved file came from its own download.
@@ -138,11 +123,6 @@ afterAll(async () => {
   server.closeAllConnections();
   await new Promise<void>(resolve => server.close(() => resolve()));
 });
-
-function isObservedNativeCrashTuple(browser: Browser) {
-  return versions.playwright === '1.63.0' && versions.playwrightCore === '1.63.0'
-    && observedNativeCrashes.has(`${process.platform}/${channel}/${browser.version()}`);
-}
 
 async function connect(config: FullConfig, factory = contextFactory(config)) {
   const client = new Client({ name: 'history-downloads-test', version: '1' });
@@ -349,7 +329,7 @@ it.each(
   process.stdout.write(JSON.stringify({ case: 'history-response-refs', mode, api, variant, cycles: used, bfcacheRestores }) + '\n');
 }, 60_000);
 
-it.each([false, true])('saves bytes or reports a known native relaunch crash without losing MCP (isolated: %s) #230', async isolated => {
+it.each([false, true])('saves bytes across relaunches without losing MCP (isolated: %s) #230', async isolated => {
   const profile = path.join(directory, 'profile');
   for (let launch = 0; launch < 2; launch++) {
     const outputDir = path.join(directory, `downloads-${launch}`);
@@ -372,7 +352,6 @@ it.each([false, true])('saves bytes or reports a known native relaunch crash wit
     await call(client, 'browser_navigate', { url: `${origin}/downloads` });
     const page = context!.pages()[0];
     const browser = context!.browser()!;
-    const knownNativeCrash = !isolated && launch === 1 && isObservedNativeCrashTuple(browser);
     process.stdout.write(JSON.stringify({ case: 'download', isolated, launch, browser: browser.version() }) + '\n');
     expect(await page.evaluate(() => localStorage.getItem('previousLaunch'))).toBe(!isolated && launch ? 'saved' : null);
     await page.evaluate(() => localStorage.setItem('previousLaunch', 'saved'));
@@ -400,63 +379,21 @@ it.each([false, true])('saves bytes or reports a known native relaunch crash wit
     const clicked = await client.callTool({ name: 'browser_click', arguments: { element: 'Download file', ref: linkRef(snapshot, 'Download file') } });
     const clickResult = clicked.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
     let savedContents: string[] = [];
-    const downloadDeadline = Date.now() + 10_000;
     try {
       await expect.poll(async () => {
         const files = await fs.readdir(outputDir);
         savedContents = await Promise.all(files.filter(file => file.endsWith('.txt')).map(file => fs.readFile(path.join(outputDir, file), 'utf8')));
-        return savedContents.length === 1 && savedContents[0] === downloadBytes.toString()
-          || knownNativeCrash && page.isClosed() && !browser.isConnected() && downloadEvents.some(event => event.failure !== undefined);
+        return savedContents.length === 1 && savedContents[0] === downloadBytes.toString();
       }, { timeout: 10_000 }).toBe(true);
-      if (!savedContents.length) {
-        expect(knownNativeCrash).toBe(true);
-        expect(page.isClosed()).toBe(true);
-        expect(browser.isConnected()).toBe(false);
-        expect(downloadEvents).toEqual([expect.objectContaining({ name: 'fixture.txt', failure: 'Target page, context or browser has been closed' })]);
-        expect(downloadRequests).toContainEqual({ event: 'response', status: 200 });
-        expect(await fs.readdir(outputDir)).toEqual([]);
-        // A crash can arrive after the click returns. The next tool must
-        // retain its named download error even with no current tab left.
-        let failure = clicked;
-        let failureText = clickResult;
-        // Native failure can precede the server's outputFile()/saveAs failure
-        // handler. Use the remaining download budget to observe its response.
-        await expect.poll(async () => {
-          if (!failureText.includes('Failed to save download "fixture.txt":')) {
-            failure = await client.callTool({ name: 'browser_snapshot', arguments: {} });
-            failureText = failure.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
-          }
-          return failureText.includes('Failed to save download "fixture.txt":');
-        }, { timeout: Math.max(1, downloadDeadline - Date.now()) }).toBe(true);
-        expect(failure.isError, failureText).toBe(true);
-        expect(failureText).toContain('Failed to save download "fixture.txt":');
-        expect(failureText).toContain('Target page, context or browser has been closed');
-        expect(failureText).not.toContain('Downloading file fixture.txt');
-        expect(failureText).not.toContain('Downloaded file fixture.txt');
-        await client.ping();
-        process.stdout.write(JSON.stringify({ case: 'known-native-crash-reported', platform: process.platform, channel,
-          browser: browser.version(), ...versions, isolated, launch, downloadEvents, browserConnected: false,
-          savedFiles: [], mcpAlive: true }) + '\n');
-      } else {
-        expect(savedContents).toEqual([downloadBytes.toString()]);
-        expect(clicked.isError, clickResult).not.toBe(true);
-        // Read raw: after the known crash the snapshot itself can be an error result.
-        const afterSaveResult = await client.callTool({ name: 'browser_snapshot', arguments: {} });
-        const afterSave = textOf(afterSaveResult);
-        if (knownNativeCrash && !browser.isConnected()) {
-          // The observed native crash can also land just after the save finished:
-          // the exact bytes are on disk and MCP must still answer.
-          await client.ping();
-          process.stdout.write(JSON.stringify({ case: 'known-native-crash-after-save', platform: process.platform, channel,
-            browser: browser.version(), ...versions, isolated, launch }) + '\n');
-        } else {
-          expect(afterSaveResult.isError, afterSave).not.toBe(true);
-          expect(page.isClosed()).toBe(false);
-          expect(browser.isConnected()).toBe(true);
-          expect(afterSave).toContain('Download fixture');
-          await client.ping();
-        }
-      }
+      expect(savedContents).toEqual([downloadBytes.toString()]);
+      expect(clicked.isError, clickResult).not.toBe(true);
+      const afterSaveResult = await client.callTool({ name: 'browser_snapshot', arguments: {} });
+      const afterSave = textOf(afterSaveResult);
+      expect(afterSaveResult.isError, afterSave).not.toBe(true);
+      expect(page.isClosed()).toBe(false);
+      expect(browser.isConnected()).toBe(true);
+      expect(afterSave).toContain('Download fixture');
+      await client.ping();
     } catch (error) {
       process.stdout.write(JSON.stringify({ case: 'download-failure', isolated, launch, downloadEvents, downloadRequests,
         pageClosed: page.isClosed(), browserConnected: context!.browser()!.isConnected(),
@@ -566,27 +503,15 @@ it.each(['context', 'browser'] as const)('reports a named error when the %s is c
   // Reported once: the failure is consumed, not repeated on every later response.
   expect(textOf(await client.callTool({ name: 'browser_snapshot', arguments: {} }))).not.toContain('Failed to save download');
   await client.ping();
-  // Every tuple must try to recover with a new browser. A relaunch of the
-  // reused profile can hit the observed native crash, which excuses the
-  // recovery checks only when it is seen: a new browser launched, then gone,
-  // and a call failed. A failure before any relaunch is never excused.
   const navigated = await client.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/slow-downloads` } });
-  // Read raw: after the known crash the snapshot itself can be an error result.
-  const snapshotted = navigated.isError ? undefined : await client.callTool({ name: 'browser_snapshot', arguments: {} });
+  expect(navigated.isError, textOf(navigated)).not.toBe(true);
   const relaunched = launched.at(-1)!;
-  const crashed = isObservedNativeCrashTuple(browser) && launched.length > 1 && relaunched !== first
-    && !relaunched.browser()?.isConnected() && (navigated.isError || snapshotted?.isError);
-  if (crashed) {
-    process.stdout.write(JSON.stringify({ case: 'known-native-crash-on-recovery', closing, platform: process.platform, channel,
-      browser: browser.version(), ...versions }) + '\n');
-  } else {
-    expect(navigated.isError, textOf(navigated)).not.toBe(true);
-    expect(launched.length).toBeGreaterThan(1);
-    expect(relaunched).not.toBe(first);
-    expect(relaunched.browser()!.isConnected()).toBe(true);
-    expect(snapshotted!.isError, textOf(snapshotted!)).not.toBe(true);
-    expect(textOf(snapshotted!)).toContain('Slow download fixture');
-  }
+  expect(launched.length).toBeGreaterThan(1);
+  expect(relaunched).not.toBe(first);
+  expect(relaunched.browser()!.isConnected()).toBe(true);
+  const snapshotted = await client.callTool({ name: 'browser_snapshot', arguments: {} });
+  expect(snapshotted.isError, textOf(snapshotted)).not.toBe(true);
+  expect(textOf(snapshotted)).toContain('Slow download fixture');
   await client.ping();
   expect(await stopWatching()).toEqual([]);
 }, 60_000);
@@ -628,49 +553,24 @@ it('relaunches the same persistent profile after the idle release and saves exac
   expect(await second.pages()[0].evaluate(() => localStorage.getItem('previousLaunch'))).toBe('saved');
 
   const secondBrowser = second.browser()!;
-  // Taken before the click: the known native crash closes the context's pages,
-  // after which pages() is empty.
-  const page = second.pages()[0];
-  const knownNativeCrash = isObservedNativeCrashTuple(secondBrowser);
-  process.stdout.write(JSON.stringify({ case: 'idle-relaunch', browser: secondBrowser.version(), knownNativeCrash }) + '\n');
+  process.stdout.write(JSON.stringify({ case: 'idle-relaunch', browser: secondBrowser.version() }) + '\n');
   const relaunchedSnapshot = await call(client, 'browser_snapshot');
   const clicked = await client.callTool({ name: 'browser_click', arguments: { element: 'Download second', ref: linkRef(relaunchedSnapshot, 'Download second') } });
   const bothSaved = [
     { file: expect.stringMatching(/^first-.*\.txt$/), bytes: idleDownloads[0].bytes },
     { file: expect.stringMatching(/^second-.*\.txt$/), bytes: idleDownloads[1].bytes },
   ];
-  let secondSaved = false;
   await expect.poll(async () => {
     const files = await savedFiles(outputDir);
-    secondSaved = files.length === 2 && files[1].bytes.equals(idleDownloads[1].bytes);
-    return secondSaved || knownNativeCrash && page.isClosed() && !secondBrowser.isConnected();
+    return files.length === 2 && files[1].bytes.equals(idleDownloads[1].bytes);
   }, { timeout: 10_000 }).toBe(true);
-  // Chosen by what was saved, not by the connection: the observed crash can
-  // also land after second.txt is fully written (handled in the else branch).
-  if (!secondSaved) {
-    // Only the observed native relaunch crash may end here; it must still be
-    // reported by name, with no second artifact and a live MCP connection.
-    expect(knownNativeCrash).toBe(true);
-    const { result, text } = clicked.isError && textOf(clicked).includes('Failed to save download "second.txt":')
-      ? { result: clicked, text: textOf(clicked) }
-      : await nextDownloadFailure(client, 'second.txt');
-    expect(result.isError, text).toBe(true);
-    expect(text).not.toContain('Downloaded file second.txt');
-    expect(await savedFiles(outputDir)).toEqual(bothSaved.slice(0, 1));
-    process.stdout.write(JSON.stringify({ case: 'known-native-crash-reported', platform: process.platform, channel,
-      browser: secondBrowser.version(), ...versions, idleRelaunch: true }) + '\n');
-  } else {
-    expect(clicked.isError, textOf(clicked)).not.toBe(true);
-    expect(await savedFiles(outputDir)).toEqual(bothSaved);
-    const afterSaveResult = await client.callTool({ name: 'browser_snapshot', arguments: {} });
-    const afterSave = textOf(afterSaveResult);
-    // As in the case above, the observed crash may land just after the save.
-    if (!knownNativeCrash || secondBrowser.isConnected()) {
-      expect(afterSaveResult.isError, afterSave).not.toBe(true);
-      expect(secondBrowser.isConnected()).toBe(true);
-      expect(afterSave).toContain('Downloaded file second.txt');
-    }
-  }
+  expect(clicked.isError, textOf(clicked)).not.toBe(true);
+  expect(await savedFiles(outputDir)).toEqual(bothSaved);
+  const afterSaveResult = await client.callTool({ name: 'browser_snapshot', arguments: {} });
+  const afterSave = textOf(afterSaveResult);
+  expect(afterSaveResult.isError, afterSave).not.toBe(true);
+  expect(secondBrowser.isConnected()).toBe(true);
+  expect(afterSave).toContain('Downloaded file second.txt');
   await client.ping();
   expect(await stopWatching()).toEqual([]);
 }, 90_000);

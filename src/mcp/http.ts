@@ -36,20 +36,32 @@ const allowedLoopbackHostnamePattern = /^127(?:\.\d{1,3}){3}$/;
 const configuredHostnames = new WeakMap<http.Server, string>();
 
 export async function startHttpServer(config: { host?: string, port?: number }, abortSignal?: AbortSignal): Promise<http.Server> {
+  if (abortSignal?.aborted)
+    throw new Error('Aborted');
   const host = config.host ?? 'localhost';
   const { port } = config;
   const httpServer = http.createServer();
   configuredHostnames.set(httpServer, normalizeHostname(host));
   decorateServer(httpServer);
   await new Promise<void>((resolve, reject) => {
-    httpServer.on('error', reject);
-    abortSignal?.addEventListener('abort', () => {
+    const cleanup = () => {
+      httpServer.removeListener('error', onError);
+      abortSignal?.removeEventListener('abort', onAbort);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onAbort = () => {
+      cleanup();
       httpServer.close();
       reject(new Error('Aborted'));
-    });
+    };
+    httpServer.on('error', onError);
+    abortSignal?.addEventListener('abort', onAbort, { once: true });
     httpServer.listen(port, host, () => {
+      cleanup();
       resolve();
-      httpServer.removeListener('error', reject);
     });
   });
   return httpServer;
