@@ -10,7 +10,7 @@ Accepted for #361, 2026-11-21. Replaces the `axe.run` and frame-messaging integr
 
 ## Decisions
 
-**Axe chooses the frames, Playwright drives them, Node merges.** In each document, `axe.utils.getFrameContexts` returns the child frames axe would scan, with the context for each. That applies axe's own scope, visibility and shadow-DOM rules. The server runs `axe.runPartial` in each of those frames through Playwright and merges the results with `axe.finishRun` in Node. At most four frames do their own resolve, install and `runPartial` work at once across the whole scan. A frame releases its slot before its descendants start, so a deep tree cannot deadlock.
+**Axe chooses the frames, Playwright drives them, Node merges.** In each document, `axe.utils.getFrameContexts` returns the child frames axe would scan, with the context for each. That applies axe's own scope, visibility and shadow-DOM rules. The server runs `axe.runPartial` in each of those frames through Playwright and merges the results with `axe.finishRun` in Node. At most four frames do their own resolve, install and `runPartial` work at once across the whole scan, and the closed-shadow coverage reads (below) share the same four slots. A frame releases its slot before its descendants start, so a deep tree cannot deadlock.
 
 `finishRun` needs no DOM. Running it in Node rather than in a page keeps findings from cross-origin frames away from third-party page script. The scan never chooses frames by walking Playwright's frame list. That list is consulted only to find frames axe could not see (below), and to find a child frame when Playwright's `contentFrame()` cannot resolve an element.
 
@@ -18,8 +18,8 @@ Accepted for #361, 2026-11-21. Replaces the `axe.run` and frame-messaging integr
 
 **Frame elements are captured at selection.** `getFrameContexts` identifies frames by positional selectors (`iframe:nth-child(2)`). The iframe elements are resolved in the same in-page task that selects them, and each child is reached through its own element handle. Resolving the selectors later could land on a different frame once an earlier sibling is removed, which would file that frame's findings under the wrong slot.
 
-Two resolution steps have fallbacks, because both fail in XHTML documents:
-- **Selector lookup.** axe lowercases element names in the selectors it generates, so `foreignObject` becomes `foreignobject`, and `shadowSelect` finds nothing in a case-sensitive document. When it returns null, the selector is followed step by step through the real tree, matching names case-insensitively and honouring `:nth-child`.
+Two resolution steps are done by hand, because the library calls fail in XHTML documents:
+- **Selector lookup.** axe's selector is an ancestry path (`html > body > iframe:nth-child(2)`) generated from the frame's document or shadow root. It is followed step by step from exactly that root, honouring `:nth-child` and comparing axe's lowercased qualified node name (`h:div`, `foreignobject`). `shadowSelect` is not used. It runs the path as CSS, which finds nothing when the case differs, and also accepts any matching suffix: an `html > body` nested in an SVG `foreignObject` earlier in the document would win, attributing one frame's findings to another.
 - **Element to frame.** Playwright's `contentFrame()` recognises frames by an uppercase `nodeName`, which XHTML does not report. When it returns null, the child frame whose own element is the captured element is used.
 
 A frame that is genuinely detached still resolves to nothing and is reported.
@@ -46,7 +46,7 @@ The walk builds a tree instead:
 | Injecting axe, resolving a child's element, reading an iframe element | 1 s | short single call |
 | Liveness probe | 500 ms | axe's default `pingWaitTime` |
 
-A descendant that hangs costs only itself; its parent and siblings keep their findings. The probe exists because a `sandbox` without `allow-scripts` accepts injected code but never fires timers, so `runPartial` would never settle there. Replacing this timing heuristic is tracked in #365.
+A descendant that hangs costs only itself; its parent and siblings keep their findings. The probe exists because a `sandbox` without `allow-scripts` accepts injected code but never fires timers, so `runPartial` would never settle there. It schedules a zero-delay timer that sets a per-probe token, then polls the token with short reads, each of which returns at once. Awaiting the timer inside one evaluation would leave a Playwright call pending forever in such a frame, one more on every scan of the tab. Replacing this timing heuristic is tracked in #365.
 
 **Handles are released as soon as they are read.** Every array slot returned by `getProperties()` is its own handle, and Playwright keeps a handle's value until it is disposed. Every slot except the iframe elements passed on to the walk is disposed after reading, including on failure. Otherwise each scan would pin its result strings, megabytes on large pages, for the life of the tab.
 
@@ -56,7 +56,9 @@ A descendant that hangs costs only itself; its parent and siblings keep their fi
 - the browser renders it (`checkVisibility()`). The browser's answer is final: a `<summary>` slotted into a closed `<details>` through a `<slot>` is not the details' own summary, so it stays collapsed even though the light DOM suggests otherwise;
 - no ancestor on the *composed path* (which also follows slot assignment, as assistive technology does) is `aria-hidden="true"`;
 - no ancestor up to and including the nearest enclosing modal dialog is `inert`. A modal dialog escapes the inertness of its ancestors, so `inert` above it does not count;
-- it is inside the topmost open modal, when modals are open. Every other open modal is inert, with no attribute to show for it. The topmost modal is the one that wins a hit test at its own centre, since the modals above it, and their backdrops, cover it. Modals are searched in the document, every open shadow root, and the closed roots on the frame's own path;
+- it is inside an open modal on its composed path, when modals are open. Every element outside the active modal is inert, with no attribute to show for it. With a single open modal that decides it. A pointer hit test is no evidence of keyboard reach: a slotted child is not a DOM descendant of its modal, and `pointer-events: none` hides a modal from hit testing while its content stays focusable.
+
+  With several open modals, the frame's modal is ruled out only on positive evidence that another modal covers it, meaning a hit at its centre lands inside a different open modal or its backdrop. An inconclusive hit keeps the frame in scope. Modals are searched in the document, every open shadow root, and the closed roots on the frame's own path;
 - for top-level frames, it is in scope by axe's own rule. The closest matching `includeSelectors` ancestor must be at least as close as the closest matching `excludeSelectors` ancestor, and include wins a tie. Selectors are resolved with `document.querySelectorAll` in the top document, exactly as the scan resolves them, so a selector that matches only inside a shadow root scopes nothing. Inside a frame axe already scanned, everything is in scope.
 
 A frame whose element cannot be read is not listed. Most unvisited frames are ones axe skipped on purpose, and an unreadable element usually means the frame detached mid-scan. Guessing would turn every detached frame into a false alarm.

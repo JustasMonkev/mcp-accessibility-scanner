@@ -85,6 +85,22 @@ describe('comments/no-comments', () => {
     expect(reports).toEqual([]);
   });
 
+  it('exempts a directive but not prose that mentions one', async () => {
+    const reports = await lint({
+      'src/a.ts': [
+        '// @ts-expect-error untyped global',
+        'globalThis.x = 1;',
+        '// This used to need @ts-ignore but no longer does.',
+        '// eslint-disabled while the rule is tuned',
+        '/* oxlint-disable-next-line no-console */',
+        'export const a = 1;',
+        '',
+      ].join('\n'),
+    });
+
+    expect(reports.map(report => report.line)).toEqual([3, 4]);
+  });
+
   it('reports a licence-looking comment that is not part of the leading notice', async () => {
     const reports = await lint({ 'src/a.ts': 'export const a = 1;\n/* Copyright is assigned on merge */\n// SPDX-License-Identifier: MIT\n' });
 

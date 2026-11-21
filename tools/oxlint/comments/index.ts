@@ -9,7 +9,7 @@ import type { Comment } from '@oxlint/plugins';
 
 type Options = [{ allowed?: number }?];
 
-const directive = /^\s*(?:eslint|oxlint)-(?:disable|enable)|@ts-(?:expect-error|ignore|nocheck)/;
+const directive = /^\s*(?:(?:eslint|oxlint)-(?:disable|enable)(?:-next-line|-line)?|@ts-(?:expect-error|ignore|nocheck|check))(?:\s|$)/;
 const annotation = /^\*\s*@(?:public|internal)\s*$/;
 const licenceNotice = /Copyright|SPDX-License-Identifier|@license/i;
 

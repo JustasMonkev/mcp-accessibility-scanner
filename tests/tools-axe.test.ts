@@ -18,7 +18,7 @@ type FakeChild = { selector: string | string[]; frame: FakeFrame | null; context
 type FakeFrameOptions = {
   name?: string,
   injection?: Behavior,
-  liveness?: Behavior,
+  liveness?: 'fires' | 'never' | 'hangs',
   run?: Behavior,
   children?: FakeChild[],
   unvisited?: FakeFrame[],
@@ -100,7 +100,10 @@ function makeFrame(url = 'https://example.com/', options: FakeFrameOptions = {})
     evaluate: async (script: unknown, arg?: any) => {
       if (typeof script === 'string')
         return behave(options.injection ?? 'ok', undefined);
-      return behave(options.liveness ?? 'ok', true);
+      if ((script as () => unknown).name === 'armLivenessProbe')
+        return true;
+      const liveness = options.liveness ?? 'fires';
+      return liveness === 'hangs' ? new Promise(() => {}) : liveness === 'fires';
     },
   };
   return frame;
@@ -420,7 +423,7 @@ describe('axe helpers', () => {
 
   it.each([
     ['injection', { injection: 'hangs' }, 1000],
-    ['timers', { liveness: 'hangs' }, 500],
+    ['timers', { liveness: 'never' }, 500],
     ['run', { run: 'hangs' }, 60_000],
   ] as const)('bounds a child frame whose %s never settles, leaving no timer behind', async (_label, behavior, budgetMs) => {
     resetScan();
@@ -580,6 +583,55 @@ describe('axe helpers', () => {
 
     expect(result.unscannedFrames).toEqual([]);
     expect(scanCalls).toHaveLength(1 + 4 + 16);
+    expect(maxActive).toBe(4);
+  });
+
+  it('bounds a frame whose timer check never answers by the check budget, not the run budget', async () => {
+    resetScan();
+    vi.useFakeTimers();
+    const stuck = makeFrame('https://example.com/stuck', { liveness: 'hangs' });
+    const main = makeFrame('https://example.com/', { children: [child('iframe', stuck)] });
+    let settled = false;
+    const scan = runAxeScan(fakePage({}, main)).finally(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(1024);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect((await scan).unscannedFrames).toEqual(['https://example.com/stuck']);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('shares the scan-wide frame limit with the closed-shadow coverage reads', async () => {
+    resetScan();
+    let active = 0;
+    let maxActive = 0;
+    const track = async <T>(work: () => T): Promise<T> => {
+      maxActive = Math.max(maxActive, ++active);
+      await new Promise(resolve => setTimeout(resolve, 2));
+      active--;
+      return work();
+    };
+    const parents = Array.from({ length: 8 }, (_, outer) => {
+      const unvisited = Array.from({ length: 8 }, (_, inner) => {
+        const closed = makeFrame(`https://example.com/${outer}/closed-${inner}`, { closedShadow: () => true });
+        const read = closed.frameElement;
+        closed.frameElement = async () => {
+          const element = await read();
+          return { ...element, evaluate: (script: unknown, scope: { include: string[], exclude: string[] }) => track(() => element.evaluate(script, scope)) };
+        };
+        return closed;
+      });
+      const parent = makeFrame(`https://example.com/${outer}`, { unvisited });
+      const scan = parent.evaluateHandle.getMockImplementation()!;
+      parent.evaluateHandle.mockImplementation((script: unknown, arg: any) => track(() => scan(script, arg)));
+      return parent;
+    });
+    const main = makeFrame('https://example.com/', { children: parents.map((parent, index) => child(`#p${index}`, parent)) });
+    const result = await runAxeScan(fakePage({}, main));
+
+    expect(result.unscannedFrames).toHaveLength(64);
     expect(maxActive).toBe(4);
   });
 
@@ -1091,6 +1143,94 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
       await waitForSrcdocFrames(page, ['escaped', 'inert']);
 
       expect((await runAxeScan(page, { rules: ['image-alt'] })).unscannedFrames).toEqual(['about:srcdoc (name="escaped")']);
+    });
+  });
+
+  async function gotoXhtml(page: Page, body: string, frameCount: number) {
+    const xhtml = `<html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><title>XHTML</title></head><body>${body}</body></html>`;
+    await page.route('http://xhtml.test/', route => route.fulfill({ contentType: 'application/xhtml+xml', body: xhtml }));
+    await page.goto('http://xhtml.test/');
+    await expect.poll(() => page.frames().filter(frame => frame.url() === 'about:srcdoc').length).toBe(frameCount);
+    await Promise.all(page.frames().map(frame => frame.waitForLoadState()));
+  }
+
+  it('resolves axe\'s frame selector from the document root, not from the first element its CSS matches', async () => {
+    await withPage(async page => {
+      await gotoXhtml(page, [
+        '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200"><foreignObject width="320" height="200">',
+        '<html xmlns="http://www.w3.org/1999/xhtml"><body><div>Decoy</div><iframe title="Decoy" srcdoc="&lt;img alt=&quot;Fine&quot; src=x.png&gt;"></iframe></body></html>',
+        '</foreignObject></svg>',
+        '<iframe id="checkout" title="Checkout" srcdoc="&lt;img id=missing src=x.png&gt;"></iframe>',
+      ].join(''), 2);
+
+      const result = await runAxeScan(page, { rules: ['image-alt'], include: ['#checkout'] });
+
+      expect(targetsOf(result.violations, 'image-alt')).toEqual([['#checkout', '#missing']]);
+      expect(result.unscannedFrames).toEqual([]);
+    });
+  });
+
+  it('follows a prefixed XHTML ancestor by axe\'s qualified node name', async () => {
+    await withPage(async page => {
+      await gotoXhtml(page, '<p>Before</p><h:div xmlns:h="http://www.w3.org/1999/xhtml"><iframe id="prefixed" title="Prefixed" srcdoc="&lt;img id=missing src=x.png&gt;"></iframe></h:div>', 1);
+
+      const result = await runAxeScan(page, { rules: ['image-alt'] });
+
+      expect(targetsOf(result.violations, 'image-alt')).toEqual([['#prefixed', '#missing']]);
+      expect(result.unscannedFrames).toEqual([]);
+    });
+  });
+
+  it('keeps a frame slotted into a single shadow-DOM modal in scope, whatever its centre hit test says', async () => {
+    await withPage(async page => {
+      await page.setContent('<div id="dialog-host"><span id="slotted"></span></div>');
+      await installAttachClosedFrame(page);
+      await page.evaluate(() => {
+        const host = document.querySelector('#dialog-host')!;
+        host.attachShadow({ mode: 'open' }).innerHTML = '<dialog><slot></slot></dialog>';
+        (window as unknown as ClosedFrameWindow).attachClosedFrame(document.querySelector('#slotted')!, 'slotted');
+        host.shadowRoot!.querySelector('dialog')!.showModal();
+      });
+      await waitForSrcdocFrames(page, ['slotted']);
+
+      expect((await runAxeScan(page, { rules: ['image-alt'] })).unscannedFrames).toEqual(['about:srcdoc (name="slotted")']);
+    });
+  });
+
+  it('keeps a frame in a single modal with pointer-events: none in scope', async () => {
+    await withPage(async page => {
+      await page.setContent('<dialog style="pointer-events: none"><button>Focusable</button><div id="host"></div></dialog>');
+      await installAttachClosedFrame(page);
+      await page.evaluate(() => {
+        (window as unknown as ClosedFrameWindow).attachClosedFrame(document.querySelector('#host')!, 'unhittable');
+        document.querySelector('dialog')!.showModal();
+      });
+      await waitForSrcdocFrames(page, ['unhittable']);
+
+      expect((await runAxeScan(page, { rules: ['image-alt'] })).unscannedFrames).toEqual(['about:srcdoc (name="unhittable")']);
+    });
+  });
+
+  it('leaves no frame evaluation pending after repeated scans of a sandboxed frame', async () => {
+    await withPage(async page => {
+      await setContentWithFrames(page, '<iframe id="locked" sandbox srcdoc="<img src=x.png>"></iframe>', 1);
+      const sandboxed = page.frames()[1];
+      const evaluate = sandboxed.evaluate.bind(sandboxed);
+      let pending = 0;
+      vi.spyOn(sandboxed, 'evaluate').mockImplementation(((script: any, arg: any) => {
+        pending++;
+        return evaluate(script, arg).finally(() => {
+          pending--;
+        });
+      }) as typeof sandboxed.evaluate);
+
+      const pendingAfterEachScan: number[] = [];
+      for (let scan = 0; scan < 4; scan++) {
+        expect((await runAxeScan(page, { rules: ['image-alt'] })).unscannedFrames).toEqual(['about:srcdoc (name="locked")']);
+        pendingAfterEachScan.push(pending);
+      }
+
+      expect(pendingAfterEachScan).toEqual([0, 0, 0, 0]);
     });
   });
 
