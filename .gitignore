@@ -23,10 +23,7 @@ coverage/
 .DS_Store
 .idea/
 # Keep legacy local agent state out of commits.
-/.claude/*
-!/.claude/commands/
-/.claude/commands/*
-!/.claude/commands/delete-comment.md
+/.claude/
 # Ignore local Codex run state, but track repository-owned harness files and skills
 .codex/*
 !.codex/luna-result.schema.json
