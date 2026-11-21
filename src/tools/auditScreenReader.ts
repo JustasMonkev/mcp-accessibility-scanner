@@ -463,11 +463,11 @@ const auditScreenReader = defineTabTool({
     const measurement = await measureScreenReaderElements(tab.page, ariaNodes, {
       maxElements: params.maxElements,
       checkNames: params.checkNames,
-      needsName: index => ariaNodes[index].name === null && namedRoles.has(ariaNodes[index].role),
+      needsName: index => ariaNodes[index].name === null && (params.checkReadingOrder || namedRoles.has(ariaNodes[index].role)),
       reportProgress: progress => response.reportProgress(progress),
     });
     const { factsByIndex, totalElements, analyzedElements, limitations } = measurement;
-    const { unresolvedElements: unresolvedCount, unmeasuredNames, truncatedElements, stoppedAtFrameWorkLimit } = limitations;
+    const { unresolvedElements: unresolvedCount, unmeasuredNames, truncatedElements, stoppedAtFrameWorkLimit, stoppedAtRefWorkLimit } = limitations;
 
     const result = analyzeScreenReader(withElementFacts(ariaNodes, factsByIndex), {
       checkNames: params.checkNames,
@@ -489,7 +489,7 @@ const auditScreenReader = defineTabTool({
         analyzed: analyzedElements,
         unresolved: unresolvedCount,
         unmeasuredNames,
-        truncated: truncatedElements > 0 || stoppedAtFrameWorkLimit !== null,
+        truncated: truncatedElements > 0 || stoppedAtFrameWorkLimit !== null || stoppedAtRefWorkLimit !== null,
       },
       countByCheck: result.countByCheck,
       totalFindings,
@@ -558,6 +558,8 @@ function withElementFacts(ariaNodes: AriaTreeNode[], factsByIndex: ReadonlyMap<n
 type Measurement = Awaited<ReturnType<typeof measureScreenReaderElements>>;
 
 function elementCountSuffix({ totalElements, analyzedElements, limitations }: Measurement): string {
+  if (limitations.stoppedAtRefWorkLimit !== null)
+    return ` (stopped after ${analyzedElements} of ${totalElements}: timed-out ref lookups reached the ${limitations.stoppedAtRefWorkLimit}-operation limit; re-run once the page is stable)`;
   if (limitations.stoppedAtFrameWorkLimit !== null)
     return ` (stopped after ${analyzedElements} of ${totalElements}: timed-out frame work reached the ${limitations.stoppedAtFrameWorkLimit}-operation limit; re-run once the page is stable)`;
   if (limitations.truncatedElements > 0)

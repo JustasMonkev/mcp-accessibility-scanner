@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { setImmediate } from 'node:timers/promises';
 import { settleWithin } from '../utils/timeout.js';
 
 import type * as playwright from 'playwright';
@@ -21,6 +22,8 @@ import type { Request } from 'playwright';
 import type { Tab } from '../tab.js';
 
 const scheduledWorkWindowMs = 100;
+// A short window for protocol events already on their way, not a DOM settle delay.
+const zeroSettleDeliveryGraceMs = 2;
 const pageActivityTimeoutMs = 10_000;
 const targetClosedMessage = /Target (?:page, context or browser has been closed|page closed|closed)/i;
 
@@ -41,6 +44,7 @@ class PageActivity {
   private readonly _inFlightRequests = new Set<Request>();
   private _sawRequest = false;
   private _mainFrameNavigated = false;
+  private _waitingForIdle = false;
   private readonly _idle = Promise.withResolvers<void>();
   private readonly _firstActivity = Promise.withResolvers<void>();
   private readonly _timeout: ReturnType<typeof setTimeout>;
@@ -58,8 +62,12 @@ class PageActivity {
   }
 
   async waitUntilIdle(firstActivityWindowMs: number): Promise<void> {
-    if (firstActivityWindowMs > 0 && !this._sawRequest && !this._mainFrameNavigated)
-      await settleWithin(this._firstActivity.promise, firstActivityWindowMs);
+    const zeroSettle = firstActivityWindowMs <= 0;
+    if (zeroSettle)
+      await setImmediate();
+    if (!this._sawRequest && !this._mainFrameNavigated)
+      await settleWithin(this._firstActivity.promise, zeroSettle ? zeroSettleDeliveryGraceMs : firstActivityWindowMs);
+    this._waitingForIdle = true;
     if (!this._inFlightRequests.size && !this._mainFrameNavigated)
       this._idle.resolve();
     await this._idle.promise;
@@ -81,7 +89,7 @@ class PageActivity {
 
   private _onRequestSettled = (request: Request) => {
     this._inFlightRequests.delete(request);
-    if (!this._inFlightRequests.size)
+    if (this._waitingForIdle && !this._inFlightRequests.size)
       this._idle.resolve();
   };
 

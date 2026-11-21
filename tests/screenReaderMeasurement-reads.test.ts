@@ -18,6 +18,23 @@ describe('screen-reader DOM reads', () => {
     await browser?.close();
   });
 
+  it('returns facts even when the page defines Array.prototype.toJSON', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent('<button>Save</button>');
+      const handles = await page.$$('button');
+      await page.evaluate(() => {
+        Object.defineProperty(Array.prototype, 'toJSON', { value: () => 'page-controlled' });
+      });
+
+      const facts = await readElementFacts(page, { elements: handles, measureNames: false });
+
+      expect(facts).toMatchObject([{ tagName: 'button', visibleText: 'Save' }]);
+    } finally {
+      await page.close();
+    }
+  });
+
   it('shares reads within a batch, skips irrelevant ancestor geometry, and refreshes the next batch', async () => {
     const page = await browser.newPage();
     try {

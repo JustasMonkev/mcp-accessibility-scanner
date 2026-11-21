@@ -47,7 +47,7 @@ function createHarness(
     browserProxy?: boolean;
     remoteEndpoint?: string;
     cdpEndpoint?: string;
-    browserContextFactoryName?: string;
+    browserContextFactory?: { name?: string; sharedContext?: boolean };
     requestContext?: any;
     cookiesForUrl?: (url: string) => { name: string, domain?: string, path?: string, expires?: number }[];
     navigationFailsFor?: (url: string) => boolean;
@@ -188,7 +188,7 @@ function createHarness(
       network: options?.network ?? {},
     },
     options: {
-      browserContextFactory: { name: options?.browserContextFactoryName ?? 'chromium' },
+      browserContextFactory: options?.browserContextFactory ?? { name: 'chromium' },
     },
   };
 
@@ -1671,7 +1671,7 @@ describe('audit_site tool', () => {
     const sitemapUrl = 'https://example.com/sitemap.xml';
     const { context, response, fetchMock } = createHarness({}, {
       sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
-      browserContextFactoryName: 'vscode',
+      browserContextFactory: { name: 'vscode' },
     });
 
     await expect(tool.handle(context as any, tool.schema.inputSchema.parse({
@@ -1688,8 +1688,8 @@ describe('audit_site tool', () => {
     const sitemapUrl = 'https://example.com/sitemap.xml';
     const { context, response, fetchMock } = createHarness({}, {
       sitemapXmlByUrl: { [sitemapUrl]: '<urlset />' },
+      browserContextFactory: { sharedContext: true },
     });
-    context.options.browserContextFactory = { sharedContext: true };
 
     await expect(tool.handle(context as any, tool.schema.inputSchema.parse({
       strategy: 'sitemap',

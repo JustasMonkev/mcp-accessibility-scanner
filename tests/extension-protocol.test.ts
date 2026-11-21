@@ -939,9 +939,7 @@ describe('extension protocol v2', () => {
 
       const connecting = relay.ensureExtensionConnectionForMCPContext(
           { name: 'test-client', version: '1.0.0' },
-          new AbortController().signal,
-          undefined,
-      );
+          new AbortController().signal);
       let settled = false;
       void connecting.then(() => settled = true, () => settled = true);
       await new Promise(resolve => setTimeout(resolve, 20));
@@ -1054,9 +1052,7 @@ describe('extension protocol v2', () => {
     try {
       const connecting = relay.ensureExtensionConnectionForMCPContext(
           { name: 'test-client', version: '1.0.0' },
-          new AbortController().signal,
-          undefined,
-      );
+          new AbortController().signal);
       await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
       expect(vi.mocked(spawn).mock.calls[0][1]).toContain('--profile-directory=Profile 1');
 
@@ -1091,9 +1087,7 @@ describe('extension protocol v2', () => {
     try {
       const connecting = relay.ensureExtensionConnectionForMCPContext(
           { name: 'test-client', version: '1.0.0' },
-          new AbortController().signal,
-          undefined,
-      );
+          new AbortController().signal);
       await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
       expect(vi.mocked(spawn).mock.calls[0][1]).toContain('--profile-directory=Profile 1');
       expect(vi.mocked(spawn).mock.calls[0][1]).not.toContain('--profile-directory=Default');
@@ -1250,9 +1244,7 @@ describe('extension protocol v2', () => {
     try {
       const connecting = relay.ensureExtensionConnectionForMCPContext(
           { name: 'test-client', version: '1.0.0' },
-          new AbortController().signal,
-          undefined,
-      );
+          new AbortController().signal);
       await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
       expect(vi.mocked(spawn).mock.calls[0][1]).toContain('--profile-directory=Profile 1');
       expect(vi.mocked(spawn).mock.calls[0][1]).not.toContain('--profile-directory=Default');

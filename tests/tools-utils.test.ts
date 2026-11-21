@@ -239,6 +239,34 @@ describe('Tool Utils', () => {
       expect(order).toEqual(['finished', 'returned']);
       expect(mockTab.waitForTimeout).not.toHaveBeenCalled();
     });
+
+    it.each([false, true])('awaits requests delivered after a zero-settle callback (earlier request already finished: %s)', async earlierRequest => {
+      const order: string[] = [];
+      const finished = Promise.withResolvers<void>();
+      const result = await waitForCompletion(mockTab, async () => {
+        if (earlierRequest) {
+          const request = { url: 'https://api.example.com/early' };
+          mockPage.emit('request', request);
+          mockPage.emit('requestfinished', request);
+        }
+        setImmediate(() => {
+          const request = { url: 'https://api.example.com/late' };
+          mockPage.emit('request', request);
+          setImmediate(() => {
+            order.push('finished');
+            mockPage.emit('requestfinished', request);
+            finished.resolve();
+          });
+        });
+        return 'result';
+      }, 0);
+      order.push('returned');
+      await finished.promise;
+
+      expect(result).toBe('result');
+      expect(order).toEqual(['finished', 'returned']);
+      expect(mockTab.waitForTimeout).not.toHaveBeenCalled();
+    });
   });
 
   describe('generateLocator', () => {

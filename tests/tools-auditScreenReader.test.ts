@@ -659,7 +659,7 @@ function snapshotOf(entries: { role: string; ref: string }[]): string {
 
 function createToolHarness(options: {
   snapshot: string;
-  factsFor?: (ref: string) => Partial<ElementFacts>;
+  factsFor?: (ref: string, nameMeasured: boolean) => Partial<ElementFacts>;
   staleRefs?: (ref: string) => boolean;
   staleDelayMs?: number;
   /**
@@ -695,12 +695,10 @@ function createToolHarness(options: {
           if (delay)
             await new Promise(resolve => setTimeout(resolve, delay));
           const measured = input.measureNames && installs.count > 0 && (options.installAxe ?? 'accept') === 'accept';
-          const facts = input.elements.map((handle, position) => ({
-            ...baseFacts,
-            nameMeasured: measured && (!input.measureNameMask || input.measureNameMask[position]),
-            ...options.factsFor?.(handle.ref),
-          }));
-          return JSON.stringify(facts);
+          return input.elements.map((handle, position) => {
+            const nameMeasured = measured && (!input.measureNameMask || input.measureNameMask[position]);
+            return { ...baseFacts, nameMeasured, ...options.factsFor?.(handle.ref, nameMeasured) };
+          });
         }
         installs.count++;
         const installDelay = options.installAxeDelayFor?.(frameIndex);
@@ -724,8 +722,9 @@ function createToolHarness(options: {
     concurrency.max = Math.max(concurrency.max, concurrency.current);
     await new Promise(resolve => setTimeout(resolve, stale ? options.staleDelayMs ?? 0 : 0));
     concurrency.current--;
-    const frameIndexMatch = /^f(\d+)e\d+$/.exec(ref);
-    const owner = frames[(frameIndexMatch ? Number(frameIndexMatch[1]) : Number(ref.replace(/\D/g, ''))) % frames.length];
+    const frameIndexMatch = /^(?:f(\d+))?e\d+$/.exec(ref);
+    const frameIndex = frameIndexMatch ? Number(frameIndexMatch[1] ?? 0) : Number(ref.replace(/\D/g, '')) % frames.length;
+    const owner = frames[frameIndex];
     return stale ? null : {
       ref,
       ownerFrame: async () => {
@@ -791,6 +790,7 @@ describe('screen-reader measurement contract', () => {
         unmeasuredNames: 0,
         truncatedElements: 1,
         stoppedAtFrameWorkLimit: null,
+        stoppedAtRefWorkLimit: null,
       },
     });
     expect(reportProgress.mock.calls.map(([progress]) => progress)).toEqual([
@@ -819,6 +819,7 @@ describe('screen-reader measurement contract', () => {
       unmeasuredNames: 0,
       truncatedElements: 2,
       stoppedAtFrameWorkLimit: null,
+      stoppedAtRefWorkLimit: null,
     });
   });
 
@@ -843,6 +844,7 @@ describe('screen-reader measurement contract', () => {
         unmeasuredNames: 0,
         truncatedElements: 0,
         stoppedAtFrameWorkLimit: 4,
+        stoppedAtRefWorkLimit: null,
       });
       expect(harness.frameConcurrency.current).toBe(4);
       expect(harness.disposals.count).toBe(4);
@@ -865,11 +867,11 @@ describe('audit_screen_reader tool measurement', () => {
     vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined);
   });
 
-  async function run(harness: ReturnType<typeof createToolHarness>, maxElements: number, checkNames = true) {
+  async function run(harness: ReturnType<typeof createToolHarness>, maxElements: number, checkNames = true, checkReadingOrder = true) {
     const response = new Response(harness.context, 'audit_screen_reader', {});
     await tool.handle(harness.context, {
       checkNames,
-      checkReadingOrder: true,
+      checkReadingOrder,
       maxElements,
       maxFindingsPerCheck: 20,
     } as any, response);
@@ -943,6 +945,70 @@ describe('audit_screen_reader tool measurement', () => {
     // here would present an unaudited page as clean.
     await expect(run(harness, 50)).rejects.toThrow(/None of the 100 accessibility tree elements could be resolved/);
     expect(harness.concurrency.max).toBe(50);
+  });
+
+  it('keeps unsettled ref queries bounded across chunks, concurrent audits and retries', async () => {
+    vi.useFakeTimers();
+    const held = Promise.withResolvers<void>();
+    const disposeLate = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 202 }, (_, index) => ({ role: 'button', ref: `e${index}` }))),
+      });
+      const page = harness.context.currentTabOrDie().page;
+      const resolveRef = page.$.getMockImplementation();
+      page.$.mockImplementation(async () => {
+        await held.promise;
+        return { dispose: disposeLate };
+      });
+
+      const outcomes = [run(harness, 202), run(harness, 202)].map(audit => audit.then(() => null, error => error));
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(page.$).toHaveBeenCalledTimes(200);
+      for (const outcome of outcomes)
+        expect((await outcome)?.message).toMatch(/nothing was evaluated/);
+
+      await expect(run(harness, 202)).rejects.toThrow(/Timed-out ref lookups reached the 200-operation limit/);
+      expect(page.$).toHaveBeenCalledTimes(200);
+
+      held.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(disposeLate).toHaveBeenCalledTimes(200);
+      page.$.mockImplementation(resolveRef);
+      const recovered = run(harness, 1);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await recovered).toContain('Elements analyzed: 1');
+    } finally {
+      held.resolve();
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports the ref work limit without losing findings from resolved elements', async () => {
+    vi.useFakeTimers();
+    const held = Promise.withResolvers<null>();
+    try {
+      const harness = createToolHarness({
+        snapshot: snapshotOf(Array.from({ length: 460 }, (_, index) => ({ role: 'button', ref: `e${index}` }))),
+      });
+      const page = harness.context.currentTabOrDie().page;
+      const resolveRef = page.$.getMockImplementation();
+      page.$.mockImplementation((selector: string) => selector === 'aria-ref=e0' ? resolveRef(selector) : held.promise);
+
+      const audit = run(harness, 460);
+      await vi.advanceTimersByTimeAsync(2_100);
+
+      const result = await audit;
+      expect(page.$).toHaveBeenCalledTimes(201);
+      expect(result).toContain('stopped after 201 of 460: timed-out ref lookups reached the 200-operation limit');
+      expect(result).toContain('WARNING: 200 of these went stale before measurement');
+      expect(result).toContain('missing-accessible-name | 1');
+      const report = JSON.parse(String(vi.mocked(fs.promises.writeFile).mock.calls[0][1]));
+      expect(report.elements).toMatchObject({ analyzed: 201, unresolved: 200, truncated: true });
+    } finally {
+      held.resolve(null);
+      vi.useRealTimers();
+    }
   });
 
   it('measures frame batches through the bounded concurrency pool', async () => {
@@ -1287,7 +1353,7 @@ describe('audit_screen_reader tool measurement', () => {
     }
   });
 
-  it('caches ownerFrame lookups per Playwright aria-ref prefix across chunks', async () => {
+  it('batches refs by their owner frame across chunks', async () => {
     const entries = [
       ...Array.from({ length: 120 }, (_, index) => ({ role: 'button', ref: `e${index + 1}` })),
       ...Array.from({ length: 120 }, (_, index) => ({ role: 'button', ref: `f1e${index + 1}` })),
@@ -1300,7 +1366,13 @@ describe('audit_screen_reader tool measurement', () => {
 
     const result = await run(harness, 360, false);
     expect(result).toContain('Elements analyzed: 360');
-    expect(harness.ownerFrames.calls).toBe(3);
+    expect(harness.frames.map(frame => frame.evaluate.mock.calls.flatMap(([, input]: [unknown, { elements: { ref: string }[] }]) =>
+      input.elements.map(handle => handle.ref),
+    ))).toEqual([
+      entries.slice(0, 120).map(entry => entry.ref),
+      entries.slice(120, 240).map(entry => entry.ref),
+      entries.slice(240).map(entry => entry.ref),
+    ]);
     expect(harness.disposals.count).toBe(360);
   });
 
@@ -1318,12 +1390,34 @@ describe('audit_screen_reader tool measurement', () => {
       installAxe: 'reject',
     });
 
-    const result = await run(harness, 50, true);
+    const result = await run(harness, 50, true, false);
     expect(harness.installs.count).toBe(1);
     expect(result).toContain('WARNING: accessible names could not be measured for 1 of these');
   });
 
-  it('probes the next handle in a frame prefix group when the first ownerFrame lookup returns null', async () => {
+  it('uses distilled headings in reading-order descriptions when names are checked', async () => {
+    const harness = createToolHarness({
+      snapshot: [
+        '- heading [level=2] [ref=e1]:',
+        '  - strong [ref=e2]',
+        '  - emphasis [ref=e3]',
+      ].join('\n'),
+      factsFor: (ref, nameMeasured) => ({
+        selector: `#${ref}`,
+        rect: { x: ref === 'e2' ? 100 : 0, y: 0, width: 50, height: 20 },
+        visibleText: 'Text',
+        accessibleName: nameMeasured && ref === 'e1' ? 'Release details' : null,
+      }),
+    });
+
+    const result = await run(harness, 3);
+
+    expect(result).toContain('Inside heading "Release details" (#e1)');
+    expect(result).toContain('reading-order-mismatch | 1');
+    expect(result).not.toContain('WARNING: accessible names could not be measured');
+  });
+
+  it('keeps measuring siblings when one ref no longer has an owner frame', async () => {
     const harness = createToolHarness({
       snapshot: snapshotOf([
         { role: 'button', ref: 'f1e1' },
@@ -1347,7 +1441,7 @@ describe('audit_screen_reader tool measurement', () => {
     expect(result).toContain('Elements analyzed: 3');
     expect(result).toContain('WARNING: 1 of these went stale before measurement');
     expect(result).toContain('missing-accessible-name | 2');
-    expect(harness.ownerFrames.calls).toBe(1);
+    expect(harness.ownerFrames.calls).toBe(2);
     expect(harness.disposals.count).toBe(3);
   });
 });
@@ -1369,6 +1463,50 @@ describe('collectElementFacts in a real page', () => {
     await page.close();
     return facts.map(fact => fact.visibleText);
   }
+
+  it('measures adopted refs in the current owner without moving snapshot siblings', async () => {
+    const page = await browser!.newPage();
+    try {
+      await page.setContent(`
+        <button id="moved" aria-labelledby="label">Move</button>
+        <button id="stays" aria-labelledby="label">Stay</button>
+        <div id="label">Original name</div>
+        <iframe></iframe>
+      `);
+      const snapshot = parseAriaSnapshot(await page.ariaSnapshot({ mode: 'ai' }));
+      const buttons = snapshot.filter(entry => entry.role === 'button');
+      expect(buttons.map(entry => entry.name)).toEqual(['Original name', 'Original name']);
+      expect(buttons.every(entry => /^e\d+$/.test(entry.ref ?? ''))).toBe(true);
+
+      await page.evaluate(() => {
+        const iframe = document.querySelector('iframe')!;
+        const child = iframe.contentDocument!;
+        child.body.innerHTML = '<div id="label">Adopted name</div><div style="height: 1000px"></div>';
+        child.body.append(document.querySelector('#moved')!);
+        iframe.contentWindow!.scrollTo(0, 500);
+      });
+      const { y, scrollY } = await page.frames()[1].locator('#moved').evaluate(element => ({
+        y: element.getBoundingClientRect().y,
+        scrollY: window.scrollY,
+      }));
+      expect(scrollY).toBeGreaterThan(0);
+
+      const measurement = await measureScreenReaderElements(page, buttons, { maxElements: 2, checkNames: true });
+
+      expect(measurement.limitations).toMatchObject({ unresolvedElements: 0, unmeasuredNames: 0 });
+      expect(measurement.factsByIndex.get(0)).toMatchObject({
+        selector: 'button#moved',
+        accessibleName: 'Adopted name',
+        rect: { y: y + scrollY },
+      });
+      expect(measurement.factsByIndex.get(1)).toMatchObject({
+        selector: 'button#stays',
+        accessibleName: 'Original name',
+      });
+    } finally {
+      await page.close();
+    }
+  });
 
   it('audits literal slash names from real AI snapshots without measured-name fallback', async () => {
     const page = await browser!.newPage();

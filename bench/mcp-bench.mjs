@@ -27,6 +27,14 @@ import { verifyScreenReader } from './screen-reader.mjs';
 
 const projectRoot = path.resolve(import.meta.dirname, '..');
 const options = parseArgs(process.argv.slice(2));
+const siteAudits = [
+  { maxPages: 6, maxDepth: 2, scannedPages: 5 },
+  { maxPages: 12, maxDepth: 5, scannedPages: 11 },
+].map(workload => ({
+  ...workload,
+  name: `audit_site (${workload.scannedPages} pages)`,
+  previousName: `audit_site (${workload.maxPages} pages)`,
+}));
 
 if (options.compare) {
   compare(options.compare[0], options.compare[1]);
@@ -161,20 +169,21 @@ const scenarios = [
     setup: () => call('browser_navigate', { url: `${origin}/heavy.html` }),
     run: () => call('audit_keyboard', { maxTabs: 12 }),
   },
-  {
-    name: 'audit_keyboard (12 tabs, settleAfterKeyMs=0)',
+  ...[12, 50].map(maxTabs => ({
+    name: `audit_keyboard (${maxTabs} tabs, settleAfterKeyMs=0)`,
+    optIn: maxTabs === 50,
     supported: async () => (await client.listTools()).tools.some(tool =>
       tool.name === 'audit_keyboard' && tool.inputSchema.properties?.settleAfterKeyMs),
     setup: () => call('browser_navigate', { url: `${origin}/heavy.html` }),
-    run: () => call('audit_keyboard', { maxTabs: 12, settleAfterKeyMs: 0 }),
+    run: () => call('audit_keyboard', { maxTabs, settleAfterKeyMs: 0 }),
     verify: result => {
       const report = JSON.parse(fs.readFileSync(new URL(result.structuredContent.reportUri), 'utf8'));
       assert.equal(report.metadata.options.settleAfterKeyMs, 0);
-      assert.equal(report.stops.length, 12);
-      assert.equal(report.uniqueFingerprints, 12);
+      assert.equal(report.stops.length, maxTabs);
+      assert.equal(report.uniqueFingerprints, maxTabs);
       assert.equal(report.skipLink.step, 1);
     },
-  },
+  })),
   {
     name: 'scan_page_matrix (3 variants)',
     setup: () => call('browser_navigate', { url: `${origin}/heavy.html` }),
@@ -186,16 +195,13 @@ const scenarios = [
       ],
     }),
   },
-  {
-    name: 'audit_site (6 pages)',
+  ...siteAudits.map(({ name, previousName, maxPages, maxDepth, scannedPages }) => ({
+    name,
+    previousName,
     setup: () => call('browser_navigate', { url: `${origin}/page-0.html` }),
-    run: () => call('audit_site', { startUrl: `${origin}/page-0.html`, maxPages: 6, maxDepth: 2 }),
-  },
-  {
-    name: 'audit_site (12 pages)',
-    setup: () => call('browser_navigate', { url: `${origin}/page-0.html` }),
-    run: () => call('audit_site', { startUrl: `${origin}/page-0.html`, maxPages: 12, maxDepth: 5 }),
-  },
+    run: () => call('audit_site', { startUrl: `${origin}/page-0.html`, maxPages, maxDepth }),
+    verify: result => assert.equal(result.structuredContent.totals.scannedPages, scannedPages, name),
+  })),
   ...screenReaderCases.map(fixture => ({
     name: fixture.name,
     setup: () => call('browser_navigate', { url: `${origin}${fixture.path}` }),
@@ -206,7 +212,9 @@ const scenarios = [
 
 const results = [];
 try {
-  const selected = scenarios.filter(scenario => !options.only || scenario.name.startsWith(options.only));
+  const selected = scenarios.filter(scenario => scenario.optIn
+    ? options.only === scenario.name
+    : !options.only || scenario.name.startsWith(options.only) || scenario.previousName?.startsWith(options.only));
   if (!selected.length)
     throw new Error(`No scenarios match --only ${options.only}`);
   server = await startFixtureServer();
@@ -352,12 +360,14 @@ function startFixtureServer() {
 function compare(beforePath, afterPath) {
   const before = JSON.parse(fs.readFileSync(beforePath, 'utf-8'));
   const after = JSON.parse(fs.readFileSync(afterPath, 'utf-8'));
-  const byName = new Map(before.scenarios.map(entry => [entry.name, entry]));
+  const correctedNames = new Map(siteAudits.map(({ name, previousName }) => [previousName, name]));
+  const byName = new Map(before.scenarios.map(entry => [correctedNames.get(entry.name) ?? entry.name, entry]));
   const rows = [['Scenario', `${before.label} (ms)`, `${after.label} (ms)`, 'Change', 'Speedup']];
   let beforeTotal = 0;
   let afterTotal = 0;
   for (const entry of after.scenarios) {
-    const baseline = byName.get(entry.name);
+    const name = correctedNames.get(entry.name) ?? entry.name;
+    const baseline = byName.get(name);
     if (!baseline)
       continue;
     if (!entry.micro && !baseline.micro) {
@@ -366,7 +376,7 @@ function compare(beforePath, afterPath) {
     }
     const change = (entry.median - baseline.median) / baseline.median * 100;
     rows.push([
-      entry.name,
+      name,
       format(baseline.median),
       format(entry.median),
       `${change >= 0 ? '+' : ''}${change.toFixed(1)}%`,

@@ -778,7 +778,7 @@ function assertSitemapFetchSupported(context: Tab['context']): void {
   const browser = context.config.browser;
   const factory = context.options.browserContextFactory;
   if (browser.remoteEndpoint || browser.cdpEndpoint || factory.sharedContext || ('name' in factory && factory.name === 'vscode'))
-    throw new Error('Sitemap fetches run on the MCP host and do not support remoteEndpoint, cdpEndpoint, --extension, or browser_connect providers. Use the provided URL strategy with an attached browser.');
+    throw new Error('Sitemap fetches run on the MCP host and do not support remoteEndpoint, cdpEndpoint, --extension, browser_connect providers, or custom contexts from createConnection(config, contextGetter). Use the provided URL strategy instead.');
   if (browser.launchOptions.proxy || browser.contextOptions.proxy)
     throw new Error('Sitemap fetches do not support browser proxies. Use the provided URL strategy when a proxy is required.');
 }
