@@ -381,14 +381,14 @@ describe('axe helpers', () => {
     expect(scanCalls[0].context).toEqual({ include: [], exclude: ['#cookie-banner'] });
   });
 
-  it('tells each page whether it has child frames, so a frame-free one skips axe\'s frame lookup', async () => {
+  it('leaves frame discovery to the page, so a frame count read beforehand cannot go stale', async () => {
     resetScan();
     const leafFrame = makeFrame('https://example.com/leaf');
     const main = makeFrame('https://example.com/', { children: [child('iframe', leafFrame)] });
     await runAxeScan(fakePage({}, main));
 
-    expect(main.evaluateHandle.mock.calls[0][1]).toMatchObject({ hasChildFrames: true, allowPlainRun: true });
-    expect(leafFrame.evaluateHandle.mock.calls[0][1]).toMatchObject({ hasChildFrames: false, allowPlainRun: false });
+    expect(main.evaluateHandle.mock.calls[0][1]).toEqual({ context: { exclude: [] }, options: expect.anything(), allowPlainRun: true });
+    expect(leafFrame.evaluateHandle.mock.calls[0][1]).toEqual({ context: expect.anything(), options: expect.anything(), allowPlainRun: false });
   });
 
   it('runs each child frame with the context axe chose for it, not the top-level one', async () => {
@@ -556,12 +556,12 @@ describe('axe helpers', () => {
       expect(handle.dispose).toHaveBeenCalledTimes(1);
   });
 
-  it('limits how many sibling frames run at once', async () => {
+  it('bounds frame scans across the whole tree, not per parent, and releases a slot before descending', async () => {
     resetScan();
     let active = 0;
     let maxActive = 0;
-    const frames = Array.from({ length: 10 }, (_, index) => {
-      const frame = makeFrame(`https://example.com/${index}`);
+    const slowFrame = (url: string, children: FakeChild[] = []) => {
+      const frame = makeFrame(url, { children });
       const scan = frame.evaluateHandle.getMockImplementation()!;
       frame.evaluateHandle.mockImplementation(async (script: unknown, arg: any) => {
         maxActive = Math.max(maxActive, ++active);
@@ -570,9 +570,16 @@ describe('axe helpers', () => {
         return scan(script, arg);
       });
       return frame;
-    });
-    const main = makeFrame('https://example.com/', { children: frames.map((frame, index) => child(`#f${index}`, frame)) });
-    expect((await runAxeScan(fakePage({}, main))).unscannedFrames).toEqual([]);
+    };
+    const children = Array.from({ length: 4 }, (_, outer) => child(`#f${outer}`, slowFrame(
+        `https://example.com/${outer}`,
+        Array.from({ length: 4 }, (_, inner) => child(`#g${inner}`, slowFrame(`https://example.com/${outer}/${inner}`))),
+    )));
+    const main = makeFrame('https://example.com/', { children });
+    const result = await runAxeScan(fakePage({}, main));
+
+    expect(result.unscannedFrames).toEqual([]);
+    expect(scanCalls).toHaveLength(1 + 4 + 16);
     expect(maxActive).toBe(4);
   });
 
@@ -914,6 +921,176 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
 
       expect(result.unscannedFrames.sort()).toEqual(['about:srcdoc (name="inner")', 'about:srcdoc (name="shadow-ad")', 'about:srcdoc (name="visible")']);
       expect(result.violations).toEqual([]);
+    });
+  });
+
+  it('scans a frame that exists only inside an open shadow root', async () => {
+    await withPage(async page => {
+      await page.setContent('<html lang="en"><title>Shadow frame</title><div id="host"></div></html>');
+      await page.evaluate(() => {
+        document.querySelector('#host')!.attachShadow({ mode: 'open' }).innerHTML = '<iframe title="Shadow" srcdoc="<img src=x.png>"></iframe>';
+      });
+      await expect.poll(() => page.frames()[1]?.url()).toBe('about:srcdoc');
+
+      const result = await runAxeScan(page, { rules: ['image-alt'] });
+
+      expect(await page.evaluate(() => window.length)).toBe(0);
+      expect(targetsOf(result.violations, 'image-alt')).toEqual([[['#host', 'iframe'], 'img']]);
+    });
+  });
+
+  it('scans an iframe inserted after Playwright last listed the frames, right before the page call', async () => {
+    await withPage(async page => {
+      await page.setContent('<html lang="en"><title>Late frame</title></html>');
+      const mainFrame = page.mainFrame();
+      const evaluateHandle = mainFrame.evaluateHandle.bind(mainFrame);
+      vi.spyOn(mainFrame, 'evaluateHandle').mockImplementationOnce(async (script: any, arg: any) => {
+        await page.evaluate(() => {
+          const late = document.createElement('iframe');
+          late.title = 'Late';
+          late.srcdoc = '<img src=late.png>';
+          document.body.append(late);
+        });
+        await expect.poll(() => page.frames()[1]?.url()).toBe('about:srcdoc');
+        await page.frames()[1].waitForLoadState();
+        return evaluateHandle(script, arg);
+      });
+
+      const result = await runAxeScan(page, { rules: ['image-alt'] });
+
+      expect(targetsOf(result.violations, 'image-alt')).toEqual([['iframe', 'img']]);
+      expect(result.unscannedFrames).toEqual([]);
+    });
+  });
+
+  it('scans an XHTML iframe whose generated selector lost the case of an SVG foreignObject', async () => {
+    await withPage(async page => {
+      const xhtml = [
+        '<html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><title>XHTML</title></head><body>',
+        '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200"><foreignObject width="320" height="200">',
+        '<iframe xmlns="http://www.w3.org/1999/xhtml" title="Inner" srcdoc="&lt;img src=x.png&gt;"></iframe>',
+        '</foreignObject></svg></body></html>',
+      ].join('');
+      await page.route('http://xhtml.test/', route => route.fulfill({ contentType: 'application/xhtml+xml', body: xhtml }));
+      await page.goto('http://xhtml.test/');
+      await expect.poll(() => page.frames()[1]?.url()).toBe('about:srcdoc');
+      await page.frames()[1].waitForLoadState();
+
+      const result = await runAxeScan(page, { rules: ['image-alt'] });
+
+      expect(result.unscannedFrames).toEqual([]);
+      expect(result.violations.find(rule => rule.id === 'image-alt')?.nodes).toHaveLength(1);
+    });
+  });
+
+  it('keeps a page-owned window.axe that cannot be overwritten', async () => {
+    for (const lock of ['non-writable', 'getter-only'] as const) {
+      await withPage(async page => {
+        await setContentWithFrames(page, '<html lang="en"><title>Locked</title><iframe title="Child" srcdoc="<img src=x.png>"></iframe></html>', 1);
+        await page.evaluate(mode => {
+          const pageAxe = { version: 'page-owned' };
+          Object.defineProperty(window, 'axe', mode === 'non-writable'
+            ? { value: pageAxe, writable: false, configurable: false }
+            : { get: () => pageAxe, configurable: false });
+        }, lock);
+
+        const result = await runAxeScan(page, { rules: ['image-alt'] });
+
+        expect(targetsOf(result.violations, 'image-alt')).toEqual([['iframe', 'img']]);
+        expect(await page.evaluate(() => (window as any).axe.version)).toBe('page-owned');
+      });
+    }
+  });
+
+  it('leaves no message listener behind across repeated scans, and keeps the page\'s own', async () => {
+    await withPage(async page => {
+      await page.setContent('<html lang="en"><title>Listeners</title><button>Named</button></html>');
+      await page.evaluate(() => window.addEventListener('message', () => {}));
+      const session = await page.context().newCDPSession(page);
+      const messageListeners = async () => {
+        const { result } = await session.send('Runtime.evaluate', { expression: 'window' });
+        const { listeners } = await session.send('DOMDebugger.getEventListeners', { objectId: result.objectId! });
+        return listeners.filter(listener => listener.type === 'message').length;
+      };
+
+      const counts = [await messageListeners()];
+      for (let scan = 0; scan < 3; scan++) {
+        await runAxeScan(page);
+        counts.push(await messageListeners());
+      }
+
+      expect(counts).toEqual([1, 1, 1, 1]);
+    });
+  });
+
+  it('sends a frame-free page\'s report to Node already projected to the fields the scanner returns', async () => {
+    await withPage(async page => {
+      await page.setContent(`<html lang="en"><title>Projection</title>${'<img src="x.png">'.repeat(25)}</html>`);
+      const mainFrame = page.mainFrame();
+      const evaluateHandle = mainFrame.evaluateHandle.bind(mainFrame);
+      let payload = '';
+      vi.spyOn(mainFrame, 'evaluateHandle').mockImplementationOnce(async (script: any, arg: any) => {
+        const handle = await evaluateHandle(script, arg);
+        payload = await handle.evaluate(result => (result as unknown as string[])[1]);
+        return handle;
+      });
+
+      const result = await runAxeScan(page, { rules: ['image-alt'] });
+      const sent = JSON.parse(payload);
+
+      expect(Object.keys(sent).sort()).toEqual(['inapplicable', 'incomplete', 'passes', 'url', 'violations']);
+      expect(Object.keys(sent.violations[0].nodes[0]).sort()).toEqual(['failureSummary', 'html', 'target']);
+      expect(sent.violations).toEqual(result.violations);
+    });
+  });
+
+  it('applies axe\'s closest-match scope rule to closed-shadow frames as axe applies it to open ones', async () => {
+    await withPage(async page => {
+      await page.setContent('<html lang="en"><title>Scope</title><main id="outer"><section id="inner"><div id="open-host"></div><div id="closed-host"></div></section></main></html>');
+      await installAttachClosedFrame(page);
+      await page.evaluate(() => {
+        document.querySelector('#open-host')!.attachShadow({ mode: 'open' }).innerHTML = '<iframe title="Open" srcdoc="<img src=x.png>"></iframe>';
+        (window as unknown as ClosedFrameWindow).attachClosedFrame(document.querySelector('#closed-host')!, 'closed');
+      });
+      await waitForSrcdocFrames(page, ['closed']);
+      await expect.poll(() => page.frames().filter(frame => frame.url() === 'about:srcdoc').length).toBe(2);
+
+      const result = await runAxeScan(page, { rules: ['image-alt'], include: ['#inner'], exclude: ['#outer'] });
+
+      expect(targetsOf(result.violations, 'image-alt')).toEqual([[['#open-host', 'iframe'], 'img']]);
+      expect(result.unscannedFrames).toEqual(['about:srcdoc (name="closed")']);
+    });
+  });
+
+  it('counts only the topmost modal as active when modals stack', async () => {
+    await withPage(async page => {
+      await page.setContent('<dialog id="first"><div id="host"></div></dialog><dialog id="second">Second</dialog>');
+      await installAttachClosedFrame(page);
+      await page.evaluate(() => {
+        (window as unknown as ClosedFrameWindow).attachClosedFrame(document.querySelector('#host')!, 'in-first');
+        document.querySelector<HTMLDialogElement>('#first')!.showModal();
+      });
+      await waitForSrcdocFrames(page, ['in-first']);
+      expect((await runAxeScan(page, { rules: ['image-alt'] })).unscannedFrames).toEqual(['about:srcdoc (name="in-first")']);
+
+      await page.evaluate(() => document.querySelector<HTMLDialogElement>('#second')!.showModal());
+      expect((await runAxeScan(page, { rules: ['image-alt'] })).unscannedFrames).toEqual([]);
+    });
+  });
+
+  it('lets a modal dialog escape the inertness of its ancestors', async () => {
+    await withPage(async page => {
+      await page.setContent('<div inert><dialog><div id="inside"></div></dialog></div><div id="outside" inert></div>');
+      await installAttachClosedFrame(page);
+      await page.evaluate(() => {
+        const { attachClosedFrame } = window as unknown as ClosedFrameWindow;
+        attachClosedFrame(document.querySelector('#inside')!, 'escaped');
+        attachClosedFrame(document.querySelector('#outside')!, 'inert');
+        document.querySelector('dialog')!.showModal();
+      });
+      await waitForSrcdocFrames(page, ['escaped', 'inert']);
+
+      expect((await runAxeScan(page, { rules: ['image-alt'] })).unscannedFrames).toEqual(['about:srcdoc (name="escaped")']);
     });
   });
 

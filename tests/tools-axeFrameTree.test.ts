@@ -62,7 +62,10 @@ describe('axe frame tree', () => {
     ]);
     await finishFrameTree(top, {});
 
-    expect(markersOf(finishRun.mock.calls[0][0])).toEqual(['top', 'a', null, 'c', null]);
+    const partials = finishRun.mock.calls[0][0];
+    expect(markersOf(partials)).toEqual(['top', 'a', null, 'c', null]);
+    expect(partials[2]).toBeNull();
+    expect(partials[4]).toBeNull();
   });
 
   it.each([

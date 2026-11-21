@@ -1399,10 +1399,7 @@ describe('collectElementFacts in a real page', () => {
     }
   });
 
-  it('does not take a page\'s own axe for its copy when the build cannot replace it', async () => {
-    // The build assigns window.axe in sloppy mode; on a page whose axe is not
-    // writable that assignment does nothing, and the page's object must not
-    // be trusted for names.
+  it('measures names with its own copy, never the page\'s, when the page\'s axe cannot be replaced', async () => {
     const page = await browser!.newPage();
     await page.setContent(`<a id="docs" href="/docs"><strong>Docs</strong></a>`);
     await page.evaluate(() => {
@@ -1410,10 +1407,10 @@ describe('collectElementFacts in a real page', () => {
     });
     const handle = await page.$('#docs');
 
-    expect(await injectAxe(page.mainFrame())).toBe(false);
-    expect(await page.evaluate(() => [(window as any).axe, typeof (window as any).__mcpAccessibilityScannerAxe])).toEqual([{ theirs: true }, 'undefined']);
+    expect(await injectAxe(page.mainFrame())).toBe(true);
+    expect(await page.evaluate(() => [(window as any).axe, typeof (window as any).__mcpAccessibilityScannerAxe?.commons])).toEqual([{ theirs: true }, 'object']);
     const [facts] = await page.evaluate(collectElementFacts, [handle] as any);
-    expect([facts.accessibleName, facts.nameMeasured]).toEqual([null, false]);
+    expect([facts.accessibleName, facts.nameMeasured]).toEqual(['Docs', true]);
     await page.close();
   });
 

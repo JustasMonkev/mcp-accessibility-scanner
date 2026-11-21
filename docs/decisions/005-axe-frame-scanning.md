@@ -10,15 +10,25 @@ Accepted for #361, 2026-11-21. Replaces the `axe.run` and frame-messaging integr
 
 ## Decisions
 
-**Axe chooses the frames, Playwright drives them, Node merges.** In each document, `axe.utils.getFrameContexts` returns the child frames axe would scan, with the context for each. That applies axe's own scope, visibility and shadow-DOM rules. The server runs `axe.runPartial` in each of those frames through Playwright, at most four siblings at a time, and merges the results with `axe.finishRun` in Node.
+**Axe chooses the frames, Playwright drives them, Node merges.** In each document, `axe.utils.getFrameContexts` returns the child frames axe would scan, with the context for each. That applies axe's own scope, visibility and shadow-DOM rules. The server runs `axe.runPartial` in each of those frames through Playwright and merges the results with `axe.finishRun` in Node. At most four frames do their own resolve, install and `runPartial` work at once across the whole scan. A frame releases its slot before its descendants start, so a deep tree cannot deadlock.
 
-`finishRun` needs no DOM. Running it in Node rather than in a page keeps findings from cross-origin frames away from third-party page script. The scan never chooses frames by walking Playwright's frame list. That list is consulted only to find frames axe could not see (below) and to skip the frame lookup in documents with no child frames.
+`finishRun` needs no DOM. Running it in Node rather than in a page keeps findings from cross-origin frames away from third-party page script. The scan never chooses frames by walking Playwright's frame list. That list is consulted only to find frames axe could not see (below), and to find a child frame when Playwright's `contentFrame()` cannot resolve an element.
 
-**A private axe global.** axe installs under `window.__mcpAccessibilityScannerAxe`, and `window.axe` is restored afterwards. A page that ships its own axe-core, or replaces `window.axe`, can neither replace this build nor be replaced by it.
+**A private axe global, installed without relying on `window.axe`.** The bundle runs with a local `module` (and an undefined `define`), so its instance is captured from `module.exports` rather than read back from `window.axe`. A page that locks `window.axe` (non-writable or getter-only) is therefore still scannable. `window.axe` is restored or deleted afterwards, and the instance is kept under `window.__mcpAccessibilityScannerAxe`. Each instance gets a no-op `frameMessenger`, which removes the `message` listener its load registered: neither `runPartial` nor a plain run with `iframes: false` uses frame messaging, and repeated scans would otherwise keep every earlier instance alive.
 
 **Frame elements are captured at selection.** `getFrameContexts` identifies frames by positional selectors (`iframe:nth-child(2)`). The iframe elements are resolved in the same in-page task that selects them, and each child is reached through its own element handle. Resolving the selectors later could land on a different frame once an earlier sibling is removed, which would file that frame's findings under the wrong slot.
 
-**One page call per frame; a plain run when there is nothing to visit.** `scanInPage` either returns a partial result, or, for the top frame only, a finished `axe.run` report when axe names no frame to visit. A child frame's result cannot stand alone, because `finishRun` needs it. `axe.run` builds node selectors only for the nodes it reports, whereas `runPartial` serializes every node it touched, so the plain run is cheaper. A document that Playwright reports as having no child frames skips `getFrameContexts`, which would rebuild axe's whole flattened tree just to find none.
+Two resolution steps have fallbacks, because both fail in XHTML documents:
+- **Selector lookup.** axe lowercases element names in the selectors it generates, so `foreignObject` becomes `foreignobject`, and `shadowSelect` finds nothing in a case-sensitive document. When it returns null, the selector is followed step by step through the real tree, matching names case-insensitively and honouring `:nth-child`.
+- **Element to frame.** Playwright's `contentFrame()` recognises frames by an uppercase `nodeName`, which XHTML does not report. When it returns null, the child frame whose own element is the captured element is used.
+
+A frame that is genuinely detached still resolves to nothing and is reported.
+
+**One page call per frame; a plain run when there is nothing to visit.** `scanInPage` either returns a partial result, or, for the top frame only, a finished `axe.run` report when axe names no frame to visit. A child frame's result cannot stand alone, because `finishRun` needs it. `axe.run` builds node selectors only for the nodes it reports, whereas `runPartial` serializes every node it touched, so the plain run is cheaper.
+
+The plain report is projected in the page to the fields the scanner returns, by the same `projectReport` that projects `finishRun`'s report in Node. Check details and the nodes of passing and inapplicable rules never cross the protocol: about a third of the payload on a page with 250 failing images.
+
+Whether a document may contain frames is decided in the page, in the same task as frame selection, so the answer cannot go stale. `window.length` counts the frames in the document tree but not those in shadow trees, so open shadow roots are also searched for `iframe` and `frame` elements. Only when both find nothing does the scan skip `getFrameContexts`, which would rebuild axe's whole flattened tree just to find none. A frame count read from Node beforehand could miss a frame inserted before the page call. The top frame would then run with `iframes: false` and silently skip it, and a child's `runPartial` could find more frames than were recorded and fail the scan.
 
 **Payloads cross the protocol as JSON strings.** A string is about twice as fast as Playwright's structured serialization at partial-result sizes. A partial result stays a string until `finishFrameTree` parses it, because `finishRun` writes frame specs into its input. Each call therefore gets fresh objects, and no defensive deep copy is needed (that copy measured about 10 ms per frame).
 
@@ -44,9 +54,10 @@ A descendant that hangs costs only itself; its parent and siblings keep their fi
 
 - it sits in a closed shadow root, judged on the *tree path* (parents, then shadow hosts), which decides whether axe could see it;
 - the browser renders it (`checkVisibility()`). The browser's answer is final: a `<summary>` slotted into a closed `<details>` through a `<slot>` is not the details' own summary, so it stays collapsed even though the light DOM suggests otherwise;
-- no ancestor on the *composed path* (which also follows slot assignment, as assistive technology does) is `aria-hidden="true"` or `inert`;
-- it is not outside an open modal dialog. A modal makes everything outside it inert with no attribute, so modals are searched in the document, every open shadow root, and the closed roots on the frame's own path;
-- for top-level frames, it lies inside `includeSelectors` and outside `excludeSelectors`. These are resolved with `document.querySelectorAll` in the top document, exactly as the scan resolves them, so a selector that matches only inside a shadow root scopes nothing. Inside a frame axe already scanned, everything is in scope.
+- no ancestor on the *composed path* (which also follows slot assignment, as assistive technology does) is `aria-hidden="true"`;
+- no ancestor up to and including the nearest enclosing modal dialog is `inert`. A modal dialog escapes the inertness of its ancestors, so `inert` above it does not count;
+- it is inside the topmost open modal, when modals are open. Every other open modal is inert, with no attribute to show for it. The topmost modal is the one that wins a hit test at its own centre, since the modals above it, and their backdrops, cover it. Modals are searched in the document, every open shadow root, and the closed roots on the frame's own path;
+- for top-level frames, it is in scope by axe's own rule. The closest matching `includeSelectors` ancestor must be at least as close as the closest matching `excludeSelectors` ancestor, and include wins a tie. Selectors are resolved with `document.querySelectorAll` in the top document, exactly as the scan resolves them, so a selector that matches only inside a shadow root scopes nothing. Inside a frame axe already scanned, everything is in scope.
 
 A frame whose element cannot be read is not listed. Most unvisited frames are ones axe skipped on purpose, and an unreadable element usually means the frame detached mid-scan. Guessing would turn every detached frame into a false alarm.
 

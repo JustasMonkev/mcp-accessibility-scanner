@@ -10,6 +10,7 @@ import type { ElementHandle, Frame, JSHandle, Page } from 'playwright';
 declare global {
   interface Window {
     __mcpAccessibilityScannerAxe?: typeof axe;
+    __mcpAccessibilityScannerProjectReport?: (results: axe.AxeResults) => Omit<AxeScanResult, 'unscannedFrames'>;
   }
 }
 
@@ -146,21 +147,50 @@ async function assertScopeSelectorsResolve(
     throw new Error(`No elements matched includeSelectors: ${unmatched.join(', ')}. The scan would have silently covered less of the page than requested.`);
 }
 
+type ScanFindings = Omit<AxeScanResult, 'unscannedFrames'>;
+
+function projectReport(results: axe.AxeResults): ScanFindings {
+  const findings = (rules: axe.Result[]) => rules.map(rule => ({
+    id: rule.id,
+    impact: rule.impact,
+    tags: rule.tags,
+    help: rule.help,
+    helpUrl: rule.helpUrl,
+    description: rule.description,
+    nodes: rule.nodes.map(node => ({
+      target: node.target,
+      html: node.html,
+      failureSummary: node.failureSummary ?? null,
+    })),
+  }));
+  return {
+    url: results.url,
+    violations: findings(results.violations),
+    incomplete: findings(results.incomplete),
+    passes: results.passes.map(rule => ({ id: rule.id })),
+    inapplicable: results.inapplicable.map(rule => ({ id: rule.id })),
+  };
+}
+
 const axePrivateGlobal = '__mcpAccessibilityScannerAxe' satisfies keyof Window;
+const projectReportGlobal = '__mcpAccessibilityScannerProjectReport' satisfies keyof Window;
 const axePrivateSource = [
   '(() => {',
+  'const module = { exports: {} };',
+  'const define = undefined;',
   'const hadAxe = \'axe\' in window;',
   'const pageAxe = window.axe;',
-  'let installed;',
   'try {',
   axe.source,
-  'installed = window.axe;',
   '} finally {',
-  'if (hadAxe) window.axe = pageAxe; else delete window.axe;',
+  'try { if (!hadAxe) delete window.axe; else if (window.axe !== pageAxe) window.axe = pageAxe; } catch {}',
   '}',
-  `if (!installed || installed === pageAxe) throw new Error('axe-core was not installed');`,
+  'const installed = module.exports;',
+  `if (typeof installed.runPartial !== 'function') throw new Error('axe-core was not installed');`,
+  'installed.frameMessenger({ open() {}, post() { return false; } });',
   `installed.configure({ branding: { application: 'playwright' } });`,
   `window[${JSON.stringify(axePrivateGlobal)}] = installed;`,
+  `window[${JSON.stringify(projectReportGlobal)}] = ${projectReport.toString()};`,
   '})();',
 ].join('\n');
 
@@ -214,6 +244,28 @@ export async function withConcurrency<T, R>(items: readonly T[], run: (item: T) 
   return results;
 }
 
+type WorkLimit = <T>(work: () => Promise<T>) => Promise<T>;
+
+function createWorkLimit(limit: number): WorkLimit {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  return async work => {
+    if (active < limit)
+      active++;
+    else
+      await new Promise<void>(resolve => waiting.push(resolve));
+    try {
+      return await work();
+    } finally {
+      const next = waiting.shift();
+      if (next)
+        next();
+      else
+        active--;
+    }
+  };
+}
+
 const maxFrameNameLength = 80;
 const maxFrameUrlLength = 2048;
 
@@ -236,7 +288,7 @@ type FrameScan = {
   children: SelectedChild[];
 };
 
-type PlainReport = { report: axe.AxeResults };
+type PlainReport = { report: ScanFindings };
 
 type FrameRunInfo = {
   childFrames: axe.FrameContext[];
@@ -247,12 +299,55 @@ type FrameRunInfo = {
 type UserScope = { include: string[], exclude: string[] };
 const noScope: UserScope = { include: [], exclude: [] };
 
-async function scanInPage({ context, options, allowPlainRun, hasChildFrames }: { context: ScanContext, options: axe.RunOptions, allowPlainRun: boolean, hasChildFrames: boolean }): Promise<[FrameRunInfo, string, ...(Element | null)[]]> {
+type FrameWalk = { options: axe.RunOptions, limit: WorkLimit };
+
+async function scanInPage({ context, options, allowPlainRun }: { context: ScanContext, options: axe.RunOptions, allowPlainRun: boolean }): Promise<[FrameRunInfo, string, ...(Element | null)[]]> {
   const instance = window.__mcpAccessibilityScannerAxe!;
-  const childFrames = hasChildFrames ? instance.utils.getFrameContexts(context, options) : [];
-  if (allowPlainRun && !childFrames.length)
-    return [{ childFrames, frameCount: 0, plainRun: true }, JSON.stringify(await instance.run(context, { ...options, iframes: false }))];
-  const frameElements = childFrames.map(({ frameSelector }) => instance.utils.shadowSelect(frameSelector));
+  const mayContainFrames = () => {
+    if (window.length)
+      return true;
+    const roots: ParentNode[] = [document];
+    for (const root of roots) {
+      for (const element of root.querySelectorAll('*')) {
+        if (!element.shadowRoot)
+          continue;
+        if (element.shadowRoot.querySelector('iframe, frame'))
+          return true;
+        roots.push(element.shadowRoot);
+      }
+    }
+    return false;
+  };
+  const followAncestry = (selector: axe.CrossTreeSelector) => {
+    let root: Document | ShadowRoot | null = document;
+    let element: Element | null = null;
+    for (const treeSelector of [selector].flat()) {
+      let children: Element[] = root ? [...root.children] : [];
+      element = null;
+      for (const step of String(treeSelector).split(' > ')) {
+        const [, escapedName, position] = /^(.+?)(?::nth-child\((\d+)\))?$/.exec(step.trim()) ?? [];
+        const name = escapedName?.replace(/\\(.)/g, '$1').toLowerCase();
+        const candidate: Element | undefined = position ? children[Number(position) - 1] : children.find(child => child.localName.toLowerCase() === name);
+        if (!name || candidate?.localName.toLowerCase() !== name)
+          return null;
+        element = candidate;
+        children = [...candidate.children];
+      }
+      root = element?.shadowRoot ?? null;
+    }
+    return element;
+  };
+  const selectFrame = (selector: axe.CrossTreeSelector) => {
+    const element = instance.utils.shadowSelect(selector) ?? followAncestry(selector);
+    return element && ['iframe', 'frame'].includes(element.localName.toLowerCase()) ? element : null;
+  };
+
+  const childFrames = mayContainFrames() ? instance.utils.getFrameContexts(context, options) : [];
+  if (allowPlainRun && !childFrames.length) {
+    const report = window.__mcpAccessibilityScannerProjectReport!(await instance.run(context, { ...options, iframes: false }));
+    return [{ childFrames, frameCount: 0, plainRun: true }, JSON.stringify(report)];
+  }
+  const frameElements = childFrames.map(({ frameSelector }) => selectFrame(frameSelector));
   const partial = await instance.runPartial(context, options);
   return [{ childFrames, frameCount: partial.frames.length, plainRun: false }, JSON.stringify(partial), ...frameElements];
 }
@@ -274,7 +369,11 @@ function isInScopeClosedShadowFrame(frameElement: Element, scope: UserScope): bo
     return false;
 
   const composedPath = pathFrom(element => element.assignedSlot ?? parentOf(element));
-  if (composedPath.some(element => element.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true' || element.hasAttribute('inert')))
+  if (composedPath.some(element => element.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true'))
+    return false;
+  const enclosingModal = composedPath.findIndex(element => element.matches('dialog:modal'));
+  const inertCandidates = enclosingModal === -1 ? composedPath : composedPath.slice(0, enclosingModal + 1);
+  if (inertCandidates.some(element => element.hasAttribute('inert')))
     return false;
 
   const roots: (Document | ShadowRoot)[] = [document, ...new Set(ownRoots)];
@@ -284,12 +383,24 @@ function isInScopeClosedShadowFrame(frameElement: Element, scope: UserScope): bo
         roots.push(element.shadowRoot);
     }
   }
+  const isTopmostModal = (modal: Element) => {
+    const box = modal.getBoundingClientRect();
+    if (!box.width || !box.height)
+      return true;
+    const [hit] = (modal.getRootNode() as Document | ShadowRoot).elementsFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return !hit || modal.contains(hit);
+  };
   const modals = roots.flatMap(root => [...root.querySelectorAll('dialog:modal')]);
-  if (modals.length && !modals.some(modal => composedPath.includes(modal)))
+  if (modals.length && !modals.filter(isTopmostModal).some(modal => composedPath.includes(modal)))
     return false;
 
-  const contains = (selector: string) => [...document.querySelectorAll(selector)].some(element => treePath.includes(element));
-  return !scope.exclude.some(contains) && (!scope.include.length || scope.include.some(contains));
+  const closestMatch = (selectors: string[]) => {
+    const matches = new Set(selectors.flatMap(selector => [...document.querySelectorAll(selector)]));
+    const depth = treePath.findIndex(element => matches.has(element));
+    return depth === -1 ? Infinity : depth;
+  };
+  const include = scope.include.length ? closestMatch(scope.include) : treePath.length;
+  return include !== Infinity && include <= closestMatch(scope.exclude);
 }
 
 async function readFrameElement<T>(frame: Frame, fallback: T, read: (element: ElementHandle) => Promise<T>): Promise<T> {
@@ -315,7 +426,7 @@ async function closedShadowFrames(frame: Frame, visited: ReadonlySet<Frame>, sco
 function scanIn(frame: Frame, context: ScanContext, options: axe.RunOptions): Promise<FrameScan>;
 function scanIn(frame: Frame, context: ScanContext, options: axe.RunOptions, allowPlainRun: true): Promise<FrameScan | PlainReport>;
 async function scanIn(frame: Frame, context: ScanContext, options: axe.RunOptions, allowPlainRun = false): Promise<FrameScan | PlainReport> {
-  const result = await frame.evaluateHandle(scanInPage, { context, options, allowPlainRun, hasChildFrames: frame.childFrames().length > 0 });
+  const result = await frame.evaluateHandle(scanInPage, { context, options, allowPlainRun });
   let properties: Map<string, JSHandle>;
   try {
     properties = await result.getProperties();
@@ -327,7 +438,7 @@ async function scanIn(frame: Frame, context: ScanContext, options: axe.RunOption
     const { childFrames, frameCount, plainRun } = await properties.get('0')!.jsonValue() as FrameRunInfo;
     const json = await properties.get('1')!.jsonValue() as string;
     if (plainRun)
-      return { report: JSON.parse(json) as axe.AxeResults };
+      return { report: JSON.parse(json) as ScanFindings };
     children = childFrames.map((context, index) => ({ context, element: properties.get(String(index + 2))?.asElement() ?? null }));
     return { partial: { json, frameCount }, children };
   } finally {
@@ -344,8 +455,10 @@ type ChildRun = {
   frame?: Frame;
 };
 
-async function scanDescendants(frame: Frame, scan: FrameScan, options: axe.RunOptions, scope: UserScope): Promise<ScannedFrame> {
-  const children = await withConcurrency(scan.children, child => runChildFrame(frame, child, options));
+type OwnScan = { frame: Frame, scan: FrameScan };
+
+async function scanDescendants(frame: Frame, scan: FrameScan, walk: FrameWalk, scope: UserScope): Promise<ScannedFrame> {
+  const children = await Promise.all(scan.children.map(child => runChildFrame(frame, child, walk)));
   const visited = new Set(children.flatMap(run => run.frame ? [run.frame] : []));
   return scannedFrame(scan.partial, children.map(run => run.outcome), await closedShadowFrames(frame, visited, scope));
 }
@@ -355,8 +468,26 @@ async function canRunAxe(frame: Frame): Promise<boolean> {
     && await withFrameTimeout(frame.evaluate(() => new Promise<boolean>(resolve => setTimeout(() => resolve(true)))), false, childFrameLivenessTimeoutMs);
 }
 
-async function runChildFrame(parent: Frame, { context, element }: SelectedChild, options: axe.RunOptions): Promise<ChildRun> {
-  const child = element && await withFrameTimeout(element.contentFrame(), null, childFrameCallTimeoutMs);
+async function contentFrameOf(parent: Frame, element: ElementHandle): Promise<Frame | null> {
+  const direct = await element.contentFrame();
+  if (direct)
+    return direct;
+  for (const candidate of parent.childFrames()) {
+    const owner = await candidate.frameElement().catch(() => null);
+    if (!owner)
+      continue;
+    try {
+      if (await element.evaluate((node, other) => node === other, owner))
+        return candidate;
+    } finally {
+      await owner.dispose().catch(() => {});
+    }
+  }
+  return null;
+}
+
+async function scanOwnFrame(parent: Frame, { context, element }: SelectedChild, options: axe.RunOptions): Promise<ChildRun | OwnScan> {
+  const child = element && await withFrameTimeout(contentFrameOf(parent, element), null, childFrameCallTimeoutMs);
   void element?.dispose().catch(() => {});
   if (!child)
     return { outcome: unscannedFrame(`${describeFrame(parent)} > ${[context.frameSelector].flat().join(' >>> ')}`) };
@@ -369,31 +500,22 @@ async function runChildFrame(parent: Frame, { context, element }: SelectedChild,
     void pending.then(late => late.children.forEach(({ element }) => void element?.dispose().catch(() => {})), () => {});
     return failed;
   }
-  return { outcome: await scanDescendants(child, scan, options, noScope), frame: child };
+  return { frame: child, scan };
 }
 
-function findingsOf(rules: axe.Result[]): AxeViolation[] {
-  return rules.map(rule => ({
-    id: rule.id,
-    impact: rule.impact,
-    tags: rule.tags,
-    help: rule.help,
-    helpUrl: rule.helpUrl,
-    description: rule.description,
-    nodes: rule.nodes.map(node => ({
-      target: node.target,
-      html: node.html,
-      failureSummary: node.failureSummary ?? null,
-    })),
-  }));
+async function runChildFrame(parent: Frame, child: SelectedChild, walk: FrameWalk): Promise<ChildRun> {
+  const own = await walk.limit(() => scanOwnFrame(parent, child, walk.options));
+  if ('outcome' in own)
+    return own;
+  return { outcome: await scanDescendants(own.frame, own.scan, walk, noScope), frame: own.frame };
 }
 
-async function scanFrameTree(mainFrame: Frame, context: ScanContext, options: axe.RunOptions, scope: UserScope): Promise<{ results: axe.AxeResults, unscannedFrames: string[] }> {
+async function scanFrameTree(mainFrame: Frame, context: ScanContext, options: axe.RunOptions, scope: UserScope): Promise<ScanFindings & { unscannedFrames: string[] }> {
   const scan = await scanIn(mainFrame, context, options, true);
   if ('report' in scan)
-    return { results: scan.report, unscannedFrames: await closedShadowFrames(mainFrame, new Set(), scope) };
-  const top = await scanDescendants(mainFrame, scan, options, scope);
-  return { results: await finishFrameTree(top, options), unscannedFrames: unscannedFramesOf(top) };
+    return { ...scan.report, unscannedFrames: await closedShadowFrames(mainFrame, new Set(), scope) };
+  const top = await scanDescendants(mainFrame, scan, { options, limit: createWorkLimit(frameConcurrency) }, scope);
+  return { ...projectReport(await finishFrameTree(top, options)), unscannedFrames: unscannedFramesOf(top) };
 }
 
 export async function runAxeScan(page: Page, options: AxeScanOptions = {}): Promise<AxeScanResult> {
@@ -414,15 +536,7 @@ export async function runAxeScan(page: Page, options: AxeScanOptions = {}): Prom
 
   const mainFrame = page.mainFrame();
   await installAxe(mainFrame);
-  const { results, unscannedFrames } = await scanFrameTree(mainFrame, context, axeOptions, scope);
-  return {
-    url: results.url,
-    violations: findingsOf(results.violations),
-    incomplete: findingsOf(results.incomplete),
-    passes: results.passes.map(rule => ({ id: rule.id })),
-    inapplicable: results.inapplicable.map(rule => ({ id: rule.id })),
-    unscannedFrames,
-  };
+  return scanFrameTree(mainFrame, context, axeOptions, scope);
 }
 
 export function unscannedFrameLines(

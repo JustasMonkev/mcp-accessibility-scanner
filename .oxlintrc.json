@@ -272,12 +272,18 @@
         "tests/tools-axeFrameTree.test.ts"
       ],
       "rules": {
+        "comments/no-comments": "error"
+      }
+    },
+    {
+      "files": [
+        "tests/tools-axe.test.ts"
+      ],
+      "rules": {
         "comments/no-comments": [
           "error",
           {
-            "baseline": {
-              "tests/tools-axe.test.ts": 29
-            }
+            "allowed": 29
           }
         ]
       }
