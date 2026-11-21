@@ -44,10 +44,6 @@ const browserSessionIdProperty = {
   description: 'Browser session to run this tool in, as returned by browser_session_open. Omit to use the default session.',
 } as const satisfies ToolInputSchemaProperty;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function toBrowserMcpTool(tool: Tool): mcpServer.Tool {
   const mcpTool = toMcpTool(tool.schema);
   if (!sessionManagementTools.has(tool.schema.name))
@@ -57,10 +53,7 @@ function toBrowserMcpTool(tool: Tool): mcpServer.Tool {
 
 function parseToolArguments(tool: Tool, rawArguments: mcpServer.CallToolRequest['params']['arguments']): Record<string, unknown> {
   try {
-    const parsed: unknown = tool.schema.inputSchema.parse(rawArguments ?? {});
-    if (!isRecord(parsed))
-      throw new Error(`Invalid input for tool "${tool.schema.name}": expected an object.`);
-    return parsed;
+    return tool.schema.inputSchema.parse(rawArguments ?? {});
   } catch (error) {
     if (error instanceof z.ZodError)
       throw new Error(`Invalid input for tool "${tool.schema.name}":\n${z.prettifyError(error)}`, { cause: error });
