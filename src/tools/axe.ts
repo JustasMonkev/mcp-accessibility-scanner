@@ -2,7 +2,9 @@ import axe from 'axe-core/axe.min.js';
 import { z } from 'zod';
 
 import { truncateDataUrls } from '../utils/dataUrl.js';
+import { finishFrameTree, scannedFrame, unscannedFrame, unscannedFramesOf } from './axeFrameTree.js';
 
+import type { FrameOutcome, ScannedFrame, SerializedPartial } from './axeFrameTree.js';
 import type { ElementHandle, Frame, Page } from 'playwright';
 
 declare global {
@@ -231,15 +233,22 @@ function describeFrame(frame: Frame): string {
 // and what getFrameContexts hands back for each child frame.
 type ScanContext = axe.SerialContextObject | axe.FrameContextObject;
 
-type FramePartial = {
-  partial: axe.PartialResult;
-  childFrames: axe.FrameContext[];
+type SelectedChild = {
+  context: axe.FrameContext;
+  // The iframe element axe selected, captured with it; null when its selector
+  // no longer resolved by the time it was captured.
+  element: ElementHandle | null;
 };
 
-type FrameScan = FramePartial & {
-  // One per childFrames entry: the iframe element axe selected, or null when
-  // its selector no longer resolved by the time it was captured.
-  frameElements: (ElementHandle | null)[];
+type FrameScan = {
+  partial: SerializedPartial;
+  children: SelectedChild[];
+};
+
+// What the page reports about one frame's run, apart from the partial itself.
+type FrameRunInfo = {
+  childFrames: axe.FrameContext[];
+  frameCount: number;
 };
 
 // The caller's selectors, which apply in the top document only.
@@ -253,15 +262,16 @@ const noScope: UserScope = { include: [], exclude: [] };
 // could land on a different frame once an earlier sibling is removed.
 //
 // The partial result carries every passing and inapplicable node too (axe only
-// applies resultTypes in finishRun), and it crosses the protocol as one JSON
+// applies resultTypes in finishRun), and it crosses the protocol as a JSON
 // string because that is roughly twice as fast as Playwright's structured
-// serialization for a payload of this size.
-async function runPartialInPage({ context, options }: { context: ScanContext, options: axe.RunOptions }): Promise<[string, ...(Element | null)[]]> {
+// serialization for a payload of this size. It stays a string until finishRun.
+async function runPartialInPage({ context, options }: { context: ScanContext, options: axe.RunOptions }): Promise<[string, string, ...(Element | null)[]]> {
   const instance = window.__mcpAccessibilityScannerAxe!;
   const childFrames = instance.utils.getFrameContexts(context, options);
   const frameElements = childFrames.map(({ frameSelector }) => instance.utils.shadowSelect(frameSelector));
   const partial = await instance.runPartial(context, options);
-  return [JSON.stringify({ partial, childFrames } satisfies FramePartial), ...frameElements];
+  const info: FrameRunInfo = { childFrames, frameCount: partial.frames.length };
+  return [JSON.stringify(info), JSON.stringify(partial), ...frameElements];
 }
 
 // Runs in the page. A document with no frames to visit is scanned with a plain
@@ -320,42 +330,34 @@ async function closedShadowFrames(frame: Frame, visited: ReadonlySet<Frame>, sco
   return unvisited.filter((_, index) => gaps[index]).map(describeFrame);
 }
 
-function disposeAll(handles: readonly (ElementHandle | null)[]) {
-  for (const handle of handles)
-    void handle?.dispose().catch(() => {});
+function disposeAll(children: readonly SelectedChild[]) {
+  for (const { element } of children)
+    void element?.dispose().catch(() => {});
 }
 
 async function runPartialIn(frame: Frame, context: ScanContext, options: axe.RunOptions): Promise<FrameScan> {
   const result = await frame.evaluateHandle(runPartialInPage, { context, options });
   try {
     const properties = await result.getProperties();
-    const { partial, childFrames } = JSON.parse(await properties.get('0')!.jsonValue() as string) as FramePartial;
-    const frameElements = childFrames.map((_, index) => properties.get(String(index + 1))?.asElement() ?? null);
-    return { partial, childFrames, frameElements };
+    const { childFrames, frameCount } = JSON.parse(await properties.get('0')!.jsonValue() as string) as FrameRunInfo;
+    const json = await properties.get('1')!.jsonValue() as string;
+    const children = childFrames.map((context, index) => ({ context, element: properties.get(String(index + 2))?.asElement() ?? null }));
+    return { partial: { json, frameCount }, children };
   } finally {
     await result.dispose().catch(() => {});
   }
 }
 
-type PartialRun = {
-  // In the order finishRun requires: each frame, then its descendants, then
-  // its next sibling. A frame that could not run is a null with no descendants.
-  partials: axe.PartialResults;
-  unscannedFrames: string[];
+type ChildRun = {
+  outcome: FrameOutcome;
   // The child frame this run resolved to, whether or not it could be scanned.
   frame?: Frame;
 };
 
-async function scanDescendants(frame: Frame, scan: FrameScan, options: axe.RunOptions, scope: UserScope): Promise<PartialRun> {
-  const children = await withConcurrency(
-      scan.childFrames.map((child, index) => ({ child, element: scan.frameElements[index] })),
-      ({ child, element }) => runChildFrame(frame, child, element, options),
-  );
+async function scanDescendants(frame: Frame, scan: FrameScan, options: axe.RunOptions, scope: UserScope): Promise<ScannedFrame> {
+  const children = await withConcurrency(scan.children, child => runChildFrame(frame, child, options));
   const visited = new Set(children.flatMap(run => run.frame ? [run.frame] : []));
-  return {
-    partials: [scan.partial, ...children.flatMap(run => run.partials)],
-    unscannedFrames: [...children.flatMap(run => run.unscannedFrames), ...await closedShadowFrames(frame, visited, scope)],
-  };
+  return scannedFrame(scan.partial, children.map(run => run.outcome), await closedShadowFrames(frame, visited, scope));
 }
 
 // The counterpart of axe.run's frame ping. Injection alone is not enough: a
@@ -366,25 +368,25 @@ async function canRunAxe(frame: Frame): Promise<boolean> {
     && await withFrameTimeout(frame.evaluate(() => new Promise<boolean>(resolve => setTimeout(() => resolve(true)))), false, childFrameLivenessTimeoutMs);
 }
 
-// A child frame that cannot be resolved, injected or run becomes a null in
-// place of its results, which tells finishRun to skip it and its descendants.
-// The run budget covers only this frame's own runPartial: a descendant that
-// hangs costs that descendant alone, never the findings already collected.
-async function runChildFrame(parent: Frame, { frameSelector, frameContext }: axe.FrameContext, element: ElementHandle | null, options: axe.RunOptions): Promise<PartialRun> {
+// A child frame that cannot be resolved, injected or run is recorded as
+// unscanned, which finishRun skips along with everything below it. The run
+// budget covers only this frame's own runPartial: a descendant that hangs
+// costs that descendant alone, never the findings already collected.
+async function runChildFrame(parent: Frame, { context, element }: SelectedChild, options: axe.RunOptions): Promise<ChildRun> {
   const child = element && await withFrameTimeout(element.contentFrame(), null);
   void element?.dispose().catch(() => {});
   if (!child)
-    return { partials: [null], unscannedFrames: [`${describeFrame(parent)} > ${[frameSelector].flat().join(' >>> ')}`] };
-  const failed: PartialRun = { partials: [null], unscannedFrames: [describeFrame(child)], frame: child };
+    return { outcome: unscannedFrame(`${describeFrame(parent)} > ${[context.frameSelector].flat().join(' >>> ')}`) };
+  const failed: ChildRun = { outcome: unscannedFrame(describeFrame(child)), frame: child };
   if (!await canRunAxe(child))
     return failed;
-  const pending = runPartialIn(child, frameContext, options);
+  const pending = runPartialIn(child, context.frameContext, options);
   const scan = await withFrameTimeout<FrameScan | null>(pending, null, childFrameRunTimeoutMs);
   if (!scan) {
-    void pending.then(late => disposeAll(late.frameElements), () => {});
+    void pending.then(late => disposeAll(late.children), () => {});
     return failed;
   }
-  return { ...await scanDescendants(child, scan, options, noScope), frame: child };
+  return { outcome: await scanDescendants(child, scan, options, noScope), frame: child };
 }
 
 function findingsOf(rules: axe.Result[]): AxeViolation[] {
@@ -407,11 +409,11 @@ async function scanFrameTree(mainFrame: Frame, context: ScanContext, options: ax
   const withoutFrames = await mainFrame.evaluate(runWithoutFramesInPage, { context, options });
   if (withoutFrames !== null)
     return { results: JSON.parse(withoutFrames) as axe.AxeResults, unscannedFrames: await closedShadowFrames(mainFrame, new Set(), scope) };
-  const { partials, unscannedFrames } = await scanDescendants(mainFrame, await runPartialIn(mainFrame, context, options), options, scope);
+  const top = await scanDescendants(mainFrame, await runPartialIn(mainFrame, context, options), options, scope);
   // finishRun merges every frame's results and runs the cross-frame `after`
   // checks. It needs no DOM, so it runs here rather than in a page where third-
   // party script could read cross-origin frames' findings.
-  return { results: await axe.finishRun(partials, options), unscannedFrames };
+  return { results: await finishFrameTree(top, options), unscannedFrames: unscannedFramesOf(top) };
 }
 
 export async function runAxeScan(page: Page, options: AxeScanOptions = {}): Promise<AxeScanResult> {

@@ -53,6 +53,11 @@ function behave<T>(behavior: Behavior, value: T, error = new Error('Execution co
   return Promise.resolve(value);
 }
 
+const frameSpec = (child: FakeChild) => {
+  const selector = [child.selector].flat().join(' ');
+  return { selector: [selector], ancestry: [selector], xpath: [`/${selector}`], nodeIndexes: [0], source: '<iframe>' };
+};
+
 function makeFrame(url = 'https://example.com/', options: FakeFrameOptions = {}) {
   const children = options.children ?? [];
   // Every element handle the frame hands out, to check disposal.
@@ -60,16 +65,23 @@ function makeFrame(url = 'https://example.com/', options: FakeFrameOptions = {})
   const evaluateHandle = vi.fn(async (_script: unknown, arg: any) => {
     scanCalls.push({ url, context: arg.context, options: arg.options });
     // The page hands back [json, ...iframe elements] as one array handle.
-    const json = JSON.stringify({
-      // Only the initiating (top) frame carries environment data; the marker
-      // lets tests read back which frame each partial came from.
-      partial: { results: [], frames: [], environmentData: arg.context.initiator === false ? undefined : environmentData(url), marker: url },
+    // The page hands back [run info, partial, ...iframe elements] as one array
+    // handle, the two JSON payloads as strings.
+    const info = JSON.stringify({
       childFrames: children.map(child => ({
         frameSelector: child.selector,
         frameContext: child.context ?? { include: [], exclude: [], initiator: false },
       })),
+      frameCount: children.length,
     });
-    const properties = new Map<string, unknown>([['0', { jsonValue: async () => json, asElement: () => null }]]);
+    // Only the initiating (top) frame carries environment data; partial.frames
+    // holds one serialized element per selected child frame, as runPartial
+    // reports it; the marker lets tests read back which frame a partial is.
+    const partial = JSON.stringify({ results: [], frames: children.map(frameSpec), environmentData: arg.context.initiator === false ? undefined : environmentData(url), marker: url });
+    const properties = new Map<string, unknown>([
+      ['0', { jsonValue: async () => info, asElement: () => null }],
+      ['1', { jsonValue: async () => partial, asElement: () => null }],
+    ]);
     children.forEach((child, index) => {
       const element = child.element === 'missing' ? null : {
         contentFrame: () => behave(child.lookup ?? 'ok', child.frame),
@@ -77,7 +89,7 @@ function makeFrame(url = 'https://example.com/', options: FakeFrameOptions = {})
       };
       if (element)
         handles.push(element);
-      properties.set(String(index + 1), { asElement: () => element });
+      properties.set(String(index + 2), { asElement: () => element });
     });
     return behave(options.run ?? 'ok', { getProperties: async () => properties, dispose: async () => undefined }, runFailure);
   });
