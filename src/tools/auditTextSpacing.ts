@@ -42,10 +42,21 @@ type TextSpacingFinding = {
   fix: string;
 } & ({ check: 'text-clipped'; clip: Omit<TextSpacingClip, 'selector' | 'text'> } | { check: 'text-overlap'; overlap: Omit<TextSpacingOverlap, 'selector' | 'text'> });
 
-type FrameOutcome = { frame: Frame; frameUrl: string | null; measurement: TextSpacingFrameMeasurement | null; error: string | null };
+type FrameOutcome = {
+  frame: Frame;
+  frameUrl: string | null;
+  measurement: TextSpacingFrameMeasurement | null;
+  error: string | null;
+  evaluation: Promise<unknown>;
+};
 
 const mainFrameTimeoutMs = 15_000;
 const childFrameTimeoutMs = 5_000;
+// In-page budgets for discovery and the baseline, kept well under the host timeouts so the
+// page normally finishes, and removes its own overrides, before the host gives up on it.
+const mainFrameBudgetMs = 10_000;
+const childFrameBudgetMs = 3_000;
+const maxDiscoveryNodes = 100_000;
 const cleanupTimeoutMs = 2_000;
 const maxOverlapLines = 200;
 const maxBlockedSamples = 20;
@@ -132,17 +143,67 @@ async function cleanupFrame(frame: Frame): Promise<boolean> {
 
 async function measureFrame(frame: Frame, maxElements: number, layerName: string): Promise<FrameOutcome> {
   const frameUrl = frameLabel(frame);
-  const timeoutMs = frame.parentFrame() === null ? mainFrameTimeoutMs : childFrameTimeoutMs;
+  const isMain = frame.parentFrame() === null;
+  const timeoutMs = isMain ? mainFrameTimeoutMs : childFrameTimeoutMs;
+  const evaluation = frame.evaluate(measureTextSpacing, {
+    layerName,
+    maxElements,
+    maxOverlapLines,
+    maxNodes: maxDiscoveryNodes,
+    timeBudgetMs: isMain ? mainFrameBudgetMs : childFrameBudgetMs,
+    overrides: textSpacingOverrides,
+  });
   try {
-    const measurement = await rejectAfterTimeout(
-        frame.evaluate(measureTextSpacing, { layerName, maxElements, maxOverlapLines, overrides: textSpacingOverrides }),
-        timeoutMs,
-        `timed out after ${timeoutMs}ms`,
-    );
-    return { frame, frameUrl, measurement, error: null };
+    const measurement = await rejectAfterTimeout(evaluation, timeoutMs, `timed out after ${timeoutMs}ms`);
+    return { frame, frameUrl, measurement, error: null, evaluation };
   } catch (error) {
-    return { frame, frameUrl, measurement: null, error: errorMessage(error) };
+    return { frame, frameUrl, measurement: null, error: errorMessage(error), evaluation };
   }
+}
+
+/**
+ * A failed frame may still carry the overrides, and after a timeout its evaluation may still be
+ * running. Wait for that evaluation to end (bounded) before stripping the overrides, so the
+ * cleanup does not race the in-page work. Returns the frames whose cleanup could not be confirmed.
+ */
+async function releaseFailedFrames(outcomes: FrameOutcome[]): Promise<string[]> {
+  const failed = outcomes.flatMap(outcome => outcome.error !== null && !outcome.frame.isDetached() ? [outcome] : []);
+  const failures = await Promise.all(failed.map(async outcome => {
+    let ended = false;
+    await settleWithin(outcome.evaluation.finally(() => { ended = true; }), cleanupTimeoutMs);
+    const cleaned = await cleanupFrame(outcome.frame);
+    return ended && cleaned ? null : outcome.frameUrl ?? 'main frame';
+  }));
+  return failures.filter(failure => failure !== null);
+}
+
+async function captureWithOverrides(tab: Tab, outcomes: FrameOutcome[], layerName: string, cleanupFailures: string[]): Promise<{ path: string | null; error: string | null }> {
+  const styled = outcomes.flatMap(outcome => outcome.measurement !== null ? [outcome.frame] : []);
+  let path: string | null = null;
+  let error: string | null = null;
+  try {
+    const applied = await Promise.all(styled.map(frame => rejectAfterTimeout(
+        frame.evaluate(applyTextSpacing, { layerName, overrides: textSpacingOverrides }),
+        frame.parentFrame() === null ? mainFrameTimeoutMs : childFrameTimeoutMs,
+        'timed out',
+    ).then(() => true, () => false)));
+    const unstyled = styled.flatMap((frame, index) => applied[index] ? [] : [frameLabel(frame) ?? 'main frame']);
+    if (unstyled.length) {
+      error = `the overrides could not be re-applied to ${unstyled.join(', ')}`;
+    } else {
+      const file = await tab.context.outputFile(`audit-text-spacing-${safeIsoTimestampForFileName()}.png`);
+      await tab.page.screenshot({ path: file, fullPage: true }).then(
+          () => { path = file; },
+          captureError => { error = `the screenshot could not be captured (${errorMessage(captureError)})`; },
+      );
+    }
+  } finally {
+    for (const frame of styled) {
+      if (!frame.isDetached() && !await cleanupFrame(frame))
+        cleanupFailures.push(frameLabel(frame) ?? 'main frame');
+    }
+  }
+  return { path, error };
 }
 
 const auditTextSpacingSchema = z.object({
@@ -181,11 +242,7 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
     return outcome;
   });
 
-  const cleanupFailures: string[] = [];
-  for (const outcome of outcomes.filter(entry => entry.error !== null)) {
-    if (!outcome.frame.isDetached() && !await cleanupFrame(outcome.frame))
-      cleanupFailures.push(outcome.frameUrl ?? 'main frame');
-  }
+  const cleanupFailures = await releaseFailedFrames(outcomes);
 
   const main = outcomes.find(outcome => outcome.frame === tab.page.mainFrame());
   if (!main?.measurement)
@@ -213,35 +270,15 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
     truncated: outcomes.reduce((sum, outcome) => sum + (outcome.measurement?.truncated ?? 0), 0),
     stale: outcomes.reduce((sum, outcome) => sum + (outcome.measurement?.stale ?? 0), 0),
     overlapLinesTruncated: outcomes.reduce((sum, outcome) => sum + (outcome.measurement?.overlapLinesTruncated ?? 0), 0),
+    paragraphsTruncated: outcomes.reduce((sum, outcome) => sum + (outcome.measurement?.paragraphsTruncated ?? 0), 0),
   };
+  const partialFrames = outcomes.flatMap(outcome => outcome.measurement?.stoppedEarly
+    ? [{ frameUrl: outcome.frameUrl ?? 'main frame', stoppedBy: outcome.measurement.stoppedEarly }]
+    : []);
 
-  let screenshotPath: string | null = null;
-  let screenshotError: string | null = null;
-  if (params.screenshot) {
-    const styled = outcomes.filter(outcome => outcome.measurement !== null).map(outcome => outcome.frame);
-    try {
-      const applied = await Promise.all(styled.map(frame => rejectAfterTimeout(
-          frame.evaluate(applyTextSpacing, { layerName, overrides: textSpacingOverrides }),
-          frame.parentFrame() === null ? mainFrameTimeoutMs : childFrameTimeoutMs,
-          'timed out',
-      ).then(() => true, () => false)));
-      const unstyled = styled.filter((_, index) => !applied[index]).map(frame => frameLabel(frame) ?? 'main frame');
-      if (unstyled.length) {
-        screenshotError = `the overrides could not be re-applied to ${unstyled.join(', ')}`;
-      } else {
-        const path = await tab.context.outputFile(`audit-text-spacing-${safeIsoTimestampForFileName()}.png`);
-        await tab.page.screenshot({ path, fullPage: true }).then(
-            () => { screenshotPath = path; },
-            error => { screenshotError = `the screenshot could not be captured (${errorMessage(error)})`; },
-        );
-      }
-    } finally {
-      for (const frame of styled) {
-        if (!frame.isDetached() && !await cleanupFrame(frame))
-          cleanupFailures.push(frameLabel(frame) ?? 'main frame');
-      }
-    }
-  }
+  const { path: screenshotPath, error: screenshotError } = params.screenshot
+    ? await captureWithOverrides(tab, outcomes, layerName, cleanupFailures)
+    : { path: null, error: null };
 
   const totalFindings = findings.length;
   const report = {
@@ -253,7 +290,7 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
       generatedAt: new Date().toISOString(),
     },
     elements: totals,
-    frames: { total: frames.length, unmeasured: unmeasuredFrames },
+    frames: { total: frames.length, unmeasured: unmeasuredFrames, partial: partialFrames },
     overridesNotApplied: { count: blocked.length, elements: blocked },
     cleanupFailures,
     screenshotError,
@@ -287,6 +324,8 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
       elementsStale: totals.stale,
       elementsOverlapLinesTruncated: totals.overlapLinesTruncated,
       framesUnmeasured: unmeasuredFrames.length,
+      framesPartial: partialFrames.length,
+      paragraphsTruncated: totals.paragraphsTruncated,
       overridesNotApplied: blocked.length,
       totalFindings,
       countByCheck,
@@ -299,7 +338,9 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
   response.addCode('// Applied the WCAG 1.4.12 text spacing overrides, compared text geometry before and after, then removed them.');
   response.addResult([
     `Text spacing overrides (WCAG 1.4.12): line-height ${textSpacingOverrides.lineHeight}, letter-spacing ${textSpacingOverrides.letterSpacingEm}em, word-spacing ${textSpacingOverrides.wordSpacingEm}em, paragraph spacing ${textSpacingOverrides.paragraphSpacingEm}em`,
-    `Text elements measured: ${totals.measured}${totals.truncated ? ` (truncated: ${totals.truncated} more visible text elements were not measured; raise maxElements)` : ''}`,
+    `Text elements measured: ${totals.measured}${totals.truncated ? ` (truncated: ${totals.truncated} more visible text elements were not measured${partialFrames.length ? '' : '; raise maxElements'})` : ''}`,
+    ...(partialFrames.length ? [`WARNING: measurement stopped early in ${partialFrames.length} frame(s), so coverage is partial and findings cover only the elements measured:`, ...partialFrames.map(entry => `- ${entry.frameUrl}: ${entry.stoppedBy === 'time-limit' ? 'in-page time budget reached' : `more than ${maxDiscoveryNodes} elements`}`)] : []),
+    ...(totals.paragraphsTruncated ? [`WARNING: paragraph spacing was not verified on ${totals.paragraphsTruncated} paragraph(s) past maxElements.`] : []),
     ...(totals.overlapLinesTruncated ? [`WARNING: ${totals.overlapLinesTruncated} element(s) have more than ${maxOverlapLines} text lines; overlap was checked on their first ${maxOverlapLines} lines only (clipping was checked on every line).`] : []),
     ...(totals.stale ? [`WARNING: ${totals.stale} element(s) were removed from the page while it was being measured and were not evaluated; re-run once the page is stable.`] : []),
     ...(unmeasuredFrames.length ? [`WARNING: ${unmeasuredFrames.length} frame(s) could not be measured and contribute no findings:`, ...unmeasuredFrames.map(entry => `- ${entry.frameUrl}: ${entry.error}`)] : []),

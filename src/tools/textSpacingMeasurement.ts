@@ -57,6 +57,8 @@ export type TextSpacingFrameMeasurement = {
   candidates: number;
   measured: number;
   truncated: number;
+  stoppedEarly: 'node-limit' | 'time-limit' | null;
+  paragraphsTruncated: number;
   stale: number;
   overlapLinesTruncated: number;
   clipped: TextSpacingClip[];
@@ -68,11 +70,16 @@ export type TextSpacingMeasureArgs = {
   layerName: string;
   maxElements: number;
   maxOverlapLines: number;
+  maxNodes: number;
+  timeBudgetMs: number;
   overrides: typeof textSpacingOverrides;
 };
 
 export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<TextSpacingFrameMeasurement> {
-  const { layerName, maxElements, maxOverlapLines, overrides } = args;
+  const { layerName, maxElements, maxOverlapLines, maxNodes, timeBudgetMs, overrides } = args;
+  const deadline = performance.now() + timeBudgetMs;
+  let stoppedEarly: TextSpacingFrameMeasurement['stoppedEarly'] = null;
+  let visitedNodes = 0;
   const XHTML = 'http://www.w3.org/1999/xhtml';
   const skippedTags = new Set([
     'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA', 'SELECT', 'OPTION', 'OPTGROUP', 'DATALIST',
@@ -86,6 +93,7 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
   const candidates: HTMLElement[] = [];
   const paragraphs: HTMLElement[] = [];
   let candidateCount = 0;
+  let paragraphsTruncated = 0;
   const composedParent = (element: Element): Element | null => {
     if (element.assignedSlot)
       return element.assignedSlot;
@@ -122,10 +130,20 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
         return NodeFilter.FILTER_ACCEPT;
       },
     });
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    for (let node = walker.nextNode(); node && !stoppedEarly; node = walker.nextNode()) {
+      if (++visitedNodes > maxNodes)
+        stoppedEarly = 'node-limit';
+      else if (performance.now() > deadline)
+        stoppedEarly = 'time-limit';
+      if (stoppedEarly)
+        return;
       const element = node as HTMLElement;
-      if (element.localName === 'p' && isVisible(element))
-        paragraphs.push(element);
+      if (element.localName === 'p' && isVisible(element)) {
+        if (paragraphs.length < maxElements)
+          paragraphs.push(element);
+        else
+          paragraphsTruncated++;
+      }
       if (hasOwnText(element) && isVisible(element)) {
         candidateCount++;
         if (candidates.length < maxElements)
@@ -344,7 +362,15 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
   });
 
   startPhase();
-  const before = candidates.map(element => measurePhase(element));
+  const before: Phase[] = [];
+  for (const element of candidates) {
+    if (performance.now() > deadline) {
+      stoppedEarly = 'time-limit';
+      candidates.length = before.length;
+      break;
+    }
+    before.push(measurePhase(element));
+  }
 
   const sheet = new CSSStyleSheet();
   sheet.replaceSync(`@layer ${layerName} {
@@ -486,6 +512,8 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
       candidates: candidateCount,
       measured: candidates.length - stale,
       truncated: candidateCount - candidates.length,
+      stoppedEarly,
+      paragraphsTruncated,
       stale,
       overlapLinesTruncated: candidates.filter((_, index) => before[index].visibleLines.length > maxOverlapLines || (after[index]?.visibleLines.length ?? 0) > maxOverlapLines).length,
       clipped,

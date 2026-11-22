@@ -11,6 +11,13 @@ type PressableKey = 'Tab' | 'Shift+Tab' | 'Enter';
 
 type TargetRect = { x: number; y: number; width: number; height: number };
 
+/**
+ * SC 2.5.8 spacing outcome measured in the page: `crowded` once a neighbour is found
+ * inside the target's spacing circle, `clear` after every candidate was checked, and
+ * `inconclusive` when the candidate budget ran out first.
+ */
+type TargetSpacing = 'clear' | 'crowded' | 'inconclusive';
+
 /** @public */
 export type FocusPoint = {
   focusIdentity?: string;
@@ -25,7 +32,10 @@ export type FocusPoint = {
   hasVisibleIndicator: boolean;
   isPointerTarget: boolean;
   inlineTarget: boolean;
+  /** The neighbour that decided a `crowded` spacing result, if any. */
   neighborTargets: TargetRect[];
+  /** Null when spacing was not measured (not an undersized pointer target, or the check is off). */
+  targetSpacing: TargetSpacing | null;
   obstruction: { sampled: number; blocked: number; blockedBy: string | null } | null;
   scrollX: number;
   scrollY: number;
@@ -91,6 +101,7 @@ type KeyboardAuditResult = {
   focusVisibilityIssues: FocusStop[];
   focusJumpIssues: FocusStop[];
   targetSizeIssues: FocusStop[];
+  targetSizeInconclusive: FocusStop[];
   focusObscuredIssues: FocusStop[];
   focusTrap: {
     detected: boolean;
@@ -133,41 +144,25 @@ function isLikelySkipLink(point: FocusPoint): boolean {
 
 const MIN_TARGET_SIZE_PX = 24;
 
-const maxNeighborTargets = 32;
+// Work limit for the in-page spacing search: candidate pointer targets examined per focus stop.
+const maxTargetCandidates = 2000;
 const maxFocusTextLength = 200;
 
-function rectCenter(rect: TargetRect) {
-  return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-}
+type TargetSizeVerdict = 'pass' | 'fail' | 'inconclusive';
 
-function isUndersizedTarget(rect: TargetRect): boolean {
-  return rect.width < MIN_TARGET_SIZE_PX || rect.height < MIN_TARGET_SIZE_PX;
-}
-
-function meetsSpacingException(rect: TargetRect, neighbors: TargetRect[]): boolean {
-  const center = rectCenter(rect);
-  const radius = MIN_TARGET_SIZE_PX / 2;
-  return neighbors.every(neighbor => {
-    const nearestX = Math.min(Math.max(center.x, neighbor.x), neighbor.x + neighbor.width);
-    const nearestY = Math.min(Math.max(center.y, neighbor.y), neighbor.y + neighbor.height);
-    if (Math.hypot(center.x - nearestX, center.y - nearestY) < radius)
-      return false;
-    if (!isUndersizedTarget(neighbor))
-      return true;
-    const neighborCenter = rectCenter(neighbor);
-    return Math.hypot(center.x - neighborCenter.x, center.y - neighborCenter.y) >= MIN_TARGET_SIZE_PX;
-  });
-}
-
-function meetsTargetSizeMinimum(point: FocusPoint): boolean {
+function targetSizeVerdict(point: FocusPoint): TargetSizeVerdict {
   const rect = point.boundingBox;
   if (!point.isPointerTarget || !rect)
-    return true;
-  if (!isUndersizedTarget(rect))
-    return true;
+    return 'pass';
+  if (rect.width >= MIN_TARGET_SIZE_PX && rect.height >= MIN_TARGET_SIZE_PX)
+    return 'pass';
   if (point.inlineTarget)
-    return true;
-  return meetsSpacingException(rect, point.neighborTargets);
+    return 'pass';
+  if (point.targetSpacing === 'clear')
+    return 'pass';
+  if (point.targetSpacing === 'crowded')
+    return 'fail';
+  return 'inconclusive';
 }
 
 function isFocusEntirelyObscured(point: FocusPoint): boolean {
@@ -197,7 +192,7 @@ function focusIssuesOf(stop: FocusStop, options: KeyboardAuditOptions): FocusIss
     if (hasLargeJump || isNotVisible)
       issues.push({ name: 'focus-jump-or-not-visible', screenshotLabel: 'focus-jump' });
   }
-  if (options.checkTargetSize && !meetsTargetSizeMinimum(stop))
+  if (options.checkTargetSize && targetSizeVerdict(stop) === 'fail')
     issues.push({ name: 'target-size-below-minimum', screenshotLabel: 'target-size' });
   if (options.checkFocusObscured && isFocusEntirelyObscured(stop))
     issues.push({ name: 'focus-entirely-obscured', screenshotLabel: 'focus-obscured' });
@@ -316,6 +311,7 @@ export async function runKeyboardFocusAudit(
     focusVisibilityIssues: stopsWithIssue('no-visible-focus-indicator'),
     focusJumpIssues: stopsWithIssue('focus-jump-or-not-visible'),
     targetSizeIssues: stopsWithIssue('target-size-below-minimum'),
+    targetSizeInconclusive: options.checkTargetSize ? stops.filter(stop => targetSizeVerdict(stop) === 'inconclusive') : [],
     focusObscuredIssues: stopsWithIssue('focus-entirely-obscured'),
     focusTrap,
     screenshots,
@@ -324,17 +320,22 @@ export async function runKeyboardFocusAudit(
 
 type FocusIdentityState = { identities: WeakMap<Element, number>; nextId: number };
 
-type CollectFocusPointArgs = {
+/** @public */
+export type CollectFocusPointArgs = {
   checkTargetSize: boolean;
   checkFocusObscured: boolean;
   minTargetSize: number;
-  maxNeighborTargets: number;
+  maxTargetCandidates: number;
   maxTextLength: number;
   focusState: FocusIdentityState;
   documentId: number;
 };
 
-function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize, maxNeighborTargets, maxTextLength, focusState, documentId }: CollectFocusPointArgs): FocusPoint {
+/**
+ * Runs inside the page through `page.evaluate`, so it must stay self-contained.
+ * @public
+ */
+export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize, maxTargetCandidates, maxTextLength, focusState, documentId }: CollectFocusPointArgs): FocusPoint {
   const pointerTargetSelector = 'a[href], button, input:not([type="hidden"]), select, textarea, summary, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex^="-"]), [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"]';
   type Rect = { x: number; y: number; width: number; height: number };
 
@@ -399,26 +400,36 @@ function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize,
     return false;
   }
 
-  function nearbyPointerTargets(element: Element, rect: DOMRect): Rect[] {
-    const neighbors: Rect[] = [];
-    const reach = 2 * minTargetSize;
+  // SC 2.5.8 spacing: a circle of minTargetSize diameter centered on the target must
+  // reach neither another target's box nor another undersized target's circle.
+  function crowds(center: { x: number; y: number }, neighbor: DOMRect): boolean {
+    const nearestX = Math.min(Math.max(center.x, neighbor.left), neighbor.right);
+    const nearestY = Math.min(Math.max(center.y, neighbor.top), neighbor.bottom);
+    if (Math.hypot(center.x - nearestX, center.y - nearestY) < minTargetSize / 2)
+      return true;
+    if (neighbor.width >= minTargetSize && neighbor.height >= minTargetSize)
+      return false;
+    const neighborX = neighbor.left + neighbor.width / 2;
+    const neighborY = neighbor.top + neighbor.height / 2;
+    return Math.hypot(center.x - neighborX, center.y - neighborY) < minTargetSize;
+  }
+
+  // Checks every candidate as it is examined and stops at the first crowding neighbour,
+  // so the outcome does not depend on DOM order. A search cut short by the work limit
+  // without finding one is inconclusive, never a pass.
+  function measureSpacing(element: Element, rect: DOMRect): { spacing: TargetSpacing; neighbors: Rect[] } {
+    const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    let examined = 0;
     for (const candidate of document.querySelectorAll<HTMLElement>(pointerTargetSelector)) {
       if (candidate === element)
         continue;
+      if (++examined > maxTargetCandidates)
+        return { spacing: 'inconclusive', neighbors: [] };
       const other = candidate.getBoundingClientRect();
-      if (other.width <= 0 || other.height <= 0)
-        continue;
-      const outOfRange = other.right < rect.left - reach
-        || other.left > rect.right + reach
-        || other.bottom < rect.top - reach
-        || other.top > rect.bottom + reach;
-      if (outOfRange || candidate.matches(':disabled'))
-        continue;
-      neighbors.push({ x: other.x, y: other.y, width: other.width, height: other.height });
-      if (neighbors.length >= maxNeighborTargets)
-        break;
+      if (other.width > 0 && other.height > 0 && crowds(center, other) && !candidate.matches(':disabled'))
+        return { spacing: 'crowded', neighbors: [{ x: other.x, y: other.y, width: other.width, height: other.height }] };
     }
-    return neighbors;
+    return { spacing: 'clear', neighbors: [] };
   }
 
   function composedParent(element: Element): Element | null {
@@ -522,6 +533,7 @@ function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize,
       isPointerTarget: false,
       inlineTarget: false,
       neighborTargets: [],
+      targetSpacing: null,
       obstruction: null,
       scrollX,
       scrollY,
@@ -534,6 +546,7 @@ function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize,
   const name = approximateAccessibleName(focused, text);
   const pointerTarget = isPointerTarget(focused, rect);
   const undersized = rect.width < minTargetSize || rect.height < minTargetSize;
+  const spacing = checkTargetSize && pointerTarget && undersized ? measureSpacing(focused, rect) : null;
   return {
     focusIdentity: `${documentId}:${stableIdentityOf(focused)}`,
     role: focused.getAttribute('role') || focused.tagName.toLowerCase(),
@@ -552,7 +565,8 @@ function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize,
     hasVisibleIndicator: hasFocusRing(style),
     isPointerTarget: pointerTarget,
     inlineTarget: pointerTarget && style.display.startsWith('inline') && sitsInsideSentence(focused),
-    neighborTargets: checkTargetSize && pointerTarget && undersized ? nearbyPointerTargets(focused, rect) : [],
+    neighborTargets: spacing?.neighbors ?? [],
+    targetSpacing: spacing?.spacing ?? null,
     obstruction: checkFocusObscured ? measureObstruction(focused, rect) : null,
     scrollX,
     scrollY,
@@ -578,7 +592,7 @@ function createFocusReader(tab: Tab, options: Pick<KeyboardAuditOptions, 'checkT
     checkTargetSize: options.checkTargetSize,
     checkFocusObscured: options.checkFocusObscured,
     minTargetSize: MIN_TARGET_SIZE_PX,
-    maxNeighborTargets,
+    maxTargetCandidates,
     maxTextLength: maxFocusTextLength,
     focusState: state,
     documentId,
@@ -661,6 +675,10 @@ function renderKeyboardSummary(result: KeyboardAuditResult, response: Response, 
     '',
     `Target size below 24x24 CSS px (WCAG 2.2 SC 2.5.8, spacing and inline exceptions applied): ${result.targetSizeIssues.length}`,
     ...previewOf(result.targetSizeIssues, stop => `- Step ${stop.step}: ${describeElement(stop)} is ${Math.round(stop.boundingBox?.width ?? 0)}x${Math.round(stop.boundingBox?.height ?? 0)} CSS px`.replace(/\s+/g, ' ')),
+    ...(result.targetSizeInconclusive.length ? [
+      `Target size inconclusive (spacing search hit its ${maxTargetCandidates}-candidate limit): ${result.targetSizeInconclusive.length}`,
+      ...previewOf(result.targetSizeInconclusive, stop => `- Step ${stop.step}: ${describeElement(stop)}`.replace(/\s+/g, ' ')),
+    ] : []),
     '',
     `Focus entirely obscured (WCAG 2.2 SC 2.4.11): ${result.focusObscuredIssues.length}`,
     ...previewOf(result.focusObscuredIssues, stop => `- Step ${stop.step}: ${describeElement(stop)} hidden behind ${stop.obstruction?.blockedBy ?? 'other content'}`.replace(/\s+/g, ' ')),
@@ -699,6 +717,7 @@ function keyboardAuditSummary(result: KeyboardAuditResult) {
     focusVisibilityIssueCount: result.focusVisibilityIssues.length,
     focusJumpIssueCount: result.focusJumpIssues.length,
     targetSizeIssueCount: result.targetSizeIssues.length,
+    targetSizeInconclusiveCount: result.targetSizeInconclusive.length,
     focusObscuredIssueCount: result.focusObscuredIssues.length,
     focusTrapDetected: result.focusTrap.detected,
     focusTrapStep: result.focusTrap.step,
