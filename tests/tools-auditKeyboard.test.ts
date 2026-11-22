@@ -15,6 +15,7 @@ function focusPoint(overrides: Partial<FocusPoint>): FocusPoint {
     isPointerTarget: false,
     inlineTarget: false,
     neighborTargets: [],
+    targetSpacing: null,
     obstruction: null,
     scrollX: 0,
     scrollY: 0,
@@ -488,89 +489,51 @@ describe('runKeyboardFocusAudit', () => {
     expect(result.stops).toHaveLength(100);
   });
 
-  it('treats 24x24 as compliant and 23x23 as compliant only while it stays isolated', async () => {
+  it('classifies undersized targets from the measured spacing outcome', async () => {
     const boundary = await auditSingleStop(focusPoint({
       role: 'button', tagName: 'BUTTON', name: 'Exactly', isPointerTarget: true,
       boundingBox: { x: 0, y: 0, width: 24, height: 24 },
-      neighborTargets: [{ x: 24, y: 0, width: 24, height: 24 }],
     }));
     expect(boundary.targetSizeIssues).toHaveLength(0);
+    expect(boundary.targetSizeInconclusive).toHaveLength(0);
 
-    // An isolated undersized target still satisfies the spacing exception.
-    const isolated = await auditSingleStop(focusPoint({
+    const clear = await auditSingleStop(focusPoint({
       role: 'link', tagName: 'A', name: 'Tiny', isPointerTarget: true,
-      boundingBox: { x: 0, y: 0, width: 23, height: 23 },
+      boundingBox: { x: 0, y: 0, width: 23, height: 23 }, targetSpacing: 'clear',
     }));
-    expect(isolated.targetSizeIssues).toHaveLength(0);
+    expect(clear.targetSizeIssues).toHaveLength(0);
+    expect(clear.targetSizeInconclusive).toHaveLength(0);
 
-    // Two 16px targets 4px apart: centers are 20px apart, so the circles overlap.
     const crowded = await auditSingleStop(focusPoint({
       role: 'link', tagName: 'A', name: 'Tiny', isPointerTarget: true,
-      boundingBox: { x: 0, y: 0, width: 16, height: 16 },
+      boundingBox: { x: 0, y: 0, width: 16, height: 16 }, targetSpacing: 'crowded',
       neighborTargets: [{ x: 20, y: 0, width: 16, height: 16 }],
     }));
     expect(crowded.targetSizeIssues.map(stop => stop.step)).toEqual([1]);
     expect(crowded.stops[0]?.issues).toContain('target-size-below-minimum');
+    expect(crowded.targetSizeInconclusive).toHaveLength(0);
   });
 
-  it('passes an undersized target that satisfies the SC 2.5.8 spacing exception', async () => {
-    const result = await auditSingleStop(focusPoint({
-      role: 'button', tagName: 'BUTTON', name: 'Spaced', isPointerTarget: true,
-      boundingBox: { x: 100, y: 100, width: 16, height: 16 },
-      // Neighbor center is 48px away, so the two 24px-diameter circles never meet.
-      neighborTargets: [{ x: 148, y: 100, width: 16, height: 16 }],
+  it('reports a truncated spacing search as inconclusive, not as a pass or a finding', async () => {
+    const truncated = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'Crowded page', isPointerTarget: true,
+      boundingBox: { x: 0, y: 0, width: 16, height: 16 }, targetSpacing: 'inconclusive',
     }));
-    expect(result.targetSizeIssues).toHaveLength(0);
-  });
+    expect(truncated.targetSizeIssues).toHaveLength(0);
+    expect(truncated.stops[0]?.issues).toEqual([]);
+    expect(truncated.targetSizeInconclusive.map(stop => stop.step)).toEqual([1]);
 
-  it('flags an undersized target whose spacing circle intersects a neighbor', async () => {
-    const crowdedCircles = await auditSingleStop(focusPoint({
-      role: 'button', tagName: 'BUTTON', name: 'Crowded', isPointerTarget: true,
-      boundingBox: { x: 100, y: 100, width: 16, height: 16 },
-      neighborTargets: [{ x: 120, y: 100, width: 16, height: 16 }],
-    }));
-    expect(crowdedCircles.targetSizeIssues).toHaveLength(1);
-
-    const nextToLargeTarget = await auditSingleStop(focusPoint({
-      role: 'button', tagName: 'BUTTON', name: 'Adjacent', isPointerTarget: true,
-      boundingBox: { x: 100, y: 100, width: 16, height: 16 },
-      neighborTargets: [{ x: 112, y: 100, width: 80, height: 40 }],
-    }));
-    expect(nextToLargeTarget.targetSizeIssues).toHaveLength(1);
-  });
-
-  it('tests an undersized neighbour by its box as well as by its circle', async () => {
-    // A 100x10 strip is undersized, so it owns a circle, but it is also "another
-    // target": its box starts 2px away even though its center is 57px away.
-    const stripInsideCircle = await auditSingleStop(focusPoint({
-      role: 'link', tagName: 'A', name: 'Short target', isPointerTarget: true,
-      boundingBox: { x: 0, y: 0, width: 10, height: 10 },
-      neighborTargets: [{ x: 12, y: 0, width: 100, height: 10 }],
-    }));
-    expect(stripInsideCircle.targetSizeIssues).toHaveLength(1);
-
-    // Same strip moved clear of the circle passes both tests.
-    const stripClear = await auditSingleStop(focusPoint({
-      role: 'link', tagName: 'A', name: 'Short clear', isPointerTarget: true,
-      boundingBox: { x: 0, y: 0, width: 10, height: 10 },
-      neighborTargets: [{ x: 30, y: 0, width: 100, height: 10 }],
-    }));
-    expect(stripClear.targetSizeIssues).toHaveLength(0);
-
-    // The relation is asymmetric: from the strip's side the short target's box is
-    // 45px away, so the strip itself stays compliant.
-    const fromTheStrip = await auditSingleStop(focusPoint({
-      role: 'link', tagName: 'A', name: 'Long strip', isPointerTarget: true,
-      boundingBox: { x: 12, y: 0, width: 100, height: 10 },
-      neighborTargets: [{ x: 0, y: 0, width: 10, height: 10 }],
-    }));
-    expect(fromTheStrip.targetSizeIssues).toHaveLength(0);
+    const checkOff = await auditSingleStop(focusPoint({
+      role: 'link', tagName: 'A', name: 'Crowded page', isPointerTarget: true,
+      boundingBox: { x: 0, y: 0, width: 16, height: 16 }, targetSpacing: 'inconclusive',
+    }), { checkTargetSize: false });
+    expect(checkOff.targetSizeInconclusive).toHaveLength(0);
   });
 
   it('does not apply target size to inline targets or non-target focus stops', async () => {
     const inline = await auditSingleStop(focusPoint({
       role: 'link', tagName: 'A', name: 'terms', isPointerTarget: true, inlineTarget: true,
-      boundingBox: { x: 0, y: 0, width: 40, height: 18 },
+      boundingBox: { x: 0, y: 0, width: 40, height: 18 }, targetSpacing: 'crowded',
       neighborTargets: [{ x: 44, y: 0, width: 40, height: 18 }],
     }));
     expect(inline.targetSizeIssues).toHaveLength(0);
@@ -626,7 +589,7 @@ describe('runKeyboardFocusAudit', () => {
     // with a crowding neighbour.
     const inlineBlock = await auditSingleStop(focusPoint({
       role: 'link', tagName: 'A', name: 'Inline block terms', isPointerTarget: true, inlineTarget: true,
-      boundingBox: { x: 0, y: 340, width: 12, height: 18 },
+      boundingBox: { x: 0, y: 340, width: 12, height: 18 }, targetSpacing: 'crowded',
       neighborTargets: [{ x: 16, y: 340, width: 12, height: 18 }],
     }));
     expect(inlineBlock.targetSizeIssues).toHaveLength(0);
@@ -634,7 +597,7 @@ describe('runKeyboardFocusAudit', () => {
     // The same geometry without the sentence context is still a real failure.
     const standalone = await auditSingleStop(focusPoint({
       role: 'link', tagName: 'A', name: 'Standalone', isPointerTarget: true,
-      boundingBox: { x: 0, y: 340, width: 12, height: 18 },
+      boundingBox: { x: 0, y: 340, width: 12, height: 18 }, targetSpacing: 'crowded',
       neighborTargets: [{ x: 16, y: 340, width: 12, height: 18 }],
     }));
     expect(standalone.targetSizeIssues).toHaveLength(1);
@@ -643,7 +606,7 @@ describe('runKeyboardFocusAudit', () => {
     // neighborTargets and the isolated target passes.
     const nextToDisabled = await auditSingleStop(focusPoint({
       role: 'link', tagName: 'A', name: 'Isolated link', isPointerTarget: true,
-      boundingBox: { x: 0, y: 400, width: 18, height: 18 },
+      boundingBox: { x: 0, y: 400, width: 18, height: 18 }, targetSpacing: 'clear',
       neighborTargets: [],
     }));
     expect(nextToDisabled.targetSizeIssues).toHaveLength(0);
