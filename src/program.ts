@@ -26,6 +26,7 @@ import { ProxyBackend } from './mcp/proxyBackend.js';
 import { toolNameList } from './mcp/toolPolicy.js';
 import { SharedClientSlot } from './mcp/sharedClientSlot.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
+import { SessionLog } from './sessionLog.js';
 import { BrowserSessionRegistry } from './browserSessions.js';
 import { assertNetworkPolicySupported } from './networkPolicy.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
@@ -95,6 +96,13 @@ function parseInteractiveLine(line: string): { toolName: string, json: string } 
   return { toolName: line.substring(0, spaceIndex), json: line.substring(spaceIndex + 1).trim() };
 }
 
+// Strict number parsing for numeric options: parseInt accepted "30s" as 30 and
+// "1.5" as 1, and a blank value became NaN either way. Config resolution
+// rejects anything that is not an in-range integer.
+function cliNumber(value: string): number {
+  return value.trim() ? Number(value) : NaN;
+}
+
 function appendCdpHeader(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
@@ -114,11 +122,11 @@ function configureBaseProgram() {
       .option('--cdp-launch-command <command>', 'launch a desktop app command and connect to its CDP endpoint.')
       .option('--cdp-launch-args <args>', 'comma-separated arguments passed to the CDP launch command.', commaSeparatedList)
       .option('--cdp-launch-cwd <path>', 'working directory for the CDP launch command.')
-      .option('--cdp-launch-port <port>', 'port to use for the launched app CDP endpoint.', parseInt)
-      .option('--cdp-launch-startup-timeout <ms>', 'maximum time in milliseconds to wait for a launched app CDP endpoint.', parseInt)
+      .option('--cdp-launch-port <port>', 'port to use for the launched app CDP endpoint.', cliNumber)
+      .option('--cdp-launch-startup-timeout <ms>', 'maximum time in milliseconds to wait for a launched app CDP endpoint.', cliNumber)
       .option('--cdp-endpoint <endpoint>', 'CDP endpoint to connect to.')
       .option('--cdp-header <header>', 'CDP header to send with the connect request, in "Name: Value" form (for example "Authorization: Bearer <token>"). Repeat the flag to send multiple headers.', appendCdpHeader, [])
-      .option('--cdp-timeout <ms>', 'maximum time in milliseconds to wait when connecting to the CDP endpoint. Defaults to 30000ms (30 seconds).', parseInt)
+      .option('--cdp-timeout <ms>', 'maximum time in milliseconds to wait when connecting to the CDP endpoint. Defaults to 30000ms (30 seconds).', cliNumber)
       .option('--config <path>', 'path to the configuration file.')
       .option('--device <device>', 'device to emulate, for example: "iPhone 15"')
       .option('--executable-path <path>', 'path to the browser executable.')
@@ -133,7 +141,7 @@ function configureBaseProgram() {
       .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
       .option('--output-dir <path>', 'path to the directory for output files.')
       .option('--file-paths <relative|absolute>', 'render output paths relative to the server working directory or as absolute paths; omitted preserves legacy rendering.')
-      .option('--port <port>', 'port to listen on for MCP Streamable HTTP transport.')
+      .option('--port <port>', 'port to listen on for MCP Streamable HTTP transport.', cliNumber)
       .option('--profile-dir-name <name>', 'name of the Chrome profile directory to connect to with --extension, for example "Profile 1". Requires --user-data-dir. Defaults to the last-used profile that has the extension installed.')
       .option('--proxy-bypass <bypass>', 'comma-separated domains to bypass proxy, for example ".com,chromium.org,.domain.com"')
       .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128", "http://user:password@myproxy:3128" or "socks5://myproxy:8080"')
@@ -145,10 +153,10 @@ function configureBaseProgram() {
       .option('--user-agent <ua string>', 'specify user agent string')
       .option('--user-data-dir <path>', 'path to the user data directory. If not specified, a temporary directory will be created.')
       .option('--viewport-size <size>', 'specify browser viewport size in pixels, for example "1280, 720"')
-      .option('--navigation-timeout <ms>', 'maximum time in milliseconds for page navigation. Defaults to 60000ms (60 seconds).', parseInt)
-      .option('--default-timeout <ms>', 'default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).', parseInt)
-      .option('--timeout-settle <ms>', 'how long to wait after each action for triggered work to settle, in milliseconds. Defaults to 500ms.', parseInt)
-      .option('--timeout-idle <ms>', 'release the default browser context after inactivity, in milliseconds. Defaults to 0 (disabled).', value => value.trim() ? Number(value) : NaN)
+      .option('--navigation-timeout <ms>', 'maximum time in milliseconds for page navigation. Defaults to 60000ms (60 seconds).', cliNumber)
+      .option('--default-timeout <ms>', 'default timeout for all Playwright operations (clicks, fills, etc). Defaults to 5000ms (5 seconds).', cliNumber)
+      .option('--timeout-settle <ms>', 'how long to wait after each action for triggered work to settle, in milliseconds. Defaults to 500ms.', cliNumber)
+      .option('--timeout-idle <ms>', 'release the default browser context after inactivity, in milliseconds. Defaults to 0 (disabled).', cliNumber)
       .addOption(new Option('--connect-tool', 'Allow to switch between different browser connection methods.').hideHelp())
       .addOption(new Option('--vscode', 'VS Code tools.').hideHelp());
 
@@ -241,7 +249,12 @@ program
         throw new Error('Interactive mode prints text only. Use --image-responses allow or omit instead of only.');
       const backend = new BrowserServerBackend(config, parentOptions.extension ? extensionContextFactory : browserContextFactory);
       const redactSecrets = createUrlRedactor(config.redactUrlParams);
-      const handleExit = setupExitWatchdog();
+      // Calls still running when stdin ends finish (and are logged) before exit.
+      const inFlightLines = new Set<Promise<void>>();
+      const handleExit = setupExitWatchdog(async () => {
+        await Promise.all(inFlightLines);
+        await Context.disposeAll();
+      });
       await backend.initialize(
           { notifyToolListChanged: async () => {} },
           { name: 'interactive-cli', version: packageJSON.version },
@@ -291,7 +304,9 @@ program
         prompt();
       };
       rl.on('line', line => {
-        void handleLine(line).catch(logUnhandledError);
+        const handled = handleLine(line).catch(logUnhandledError);
+        inFlightLines.add(handled);
+        void handled.finally(() => inFlightLines.delete(handled));
       });
 
       rl.on('close', () => {
@@ -308,6 +323,13 @@ function setupExitWatchdog(cleanup: () => Promise<void> = () => Context.disposeA
     setTimeout(() => process.exit(0), 15000);
     try {
       await cleanup();
+    } catch (error) {
+      logUnhandledError(error);
+    }
+    try {
+      // Session recording batches its writes; persist the final batch and
+      // its snapshot files before the process exits.
+      await SessionLog.flushAll();
     } catch (error) {
       logUnhandledError(error);
     } finally {

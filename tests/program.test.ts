@@ -60,6 +60,69 @@ describe('restricted external provider switches', () => {
   });
 });
 
+describe('numeric CLI options', () => {
+  it.each([
+    [['--cdp-launch-command', 'app', '--cdp-launch-startup-timeout', '30s'], 'browser.cdpLaunch.startupTimeoutMs (--cdp-launch-startup-timeout, PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT) must be an integer from 1 to 2147483647; got NaN.'],
+    [['--port', 'abc'], 'server.port (--port, PLAYWRIGHT_MCP_PORT) must be an integer from 0 to 65535; got NaN.'],
+    [['--timeout-settle', '1.5'], 'timeouts.settle (--timeout-settle, PLAYWRIGHT_MCP_TIMEOUT_SETTLE) must be an integer from 0 to 2147483647; got 1.5.'],
+  ])('rejects %j at startup instead of truncating or ignoring it', async (args, message) => {
+    const { stderr } = await collectFailure(args);
+    expect(stderr).toContain(message);
+  });
+
+  it('rejects a mistyped environment startup timeout before launching the application', async () => {
+    const { stderr } = await collectFailure([], { PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND: 'app', PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT: 'thirty' });
+    expect(stderr).toContain('browser.cdpLaunch.startupTimeoutMs');
+    expect(stderr).toContain('got NaN.');
+  });
+});
+
+describe('missing CDP launch application', () => {
+  it.each([
+    ['an automatically allocated port', []],
+    ['a pinned port', ['--cdp-launch-port', '9']],
+  ])('fails the tool call and keeps the server alive on %s', async (_label, portArgs) => {
+    // An async spawn ENOENT without an 'error' listener terminated the server.
+    const client = new Client({ name: 'missing-cdp-launch-test', version: '1' });
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [...cliArgs, '--cdp-launch-command', path.join(os.tmpdir(), 'mcp-a11y-missing-app-does-not-exist'), '--cdp-launch-startup-timeout', '60000', ...portArgs],
+      stderr: 'pipe',
+    });
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({ name: 'browser_navigate', arguments: { url: 'about:blank' } });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toMatch(/Failed to start CDP launch command .*mcp-a11y-missing-app-does-not-exist.*ENOENT/);
+      expect((await client.listTools()).tools.map(tool => tool.name)).toContain('browser_navigate');
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe('interactive session recording', () => {
+  it('persists a call that is still running when stdin ends', async () => {
+    // Ctrl+D (or piped input ending) exited before the in-flight call was
+    // logged and before the debounced batch reached disk.
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-interactive-session-'));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(process.execPath, [...cliArgs, '--isolated', '--save-session', '--output-dir', outputDir, 'interactive'], { stdio: ['pipe', 'ignore', 'ignore'] });
+        const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('interactive CLI did not exit')); }, 20_000);
+        child.on('error', reject);
+        child.on('exit', () => { clearTimeout(timer); resolve(); });
+        child.stdin.end('browser_session_open {}\n');
+      });
+      const [sessionFolder] = fs.readdirSync(outputDir);
+      expect(sessionFolder).toMatch(/^session-/);
+      expect(fs.readFileSync(path.join(outputDir, sessionFolder, 'session.md'), 'utf-8')).toContain('### Tool call: browser_session_open');
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('direct MCP harness install coverage', () => {
   it.each([
     { args: ['--only', 'browser_install'], summary: 'Skipped: 1' },
