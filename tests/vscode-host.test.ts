@@ -17,7 +17,6 @@
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/client';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { BrowserSessionRegistry } from '../src/browserSessions.js';
 import { outputFile, resolveConfig } from '../src/config.js';
@@ -44,6 +43,23 @@ function makeFakeContextFactory(sessionsUnsupportedReason?: string) {
   return { createContext, sessionsUnsupportedReason } as any;
 }
 
+function makeInnerBackend(toolName: string) {
+  const backend = {
+    toolName,
+    closed: 0,
+    calls: [] as string[],
+    listTools: async () => [{ name: toolName, description: toolName, inputSchema: { type: 'object' as const, properties: {} } }],
+    callTool: async (name: string) => {
+      backend.calls.push(name);
+      return { content: [{ type: 'text' as const, text: toolName }] };
+    },
+    serverClosed: () => {
+      backend.closed++;
+    },
+  };
+  return backend;
+}
+
 describe('VSCodeProxyBackend', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
@@ -52,30 +68,116 @@ describe('VSCodeProxyBackend', () => {
   });
 
   it('notifies clients when the exposed tool list changes after switching clients', async () => {
-    const backend = new VSCodeProxyBackend({} as any, vi.fn(async () => ({ id: 'default-transport' } as any)));
+    const defaultInner = makeInnerBackend('scan_page');
+    const child = makeInnerBackend('audit_site');
+    const defaultListTools = vi.spyOn(defaultInner, 'listTools');
+    const childListTools = vi.spyOn(child, 'listTools');
+    const backend = new VSCodeProxyBackend(await resolveConfig({}), async () => wrapInProcess(defaultInner));
+    const context = { notifyToolListChanged: vi.fn(async () => undefined) };
+    await backend.initialize(context, { name: 'vitest', version: '1.0.0' });
+    vi.spyOn(backend as any, '_createSwitchTransport').mockImplementation(async () => wrapInProcess(child));
 
-    const close = vi.fn(async () => undefined);
-    const currentListTools = vi.fn(async () => ({ tools: [{ name: 'scan_page' }] }));
-    (backend as any)._currentClient = {
-      listTools: currentListTools,
-      close,
-    };
-    (backend as any)._backendContext = {
-      notifyToolListChanged: vi.fn(async () => undefined),
-    };
-    (backend as any)._clientVersion = { name: 'vitest', version: '1.0.0' };
+    const switched = await backend.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' });
 
-    vi.spyOn(Client.prototype, 'connect').mockResolvedValue(undefined);
-    const nextListTools = vi.spyOn(Client.prototype, 'listTools').mockResolvedValue({
-      tools: [{ name: 'audit_site' }] as any[],
+    expect(switched.isError).not.toBe(true);
+    expect(defaultInner.closed).toBe(1);
+    expect(defaultListTools).not.toHaveBeenCalled();
+    expect(childListTools).not.toHaveBeenCalled();
+    expect(context.notifyToolListChanged).toHaveBeenCalledTimes(1);
+    backend.serverClosed?.();
+  });
+
+  // A switch connects the replacement before publishing it and only then
+  // closes the provider it replaced: a failed handshake must not strand the
+  // connection without the provider that was working.
+  describe('switching the per-connection provider', () => {
+    const connectArgs = { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' };
+
+    async function makeBackend() {
+      const defaultInner = makeInnerBackend('tool_default');
+      const backend = new VSCodeProxyBackend(await resolveConfig({}), async () => wrapInProcess(defaultInner));
+      const context = { notifyToolListChanged: vi.fn(async () => undefined) };
+      await backend.initialize(context, { name: 'vitest', version: '1.0.0' });
+      return { backend, defaultInner, context };
+    }
+
+    const refusingTransport = () => ({
+      start: async () => {
+        throw new Error('handshake refused');
+      },
+      send: async () => {},
+      close: async () => {},
     });
 
-    await (backend as any)._setCurrentClient({ id: 'alternate-transport' } as any, true);
+    it('keeps the working provider when the replacement handshake fails', async () => {
+      const { backend, defaultInner, context } = await makeBackend();
+      vi.spyOn(backend as any, '_createSwitchTransport').mockImplementation(async () => refusingTransport());
 
-    expect(close).toHaveBeenCalledTimes(1);
-    expect(currentListTools).not.toHaveBeenCalled();
-    expect(nextListTools).not.toHaveBeenCalled();
-    expect((backend as any)._backendContext.notifyToolListChanged).toHaveBeenCalledTimes(1);
+      await expect(backend.callTool('browser_connect', connectArgs)).rejects.toThrow('handshake refused');
+
+      expect(defaultInner.closed).toBe(0);
+      expect(context.notifyToolListChanged).not.toHaveBeenCalled();
+      const after = await backend.callTool('tool_default', {});
+      expect((after.content?.[0] as any).text).toBe('tool_default');
+      expect(defaultInner.calls).toEqual(['tool_default']);
+      backend.serverClosed?.();
+      await vi.waitFor(() => expect(defaultInner.closed).toBe(1));
+    });
+
+    it('serves from the working provider while a replacement connects, and applies overlapping switches in call order', async () => {
+      const { backend, defaultInner } = await makeBackend();
+      const first = makeInnerBackend('tool_first');
+      const second = makeInnerBackend('tool_second');
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+      const firstTransport = await wrapInProcess(first);
+      const gatedStart = firstTransport.start.bind(firstTransport);
+      firstTransport.start = async () => {
+        await firstGate;
+        await gatedStart();
+      };
+      vi.spyOn(backend as any, '_createSwitchTransport')
+          .mockImplementationOnce(async () => firstTransport)
+          .mockImplementationOnce(async () => wrapInProcess(second));
+
+      const switchingFirst = backend.callTool('browser_connect', connectArgs);
+      const switchingSecond = backend.callTool('browser_connect', connectArgs);
+      const during = await backend.callTool('tool_default', {});
+      expect((during.content?.[0] as any).text).toBe('tool_default');
+      expect(defaultInner.closed).toBe(0);
+
+      releaseFirst();
+      expect((await switchingFirst).isError).not.toBe(true);
+      expect((await switchingSecond).isError).not.toBe(true);
+
+      const after = await backend.callTool('tool_second', {});
+      expect((after.content?.[0] as any).text).toBe('tool_second');
+      expect(defaultInner.closed).toBe(1);
+      expect(first.closed).toBe(1);
+      expect(second.closed).toBe(0);
+      backend.serverClosed?.();
+      await vi.waitFor(() => expect(second.closed).toBe(1));
+    });
+
+    it('keeps the working provider when an overlapping switch fails, and applies the one that succeeds', async () => {
+      const { backend, defaultInner } = await makeBackend();
+      const second = makeInnerBackend('tool_second');
+      vi.spyOn(backend as any, '_createSwitchTransport')
+          .mockImplementationOnce(async () => refusingTransport())
+          .mockImplementationOnce(async () => wrapInProcess(second));
+
+      const [failed, succeeded] = await Promise.allSettled([
+        backend.callTool('browser_connect', connectArgs),
+        backend.callTool('browser_connect', connectArgs),
+      ]);
+
+      expect(failed.status).toBe('rejected');
+      expect(succeeded.status).toBe('fulfilled');
+      const after = await backend.callTool('tool_second', {});
+      expect((after.content?.[0] as any).text).toBe('tool_second');
+      expect(defaultInner.closed).toBe(1);
+      backend.serverClosed?.();
+    });
   });
 
   it('serializes the resolved fallback output dir into the spawned provider config', async () => {
@@ -228,23 +330,6 @@ describe('VSCodeProxyBackend', () => {
   // process-wide, or it reports success while the child it launched is killed
   // with the response and the next request reverts to the default provider.
   describe('process-scoped provider selection for stateless serving', () => {
-    function makeInnerBackend(toolName: string) {
-      const backend = {
-        toolName,
-        closed: 0,
-        calls: [] as string[],
-        listTools: async () => [{ name: toolName, description: toolName, inputSchema: { type: 'object' as const, properties: {} } }],
-        callTool: async (name: string) => {
-          backend.calls.push(name);
-          return { content: [{ type: 'text' as const, text: toolName }] };
-        },
-        serverClosed: () => {
-          backend.closed++;
-        },
-      };
-      return backend;
-    }
-
     async function makeSharedSetup() {
       const config = await resolveConfig({});
       const slot = new SharedClientSlot();

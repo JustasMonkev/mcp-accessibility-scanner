@@ -23,7 +23,7 @@ import { assertToolNotBlocked, isToolBlocked } from './toolPolicy.js';
 import { logUnhandledError } from '../utils/log.js';
 import type { ToolPolicy } from './toolPolicy.js';
 import type { CallToolRequestContext, ServerBackend, ClientVersion, ServerBackendContext, Tool, CallToolResult, CallToolRequest } from './server.js';
-import type { SharedClientSlot } from './sharedClientSlot.js';
+import { SharedClientSlot } from './sharedClientSlot.js';
 import type { Transport } from '@modelcontextprotocol/client';
 
 export type MCPProvider = {
@@ -46,6 +46,7 @@ export class ProxyBackend implements ServerBackend {
   private _contextSwitchTool: Tool;
   private _backendContext: ServerBackendContext | undefined;
   private _sharedSelection: SharedProxySelection | undefined;
+  private _ownedSlot = new SharedClientSlot();
   private _relay = new ToolRelay(client => {
     if (this._ownsCurrentClient && this._currentClient === client)
       return this._backendContext?.notifyToolListChanged();
@@ -90,9 +91,8 @@ export class ProxyBackend implements ServerBackend {
   serverClosed?(): void {
     this._relay.close();
     this._backendContext = undefined;
-    if (this._ownsCurrentClient)
-      void this._currentClient?.close().catch(logUnhandledError);
-    else if (this._currentClient)
+    void this._ownedSlot.dispose().catch(logUnhandledError);
+    if (!this._ownsCurrentClient && this._currentClient)
       void this._sharedSelection?.slot.release(this._currentClient);
   }
 
@@ -122,19 +122,17 @@ export class ProxyBackend implements ServerBackend {
     const provider = providers.find(factory => factory.name === name);
     if (!provider)
       throw new Error('Unknown connection method: ' + name);
-    const previousOwned = this._ownsCurrentClient ? this._currentClient : undefined;
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
     const shared = await slot.replace(provider === providers[0] ? undefined : () => this._connectClient(provider));
     if (shared) {
       this._currentClient = shared;
       this._ownsCurrentClient = false;
+      await this._ownedSlot.replace(undefined);
     } else {
-      this._currentClient = await this._connectClient(this._mcpProviders[0]);
-      this._ownsCurrentClient = true;
+      await this._setCurrentClient(this._mcpProviders[0], false);
     }
     if (previousShared)
       await slot.release(previousShared);
-    await previousOwned?.close().catch(logUnhandledError);
   }
 
   private _defineContextSwitchTool(): Tool {
@@ -155,13 +153,17 @@ export class ProxyBackend implements ServerBackend {
     };
   }
 
+  // The replacement is connected before it is published, and the client it
+  // replaces is closed only afterwards: a failed handshake keeps the working
+  // client, and overlapping switches apply in call order.
   private async _setCurrentClient(factory: MCPProvider, notifyOnChange: boolean) {
-    await this._currentClient?.close();
-    this._currentClient = undefined;
-
-    const client = await this._connectClient(factory);
-    this._currentClient = client;
-    this._ownsCurrentClient = true;
+    await this._ownedSlot.replace(() => this._connectClient(factory), {
+      lease: false,
+      publish: client => {
+        this._currentClient = client;
+        this._ownsCurrentClient = true;
+      },
+    });
     if (notifyOnChange)
       await this._backendContext?.notifyToolListChanged().catch(logUnhandledError);
   }

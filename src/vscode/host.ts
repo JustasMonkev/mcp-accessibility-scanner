@@ -56,6 +56,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   private _backendContext: ServerBackendContext | undefined;
   private _listedClient: Client | undefined;
   private _providerGeneration = 0;
+  private _ownedSlot = new SharedClientSlot();
   private _relay = new ToolRelay(client => {
     if (!this._sharedSlot && this._listedClient === client)
       return this._backendContext?.notifyToolListChanged();
@@ -127,9 +128,8 @@ export class VSCodeProxyBackend implements ServerBackend {
     this._relay.close();
     this._backendContext = undefined;
     this._listedClient = undefined;
-    if (this._ownsCurrentClient)
-      void this._currentClient?.close().catch(logUnhandledError);
-    else if (this._currentClient)
+    void this._ownedSlot.dispose().catch(logUnhandledError);
+    if (!this._ownsCurrentClient && this._currentClient)
       void this._sharedSlot?.release(this._currentClient);
     void this._sessionClient?.then(client => client.close()).catch(logUnhandledError);
   }
@@ -195,21 +195,18 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   private async _switchSharedClient(sharedSlot: SharedClientSlot, createTransport: (() => Promise<Transport>) | undefined): Promise<void> {
-    const previousOwned = this._ownsCurrentClient ? this._currentClient : undefined;
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
     const shared = await sharedSlot.replace(createTransport ? async () => this._connectClient(await createTransport()) : undefined);
     if (shared) {
       this._currentClient = shared;
       this._ownsCurrentClient = false;
       this._currentClientIsDefault = false;
+      await this._ownedSlot.replace(undefined);
     } else {
-      this._currentClient = await this._connectClient(await this._defaultTransportFactory());
-      this._ownsCurrentClient = true;
-      this._currentClientIsDefault = true;
+      await this._setCurrentClient(await this._defaultTransportFactory(), false, true);
     }
     if (previousShared)
       await sharedSlot.release(previousShared);
-    await previousOwned?.close().catch(logUnhandledError);
   }
 
   private _defineContextSwitchTool(): Tool {
@@ -226,20 +223,21 @@ export class VSCodeProxyBackend implements ServerBackend {
     };
   }
 
+  // The replacement is connected before it is published, and the client it
+  // replaces is closed only afterwards: a failed handshake keeps the working
+  // provider, and overlapping switches apply in call order.
   private async _setCurrentClient(transport: Transport, notifyOnChange: boolean, isDefault = false) {
-    ++this._providerGeneration;
-    if (this._listedClient === this._currentClient)
-      this._listedClient = undefined;
-    await this._currentClient?.close();
-    this._currentClient = undefined;
-    this._currentClientIsDefault = false;
-
-    const client = await this._connectClient(transport);
-    this._currentClient = client;
-    this._ownsCurrentClient = true;
-    this._currentClientIsDefault = isDefault;
-    if (isDefault)
-      this._listedClient = undefined;
+    await this._ownedSlot.replace(() => this._connectClient(transport), {
+      lease: false,
+      publish: client => {
+        ++this._providerGeneration;
+        if (isDefault || this._listedClient === this._currentClient)
+          this._listedClient = undefined;
+        this._currentClient = client;
+        this._ownsCurrentClient = true;
+        this._currentClientIsDefault = isDefault;
+      },
+    });
     if (notifyOnChange)
       await this._backendContext?.notifyToolListChanged();
   }
