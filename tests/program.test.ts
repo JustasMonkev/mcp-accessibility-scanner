@@ -84,6 +84,28 @@ describe('missing CDP launch application', () => {
   });
 });
 
+describe('interactive session recording', () => {
+  it('persists a call that is still running when stdin ends', async () => {
+    // Ctrl+D (or piped input ending) exited before the in-flight call was
+    // logged and before the debounced batch reached disk.
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-interactive-session-'));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(process.execPath, [...cliArgs, '--isolated', '--save-session', '--output-dir', outputDir, 'interactive'], { stdio: ['pipe', 'ignore', 'ignore'] });
+        const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('interactive CLI did not exit')); }, 20_000);
+        child.on('error', reject);
+        child.on('exit', () => { clearTimeout(timer); resolve(); });
+        child.stdin.end('browser_session_open {}\n');
+      });
+      const [sessionFolder] = fs.readdirSync(outputDir);
+      expect(sessionFolder).toMatch(/^session-/);
+      expect(fs.readFileSync(path.join(outputDir, sessionFolder, 'session.md'), 'utf-8')).toContain('### Tool call: browser_session_open');
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('direct MCP harness install coverage', () => {
   it.each([
     { args: ['--only', 'browser_install'], summary: 'Skipped: 1' },

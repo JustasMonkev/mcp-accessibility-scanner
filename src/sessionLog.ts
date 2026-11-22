@@ -93,13 +93,24 @@ function renderUserAction(action: actions.Action, browserSessionId: string | und
   return lines;
 }
 
+// Entries are batched: each new entry restarts a short debounce, but a batch is
+// written once its oldest entry reaches the maximum age or it holds the maximum
+// number of entries, so continuous traffic cannot postpone writes forever.
+const flushDebounceMs = 1000;
+const maxBatchAgeMs = 2000;
+const maxBatchEntries = 50;
+
 export class SessionLog {
+  // Logs with unwritten entries or writes in flight, awaited at shutdown.
+  private static _busyLogs = new Set<SessionLog>();
   private _folder: string;
   private _file: string;
   private _ordinal = 0;
   private _pendingEntries: LogEntry[] = [];
   private _sessionFileQueue = Promise.resolve();
   private _flushEntriesTimeout: NodeJS.Timeout | undefined;
+  private _batchStartedAt: number | undefined;
+  private _inFlightWrites = new Set<Promise<void>>();
   private _storage: IFileStorage;
   private _lastFlushedAction = new WeakMap<Tab, { action: actions.Action; browserSessionId?: string; code: string; marker: string }>();
 
@@ -153,7 +164,7 @@ export class SessionLog {
       const previousCode = flushed.code;
       flushed.action = action;
       flushed.code = code;
-      this._sessionFileQueue = this._sessionFileQueue
+      this._sessionFileQueue = this._track(this._sessionFileQueue
           .catch(logUnhandledError)
           .then(async () => {
             const content = await this._storage.readFile(this._file);
@@ -166,7 +177,7 @@ export class SessionLog {
             if (blockIndex !== -1)
               await this._storage.writeFile(this._file, content.slice(0, blockIndex) + newBlock + content.slice(blockIndex + oldBlock.length));
           })
-          .catch(logUnhandledError);
+          .catch(logUnhandledError));
       return;
     }
     if (action.name === 'navigate') {
@@ -201,18 +212,58 @@ export class SessionLog {
     return undefined;
   }
 
-  private _appendEntry(entry: LogEntry) {
-    this._pendingEntries.push(entry);
-    if (this._flushEntriesTimeout)
-      clearTimeout(this._flushEntriesTimeout);
-    this._flushEntriesTimeout = setTimeout(() => {
-      void this._flushEntries().catch(logUnhandledError);
-    }, 1000);
+  /** Writes every pending entry and waits until all writes reach storage. */
+  async flush(): Promise<void> {
+    this._flushEntries();
+    while (this._inFlightWrites.size)
+      await Promise.all(this._inFlightWrites);
   }
 
-  private async _flushEntries() {
+  /** Flushes every session log that still has unwritten entries or writes in flight. */
+  static async flushAll(): Promise<void> {
+    await Promise.all([...SessionLog._busyLogs].map(log => log.flush()));
+  }
+
+  private _appendEntry(entry: LogEntry) {
+    this._pendingEntries.push(entry);
+    SessionLog._busyLogs.add(this);
     clearTimeout(this._flushEntriesTimeout);
+    const now = Date.now();
+    this._batchStartedAt ??= now;
+    const untilMaxAge = this._batchStartedAt + maxBatchAgeMs - now;
+    if (this._pendingEntries.length >= maxBatchEntries || untilMaxAge <= 0) {
+      this._flushEntries();
+      return;
+    }
+    this._flushEntriesTimeout = setTimeout(() => this._flushEntries(), Math.min(flushDebounceMs, untilMaxAge));
+  }
+
+  private _track(write: Promise<void>): Promise<void> {
+    this._inFlightWrites.add(write);
+    SessionLog._busyLogs.add(this);
+    void write.finally(() => {
+      this._inFlightWrites.delete(write);
+      if (!this._inFlightWrites.size && !this._pendingEntries.length)
+        SessionLog._busyLogs.delete(this);
+    });
+    return write;
+  }
+
+  private _flushEntries(): void {
+    try {
+      this._writeEntries();
+    } catch (error) {
+      logUnhandledError(error);
+    }
+  }
+
+  private _writeEntries(): void {
+    clearTimeout(this._flushEntriesTimeout);
+    this._flushEntriesTimeout = undefined;
+    this._batchStartedAt = undefined;
     const entries = this._pendingEntries;
+    if (!entries.length)
+      return;
     this._pendingEntries = [];
     const lines: string[] = [''];
 
@@ -245,7 +296,7 @@ export class SessionLog {
 
       if (entry.tabSnapshot) {
         const fileName = `${ordinal}.snapshot.yml`;
-        this._storage.writeFile(path.join(this._folder, fileName), this._redactSecrets?.(entry.tabSnapshot.ariaSnapshot) ?? entry.tabSnapshot.ariaSnapshot).catch(logUnhandledError);
+        void this._track(this._storage.writeFile(path.join(this._folder, fileName), this._redactSecrets?.(entry.tabSnapshot.ariaSnapshot) ?? entry.tabSnapshot.ariaSnapshot).catch(logUnhandledError));
         const marker = `- Snapshot: ${fileName}`;
         lines.push(marker);
         if (entry.userAction && entry.tab) {
@@ -261,10 +312,10 @@ export class SessionLog {
       lines.push('', '');
     }
 
-    this._sessionFileQueue = this._sessionFileQueue
+    this._sessionFileQueue = this._track(this._sessionFileQueue
         .catch(logUnhandledError)
         .then(() => this._storage.appendFile(this._file, this._redact(lines.join('\n'))))
-        .catch(logUnhandledError);
+        .catch(logUnhandledError));
   }
 
   private _redact(text: string): string {

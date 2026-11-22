@@ -26,6 +26,7 @@ import { ProxyBackend } from './mcp/proxyBackend.js';
 import { toolNameList } from './mcp/toolPolicy.js';
 import { SharedClientSlot } from './mcp/sharedClientSlot.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
+import { SessionLog } from './sessionLog.js';
 import { BrowserSessionRegistry } from './browserSessions.js';
 import { assertNetworkPolicySupported } from './networkPolicy.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
@@ -241,7 +242,12 @@ program
         throw new Error('Interactive mode prints text only. Use --image-responses allow or omit instead of only.');
       const backend = new BrowserServerBackend(config, parentOptions.extension ? extensionContextFactory : browserContextFactory);
       const redactSecrets = createUrlRedactor(config.redactUrlParams);
-      const handleExit = setupExitWatchdog();
+      // Calls still running when stdin ends finish (and are logged) before exit.
+      const inFlightLines = new Set<Promise<void>>();
+      const handleExit = setupExitWatchdog(async () => {
+        await Promise.all(inFlightLines);
+        await Context.disposeAll();
+      });
       await backend.initialize(
           { notifyToolListChanged: async () => {} },
           { name: 'interactive-cli', version: packageJSON.version },
@@ -291,7 +297,9 @@ program
         prompt();
       };
       rl.on('line', line => {
-        void handleLine(line).catch(logUnhandledError);
+        const handled = handleLine(line).catch(logUnhandledError);
+        inFlightLines.add(handled);
+        void handled.finally(() => inFlightLines.delete(handled));
       });
 
       rl.on('close', () => {
@@ -308,6 +316,13 @@ function setupExitWatchdog(cleanup: () => Promise<void> = () => Context.disposeA
     setTimeout(() => process.exit(0), 15000);
     try {
       await cleanup();
+    } catch (error) {
+      logUnhandledError(error);
+    }
+    try {
+      // Session recording batches its writes; persist the final batch and
+      // its snapshot files before the process exits.
+      await SessionLog.flushAll();
     } catch (error) {
       logUnhandledError(error);
     } finally {
