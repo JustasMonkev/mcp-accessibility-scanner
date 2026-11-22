@@ -435,7 +435,7 @@ The VS Code `browser_connect` tool accepts only `playwright` or `playwright-core
 
 #### HTTP Heartbeat
 
-When the server runs with `--port`, it sends MCP heartbeat pings after a Streamable HTTP client opens the optional event stream. POST-only clients stay connected without heartbeat because server-initiated requests cannot reach them. Set `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` to override the default `5000` ms timeout, or to `0` or any negative value to disable heartbeat pings. A client that answers `ping` with a JSON-RPC "method not found" error is treated as alive: the server stops heartbeating that session instead of closing it. Only an unanswered ping (timeout) or a transport failure closes the session.
+When the server runs with `--port`, it sends MCP heartbeat pings after a Streamable HTTP client opens the optional event stream. POST-only clients stay connected without heartbeat because server-initiated requests cannot reach them. Set `PLAYWRIGHT_MCP_PING_TIMEOUT_MS` to override the default `5000` ms timeout, or to `0` or any negative value to disable heartbeat pings. A client that answers `ping` with a JSON-RPC "method not found" error is treated as alive: the server stops heartbeating that session instead of closing it. Only an unanswered ping (timeout) or a transport failure closes the session. Independently of the heartbeat, an `Mcp-Session-Id` session with no request in flight and no open event stream expires after 30 idle minutes, so a client that disappears without sending `DELETE` does not hold its browser forever; every request restarts that window, and a client whose session expired gets `404 Session not found` and must initialize again.
 
 #### Clients without the initialize handshake
 

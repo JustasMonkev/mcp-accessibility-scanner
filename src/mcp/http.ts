@@ -138,7 +138,46 @@ function validateAuthorization(req: http.IncomingMessage, authToken: string | un
     return { statusCode: 401, message: 'Unauthorized: invalid token.' };
 }
 
-type StatefulSession = { transport: NodeStreamableHTTPServerTransport, eventStreamReady: ManualPromise };
+// A legacy Mcp-Session-Id session otherwise lives until DELETE or a failed
+// heartbeat, and the heartbeat waits for both a tool call and the optional
+// event stream: a client that initializes, lists tools and disappears would
+// hold its backend forever. A session with no request in flight (an open event
+// stream counts as one) expires after this long without activity.
+/** @public */
+export const legacySessionIdleTimeoutMs = 30 * 60 * 1000;
+
+class SessionIdleExpiry {
+  private _inFlight = 0;
+  private _timer: NodeJS.Timeout | undefined;
+  private _disposed = false;
+
+  constructor(private readonly _expire: () => void) {}
+
+  track(res: http.ServerResponse): void {
+    if (this._disposed)
+      return;
+    ++this._inFlight;
+    this._clearTimer();
+    res.once('close', () => {
+      if (--this._inFlight || this._disposed)
+        return;
+      this._timer = setTimeout(() => this._expire(), legacySessionIdleTimeoutMs);
+      this._timer.unref();
+    });
+  }
+
+  dispose(): void {
+    this._disposed = true;
+    this._clearTimer();
+  }
+
+  private _clearTimer(): void {
+    clearTimeout(this._timer);
+    this._timer = undefined;
+  }
+}
+
+type StatefulSession = { transport: NodeStreamableHTTPServerTransport, eventStreamReady: ManualPromise, idleExpiry: SessionIdleExpiry };
 
 class SessionStore {
   private readonly _sessions = new Map<string, StatefulSession>();
@@ -179,6 +218,7 @@ class SessionStore {
       res.end('Session not found');
       return;
     }
+    session.idleExpiry.track(res);
     if (req.method === 'GET' && req.headers.accept?.split(',').some(type => type.split(';')[0].trim().toLowerCase() === 'text/event-stream')) {
       const writeHead = res.writeHead.bind(res);
       const resolveOnEstablished = (...args: Parameters<http.ServerResponse['writeHead']>) => {
@@ -267,15 +307,21 @@ class SessionStore {
 
   private async _createSession(req: http.IncomingMessage, res: http.ServerResponse, parsedBody: unknown): Promise<void> {
     const eventStreamReady = new ManualPromise();
+    const idleExpiry = new SessionIdleExpiry(() => {
+      testDebug(`expire idle http session: ${transport.sessionId}`);
+      void transport.close().catch(e => testDebug(e));
+    });
+    idleExpiry.track(res);
     const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: sessionId => {
         testDebug(`create http session: ${transport.sessionId}`);
-        this._sessions.set(sessionId, { transport, eventStreamReady });
+        this._sessions.set(sessionId, { transport, eventStreamReady, idleExpiry });
       }
     });
 
     transport.onclose = () => {
+      idleExpiry.dispose();
       if (!transport.sessionId)
         return;
       this._sessions.delete(transport.sessionId);
@@ -285,9 +331,12 @@ class SessionStore {
     try {
       await mcpServer.connect(this._serverBackendFactory, transport, true, eventStreamReady);
       await transport.handleRequest(req, res, parsedBody);
-      if (!transport.sessionId)
+      if (!transport.sessionId) {
+        idleExpiry.dispose();
         await transport.close();
+      }
     } catch (error) {
+      idleExpiry.dispose();
       await transport.close().catch(e => testDebug(e));
       testDebug(error);
       sendInternalError(req, res, parsedBody);
