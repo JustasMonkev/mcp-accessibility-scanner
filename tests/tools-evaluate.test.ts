@@ -209,6 +209,37 @@ describe('browser_evaluate tool', () => {
     expect(locatorEvaluate.mock.calls[0][0].toString()).toBe(toFunctionSource('element.textContent', true));
   });
 
+  it('emits replay code that calls the function on the page and on a locator like the tool does', async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<title>Replay</title><button id="target">Press</button>');
+      mockTab.page = page;
+      mockTab.refLocator.mockResolvedValue(page.locator('#target'));
+      const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+      const cases = [
+        { function: '() => document.title' },
+        { function: 'document.title' },
+        { function: '() => ({ n: 2 + 2 })' },
+        { function: '(\n  () => document.title\n)' },
+        { function: 'element.textContent', element: 'the button', ref: 'e1' },
+        { function: '(el) => el.id', element: 'the button', ref: 'e1' },
+      ];
+      for (const params of cases) {
+        const result = new Response(mockContext, 'browser_evaluate', {});
+        await evaluateTool.handle(mockContext, params, result);
+        const code = result.code();
+        // A quoted string is evaluated as an expression on replay, returning the function uncalled.
+        expect(code).not.toMatch(/\.evaluate\(['"`]/);
+        const replayed = await new AsyncFunction('page', `return ${code.replace(/;$/, '')}`)(page);
+        expect(replayed).not.toBeUndefined();
+        expect(JSON.stringify(replayed, null, 2)).toBe(result.result());
+      }
+    } finally {
+      await browser.close();
+    }
+  });
+
   it('wraps an object literal expression without it parsing as a block', async () => {
     await evaluateTool.handle(mockContext, { function: '{ title: document.title }' }, response);
 

@@ -19,7 +19,6 @@ import { inspect } from 'util';
 import { z } from 'zod';
 
 import { defineTabTool } from './tool.js';
-import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
 import { isFunctionSource } from '../utils/jsSource.js';
 
@@ -50,7 +49,9 @@ const evaluate = defineTabTool({
     const locator = params.ref && params.element ? await tab.refLocator({ ref: params.ref, element: params.element }) : undefined;
     const source = toFunctionSource(params.function, !!locator);
     const target = locator ? `page.${await generateLocator(locator)}` : 'page';
-    response.addCode(`await ${target}.evaluate(${javascript.quote(source)});`);
+    // Emit the function itself, as the tool passes it: Playwright evaluates a
+    // quoted string as an expression, so replay would return the function uncalled.
+    response.addCode(`await ${target}.evaluate(${source});`);
 
     await tab.waitForCompletion(async () => {
       const func = functionSerializingAs(source);
