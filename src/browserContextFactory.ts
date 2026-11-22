@@ -53,21 +53,85 @@ export function contextFactory(config: FullConfig): BrowserContextFactory {
   return factory;
 }
 
-async function replaceOpenPagesWithBlankTabs(browserContext: playwright.BrowserContext): Promise<{ page: playwright.Page, url: string }[]> {
-  const seen = new Set<playwright.Page>();
-  const arrivals: playwright.Page[] = [];
-  const onPage = (page: playwright.Page) => arrivals.push(page);
-  const replaced: { page: playwright.Page, url: string }[] = [];
-  const replacePage = async (page: playwright.Page) => {
+const pageReplacementTimeoutMs = 30_000;
+
+type ReplacedPage = { page: playwright.Page, url: string };
+
+/**
+ * Replaces every open page with a blank tab before a storage state lands.
+ * Pages that keep arriving while earlier ones are replaced are swept in
+ * further batches, all within one deadline: a context that never stops
+ * opening tabs fails the phase instead of stalling the first tool call.
+ */
+class OpenPageReplacement {
+  private readonly _browserContext: playwright.BrowserContext;
+  private readonly _inFlight = new Set<Promise<void>>();
+  private _closed = false;
+
+  constructor(browserContext: playwright.BrowserContext) {
+    this._browserContext = browserContext;
+  }
+
+  async run(timeoutMs = pageReplacementTimeoutMs): Promise<ReplacedPage[]> {
+    const seen = new Set<playwright.Page>();
+    const arrivals: playwright.Page[] = [];
+    const onPage = (page: playwright.Page) => arrivals.push(page);
+    const replaced: ReplacedPage[] = [];
+    const deadline = Date.now() + timeoutMs;
+    const { promise: expired, resolve: expire } = Promise.withResolvers<'expired'>();
+    const timer = setTimeout(() => expire('expired'), timeoutMs);
+    const timeoutError = () => new Error(`Timed out after ${timeoutMs}ms replacing the pages open in the browser profile before applying the storage state: new pages kept opening. Close the pages the profile restores or opens on startup, then retry.`);
+    this._browserContext.on('page', onPage);
+    try {
+      for (;;) {
+        const pending = [...new Set([...this._browserContext.pages(), ...arrivals.splice(0)])].filter(page => !seen.has(page));
+        if (!pending.length)
+          return replaced;
+        if (Date.now() >= deadline)
+          throw timeoutError();
+        for (const page of pending)
+          seen.add(page);
+        const batch = Promise.all(pending.map(page => this._track(this._replacePage(page, seen, replaced))));
+        if (await Promise.race([batch, expired]) === 'expired')
+          throw timeoutError();
+      }
+    } catch (error) {
+      // Stop admitting work; the caller cancels what is in flight by closing
+      // the context and then waits for settled().
+      this._closed = true;
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      this._browserContext.off('page', onPage);
+    }
+  }
+
+  /** Resolves once no replacement started by run() is still in flight. */
+  async settled(): Promise<void> {
+    while (this._inFlight.size)
+      await Promise.allSettled(this._inFlight);
+  }
+
+  private _track(work: Promise<void>): Promise<void> {
+    this._inFlight.add(work);
+    void work.catch(() => {}).finally(() => this._inFlight.delete(work));
+    return work;
+  }
+
+  private async _replacePage(page: playwright.Page, seen: Set<playwright.Page>, replaced: ReplacedPage[]): Promise<void> {
     const url = page.url();
     let fresh: playwright.Page;
     try {
-      fresh = await browserContext.newPage();
+      fresh = await this._browserContext.newPage();
     } catch {
       await page.close();
       return;
     }
     seen.add(fresh);
+    if (this._closed) {
+      await fresh.close().catch(() => {});
+      return;
+    }
     try {
       await page.close();
     } catch (error) {
@@ -75,24 +139,10 @@ async function replaceOpenPagesWithBlankTabs(browserContext: playwright.BrowserC
       throw error;
     }
     replaced.push({ page: fresh, url });
-  };
-  browserContext.on('page', onPage);
-  try {
-    while (true) {
-      const pending = [...new Set([...browserContext.pages(), ...arrivals.splice(0)])].filter(page => !seen.has(page));
-      if (!pending.length)
-        break;
-      for (const page of pending)
-        seen.add(page);
-      await Promise.all(pending.map(replacePage));
-    }
-  } finally {
-    browserContext.off('page', onPage);
   }
-  return replaced;
 }
 
-async function navigateReplacementPages(replaced: { page: playwright.Page, url: string }[]): Promise<void> {
+async function navigateReplacementPages(replaced: ReplacedPage[]): Promise<void> {
   await Promise.all(replaced.map(async ({ page, url }) => {
     if (!url || url === 'about:blank')
       return;
@@ -685,13 +735,16 @@ export class PersistentContextFactory implements BrowserContextFactory {
 
   private async _applyStorageState(browserContext: playwright.BrowserContext, storageState: NonNullable<FullConfig['browser']['contextOptions']>['storageState'], userDataDir: string, disposableProfile: boolean): Promise<ContextHandle> {
     if (storageState) {
+      const replacement = new OpenPageReplacement(browserContext);
       try {
-        const replaced = await replaceOpenPagesWithBlankTabs(browserContext);
+        const replaced = await replacement.run();
         await browserContext.setStorageState(storageState);
         await ensureNetworkPolicyRoutes(this.config, browserContext);
         await navigateReplacementPages(replaced);
       } catch (error) {
-        await this._closeBrowserContext(browserContext, userDataDir, disposableProfile);
+        // Closing the context cancels replacements still in flight; they
+        // settle before the profile directory is removed.
+        await this._closeBrowserContext(browserContext, userDataDir, disposableProfile, () => replacement.settled());
         throw new StorageStateError(errorMessage(error));
       }
     }
@@ -699,10 +752,11 @@ export class PersistentContextFactory implements BrowserContextFactory {
     return { browserContext, close };
   }
 
-  private async _closeBrowserContext(browserContext: playwright.BrowserContext, userDataDir: string, disposeUserDataDir = false) {
+  private async _closeBrowserContext(browserContext: playwright.BrowserContext, userDataDir: string, disposeUserDataDir = false, afterClose?: () => Promise<void>) {
     testDebug('close browser context (persistent)');
     testDebug('release user data dir', userDataDir);
     await browserContext.close().catch(() => {});
+    await afterClose?.();
     if (disposeUserDataDir)
       await fs.promises.rm(userDataDir, { recursive: true, force: true }).catch(() => {});
     this._userDataDirs.delete(userDataDir);

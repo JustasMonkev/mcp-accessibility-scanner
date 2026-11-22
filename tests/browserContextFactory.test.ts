@@ -20,7 +20,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { connectOverCDP, spawnMock, startTraceViewerServerMock } = vi.hoisted(() => ({
   connectOverCDP: vi.fn(),
@@ -1186,6 +1186,84 @@ describe('browserContextFactory', () => {
     await expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
         .rejects.toThrow('--storage-state and --user-data-dir contradict each other');
     expect(playwright.chromium.launchPersistentContext).not.toHaveBeenCalled();
+  });
+
+  describe('storage-state page replacement deadline', () => {
+    // A context whose every closed page makes another one appear: the sweep
+    // replaced newly arriving pages until a batch found none, so a continuing
+    // stream of tabs made the first tool call wait forever.
+    function createTabStreamContext(options: { hangAfter?: number } = {}) {
+      const browserContext = createMockBrowserContext();
+      const events = new EventEmitter();
+      browserContext.on.mockImplementation((event: string, listener: (...args: any[]) => void) => events.on(event, listener));
+      browserContext.off.mockImplementation((event: string, listener: (...args: any[]) => void) => events.off(event, listener));
+      const { promise: closed, resolve: markClosed } = Promise.withResolvers<void>();
+      browserContext.close.mockImplementation(async () => markClosed());
+      const streamPage = () => {
+        const page = createMockPage('https://restored.example/');
+        page.close.mockImplementation(async () => {
+          events.emit('page', streamPage());
+        });
+        return page;
+      };
+      let newPages = 0;
+      browserContext.newPage.mockImplementation(async () => {
+        if (options.hangAfter !== undefined && ++newPages > options.hangAfter) {
+          // Cancelled only by closing the context.
+          await closed;
+          throw new Error('Target page, context or browser has been closed');
+        }
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return createMockPage('about:blank');
+      });
+      browserContext.pages.mockReturnValue([streamPage()]);
+      return browserContext;
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    // Profile setup does real I/O first; the deadline starts with the sweep.
+    async function untilSweepStarts(browserContext: any) {
+      while (!browserContext.newPage.mock.calls.length)
+        await new Promise(resolve => setImmediate(resolve));
+    }
+
+    it('fails the whole replacement phase at one deadline and stops admitting new pages', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      const browserContext = createTabStreamContext();
+      vi.mocked(playwright.chromium.launchPersistentContext).mockResolvedValue(browserContext);
+      const factory = contextFactory(await resolveConfig({ browser: { contextOptions: { storageState: '/tmp/auth.json' } } }));
+      const failure = expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
+          .rejects.toThrow(/Timed out after 30000ms replacing the pages open in the browser profile before applying the storage state/);
+      await untilSweepStarts(browserContext);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await failure;
+      expect(browserContext.setStorageState).not.toHaveBeenCalled();
+      expect(browserContext.close).toHaveBeenCalledTimes(1);
+      const replacements = browserContext.newPage.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(browserContext.newPage).toHaveBeenCalledTimes(replacements);
+    });
+
+    it('lets replacements still in flight settle before removing the disposable profile', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      const browserContext = createTabStreamContext({ hangAfter: 3 });
+      vi.mocked(playwright.chromium.launchPersistentContext).mockResolvedValue(browserContext);
+      const rm = vi.spyOn(fs.promises, 'rm').mockResolvedValue(undefined);
+      const factory = contextFactory(await resolveConfig({ browser: { contextOptions: { storageState: '/tmp/auth.json' } } }));
+      const failure = expect(factory.createContext({ name: 'vitest', version: '1.0.0' }, new AbortController().signal))
+          .rejects.toThrow('Timed out after 30000ms');
+      await untilSweepStarts(browserContext);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await failure;
+      // The hung newPage() rejected on close, and its page was closed, before the profile was removed.
+      const profileRemoval = rm.mock.calls.findIndex(([dir]) => String(dir).includes('-storage-state-'));
+      expect(profileRemoval).toBeGreaterThanOrEqual(0);
+      expect(browserContext.close.mock.invocationCallOrder[0]).toBeLessThan(rm.mock.invocationCallOrder[profileRemoval]);
+    });
   });
 
   it('closes the launched persistent browser when applying the storage state fails', async () => {
