@@ -43,13 +43,20 @@ export class SharedClientSlot {
     }
   }
 
-  async replace(connect: (() => Promise<Client>) | undefined): Promise<Client | undefined> {
+  // Replacements run one at a time, in call order. The candidate is connected
+  // before anything is published, so a failed connect leaves the current
+  // client in place. `publish` runs synchronously with the swap, before the
+  // previous client is retired. A caller that is the slot's sole user passes
+  // `lease: false`: it keeps no lease on the published client, which is then
+  // closed as soon as it is replaced.
+  async replace(connect: (() => Promise<Client>) | undefined, options: { lease?: boolean, publish?: (next: Client | undefined) => void } = {}): Promise<Client | undefined> {
     const result = this._chain.then(async () => {
       const next = connect ? await connect() : undefined;
       const previous = this._current;
       this._current = next;
       if (next)
-        this._leases.set(next, { count: 1, retired: false });
+        this._leases.set(next, { count: options.lease === false ? 0 : 1, retired: false });
+      options.publish?.(next);
       if (previous) {
         const lease = this._leases.get(previous);
         if (lease && lease.count > 0) {

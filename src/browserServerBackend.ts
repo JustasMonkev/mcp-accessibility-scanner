@@ -214,8 +214,8 @@ export class BrowserServerBackend implements ServerBackend {
     const tool = this._toolsByName.get(name);
     if (!tool)
       return this._callWebMCP(name, rawArguments, requestContext);
-    const routedSessionId = this._routedSessionId(name, rawArguments);
-    const parsedArguments = parseToolArguments(tool, rawArguments);
+    const { routedSessionId, toolArguments } = this._routeToolArguments(name, rawArguments);
+    const parsedArguments = parseToolArguments(tool, toolArguments);
     const context = this._contextFor(routedSessionId);
     const responseArguments = routedSessionId !== undefined ? { browserSessionId: routedSessionId, ...parsedArguments } : parsedArguments;
     const closingSessionContext = name === 'browser_session_close' ? this._sessionContextOrUndefined(parsedArguments.browserSessionId) : undefined;
@@ -271,15 +271,22 @@ export class BrowserServerBackend implements ServerBackend {
     }
   }
 
-  private _routedSessionId(name: string, rawArguments: ToolArguments): string | undefined {
-    if (sessionManagementTools.has(name))
-      return undefined;
-    const id = rawArguments?.browserSessionId;
+  // browserSessionId is a routing argument the server adds to every
+  // non-session tool's advertised schema; the tool's own input schema never
+  // declares it (strict schemas would reject it), so it is validated here once
+  // and removed before the tool sees its arguments.
+  private _routeToolArguments(name: string, rawArguments: ToolArguments): {
+    routedSessionId: string | undefined;
+    toolArguments: ToolArguments;
+  } {
+    if (sessionManagementTools.has(name) || !rawArguments || !('browserSessionId' in rawArguments))
+      return { routedSessionId: undefined, toolArguments: rawArguments };
+    const { browserSessionId: id, ...toolArguments } = rawArguments;
     if (id === undefined)
-      return undefined;
+      return { routedSessionId: undefined, toolArguments };
     if (typeof id !== 'string')
       throw new Error('Invalid browserSessionId: expected a string handle returned by browser_session_open.');
-    return id;
+    return { routedSessionId: id, toolArguments };
   }
 
   serverClosed() {

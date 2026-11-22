@@ -22,6 +22,23 @@ import { wrapInProcess } from '../src/mcp/server.js';
 
 import type { SharedProxySelection } from '../src/mcp/proxyBackend.js';
 
+function makeInnerBackend(toolName: string) {
+  const backend = {
+    toolName,
+    closed: 0,
+    calls: [] as string[],
+    listTools: async () => [{ name: toolName, description: toolName, inputSchema: { type: 'object' as const, properties: {} } }],
+    callTool: async (name: string) => {
+      backend.calls.push(name);
+      return { content: [{ type: 'text' as const, text: toolName }] };
+    },
+    serverClosed: () => {
+      backend.closed++;
+    },
+  };
+  return backend;
+}
+
 describe('ProxyBackend', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -74,39 +91,121 @@ describe('ProxyBackend', () => {
   });
 
   it('notifies clients when the exposed tool list changes after switching providers', async () => {
+    const defaultInner = makeInnerBackend('scan_page');
+    const alternateInner = makeInnerBackend('scan_page');
+    const defaultListTools = vi.spyOn(defaultInner, 'listTools');
+    const alternateListTools = vi.spyOn(alternateInner, 'listTools');
     const backend = new ProxyBackend([
-      {
-        name: 'default',
-        description: 'Default provider',
-        connect: vi.fn(async () => ({ id: 'default-transport' })),
-      },
-      {
-        name: 'alternate',
-        description: 'Alternate provider',
-        connect: vi.fn(async () => ({ id: 'alternate-transport' })),
-      },
-    ] as any);
+      { name: 'default', description: 'Default provider', connect: async () => wrapInProcess(defaultInner) },
+      { name: 'alternate', description: 'Alternate provider', connect: async () => wrapInProcess(alternateInner) },
+    ]);
+    const context = { notifyToolListChanged: vi.fn(async () => undefined) };
+    await backend.initialize(context, { name: 'vitest', version: '1' });
 
-    const close = vi.fn(async () => undefined);
-    const previousListTools = vi.fn(async () => ({ tools: [{ name: 'scan_page' }] }));
-    (backend as any)._currentClient = { listTools: previousListTools, close };
-    (backend as any)._backendContext = {
-      notifyToolListChanged: vi.fn(async () => undefined),
-    };
+    const switched = await backend.callTool('browser_connect', { name: 'alternate' });
 
-    vi.spyOn(Client.prototype, 'connect').mockResolvedValue(undefined);
-    const nextListTools = vi.spyOn(Client.prototype, 'listTools').mockResolvedValue({
-      tools: [{ name: 'scan_page' }] as any[],
-    });
-
-    await (backend as any)._setCurrentClient((backend as any)._mcpProviders[1], true);
-
-    expect(close).toHaveBeenCalledTimes(1);
+    expect(switched.isError).not.toBe(true);
+    expect(defaultInner.closed).toBe(1);
     // Announced even with matching built-in names: page tools depend on the
     // browser, and listing either provider would run page discovery.
-    expect((backend as any)._backendContext.notifyToolListChanged).toHaveBeenCalledTimes(1);
-    expect(previousListTools).not.toHaveBeenCalled();
-    expect(nextListTools).not.toHaveBeenCalled();
+    expect(context.notifyToolListChanged).toHaveBeenCalledTimes(1);
+    expect(defaultListTools).not.toHaveBeenCalled();
+    expect(alternateListTools).not.toHaveBeenCalled();
+    backend.serverClosed?.();
+  });
+
+  // A switch connects the replacement before publishing it and only then
+  // closes the client it replaced: a failed handshake must not strand the
+  // connection without the client that was working.
+  describe('switching the per-connection provider', () => {
+    async function makeBackend(alternates: Record<string, () => Promise<any>>) {
+      const defaultInner = makeInnerBackend('tool_default');
+      const backend = new ProxyBackend([
+        { name: 'default', description: 'Default provider', connect: async () => wrapInProcess(defaultInner) },
+        ...Object.entries(alternates).map(([name, connect]) => ({ name, description: name, connect })),
+      ]);
+      const context = { notifyToolListChanged: vi.fn(async () => undefined) };
+      await backend.initialize(context, { name: 'vitest', version: '1' });
+      return { backend, defaultInner, context };
+    }
+
+    const refusingTransport = () => ({
+      start: async () => {
+        throw new Error('handshake refused');
+      },
+      send: async () => {},
+      close: async () => {},
+    });
+
+    it('keeps the working client when the replacement handshake fails', async () => {
+      const { backend, defaultInner, context } = await makeBackend({ alternate: async () => refusingTransport() });
+
+      const result = await backend.callTool('browser_connect', { name: 'alternate' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content?.[0]).toMatchObject({ type: 'text', text: expect.stringContaining('handshake refused') });
+      expect(defaultInner.closed).toBe(0);
+      expect(context.notifyToolListChanged).not.toHaveBeenCalled();
+      const after = await backend.callTool('tool_default', {});
+      expect((after.content?.[0] as any).text).toBe('tool_default');
+      expect(defaultInner.calls).toEqual(['tool_default']);
+      backend.serverClosed?.();
+      await vi.waitFor(() => expect(defaultInner.closed).toBe(1));
+    });
+
+    it('serves from the working client while a replacement connects, and applies overlapping switches in call order', async () => {
+      const first = makeInnerBackend('tool_first');
+      const second = makeInnerBackend('tool_second');
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+      const { backend, defaultInner } = await makeBackend({
+        first: async () => {
+          await firstGate;
+          return wrapInProcess(first);
+        },
+        second: async () => wrapInProcess(second),
+      });
+
+      const switchingFirst = backend.callTool('browser_connect', { name: 'first' });
+      const switchingSecond = backend.callTool('browser_connect', { name: 'second' });
+      // While the first replacement is still connecting, the working client
+      // stays published and open.
+      const during = await backend.callTool('tool_default', {});
+      expect((during.content?.[0] as any).text).toBe('tool_default');
+      expect(defaultInner.closed).toBe(0);
+
+      releaseFirst();
+      expect((await switchingFirst).isError).not.toBe(true);
+      expect((await switchingSecond).isError).not.toBe(true);
+
+      const after = await backend.callTool('tool_second', {});
+      expect((after.content?.[0] as any).text).toBe('tool_second');
+      expect(defaultInner.closed).toBe(1);
+      expect(first.closed).toBe(1);
+      expect(second.closed).toBe(0);
+      backend.serverClosed?.();
+      await vi.waitFor(() => expect(second.closed).toBe(1));
+    });
+
+    it('keeps the working client when an overlapping switch fails, and applies the one that succeeds', async () => {
+      const second = makeInnerBackend('tool_second');
+      const { backend, defaultInner } = await makeBackend({
+        broken: async () => refusingTransport(),
+        second: async () => wrapInProcess(second),
+      });
+
+      const [failed, succeeded] = await Promise.all([
+        backend.callTool('browser_connect', { name: 'broken' }),
+        backend.callTool('browser_connect', { name: 'second' }),
+      ]);
+
+      expect(failed.isError).toBe(true);
+      expect(succeeded.isError).not.toBe(true);
+      const after = await backend.callTool('tool_second', {});
+      expect((after.content?.[0] as any).text).toBe('tool_second');
+      expect(defaultInner.closed).toBe(1);
+      backend.serverClosed?.();
+    });
   });
 
   it('neither lists tools nor notifies while connecting the first provider', async () => {
@@ -171,23 +270,6 @@ describe('ProxyBackend', () => {
   // process-wide, or it reports success and silently reverts to the default
   // provider on the very next request.
   describe('process-scoped provider selection for stateless serving', () => {
-    function makeInnerBackend(toolName: string) {
-      const backend = {
-        toolName,
-        closed: 0,
-        calls: [] as string[],
-        listTools: async () => [{ name: toolName, description: toolName, inputSchema: { type: 'object' as const, properties: {} } }],
-        callTool: async (name: string) => {
-          backend.calls.push(name);
-          return { content: [{ type: 'text' as const, text: toolName }] };
-        },
-        serverClosed: () => {
-          backend.closed++;
-        },
-      };
-      return backend;
-    }
-
     function makeSharedSetup() {
       const defaults: ReturnType<typeof makeInnerBackend>[] = [];
       const alternates: ReturnType<typeof makeInnerBackend>[] = [];
