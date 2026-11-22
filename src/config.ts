@@ -146,6 +146,7 @@ async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   parseFilePaths(config.filePaths);
   applyProxyToClientCertificates(config);
   validateIdleTimeout(config.timeouts.idle);
+  validateNumericSettings(config);
   config.browser.allowedUploadDirs = await resolveUploadDirs(config.browser.allowedUploadDirs);
   if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
     throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
@@ -181,6 +182,29 @@ const maxTimerDelayMs = 2_147_483_647;
 function validateIdleTimeout(idle: number): void {
   if (!Number.isInteger(idle) || idle < 0 || idle > maxTimerDelayMs)
     throw new Error(`timeouts.idle must be an integer from 0 to ${maxTimerDelayMs} milliseconds. Use 0 to disable idle shutdown.`);
+}
+
+const maxPort = 65_535;
+
+// CLI, environment and config-file numbers all arrive here after the merge: a
+// mistyped value (parseInt/Number of non-numeric text is NaN, a JSON string
+// stays a string) must fail startup instead of silently disabling a deadline.
+function validateNumericSettings(config: FullConfig): void {
+  const { browser, server, timeouts } = config;
+  validateIntegerSetting('browser.cdpTimeout (--cdp-timeout, PLAYWRIGHT_MCP_CDP_TIMEOUT)', browser.cdpTimeout, 0, maxTimerDelayMs, ' Use 0 to disable the CDP connect timeout.');
+  validateIntegerSetting('browser.cdpLaunch.startupTimeoutMs (--cdp-launch-startup-timeout, PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT)', browser.cdpLaunch?.startupTimeoutMs, 1, maxTimerDelayMs);
+  validateIntegerSetting('browser.cdpLaunch.port (--cdp-launch-port, PLAYWRIGHT_MCP_CDP_LAUNCH_PORT)', browser.cdpLaunch?.port, 1, maxPort);
+  validateIntegerSetting('server.port (--port, PLAYWRIGHT_MCP_PORT)', server.port, 0, maxPort);
+  validateIntegerSetting('timeouts.navigationTimeout (--navigation-timeout, PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT)', timeouts.navigationTimeout, 0, maxTimerDelayMs);
+  validateIntegerSetting('timeouts.defaultTimeout (--default-timeout, PLAYWRIGHT_MCP_DEFAULT_TIMEOUT)', timeouts.defaultTimeout, 0, maxTimerDelayMs);
+  validateIntegerSetting('timeouts.settle (--timeout-settle, PLAYWRIGHT_MCP_TIMEOUT_SETTLE)', timeouts.settle, 0, maxTimerDelayMs);
+}
+
+function validateIntegerSetting(name: string, value: unknown, min: number, max: number, hint = ''): void {
+  if (value === undefined || value === null)
+    return;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max)
+    throw new Error(`${name} must be an integer from ${min} to ${max}; got ${typeof value === 'number' ? String(value) : JSON.stringify(value)}.${hint}`);
 }
 
 async function resolveUploadDirs(uploadDirs: string[] | undefined): Promise<string[] | undefined> {

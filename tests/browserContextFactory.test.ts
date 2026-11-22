@@ -398,6 +398,15 @@ describe('browserContextFactory', () => {
       await result.close();
     });
 
+    it.each([NaN, Infinity, 0])('refuses a startup timeout of %s that bypassed config validation before launching', async startupTimeoutMs => {
+      // A NaN deadline never expires, so the attach loop would retry forever.
+      const config = await resolveConfig({ browser: { cdpLaunch: { command: 'open', port: 9222 } } });
+      config.browser.cdpLaunch!.startupTimeoutMs = startupTimeoutMs;
+      await expect(contextFactory(config).createContext(clientInfo, new AbortController().signal, undefined))
+          .rejects.toThrow(`Invalid CDP launch startup timeout ${startupTimeoutMs}`);
+      expect(spawnMock).not.toHaveBeenCalled();
+    });
+
     it('closes an attach still in flight when the launched command fails', async () => {
       const child = createMockChildProcess();
       spawnMock.mockReturnValueOnce(child);

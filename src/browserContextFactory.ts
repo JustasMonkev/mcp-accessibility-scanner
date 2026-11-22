@@ -384,6 +384,11 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     const { cdpLaunch } = this.config.browser;
     if (!cdpLaunch)
       throw new Error('CDP launch requires browser.cdpLaunch.');
+    const startupTimeoutMs = cdpLaunch.startupTimeoutMs ?? defaultCdpTimeoutMs;
+    // A NaN or infinite budget would make the attach loop's deadline check
+    // never fire. Config resolution rejects those; never launch on one anyway.
+    if (!Number.isFinite(startupTimeoutMs) || startupTimeoutMs <= 0)
+      throw new Error(`Invalid CDP launch startup timeout ${startupTimeoutMs}: expected a positive number of milliseconds. No application was launched.`);
     if (cdpLaunch.port !== undefined) {
       await this._waitForClosingPinnedPortHolder(cdpLaunch);
       this._assertPinnedPortFree(cdpLaunch);
@@ -412,7 +417,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
         testDebug(`cdp-launch stderr: ${String(data).trimEnd()}`);
       });
 
-      browser = await this._waitForBrowser(endpoint, clientInfo, childProcess, cdpLaunch.startupTimeoutMs ?? defaultCdpTimeoutMs, launchFailure);
+      browser = await this._waitForBrowser(endpoint, clientInfo, childProcess, startupTimeoutMs, launchFailure);
     } catch (error) {
       if (pinnedLaunch)
         pinnedLaunch.closing = true;
@@ -470,12 +475,6 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
   }
 
   private async _waitForBrowser(endpoint: string, clientInfo: ClientInfo, childProcess: ReturnType<typeof spawn>, startupTimeoutMs: number, launchFailure: AbortSignal): Promise<playwright.Browser> {
-    // A NaN or infinite budget would make the deadline comparison below never
-    // fire; config validation rejects those, but never loop on one regardless.
-    if (!Number.isFinite(startupTimeoutMs) || startupTimeoutMs <= 0) {
-      childProcess.kill('SIGTERM');
-      throw new Error(`Invalid CDP launch startup timeout ${startupTimeoutMs}: expected a positive number of milliseconds.`);
-    }
     const deadline = Date.now() + startupTimeoutMs;
     const headers = cdpConnectHeaders(clientInfo, this.config.browser);
     const cdpTimeout = this.config.browser.cdpTimeout ?? defaultCdpTimeoutMs;
