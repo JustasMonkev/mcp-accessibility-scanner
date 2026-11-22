@@ -1,0 +1,19 @@
+npm notice run mcp-accessibility-scanner@5.0.1 check
+npm notice run npm run lint && npm run knip && npm run check:pinned-deps && npm run check:runtime-deps && npm run check:deps-list
+npm notice run mcp-accessibility-scanner@5.0.1 lint
+npm notice run oxlint --type-aware . && npm run typecheck
+npm notice run mcp-accessibility-scanner@5.0.1 typecheck
+npm notice run tsc --noEmit --project tsconfig.json
+npm notice run mcp-accessibility-scanner@5.0.1 knip
+npm notice run knip --strict
+npm notice run mcp-accessibility-scanner@5.0.1 check:pinned-deps
+npm notice run node scripts/check-pinned-deps.mjs
+Registry dependencies are pinned.
+npm notice run mcp-accessibility-scanner@5.0.1 check:runtime-deps
+npm notice run node scripts/check-runtime-deps.mjs
+Runtime imports have declared dependencies.
+npm notice run mcp-accessibility-scanner@5.0.1 check:deps-list
+npm notice run node scripts/check-deps-list.mjs
+Imports respect src/**/DEPS.list.
+[perf/reuse-axe-installer 1895981] perf(scanner): reuse the axe installer across same-document scans
+ 3 files changed, 198 insertions(+), 27 deletions(-)

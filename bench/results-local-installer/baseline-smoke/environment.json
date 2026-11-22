@@ -1,0 +1,81 @@
+{
+  "start": "2026-11-22T08:28:14.731Z",
+  "command": [
+    "/opt/homebrew/Cellar/node/26.5.0/bin/node",
+    "/Users/justas/Desktop/mcp-accessibility-scanner/tmp/reuse-axe-installer/bench/results-local-installer/run.mjs",
+    "--baseline",
+    "/private/tmp/mcp-axe-stock-main",
+    "--corpus",
+    "fast-axe/bench",
+    "--smoke",
+    "--out",
+    "tmp/reuse-axe-installer/bench/results-local-installer/baseline-smoke"
+  ],
+  "cwd": "/Users/justas/Desktop/mcp-accessibility-scanner",
+  "count": 1,
+  "node": "v26.5.0",
+  "platform": "darwin",
+  "osRelease": "27.2.0",
+  "arch": "arm64",
+  "cpu": "Apple M4 Pro",
+  "corpusGit": "2e8667cd88be42f3c6985c12db370b6fa4762a63",
+  "corpusFiles": {
+    "corpus.mjs": "fe8676963bcdf4ae6ad04d783a3d5b1fe0160bb45d9878ecad3703d8ced0f7f4",
+    "server.mjs": "ba8f776926436fc3a727fb81b87494ae393c4ec763657c1f9800813889370df1"
+  },
+  "pages": {
+    "example": {
+      "path": "/example/example.html",
+      "sha256": "78011fc72d0bc1104aab053dddd03aa2aa2913d9d37982ef666ce214e6d59ce0"
+    },
+    "bad-home": {
+      "path": "/bad-home/bad-home.html",
+      "sha256": "349a49d1c3a7722601984eb99e2b5c8f876d1e62cc18f761dfdf7bb2d5192f8f"
+    },
+    "mdn": {
+      "path": "/mdn/index.html",
+      "sha256": "49af30d19ad608f5fd769cfffd606a21db0d997c969422138bb1da962c05f689"
+    },
+    "fixture-frame-title": {
+      "path": "/fixture-frame-title/frame-title.html",
+      "sha256": "9f5e1445c7f279bb4ecbd918af66545458fbc4f8499fea8a2867daa9f7f3174d"
+    }
+  },
+  "arms": {
+    "baseline": {
+      "cwd": "/private/tmp/mcp-axe-stock-main",
+      "revision": "da84370f17e7a7abb2b56eeddd965d81dfad7b5a",
+      "scannedModuleSha": "100f55606a8ae669dc91df0fb0a0d226d786cdd84e939335f00bfaf7b23c1295",
+      "scanner": "5.0.1",
+      "playwright": "1.65.1",
+      "enginePath": "/private/tmp/mcp-axe-stock-main/node_modules/axe-core/axe.min.js",
+      "axe": "4.14.0",
+      "engineFileSha": "20c09fe157a8a34a30e241aaa1fcdade657734f08ab379ecfbeb7d45cc46e878",
+      "injectedAxeSourceSha": "a5fcf3b78743edaddb1f38548e125c8673f7140671e0da78ed52d15e969d66c0",
+      "packageLockSha": "28d88450895122df1074d594f7b1c786da97f1727ad72661376ceb1b345999ef",
+      "engineLockIntegrity": "sha512-9WTZxEjsZ7b13TH8JPmbV2z8CHbl80/2hm3XPEG4JgNdQLK81IBRXmSxHfMAOkSqQeRxT/0dwNDz2GOm3zzpcQ==",
+      "args": [
+        "cli.js",
+        "--config",
+        "/var/folders/6n/nmb3q83j5yd13qfq3xpjk_r40000gn/T/stock-scanner-timing-xOA8GH/baseline/settings.json",
+        "--headless",
+        "--isolated",
+        "--browser",
+        "chromium",
+        "--no-sandbox",
+        "--viewport-size",
+        "1280,800",
+        "--block-service-workers",
+        "--output-dir",
+        "/var/folders/6n/nmb3q83j5yd13qfq3xpjk_r40000gn/T/stock-scanner-timing-xOA8GH/baseline"
+      ],
+      "runtime": {
+        "version": "4.14.0",
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/159.0.0.0 Safari/537.36"
+      }
+    }
+  },
+  "servedMdnScriptSha": "26663db44628c55ee9cfadd257c98094467421d257423c798681bd82662a1a89",
+  "origin": "http://127.0.0.1:55390",
+  "end": "2026-11-22T08:28:20.182Z"
+}
