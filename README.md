@@ -1001,19 +1001,19 @@ Sessions that stay idle expire automatically after 30 minutes; the timer is refr
 ### Information & Monitoring Tools
 
 #### `browser_console_messages`
-Returns all console messages from the page.
+Returns console messages from the current page. Each tab keeps the most recent 200 messages per page; when older ones were dropped, the result starts with a line saying how many were omitted. Page snapshots likewise show at most the 200 most recent console messages since the previous snapshot, with an omitted count.
 Source locations use `url:line` with one-based line numbers, both here and in page snapshot console snippets.
 Large `data:` URL payloads in console messages are truncated to their media type prefix.
 
 #### `browser_network_requests`
-Returns the current request list, numbered so a single request can be inspected with `browser_network_request`. Set `all: true` to include up to 200 retained requests from earlier explicit `browser_navigate` calls, alongside all current requests.
+Returns the current request list, numbered so a single request can be inspected with `browser_network_request`. Set `all: true` to include up to 200 retained requests from earlier explicit `browser_navigate` calls, alongside the current requests. The current list keeps the most recent 200 requests since the last explicit navigation, including requests from link clicks, form submits and `history` calls. When older requests were dropped, the listing starts with a line saying how many were omitted.
 Large `data:` URL payloads in request URLs are truncated to their media type prefix.
 When there is at least one request, a closing line points at `browser_network_request`.
 
 #### `browser_network_request`
 Returns credential-redacted request/response headers and body metadata for one request from the `browser_network_requests` listing.
 - Parameters: `index` (the request ID shown in either listing). IDs start at 1 for each tab and increase for its lifetime; they are never renumbered or reused after navigation or eviction. Current lists can therefore start above 1 and contain gaps.
-- By default, the listing still resets on explicit `browser_navigate`; link clicks, form submits and `history` calls keep appending, as before. `all: true` adds retained earlier requests. Detail lookup accepts any retained ID even when it is absent from the default list. After the oldest historical request is evicted, its ID returns an error rather than identifying another request. Closing or disposing the tab clears both lists. Each tab and browser session owns its own history and IDs; use an ID with its originating tab/session.
+- By default, the listing still resets on explicit `browser_navigate`; link clicks, form submits and `history` calls keep appending, as before. `all: true` adds retained earlier requests. Detail lookup accepts any retained ID even when it is absent from the default list. After the oldest historical or current request is evicted, its ID returns an error rather than identifying another request. Closing or disposing the tab clears both lists. Each tab and browser session owns its own history and IDs; use an ID with its originating tab/session.
 - IDs do not survive server restarts or recreated browser-session contexts. Stateless clients should use an explicit browser session when they need retained browser state across requests.
 - Credential-bearing headers (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`) are reported as `<redacted, N characters>`, so their presence and size stay visible but the secret never reaches the transcript. All other headers are reported in full, one line each.
 - Request and response body contents are never returned because they can contain submitted credentials or private API data. Non-empty bodies are reported as `<redacted, N bytes, mime/type>`; empty bodies remain `<empty>`.
