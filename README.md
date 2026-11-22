@@ -647,6 +647,7 @@ Viewport variants require a configured viewport (for example `--viewport-size=12
 Runs Axe scans on the same page across viewport/media/zoom variants and compares deltas against baseline.
 - Default variants: baseline, mobile, desktop, forced-colors, reduced-motion, zoom-200
 - Supports custom variants and optional reload between variants
+- Runs exclusively in its browser context, like the interaction audits: while a matrix scan runs, overlapping MCP tool calls routed to the same context (including another matrix scan) are rejected with a busy error, and a matrix scan started while another tool is active is rejected too. Each scan therefore measures only its own variants and restores the viewport, media and zoom it captured. Calls routed to other browser sessions proceed independently.
 - Always writes a JSON report (default filename: `scan-matrix-{timestamp}-{token}.json`)
 - JSON report and structured result schema `v2` set baseline deltas to `null` when either scan left frames unscanned, or when a rule recorded as a violation on either side also has incomplete results on either side. An undecidable result is not evidence that a violation was fixed, introduced, or changed in count.
 - Each variant includes `comparisonIncompleteRuleIds` in JSON and structured output: the sorted rule IDs making its comparison uncertain, or `[]` when none do. The text table distinguishes missing-frame coverage from incomplete checks. These safeguards still apply with `includeIncomplete: false`; that option hides detailed findings, not comparison validity.
