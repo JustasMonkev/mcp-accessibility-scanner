@@ -153,19 +153,14 @@ const axeReadyNonce = randomUUID();
 
 const axeConfigureSource = `;axe.configure({ allowedOrigins: ['<unsafe_all_origins>'], branding: { application: 'playwright' } });`;
 
-// Keep the installer, not the installed engine: every scan gets fresh axe state
-// and its own coverage marker. The handle belongs to one frame document.
 type AxeInstaller = { install: (token: string) => void };
-type InstallerEntry = { handle?: JSHandle<AxeInstaller> };
-const installers = new WeakMap<Frame, InstallerEntry>();
-const observedPages = new WeakSet<Page>();
 
-function forgetInstaller(frame: Frame): void {
-  const entry = installers.get(frame);
-  installers.delete(frame);
-  void entry?.handle?.dispose().catch(() => {});
-}
+const cachedInstallers = new WeakMap<Frame, JSHandle<AxeInstaller>>();
+const installerVersions = new WeakMap<Frame, number>();
+const watchedPages = new WeakSet<Page>();
 
+// Return `{ install }` instead of bare `install` so Playwright's remote-object
+// description stays tiny instead of serializing the full axe source.
 const installerSource = [
   '(function install(token) {',
   axe.source,
@@ -175,34 +170,58 @@ const installerSource = [
   '})',
 ].join('\n');
 
-async function installAxe(frame: Frame, token: string): Promise<void> {
-  const previous = installers.get(frame);
-  const cached = previous?.handle;
-  if (cached) {
-    try {
-      await frame.evaluate(({ installer, token }) => { installer.install(token); }, { installer: cached, token });
-      return;
-    } catch (error) {
-      // A Frame survives navigation; its handles don't. Ask Playwright to
-      // resolve the argument without running the installer again. A live
-      // handle means installation itself failed: preserve that exception.
-      if (await frame.evaluate(() => true, cached).catch(() => false))
-        throw error;
-    }
-  }
+function disposeHandle(handle: JSHandle<AxeInstaller> | undefined): void {
+  void handle?.dispose().catch(() => {});
+}
 
-  const entry: InstallerEntry = {};
-  if (installers.get(frame) === previous) {
-    installers.set(frame, entry);
-    void cached?.dispose().catch(() => {});
+function invalidateInstaller(frame: Frame): void {
+  installerVersions.set(frame, (installerVersions.get(frame) ?? 0) + 1);
+  const existing = cachedInstallers.get(frame);
+  cachedInstallers.delete(frame);
+  disposeHandle(existing);
+}
+
+function watchPageFrames(page: Page): void {
+  if (watchedPages.has(page))
+    return;
+  watchedPages.add(page);
+  page.on('framenavigated', invalidateInstaller);
+  page.on('framedetached', invalidateInstaller);
+}
+
+async function tryReuseInstaller(frame: Frame, token: string): Promise<boolean> {
+  const handle = cachedInstallers.get(frame);
+  if (!handle)
+    return false;
+  try {
+    await frame.evaluate(({ installer, token }) => { installer.install(token); }, { installer: handle, token });
+    return true;
+  } catch (error) {
+    // Probe the handle without running install() so engine errors propagate
+    // while stale post-navigation handles fall back to recompilation.
+    const isHandleAlive = await frame.evaluate(() => true, handle).catch(() => false);
+    if (isHandleAlive)
+      throw error;
+    if (cachedInstallers.get(frame) === handle)
+      invalidateInstaller(frame);
+    return false;
   }
+}
+
+async function installAxe(frame: Frame, token: string): Promise<void> {
+  if (await tryReuseInstaller(frame, token))
+    return;
+
+  const version = (installerVersions.get(frame) ?? 0) + 1;
+  installerVersions.set(frame, version);
   const handle = await frame.evaluateHandle<AxeInstaller>(`${installerSource}(${JSON.stringify(token)})`);
-  if (installers.get(frame) === entry && !frame.isDetached()) {
-    entry.handle = handle;
-  } else {
-    // The frame navigated, detached, or another install started in the meantime.
-    await handle.dispose().catch(() => {});
+  if (installerVersions.get(frame) !== version || frame.isDetached()) {
+    disposeHandle(handle);
+    return;
   }
+  const previous = cachedInstallers.get(frame);
+  cachedInstallers.set(frame, handle);
+  disposeHandle(previous);
 }
 
 const axeForNamesGlobal = '__mcpAccessibilityScannerAxe';
@@ -427,11 +446,7 @@ async function injectAxeIntoFrames(
   include: readonly string[],
   exclude: readonly string[]
 ): Promise<string[]> {
-  if (!observedPages.has(page)) {
-    observedPages.add(page);
-    page.on('framenavigated', forgetInstaller);
-    page.on('framedetached', forgetInstaller);
-  }
+  watchPageFrames(page);
   const token = `${axe.version}:${axeReadyNonce}:${++axeReadySequence}`;
   const mainFrame = page.mainFrame();
   await installAxe(mainFrame, token);

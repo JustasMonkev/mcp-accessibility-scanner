@@ -87,6 +87,10 @@ function pageWithSelectorCounts(countBySelector: Record<string, number> = {}, ch
   return page;
 }
 
+function makeInstallerHandle() {
+  return { install: vi.fn(), dispose: vi.fn(async () => {}) };
+}
+
 function resetScan() {
   lastScan = undefined;
   scanResult = { url: 'https://example.com', violations: [], incomplete: [], passes: [], inapplicable: [] };
@@ -625,16 +629,19 @@ describe('axe helpers', () => {
     resetScan();
     const page = pageWithSelectorCounts();
     const frame = page.mainFrame();
-    const handle = { install: vi.fn(), dispose: vi.fn(async () => {}) };
+    const handle = makeInstallerHandle();
     const compile = vi.spyOn(frame, 'evaluateHandle').mockResolvedValue(handle);
     frame.evaluate = async (callback: (value: unknown) => unknown, arg: unknown) => callback(arg);
 
     await runAxeScan(page);
     await runAxeScan(page);
+
     const error = new Error('Axe configuration failed');
     handle.install.mockImplementationOnce(() => { throw error; });
     await expect(runAxeScan(page)).rejects.toBe(error);
+
     await runAxeScan(page);
+
     expect(compile).toHaveBeenCalledTimes(1);
     expect(handle.install).toHaveBeenCalledTimes(3);
     expect(handle.dispose).not.toHaveBeenCalled();
@@ -644,8 +651,8 @@ describe('axe helpers', () => {
     resetScan();
     const page = pageWithSelectorCounts();
     const frame = page.mainFrame();
-    const stale = { install: vi.fn(), dispose: vi.fn(async () => {}) };
-    const fresh = { install: vi.fn(), dispose: vi.fn(async () => {}) };
+    const stale = makeInstallerHandle();
+    const fresh = makeInstallerHandle();
     const compile = vi.spyOn(frame, 'evaluateHandle').mockResolvedValueOnce(stale).mockResolvedValueOnce(fresh);
     frame.evaluate = async (callback: (value: unknown) => unknown, arg: typeof stale | { installer: typeof stale }) => {
       if (arg === stale || ('installer' in arg && arg.installer === stale))
@@ -656,6 +663,7 @@ describe('axe helpers', () => {
     await runAxeScan(page);
     await runAxeScan(page);
     await runAxeScan(page);
+
     expect(compile).toHaveBeenCalledTimes(2);
     expect(stale.install).not.toHaveBeenCalled();
     expect(stale.dispose).toHaveBeenCalledTimes(1);
@@ -663,24 +671,51 @@ describe('axe helpers', () => {
     expect(fresh.dispose).not.toHaveBeenCalled();
   });
 
+  it('caches the new installer when navigation invalidates a cached handle mid-scan', async () => {
+    resetScan();
+    const page = pageWithSelectorCounts();
+    const frame = page.mainFrame();
+    const stale = makeInstallerHandle();
+    const fresh = makeInstallerHandle();
+    const compile = vi.spyOn(frame, 'evaluateHandle').mockResolvedValueOnce(stale).mockResolvedValueOnce(fresh);
+    frame.evaluate = async (callback: (value: unknown) => unknown, arg: typeof stale | { installer: typeof stale }) => {
+      if (arg === stale || ('installer' in arg && arg.installer === stale)) {
+        page.emit('framenavigated', frame);
+        throw new Error('Execution context was destroyed');
+      }
+      return callback(arg);
+    };
+
+    await runAxeScan(page);
+    await runAxeScan(page);
+    await runAxeScan(page);
+
+    expect(compile).toHaveBeenCalledTimes(2);
+    expect(stale.dispose).toHaveBeenCalledTimes(1);
+    expect(fresh.dispose).not.toHaveBeenCalled();
+    expect(fresh.install).toHaveBeenCalledTimes(1);
+  });
+
   it('disposes child installers on navigation and detachment without accumulating listeners', async () => {
     resetScan();
     const child = makeFrame({}, 'https://example.com/widget');
     const page = pageWithSelectorCounts({}, [child]);
-    const compile = vi.spyOn(child, 'evaluateHandle');
+    const first = makeInstallerHandle();
+    const second = makeInstallerHandle();
+    const compile = vi.spyOn(child, 'evaluateHandle').mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+
     await runAxeScan(page);
     await runAxeScan(page);
     expect(compile).toHaveBeenCalledTimes(1);
-    const old = await compile.mock.results[0].value;
-    const disposeOld = vi.spyOn(old, 'dispose');
+
     page.emit('framenavigated', child);
-    expect(disposeOld).toHaveBeenCalledTimes(1);
+    expect(first.dispose).toHaveBeenCalledTimes(1);
+
     await runAxeScan(page);
     expect(compile).toHaveBeenCalledTimes(2);
-    const current = await compile.mock.results[1].value;
-    const disposeCurrent = vi.spyOn(current, 'dispose');
+
     page.emit('framedetached', child);
-    expect(disposeCurrent).toHaveBeenCalledTimes(1);
+    expect(second.dispose).toHaveBeenCalledTimes(1);
     expect(page.listenerCount('framenavigated')).toBe(1);
     expect(page.listenerCount('framedetached')).toBe(1);
   });
@@ -689,8 +724,8 @@ describe('axe helpers', () => {
     resetScan();
     const page = pageWithSelectorCounts();
     const frame = page.mainFrame();
-    const winner = { install: vi.fn(), dispose: vi.fn(async () => {}) };
-    const late = { install: vi.fn(), dispose: vi.fn(async () => {}) };
+    const winner = makeInstallerHandle();
+    const late = makeInstallerHandle();
     const pending = Promise.withResolvers<typeof late>();
     const compile = vi.spyOn(frame, 'evaluateHandle').mockReturnValueOnce(pending.promise).mockResolvedValueOnce(winner);
     frame.evaluate = async (callback: (value: unknown) => unknown, arg: unknown) => callback(arg);
@@ -700,6 +735,7 @@ describe('axe helpers', () => {
     pending.resolve(late);
     await firstScan;
     await runAxeScan(page);
+
     expect(compile).toHaveBeenCalledTimes(2);
     expect(late.dispose).toHaveBeenCalledTimes(1);
     expect(winner.dispose).not.toHaveBeenCalled();
@@ -727,7 +763,7 @@ describe('axe helpers', () => {
     // with allowedOrigins, so the top-level run's ping goes unanswered and the
     // frame contributes nothing. It must not read as covered.
     const pageOwned = makeFrame({}, 'https://example.com/widget');
-    pageOwned.evaluate = async (_script: unknown, arg?: unknown) => typeof arg === 'string';
+    pageOwned.evaluate = async () => false;
     const result = await runAxeScan(pageWithSelectorCounts({}, [pageOwned]));
 
     expect(result.unscannedFrames).toEqual(['https://example.com/widget']);
@@ -939,27 +975,31 @@ describe.skipIf(!fs.existsSync(chromium.executablePath()))('axe frame coverage i
           : '<button id="save"></button>',
       }));
       await page.goto('https://scan.test/');
+
       const widget = page.frame({ name: 'widget' })!;
-      const scan = async () => {
+      const scanTargets = async () => {
         const result = await runAxeScan(page, { rules: ['button-name'] });
         expect(result.unscannedFrames).toEqual([]);
         return result.violations.flatMap(rule => rule.nodes.map(node => node.target));
       };
 
-      expect(await scan()).toEqual([['#widget', '#save']]);
+      expect(await scanTargets()).toEqual([['#widget', '#save']]);
+
       const topAxe = await page.evaluateHandle(() => window.axe);
       const childAxe = await widget.evaluateHandle(() => window.axe);
       await widget.locator('#save').evaluate(button => button.setAttribute('aria-label', 'Save'));
-      expect(await scan()).toEqual([]);
+
+      expect(await scanTargets()).toEqual([]);
       expect(await page.evaluate(previous => window.axe !== previous, topAxe)).toBe(true);
       expect(await widget.evaluate(previous => window.axe !== previous, childAxe)).toBe(true);
       await Promise.all([topAxe.dispose(), childAxe.dispose()]);
 
-      // The Playwright Frame and URL survive navigation; its installer handle does not.
+      // Same-URL navigation keeps the Frame object but invalidates its document and installer handle.
       await widget.goto(widget.url());
-      expect(await scan()).toEqual([['#widget', '#save']]);
+      expect(await scanTargets()).toEqual([['#widget', '#save']]);
+
       await page.reload();
-      expect(await scan()).toEqual([['#widget', '#save']]);
+      expect(await scanTargets()).toEqual([['#widget', '#save']]);
     } finally {
       await browser.close();
     }
