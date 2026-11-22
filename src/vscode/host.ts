@@ -135,13 +135,22 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   private async _callContextSwitchTool(params: z.infer<typeof contextSwitchOptions>, _requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
-    if (!params.connectionString || !params.lib) {
+    // Only an empty request disconnects. A request naming either field is a
+    // switch and needs both as non-blank strings; anything partial is an
+    // error that keeps the current provider.
+    if (params.connectionString === undefined && params.lib === undefined) {
       if (this._sharedSlot)
         await this._switchSharedClient(this._sharedSlot, undefined);
       else
         await this._setCurrentClient(await this._defaultTransportFactory(), true, true);
       return {
         content: [{ type: 'text', text: '### Result\nSuccessfully disconnected.\n' }],
+      };
+    }
+    if (!params.connectionString?.trim() || !params.lib?.trim()) {
+      return {
+        content: [{ type: 'text', text: '### Result\nInvalid input: switching providers needs both `connectionString` and `lib` as non-blank strings. Omit both to disconnect.\n' }],
+        isError: true,
       };
     }
 

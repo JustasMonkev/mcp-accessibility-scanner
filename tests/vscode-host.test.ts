@@ -264,6 +264,54 @@ describe('VSCodeProxyBackend', () => {
     expect(defaultTransportFactory).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { connectionString: 'ws://127.0.0.1:1234/' },
+    { lib: 'playwright' },
+    { connectionString: '', lib: 'playwright' },
+    { connectionString: 'ws://127.0.0.1:1234/', lib: '' },
+    { connectionString: '   ', lib: 'playwright' },
+    { connectionString: 'ws://127.0.0.1:1234/', lib: ' \t' },
+    { connectionString: ' ', lib: ' ' },
+  ])('rejects partial or blank browser_connect arguments %o and keeps the working provider', async args => {
+    const defaultInner = makeInnerBackend('tool_default');
+    const defaultTransportFactory = vi.fn(async () => wrapInProcess(defaultInner));
+    const backend = new VSCodeProxyBackend(await resolveConfig({}), defaultTransportFactory);
+    const context = { notifyToolListChanged: vi.fn(async () => undefined) };
+    await backend.initialize(context, { name: 'vitest', version: '1.0.0' });
+    const createSwitchTransport = vi.spyOn(backend as any, '_createSwitchTransport');
+
+    const result = await backend.callTool('browser_connect', args);
+
+    expect(result.isError).toBe(true);
+    expect((result.content?.[0] as any).text).toContain('needs both `connectionString` and `lib`');
+    expect((result.content?.[0] as any).text).not.toContain('disconnected');
+    expect(defaultTransportFactory).toHaveBeenCalledTimes(1);
+    expect(createSwitchTransport).not.toHaveBeenCalled();
+    expect(context.notifyToolListChanged).not.toHaveBeenCalled();
+    expect(defaultInner.closed).toBe(0);
+    const after = await backend.callTool('tool_default', {});
+    expect((after.content?.[0] as any).text).toBe('tool_default');
+    backend.serverClosed?.();
+  });
+
+  it('treats an empty browser_connect request as an intentional disconnect', async () => {
+    const defaults: ReturnType<typeof makeInnerBackend>[] = [];
+    const backend = new VSCodeProxyBackend(await resolveConfig({}), async () => {
+      const inner = makeInnerBackend('tool_default');
+      defaults.push(inner);
+      return wrapInProcess(inner);
+    });
+    await backend.initialize({ notifyToolListChanged: vi.fn(async () => undefined) }, { name: 'vitest', version: '1.0.0' });
+
+    const result = await backend.callTool('browser_connect', {});
+
+    expect(result.isError).not.toBe(true);
+    expect((result.content?.[0] as any).text).toContain('Successfully disconnected');
+    expect(defaults).toHaveLength(2);
+    expect(defaults[0].closed).toBe(1);
+    backend.serverClosed?.();
+  });
+
   it('keeps session handles at the host across a browser_connect provider switch', async () => {
     // The switched VS Code provider is a separate server process whose
     // BrowserServerBackend builds its own registry — forwarding handle-routed
