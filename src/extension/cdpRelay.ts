@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -94,6 +94,7 @@ export class CDPRelayServer {
   private _extensionConnection: ExtensionConnection | null = null;
   private _handler!: ExtensionProtocolV2;
   private _extensionConnectionPromise!: ManualPromise;
+  private _launchedBrowser: ChildProcess | undefined;
 
   constructor(server: http.Server, browser: ExtensionBrowserOptions) {
     this._server = server;
@@ -189,12 +190,47 @@ export class CDPRelayServer {
     abortSignal.throwIfAborted();
     args.push(href);
 
-    spawn(executablePath, args, {
+    const child = spawn(executablePath, args, {
       windowsHide: true,
       detached: true,
       shell: false,
       stdio: 'ignore',
     });
+    this._launchedBrowser = child;
+    await this._waitForLaunch(child, executablePath);
+  }
+
+  private _waitForLaunch(child: ChildProcess, executablePath: string): Promise<void> {
+    // The listeners stay attached for the child's lifetime: an 'error' event
+    // without a listener would terminate the server.
+    return new Promise<void>((resolve, reject) => {
+      let spawned = false;
+      child.once('spawn', () => {
+        spawned = true;
+        resolve();
+      });
+      child.on('error', error => {
+        debugLogger(`Browser launch error: ${errorMessage(error)}`);
+        if (!spawned) {
+          reject(new Error(`Failed to launch the browser for the Playwright extension (${executablePath}): ${errorMessage(error)}. Make sure the browser is installed, or pass a valid --executable-path.`));
+          return;
+        }
+        this._failPendingExtensionConnection(`The browser launched for the Playwright extension (${executablePath}) failed: ${errorMessage(error)}`);
+      });
+      child.once('exit', (code, signal) => {
+        if (this._launchedBrowser === child)
+          this._launchedBrowser = undefined;
+        // A browser that forwards the connect page to an already-running
+        // instance exits cleanly; only an unsuccessful exit is a failure.
+        if (code !== 0)
+          this._failPendingExtensionConnection(`The browser launched for the Playwright extension (${executablePath}) exited ${signal ? `on signal ${signal}` : `with code ${code}`} before the extension connected.`);
+      });
+    });
+  }
+
+  private _failPendingExtensionConnection(reason: string): void {
+    if (!this._extensionConnection && !this._extensionConnectionPromise.isDone())
+      this._extensionConnectionPromise.reject(new Error(reason));
   }
 
   stop(): void {

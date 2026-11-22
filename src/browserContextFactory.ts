@@ -28,7 +28,7 @@ import { createGuid, createHash, createShortGuid } from './utils/guid.js';
 import { outputFile } from './config.js';
 import { ensureNetworkPolicyRoutes } from './networkPolicy.js';
 import { connectOverCDP } from './utils/cdpConnection.js';
-import { settleWithin } from './utils/timeout.js';
+import { rejectOnAbort, settleWithin } from './utils/timeout.js';
 import { printToStderr } from './utils/terminal.js';
 
 import type { FullConfig } from './config.js';
@@ -404,6 +404,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
         },
         stdio: ['ignore', 'ignore', 'pipe'],
       });
+      const launchFailure = watchLaunchFailure(childProcess, cdpLaunch.command, endpoint);
       if (cdpLaunch.port !== undefined)
         pinnedLaunch = this._trackPinnedPortChild(childProcess);
 
@@ -411,7 +412,7 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
         testDebug(`cdp-launch stderr: ${String(data).trimEnd()}`);
       });
 
-      browser = await this._waitForBrowser(endpoint, clientInfo, childProcess, cdpLaunch.startupTimeoutMs ?? defaultCdpTimeoutMs);
+      browser = await this._waitForBrowser(endpoint, clientInfo, childProcess, cdpLaunch.startupTimeoutMs ?? defaultCdpTimeoutMs, launchFailure);
     } catch (error) {
       if (pinnedLaunch)
         pinnedLaunch.closing = true;
@@ -468,30 +469,83 @@ class CdpLaunchContextFactory implements BrowserContextFactory {
     return launch;
   }
 
-  private async _waitForBrowser(endpoint: string, clientInfo: ClientInfo, childProcess: ReturnType<typeof spawn>, startupTimeoutMs: number): Promise<playwright.Browser> {
+  private async _waitForBrowser(endpoint: string, clientInfo: ClientInfo, childProcess: ReturnType<typeof spawn>, startupTimeoutMs: number, launchFailure: AbortSignal): Promise<playwright.Browser> {
+    // A NaN or infinite budget would make the deadline comparison below never
+    // fire; config validation rejects those, but never loop on one regardless.
+    if (!Number.isFinite(startupTimeoutMs) || startupTimeoutMs <= 0) {
+      childProcess.kill('SIGTERM');
+      throw new Error(`Invalid CDP launch startup timeout ${startupTimeoutMs}: expected a positive number of milliseconds.`);
+    }
     const deadline = Date.now() + startupTimeoutMs;
     const headers = cdpConnectHeaders(clientInfo, this.config.browser);
     const cdpTimeout = this.config.browser.cdpTimeout ?? defaultCdpTimeoutMs;
+    const failLaunch = () => {
+      childProcess.kill('SIGTERM');
+      return launchFailure.reason;
+    };
     let attachTimedOut = false;
     for (;;) {
       const remaining = Math.max(1, deadline - Date.now());
+      const attempt = connectOverCDP(endpoint, {
+        headers,
+        timeout: cdpTimeout > 0 ? Math.min(cdpTimeout, remaining) : remaining,
+        noDefaults: true,
+      });
       try {
-        return await connectOverCDP(endpoint, {
-          headers,
-          timeout: cdpTimeout > 0 ? Math.min(cdpTimeout, remaining) : remaining,
-          noDefaults: true,
-        });
+        return await rejectOnAbort(() => attempt, launchFailure);
       } catch (error) {
+        if (launchFailure.aborted) {
+          // The attempt still in flight can no longer be handed out.
+          attempt.then(browser => browser.close(), () => {}).catch(logUnhandledError);
+          throw failLaunch();
+        }
         testDebug(`connect over CDP failed for ${endpoint}: ${String(error)}`);
         attachTimedOut ||= isCdpAttachTimeout(error);
         if (Date.now() >= deadline) {
           childProcess.kill('SIGTERM');
           throw new Error(`Timed out waiting for CDP endpoint ${endpoint}.${attachTimedOut ? ` ${cdpAttachTimeoutHint}` : ''}`, { cause: error });
         }
-        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await rejectOnAbort(() => new Promise(resolve => { timer = setTimeout(resolve, 50); }), launchFailure);
+      } catch {
+        throw failLaunch();
+      } finally {
+        clearTimeout(timer);
       }
     }
   }
+}
+
+/**
+ * Settles a launch promptly when the launched command cannot run: an async
+ * spawn 'error' (for example ENOENT for a missing application) would otherwise
+ * be an unhandled EventEmitter error that terminates the server, and a command
+ * that dies unsuccessfully would leave the attach loop retrying until its
+ * deadline. A clean exit (code 0) is not a failure: launchers such as
+ * `open -a <App>` hand off to the application and exit immediately.
+ */
+function watchLaunchFailure(childProcess: ReturnType<typeof spawn>, command: string, endpoint: string): AbortSignal {
+  const controller = new AbortController();
+  let spawned = false;
+  childProcess.once('spawn', () => { spawned = true; });
+  // Stays attached for the child's lifetime: a later 'error' (for example a
+  // failed kill) must not become an unhandled EventEmitter error either.
+  childProcess.on('error', error => {
+    testDebug(`cdp-launch process error: ${String(error)}`);
+    if (controller.signal.aborted)
+      return;
+    controller.abort(new Error(spawned
+      ? `CDP launch command "${command}" failed before its CDP endpoint ${endpoint} became available: ${errorMessage(error)}`
+      : `Failed to start CDP launch command "${command}": ${errorMessage(error)}. Check that the application is installed and the command path is correct.`));
+  });
+  childProcess.once('exit', (code, signal) => {
+    if (code === 0 || controller.signal.aborted)
+      return;
+    controller.abort(new Error(`CDP launch command "${command}" exited ${signal ? `on signal ${signal}` : `with code ${code}`} before its CDP endpoint ${endpoint} became available.`));
+  });
+  return controller.signal;
 }
 
 class StorageStateError extends Error {}

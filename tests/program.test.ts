@@ -60,6 +60,30 @@ describe('restricted external provider switches', () => {
   });
 });
 
+describe('missing CDP launch application', () => {
+  it.each([
+    ['an automatically allocated port', []],
+    ['a pinned port', ['--cdp-launch-port', '9']],
+  ])('fails the tool call and keeps the server alive on %s', async (_label, portArgs) => {
+    // An async spawn ENOENT without an 'error' listener terminated the server.
+    const client = new Client({ name: 'missing-cdp-launch-test', version: '1' });
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [...cliArgs, '--cdp-launch-command', path.join(os.tmpdir(), 'mcp-a11y-missing-app-does-not-exist'), '--cdp-launch-startup-timeout', '60000', ...portArgs],
+      stderr: 'pipe',
+    });
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({ name: 'browser_navigate', arguments: { url: 'about:blank' } });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toMatch(/Failed to start CDP launch command .*mcp-a11y-missing-app-does-not-exist.*ENOENT/);
+      expect((await client.listTools()).tools.map(tool => tool.name)).toContain('browser_navigate');
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 describe('direct MCP harness install coverage', () => {
   it.each([
     { args: ['--only', 'browser_install'], summary: 'Skipped: 1' },

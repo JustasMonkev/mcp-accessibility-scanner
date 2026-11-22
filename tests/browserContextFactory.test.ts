@@ -338,6 +338,82 @@ describe('browserContextFactory', () => {
     expect(childProcess.kill).toHaveBeenCalledWith('SIGTERM');
   });
 
+  describe('launched application failures', () => {
+    const clientInfo = { name: 'vitest', version: '1.0.0' };
+    const missingExecutable = () => Object.assign(new Error('spawn missing-app ENOENT'), { code: 'ENOENT', errno: -2, syscall: 'spawn missing-app' });
+
+    it.each([
+      ['an automatically allocated port', undefined],
+      ['a pinned port', 9222],
+    ])('fails the attach promptly instead of the server when the command is missing, on %s', async (_label, port) => {
+      // The automatic-port path attached no 'error' listener, so ENOENT was an
+      // unhandled EventEmitter error that terminated the MCP server; the pinned
+      // path kept retrying until the startup deadline.
+      const missing = createMockChildProcess();
+      spawnMock.mockImplementationOnce(() => {
+        setTimeout(() => missing.emit('error', missingExecutable()), 20);
+        return missing;
+      });
+      connectOverCDP.mockRejectedValue(new Error('connect ECONNREFUSED'));
+      const factory = contextFactory(await resolveConfig({
+        browser: { isolated: true, cdpLaunch: { command: 'missing-app', port, startupTimeoutMs: 60_000 } },
+      }));
+      const started = Date.now();
+      await expect(factory.createContext(clientInfo, new AbortController().signal, undefined))
+          .rejects.toThrow(/^Failed to start CDP launch command "missing-app": spawn missing-app ENOENT\. Check that the application is installed/);
+      expect(Date.now() - started).toBeLessThan(5_000);
+
+      // The factory stays usable once the application is fixed.
+      const browser = createMockBrowser(createMockBrowserContext());
+      spawnMock.mockImplementation(createMockChildProcess);
+      connectOverCDP.mockReset().mockResolvedValue(browser);
+      const result = await factory.createContext(clientInfo, new AbortController().signal, undefined);
+      await result.close();
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails promptly when the launched command exits unsuccessfully, and keeps waiting after a clean hand-off exit', async () => {
+      const crashed = createMockChildProcess();
+      spawnMock.mockImplementationOnce(() => {
+        setTimeout(() => crashed.emit('exit', 3, null), 20);
+        return crashed;
+      });
+      connectOverCDP.mockRejectedValue(new Error('connect ECONNREFUSED'));
+      const factory = contextFactory(await resolveConfig({ browser: { cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 60_000 } } }));
+      await expect(factory.createContext(clientInfo, new AbortController().signal, undefined))
+          .rejects.toThrow('CDP launch command "open" exited with code 3 before its CDP endpoint http://127.0.0.1:9222 became available.');
+
+      // `open -a <App>` exits 0 right after handing off to the application.
+      const launcher = createMockChildProcess();
+      spawnMock.mockImplementationOnce(() => {
+        setTimeout(() => launcher.emit('exit', 0, null), 0);
+        return launcher;
+      });
+      const browser = createMockBrowser(createMockBrowserContext());
+      connectOverCDP.mockReset()
+          .mockImplementationOnce(() => new Promise((_, reject) => setTimeout(() => reject(new Error('connect ECONNREFUSED')), 30)))
+          .mockResolvedValue(browser);
+      const result = await factory.createContext(clientInfo, new AbortController().signal, undefined);
+      expect(connectOverCDP).toHaveBeenCalledTimes(2);
+      await result.close();
+    });
+
+    it('closes an attach still in flight when the launched command fails', async () => {
+      const child = createMockChildProcess();
+      spawnMock.mockReturnValueOnce(child);
+      const late = createMockBrowser(createMockBrowserContext());
+      const { promise: attach, resolve: finishAttach } = Promise.withResolvers<any>();
+      connectOverCDP.mockReturnValueOnce(attach);
+      const factory = contextFactory(await resolveConfig({ browser: { cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 60_000 } } }));
+      const pending = factory.createContext(clientInfo, new AbortController().signal, undefined);
+      await vi.waitFor(() => expect(connectOverCDP).toHaveBeenCalledTimes(1));
+      child.emit('exit', null, 'SIGKILL');
+      await expect(pending).rejects.toThrow('exited on signal SIGKILL');
+      finishAttach(late);
+      await vi.waitFor(() => expect(late.close).toHaveBeenCalledTimes(1));
+    });
+  });
+
   describe('CDP attach timeouts (#244)', () => {
     const attachHint = 'Playwright did not finish attaching before the timeout';
 

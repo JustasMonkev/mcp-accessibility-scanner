@@ -15,7 +15,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
@@ -31,7 +31,16 @@ import { EXTENSION_ID, VERSION } from '../src/extension/protocol.js';
 import type { CDPMessage } from '../src/extension/browserModel.js';
 import type { Tab } from '../src/extension/protocol.js';
 
-vi.mock('node:child_process', () => ({ spawn: vi.fn() }));
+vi.mock('node:child_process', async () => {
+  const { EventEmitter } = await import('node:events');
+  // A launched browser reports a successful spawn on the next tick.
+  const spawnedChild = () => {
+    const child = new EventEmitter();
+    process.nextTick(() => child.emit('spawn'));
+    return child;
+  };
+  return { spawn: vi.fn(spawnedChild) };
+});
 
 describe('extension protocol v2', () => {
   it('tracks tabs and routes top-level, child, and browser CDP commands', async () => {
@@ -969,6 +978,25 @@ describe('extension protocol v2', () => {
       await new Promise<void>(resolve => server.close(() => resolve()));
       vi.unstubAllEnvs();
     }
+  });
+
+  it.each([
+    ['a missing browser executable', (child: EventEmitter) => child.emit('error', Object.assign(new Error('spawn /missing/chrome ENOENT'), { code: 'ENOENT' })), /Failed to launch the browser for the Playwright extension \(\/missing\/chrome\): spawn \/missing\/chrome ENOENT/],
+    ['a browser that exits unsuccessfully', (child: EventEmitter) => { child.emit('spawn'); child.emit('exit', 1, null); }, /exited with code 1 before the extension connected/],
+  ])('fails the attach instead of the server for %s', async (_label, fail, message) => {
+    // An 'error' event on the dropped child process had no listener, so a
+    // missing browser terminated the whole MCP server.
+    const child = new EventEmitter();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(spawn).mockImplementationOnce((() => {
+      process.nextTick(() => fail(child));
+      return child;
+    }) as any);
+    const factory = new ExtensionContextFactory({ browserChannel: 'chrome', executablePath: '/missing/chrome' });
+    await expect(factory.createContext({ name: 'test-client', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow(message);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    // A later error from the same child stays handled.
+    expect(() => child.emit('error', new Error('late failure'))).not.toThrow();
   });
 
   it('passes the grouping setting from the extension browser provider to the connect URL', async () => {
