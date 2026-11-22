@@ -589,11 +589,13 @@ class CrawlScope {
   }
 }
 
+type RepresentativeSelection = { candidates: number, selected: number, complete: boolean };
+
 class CrawlFrontier {
   readonly queue: CrawlItem[] = [];
   readonly visited = new Set<string>();
   skippedUrls = 0;
-  representativeSelection: { candidates: number, selected: number } | null = null;
+  representativeSelection: RepresentativeSelection | null = null;
   private readonly _queued = new Set<string>();
   private readonly _scope: CrawlScope;
   private readonly _maxPages: number;
@@ -631,11 +633,11 @@ class CrawlFrontier {
       else
         candidates.add(admitted);
     }
-    const selected = selectRepresentativeUrls([...candidates], this._maxPages);
+    const { urls: selected, complete } = selectRepresentativeUrls([...candidates], this._maxPages);
     this.skippedUrls += candidates.size - selected.length;
     for (const url of selected)
       this.enqueue(url, 0, discoveredFrom);
-    this.representativeSelection = { candidates: candidates.size, selected: selected.length };
+    this.representativeSelection = { candidates: candidates.size, selected: selected.length, complete };
   }
 
   takeUnvisited(): CrawlItem | undefined {
@@ -968,11 +970,19 @@ function orNone(lines: string[]): string[] {
   return lines.length ? lines : ['- None'];
 }
 
+function representativeSelectionLines(selection: RepresentativeSelection | null): string[] {
+  if (!selection)
+    return [];
+  if (!selection.complete)
+    return [`WARNING: representative selection exceeded its work budget for ${selection.candidates} listed URLs, so the first ${selection.selected} in listed order were queued instead of a spread across site sections and URL templates.`];
+  return [`Representative selection: queued ${selection.selected} of ${selection.candidates} listed URLs, spread across site sections and URL templates.`];
+}
+
 function renderSiteSummary(options: {
   pagesWithUnscannedFrames: PageReport[],
   sessionLosses: SessionLoss[],
   crawlTabRestarts: { url: string }[],
-  representativeSelection: { candidates: number, selected: number } | null,
+  representativeSelection: RepresentativeSelection | null,
   summary: SummaryReport,
   scannedPagesByViolations: PageReport[],
   includeIncomplete: boolean,
@@ -997,7 +1007,7 @@ function renderSiteSummary(options: {
     ...frameWarning,
     ...sessionWarning,
     ...restartWarning,
-    ...(representativeSelection ? [`Representative selection: queued ${representativeSelection.selected} of ${representativeSelection.candidates} listed URLs, spread across site sections and URL templates.`] : []),
+    ...representativeSelectionLines(representativeSelection),
     `Scanned pages: ${summary.totals.scannedPages}`,
     `Errored pages: ${summary.totals.erroredPages}`,
     `Skipped URLs: ${summary.totals.skippedUrls}`,

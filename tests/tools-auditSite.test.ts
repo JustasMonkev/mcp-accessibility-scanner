@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import auditSiteTools from '../src/tools/auditSite.js';
 import { Response } from '../src/response.js';
 import * as axe from '../src/tools/axe.js';
+import * as representativeUrls from '../src/utils/representativeUrls.js';
 
 function createViolation(id: string, html: string, target: string[] = ['#target']) {
   return {
@@ -1121,12 +1122,29 @@ describe('audit_site tool', () => {
       'https://example.com/about',
       'https://example.com/pricing',
     ]);
-    expect(report.representativeSelection).toEqual({ candidates: 8, selected: 3 });
+    expect(report.representativeSelection).toEqual({ candidates: 8, selected: 3, complete: true });
     expect(report.metadata.options.pageSelection).toBe('representative');
     // 5 unselected blog posts, the duplicate listing and the external URL.
     expect(report.summary.totals.skippedUrls).toBe(7);
     expect(response.structuredContent()).toMatchObject({ representativeSelection: { candidates: 8, selected: 3 } });
     expect(response.result()).toContain('Representative selection: queued 3 of 8 listed URLs');
+  });
+
+  it('warns and reports an incomplete representative selection that fell back to listed order', async () => {
+    const listed = Array.from({ length: 6 }, (_, index) => `https://example.com/section-${index}/page`);
+    const { response } = createHarness({});
+    const select = vi.spyOn(representativeUrls, 'selectRepresentativeUrls').mockImplementation((urls, k) => ({ urls: urls.slice(0, k), complete: false }));
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'provided', urls: listed, maxPages: 2, pageSelection: 'representative', waitAfterNavigationMs: 0 }), response);
+
+    expect(select).toHaveBeenCalledOnce();
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { url: string }) => page.url)).toEqual(listed.slice(0, 2));
+    expect(report.representativeSelection).toEqual({ candidates: 6, selected: 2, complete: false });
+    expect(response.structuredContent()).toMatchObject({ representativeSelection: { complete: false } });
+    expect(response.result()).toContain('WARNING: representative selection exceeded its work budget for 6 listed URLs, so the first 2 in listed order were queued');
+    expect(response.result()).not.toContain('Representative selection: queued');
   });
 
   it('keeps listed order and reports no selection in discovery mode', async () => {

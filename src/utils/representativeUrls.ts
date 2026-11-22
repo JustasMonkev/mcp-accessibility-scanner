@@ -109,14 +109,42 @@ function mergeParts(nodeParts: Part[], costs: Float64Array[], k: number, cover: 
   return previous;
 }
 
-function solve(node: TreeNode, k: number) {
+// Bounds the selection work (trie segments plus dynamic-programming cells),
+// which grows with how many URLs are listed, how deep they go and maxPages.
+const defaultWorkBudget = 200_000_000;
+
+class WorkBudgetExceeded extends Error {}
+
+class WorkBudget {
+  private _remaining: number;
+
+  constructor(units: number) {
+    this._remaining = units;
+  }
+
+  spend(units: number): void {
+    this._remaining -= units;
+    if (this._remaining < 0)
+      throw new WorkBudgetExceeded();
+  }
+}
+
+// The cells mergeParts fills: each part's row holds at most k + 1 totals,
+// each trying at most that part's number of counts.
+function mergeCells(costs: Float64Array[], k: number): number {
+  let cells = 0;
+  let total = 0;
+  for (const partCost of costs) {
+    total += partCost.length - 1;
+    cells += (Math.min(k, total) + 1) * partCost.length;
+  }
+  return cells;
+}
+
+function solveNode(node: TreeNode, k: number, budget: WorkBudget) {
   if (!node.children.size) {
     node.best = new Float64Array(Math.min(k, node.size) + 1);
     return;
-  }
-  for (const child of node.children.values()) {
-    if (child.size > 1)
-      solve(child, k);
   }
   if (!node.terminal.length && node.children.size === 1 && node.size > 1) {
     const [child] = node.children.values();
@@ -125,7 +153,10 @@ function solve(node: TreeNode, k: number) {
   }
   const nodeParts = parts(node);
   const missCost = 2 ** -node.depth;
+  budget.spend(nodeParts.reduce((units, part) => units + Math.min(k, part.size) + 1, 0));
   const costs = nodeParts.map(part => partCosts(part, k, missCost));
+  const mergeWork = mergeCells(costs, k);
+  budget.spend(mergeWork);
   node.parts = nodeParts;
   node.free = [];
   const free = mergeParts(nodeParts, costs, k, false, node.free);
@@ -134,50 +165,69 @@ function solve(node: TreeNode, k: number) {
     node.best = free;
     return;
   }
+  budget.spend(mergeWork);
   node.covered = [];
   const covered = mergeParts(nodeParts, costs, k, true, node.covered);
   node.best = free.map((cost, count) => count >= branches ? covered[count] : cost);
 }
 
-function collect(node: TreeNode, count: number, selected: number[]) {
-  if (!node.children.size) {
-    for (let index = 0; index < count; index++)
-      selected.push(node.terminal[index]);
-    return;
+// Children are solved before their parent. The traversal keeps its own stack,
+// since the tree is as deep as the longest listed URL.
+function solve(root: TreeNode, k: number, budget: WorkBudget) {
+  const preorder: TreeNode[] = [];
+  const pending = [root];
+  for (let node = pending.pop(); node; node = pending.pop()) {
+    preorder.push(node);
+    for (const child of node.children.values()) {
+      if (child.size > 1)
+        pending.push(child);
+    }
   }
-  if (!node.terminal.length && node.children.size === 1) {
-    const [child] = node.children.values();
-    collect(child, count, selected);
-    return;
-  }
-  const nodeParts = node.parts;
-  const choices = count >= branchCount(node) ? node.covered : node.free;
-  if (!nodeParts || !choices)
-    throw new Error('Representative URL tree was not prepared before collecting.');
-  let remaining = count;
-  for (let index = nodeParts.length - 1; index >= 0; index--) {
-    const given = choices[index][remaining];
-    remaining -= given;
-    if (!given)
+  for (let index = preorder.length - 1; index >= 0; index--)
+    solveNode(preorder[index], k, budget);
+}
+
+function collect(root: TreeNode, k: number, selected: number[]) {
+  const pending: { node: TreeNode, count: number }[] = [{ node: root, count: k }];
+  for (let task = pending.pop(); task; task = pending.pop()) {
+    let { node } = task;
+    const { count } = task;
+    while (node.children.size === 1 && !node.terminal.length)
+      [node] = node.children.values();
+    if (!node.children.size) {
+      for (let index = 0; index < count; index++)
+        selected.push(node.terminal[index]);
       continue;
-    const part = nodeParts[index];
-    if (part.kind === 'terminal')
-      selected.push(...part.urls.slice(0, given));
-    else if (part.kind === 'singles')
-      part.children.slice(0, given).forEach(child => collect(child, 1, selected));
-    else
-      collect(part.child, given, selected);
+    }
+    const nodeParts = node.parts;
+    const choices = count >= branchCount(node) ? node.covered : node.free;
+    if (!nodeParts || !choices)
+      throw new Error('Representative URL tree was not prepared before collecting.');
+    let remaining = count;
+    for (let index = nodeParts.length - 1; index >= 0; index--) {
+      const given = choices[index][remaining];
+      remaining -= given;
+      if (!given)
+        continue;
+      const part = nodeParts[index];
+      if (part.kind === 'terminal')
+        selected.push(...part.urls.slice(0, given));
+      else if (part.kind === 'singles')
+        pending.push(...part.children.slice(0, given).map(child => ({ node: child, count: 1 })));
+      else
+        pending.push({ node: part.child, count: given });
+    }
   }
 }
 
-export function selectRepresentativeUrls(urls: readonly string[], k: number): string[] {
-  if (urls.length <= k)
-    return [...urls];
+function buildTree(urls: readonly string[], budget: WorkBudget): TreeNode {
   const root = newNode(0);
   urls.forEach((url, index) => {
+    const segments = templateSegments(url);
+    budget.spend(segments.length + 1);
     let node = root;
     node.size++;
-    for (const segment of templateSegments(url)) {
+    for (const segment of segments) {
       let child = node.children.get(segment);
       if (!child) {
         child = newNode(node.depth + 1);
@@ -188,8 +238,26 @@ export function selectRepresentativeUrls(urls: readonly string[], k: number): st
     }
     node.terminal.push(index);
   });
-  solve(root, k);
+  return root;
+}
+
+/**
+ * `complete` is false when the selection would exceed its work budget; the
+ * first `k` URLs in listed order are returned instead.
+ */
+export function selectRepresentativeUrls(urls: readonly string[], k: number, workBudget = defaultWorkBudget): { urls: string[], complete: boolean } {
+  if (urls.length <= k)
+    return { urls: [...urls], complete: true };
   const selected: number[] = [];
-  collect(root, k, selected);
-  return selected.sort((first, second) => first - second).map(index => urls[index]);
+  try {
+    const budget = new WorkBudget(workBudget);
+    const root = buildTree(urls, budget);
+    solve(root, k, budget);
+    collect(root, k, selected);
+  } catch (error) {
+    if (!(error instanceof WorkBudgetExceeded))
+      throw error;
+    return { urls: urls.slice(0, k), complete: false };
+  }
+  return { urls: selected.sort((first, second) => first - second).map(index => urls[index]), complete: true };
 }
