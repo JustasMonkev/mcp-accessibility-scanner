@@ -422,5 +422,29 @@ describe('session log folders', () => {
         await fs.promises.rm(folder, { recursive: true, force: true });
       }
     });
+
+    it('persists an entry appended while shutdown waits for an earlier write', async () => {
+      // flush() wrote the pending batch once and then only awaited in-flight
+      // writes, so an entry logged during that wait stayed pending behind its
+      // debounce and flushAll() resolved without it.
+      const appended: string[] = [];
+      const storage = {
+        readFile: vi.fn(async () => ''),
+        writeFile: vi.fn(async () => {}),
+        appendFile: vi.fn(async (_file: string, content: string) => {
+          if (!appended.length)
+            log.logResponse(response(2));
+          await new Promise(resolve => setTimeout(resolve, 20));
+          appended.push(content);
+        }),
+      };
+      const log = new SessionLog('/unused', storage);
+      log.logResponse(response(1));
+      await SessionLog.flushAll();
+      const written = appended.join('');
+      expect(written).toContain('result 1');
+      expect(written).toContain('result 2');
+      expect(storage.writeFile).toHaveBeenCalledTimes(2);
+    });
   });
 });
