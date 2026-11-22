@@ -44,6 +44,7 @@ describe('Console Tools', () => {
           toString: () => '[WARNING] Warning message @ util.js:5',
         },
       ]),
+      omittedConsoleMessages: vi.fn().mockReturnValue(0),
       modalStates: vi.fn().mockReturnValue([]),
     } as any;
 
@@ -83,6 +84,16 @@ describe('Console Tools', () => {
       expect(result).toContain('[LOG]');
       expect(result).toContain('[ERROR]');
       expect(result).toContain('[WARNING]');
+    });
+
+    it('reports how many earlier console messages were omitted', async () => {
+      (mockTab as any).omittedConsoleMessages = vi.fn().mockReturnValue(12);
+
+      await consoleTool.handle(mockContext, {}, response);
+
+      const lines = response.result().split('\n');
+      expect(lines[0]).toBe('12 earlier console messages were omitted; only the most recent 3 are kept.');
+      expect(lines[1]).toContain('Info message');
     });
 
     it('should handle empty console messages', async () => {

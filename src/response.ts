@@ -288,6 +288,8 @@ function renderTabSnapshot(tabSnapshot: TabSnapshot, formatFilePath: (file: stri
 
   if (tabSnapshot.consoleMessages.length) {
     lines.push(`### New console messages`);
+    if (tabSnapshot.omittedConsoleMessages)
+      lines.push(`- ${tabSnapshot.omittedConsoleMessages} earlier console ${tabSnapshot.omittedConsoleMessages === 1 ? 'message' : 'messages'} omitted`);
     for (const message of tabSnapshot.consoleMessages)
       lines.push(`- ${trim(formatConsoleMessage(message), 100)}`);
     lines.push('');

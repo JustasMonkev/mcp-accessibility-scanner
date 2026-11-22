@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { selectRepresentativeUrls } from '../src/utils/representativeUrls.js';
+import { selectRepresentativeUrls as selectWithStatus } from '../src/utils/representativeUrls.js';
+
+function selectRepresentativeUrls(urls: readonly string[], k: number): string[] {
+  const { urls: selected, complete } = selectWithStatus(urls, k);
+  expect(complete).toBe(true);
+  return selected;
+}
 
 // The objective and coverage rule, written out independently. The distance is
 // 0 for a shared template, otherwise 2^-(number of leading segments in common).
@@ -197,6 +203,21 @@ describe('selectRepresentativeUrls', () => {
     const startedAt = performance.now();
     expect(selectRepresentativeUrls(urls, 200)).toEqual(urls.slice(0, 200));
     expect(performance.now() - startedAt).toBeLessThan(5000);
+  });
+
+  it('walks a 20,000-segment URL path without exhausting the stack', () => {
+    const deep = `https://example.com/${Array.from({ length: 20000 }, (_, index) => `s${index}`).join('/')}`;
+    const urls = [`${deep}/a`, `${deep}/b`, `${deep}/c`, 'https://example.com/other'];
+    expect(selectRepresentativeUrls(urls, 2)).toEqual([`${deep}/a`, 'https://example.com/other']);
+    expect(selectRepresentativeUrls([deep, 'https://example.com/x', 'https://example.com/y'], 2)).toEqual([deep, 'https://example.com/x']);
+  });
+
+  it('falls back to listed order and reports an incomplete selection past its work budget', () => {
+    const urls = Array.from({ length: 50 }, (_, index) => `https://example.com/section-${index % 5}/page-${index}`);
+    expect(selectWithStatus(urls, 5, 100)).toEqual({ urls: urls.slice(0, 5), complete: false });
+    const within = selectWithStatus(urls, 5);
+    expect(within.complete).toBe(true);
+    expect(new Set(within.urls.map(url => url.split('/')[3])).size).toBe(5);
   });
 
   it('handles a large list within the maximum budget quickly', () => {

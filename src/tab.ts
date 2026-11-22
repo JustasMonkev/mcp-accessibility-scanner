@@ -44,15 +44,25 @@ export type TabSnapshot = {
   ariaSnapshot: string;
   modalStates: ModalState[];
   consoleMessages: ConsoleMessage[];
+  /** Console messages since the previous snapshot that were dropped to keep `consoleMessages` bounded. */
+  omittedConsoleMessages?: number;
   downloads: { download: playwright.Download, finished: boolean, outputFile: string, error?: string }[];
 };
+
+/** How an explicit navigation ended: a committed document, or a confirmed download that left the previous document in place. */
+type NavigationOutcome = 'document' | 'download';
 
 class StaleAriaSnapshotError extends Error {}
 
 const defaultActionTimeoutMs = 5000;
 const defaultNavigationTimeoutMs = 60000;
 const fallbackOperationTimeoutMs = 5000;
+// Requests kept from earlier explicit navigations, requests kept for the
+// current page, and console messages kept per page and between snapshots.
+// The oldest entries are dropped first and reported as omitted.
 const maxRetainedRequests = 200;
+const maxCurrentPageRequests = 200;
+const maxRetainedConsoleMessages = 200;
 const maxDownloadErrorBytes = 2000;
 const maxFileNameBytes = 255;
 
@@ -75,6 +85,8 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _lastTitle = 'about:blank';
   private _consoleMessages: ConsoleMessage[] = [];
   private _recentConsoleMessages: ConsoleMessage[] = [];
+  private _omittedConsoleMessages = 0;
+  private _omittedRecentConsoleMessages = 0;
   private _requests = new Map<number, Request>();
   private _requestIds = new WeakMap<Request, number>();
   private _nextRequestId = 0;
@@ -184,6 +196,8 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _clearCollectedArtifacts() {
     this._consoleMessages.length = 0;
     this._recentConsoleMessages.length = 0;
+    this._omittedConsoleMessages = 0;
+    this._omittedRecentConsoleMessages = 0;
     this._mainDocumentStatus = undefined;
     ++this._pageGeneration;
     this._invalidateAriaSnapshot();
@@ -204,14 +218,19 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   private _handleConsoleMessage(message: ConsoleMessage) {
-    this._consoleMessages.push(message);
-    this._recentConsoleMessages.push(message);
+    this._omittedConsoleMessages += retainRecent(this._consoleMessages, message, maxRetainedConsoleMessages);
+    this._omittedRecentConsoleMessages += retainRecent(this._recentConsoleMessages, message, maxRetainedConsoleMessages);
   }
 
   private _addRequest(request: Request) {
     const id = ++this._nextRequestId;
     this._requestIds.set(request, id);
     this._requests.set(id, request);
+    // Current-page IDs are contiguous and only ever dropped oldest first, so
+    // the one that leaves the window is exactly maxCurrentPageRequests back.
+    const evicted = id - maxCurrentPageRequests;
+    if (evicted > this._navigationRequestId)
+      this._requests.delete(evicted);
     return id;
   }
 
@@ -220,8 +239,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       return;
     const request = response.request();
     const id = this._requestIds.get(request) ?? this._addRequest(request);
-    if (!this._requests.has(id))
-      return;
     if (id > this._navigationRequestId && request.isNavigationRequest() && response.frame() === this.page.mainFrame() && !request.redirectedTo())
       this._mainDocumentStatus = { status: response.status(), statusText: response.statusText() };
   }
@@ -267,22 +284,26 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     await callOnPageNoTrace(this.page, page => page.waitForLoadState(state, options).catch(logUnhandledError));
   }
 
-  async navigate(url: string, options?: { returnOnDialog?: boolean }) {
+  /**
+   * Without `returnOnDialog`, resolves to `'download'` when the URL started a
+   * confirmed download instead of committing a document; the page then still
+   * shows the previous document. With `returnOnDialog`, resolves `undefined`.
+   */
+  async navigate(url: string, options?: { returnOnDialog?: boolean }): Promise<NavigationOutcome | undefined> {
     if (options?.returnOnDialog && this.modalStates().length)
       throw new Error(`Cannot navigate while a modal state is present.\n${this.modalStatesMarkdown().join('\n')}`);
     this._markRequestsNavigation();
     this._clearCollectedArtifacts();
-    if (!options?.returnOnDialog) {
-      await this._navigate(url);
-      return;
-    }
-    let navigation: Promise<void> | undefined;
-    const modalStates = await this._raceAgainstModalStates(() => {
+    if (!options?.returnOnDialog)
+      return await this._navigate(url);
+    let navigation: Promise<NavigationOutcome> | undefined;
+    const modalStates = await this._raceAgainstModalStates(async () => {
       navigation = this._navigate(url);
-      return navigation;
+      await navigation;
     });
     if (modalStates.length && navigation)
       this._reportLateNavigationFailure(navigation);
+    return undefined;
   }
 
   private _reportLateNavigationFailure(navigation: Promise<unknown>) {
@@ -293,7 +314,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     });
   }
 
-  private async _navigate(url: string) {
+  private async _navigate(url: string): Promise<NavigationOutcome> {
     const downloadEvent = new ManualPromise<playwright.Download>();
     const downloadListener = (download: playwright.Download) => downloadEvent.resolve(download);
     this.page.once('download', downloadListener);
@@ -306,12 +327,13 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       if (!download)
         throw error;
       await new Promise(resolve => setTimeout(resolve, 500));
-      return;
+      return 'download';
     } finally {
       this.page.off('download', downloadListener);
     }
 
     await this.waitForLoadState('load', { timeout: fallbackOperationTimeoutMs });
+    return 'document';
   }
 
   goBack(options?: Parameters<playwright.Page['goBack']>[0]) {
@@ -334,8 +356,19 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this._consoleMessages;
   }
 
+  /** Console messages from the current page dropped from `consoleMessages()` to keep it bounded. */
+  omittedConsoleMessages(): number {
+    return this._omittedConsoleMessages;
+  }
+
   requests(all = false): Map<number, Request> {
     return all ? this._requests : new Map([...this._requests].filter(([id]) => id > this._navigationRequestId));
+  }
+
+  /** Requests issued in this tab, or since the last explicit navigation, that `requests(all)` no longer retains. */
+  omittedRequests(all = false): number {
+    const issued = all ? this._nextRequestId : this._nextRequestId - this._navigationRequestId;
+    return issued - this.requests(all).size;
   }
 
   request(id: number): Request | undefined {
@@ -397,7 +430,9 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       };
     }
     tabSnapshot.consoleMessages = this._recentConsoleMessages;
+    tabSnapshot.omittedConsoleMessages = this._omittedRecentConsoleMessages;
     this._recentConsoleMessages = [];
+    this._omittedRecentConsoleMessages = 0;
     return tabSnapshot;
   }
 
@@ -477,6 +512,14 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
     await callOnPageNoTrace(this.page, page => page.waitForTimeout(time));
   }
+}
+
+function retainRecent<T>(list: T[], item: T, limit: number): number {
+  list.push(item);
+  if (list.length <= limit)
+    return 0;
+  list.shift();
+  return 1;
 }
 
 function withoutSnapshotBox(line: string): string {

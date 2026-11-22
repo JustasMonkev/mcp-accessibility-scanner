@@ -1123,6 +1123,39 @@ describe('Tab', () => {
       expect(tab.consoleMessages()[0].type).toBe('log');
       expect(tab.consoleMessages()[1].type).toBe('error');
     });
+
+    it('keeps the most recent 200 messages per page and between snapshots, counting the rest', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const emit = (index: number) => mockPage.emit('console', {
+        type: () => 'log',
+        text: () => `Message ${index}`,
+        location: () => ({ url: 'test.js', lineNumber: 1 }),
+      });
+      for (let index = 0; index < 260; index++)
+        emit(index);
+
+      expect(tab.consoleMessages()).toHaveLength(200);
+      expect(tab.consoleMessages()[0].text).toBe('Message 60');
+      expect(tab.consoleMessages().at(-1)?.text).toBe('Message 259');
+      expect(tab.omittedConsoleMessages()).toBe(60);
+
+      const snapshot = await tab.captureSnapshot();
+      expect(snapshot.consoleMessages).toHaveLength(200);
+      expect(snapshot.consoleMessages[0].text).toBe('Message 60');
+      expect(snapshot.omittedConsoleMessages).toBe(60);
+
+      emit(260);
+      const next = await tab.captureSnapshot();
+      expect(next.consoleMessages.map(message => message.text)).toEqual(['Message 260']);
+      expect(next.omittedConsoleMessages).toBe(0);
+      expect(tab.omittedConsoleMessages()).toBe(61);
+
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      await tab.navigate('https://example.com/new');
+      expect(tab.consoleMessages()).toEqual([]);
+      expect(tab.omittedConsoleMessages()).toBe(0);
+    });
   });
 
   describe('requests', () => {
@@ -1133,7 +1166,8 @@ describe('Tab', () => {
       const requests = Array.from({ length: 201 }, (_, index) => ({ url: () => `https://example.com/${index}`, isNavigationRequest: () => false }));
       for (const request of requests)
         mockPage.emit('request', request);
-      expect(tab.requests().size).toBe(201);
+      expect([...tab.requests().keys()]).toEqual(Array.from({ length: 200 }, (_, index) => index + 2));
+      expect(tab.omittedRequests()).toBe(1);
       await tab.navigate('https://example.com/new');
       expect([...tab.requests(true).keys()]).toEqual(Array.from({ length: 200 }, (_, index) => index + 2));
       expect(tab.request(1)).toBeUndefined();
@@ -1151,6 +1185,38 @@ describe('Tab', () => {
       expect(tab.requests(true).size).toBe(200);
       expect(tab.requests(true).has(2)).toBe(false);
       expect(tab.requests(true).has(202)).toBe(true);
+    });
+
+    it('keeps the most recent 200 requests issued without navigation and keeps their IDs stable', () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      const requests = Array.from({ length: 260 }, (_, index) => ({ url: () => `https://example.com/${index}`, isNavigationRequest: () => false }));
+      for (const request of requests)
+        mockPage.emit('request', request);
+
+      expect([...tab.requests().keys()]).toEqual(Array.from({ length: 200 }, (_, index) => index + 61));
+      expect(tab.requests(true).size).toBe(200);
+      expect(tab.omittedRequests()).toBe(60);
+      expect(tab.omittedRequests(true)).toBe(60);
+      expect(tab.request(60)).toBeUndefined();
+      expect(tab.request(61)).toBe(requests[60]);
+      // A late response for an evicted request does not bring it back.
+      mockPage.emit('response', { request: () => requests[0], frame: () => 'main-frame' });
+      expect(tab.request(1)).toBeUndefined();
+      expect(tab.requests().size).toBe(200);
+    });
+
+    it('records the main document status even after its request left the bounded list', async () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      mockPage.goto = vi.fn().mockResolvedValue(undefined);
+      mockPage.waitForLoadState = vi.fn().mockResolvedValue(undefined);
+      await tab.navigate('https://example.com/new');
+      const documentRequest = { url: () => 'https://example.com/new', isNavigationRequest: () => true, redirectedTo: () => null };
+      mockPage.emit('request', documentRequest);
+      for (let index = 0; index < 200; index++)
+        mockPage.emit('request', { url: () => `https://example.com/asset-${index}`, isNavigationRequest: () => false });
+      expect(tab.request(1)).toBeUndefined();
+      mockPage.emit('response', { request: () => documentRequest, frame: () => 'main-frame', status: () => 503, statusText: () => 'Service Unavailable' });
+      expect((await tab.captureSnapshot()).mainDocumentStatus).toEqual({ status: 503, statusText: 'Service Unavailable' });
     });
 
     it('ignores retained late responses when updating the current document status', async () => {

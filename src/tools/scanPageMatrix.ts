@@ -311,6 +311,10 @@ const scanPageMatrix = defineTabTool({
     inputSchema: scanPageMatrixSchema,
     type: 'destructive',
   },
+  // Each call captures and restores viewport, media and zoom; an overlapping
+  // call in the same context would scan the other's variant or restore its
+  // temporary state as the final one.
+  exclusive: true,
 
   handle: async (tab, params, response, signal) => {
     signal?.throwIfAborted();

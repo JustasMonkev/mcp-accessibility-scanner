@@ -28,7 +28,7 @@ const requests = defineTabTool({
   schema: {
     name: 'browser_network_requests',
     title: 'List network requests',
-    description: 'Returns network requests since the last explicit navigation, optionally including up to 200 requests from earlier navigations in this tab',
+    description: 'Returns the most recent 200 network requests since the last explicit navigation, optionally including up to 200 requests from earlier navigations in this tab',
     inputSchema: z.object({
       all: z.boolean().optional().describe('Include up to 200 requests from earlier explicit navigations in this tab'),
     }),
@@ -37,6 +37,9 @@ const requests = defineTabTool({
 
   handle: async (tab, params, response) => {
     const entries = tab.requests(params.all);
+    const omitted = tab.omittedRequests(params.all);
+    if (omitted)
+      response.addResult(`${omitted} earlier ${omitted === 1 ? 'request was' : 'requests were'} omitted to keep this tab's history bounded.`);
     for (const [index, request] of entries)
       response.addResult(renderRequest(index, request, request.existingResponse()));
     if (entries.size)
