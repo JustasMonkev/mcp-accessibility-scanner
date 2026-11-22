@@ -993,7 +993,7 @@ describe('extension protocol v2', () => {
       return child;
     }) as any);
     const factory = new ExtensionContextFactory({ browserChannel: 'chrome', executablePath: '/missing/chrome' });
-    await expect(factory.createContext({ name: 'test-client', version: '1.0.0' }, new AbortController().signal, undefined)).rejects.toThrow(message);
+    await expect(factory.createContext({ name: 'test-client', version: '1.0.0' }, new AbortController().signal)).rejects.toThrow(message);
     expect(spawn).toHaveBeenCalledTimes(1);
     // A later error from the same child stays handled.
     expect(() => child.emit('error', new Error('late failure'))).not.toThrow();

@@ -359,7 +359,7 @@ describe('browserContextFactory', () => {
         browser: { isolated: true, cdpLaunch: { command: 'missing-app', port, startupTimeoutMs: 60_000 } },
       }));
       const started = Date.now();
-      await expect(factory.createContext(clientInfo, new AbortController().signal, undefined))
+      await expect(factory.createContext(clientInfo, new AbortController().signal))
           .rejects.toThrow(/^Failed to start CDP launch command "missing-app": spawn missing-app ENOENT\. Check that the application is installed/);
       expect(Date.now() - started).toBeLessThan(5_000);
 
@@ -367,7 +367,7 @@ describe('browserContextFactory', () => {
       const browser = createMockBrowser(createMockBrowserContext());
       spawnMock.mockImplementation(createMockChildProcess);
       connectOverCDP.mockReset().mockResolvedValue(browser);
-      const result = await factory.createContext(clientInfo, new AbortController().signal, undefined);
+      const result = await factory.createContext(clientInfo, new AbortController().signal);
       await result.close();
       expect(spawnMock).toHaveBeenCalledTimes(2);
     });
@@ -380,7 +380,7 @@ describe('browserContextFactory', () => {
       });
       connectOverCDP.mockRejectedValue(new Error('connect ECONNREFUSED'));
       const factory = contextFactory(await resolveConfig({ browser: { cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 60_000 } } }));
-      await expect(factory.createContext(clientInfo, new AbortController().signal, undefined))
+      await expect(factory.createContext(clientInfo, new AbortController().signal))
           .rejects.toThrow('CDP launch command "open" exited with code 3 before its CDP endpoint http://127.0.0.1:9222 became available.');
 
       // `open -a <App>` exits 0 right after handing off to the application.
@@ -393,7 +393,7 @@ describe('browserContextFactory', () => {
       connectOverCDP.mockReset()
           .mockImplementationOnce(() => new Promise((_, reject) => setTimeout(() => reject(new Error('connect ECONNREFUSED')), 30)))
           .mockResolvedValue(browser);
-      const result = await factory.createContext(clientInfo, new AbortController().signal, undefined);
+      const result = await factory.createContext(clientInfo, new AbortController().signal);
       expect(connectOverCDP).toHaveBeenCalledTimes(2);
       await result.close();
     });
@@ -402,7 +402,7 @@ describe('browserContextFactory', () => {
       // A NaN deadline never expires, so the attach loop would retry forever.
       const config = await resolveConfig({ browser: { cdpLaunch: { command: 'open', port: 9222 } } });
       config.browser.cdpLaunch!.startupTimeoutMs = startupTimeoutMs;
-      await expect(contextFactory(config).createContext(clientInfo, new AbortController().signal, undefined))
+      await expect(contextFactory(config).createContext(clientInfo, new AbortController().signal))
           .rejects.toThrow(`Invalid CDP launch startup timeout ${startupTimeoutMs}`);
       expect(spawnMock).not.toHaveBeenCalled();
     });
@@ -414,7 +414,7 @@ describe('browserContextFactory', () => {
       const { promise: attach, resolve: finishAttach } = Promise.withResolvers<any>();
       connectOverCDP.mockReturnValueOnce(attach);
       const factory = contextFactory(await resolveConfig({ browser: { cdpLaunch: { command: 'open', port: 9222, startupTimeoutMs: 60_000 } } }));
-      const pending = factory.createContext(clientInfo, new AbortController().signal, undefined);
+      const pending = factory.createContext(clientInfo, new AbortController().signal);
       await vi.waitFor(() => expect(connectOverCDP).toHaveBeenCalledTimes(1));
       child.emit('exit', null, 'SIGKILL');
       await expect(pending).rejects.toThrow('exited on signal SIGKILL');
