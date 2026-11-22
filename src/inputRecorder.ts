@@ -15,6 +15,7 @@
  */
 
 import { logUnhandledError } from './utils/log.js';
+import * as javascript from './utils/codegen.js';
 
 import type * as playwright from 'playwright';
 import type * as actions from './actions.js';
@@ -322,6 +323,6 @@ export class InputRecorder {
       signals: [],
     };
     if (tab)
-      this._context.sessionLog?.logUserAction(navigateAction, tab, `await page.goto('${signal.url}');`, false);
+      this._context.sessionLog?.logUserAction(navigateAction, tab, `await page.goto(${javascript.quote(signal.url)});`, false);
   }
 }

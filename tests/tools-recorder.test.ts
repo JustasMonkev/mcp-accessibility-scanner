@@ -14,7 +14,9 @@
  * limitations under the License.
  */
 
+import vm from 'node:vm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { InputRecorder } from '../src/inputRecorder.js';
 import { toMcpTool } from '../src/mcp/tool.js';
 import { Response } from '../src/response.js';
 import { SessionLog } from '../src/sessionLog.js';
@@ -116,5 +118,29 @@ describe('Recorder tools', () => {
       readOnlyHint: false,
       destructiveHint: true,
     });
+  });
+});
+
+describe('InputRecorder navigation logging', () => {
+  it.each([
+    "https://example.com/o'brien",
+    'https://example.com/back\\slash',
+    'https://example.com/line\nbreak',
+  ])('logs a replayable goto for %j', url => {
+    const logUserAction = vi.fn();
+    const tab = {};
+    const recorder = {
+      _context: { tabForPage: () => tab, sessionLog: { logUserAction } },
+      _lastActions: new WeakMap(),
+    };
+
+    InputRecorder.prototype.logSignalAdded.call(recorder as unknown as InputRecorder, {} as any, { name: 'navigation', url } as any, '');
+
+    expect(logUserAction).toHaveBeenCalledTimes(1);
+    const code: string = logUserAction.mock.calls[0][2];
+    expect(() => new vm.Script(`(async () => { ${code} })`)).not.toThrow();
+    const goto = vi.fn();
+    vm.runInNewContext(`(async () => { ${code} })()`, { page: { goto } });
+    expect(goto).toHaveBeenCalledWith(url);
   });
 });
