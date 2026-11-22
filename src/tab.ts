@@ -47,6 +47,9 @@ export type TabSnapshot = {
   downloads: { download: playwright.Download, finished: boolean, outputFile: string, error?: string }[];
 };
 
+/** How an explicit navigation ended: a committed document, or a confirmed download that left the previous document in place. */
+type NavigationOutcome = 'document' | 'download';
+
 class StaleAriaSnapshotError extends Error {}
 
 const defaultActionTimeoutMs = 5000;
@@ -267,22 +270,26 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     await callOnPageNoTrace(this.page, page => page.waitForLoadState(state, options).catch(logUnhandledError));
   }
 
-  async navigate(url: string, options?: { returnOnDialog?: boolean }) {
+  /**
+   * Without `returnOnDialog`, resolves to `'download'` when the URL started a
+   * confirmed download instead of committing a document; the page then still
+   * shows the previous document. With `returnOnDialog`, resolves `undefined`.
+   */
+  async navigate(url: string, options?: { returnOnDialog?: boolean }): Promise<NavigationOutcome | undefined> {
     if (options?.returnOnDialog && this.modalStates().length)
       throw new Error(`Cannot navigate while a modal state is present.\n${this.modalStatesMarkdown().join('\n')}`);
     this._markRequestsNavigation();
     this._clearCollectedArtifacts();
-    if (!options?.returnOnDialog) {
-      await this._navigate(url);
-      return;
-    }
-    let navigation: Promise<void> | undefined;
-    const modalStates = await this._raceAgainstModalStates(() => {
+    if (!options?.returnOnDialog)
+      return await this._navigate(url);
+    let navigation: Promise<NavigationOutcome> | undefined;
+    const modalStates = await this._raceAgainstModalStates(async () => {
       navigation = this._navigate(url);
-      return navigation;
+      await navigation;
     });
     if (modalStates.length && navigation)
       this._reportLateNavigationFailure(navigation);
+    return undefined;
   }
 
   private _reportLateNavigationFailure(navigation: Promise<unknown>) {
@@ -293,7 +300,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     });
   }
 
-  private async _navigate(url: string) {
+  private async _navigate(url: string): Promise<NavigationOutcome> {
     const downloadEvent = new ManualPromise<playwright.Download>();
     const downloadListener = (download: playwright.Download) => downloadEvent.resolve(download);
     this.page.once('download', downloadListener);
@@ -306,12 +313,13 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       if (!download)
         throw error;
       await new Promise(resolve => setTimeout(resolve, 500));
-      return;
+      return 'download';
     } finally {
       this.page.off('download', downloadListener);
     }
 
     await this.waitForLoadState('load', { timeout: fallbackOperationTimeoutMs });
+    return 'document';
   }
 
   goBack(options?: Parameters<playwright.Page['goBack']>[0]) {

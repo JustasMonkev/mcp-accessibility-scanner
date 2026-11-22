@@ -907,6 +907,45 @@ describe('audit_site tool', () => {
     expect(byUrl.get('https://example.com/behind-the-gate')?.discoveredFrom).toBe('https://example.com/gate');
   });
 
+  it('skips a download without reading or scanning the document it left in the tab', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/export.csv', 'https://example.com/about'],
+    });
+    const navigate = crawlTab.navigate.getMockImplementation();
+    // A confirmed download leaves the previous document in place.
+    crawlTab.navigate.mockImplementation(async (url: string) => url.endsWith('.csv') ? 'download' : navigate(url));
+    const scan = vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) =>
+      createAxeResult(page.url(), [createViolation('image-alt', `<img src="${page.url()}">`)]));
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      concurrency: 1,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/export.csv', 'skipped'],
+      ['https://example.com/about', 'scanned'],
+    ]);
+    expect(report.pages[1]).toMatchObject({ error: null, title: '', summary: null, violations: [] });
+    expect(report.pages[1].skipReason).toContain('download');
+    expect(report.summary.totals).toMatchObject({ scannedPages: 2, erroredPages: 0, skippedUrls: 1 });
+    expect(report.summary.violations[0].pagesAffected).toEqual(['https://example.com/', 'https://example.com/about']);
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(crawlTab.page.evaluate).toHaveBeenCalledTimes(2);
+  });
+
   it('respects BFS maxPages and maxDepth limits', async () => {
     const { context, response, crawlTab } = createHarness({
       'https://example.com/': ['https://example.com/one', 'https://example.com/two', 'https://example.com/three'],

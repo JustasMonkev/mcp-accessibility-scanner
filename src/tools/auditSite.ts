@@ -36,7 +36,7 @@ type CrawlItem = {
   retriedAfterOutgoingDialog?: boolean;
 };
 
-type PageScanStatus = 'scanned' | 'error';
+type PageScanStatus = 'scanned' | 'error' | 'skipped';
 
 type PageReport = {
   url: string;
@@ -45,6 +45,7 @@ type PageReport = {
   discoveredFrom: string | null;
   status: PageScanStatus;
   error: string | null;
+  skipReason: string | null;
   summary: ReturnType<typeof summarizeAxeViolations> | null;
   violations: AxeViolation[];
   incomplete: AxeViolation[];
@@ -815,6 +816,7 @@ function newPageReport(item: CrawlItem): PageReport {
     discoveredFrom: item.discoveredFrom,
     status: 'error',
     error: null,
+    skipReason: null,
     summary: null,
     violations: [],
     incomplete: [],
@@ -826,10 +828,20 @@ type PageFindings = { violations: AxeViolation[], incomplete: AxeViolation[] | n
 type DialogWatch = ReturnType<typeof watchForDialog>;
 type PageVisit = { tab: Tab, item: CrawlItem, report: PageReport, dialogWatch: DialogWatch };
 
-async function scanCrawledPage({ tab, item, report, dialogWatch }: PageVisit, scope: CrawlScope, params: AuditSiteParams, commitLinks: (links: string[]) => void, signal?: AbortSignal): Promise<PageFindings> {
+const progressVerbs: Record<PageScanStatus, string> = { scanned: 'Scanned', error: 'Failed', skipped: 'Skipped' };
+const downloadSkipReason = 'The URL started a file download instead of loading a document, so there was no page to audit.';
+
+// Resolves null when the URL is skipped: a download leaves the previous
+// document in the tab, which must not be read or scanned as this URL.
+async function scanCrawledPage({ tab, item, report, dialogWatch }: PageVisit, scope: CrawlScope, params: AuditSiteParams, commitLinks: (links: string[]) => void, signal?: AbortSignal): Promise<PageFindings | null> {
   signal?.throwIfAborted();
   await rejectOnAbort(() => dialogWatch.ready(), signal);
-  await rejectOnAbort(() => dialogWatch.guard(tab.navigate(item.url)), signal);
+  const outcome = await rejectOnAbort(() => dialogWatch.guard(tab.navigate(item.url)), signal);
+  if (outcome === 'download') {
+    report.status = 'skipped';
+    report.skipReason = downloadSkipReason;
+    return null;
+  }
   await rejectOnAbort(() => dialogWatch.guard(tab.waitForTimeout(params.waitAfterNavigationMs)), signal);
 
   const reachedUrl = tab.page.url();
@@ -1142,7 +1154,11 @@ class SiteCrawl {
     const dialogWatch = watchForDialog(tab, item.url);
     let retry = false;
     try {
-      this._pageFindings.set(report, await scanCrawledPage({ tab, item, report, dialogWatch }, this._setup.scope, this._setup.params, commitLinks, this._setup.signal));
+      const findings = await scanCrawledPage({ tab, item, report, dialogWatch }, this._setup.scope, this._setup.params, commitLinks, this._setup.signal);
+      if (findings)
+        this._pageFindings.set(report, findings);
+      else
+        this._setup.frontier.skippedUrls++;
     } catch (error) {
       this._setup.signal?.throwIfAborted();
       retry = !item.retriedAfterOutgoingDialog && dialogWatch.raisedByOutgoingDocument();
@@ -1188,7 +1204,7 @@ class SiteCrawl {
   private async _reportPageProgress(report: PageReport, url: string): Promise<void> {
     this._processedPages++;
     const { params, response } = this._setup;
-    const verb = report.status === 'scanned' ? 'Scanned' : 'Failed';
+    const verb = progressVerbs[report.status];
     await response.reportProgress({
       progress: this._processedPages,
       total: params.maxPages,
