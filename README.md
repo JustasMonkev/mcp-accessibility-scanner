@@ -1149,6 +1149,8 @@ HTML `<dialog>` elements and in-page modal components are page content. `browser
 
 `scan_page_matrix` varies viewport/media/zoom, not application state. Keep `reloadBetweenVariants: false` for a transient state, and verify that responsive rerenders did not close or reset it. Run `audit_keyboard` separately for keyboard behavior; it moves focus and may activate skip links, so restore the intended state before comparing scans. A modal's intentional focus containment is not automatically a keyboard trap: verify an accessible way to dismiss it and that focus returns appropriately.
 
+Repeat scans reuse the Axe installer in frames that have not navigated. Each scan still installs a fresh engine and checks the current DOM; findings from an earlier scan are never reused.
+
 Review Axe's `incomplete` results, frame coverage warnings and sampled node counts. Zero automated violations do not establish conformance or cover states you never opened. Manually check keyboard operation, focus appearance/order and whether error messages are understandable and announced.
 
 ### Page Analysis

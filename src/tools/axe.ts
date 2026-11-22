@@ -4,7 +4,7 @@ import { z } from 'zod';
 
 import { truncateDataUrls } from '../utils/dataUrl.js';
 
-import type { ElementHandle, Frame, Page } from 'playwright';
+import type { ElementHandle, Frame, JSHandle, Page } from 'playwright';
 
 declare global {
   interface Window {
@@ -153,8 +153,56 @@ const axeReadyNonce = randomUUID();
 
 const axeConfigureSource = `;axe.configure({ allowedOrigins: ['<unsafe_all_origins>'], branding: { application: 'playwright' } });`;
 
-async function injectAxe(frame: Frame, source: string): Promise<void> {
-  await frame.evaluate(source);
+// Keep the installer, not the installed engine: every scan gets fresh axe state
+// and its own coverage marker. The handle belongs to one frame document.
+type AxeInstaller = { install: (token: string) => void };
+type InstallerEntry = { handle?: JSHandle<AxeInstaller> };
+const installers = new WeakMap<Frame, InstallerEntry>();
+const observedPages = new WeakSet<Page>();
+
+function forgetInstaller(frame: Frame): void {
+  const entry = installers.get(frame);
+  installers.delete(frame);
+  void entry?.handle?.dispose().catch(() => {});
+}
+
+const installerSource = [
+  '(function install(token) {',
+  axe.source,
+  axeConfigureSource,
+  `window[${JSON.stringify(axeReadyMarker)}] = token;`,
+  'return { install };',
+  '})',
+].join('\n');
+
+async function installAxe(frame: Frame, token: string): Promise<void> {
+  const previous = installers.get(frame);
+  const cached = previous?.handle;
+  if (cached) {
+    try {
+      await frame.evaluate(({ installer, token }) => { installer.install(token); }, { installer: cached, token });
+      return;
+    } catch (error) {
+      // A Frame survives navigation; its handles don't. Ask Playwright to
+      // resolve the argument without running the installer again. A live
+      // handle means installation itself failed: preserve that exception.
+      if (await frame.evaluate(() => true, cached).catch(() => false))
+        throw error;
+    }
+  }
+
+  const entry: InstallerEntry = {};
+  if (installers.get(frame) === previous) {
+    installers.set(frame, entry);
+    void cached?.dispose().catch(() => {});
+  }
+  const handle = await frame.evaluateHandle<AxeInstaller>(`${installerSource}(${JSON.stringify(token)})`);
+  if (installers.get(frame) === entry && !frame.isDetached()) {
+    entry.handle = handle;
+  } else {
+    // The frame navigated, detached, or another install started in the meantime.
+    await handle.dispose().catch(() => {});
+  }
 }
 
 const axeForNamesGlobal = '__mcpAccessibilityScannerAxe';
@@ -185,7 +233,7 @@ export function frameReadTimeoutMs(frame: Frame): number {
 }
 
 export async function injectAxeForNames(frame: Frame): Promise<boolean> {
-  return injectAxe(frame, axeForNamesSource).then(() => true, () => false);
+  return frame.evaluate(axeForNamesSource).then(() => true, () => false);
 }
 
 export async function withFrameTimeout<T>(work: Promise<T>, fallback: T, timeoutMs = childFrameInjectionTimeoutMs): Promise<T> {
@@ -379,13 +427,17 @@ async function injectAxeIntoFrames(
   include: readonly string[],
   exclude: readonly string[]
 ): Promise<string[]> {
+  if (!observedPages.has(page)) {
+    observedPages.add(page);
+    page.on('framenavigated', forgetInstaller);
+    page.on('framedetached', forgetInstaller);
+  }
   const token = `${axe.version}:${axeReadyNonce}:${++axeReadySequence}`;
-  const source = `${axe.source}${axeConfigureSource}window[${JSON.stringify(axeReadyMarker)}]=${JSON.stringify(token)};`;
   const mainFrame = page.mainFrame();
-  await injectAxe(mainFrame, source);
+  await installAxe(mainFrame, token);
   await withConcurrency(
       childFramesOf(page),
-      frame => withFrameTimeout(injectAxe(frame, source), undefined),
+      frame => withFrameTimeout(installAxe(frame, token), undefined),
   );
 
   const stableFrameIds = new Map<Frame, number>();
