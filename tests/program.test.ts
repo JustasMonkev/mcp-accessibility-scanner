@@ -60,6 +60,23 @@ describe('restricted external provider switches', () => {
   });
 });
 
+describe('numeric CLI options', () => {
+  it.each([
+    [['--cdp-launch-command', 'app', '--cdp-launch-startup-timeout', '30s'], 'browser.cdpLaunch.startupTimeoutMs (--cdp-launch-startup-timeout, PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT) must be an integer from 1 to 2147483647; got NaN.'],
+    [['--port', 'abc'], 'server.port (--port, PLAYWRIGHT_MCP_PORT) must be an integer from 0 to 65535; got NaN.'],
+    [['--timeout-settle', '1.5'], 'timeouts.settle (--timeout-settle, PLAYWRIGHT_MCP_TIMEOUT_SETTLE) must be an integer from 0 to 2147483647; got 1.5.'],
+  ])('rejects %j at startup instead of truncating or ignoring it', async (args, message) => {
+    const { stderr } = await collectFailure(args);
+    expect(stderr).toContain(message);
+  });
+
+  it('rejects a mistyped environment startup timeout before launching the application', async () => {
+    const { stderr } = await collectFailure([], { PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND: 'app', PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT: 'thirty' });
+    expect(stderr).toContain('browser.cdpLaunch.startupTimeoutMs');
+    expect(stderr).toContain('got NaN.');
+  });
+});
+
 describe('missing CDP launch application', () => {
   it.each([
     ['an automatically allocated port', []],
