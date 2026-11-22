@@ -127,6 +127,8 @@ docker compose up -d
 
 The Compose configuration publishes the unauthenticated MCP HTTP transport on `127.0.0.1:8931` only. Do not expose this port to untrusted networks.
 
+The Compose service defines a Docker healthcheck that sends a JSON-RPC `ping` to `/mcp` and expects HTTP 200. The image itself declares no `HEALTHCHECK`, because its default stdio mode opens no HTTP listener; add the Compose healthcheck to your own HTTP deployments if you need one.
+
 #### Build from source
 
 ```bash

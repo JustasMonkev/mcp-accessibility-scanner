@@ -47,7 +47,7 @@ USER mcp
 
 EXPOSE 8931
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "const http = require('http'); const req = http.request({hostname:'localhost',port:8931,path:'/mcp',method:'POST',headers:{'content-type':'application/json'}}, res => process.exit(res.statusCode === 406 ? 0 : 1)); req.on('error', () => process.exit(1)); req.end('{}');"
+# No image HEALTHCHECK: the default stdio mode opens no HTTP listener to probe.
+# The HTTP service in docker-compose.yaml defines its own healthcheck.
 
 ENTRYPOINT ["/usr/bin/tini", "-s", "--", "node", "cli.js", "--no-sandbox"]
