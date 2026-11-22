@@ -24,6 +24,7 @@ import { BrowserSessionRegistry, browserSessionTtlMs } from '../src/browserSessi
 import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
 import { SessionLog } from '../src/sessionLog.js';
+import { allTools } from '../src/tools.js';
 
 import type { CallToolResult } from '@modelcontextprotocol/server';
 
@@ -255,6 +256,30 @@ describe('browser sessions', () => {
 
     await expect(backend.callTool('browser_tabs', { action: 'list', browserSessionId: 42 as any }))
         .rejects.toThrow(/Invalid browserSessionId/);
+  });
+
+  it('consumes browserSessionId before a strict tool schema validates the remaining arguments', async () => {
+    const { factory } = makeFactory();
+    const backend = await makeBackend(factory);
+    const id = await openSession(backend);
+    const tool = allTools.find(candidate => candidate.schema.name === 'audit_keyboard_operation')!;
+    const handle = vi.spyOn(tool, 'handle').mockImplementation(async (_context, _params, response) => {
+      response.addResult('reached');
+    });
+    try {
+      const steps = [{ key: 'Tab', expect: [{ selector: '#toggle', focused: true }] }];
+      const routed = await backend.callTool('audit_keyboard_operation', { browserSessionId: id, steps });
+      expect(routed.isError).not.toBe(true);
+      expect(handle).toHaveBeenCalledTimes(1);
+      expect(handle.mock.calls[0][0]).toBe(backend['_sessionRegistry']!.resolve(id));
+      expect(handle.mock.calls[0][1]).not.toHaveProperty('browserSessionId');
+
+      await expect(backend.callTool('audit_keyboard_operation', { browserSessionId: id, steps, unexpectedField: true }))
+          .rejects.toThrow('Unrecognized key: "unexpectedField"');
+      expect(handle).toHaveBeenCalledTimes(1);
+    } finally {
+      handle.mockRestore();
+    }
   });
 
   it('closing an unknown handle is a tool error without disclosing the open sessions', async () => {
