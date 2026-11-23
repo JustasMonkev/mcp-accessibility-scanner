@@ -123,13 +123,18 @@ describe('interactive session recording', () => {
   });
 
   // Starts the REPL, navigates, and resolves once the navigation printed.
+  // Bundled Chromium, not the default branded Chrome: CI installs only the
+  // former. A failed navigation rejects at once with the CLI's output instead
+  // of leaving the test to time out.
   async function startNavigatedRepl(outputDir: string, env: NodeJS.ProcessEnv = {}) {
-    const child = spawn(process.execPath, [...cliArgs, '--headless', '--isolated', '--save-session', '--output-dir', outputDir, 'interactive'], {
-      stdio: ['pipe', 'pipe', 'ignore'],
+    const child = spawn(process.execPath, [...cliArgs, '--browser', 'chromium', '--headless', '--isolated', '--save-session', '--output-dir', outputDir, 'interactive'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, ...env },
     });
     let stdout = '';
+    let stderr = '';
     child.stdout.on('data', chunk => { stdout += String(chunk); });
+    child.stderr.on('data', chunk => { stderr += String(chunk); });
     const exited = new Promise<number>((resolve, reject) => {
       const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('interactive CLI did not exit')); }, 30_000);
       child.on('error', reject);
@@ -137,9 +142,19 @@ describe('interactive session recording', () => {
     });
     child.stdin.write('browser_navigate {"url":"data:text/html,<p>ready</p>"}\n');
     await new Promise<void>((resolve, reject) => {
-      const check = () => stdout.includes('Page URL') ? resolve() : undefined;
+      const fail = (reason: string) => {
+        child.kill('SIGKILL');
+        reject(new Error(`${reason}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`));
+      };
+      const check = () => {
+        if (stdout.includes('Page URL'))
+          resolve();
+        else if (/^Error:/m.test(stdout) || /^Error:/m.test(stderr))
+          fail('navigation failed');
+      };
       child.stdout.on('data', check);
-      void exited.then(() => reject(new Error(`exited before navigating: ${stdout}`)), reject);
+      child.stderr.on('data', check);
+      void exited.then(() => fail('exited before navigating'), reject);
     });
     return { child, exited, stdout: () => stdout };
   }
