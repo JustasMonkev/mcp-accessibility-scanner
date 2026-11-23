@@ -110,10 +110,27 @@ export function fixtures(modules, { tab, endpoint, output, importMetadata }) {
   const unlimited = () => r.WorkBudget ? new r.WorkBudget(Infinity) : undefined;
   r.solve(tree, 3, unlimited());
   const parts = r.parts(tree);
-  cases('representativeUrls', { templateSegments: [urls[0]], newNode: [1], parts: [tree], branchCount: [tree],
-    compareCodeUnits: ['docs', 'help'], coveredCount: [parts[1]], partCost: [parts[0], 1, 1], partCosts: [parts[0], 3, 1],
-    mergePart: [[0, 0], parts[1], 0, 3, 1],
-    mergeParts: [tree, parts, 3, false], selectRepresentativeUrls: [urls, 12] });
+  // Builds with newCosts keep each cost as { value, depth } and take the node depth;
+  // earlier ones keep a Float64Array and take the root's miss cost of 1 (or ignore it).
+  const rootMiss = r.newCosts ? 0 : 1;
+  const costValues = costs => costs instanceof Float64Array ? Array.from(costs) : Array.from(costs.value, (value, i) => value * 2 ** -costs.depth[i]);
+  const costs = parts.map(part => r.partCosts(part, 3, rootMiss));
+  const start = () => r.newCosts ? r.newCosts(1) : new Float64Array(1);
+  cases('representativeUrls', { templateSegments: [urls[0]], parts: [tree], branchCount: [tree],
+    compareCodeUnits: ['docs', 'help'], coveredCount: [parts[1]], partCost: [parts[0], 1, 1] });
+  // Builds differ in the cost fields they add; compare the fields every build sets.
+  add('representativeUrls', 'newNode', () => r.newNode(1), {
+    project: ({ depth, children, terminal, size }) => ({ depth, children, terminal, size }),
+  });
+  add('representativeUrls', 'partCosts', () => r.partCosts(parts[1], 3, rootMiss), { project: costValues });
+  add('representativeUrls', 'mergePart', () => r.mergePart(start(), costs[1], 0, 3), {
+    project: ({ row, choice }) => [costValues(row), Array.from(choice)],
+  });
+  add('representativeUrls', 'mergeParts', () => r.mergeParts(parts, costs, 3, false, []), { project: costValues });
+  // Builds since the work budget also report whether the selection is complete.
+  add('representativeUrls', 'selectRepresentativeUrls', () => r.selectRepresentativeUrls(urls, 12), {
+    project: result => Array.isArray(result) ? result : (assert.equal(result.complete, true), result.urls),
+  });
   // Private DP storage differs across builds. Validate the allocation and selected URL indices.
   add('representativeUrls', 'parts', () => r.parts(tree), { project: list => list.map(p => [p.kind, p.size]) });
   function collect(t) {
@@ -122,17 +139,21 @@ export function fixtures(modules, { tab, endpoint, output, importMetadata }) {
       r.collect(t, 3, 3, out);
     else
       r.collect(t, 3, out);
-    return out;
+    // Recursive builds collect depth first, stack-based ones in another order.
+    return out.sort((first, second) => first - second);
   }
   add('representativeUrls', 'solve', t => r.solve(t, 3, unlimited()), { prepare: () => structuredClone(tree), project: (_, t) => collect(t), limit: 32 });
   add('representativeUrls', 'collect', () => collect(tree));
   if (r.WorkBudget) {
-    const costs = parts.map(part => r.partCosts(part, 3, 1));
     cases('representativeUrls', { mergeCells: [costs, 3], buildTree: [urls, unlimited()] });
     add('representativeUrls', 'WorkBudget.constructor', () => new r.WorkBudget(10), { project: budget => budget._remaining });
     add('representativeUrls', 'WorkBudget.spend', budget => budget.spend(1), { prepare: () => new r.WorkBudget(10), project: (_, budget) => budget._remaining });
     add('representativeUrls', 'WorkBudgetExceeded', () => new r.WorkBudgetExceeded(), { project: error => error instanceof Error });
-    add('representativeUrls', 'solveNode', t => r.solveNode(t, 3, unlimited()), { prepare: () => structuredClone(tree), project: (_, t) => Array.from(t.best) });
+    add('representativeUrls', 'solveNode', t => r.solveNode(t, 3, unlimited()), { prepare: () => structuredClone(tree), project: (_, t) => costValues(t.best) });
+  }
+  if (r.newCosts) {
+    add('representativeUrls', 'newCosts', () => r.newCosts(3), { project: costValues });
+    cases('representativeUrls', { half: [3], lower: [1, 2, 3, 4] });
   }
 
   const redactor = modules.urlRedaction.createUrlRedactor(['token']);
