@@ -797,6 +797,55 @@ describe('Config', () => {
       vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT', ' ');
       expect((await resolveCLIConfig({})).browser.cdpLaunch?.startupTimeoutMs).toBeUndefined();
     });
+
+    describe('CDP launch settings across layers', () => {
+      beforeEach(() => {
+        for (const name of Object.keys(process.env)) {
+          if (name.startsWith('PLAYWRIGHT_MCP_'))
+            vi.stubEnv(name, undefined);
+        }
+      });
+
+      it('validates a startup timeout from the environment against a CLI command', async () => {
+        // The CLI launch object replaced the environment's wholesale, so a
+        // mistyped environment timeout was dropped instead of rejected.
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT', '30s');
+        await expect(resolveCLIConfig({ cdpLaunchCommand: 'app' })).rejects.toThrow('browser.cdpLaunch.startupTimeoutMs (');
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_PORT', '0');
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT', undefined);
+        await expect(resolveCLIConfig({ cdpLaunchCommand: 'app' })).rejects.toThrow('browser.cdpLaunch.port (');
+      });
+
+      it('applies valid port and timeout from other layers with field-level precedence', async () => {
+        const configFile = await writeConfigFile({ browser: { cdpLaunch: { command: 'file-app', args: ['--file-arg'], port: 9001, startupTimeoutMs: 1000 } } });
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT', '2000');
+        expect((await resolveCLIConfig({ config: configFile, cdpLaunchCommand: 'cli-app' })).browser.cdpLaunch)
+            .toEqual({ command: 'cli-app', port: 9001, startupTimeoutMs: 2000 });
+        expect((await resolveCLIConfig({ config: configFile, cdpLaunchStartupTimeout: 3000 })).browser.cdpLaunch)
+            .toEqual({ command: 'file-app', args: ['--file-arg'], port: 9001, startupTimeoutMs: 3000 });
+        // A settings-only file applies to a command from the environment.
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND', 'env-app');
+        const settingsFile = await writeConfigFile({ browser: { cdpLaunch: { port: 9002 } as any } });
+        expect((await resolveCLIConfig({ config: settingsFile })).browser.cdpLaunch).toEqual({ command: 'env-app', port: 9002, startupTimeoutMs: 2000 });
+      });
+
+      it('rejects launch arguments that would be separated from their command', async () => {
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_ARGS', '--remote-debugging-port={port}');
+        await expect(resolveCLIConfig({ cdpLaunchCommand: 'cli-app' }))
+            .rejects.toThrow('browser.cdpLaunch args from the environment would be ignored');
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_ARGS', undefined);
+        const configFile = await writeConfigFile({ browser: { cdpLaunch: { command: 'file-app' } } });
+        await expect(resolveCLIConfig({ config: configFile, cdpLaunchCwd: './cli-cwd' }))
+            .rejects.toThrow('browser.cdpLaunch cwd from the CLI would be ignored');
+        // Without a command anywhere, stray CLI/environment settings stay inert.
+        expect((await resolveCLIConfig({ cdpLaunchArgs: ['x'], cdpLaunchPort: 9222 })).browser.cdpLaunch).toBeUndefined();
+      });
+
+      it('rejects a config-file launch block without any command', async () => {
+        const configFile = await writeConfigFile({ browser: { cdpLaunch: { startupTimeoutMs: 1000 } as any } });
+        await expect(resolveCLIConfig({ config: configFile })).rejects.toThrow('browser.cdpLaunch in the config file needs a command');
+      });
+    });
   });
 
   describe('snapshot boxes', () => {

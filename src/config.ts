@@ -130,7 +130,8 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
   const noTabGroup = envToBoolean(process.env.PLAYWRIGHT_MCP_NO_TAB_GROUP);
   if (noTabGroup !== undefined)
     envOverrides.tabGroup = !noTabGroup;
-  const layers: ConfigLayers = { file: configInFile, env: envOverrides, cli: configFromCLIOptions(cliOptions) };
+  const cdpLaunch = mergeCdpLaunchLayers({ file: configInFile.browser?.cdpLaunch, env: cdpLaunchFromCLI(envOptions), cli: cdpLaunchFromCLI(cliOptions) });
+  const layers: ConfigLayers = { file: configInFile, env: envOverrides, cli: configFromCLIOptions(cliOptions), cdpLaunch };
   const options: OptionLayers = { env: envOptions, cli: cliOptions };
   return validateResolvedConfig(applyMobileConfig(mergeConfigLayers(layers), layers, options));
 }
@@ -235,7 +236,7 @@ function applyDefaultChromiumSandbox(config: FullConfig): void {
 }
 
 type MobileSource = 'env' | 'cli';
-type ConfigLayers = { file: Config, env: Config, cli: Config };
+type ConfigLayers = { file: Config, env: Config, cli: Config, cdpLaunch: CdpLaunch | undefined };
 type OptionLayers = { env: CLIOptions, cli: CLIOptions };
 
 function mergeConfigLayers(layers: ConfigLayers, mobile?: { override: Config, source: MobileSource }): FullConfig {
@@ -245,7 +246,57 @@ function mergeConfigLayers(layers: ConfigLayers, mobile?: { override: Config, so
       result = mergeConfig(result, mobile.override);
     result = mergeConfig(result, layers[source]);
   }
+  if (layers.cdpLaunch)
+    result.browser.cdpLaunch = layers.cdpLaunch;
+  else
+    delete result.browser.cdpLaunch;
   return result;
+}
+
+type CdpLaunch = NonNullable<BrowserUserConfig['cdpLaunch']>;
+type CdpLaunchSource = 'file' | 'env' | 'cli';
+const cdpLaunchSources: CdpLaunchSource[] = ['file', 'env', 'cli'];
+const cdpLaunchSourceNames: Record<CdpLaunchSource, string> = { file: 'the config file', env: 'the environment', cli: 'the CLI' };
+const appSpecificCdpLaunchFields = ['args', 'cwd', 'env'] as const;
+
+// The launched application (command, args, cwd, env) comes whole from the
+// highest-precedence layer that names a command: arguments and a working
+// directory written for one application are never mixed into another's.
+// port and startupTimeoutMs are generic launch settings and merge field by
+// field (CLI > environment > config file), so they apply with a command set
+// in any layer. JSON null is kept so validation can reject it.
+function mergeCdpLaunchLayers(layers: Record<CdpLaunchSource, Partial<CdpLaunch> | undefined>): CdpLaunch | undefined {
+  let app: { source: CdpLaunchSource, command: string, layer: Partial<CdpLaunch> } | undefined;
+  for (const source of cdpLaunchSources) {
+    const layer = layers[source];
+    if (layer?.command !== undefined)
+      app = { source, command: layer.command, layer };
+  }
+  if (!app) {
+    if (layers.file)
+      throw new Error('browser.cdpLaunch in the config file needs a command: set browser.cdpLaunch.command, --cdp-launch-command or PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND, or remove browser.cdpLaunch.');
+    return undefined;
+  }
+  const merged: CdpLaunch = { command: app.command };
+  if (app.layer.args !== undefined)
+    merged.args = app.layer.args;
+  if (app.layer.cwd !== undefined)
+    merged.cwd = app.layer.cwd;
+  if (app.layer.env !== undefined)
+    merged.env = app.layer.env;
+  for (const source of cdpLaunchSources) {
+    const layer = layers[source];
+    if (!layer)
+      continue;
+    const orphaned = layer.command === undefined ? appSpecificCdpLaunchFields.filter(field => layer[field] !== undefined) : [];
+    if (orphaned.length)
+      throw new Error(`browser.cdpLaunch ${orphaned.join(', ')} from ${cdpLaunchSourceNames[source]} would be ignored: they apply only with the command from the same layer, and ${cdpLaunchSourceNames[app.source]} sets the command. Set the command alongside them, or remove them.`);
+    if (layer.port !== undefined)
+      merged.port = layer.port;
+    if (layer.startupTimeoutMs !== undefined)
+      merged.startupTimeoutMs = layer.startupTimeoutMs;
+  }
+  return merged;
 }
 
 function mobileSourceOf(options: OptionLayers): MobileSource | undefined {
@@ -324,16 +375,15 @@ function contextOptionsFromCLI(cliOptions: CLIOptions): BrowserContextOptions {
   return contextOptions;
 }
 
-function cdpLaunchFromCLI(cliOptions: CLIOptions): NonNullable<Config['browser']>['cdpLaunch'] {
-  if (!cliOptions.cdpLaunchCommand)
-    return undefined;
-  return {
-    command: cliOptions.cdpLaunchCommand,
+function cdpLaunchFromCLI(cliOptions: CLIOptions): Partial<CdpLaunch> | undefined {
+  const launch = pickDefined<Partial<CdpLaunch>>({
+    command: cliOptions.cdpLaunchCommand || undefined,
     args: cliOptions.cdpLaunchArgs,
     cwd: cliOptions.cdpLaunchCwd,
     port: cliOptions.cdpLaunchPort,
     startupTimeoutMs: cliOptions.cdpLaunchStartupTimeout,
-  };
+  });
+  return Object.keys(launch).length ? launch : undefined;
 }
 
 function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = false): Config {
@@ -352,7 +402,6 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
       allowedUploadDirs: cliOptions.allowedUploadDirs,
       launchOptions: launchOptionsFromCLI(cliOptions, channel, sandboxTrueIsExplicit),
       contextOptions: contextOptionsFromCLI(cliOptions),
-      cdpLaunch: cdpLaunchFromCLI(cliOptions),
       cdpEndpoint: cliOptions.cdpEndpoint,
       cdpHeaders: parseCdpHeaders(cliOptions.cdpHeader),
       cdpTimeout: cliOptions.cdpTimeout,
