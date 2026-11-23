@@ -50,16 +50,16 @@ const evaluate = defineTabTool({
     const locator = params.ref && params.element ? await tab.refLocator({ ref: params.ref, element: params.element }) : undefined;
     const source = toFunctionSource(params.function, !!locator);
     const target = locator ? `page.${await generateLocator(locator)}` : 'page';
-    // Replay evaluates the source in the browser exactly as the tool does: the
-    // parenthesized source is eval'd in the page and its value called (with the
-    // element, if any). Emitting the source as a Node function literal would run
-    // parts of it, such as `.bind(document)`, outside the browser. Playwright
-    // also passes its omitted argument as undefined, so `arguments` matches.
-    const [parameters, args] = locator ? ['(element, source)', 'element, undefined'] : ['source', 'undefined'];
-    response.addCode(`await ${target}.evaluate(${parameters} => globalThis.eval(\`(\${source}\\n)\`)(${args}), ${quote(source)});`);
+    const expression = asBrowserExpression(source);
+    // Replay hands Playwright the same function the tool does: one whose
+    // toString() is the source, so the browser evaluates and calls it exactly
+    // as in the live call. A Node function literal would run parts of the
+    // source, such as `.bind(document)`, outside the browser, and an in-page
+    // eval wrapper would add an eval call the page can observe.
+    response.addCode(`await ${target}.evaluate(Object.assign(() => {}, { toString: () => ${quote(expression)} }));`);
 
     await tab.waitForCompletion(async () => {
-      const func = functionSerializingAs(asBrowserExpression(source));
+      const func = functionSerializingAs(expression);
       const result = locator ? await locator.evaluate(func) : await tab.page.evaluate(func);
       response.addResult(formatEvaluationResult(result));
     });
