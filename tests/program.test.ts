@@ -179,6 +179,31 @@ describe('interactive session recording', () => {
     }
   }, 40_000);
 
+  it('delivers a large result to a slow stdout reader before exiting at end of input', async () => {
+    // End of input waited for console.log to be called, not for the pipe to
+    // take the data, so process.exit(0) dropped what was still buffered.
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-interactive-backpressure-'));
+    try {
+      const repl = await startNavigatedRepl(outputDir);
+      const closed = new Promise(resolve => repl.child.on('close', resolve));
+      repl.child.stdout.pause();
+      const evaluate = { function: '() => "x".repeat(1_500_000) + ["TAIL", "MARKER"].join("-")' };
+      repl.child.stdin.end(`browser_evaluate ${JSON.stringify(evaluate)}\n`);
+      // Read nothing until well after the process would have exited unflushed.
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([repl.exited, new Promise(resolve => { timer = setTimeout(resolve, 5_000); })]);
+      clearTimeout(timer);
+      repl.child.stdout.resume();
+      await repl.exited;
+      await closed;
+      // A boolean keeps a failure from printing the 1.5 MB output.
+      expect(repl.stdout().includes('TAIL-MARKER"'), `got ${repl.stdout().length} characters without the marker`).toBe(true);
+      expect(repl.child.exitCode).toBe(0);
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  }, 40_000);
+
   it('starts shutdown on SIGTERM without waiting for a running call', async () => {
     // SIGTERM waited for the running call, so the watchdog ended the process
     // before contexts were disposed and the session log was flushed.
@@ -196,6 +221,23 @@ describe('interactive session recording', () => {
       fs.rmSync(outputDir, { recursive: true, force: true });
     }
   }, 40_000);
+});
+
+describe('exit output flushing', () => {
+  it('exits cleanly on SIGTERM when the stdout reader is already gone', async () => {
+    // Flushing stdout at exit must not turn a closed pipe (EPIPE) into a crash.
+    const child = spawn(process.execPath, [...cliArgs, '--host', '127.0.0.1', '--port', '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.destroy();
+    let stderr = '';
+    const exitCode = new Promise<number | null>(resolve => child.on('exit', resolve));
+    await new Promise<void>(resolve => child.stderr.on('data', chunk => {
+      stderr += String(chunk);
+      if (stderr.includes('Listening on'))
+        resolve();
+    }));
+    child.kill('SIGTERM');
+    expect(await exitCode, stderr).toBe(0);
+  });
 });
 
 describe('direct MCP harness install coverage', () => {

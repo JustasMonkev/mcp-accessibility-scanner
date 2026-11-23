@@ -346,9 +346,12 @@ function setupExitWatchdog(cleanup: () => Promise<void> = () => Context.disposeA
       await SessionLog.flushAll();
     } catch (error) {
       logUnhandledError(error);
-    } finally {
-      process.exit(0);
     }
+    // Printed output may still sit in the stream buffers of a piped stdout or
+    // stderr whose reader is slow; process.exit() would drop it. The watchdog
+    // above bounds this wait.
+    await Promise.all([flushed(process.stdout), flushed(process.stderr)]);
+    process.exit(0);
   };
 
   if (exitOnStdinClose) {
@@ -366,6 +369,19 @@ function setupExitWatchdog(cleanup: () => Promise<void> = () => Context.disposeA
     void handleExit();
   });
   return handleExit;
+}
+
+// Resolves once everything written to the stream before it has been handed to
+// the OS: writes complete in order, so the callback of an empty write marks it.
+// A reader that already went away (EPIPE) has nothing left to receive; the
+// error listener keeps that from crashing the exit.
+function flushed(stream: NodeJS.WriteStream): Promise<void> {
+  return new Promise(resolve => {
+    if (!stream.writable)
+      resolve();
+    else
+      stream.once('error', () => resolve()).write('', () => resolve());
+  });
 }
 
 void program.parseAsync(process.argv);
