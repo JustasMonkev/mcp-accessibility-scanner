@@ -14,7 +14,7 @@ type TargetRect = { x: number; y: number; width: number; height: number };
 /**
  * SC 2.5.8 spacing outcome measured in the page: `crowded` once a neighbour is found
  * inside the target's spacing circle, `clear` after every candidate was checked, and
- * `inconclusive` when the candidate budget ran out first.
+ * `inconclusive` when the candidate or element-visit budget ran out first.
  */
 type TargetSpacing = 'clear' | 'crowded' | 'inconclusive';
 
@@ -144,9 +144,10 @@ function isLikelySkipLink(point: FocusPoint): boolean {
 
 const MIN_TARGET_SIZE_PX = 24;
 
-// Work limit for the in-page spacing search: candidate pointer targets and open shadow
-// roots examined per focus stop.
+// Work limits for the in-page spacing search per focus stop: candidate pointer targets and
+// open shadow roots examined, and elements walked to find them (ordinary elements included).
 const maxTargetCandidates = 2000;
+const maxSpacingVisits = 50_000;
 const maxFocusTextLength = 200;
 
 type TargetSizeVerdict = 'pass' | 'fail' | 'inconclusive';
@@ -327,6 +328,7 @@ export type CollectFocusPointArgs = {
   checkFocusObscured: boolean;
   minTargetSize: number;
   maxTargetCandidates: number;
+  maxSpacingVisits: number;
   maxTextLength: number;
   focusState: FocusIdentityState;
   documentId: number;
@@ -336,7 +338,7 @@ export type CollectFocusPointArgs = {
  * Runs inside the page through `page.evaluate`, so it must stay self-contained.
  * @public
  */
-export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize, maxTargetCandidates, maxTextLength, focusState, documentId }: CollectFocusPointArgs): FocusPoint {
+export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize, maxTargetCandidates, maxSpacingVisits, maxTextLength, focusState, documentId }: CollectFocusPointArgs): FocusPoint {
   const pointerTargetSelector = 'a[href], button, input:not([type="hidden"]), select, textarea, summary, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex^="-"]), [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"]';
   type Rect = { x: number; y: number; width: number; height: number };
 
@@ -431,29 +433,34 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
 
   // Checks every candidate as it is examined and stops at the first crowding neighbour,
   // so the outcome does not depend on DOM order. Candidates come from the document and
-  // every open shadow root inside it, nested ones included; entering a shadow root counts
-  // against the work limit like a candidate. A search cut short by the work limit without
+  // every open shadow root inside it, nested ones included, found by one lazy walk per root.
+  // Every element walked counts against the visit limit, and every candidate and entered
+  // shadow root against the candidate limit. A search cut short by either limit without
   // finding a crowding neighbour is inconclusive, never a pass.
   function measureSpacing(element: Element, rect: DOMRect): { spacing: TargetSpacing; neighbors: Rect[] } {
     const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    const inconclusive = { spacing: 'inconclusive' as const, neighbors: [] };
     let examined = 0;
+    let visited = 0;
     const roots: (Document | ShadowRoot)[] = [document];
     for (let root = roots.pop(); root; root = roots.pop()) {
-      for (const candidate of root.querySelectorAll<HTMLElement>(pointerTargetSelector)) {
-        if (candidate === element)
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const candidate = node as Element;
+        if (++visited > maxSpacingVisits)
+          return inconclusive;
+        if (candidate.shadowRoot) {
+          if (++examined > maxTargetCandidates)
+            return inconclusive;
+          roots.push(candidate.shadowRoot);
+        }
+        if (candidate === element || !candidate.matches(pointerTargetSelector))
           continue;
         if (++examined > maxTargetCandidates)
-          return { spacing: 'inconclusive', neighbors: [] };
+          return inconclusive;
         const other = candidate.getBoundingClientRect();
         if (crowds(center, other) && isPointerTarget(candidate, other))
           return { spacing: 'crowded', neighbors: [{ x: other.x, y: other.y, width: other.width, height: other.height }] };
-      }
-      for (const host of root.querySelectorAll('*')) {
-        if (!host.shadowRoot)
-          continue;
-        if (++examined > maxTargetCandidates)
-          return { spacing: 'inconclusive', neighbors: [] };
-        roots.push(host.shadowRoot);
       }
     }
     return { spacing: 'clear', neighbors: [] };
@@ -620,6 +627,7 @@ function createFocusReader(tab: Tab, options: Pick<KeyboardAuditOptions, 'checkT
     checkFocusObscured: options.checkFocusObscured,
     minTargetSize: MIN_TARGET_SIZE_PX,
     maxTargetCandidates,
+    maxSpacingVisits,
     maxTextLength: maxFocusTextLength,
     focusState: state,
     documentId,
@@ -703,7 +711,7 @@ function renderKeyboardSummary(result: KeyboardAuditResult, response: Response, 
     `Target size below 24x24 CSS px (WCAG 2.2 SC 2.5.8, spacing and inline exceptions applied): ${result.targetSizeIssues.length}`,
     ...previewOf(result.targetSizeIssues, stop => `- Step ${stop.step}: ${describeElement(stop)} is ${Math.round(stop.boundingBox?.width ?? 0)}x${Math.round(stop.boundingBox?.height ?? 0)} CSS px`.replace(/\s+/g, ' ')),
     ...(result.targetSizeInconclusive.length ? [
-      `Target size inconclusive (spacing search hit its ${maxTargetCandidates}-candidate limit): ${result.targetSizeInconclusive.length}`,
+      `Target size inconclusive (spacing search hit its limit of ${maxTargetCandidates} candidates or ${maxSpacingVisits} elements): ${result.targetSizeInconclusive.length}`,
       ...previewOf(result.targetSizeInconclusive, stop => `- Step ${stop.step}: ${describeElement(stop)}`.replace(/\s+/g, ' ')),
     ] : []),
     '',

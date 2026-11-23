@@ -10,8 +10,8 @@ import { collectFocusPoint, type FocusPoint } from '../src/tools/auditKeyboard.j
 type Box = { left: number; top: number; width: number; height: number; css?: string; inert?: boolean };
 
 // Buttons placed in a root; each entry of `shadows` is a host whose open shadow root holds that tree.
-// `host` styles the shadow host itself.
-type Tree = { focused?: Box; buttons?: Box[]; shadows?: Tree[]; host?: { css?: string; inert?: boolean } };
+// `host` styles the shadow host itself, and `spans` adds that many ordinary elements before the buttons.
+type Tree = { focused?: Box; buttons?: Box[]; shadows?: Tree[]; host?: { css?: string; inert?: boolean }; spans?: number };
 
 const box = (left: number, top: number, width: number, height: number): Box => ({ left, top, width, height });
 const styled = (place: Box, css: string): Box => ({ ...place, css });
@@ -37,11 +37,13 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
     return measureTree({ focused, buttons: neighbors }, maxTargetCandidates);
   }
 
-  async function measureTree(tree: Tree, maxTargetCandidates = 2000): Promise<FocusPoint> {
+  async function measureTree(tree: Tree, maxTargetCandidates = 2000, maxSpacingVisits = 50_000, beforeMeasure?: () => Promise<unknown>): Promise<FocusPoint> {
     await page.setContent('<body style="margin:0"></body>');
     await page.evaluate(tree => {
       const position = ({ left, top, width, height, css = '' }: Box) => `position:absolute;left:${left}px;top:${top}px;width:${width}px;height:${height}px;padding:0;border:0;${css}`;
-      const build = (root: ParentNode, { focused, buttons = [], shadows = [] }: Tree) => {
+      const build = (root: ParentNode, { focused, buttons = [], shadows = [], spans = 0 }: Tree) => {
+        for (let index = 0; index < spans; index++)
+          root.append(document.createElement('span'));
         for (const [index, place] of [...(focused ? [focused] : []), ...buttons].entries()) {
           const button = document.createElement('button');
           if (focused && index === 0)
@@ -62,6 +64,7 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
     }, tree);
     // Playwright's CSS engine pierces open shadow roots.
     await page.focus('#focused');
+    await beforeMeasure?.();
     const focusState = await page.evaluateHandle(() => ({ identities: new WeakMap<Element, number>(), nextId: 0 }));
     try {
       return await page.evaluate(collectFocusPoint, {
@@ -69,6 +72,7 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
         checkFocusObscured: false,
         minTargetSize: 24,
         maxTargetCandidates,
+        maxSpacingVisits,
         maxTextLength: 200,
         focusState,
         documentId: 1,
@@ -174,5 +178,45 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
     const keyboardOnly = await measure(styled(focused, 'pointer-events:none'), [neighbor]);
     expect(keyboardOnly.isPointerTarget).toBe(false);
     expect(keyboardOnly.targetSpacing).toBeNull();
+  });
+
+  it('bounds the elements it walks, not only the candidates it finds', async () => {
+    // Counts the shadow-host checks the measurement itself makes, ordinary elements included.
+    const countShadowRootReads = async (tree: Tree) => {
+      const point = await measureTree(tree, 2000, 50_000, () => page.evaluate(() => {
+        const state = window as unknown as { shadowRootReads?: number };
+        const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'shadowRoot')!;
+        const patched = state.shadowRootReads !== undefined;
+        state.shadowRootReads = 0;
+        if (!patched) {
+          Object.defineProperty(Element.prototype, 'shadowRoot', {
+            ...descriptor,
+            get() {
+              state.shadowRootReads!++;
+              return descriptor.get!.call(this);
+            },
+          });
+        }
+      }));
+      return { point, reads: await page.evaluate(() => (window as unknown as { shadowRootReads: number }).shadowRootReads) };
+    };
+    try {
+      const huge = await countShadowRootReads({ focused: box(0, 0, 16, 16), spans: 100_000 });
+      expect(huge.point.targetSpacing).toBe('inconclusive');
+      // The 50,000-element visit limit, plus a few reads to find the focused element; a full walk reads 100,000+.
+      expect(huge.reads).toBeLessThanOrEqual(50_010);
+      // Small pages are walked in full: crowding neighbours after ordinary elements and inside shadow roots are found.
+      const small = await countShadowRootReads({ spans: 1_000, buttons: [box(48, 0, 16, 16)], shadows: [{ spans: 1_000, focused: box(0, 0, 16, 16) }, { spans: 1_000, buttons: [box(16, 0, 16, 16)] }] });
+      expect(small.point.targetSpacing).toBe('crowded');
+      expect(small.point.neighborTargets).toEqual([{ x: 16, y: 0, width: 16, height: 16 }]);
+      const clear = await measureTree({ spans: 1_000, focused: box(0, 0, 16, 16), shadows: [{ spans: 1_000, buttons: [box(48, 0, 16, 16)] }] });
+      expect(clear.targetSpacing).toBe('clear');
+      // The visit limit is enforced on its own.
+      const limited = await measureTree({ spans: 100, focused: box(0, 0, 16, 16), buttons: [box(16, 0, 16, 16)] }, 2000, 50);
+      expect(limited.targetSpacing).toBe('inconclusive');
+    } finally {
+      await page.close();
+      page = await browser.newPage();
+    }
   });
 });

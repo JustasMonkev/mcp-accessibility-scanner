@@ -692,9 +692,10 @@ Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) wit
   clicks and are counted. `contenteditable` regions are counted as targets on both sides.
 - The spacing search checks each candidate as it goes and stops at the first crowding neighbour, so DOM order does not
   change the result. Neighbours inside open shadow roots, nested ones included, are searched too (closed ones cannot
-  be). It examines at most 2,000 candidates and shadow roots per focus stop; an undersized target with no crowding
-  neighbour found before that limit is reported as inconclusive (`targetSizeInconclusive` in the JSON report,
-  `targetSizeInconclusiveCount` in the structured summary), not as a pass.
+  be). Per focus stop it examines at most 2,000 candidates and shadow roots and walks at most 50,000 elements (ordinary
+  elements included); an undersized target with no crowding neighbour found before either limit is reported as
+  inconclusive (`targetSizeInconclusive` in the JSON report, `targetSizeInconclusiveCount` in the structured summary),
+  not as a pass.
 - Target size uses the element's bounding box, so an inline target wrapped over several lines is measured as one
   union box rather than per line, and a target whose visible area is cut down by an `overflow` or `clip-path` ancestor
   is measured at its full unclipped size.
