@@ -384,8 +384,22 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
     return hasOutline || style.boxShadow !== 'none';
   }
 
+  // SC 2.5.8 targets are regions that accept a pointer action, so hidden (`visibility: hidden`
+  // or `collapse`), `pointer-events: none` and inert elements are not targets. Fully
+  // transparent elements still take clicks and stay targets.
+  function acceptsPointer(element: Element): boolean {
+    const elementStyle = window.getComputedStyle(element);
+    if (elementStyle.visibility !== 'visible' || elementStyle.pointerEvents === 'none')
+      return false;
+    for (let node: Element | null = element; node; node = composedParent(node)) {
+      if (node.hasAttribute('inert'))
+        return false;
+    }
+    return true;
+  }
+
   function isPointerTarget(element: Element, box: DOMRect): boolean {
-    return box.width > 0 && box.height > 0 && element.matches(pointerTargetSelector) && !element.matches(':disabled');
+    return box.width > 0 && box.height > 0 && element.matches(pointerTargetSelector) && !element.matches(':disabled') && acceptsPointer(element);
   }
 
   function sitsInsideSentence(element: Element): boolean {
@@ -431,7 +445,7 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
         if (++examined > maxTargetCandidates)
           return { spacing: 'inconclusive', neighbors: [] };
         const other = candidate.getBoundingClientRect();
-        if (other.width > 0 && other.height > 0 && crowds(center, other) && !candidate.matches(':disabled'))
+        if (crowds(center, other) && isPointerTarget(candidate, other))
           return { spacing: 'crowded', neighbors: [{ x: other.x, y: other.y, width: other.width, height: other.height }] };
       }
       for (const host of root.querySelectorAll('*')) {

@@ -686,8 +686,10 @@ Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) wit
   `inline-flex`, … — inside surrounding sentence text, found by walking out through inline wrappers such as `<strong>`
   to the containing block) are evaluated. The *user agent control*, *essential*, and *equivalent* exceptions cannot be
   detected from the DOM, so a target relying on one of them is still reported and needs manual triage.
-- Spacing neighbours use the same pointer-target rule as the focused element, so rendered `:disabled` controls are not
-  counted as neighbours, and `contenteditable` regions are counted as targets on both sides.
+- Spacing neighbours use the same pointer-target rule as the focused element: a target must accept pointer input, so
+  rendered `:disabled`, `visibility: hidden`/`collapse`, `pointer-events: none` and `inert` controls (including those
+  inside an inert or hidden shadow host) are not counted on either side. Transparent (`opacity: 0`) controls still take
+  clicks and are counted. `contenteditable` regions are counted as targets on both sides.
 - The spacing search checks each candidate as it goes and stops at the first crowding neighbour, so DOM order does not
   change the result. Neighbours inside open shadow roots, nested ones included, are searched too (closed ones cannot
   be). It examines at most 2,000 candidates and shadow roots per focus stop; an undersized target with no crowding

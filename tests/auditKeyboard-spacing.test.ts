@@ -7,12 +7,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { collectFocusPoint, type FocusPoint } from '../src/tools/auditKeyboard.js';
 
-type Box = { left: number; top: number; width: number; height: number };
+type Box = { left: number; top: number; width: number; height: number; css?: string; inert?: boolean };
 
 // Buttons placed in a root; each entry of `shadows` is a host whose open shadow root holds that tree.
-type Tree = { focused?: Box; buttons?: Box[]; shadows?: Tree[] };
+// `host` styles the shadow host itself.
+type Tree = { focused?: Box; buttons?: Box[]; shadows?: Tree[]; host?: { css?: string; inert?: boolean } };
 
 const box = (left: number, top: number, width: number, height: number): Box => ({ left, top, width, height });
+const styled = (place: Box, css: string): Box => ({ ...place, css });
 
 const roomy = Array.from({ length: 40 }, (_, index) => box(40 + index % 4, 0, 30, 30));
 
@@ -38,17 +40,20 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
   async function measureTree(tree: Tree, maxTargetCandidates = 2000): Promise<FocusPoint> {
     await page.setContent('<body style="margin:0"></body>');
     await page.evaluate(tree => {
-      const position = ({ left, top, width, height }: Box) => `position:absolute;left:${left}px;top:${top}px;width:${width}px;height:${height}px;padding:0;border:0`;
+      const position = ({ left, top, width, height, css = '' }: Box) => `position:absolute;left:${left}px;top:${top}px;width:${width}px;height:${height}px;padding:0;border:0;${css}`;
       const build = (root: ParentNode, { focused, buttons = [], shadows = [] }: Tree) => {
         for (const [index, place] of [...(focused ? [focused] : []), ...buttons].entries()) {
           const button = document.createElement('button');
           if (focused && index === 0)
             button.id = 'focused';
           button.style.cssText = position(place);
+          button.inert = !!place.inert;
           root.append(button);
         }
         for (const shadow of shadows) {
           const host = document.createElement('div');
+          host.style.cssText = shadow.host?.css ?? '';
+          host.inert = !!shadow.host?.inert;
           root.append(host);
           build(host.attachShadow({ mode: 'open' }), shadow);
         }
@@ -144,5 +149,30 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
     expect(empty.targetSpacing).toBe('inconclusive');
     const within = await measureTree({ focused: box(0, 0, 16, 16), shadows: components }, 40);
     expect(within.targetSpacing).toBe('clear');
+  });
+
+  it('ignores neighbours that cannot take a pointer action', async () => {
+    const focused = box(0, 0, 16, 16);
+    const neighbor = box(16, 0, 16, 16);
+    // A visible neighbour in the same place is the positive control for every case below.
+    expect((await measure(focused, [neighbor])).targetSpacing).toBe('crowded');
+    expect((await measureTree({ focused, shadows: [{ buttons: [neighbor] }] })).targetSpacing).toBe('crowded');
+    // An invisible but clickable neighbour still takes pointer actions.
+    expect((await measure(focused, [styled(neighbor, 'opacity:0')])).targetSpacing).toBe('crowded');
+
+    for (const css of ['visibility:hidden', 'visibility:collapse', 'pointer-events:none']) {
+      expect((await measure(focused, [styled(neighbor, css)])).targetSpacing, css).toBe('clear');
+      expect((await measureTree({ focused, shadows: [{ buttons: [styled(neighbor, css)] }] })).targetSpacing, `shadow ${css}`).toBe('clear');
+      // Inherited from the shadow host.
+      expect((await measureTree({ focused, shadows: [{ host: { css }, buttons: [neighbor] }] })).targetSpacing, `host ${css}`).toBe('clear');
+    }
+    expect((await measure(focused, [{ ...neighbor, inert: true }])).targetSpacing).toBe('clear');
+    expect((await measureTree({ focused, shadows: [{ host: { inert: true }, buttons: [neighbor] }] })).targetSpacing).toBe('clear');
+    // A hidden neighbour does not hide a visible one behind it.
+    expect((await measure(focused, [styled(neighbor, 'visibility:hidden'), neighbor])).targetSpacing).toBe('crowded');
+    // The focused element follows the same rule: a keyboard-only control is not a pointer target.
+    const keyboardOnly = await measure(styled(focused, 'pointer-events:none'), [neighbor]);
+    expect(keyboardOnly.isPointerTarget).toBe(false);
+    expect(keyboardOnly.targetSpacing).toBeNull();
   });
 });
