@@ -202,8 +202,12 @@ function validateNumericSettings(config: FullConfig): void {
 }
 
 function validateIntegerSetting(name: string, value: unknown, min: number, max: number, hint = ''): void {
-  if (value === undefined || value === null)
+  if (value === undefined)
     return;
+  // JSON null is not "omitted": a null port reached transport selection and
+  // port allocation as if it were set. Omit the key to use the default.
+  if (value === null)
+    throw new Error(`${name} must be an integer from ${min} to ${max}; got null. Omit the setting to use its default.`);
   if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max)
     throw new Error(`${name} must be an integer from ${min} to ${max}; got ${typeof value === 'number' ? String(value) : JSON.stringify(value)}.${hint}`);
 }
@@ -618,9 +622,9 @@ function mergeConfig(base: FullConfig, overrides: Config): FullConfig {
       ...pickDefined(overrides.server),
     },
     timeouts: {
-      navigationTimeout: overrides.timeouts?.navigationTimeout ?? base.timeouts.navigationTimeout,
-      defaultTimeout: overrides.timeouts?.defaultTimeout ?? base.timeouts.defaultTimeout,
-      settle: overrides.timeouts?.settle ?? base.timeouts.settle,
+      navigationTimeout: overrides.timeouts?.navigationTimeout !== undefined ? overrides.timeouts.navigationTimeout : base.timeouts.navigationTimeout,
+      defaultTimeout: overrides.timeouts?.defaultTimeout !== undefined ? overrides.timeouts.defaultTimeout : base.timeouts.defaultTimeout,
+      settle: overrides.timeouts?.settle !== undefined ? overrides.timeouts.settle : base.timeouts.settle,
       idle: overrides.timeouts?.idle !== undefined ? overrides.timeouts.idle : base.timeouts.idle,
     },
   } as FullConfig;

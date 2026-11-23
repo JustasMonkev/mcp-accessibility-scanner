@@ -782,6 +782,13 @@ describe('Config', () => {
         await expect(resolveConfig(file(value) as Config)).rejects.toThrow(`${name} (`);
     });
 
+    it.each(settings)('rejects an explicit JSON null for $name instead of treating it as omitted', async ({ name, file }) => {
+      // server.port: null started an HTTP listener on an ephemeral port, and
+      // cdpLaunch.port: null allocated a port whose reservation was never released.
+      await expect(resolveCLIConfig({ config: await writeConfigFile(file(null) as Config) })).rejects.toThrow(`${name} (`);
+      await expect(resolveConfig(file(null) as Config)).rejects.toThrow(/; got null\. Omit the setting to use its default\./);
+    });
+
     it('keeps valid values, explicit zeros where documented, and defaults', async () => {
       vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND', 'app');
       vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT', '45000');
