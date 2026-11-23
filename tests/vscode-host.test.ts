@@ -159,6 +159,57 @@ describe('VSCodeProxyBackend', () => {
       await vi.waitFor(() => expect(second.closed).toBe(1));
     });
 
+    it('lets a call routed to the working provider finish when the replacement handshake completes first, then closes it', async () => {
+      // An owned provider was published without a lease, so the replacement
+      // closed it the moment its handshake finished, failing a scan that had
+      // been routed to it while the handshake was pending.
+      let releaseCall!: () => void;
+      const callGate = new Promise<void>(resolve => { releaseCall = resolve; });
+      let callStarted = false;
+      const defaultInner = {
+        closed: 0,
+        listTools: async () => [{ name: 'tool_default', description: 'd', inputSchema: { type: 'object' as const, properties: {} } }],
+        callTool: async () => {
+          callStarted = true;
+          await callGate;
+          return { content: [{ type: 'text' as const, text: 'late result' }] };
+        },
+        serverClosed: () => {
+          defaultInner.closed++;
+        },
+      };
+      const backend = new VSCodeProxyBackend(await resolveConfig({}), async () => wrapInProcess(defaultInner));
+      await backend.initialize({ notifyToolListChanged: vi.fn(async () => undefined) }, { name: 'vitest', version: '1.0.0' });
+      const child = makeInnerBackend('tool_child');
+      let releaseHandshake!: () => void;
+      const handshakeGate = new Promise<void>(resolve => { releaseHandshake = resolve; });
+      const childTransport = await wrapInProcess(child);
+      const start = childTransport.start.bind(childTransport);
+      childTransport.start = async () => {
+        await handshakeGate;
+        await start();
+      };
+      vi.spyOn(backend as any, '_createSwitchTransport').mockImplementation(async () => childTransport);
+
+      const switching = backend.callTool('browser_connect', connectArgs);
+      const inFlight = backend.callTool('tool_default', {});
+      await vi.waitFor(() => expect(callStarted).toBe(true));
+
+      releaseHandshake();
+      expect((await switching).isError).not.toBe(true);
+      const fresh = await backend.callTool('tool_child', {});
+      expect((fresh.content?.[0] as any).text).toBe('tool_child');
+      expect(defaultInner.closed).toBe(0);
+
+      releaseCall();
+      const result = await inFlight;
+      expect(result.isError).not.toBe(true);
+      expect((result.content?.[0] as any).text).toBe('late result');
+      await vi.waitFor(() => expect(defaultInner.closed).toBe(1));
+      backend.serverClosed?.();
+      await vi.waitFor(() => expect(child.closed).toBe(1));
+    });
+
     it('keeps the working provider when an overlapping switch fails, and applies the one that succeeds', async () => {
       const { backend, defaultInner } = await makeBackend();
       const second = makeInnerBackend('tool_second');

@@ -43,12 +43,30 @@ export class SharedClientSlot {
     }
   }
 
+  // Holds a lease on `client` while `use` runs, so a replacement published
+  // meanwhile retires it instead of closing it under the pending request; the
+  // close then runs once `use` settles. The lease is taken synchronously, so
+  // read `client` and call this in the same tick. A client this slot does not
+  // track (never published here, or already closed) is used without a lease.
+  async withLease<T>(client: Client, use: () => Promise<T>): Promise<T> {
+    const lease = this._leases.get(client);
+    if (lease)
+      lease.count++;
+    try {
+      return await use();
+    } finally {
+      if (lease)
+        void this.release(client);
+    }
+  }
+
   // Replacements run one at a time, in call order. The candidate is connected
   // before anything is published, so a failed connect leaves the current
   // client in place. `publish` runs synchronously with the swap, before the
   // previous client is retired. A caller that is the slot's sole user passes
   // `lease: false`: it keeps no lease on the published client, which is then
-  // closed as soon as it is replaced.
+  // closed as soon as it is replaced, or once the last `withLease` request on
+  // it settles.
   async replace(connect: (() => Promise<Client>) | undefined, options: { lease?: boolean, publish?: (next: Client | undefined) => void } = {}): Promise<Client | undefined> {
     const result = this._chain.then(async () => {
       const next = connect ? await connect() : undefined;

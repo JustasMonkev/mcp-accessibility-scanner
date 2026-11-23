@@ -187,6 +187,61 @@ describe('ProxyBackend', () => {
       await vi.waitFor(() => expect(second.closed).toBe(1));
     });
 
+    it('lets a call routed to the working client finish when the replacement handshake completes first, then closes it', async () => {
+      // An owned client was published without a lease, so the replacement
+      // closed it the moment its handshake finished, failing a scan that had
+      // been routed to it while the handshake was pending.
+      let releaseCall!: () => void;
+      const callGate = new Promise<void>(resolve => { releaseCall = resolve; });
+      let callStarted = false;
+      const defaultInner = {
+        closed: 0,
+        listTools: async () => [{ name: 'tool_default', description: 'd', inputSchema: { type: 'object' as const, properties: {} } }],
+        callTool: async () => {
+          callStarted = true;
+          await callGate;
+          return { content: [{ type: 'text' as const, text: 'late result' }] };
+        },
+        serverClosed: () => {
+          defaultInner.closed++;
+        },
+      };
+      const alternate = makeInnerBackend('tool_alternate');
+      let releaseHandshake!: () => void;
+      const handshakeGate = new Promise<void>(resolve => { releaseHandshake = resolve; });
+      const backend = new ProxyBackend([
+        { name: 'default', description: 'd', connect: async () => wrapInProcess(defaultInner) },
+        {
+          name: 'alternate',
+          description: 'a',
+          connect: async () => {
+            await handshakeGate;
+            return wrapInProcess(alternate);
+          },
+        },
+      ]);
+      await backend.initialize({ notifyToolListChanged: vi.fn(async () => undefined) }, { name: 'vitest', version: '1' });
+
+      const switching = backend.callTool('browser_connect', { name: 'alternate' });
+      const inFlight = backend.callTool('tool_default', {});
+      await vi.waitFor(() => expect(callStarted).toBe(true));
+
+      releaseHandshake();
+      expect((await switching).isError).not.toBe(true);
+      // The new client serves new calls while the old one drains.
+      const fresh = await backend.callTool('tool_alternate', {});
+      expect((fresh.content?.[0] as any).text).toBe('tool_alternate');
+      expect(defaultInner.closed).toBe(0);
+
+      releaseCall();
+      const result = await inFlight;
+      expect(result.isError).not.toBe(true);
+      expect((result.content?.[0] as any).text).toBe('late result');
+      await vi.waitFor(() => expect(defaultInner.closed).toBe(1));
+      backend.serverClosed?.();
+      await vi.waitFor(() => expect(alternate.closed).toBe(1));
+    });
+
     it('keeps the working client when an overlapping switch fails, and applies the one that succeeds', async () => {
       const second = makeInnerBackend('tool_second');
       const { backend, defaultInner } = await makeBackend({

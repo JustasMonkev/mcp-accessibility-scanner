@@ -71,7 +71,8 @@ export class ProxyBackend implements ServerBackend {
   }
 
   async listTools(requestContext?: Partial<Pick<CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]> {
-    const downstreamTools = await this._relay.listTools(this._client(), requestContext);
+    const client = this._client();
+    const downstreamTools = await this._withLease(client, () => this._relay.listTools(client, requestContext));
     const tools = this._mcpProviders.length === 1 ? downstreamTools : [...downstreamTools, this._contextSwitchTool];
     return tools.filter(tool => !isToolBlocked(this._toolPolicy, tool.name));
   }
@@ -80,13 +81,22 @@ export class ProxyBackend implements ServerBackend {
     assertToolNotBlocked(this._toolPolicy, name);
     if (name === this._contextSwitchTool.name)
       return this._callContextSwitchTool(args);
-    return await this._relay.callTool(this._client(), name, args, requestContext);
+    const client = this._client();
+    return await this._withLease(client, () => this._relay.callTool(client, name, args, requestContext));
   }
 
   private _client(): Client {
     if (!this._currentClient)
       throw new Error('Initialize the proxy backend before running tools.');
     return this._currentClient;
+  }
+
+  // A switch can publish a replacement while a forwarded request is still
+  // awaiting `client`; the lease keeps it open until that request settles.
+  // Call in the same tick that read `client` from `_currentClient`.
+  private _withLease<T>(client: Client, use: () => Promise<T>): Promise<T> {
+    const slot = this._ownsCurrentClient ? this._ownedSlot : this._sharedSelection?.slot;
+    return slot ? slot.withLease(client, use) : use();
   }
 
   serverClosed?(): void {
