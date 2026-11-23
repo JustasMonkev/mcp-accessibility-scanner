@@ -58,6 +58,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   private _providerGeneration = 0;
   private _ownedSlot = new SharedClientSlot();
   private _transition: Promise<unknown> = Promise.resolve();
+  private _closed = false;
   private _relay = new ToolRelay(client => {
     if (!this._sharedSlot && this._listedClient === client)
       return this._backendContext?.notifyToolListChanged();
@@ -140,12 +141,22 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   serverClosed?(): void {
+    if (this._closed)
+      return;
+    this._closed = true;
     this._relay.close();
     this._backendContext = undefined;
     this._listedClient = undefined;
     void this._ownedSlot.dispose().catch(logUnhandledError);
-    if (!this._ownsCurrentClient && this._currentClient)
-      void this._sharedSlot?.release(this._currentClient);
+    // The shared lease is released once, after any in-progress switch
+    // settles: that switch may still release the client it replaces, or move
+    // this backend onto the client it publishes.
+    const released = this._transition.then(async () => {
+      if (!this._ownsCurrentClient && this._currentClient)
+        await this._sharedSlot?.release(this._currentClient);
+    });
+    this._transition = released.catch(() => {});
+    void released.catch(logUnhandledError);
     void this._sessionClient?.then(client => client.close()).catch(logUnhandledError);
   }
 
@@ -237,15 +248,28 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   private async _applySharedSwitch(sharedSlot: SharedClientSlot, createTransport: (() => Promise<Transport>) | undefined): Promise<void> {
+    if (this._closed)
+      throw new Error('The connection closed before the switch could run.');
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
     const shared = await sharedSlot.replace(createTransport ? async () => this._connectClient(await createTransport()) : undefined);
-    if (shared) {
+    const defaultTransport = shared ? undefined : await this._defaultTransportFactory();
+    if (this._closed) {
+      // serverClosed() ran while the replacement connected: the switch still
+      // applies process-wide, but this backend keeps no lease on its
+      // replacement and publishes nothing into its disposed owned slot. Its
+      // lease on `previousShared`, still the current client, is released by
+      // serverClosed() once this settles.
+      if (shared)
+        await sharedSlot.release(shared);
+      return;
+    }
+    if (defaultTransport) {
+      await this._setCurrentClient(defaultTransport, false, true);
+    } else if (shared) {
       this._currentClient = shared;
       this._ownsCurrentClient = false;
       this._currentClientIsDefault = false;
       await this._ownedSlot.replace(undefined);
-    } else {
-      await this._setCurrentClient(await this._defaultTransportFactory(), false, true);
     }
     if (previousShared)
       await sharedSlot.release(previousShared);

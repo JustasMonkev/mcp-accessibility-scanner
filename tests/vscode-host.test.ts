@@ -570,5 +570,176 @@ describe('VSCodeProxyBackend', () => {
       request.serverClosed?.();
       await slot.dispose();
     });
+
+    // A request can close while its own browser_connect is still connecting
+    // the replacement, or still queued behind another switch.
+    describe('closing a request during its switch', () => {
+      const connectArgs = { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' };
+
+      async function makeGatedSetup() {
+        const config = await resolveConfig({});
+        const slot = new SharedClientSlot();
+        const children: ReturnType<typeof makeInnerBackend>[] = [];
+        const defaults: { inner: ReturnType<typeof makeInnerBackend>, started: boolean }[] = [];
+        const handshake: { childGate?: Promise<void>, defaultGate?: Promise<void>, childEntered: number, defaultEntered: number } = { childEntered: 0, defaultEntered: 0 };
+        const defaultTransportFactory = async () => {
+          handshake.defaultEntered++;
+          if (handshake.defaultGate)
+            await handshake.defaultGate;
+          const entry = { inner: makeInnerBackend('tool_default'), started: false };
+          defaults.push(entry);
+          const transport = await wrapInProcess(entry.inner);
+          const start = transport.start.bind(transport);
+          transport.start = async () => {
+            entry.started = true;
+            await start();
+          };
+          return transport;
+        };
+        // Pauses the next child (or default) handshakes until the returned
+        // callback runs.
+        const hold = (key: 'childGate' | 'defaultGate') => {
+          let release!: () => void;
+          handshake[key] = new Promise<void>(resolve => { release = resolve; });
+          return () => {
+            handshake[key] = undefined;
+            release();
+          };
+        };
+        const backendContext = { notifyToolListChanged: vi.fn(async () => undefined) };
+        const clientVersion = { name: 'vitest', version: '1.0.0' };
+        const makeRequestBackend = () => {
+          const backend = new VSCodeProxyBackend(config, defaultTransportFactory, slot);
+          vi.spyOn(backend as any, '_createSwitchTransport').mockImplementation(async () => {
+            handshake.childEntered++;
+            if (handshake.childGate)
+              await handshake.childGate;
+            const inner = makeInnerBackend('tool_child');
+            children.push(inner);
+            return await wrapInProcess(inner);
+          });
+          return backend;
+        };
+        return { slot, children, defaults, handshake, hold, backendContext, clientVersion, makeRequestBackend };
+      }
+
+      it('releases the replacement a switch publishes after its request closed', async () => {
+        const { slot, children, handshake, hold, backendContext, clientVersion, makeRequestBackend } = await makeGatedSetup();
+
+        const request1 = makeRequestBackend();
+        await request1.initialize(backendContext, clientVersion);
+        const releaseHandshake = hold('childGate');
+        const switching = request1.callTool('browser_connect', connectArgs);
+        await vi.waitFor(() => expect(handshake.childEntered).toBe(1));
+        request1.serverClosed?.();
+        releaseHandshake();
+        // The switch still applies process-wide.
+        expect((await switching).isError).not.toBe(true);
+
+        const request2 = makeRequestBackend();
+        await request2.initialize(backendContext, clientVersion);
+        expect((await request2.callTool('tool_child', {})).isError).not.toBe(true);
+        expect((await request2.callTool('browser_connect', {})).isError).not.toBe(true);
+        await vi.waitFor(() => expect(children[0].closed).toBe(1));
+        request2.serverClosed?.();
+        await slot.dispose();
+        expect(children.map(inner => inner.closed)).toEqual([1]);
+      });
+
+      it('does not drop another request\'s lease when a closed request\'s switch settles', async () => {
+        const { slot, children, handshake, hold, backendContext, clientVersion, makeRequestBackend } = await makeGatedSetup();
+
+        const request0 = makeRequestBackend();
+        await request0.initialize(backendContext, clientVersion);
+        await request0.callTool('browser_connect', connectArgs);
+
+        const request1 = makeRequestBackend();
+        await request1.initialize(backendContext, clientVersion);
+        const releaseHandshake = hold('childGate');
+        const switching = request1.callTool('browser_connect', connectArgs);
+        await vi.waitFor(() => expect(handshake.childEntered).toBe(2));
+        request1.serverClosed?.();
+        releaseHandshake();
+        expect((await switching).isError).not.toBe(true);
+        expect(children).toHaveLength(2);
+        await new Promise(resolve => setTimeout(resolve, 0));
+
+        // request0 still holds its lease on the retired child and can use it.
+        expect(children[0].closed).toBe(0);
+        expect((await request0.callTool('tool_child', {})).isError).not.toBe(true);
+        expect(children[0].calls).toContain('tool_child');
+        request0.serverClosed?.();
+        await vi.waitFor(() => expect(children[0].closed).toBe(1));
+
+        // The replacement stayed published without a leftover lease.
+        expect(children[1].closed).toBe(0);
+        const request2 = makeRequestBackend();
+        await request2.initialize(backendContext, clientVersion);
+        expect((await request2.callTool('browser_connect', {})).isError).not.toBe(true);
+        await vi.waitFor(() => expect(children[1].closed).toBe(1));
+        request2.serverClosed?.();
+        await slot.dispose();
+        expect(children.map(inner => inner.closed)).toEqual([1, 1]);
+      });
+
+      it('neither double-releases nor opens a default provider for a disconnect that settles after its request closed', async () => {
+        const { slot, children, defaults, handshake, hold, backendContext, clientVersion, makeRequestBackend } = await makeGatedSetup();
+
+        const request0 = makeRequestBackend();
+        await request0.initialize(backendContext, clientVersion);
+        await request0.callTool('browser_connect', connectArgs);
+
+        const request1 = makeRequestBackend();
+        await request1.initialize(backendContext, clientVersion);
+        const defaultsBefore = handshake.defaultEntered;
+        const releaseDefault = hold('defaultGate');
+        const disconnecting = request1.callTool('browser_connect', {});
+        await vi.waitFor(() => expect(handshake.defaultEntered).toBe(defaultsBefore + 1));
+        request1.serverClosed?.();
+        releaseDefault();
+        expect((await disconnecting).isError).not.toBe(true);
+        await new Promise(resolve => setTimeout(resolve, 0));
+
+        // request0's lease keeps the retired child open until it closes.
+        expect(children[0].closed).toBe(0);
+        expect((await request0.callTool('tool_child', {})).isError).not.toBe(true);
+        request0.serverClosed?.();
+        await vi.waitFor(() => expect(children[0].closed).toBe(1));
+
+        // No default provider was connected into the closed request's
+        // disposed slot; every one that started was closed.
+        await slot.dispose();
+        await vi.waitFor(() => expect(defaults.filter(entry => entry.started).map(entry => entry.inner.closed)).toEqual(defaults.filter(entry => entry.started).map(() => 1)));
+        expect(defaults.at(-1)!.started).toBe(false);
+      });
+
+      it('skips a switch still queued when its request closes', async () => {
+        const { slot, children, handshake, hold, backendContext, clientVersion, makeRequestBackend } = await makeGatedSetup();
+
+        const request1 = makeRequestBackend();
+        await request1.initialize(backendContext, clientVersion);
+        const releaseHandshake = hold('childGate');
+        const first = request1.callTool('browser_connect', connectArgs);
+        await vi.waitFor(() => expect(handshake.childEntered).toBe(1));
+        const queued = request1.callTool('browser_connect', connectArgs);
+        request1.serverClosed?.();
+        releaseHandshake();
+
+        expect((await first).isError).not.toBe(true);
+        await expect(queued).rejects.toThrow('closed before the switch could run');
+        expect(handshake.childEntered).toBe(1);
+        expect(children).toHaveLength(1);
+
+        // Only the first switch's replacement is published, and no lease on
+        // it is left behind.
+        const request2 = makeRequestBackend();
+        await request2.initialize(backendContext, clientVersion);
+        expect((await request2.callTool('browser_connect', {})).isError).not.toBe(true);
+        await vi.waitFor(() => expect(children[0].closed).toBe(1));
+        request2.serverClosed?.();
+        await slot.dispose();
+        expect(children.map(inner => inner.closed)).toEqual([1]);
+      });
+    });
   });
 });

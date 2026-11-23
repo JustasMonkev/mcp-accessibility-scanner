@@ -48,6 +48,7 @@ export class ProxyBackend implements ServerBackend {
   private _sharedSelection: SharedProxySelection | undefined;
   private _ownedSlot = new SharedClientSlot();
   private _transition: Promise<unknown> = Promise.resolve();
+  private _closed = false;
   private _relay = new ToolRelay(client => {
     if (this._ownsCurrentClient && this._currentClient === client)
       return this._backendContext?.notifyToolListChanged();
@@ -100,11 +101,21 @@ export class ProxyBackend implements ServerBackend {
   }
 
   serverClosed?(): void {
+    if (this._closed)
+      return;
+    this._closed = true;
     this._relay.close();
     this._backendContext = undefined;
     void this._ownedSlot.dispose().catch(logUnhandledError);
-    if (!this._ownsCurrentClient && this._currentClient)
-      void this._sharedSelection?.slot.release(this._currentClient);
+    // The shared lease is released once, after any in-progress switch
+    // settles: that switch may still release the client it replaces, or move
+    // this backend onto the client it publishes.
+    const released = this._transition.then(async () => {
+      if (!this._ownsCurrentClient && this._currentClient)
+        await this._sharedSelection?.slot.release(this._currentClient);
+    });
+    this._transition = released.catch(() => {});
+    void released.catch(logUnhandledError);
   }
 
   private async _callContextSwitchTool(params: CallToolRequest['params']['arguments']): Promise<CallToolResult> {
@@ -141,11 +152,23 @@ export class ProxyBackend implements ServerBackend {
   }
 
   private async _applySharedSwitch({ slot, providers }: SharedProxySelection, name: string): Promise<void> {
+    if (this._closed)
+      throw new Error('The connection closed before the switch could run.');
     const provider = providers.find(factory => factory.name === name);
     if (!provider)
       throw new Error('Unknown connection method: ' + name);
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
     const shared = await slot.replace(provider === providers[0] ? undefined : () => this._connectClient(provider));
+    if (this._closed) {
+      // serverClosed() ran while the replacement connected: the switch still
+      // applies process-wide, but this backend keeps no lease on its
+      // replacement and publishes nothing into its disposed owned slot. Its
+      // lease on `previousShared`, still the current client, is released by
+      // serverClosed() once this settles.
+      if (shared)
+        await slot.release(shared);
+      return;
+    }
     if (shared) {
       this._currentClient = shared;
       this._ownsCurrentClient = false;

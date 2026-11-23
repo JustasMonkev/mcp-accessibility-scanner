@@ -22,6 +22,7 @@ export class SharedClientSlot {
   private _current: Client | undefined;
   private _chain: Promise<unknown> = Promise.resolve();
   private _leases = new Map<Client, { count: number, retired: boolean }>();
+  private _closing = new Set<Promise<void>>();
 
   acquire(): Client | undefined {
     if (!this._current)
@@ -39,8 +40,16 @@ export class SharedClientSlot {
     lease.count = Math.max(0, lease.count - 1);
     if (lease.retired && lease.count === 0) {
       this._leases.delete(client);
-      await client.close().catch(logUnhandledError);
+      await this._close(client);
     }
+  }
+
+  // Tracks the close until it settles, so dispose() waits for a close that
+  // release() started after removing the client from `_leases`.
+  private _close(client: Client): Promise<void> {
+    const closing = client.close().catch(logUnhandledError).finally(() => this._closing.delete(closing));
+    this._closing.add(closing);
+    return closing;
   }
 
   // Holds a lease on `client` while `use` runs, so a replacement published
@@ -95,7 +104,9 @@ export class SharedClientSlot {
       const clients = [...this._leases.keys()];
       this._leases.clear();
       this._current = undefined;
-      await Promise.all(clients.map(client => client.close().catch(logUnhandledError)));
+      for (const client of clients)
+        void this._close(client);
+      await Promise.all([...this._closing]);
     });
     this._chain = result.catch(() => {});
     return await result;
