@@ -20,6 +20,7 @@ import { z } from 'zod';
 
 import { defineTabTool } from './tool.js';
 import { generateLocator } from './utils.js';
+import { quote } from '../utils/codegen.js';
 import { isFunctionSource } from '../utils/jsSource.js';
 
 const evaluateSchema = z.object({
@@ -49,12 +50,15 @@ const evaluate = defineTabTool({
     const locator = params.ref && params.element ? await tab.refLocator({ ref: params.ref, element: params.element }) : undefined;
     const source = toFunctionSource(params.function, !!locator);
     const target = locator ? `page.${await generateLocator(locator)}` : 'page';
-    // Emit the function itself, as the tool passes it: Playwright evaluates a
-    // quoted string as an expression, so replay would return the function uncalled.
-    response.addCode(`await ${target}.evaluate(${source});`);
+    // Replay evaluates the source in the browser exactly as the tool does: the
+    // parenthesized source is eval'd in the page and its value called (with the
+    // element, if any). Emitting the source as a Node function literal would run
+    // parts of it, such as `.bind(document)`, outside the browser.
+    const [parameters, args] = locator ? ['(element, source)', 'element'] : ['source', ''];
+    response.addCode(`await ${target}.evaluate(${parameters} => globalThis.eval(\`(\${source}\\n)\`)(${args}), ${quote(source)});`);
 
     await tab.waitForCompletion(async () => {
-      const func = functionSerializingAs(source);
+      const func = functionSerializingAs(asBrowserExpression(source));
       const result = locator ? await locator.evaluate(func) : await tab.page.evaluate(func);
       response.addResult(formatEvaluationResult(result));
     });
@@ -95,6 +99,12 @@ function hasJSONContents(value: object, parents: readonly object[]): boolean {
 
   return isPlainContainer && !isCircular
     && Object.values(value).every(child => canFormatAsJSON(child, childParents));
+}
+
+// Playwright parses a function's source as `(source)` before evaluating it, so a
+// trailing line comment would swallow that `)`. Close the group on its own line.
+function asBrowserExpression(source: string): string {
+  return `(${source}\n)`;
 }
 
 function functionSerializingAs(source: string): () => void {

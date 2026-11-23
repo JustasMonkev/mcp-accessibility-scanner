@@ -162,7 +162,7 @@ describe('browser_evaluate tool', () => {
     expect(mockTab.page._evaluateFunction).not.toHaveBeenCalled();
     const passedFunction = pageEvaluate.mock.calls[0][0];
     expect(typeof passedFunction).toBe('function');
-    expect(passedFunction.toString()).toBe('() => window.location.href');
+    expect(passedFunction.toString()).toBe('(() => window.location.href\n)');
   });
 
   it('evaluates against an element locator when ref and element are provided', async () => {
@@ -181,14 +181,14 @@ describe('browser_evaluate tool', () => {
     expect(mockTab.refLocator).toHaveBeenCalledWith({ ref: 'e1', element: 'the button' });
     expect(locatorEvaluate).toHaveBeenCalledTimes(1);
     expect(pageEvaluate).not.toHaveBeenCalled();
-    expect(locatorEvaluate.mock.calls[0][0].toString()).toBe('(el) => el.textContent');
+    expect(locatorEvaluate.mock.calls[0][0].toString()).toBe('((el) => el.textContent\n)');
     expect(response.result()).toContain('hello');
   });
 
   it('wraps a bare page expression into a function', async () => {
     await evaluateTool.handle(mockContext, { function: 'document.title' }, response);
 
-    expect(pageEvaluate.mock.calls[0][0].toString()).toBe(toFunctionSource('document.title', false));
+    expect(pageEvaluate.mock.calls[0][0].toString()).toBe(`(${toFunctionSource('document.title', false)}\n)`);
     expect(response.code()).toContain('document.title');
   });
 
@@ -206,10 +206,10 @@ describe('browser_evaluate tool', () => {
     );
 
     // The element case also proves the onElement plumbing picks the (element) form.
-    expect(locatorEvaluate.mock.calls[0][0].toString()).toBe(toFunctionSource('element.textContent', true));
+    expect(locatorEvaluate.mock.calls[0][0].toString()).toBe(`(${toFunctionSource('element.textContent', true)}\n)`);
   });
 
-  it('emits replay code that calls the function on the page and on a locator like the tool does', async () => {
+  it('emits replay code that evaluates the function in the browser exactly like the tool does', async () => {
     const browser = await chromium.launch();
     try {
       const page = await browser.newPage();
@@ -217,23 +217,35 @@ describe('browser_evaluate tool', () => {
       mockTab.page = page;
       mockTab.refLocator.mockResolvedValue(page.locator('#target'));
       const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+      const onButton = { element: 'the button', ref: 'e1' };
       const cases = [
-        { function: '() => document.title' },
-        { function: 'document.title' },
-        { function: '() => ({ n: 2 + 2 })' },
-        { function: '(\n  () => document.title\n)' },
-        { function: 'element.textContent', element: 'the button', ref: 'e1' },
-        { function: '(el) => el.id', element: 'the button', ref: 'e1' },
+        { params: { function: '() => document.title' }, expected: 'Replay' },
+        { params: { function: 'document.title' }, expected: 'Replay' },
+        { params: { function: '() => ({ n: 2 + 2 })' }, expected: { n: 4 } },
+        { params: { function: '(\n  () => document.title\n)' }, expected: 'Replay' },
+        // A trailing line comment must not swallow a closing parenthesis.
+        { params: { function: '(() => document.title) // trailing' }, expected: 'Replay' },
+        // A comma expression evaluates to its last function; it is not split into arguments.
+        { params: { function: '() => 1, () => 2' }, expected: 2 },
+        // `.bind(document)` has to run in the browser, where `document` exists.
+        { params: { function: 'function read() { return this.title; }.bind(document)' }, expected: 'Replay' },
+        // Quotes, backslashes and template placeholders survive quoting.
+        { params: { function: '() => "it\'s" + "\\\\" + `${1}`' }, expected: 'it\'s\\1' },
+        { params: { function: 'element.textContent', ...onButton }, expected: 'Press' },
+        { params: { function: '(el) => el.id', ...onButton }, expected: 'target' },
+        { params: { function: '(el) => el.id // trailing', ...onButton }, expected: 'target' },
+        { params: { function: '(el) => 1, (el) => el.id', ...onButton }, expected: 'target' },
+        { params: { function: 'function (el) { return `${this.title}:${el.id}`; }.bind(document)', ...onButton }, expected: 'Replay:target' },
       ];
-      for (const params of cases) {
+      for (const { params, expected } of cases) {
         const result = new Response(mockContext, 'browser_evaluate', {});
         await evaluateTool.handle(mockContext, params, result);
+        expect(result.isError(), params.function).toBeFalsy();
+        expect(result.result(), params.function).toBe(JSON.stringify(expected, null, 2));
+
         const code = result.code();
-        // A quoted string is evaluated as an expression on replay, returning the function uncalled.
-        expect(code).not.toMatch(/\.evaluate\(['"`]/);
         const replayed = await new AsyncFunction('page', `return ${code.replace(/;$/, '')}`)(page);
-        expect(replayed).not.toBeUndefined();
-        expect(JSON.stringify(replayed, null, 2)).toBe(result.result());
+        expect(replayed, `${params.function}\n${code}`).toEqual(expected);
       }
     } finally {
       await browser.close();
@@ -243,7 +255,7 @@ describe('browser_evaluate tool', () => {
   it('wraps an object literal expression without it parsing as a block', async () => {
     await evaluateTool.handle(mockContext, { function: '{ title: document.title }' }, response);
 
-    expect(pageEvaluate.mock.calls[0][0].toString()).toBe(toFunctionSource('{ title: document.title }', false));
+    expect(pageEvaluate.mock.calls[0][0].toString()).toBe(`(${toFunctionSource('{ title: document.title }', false)}\n)`);
   });
 });
 
