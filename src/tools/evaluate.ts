@@ -53,8 +53,9 @@ const evaluate = defineTabTool({
     // Replay evaluates the source in the browser exactly as the tool does: the
     // parenthesized source is eval'd in the page and its value called (with the
     // element, if any). Emitting the source as a Node function literal would run
-    // parts of it, such as `.bind(document)`, outside the browser.
-    const [parameters, args] = locator ? ['(element, source)', 'element'] : ['source', ''];
+    // parts of it, such as `.bind(document)`, outside the browser. Playwright
+    // also passes its omitted argument as undefined, so `arguments` matches.
+    const [parameters, args] = locator ? ['(element, source)', 'element, undefined'] : ['source', 'undefined'];
     response.addCode(`await ${target}.evaluate(${parameters} => globalThis.eval(\`(\${source}\\n)\`)(${args}), ${quote(source)});`);
 
     await tab.waitForCompletion(async () => {

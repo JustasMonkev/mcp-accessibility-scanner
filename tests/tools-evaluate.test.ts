@@ -231,11 +231,17 @@ describe('browser_evaluate tool', () => {
         { params: { function: 'function read() { return this.title; }.bind(document)' }, expected: 'Replay' },
         // Quotes, backslashes and template placeholders survive quoting.
         { params: { function: '() => "it\'s" + "\\\\" + `${1}`' }, expected: 'it\'s\\1' },
+        // Playwright calls the function with its (undefined) argument; replay must too.
+        { params: { function: 'function () { return arguments.length; }' }, expected: 1 },
+        { params: { function: 'function (arg) { return arg === undefined && arguments.length; }' }, expected: 1 },
         { params: { function: 'element.textContent', ...onButton }, expected: 'Press' },
         { params: { function: '(el) => el.id', ...onButton }, expected: 'target' },
         { params: { function: '(el) => el.id // trailing', ...onButton }, expected: 'target' },
         { params: { function: '(el) => 1, (el) => el.id', ...onButton }, expected: 'target' },
         { params: { function: 'function (el) { return `${this.title}:${el.id}`; }.bind(document)', ...onButton }, expected: 'Replay:target' },
+        // A locator passes the element and the (undefined) argument.
+        { params: { function: 'function () { return arguments.length; }', ...onButton }, expected: 2 },
+        { params: { function: 'function (el, arg) { return `${el.id}:${arg}:${arguments.length}`; }', ...onButton }, expected: 'target:undefined:2' },
       ];
       for (const { params, expected } of cases) {
         const result = new Response(mockContext, 'browser_evaluate', {});
