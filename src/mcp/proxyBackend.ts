@@ -47,6 +47,7 @@ export class ProxyBackend implements ServerBackend {
   private _backendContext: ServerBackendContext | undefined;
   private _sharedSelection: SharedProxySelection | undefined;
   private _ownedSlot = new SharedClientSlot();
+  private _transition: Promise<unknown> = Promise.resolve();
   private _relay = new ToolRelay(client => {
     if (this._ownsCurrentClient && this._currentClient === client)
       return this._backendContext?.notifyToolListChanged();
@@ -70,7 +71,8 @@ export class ProxyBackend implements ServerBackend {
   }
 
   async listTools(requestContext?: Partial<Pick<CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]> {
-    const downstreamTools = await this._relay.listTools(this._client(), requestContext);
+    const client = this._client();
+    const downstreamTools = await this._withLease(client, () => this._relay.listTools(client, requestContext));
     const tools = this._mcpProviders.length === 1 ? downstreamTools : [...downstreamTools, this._contextSwitchTool];
     return tools.filter(tool => !isToolBlocked(this._toolPolicy, tool.name));
   }
@@ -79,13 +81,22 @@ export class ProxyBackend implements ServerBackend {
     assertToolNotBlocked(this._toolPolicy, name);
     if (name === this._contextSwitchTool.name)
       return this._callContextSwitchTool(args);
-    return await this._relay.callTool(this._client(), name, args, requestContext);
+    const client = this._client();
+    return await this._withLease(client, () => this._relay.callTool(client, name, args, requestContext));
   }
 
   private _client(): Client {
     if (!this._currentClient)
       throw new Error('Initialize the proxy backend before running tools.');
     return this._currentClient;
+  }
+
+  // A switch can publish a replacement while a forwarded request is still
+  // awaiting `client`; the lease keeps it open until that request settles.
+  // Call in the same tick that read `client` from `_currentClient`.
+  private _withLease<T>(client: Client, use: () => Promise<T>): Promise<T> {
+    const slot = this._ownsCurrentClient ? this._ownedSlot : this._sharedSelection?.slot;
+    return slot ? slot.withLease(client, use) : use();
   }
 
   serverClosed?(): void {
@@ -118,7 +129,18 @@ export class ProxyBackend implements ServerBackend {
     }
   }
 
-  private async _switchSharedClient({ slot, providers }: SharedProxySelection, name: string): Promise<void> {
+  // A shared switch spans two slots: the process-wide one and this backend's
+  // owned one. The whole transition (shared publication, owned clear, owned
+  // publication) runs as one step, one switch at a time, so an owned
+  // replacement still connecting for an earlier switch cannot publish after a
+  // later shared publication and then be closed by its clear.
+  private async _switchSharedClient(selection: SharedProxySelection, name: string): Promise<void> {
+    const result = this._transition.then(() => this._applySharedSwitch(selection, name));
+    this._transition = result.catch(() => {});
+    await result;
+  }
+
+  private async _applySharedSwitch({ slot, providers }: SharedProxySelection, name: string): Promise<void> {
     const provider = providers.find(factory => factory.name === name);
     if (!provider)
       throw new Error('Unknown connection method: ' + name);
