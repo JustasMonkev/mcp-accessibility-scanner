@@ -2,6 +2,7 @@ import { rejectOnAbort } from '../utils/timeout.js';
 import { z } from 'zod';
 import type * as playwright from 'playwright';
 import { defineTabTool } from './tool.js';
+import type { ModalState } from './tool.js';
 import { reserveReportPath, writeJsonReport } from './report.js';
 import type { JsonReportResource } from './report.js';
 import {
@@ -18,6 +19,9 @@ import {
 } from './axe.js';
 
 import type { Tab } from '../tab.js';
+import type { Response } from '../response.js';
+import { truncateDataUrls } from '../utils/dataUrl.js';
+import { logUnhandledError } from '../utils/log.js';
 
 type VariantResult = {
   name: string;
@@ -162,6 +166,103 @@ async function restorePageState(page: playwright.Page, original: PageState): Pro
     await page.setViewportSize(original.viewport);
   await page.emulateMedia(original.media);
   await setZoom(page, original.zoom);
+}
+
+// Viewport, media and zoom belong to the page, which MCP contexts sharing one
+// browser context (separate clients on a non-isolated connection) also share,
+// so per-context admission alone cannot keep their scans apart.
+const scannedPages = new WeakSet<playwright.Page>();
+
+function claimPage(page: playwright.Page): () => void {
+  if (scannedPages.has(page))
+    throw new Error('Tool "scan_page_matrix" is busy because another matrix scan is changing this page\'s viewport, media and zoom, or is waiting for a dialog to close before restoring them.');
+  scannedPages.add(page);
+  return () => scannedPages.delete(page);
+}
+
+function dialogInterruption(variant: string | undefined, state: ModalState): Error {
+  const named = truncateDataUrls(state.description);
+  const shown = named.length > 200 ? `${named.slice(0, 200)}…` : named;
+  const where = variant === undefined ? 'while the original state was being restored' : `during variant "${variant}"`;
+  return new Error(`The page opened a dialog ${where} that the matrix scan does not answer, so the scan stopped: ${shown}. The paused page cannot be restored until the dialog closes; answer it with browser_handle_dialog and the original viewport, media and zoom are then restored.`);
+}
+
+// A dialog pauses the page, so every page command issued after it waits.
+function watchForDialog(tab: Tab) {
+  const controller = new AbortController();
+  const { promise: opened, resolve: open } = Promise.withResolvers<void>();
+  let dialog: ModalState | undefined;
+  const onModalState = (state: ModalState) => {
+    if (state.type !== 'dialog' || dialog)
+      return;
+    dialog = state;
+    controller.abort(new Error('A dialog interrupted the matrix scan.'));
+    open();
+  };
+  tab.on('modalState', onModalState);
+  const present = tab.modalStates().find(state => state.type === 'dialog');
+  if (present)
+    onModalState(present);
+  return {
+    signal: controller.signal,
+    guard: async <T>(work: Promise<T>, variant: string | undefined): Promise<T> => {
+      // Work can also fail because the dialog aborted it; report the dialog either way.
+      const outcome = await Promise.race([work.then(value => ({ value })), opened]).catch((error: unknown) => {
+        if (!dialog)
+          throw error;
+      });
+      if (dialog)
+        throw dialogInterruption(variant, dialog);
+      return (outcome as { value: T }).value;
+    },
+    dispose: () => tab.off('modalState', onModalState),
+  };
+}
+
+type MatrixRun = {
+  tab: Tab;
+  variants: Variant[];
+  original: PageState;
+  params: ScanPageMatrixParams;
+  response: Response;
+  signal?: AbortSignal;
+};
+
+async function scanVariants({ tab, variants, original, params, response, signal }: MatrixRun, trackRestore: (restore: Promise<void>) => void): Promise<VariantResult[]> {
+  const dialog = watchForDialog(tab);
+  const scanSignal = signal ? AbortSignal.any([signal, dialog.signal]) : dialog.signal;
+  let inFlight: Promise<unknown> = Promise.resolve();
+  const variantResults: VariantResult[] = [];
+  const incompleteRuleIdsByVariant: string[][] = [];
+  try {
+    for (const variant of variants) {
+      const scanning = scanVariant(tab, variant, original, params, scanSignal);
+      inFlight = scanning;
+      const { result, incompleteRuleIds } = await dialog.guard(scanning, variant.name);
+      variantResults.push(result);
+      incompleteRuleIdsByVariant.push(incompleteRuleIds);
+      await response.reportProgress({
+        progress: variantResults.length,
+        total: variants.length,
+        message: `Scanned variant ${variantResults.length}/${variants.length}: ${variant.name}`,
+      });
+    }
+    compareWithBaseline(variantResults, incompleteRuleIdsByVariant);
+  } finally {
+    // An interrupted variant unwinds at its next step once the dialog closes;
+    // restoring only after that keeps it from reapplying variant state. While
+    // a dialog stays open the restore finishes in the background, still
+    // holding the page claim, so the call can report the dialog now.
+    const restore = inFlight.catch(() => {}).then(() => restorePageState(tab.page, original));
+    trackRestore(restore);
+    try {
+      if (!dialog.signal.aborted)
+        await dialog.guard(restore, undefined);
+    } finally {
+      dialog.dispose();
+    }
+  }
+  return variantResults;
 }
 
 async function scanVariant(tab: Tab, variant: Variant, original: PageState, params: ScanPageMatrixParams, signal?: AbortSignal): Promise<{ result: VariantResult, incompleteRuleIds: string[] }> {
@@ -322,28 +423,21 @@ const scanPageMatrix = defineTabTool({
 
     const reportPath = await reserveReportPath(tab.context, response, params.reportFile, 'scan-matrix');
     const variants = params.variants ?? defaultVariants;
-    const original = await capturePageState(tab.page);
-
-    if (!original.viewport && variants.some(variant => variant.viewport))
-      throw new Error('Viewport variants require a configured viewport (for example --viewport-size=1280,720). Native viewport sizing cannot be restored; use variants without viewport changes on this tab.');
-    signal?.throwIfAborted();
-
-    const variantResults: VariantResult[] = [];
-    const incompleteRuleIdsByVariant: string[][] = [];
+    // Claimed before capturing, so an overlapping scan cannot record another
+    // scan's variant as the original state.
+    const releasePage = claimPage(tab.page);
+    let restored: Promise<void> = Promise.resolve();
+    let variantResults: VariantResult[];
     try {
-      for (const variant of variants) {
-        const { result, incompleteRuleIds } = await scanVariant(tab, variant, original, params, signal);
-        variantResults.push(result);
-        incompleteRuleIdsByVariant.push(incompleteRuleIds);
-        await response.reportProgress({
-          progress: variantResults.length,
-          total: variants.length,
-          message: `Scanned variant ${variantResults.length}/${variants.length}: ${variant.name}`,
-        });
-      }
-      compareWithBaseline(variantResults, incompleteRuleIdsByVariant);
+      const original = await capturePageState(tab.page);
+      if (!original.viewport && variants.some(variant => variant.viewport))
+        throw new Error('Viewport variants require a configured viewport (for example --viewport-size=1280,720). Native viewport sizing cannot be restored; use variants without viewport changes on this tab.');
+      signal?.throwIfAborted();
+      variantResults = await scanVariants({ tab, variants, original, params, response, signal }, restore => {
+        restored = restore;
+      });
     } finally {
-      await restorePageState(tab.page, original);
+      void restored.catch(logUnhandledError).finally(releasePage);
     }
 
     signal?.throwIfAborted();

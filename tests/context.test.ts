@@ -2040,8 +2040,31 @@ describe('Context', () => {
       });
 
       const endExclusive = context.beginToolCall('exclusive_tool', true);
-      expect(() => context.beginToolCall('browser_click')).toThrow('Tool "browser_click" is busy because an interactive audit is running in this browser context.');
-      expect(() => context.beginToolCall('other_exclusive_tool', true)).toThrow('Tool "other_exclusive_tool" is busy because interactive audits require exclusive access to this browser context.');
+      expect(() => context.beginToolCall('browser_click')).toThrow('Tool "browser_click" is busy because "exclusive_tool" requires exclusive access to this browser context.');
+      expect(() => context.beginToolCall('other_exclusive_tool', true)).toThrow('Tool "other_exclusive_tool" is busy because it requires exclusive access to this browser context and other tool calls are running.');
+      endExclusive();
+      context.beginToolCall('browser_click')();
+    });
+
+    it('admits only the dialog tool while an exclusive call runs', () => {
+      const dialogTool = { schema: { name: 'browser_handle_dialog' }, clearsModalState: 'dialog' } as any;
+      const fileTool = { schema: { name: 'browser_file_upload' }, clearsModalState: 'fileChooser' } as any;
+      const context = new Context({
+        tools: [],
+        modalStateTools: [dialogTool, fileTool],
+        config: defaultConfig,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      // A dialog opened during the exclusive call pauses the page; refusing
+      // the tool that answers it would leave the call waiting forever.
+      const endExclusive = context.beginToolCall('scan_page_matrix', true);
+      const endDialog = context.beginToolCall('browser_handle_dialog');
+      expect(() => context.beginToolCall('browser_file_upload')).toThrow('busy because "scan_page_matrix" requires exclusive access');
+      expect(() => context.beginToolCall('browser_click')).toThrow('busy because "scan_page_matrix" requires exclusive access');
+      endDialog();
       endExclusive();
       context.beginToolCall('browser_click')();
     });
@@ -2056,7 +2079,7 @@ describe('Context', () => {
       });
 
       const endClick = context.beginToolCall('browser_click');
-      expect(() => context.beginToolCall('exclusive_tool', true)).toThrow('Tool "exclusive_tool" is busy because interactive audits require exclusive access to this browser context.');
+      expect(() => context.beginToolCall('exclusive_tool', true)).toThrow('Tool "exclusive_tool" is busy because it requires exclusive access to this browser context and other tool calls are running.');
       context.beginToolCall('browser_snapshot')();
       endClick();
       context.beginToolCall('exclusive_tool', true)();

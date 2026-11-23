@@ -16,13 +16,15 @@
 
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, expect, it } from 'vitest';
+import { chromium } from 'playwright';
 import { Client } from '@modelcontextprotocol/client';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { contextFactory } from '../src/browserContextFactory.js';
-import { resolveCLIConfig } from '../src/config.js';
+import { resolveCLIConfig, resolveConfig } from '../src/config.js';
 import { wrapInProcess } from '../src/mcp/server.js';
 
 const resizeWaiters: (() => void)[] = [];
@@ -36,6 +38,12 @@ const server = http.createServer((request, response) => {
     response.end();
     return;
   }
+  if (request.url === '/dialog') {
+    response.writeHead(200, { 'content-type': 'text/html' });
+    response.end(`<!doctype html><html lang="en"><title>Dialog</title><main><h1>Dialog</h1></main>
+      <script>addEventListener('resize', () => { if (innerWidth < 500) alert('narrow layout'); });</script></html>`);
+    return;
+  }
   response.writeHead(200, { 'content-type': 'text/html' });
   response.end(`<!doctype html><html lang="en"><title>Matrix</title>
     <style>img { display: none } @media (max-width: 500px) { img { display: block } }</style>
@@ -44,9 +52,29 @@ const server = http.createServer((request, response) => {
 });
 let client: Client;
 let directory: string;
+let origin: string;
 
 function text(result: Awaited<ReturnType<Client['callTool']>>): string {
   return result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+}
+
+function withinMs<T>(promise: Promise<T>, ms: number, description: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${description} did not return within ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function evaluateUntil(target: Client, expression: string, expected: string): Promise<string> {
+  let last = '';
+  for (let attempt = 0; attempt < 50; attempt++) {
+    last = text(await target.callTool({ name: 'browser_evaluate', arguments: { function: expression } }));
+    if (last.includes(expected))
+      return last;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  return last;
 }
 
 beforeAll(async () => {
@@ -54,11 +82,12 @@ beforeAll(async () => {
   const address = server.address();
   if (!address || typeof address === 'string')
     throw new Error('Expected a TCP fixture server');
+  origin = `http://127.0.0.1:${address.port}`;
   directory = await fs.mkdtemp(path.join(os.tmpdir(), 'scan-page-matrix-admission-'));
   const config = await resolveCLIConfig({ browser: 'chromium', headless: true, isolated: true, outputDir: directory, viewportSize: '1280,720' });
   client = new Client({ name: 'scan-page-matrix-admission-test', version: '1' });
   await client.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
-  const navigated = await client.callTool({ name: 'browser_navigate', arguments: { url: `http://127.0.0.1:${address.port}/` } });
+  const navigated = await client.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/` } });
   expect(navigated.isError, text(navigated)).not.toBe(true);
 });
 
@@ -101,4 +130,79 @@ it('rejects an overlapping matrix scan so neither call measures or restores the 
 
   const viewport = await client.callTool({ name: 'browser_evaluate', arguments: { function: '() => `${innerWidth}x${innerHeight}`' } });
   expect(text(viewport)).toContain('1280x720');
+});
+
+it('reports a dialog opened by a variant and restores the original state once it is answered', async () => {
+  const navigated = await client.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/dialog` } });
+  expect(navigated.isError, text(navigated)).not.toBe(true);
+  const state = '() => `${innerWidth}x${innerHeight} zoom=${document.documentElement.style.zoom || "none"} dark=${matchMedia("(prefers-color-scheme: dark)").matches}`';
+  expect(text(await client.callTool({ name: 'browser_evaluate', arguments: { function: state } }))).toContain('1280x720 zoom=none dark=false');
+
+  // The alert pauses the page, so every later page command waits on it; the
+  // scan must not hold the context until something answers the dialog.
+  const scan = await withinMs(client.callTool({ name: 'scan_page_matrix', arguments: {
+    reportFile: 'dialog.json', waitAfterApplyMs: 1000, withRules: ['image-alt'],
+    variants: [{ name: 'baseline' }, { name: 'narrow', viewport: { width: 375, height: 812 }, media: { colorScheme: 'dark' }, zoomPercent: 150 }],
+  } }), 15_000, 'scan_page_matrix');
+  expect(scan.isError).toBe(true);
+  expect(text(scan)).toContain('opened a dialog during variant "narrow"');
+  expect(text(scan)).toContain('narrow layout');
+  await expect(fs.access(path.join(directory, 'dialog.json'))).rejects.toThrow();
+
+  const answered = await withinMs(client.callTool({ name: 'browser_handle_dialog', arguments: { accept: true } }), 15_000, 'browser_handle_dialog');
+  expect(answered.isError, text(answered)).not.toBe(true);
+  expect(await evaluateUntil(client, state, '1280x720 zoom=none dark=false')).toContain('1280x720 zoom=none dark=false');
+
+  // The page claim is released after the restore, so the page can be scanned again.
+  const again = await client.callTool({ name: 'scan_page_matrix', arguments: {
+    reportFile: 'after-dialog.json', withRules: ['image-alt'], variants: [{ name: 'baseline' }],
+  } });
+  expect(again.isError, text(again)).not.toBe(true);
+});
+
+it('rejects an overlapping matrix scan from another client sharing the browser context', async () => {
+  const probe = net.createServer();
+  await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
+  const { port } = probe.address() as net.AddressInfo;
+  await new Promise<void>(resolve => probe.close(() => resolve()));
+  const browser = await chromium.launch({ args: [`--remote-debugging-port=${port}`] });
+  const config = await resolveConfig({ browser: { cdpEndpoint: `http://127.0.0.1:${port}`, cdpTimeout: 5000 }, outputDir: directory });
+  // One server, two connections: each gets its own MCP context, but both
+  // attach to the browser's existing context and so share its page.
+  const factory = contextFactory(config);
+  const clients = [new Client({ name: 'matrix-client-a', version: '1' }), new Client({ name: 'matrix-client-b', version: '1' })];
+  try {
+    for (const each of clients)
+      await each.connect(await wrapInProcess(new BrowserServerBackend(config, factory)));
+    const [first, second] = clients;
+    const navigated = await first.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/` } });
+    expect(navigated.isError, text(navigated)).not.toBe(true);
+    const attached = await second.callTool({ name: 'browser_tabs', arguments: { action: 'list' } });
+    expect(text(attached)).toContain(`${origin}/`);
+    const zoom = '() => `zoom=${document.documentElement.style.zoom || "none"}`';
+    expect(await evaluateUntil(second, zoom, 'zoom=none')).toContain('zoom=none');
+
+    const firstScan = first.callTool({ name: 'scan_page_matrix', arguments: {
+      reportFile: 'shared-first.json', waitAfterApplyMs: 2000, withRules: ['image-alt'],
+      variants: [{ name: 'baseline' }, { name: 'zoomed', zoomPercent: 150 }],
+    } });
+    expect(await evaluateUntil(second, zoom, 'zoom=150%')).toContain('zoom=150%');
+
+    // Admitted, this scan would record 150% as the original and restore it
+    // after the first scan had already put the page back.
+    const overlapping = await second.callTool({ name: 'scan_page_matrix', arguments: {
+      reportFile: 'shared-second.json', waitAfterApplyMs: 3000, withRules: ['image-alt'],
+      variants: [{ name: 'zoom-200', zoomPercent: 200 }],
+    } });
+    expect(overlapping.isError).toBe(true);
+    expect(text(overlapping)).toContain('another matrix scan is changing this page');
+
+    const firstResult = await firstScan;
+    expect(firstResult.isError, text(firstResult)).not.toBe(true);
+    expect(text(await second.callTool({ name: 'browser_evaluate', arguments: { function: zoom } }))).toContain('zoom=none');
+  } finally {
+    for (const each of clients)
+      await each.close();
+    await browser.close();
+  }
 });

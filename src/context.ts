@@ -500,9 +500,12 @@ export class Context {
 
   beginToolCall(name: string, exclusive = false): () => void {
     if (exclusive && this._runningTools.length > 0)
-      throw new Error(`Tool "${name}" is busy because interactive audits require exclusive access to this browser context.`);
-    if (this._runningTools.at(-1)?.exclusive)
-      throw new Error(`Tool "${name}" is busy because an interactive audit is running in this browser context.`);
+      throw new Error(`Tool "${name}" is busy because it requires exclusive access to this browser context and other tool calls are running.`);
+    const exclusiveCall = this._runningTools.find(call => call.exclusive);
+    // An open dialog pauses the page, so the exclusive call cannot progress
+    // until it is answered; the dialog tool only answers it.
+    if (exclusiveCall && !this._answersDialog(name))
+      throw new Error(`Tool "${name}" is busy because "${exclusiveCall.name}" requires exclusive access to this browser context.`);
     const call = { name, exclusive };
     this._runningTools.push(call);
     this._scheduleIdleTimeout();
@@ -513,6 +516,10 @@ export class Context {
       this._lastActivityAt = Date.now();
       this._scheduleIdleTimeout();
     });
+  }
+
+  private _answersDialog(name: string): boolean {
+    return this.modalStateTools.some(tool => tool.schema.name === name && tool.clearsModalState === 'dialog');
   }
 
   beginSessionHold(): () => void {

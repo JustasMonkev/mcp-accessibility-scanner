@@ -62,6 +62,8 @@ function createMatrixHarness(outputFile: string) {
     page: mockPage,
     waitForTimeout: vi.fn(async () => undefined),
     modalStates: vi.fn(() => []),
+    on: vi.fn(),
+    off: vi.fn(),
     context: { outputFile: resolveOutputFile },
   };
   const context = { currentTabOrDie: vi.fn(() => mockTab), config: {} };
@@ -436,6 +438,8 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-matrix.json'),
       },
@@ -496,6 +500,8 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-matrix.json'),
       },
@@ -696,6 +702,8 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-custom.json'),
       },
@@ -747,6 +755,8 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-metadata.json'),
       },
@@ -797,6 +807,8 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-reload.json'),
       },
@@ -841,6 +853,8 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-error.json'),
       },
@@ -890,6 +904,8 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async (name: string) => `/tmp/${name}`),
       },
@@ -935,6 +951,8 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-progress.json'),
       },

@@ -192,7 +192,7 @@ it('admits interactive audits exclusively per browser context and releases admis
     function: '() => document.querySelector("#toggle").click()',
   } });
   expect(competingMutation.isError).toBe(true);
-  expect(competingMutation.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('busy because an interactive audit is running');
+  expect(competingMutation.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('busy because "audit_keyboard_operation" requires exclusive access');
 
   const independentContext = await client.callTool({ name: 'browser_evaluate', arguments: {
     browserSessionId,
@@ -224,7 +224,7 @@ it('admits interactive audits exclusively per browser context and releases admis
       expectedFeedback: [{ selector: '#error', kind: 'error' }],
     } });
     expect(overlappingAudit.isError).toBe(true);
-    expect(overlappingAudit.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('interactive audits require exclusive access');
+    expect(overlappingAudit.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('requires exclusive access to this browser context and other tool calls are running');
   } finally {
     const release = await client.callTool({ name: 'browser_evaluate', arguments: {
       function: '() => { window.releaseOrdinaryEvaluation?.(); delete window.releaseOrdinaryEvaluation; return "ordinary evaluation released"; }',
