@@ -250,20 +250,31 @@ export class VSCodeProxyBackend implements ServerBackend {
     if (this._closed)
       throw new Error('The connection closed before the switch could run.');
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
+    // A disconnect readies this backend's default provider, handshake
+    // included, before it clears the shared selection: a default that fails
+    // to start fails the switch and leaves every request, existing or new, on
+    // the shared provider. A request closed meanwhile connects no default.
+    const defaultTransport = createTransport ? undefined : await this._defaultTransportFactory();
+    const defaultClient = defaultTransport && !this._closed ? await this._connectClient(defaultTransport) : undefined;
     const shared = await sharedSlot.replace(createTransport ? async () => this._connectClient(await createTransport()) : undefined);
-    const defaultTransport = shared ? undefined : await this._defaultTransportFactory();
     if (this._closed) {
       // serverClosed() ran while the replacement connected: the switch still
       // applies process-wide, but this backend keeps no lease on its
       // replacement and publishes nothing into its disposed owned slot. Its
       // lease on `previousShared`, still the current client, is released by
       // serverClosed() once this settles.
+      await defaultClient?.close().catch(logUnhandledError);
       if (shared)
         await sharedSlot.release(shared);
       return;
     }
-    if (defaultTransport) {
-      await this._setCurrentClient(() => this._connectClient(defaultTransport), false, true);
+    if (defaultClient) {
+      // The owned slot refuses a client it never took if it was disposed in
+      // the meantime; close it here then.
+      await this._setCurrentClient(async () => defaultClient, false, true).catch(async error => {
+        await defaultClient.close().catch(logUnhandledError);
+        throw error;
+      });
     } else if (shared) {
       this._currentClient = shared;
       this._ownsCurrentClient = false;

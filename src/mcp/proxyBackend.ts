@@ -158,23 +158,35 @@ export class ProxyBackend implements ServerBackend {
     if (!provider)
       throw new Error('Unknown connection method: ' + name);
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
-    const shared = await slot.replace(provider === providers[0] ? undefined : () => this._connectClient(provider));
+    const toDefault = provider === providers[0];
+    // Switching back to the default readies this backend's default client,
+    // handshake included, before it clears the shared selection: a default
+    // that fails to start fails the switch and leaves every request, existing
+    // or new, on the shared provider.
+    const defaultClient = toDefault ? await this._connectClient(this._mcpProviders[0]) : undefined;
+    const shared = await slot.replace(toDefault ? undefined : () => this._connectClient(provider));
     if (this._closed) {
       // serverClosed() ran while the replacement connected: the switch still
       // applies process-wide, but this backend keeps no lease on its
       // replacement and publishes nothing into its disposed owned slot. Its
       // lease on `previousShared`, still the current client, is released by
       // serverClosed() once this settles.
+      await defaultClient?.close().catch(logUnhandledError);
       if (shared)
         await slot.release(shared);
       return;
     }
-    if (shared) {
+    if (defaultClient) {
+      // The owned slot refuses a client it never took if it was disposed in
+      // the meantime; close it here then.
+      await this._setCurrentClient(async () => defaultClient, false).catch(async error => {
+        await defaultClient.close().catch(logUnhandledError);
+        throw error;
+      });
+    } else if (shared) {
       this._currentClient = shared;
       this._ownsCurrentClient = false;
       await this._ownedSlot.replace(undefined);
-    } else {
-      await this._setCurrentClient(() => this._connectClient(this._mcpProviders[0]), false);
     }
     if (previousShared)
       await slot.release(previousShared);

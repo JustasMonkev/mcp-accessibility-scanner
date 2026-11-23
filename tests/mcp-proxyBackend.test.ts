@@ -673,6 +673,78 @@ describe('ProxyBackend', () => {
       expect((await request2.listTools()).map(tool => tool.name)).toContain('tool_alternate');
     });
 
+    it.each([
+      ['cannot create its transport', async () => { throw new Error('default provider failed'); }],
+      ['fails its handshake', async () => ({
+        start: async () => { throw new Error('default provider failed'); },
+        send: async () => {},
+        close: async () => {},
+      })],
+    ])('keeps the shared selection for new requests when switching back fails because the default %s', async (_label, failingDefault) => {
+      // The shared selection used to be cleared before the default was
+      // ready: the switch failed, yet the next request already started on
+      // the default provider.
+      const alternates: ReturnType<typeof makeInnerBackend>[] = [];
+      const defaults: ReturnType<typeof makeInnerBackend>[] = [];
+      let failDefault = false;
+      const makeProviders = () => [
+        {
+          name: 'default',
+          description: 'd',
+          connect: async (): Promise<any> => {
+            if (failDefault)
+              return await failingDefault();
+            const inner = makeInnerBackend('tool_default');
+            defaults.push(inner);
+            return wrapInProcess(inner);
+          },
+        },
+        {
+          name: 'alternate',
+          description: 'a',
+          connect: async () => {
+            const inner = makeInnerBackend('tool_alternate');
+            alternates.push(inner);
+            return wrapInProcess(inner);
+          },
+        },
+      ];
+      const shared: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders() };
+      const backendContext = { notifyToolListChanged: vi.fn(async () => undefined) };
+      const clientVersion = { name: 'vitest', version: '1.0.0' };
+      const makeRequestBackend = () => new ProxyBackend(makeProviders(), shared);
+
+      const request0 = makeRequestBackend();
+      await request0.initialize(backendContext, clientVersion);
+      expect((await request0.callTool('browser_connect', { name: 'alternate' })).isError).not.toBe(true);
+      request0.serverClosed?.();
+
+      const request1 = makeRequestBackend();
+      await request1.initialize(backendContext, clientVersion);
+      const defaultsBefore = defaults.length;
+      failDefault = true;
+      const failed = await request1.callTool('browser_connect', { name: 'default' });
+      failDefault = false;
+      expect(failed.isError).toBe(true);
+      expect((failed.content?.[0] as any).text).toContain('default provider failed');
+
+      // The first request after the failure still starts on the shared
+      // selection...
+      const request2 = makeRequestBackend();
+      await request2.initialize(backendContext, clientVersion);
+      expect((await request2.listTools()).map(tool => tool.name)).toContain('tool_alternate');
+      // ...and so does the request whose switch failed.
+      expect(((await request1.callTool('tool_alternate', {})).content?.[0] as any).text).toBe('tool_alternate');
+      expect(alternates).toHaveLength(1);
+      expect(alternates[0].closed).toBe(0);
+      expect(defaults).toHaveLength(defaultsBefore);
+
+      request1.serverClosed?.();
+      request2.serverClosed?.();
+      await shared.slot.dispose();
+      expect(alternates[0].closed).toBe(1);
+    });
+
     // A request can close while its own browser_connect is still connecting
     // the replacement, or still queued behind another switch.
     describe('closing a request during its switch', () => {
