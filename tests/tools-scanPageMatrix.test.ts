@@ -2,6 +2,7 @@ import fs from 'fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import scanPageMatrixTools from '../src/tools/scanPageMatrix.js';
 import { Response } from '../src/response.js';
+import { renderModalStates } from '../src/tab.js';
 import * as axe from '../src/tools/axe.js';
 
 // The page's media emulation as an unconfigured browser reports it. Variants
@@ -15,6 +16,11 @@ const defaultMedia = {
 };
 
 // What the single setup evaluate returns: the page's zoom and media state.
+// The page claim the tool takes through its context; never canceled here.
+function claimPage() {
+  return { release: () => {}, canceled: new AbortController().signal };
+}
+
 function pageState(zoom = '', media: Record<string, unknown> = {}) {
   return { zoom, media: { ...defaultMedia, ...media } };
 }
@@ -64,7 +70,7 @@ function createMatrixHarness(outputFile: string) {
     modalStates: vi.fn(() => []),
     on: vi.fn(),
     off: vi.fn(),
-    context: { outputFile: resolveOutputFile, holdExclusiveUntil: vi.fn() },
+    context: { outputFile: resolveOutputFile, holdExclusiveUntil: vi.fn(), claimPage },
   };
   const context = { currentTabOrDie: vi.fn(() => mockTab), config: {} };
   return { context, mockPage, response: new Response(context as any, 'scan_page_matrix', {}) };
@@ -124,6 +130,51 @@ describe('scan_page_matrix tool', () => {
     expect(mockPage.emulateMedia).not.toHaveBeenCalled();
     expect(scan).not.toHaveBeenCalled();
     expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('names a blocked dialog tool and skips the rest of a dialog-delayed restore once the browser context closes', async () => {
+    const { context, mockPage, response } = createMatrixHarness('/tmp/dialog.json');
+    const tab = context.currentTabOrDie();
+    const canceled = new AbortController();
+    const dialogTool = { schema: { name: 'browser_handle_dialog' }, clearsModalState: 'dialog' };
+    const closeTool = { schema: { name: 'browser_close' } };
+    Object.assign(tab.context, {
+      // As filteredTools leaves it: the blocked dialog tool is not exposed.
+      tools: [closeTool],
+      config: { blockedTools: ['browser_handle_dialog'] },
+      modalStateTools: [dialogTool],
+      claimPage: () => ({ release: () => {}, canceled: canceled.signal }),
+    });
+    const modalStates: unknown[] = [];
+    let openDialog!: (state: unknown) => void;
+    Object.assign(tab, { modalStatesMarkdown: () => renderModalStates(tab.context as any, modalStates as any) });
+    tab.modalStates.mockImplementation(() => modalStates as never[]);
+    tab.on.mockImplementation((_event: string, listener: (state: unknown) => void) => { openDialog = listener; });
+    // The dialog pauses the page during the variant's wait; the restore's
+    // first step then waits for it to close.
+    tab.waitForTimeout.mockImplementation(() => {
+      const dialog = { type: 'dialog', description: '"alert" dialog with message "narrow layout"' };
+      modalStates.push(dialog);
+      openDialog(dialog);
+      return new Promise(() => {});
+    });
+    const dialogClosed = Promise.withResolvers<undefined>();
+    mockPage.setViewportSize.mockResolvedValueOnce(undefined).mockReturnValueOnce(dialogClosed.promise);
+
+    const failure = await tool.handle(response.context, tool.schema.inputSchema.parse({ variants: [{ name: 'narrow' }] }), response).catch((error: Error) => error);
+    expect(String(failure)).toContain('opened a dialog during variant "narrow"');
+    expect(String(failure)).toContain('- ["alert" dialog with message "narrow layout"]: would be handled by the "browser_handle_dialog" tool, but this server blocks it (blockedTools)');
+    expect(String(failure)).toContain('browser_close cancels the restore');
+    expect(String(failure)).not.toContain('answer it with');
+    expect(mockPage.setViewportSize).toHaveBeenCalledTimes(2);
+
+    canceled.abort(new Error('The browser context closed.'));
+    dialogClosed.resolve(undefined);
+    const restored = tab.context.holdExclusiveUntil.mock.calls[0][1] as Promise<void>;
+    await expect(restored).rejects.toThrow('The browser context closed.');
+    // Only the variant's own media and zoom were applied; the restore stopped.
+    expect(mockPage.emulateMedia).toHaveBeenCalledTimes(1);
+    expect(mockPage.evaluate).toHaveBeenCalledTimes(2);
   });
 
   it('waits for active Axe before restoring the caller tab on cancellation', async () => {
@@ -443,6 +494,7 @@ describe('scan_page_matrix tool', () => {
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-matrix.json'),
         holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -506,6 +558,7 @@ describe('scan_page_matrix tool', () => {
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-matrix.json'),
         holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -709,6 +762,7 @@ describe('scan_page_matrix tool', () => {
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-custom.json'),
         holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -763,6 +817,7 @@ describe('scan_page_matrix tool', () => {
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-metadata.json'),
         holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -816,6 +871,7 @@ describe('scan_page_matrix tool', () => {
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-reload.json'),
         holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -863,6 +919,7 @@ describe('scan_page_matrix tool', () => {
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-error.json'),
         holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -915,6 +972,7 @@ describe('scan_page_matrix tool', () => {
       context: {
         outputFile: vi.fn(async (name: string) => `/tmp/${name}`),
         holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -963,6 +1021,7 @@ describe('scan_page_matrix tool', () => {
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-progress.json'),
         holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
