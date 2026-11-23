@@ -121,6 +121,66 @@ describe('interactive session recording', () => {
       fs.rmSync(outputDir, { recursive: true, force: true });
     }
   });
+
+  // Starts the REPL, navigates, and resolves once the navigation printed.
+  async function startNavigatedRepl(outputDir: string, env: NodeJS.ProcessEnv = {}) {
+    const child = spawn(process.execPath, [...cliArgs, '--headless', '--isolated', '--save-session', '--output-dir', outputDir, 'interactive'], {
+      stdio: ['pipe', 'pipe', 'ignore'],
+      env: { ...process.env, ...env },
+    });
+    let stdout = '';
+    child.stdout.on('data', chunk => { stdout += String(chunk); });
+    const exited = new Promise<number>((resolve, reject) => {
+      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('interactive CLI did not exit')); }, 30_000);
+      child.on('error', reject);
+      child.on('exit', () => { clearTimeout(timer); resolve(Date.now()); });
+    });
+    child.stdin.write('browser_navigate {"url":"data:text/html,<p>ready</p>"}\n');
+    await new Promise<void>((resolve, reject) => {
+      const check = () => stdout.includes('Page URL') ? resolve() : undefined;
+      child.stdout.on('data', check);
+      void exited.then(() => reject(new Error(`exited before navigating: ${stdout}`)), reject);
+    });
+    return { child, exited, stdout: () => stdout };
+  }
+
+  const sessionText = (outputDir: string) => {
+    const [sessionFolder] = fs.readdirSync(outputDir);
+    return fs.readFileSync(path.join(outputDir, sessionFolder, 'session.md'), 'utf-8');
+  };
+
+  it('finishes a call longer than the shutdown watchdog when stdin ends', async () => {
+    // The watchdog started at end of input while shutdown still awaited the
+    // running call, so the process exited before printing or logging it.
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-interactive-eof-'));
+    try {
+      const repl = await startNavigatedRepl(outputDir, { PWMCP_EXIT_WATCHDOG_MS_FOR_TEST: '1000' });
+      repl.child.stdin.end('browser_wait_for {"time":3}\n');
+      await repl.exited;
+      expect(repl.stdout()).toContain('Waited for 3 seconds');
+      expect(sessionText(outputDir)).toContain('### Tool call: browser_wait_for');
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  }, 40_000);
+
+  it('starts shutdown on SIGTERM without waiting for a running call', async () => {
+    // SIGTERM waited for the running call, so the watchdog ended the process
+    // before contexts were disposed and the session log was flushed.
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-interactive-sigterm-'));
+    try {
+      const repl = await startNavigatedRepl(outputDir);
+      repl.child.stdin.write('browser_wait_for {"time":20}\n');
+      await new Promise(resolve => setTimeout(resolve, 300));
+      const signaledAt = Date.now();
+      repl.child.kill('SIGTERM');
+      expect(await repl.exited - signaledAt).toBeLessThan(8_000);
+      expect(repl.stdout()).not.toContain('Waited for 20 seconds');
+      expect(sessionText(outputDir)).toContain('### Tool call: browser_navigate');
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  }, 40_000);
 });
 
 describe('direct MCP harness install coverage', () => {

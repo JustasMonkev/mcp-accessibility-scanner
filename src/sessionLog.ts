@@ -212,16 +212,25 @@ export class SessionLog {
     return undefined;
   }
 
-  /** Writes every pending entry and waits until all writes reach storage. */
+  /**
+   * Writes every pending entry and waits until all writes reach storage,
+   * including entries appended while earlier writes were still in flight.
+   */
   async flush(): Promise<void> {
-    this._flushEntries();
-    while (this._inFlightWrites.size)
-      await Promise.all(this._inFlightWrites);
+    while (this._pendingEntries.length || this._inFlightWrites.size) {
+      this._flushEntries();
+      if (this._inFlightWrites.size)
+        await Promise.all(this._inFlightWrites);
+    }
+    // Idle now even if a batch failed before any write was tracked.
+    SessionLog._busyLogs.delete(this);
   }
 
   /** Flushes every session log that still has unwritten entries or writes in flight. */
   static async flushAll(): Promise<void> {
-    await Promise.all([...SessionLog._busyLogs].map(log => log.flush()));
+    // A log can become busy while another one is being flushed.
+    while (SessionLog._busyLogs.size)
+      await Promise.all([...SessionLog._busyLogs].map(log => log.flush()));
   }
 
   private _appendEntry(entry: LogEntry) {

@@ -249,12 +249,10 @@ program
         throw new Error('Interactive mode prints text only. Use --image-responses allow or omit instead of only.');
       const backend = new BrowserServerBackend(config, parentOptions.extension ? extensionContextFactory : browserContextFactory);
       const redactSecrets = createUrlRedactor(config.redactUrlParams);
-      // Calls still running when stdin ends finish (and are logged) before exit.
       const inFlightLines = new Set<Promise<void>>();
-      const handleExit = setupExitWatchdog(async () => {
-        await Promise.all(inFlightLines);
-        await Context.disposeAll();
-      });
+      // Signals and Ctrl+C cancel: shutdown starts at once, without waiting
+      // for running calls. Only the natural end of input waits for them (below).
+      const handleExit = setupExitWatchdog(undefined, { exitOnStdinClose: false });
       await backend.initialize(
           { notifyToolListChanged: async () => {} },
           { name: 'interactive-cli', version: packageJSON.version },
@@ -309,18 +307,34 @@ program
         void handled.finally(() => inFlightLines.delete(handled));
       });
 
-      rl.on('close', () => {
+      // Ctrl+C at the prompt reaches readline, not the process: cancel too.
+      rl.on('SIGINT', () => {
         void handleExit();
+      });
+      rl.on('close', () => {
+        // End of input: calls still running finish (and are logged) under
+        // their own tool deadlines. Shutdown, and with it the watchdog, starts
+        // only afterwards, so the watchdog bounds disposal and log flushing
+        // instead of cutting a long call (and that cleanup) short.
+        void (async () => {
+          while (inFlightLines.size)
+            await Promise.all(inFlightLines);
+          await handleExit();
+        })();
       });
     });
 
-function setupExitWatchdog(cleanup: () => Promise<void> = () => Context.disposeAll()) {
+// Test hook: subprocess tests shorten the watchdog to prove it no longer
+// races running calls.
+const exitWatchdogMs = Number(process.env.PWMCP_EXIT_WATCHDOG_MS_FOR_TEST) || 15000;
+
+function setupExitWatchdog(cleanup: () => Promise<void> = () => Context.disposeAll(), { exitOnStdinClose = true } = {}) {
   let isExiting = false;
   const handleExit = async () => {
     if (isExiting)
       return;
     isExiting = true;
-    setTimeout(() => process.exit(0), 15000);
+    setTimeout(() => process.exit(0), exitWatchdogMs);
     try {
       await cleanup();
     } catch (error) {
@@ -337,9 +351,11 @@ function setupExitWatchdog(cleanup: () => Promise<void> = () => Context.disposeA
     }
   };
 
-  process.stdin.on('close', () => {
-    void handleExit();
-  });
+  if (exitOnStdinClose) {
+    process.stdin.on('close', () => {
+      void handleExit();
+    });
+  }
   process.on('SIGINT', () => {
     void handleExit();
   });
