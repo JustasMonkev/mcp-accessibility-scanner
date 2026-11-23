@@ -20,7 +20,6 @@ import {
 
 import type { Tab } from '../tab.js';
 import type { Response } from '../response.js';
-import { truncateDataUrls } from '../utils/dataUrl.js';
 import { logUnhandledError } from '../utils/log.js';
 
 type VariantResult = {
@@ -161,30 +160,27 @@ async function setZoom(page: playwright.Page, zoom: string): Promise<void> {
   }, zoom);
 }
 
-async function restorePageState(page: playwright.Page, original: PageState): Promise<void> {
+// A canceled restore stops at its next step, so a page left to other clients
+// is not reset once a dialog that paused it closes.
+async function restorePageState(page: playwright.Page, original: PageState, canceled: AbortSignal): Promise<void> {
+  canceled.throwIfAborted();
   if (original.viewport)
     await page.setViewportSize(original.viewport);
+  canceled.throwIfAborted();
   await page.emulateMedia(original.media);
+  canceled.throwIfAborted();
   await setZoom(page, original.zoom);
 }
 
-// Viewport, media and zoom belong to the page, which MCP contexts sharing one
-// browser context (separate clients on a non-isolated connection) also share,
-// so per-context admission alone cannot keep their scans apart.
-const scannedPages = new WeakSet<playwright.Page>();
-
-function claimPage(page: playwright.Page): () => void {
-  if (scannedPages.has(page))
-    throw new Error('Tool "scan_page_matrix" is busy because another matrix scan is changing this page\'s viewport, media and zoom, or is waiting for a dialog to close before restoring them.');
-  scannedPages.add(page);
-  return () => scannedPages.delete(page);
-}
-
-function dialogInterruption(variant: string | undefined, state: ModalState): Error {
-  const named = truncateDataUrls(state.description);
-  const shown = named.length > 200 ? `${named.slice(0, 200)}…` : named;
+// The modal-state guidance names the tool that answers the dialog, or says
+// this server blocks it; context.tools leaves out blocked tools.
+function dialogInterruption(tab: Tab, variant: string | undefined): Error {
   const where = variant === undefined ? 'while the original state was being restored' : `during variant "${variant}"`;
-  return new Error(`The page opened a dialog ${where} that the matrix scan does not answer, so the scan stopped: ${shown}. The paused page cannot be restored until the dialog closes; answer it with browser_handle_dialog and the original viewport, media and zoom are then restored.`);
+  const teardown = tab.context.tools.some(tool => tool.schema.name === 'browser_close') ? ' Closing the browser with browser_close cancels the restore instead.' : '';
+  return new Error([
+    `The page opened a dialog ${where} that the matrix scan does not answer, so the scan stopped. The paused page cannot be restored until the dialog closes; the original viewport, media and zoom are restored once it does.${teardown}`,
+    ...tab.modalStatesMarkdown(),
+  ].join('\n'));
 }
 
 // A dialog pauses the page, so every page command issued after it waits.
@@ -212,7 +208,7 @@ function watchForDialog(tab: Tab) {
           throw error;
       });
       if (dialog)
-        throw dialogInterruption(variant, dialog);
+        throw dialogInterruption(tab, variant);
       return (outcome as { value: T }).value;
     },
     dispose: () => tab.off('modalState', onModalState),
@@ -226,9 +222,11 @@ type MatrixRun = {
   params: ScanPageMatrixParams;
   response: Response;
   signal?: AbortSignal;
+  // Aborted when the browser context closes while the page is still claimed.
+  canceled: AbortSignal;
 };
 
-async function scanVariants({ tab, variants, original, params, response, signal }: MatrixRun, trackRestore: (restore: Promise<void>) => void): Promise<VariantResult[]> {
+async function scanVariants({ tab, variants, original, params, response, signal, canceled }: MatrixRun, trackRestore: (restore: Promise<void>) => void): Promise<VariantResult[]> {
   const dialog = watchForDialog(tab);
   const scanSignal = signal ? AbortSignal.any([signal, dialog.signal]) : dialog.signal;
   let inFlight: Promise<unknown> = Promise.resolve();
@@ -252,8 +250,9 @@ async function scanVariants({ tab, variants, original, params, response, signal 
     // An interrupted variant unwinds at its next step once the dialog closes;
     // restoring only after that keeps it from reapplying variant state. While
     // a dialog stays open the restore finishes in the background, still
-    // holding the page claim, so the call can report the dialog now.
-    const restore = inFlight.catch(() => {}).then(() => restorePageState(tab.page, original));
+    // holding the page claim, so the call can report the dialog now. Closing
+    // the browser context cancels it.
+    const restore = inFlight.catch(() => {}).then(() => restorePageState(tab.page, original, canceled));
     trackRestore(restore);
     try {
       if (!dialog.signal.aborted)
@@ -424,8 +423,9 @@ const scanPageMatrix = defineTabTool({
     const reportPath = await reserveReportPath(tab.context, response, params.reportFile, 'scan-matrix');
     const variants = params.variants ?? defaultVariants;
     // Claimed before capturing, so an overlapping scan cannot record another
-    // scan's variant as the original state.
-    const releasePage = claimPage(tab.page);
+    // scan's variant as the original state, and other clients sharing the
+    // page cannot change it under this scan.
+    const claim = tab.context.claimPage('scan_page_matrix', tab.page);
     let restored: Promise<void> = Promise.resolve();
     let variantResults: VariantResult[];
     try {
@@ -433,14 +433,17 @@ const scanPageMatrix = defineTabTool({
       if (!original.viewport && variants.some(variant => variant.viewport))
         throw new Error('Viewport variants require a configured viewport (for example --viewport-size=1280,720). Native viewport sizing cannot be restored; use variants without viewport changes on this tab.');
       signal?.throwIfAborted();
-      variantResults = await scanVariants({ tab, variants, original, params, response, signal }, restore => {
+      variantResults = await scanVariants({ tab, variants, original, params, response, signal, canceled: claim.canceled }, restore => {
         restored = restore;
       });
     } finally {
       // After a dialog the restore can outlive this call; until it settles,
       // other tools could change the page and have their changes overwritten.
       tab.context.holdExclusiveUntil('scan_page_matrix', restored);
-      void restored.catch(logUnhandledError).finally(releasePage);
+      void restored.catch(error => {
+        if (!claim.canceled.aborted)
+          logUnhandledError(error);
+      }).finally(claim.release);
     }
 
     signal?.throwIfAborted();

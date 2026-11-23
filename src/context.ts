@@ -35,6 +35,9 @@ import type { SessionLog } from './sessionLog.js';
 import type { RecordedAction, Recording, RecordingTarget } from './inputRecorder.js';
 
 const recorderControlTools = new Set(['browser_start_recording', 'browser_stop_recording']);
+// Closing a browser context cancels work an exclusive call left running, so
+// these stay admitted while that work holds the context or its page.
+const teardownTools = new Set(['browser_close', 'browser_session_close']);
 const pageCloseTimeoutMs = 5_000;
 const pendingDownloadDrainTimeoutMs = 30_000;
 const maxRetainedDownloadErrors = 20;
@@ -78,6 +81,10 @@ function contextClosedWhileOpeningTabError(): Error {
   return new Error('The browser context closed while a tab was being opened.');
 }
 
+function pageClaimedError(name: string, claim: PageClaim): Error {
+  return new Error(`Tool "${name}" is busy because "${claim.name}", started by another client sharing this browser, requires exclusive access to this page until it finishes and restores the page.`);
+}
+
 function releaseOnce(release: () => void): () => void {
   let released = false;
   return () => {
@@ -89,6 +96,14 @@ function releaseOnce(release: () => void): () => void {
 }
 
 const liveContexts = new Set<Context>();
+
+type RunningTool = { name: string, exclusive: boolean, held?: boolean };
+type PageClaim = { name: string, context: Context, canceled: AbortController };
+
+// A page's viewport, media and zoom are shared by every MCP context attached
+// to its browser context (separate clients on a non-isolated connection), so
+// per-context admission alone cannot keep them from changing a claimed page.
+const pageClaims = new WeakMap<playwright.Page, PageClaim>();
 
 type TraceHub = { users: number, ready: Promise<unknown> };
 const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
@@ -169,7 +184,8 @@ export class Context {
   private _clientInfo: ClientInfo;
 
   private _closeBrowserContextPromise: Promise<void> | undefined;
-  private _runningTools: { name: string; exclusive: boolean }[] = [];
+  private _runningTools: RunningTool[] = [];
+  private _pageClaims = new Map<playwright.Page, PageClaim>();
   private _sessionHolds = 0;
   private _lastToolCallEndedAt = -Infinity;
   private _pendingDownloads = new Set<Promise<unknown>>();
@@ -504,9 +520,12 @@ export class Context {
     const exclusiveCall = this._runningTools.find(call => call.exclusive);
     // An open dialog pauses the page, so the exclusive call cannot progress
     // until it is answered; the dialog tool only answers it.
-    if (exclusiveCall && !this._answersDialog(name))
+    if (exclusiveCall && !this._answersDialog(name) && !(exclusiveCall.held && teardownTools.has(name)))
       throw new Error(`Tool "${name}" is busy because "${exclusiveCall.name}" requires exclusive access to this browser context.`);
-    const call = { name, exclusive };
+    const claim = this._currentTab && pageClaims.get(this._currentTab.page);
+    if (claim && claim.context !== this && !this._answersDialog(name) && !teardownTools.has(name))
+      throw pageClaimedError(name, claim);
+    const call: RunningTool = { name, exclusive };
     this._runningTools.push(call);
     this._scheduleIdleTimeout();
     return releaseOnce(() => {
@@ -518,18 +537,44 @@ export class Context {
     });
   }
 
-  /** Keeps a tool's exclusive access after its call returns, until work it left running settles. */
+  /**
+   * Keeps a tool's exclusive access after its call returns, until work it left
+   * running settles or the browser context closes.
+   */
   holdExclusiveUntil(name: string, work: Promise<unknown>): void {
     // Registered directly: the call that owns the work is still running and
     // would itself make an exclusive admission check fail.
-    const hold = { name, exclusive: true };
+    const hold: RunningTool = { name, exclusive: true, held: true };
     this._runningTools.push(hold);
     this._scheduleIdleTimeout();
     void work.catch(() => {}).finally(() => {
-      this._runningTools.splice(this._runningTools.indexOf(hold), 1);
+      const index = this._runningTools.indexOf(hold);
+      if (index !== -1)
+        this._runningTools.splice(index, 1);
       this._lastActivityAt = Date.now();
       this._scheduleIdleTimeout();
     });
+  }
+
+  /**
+   * Claims a page for an exclusive call, so calls from other MCP contexts
+   * sharing it are rejected until the claim is released or this context's
+   * browser context closes, which aborts `canceled`.
+   */
+  claimPage(name: string, page: playwright.Page): { release: () => void, canceled: AbortSignal } {
+    const existing = pageClaims.get(page);
+    if (existing)
+      throw pageClaimedError(name, existing);
+    const claim: PageClaim = { name, context: this, canceled: new AbortController() };
+    pageClaims.set(page, claim);
+    this._pageClaims.set(page, claim);
+    const release = releaseOnce(() => {
+      if (pageClaims.get(page) === claim)
+        pageClaims.delete(page);
+      if (this._pageClaims.get(page) === claim)
+        this._pageClaims.delete(page);
+    });
+    return { release, canceled: claim.canceled.signal };
   }
 
   private _answersDialog(name: string): boolean {
@@ -618,6 +663,15 @@ export class Context {
   }
 
   private _detachFromBrowserContext() {
+    // Work held past its call cannot finish on a closed context; dropping it
+    // keeps this context usable and other contexts' pages unclaimed.
+    this._runningTools = this._runningTools.filter(call => !call.held);
+    for (const [page, claim] of this._pageClaims) {
+      claim.canceled.abort(new Error('The browser context closed.'));
+      if (pageClaims.get(page) === claim)
+        pageClaims.delete(page);
+    }
+    this._pageClaims.clear();
     if (this._idleGroup) {
       this._idleGroup.contexts.delete(this);
       this._scheduleIdleTimeout();

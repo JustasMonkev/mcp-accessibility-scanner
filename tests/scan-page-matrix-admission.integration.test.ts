@@ -28,6 +28,7 @@ import { resolveCLIConfig, resolveConfig } from '../src/config.js';
 import { wrapInProcess } from '../src/mcp/server.js';
 
 const resizeWaiters: (() => void)[] = [];
+const darkWaiters: (() => void)[] = [];
 // The image without alt text is only rendered at narrow widths, so a variant
 // scanned at the wrong viewport changes the finding.
 const server = http.createServer((request, response) => {
@@ -36,6 +37,23 @@ const server = http.createServer((request, response) => {
       wake();
     response.writeHead(204);
     response.end();
+    return;
+  }
+  if (request.url === '/dark-applied') {
+    for (const wake of darkWaiters.splice(0))
+      wake();
+    response.writeHead(204);
+    response.end();
+    return;
+  }
+  // The image without alt text is only rendered in dark mode, so a dark
+  // variant scanned in light mode loses the finding.
+  if (request.url === '/dark-mode') {
+    response.writeHead(200, { 'content-type': 'text/html' });
+    response.end(`<!doctype html><html lang="en"><title>Dark</title>
+      <style>img { display: none } @media (prefers-color-scheme: dark) { img { display: block } }</style>
+      <main><h1>Dark</h1><img src="/missing.png" width="10" height="10"></main>
+      <script>matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => { if (event.matches) fetch('/dark-applied'); });</script></html>`);
     return;
   }
   if (request.url === '/dialog') {
@@ -171,7 +189,7 @@ it('reports a dialog opened by a variant and restores the original state once it
   await client.callTool({ name: 'browser_resize', arguments: { width: 1280, height: 720 } });
 });
 
-it('rejects an overlapping matrix scan from another client sharing the browser context', async () => {
+it('rejects page changes from another client sharing the browser context while a matrix scan holds the page', async () => {
   const probe = net.createServer();
   await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
   const { port } = probe.address() as net.AddressInfo;
@@ -186,34 +204,83 @@ it('rejects an overlapping matrix scan from another client sharing the browser c
     for (const each of clients)
       await each.connect(await wrapInProcess(new BrowserServerBackend(config, factory)));
     const [first, second] = clients;
-    const navigated = await first.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/` } });
+    const navigated = await first.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/dark-mode` } });
     expect(navigated.isError, text(navigated)).not.toBe(true);
     const attached = await second.callTool({ name: 'browser_tabs', arguments: { action: 'list' } });
-    expect(text(attached)).toContain(`${origin}/`);
-    const zoom = '() => `zoom=${document.documentElement.style.zoom || "none"}`';
-    expect(await evaluateUntil(second, zoom, 'zoom=none')).toContain('zoom=none');
+    expect(text(attached)).toContain(`${origin}/dark-mode`);
 
+    const darkApplied = new Promise<void>(resolve => darkWaiters.push(resolve));
     const firstScan = first.callTool({ name: 'scan_page_matrix', arguments: {
       reportFile: 'shared-first.json', waitAfterApplyMs: 2000, withRules: ['image-alt'],
-      variants: [{ name: 'baseline' }, { name: 'zoomed', zoomPercent: 150 }],
+      variants: [{ name: 'dark', media: { colorScheme: 'dark' } }],
     } });
-    expect(await evaluateUntil(second, zoom, 'zoom=150%')).toContain('zoom=150%');
+    await darkApplied;
 
-    // Admitted, this scan would record 150% as the original and restore it
-    // after the first scan had already put the page back.
+    // Admitted, this would switch the page back to light mode while the first
+    // client's report still records the variant as dark.
+    const lightened = await second.callTool({ name: 'browser_emulate_media', arguments: { colorScheme: 'light' } });
+    expect(lightened.isError).toBe(true);
+    expect(text(lightened)).toContain('busy because "scan_page_matrix"');
+
+    // Admitted, this scan would record dark mode as the original state and
+    // restore it after the first scan had already put the page back.
     const overlapping = await second.callTool({ name: 'scan_page_matrix', arguments: {
       reportFile: 'shared-second.json', waitAfterApplyMs: 3000, withRules: ['image-alt'],
       variants: [{ name: 'zoom-200', zoomPercent: 200 }],
     } });
     expect(overlapping.isError).toBe(true);
-    expect(text(overlapping)).toContain('another matrix scan is changing this page');
+    expect(text(overlapping)).toContain('busy because "scan_page_matrix"');
 
     const firstResult = await firstScan;
     expect(firstResult.isError, text(firstResult)).not.toBe(true);
-    expect(text(await second.callTool({ name: 'browser_evaluate', arguments: { function: zoom } }))).toContain('zoom=none');
+    const report = JSON.parse(await fs.readFile(path.join(directory, 'shared-first.json'), 'utf8'));
+    expect(report.variants.map((variant: { name: string, nodeCountByRuleId: Record<string, number> }) => [variant.name, variant.nodeCountByRuleId])).toEqual([
+      ['dark', { 'image-alt': 1 }],
+    ]);
+
+    // The claim ends with the scan, so the other client's page changes are admitted again.
+    const dark = '() => `dark=${matchMedia("(prefers-color-scheme: dark)").matches}`';
+    expect(text(await second.callTool({ name: 'browser_evaluate', arguments: { function: dark } }))).toContain('dark=false');
+    const emulated = await second.callTool({ name: 'browser_emulate_media', arguments: { colorScheme: 'dark' } });
+    expect(emulated.isError, text(emulated)).not.toBe(true);
+    expect(text(await second.callTool({ name: 'browser_evaluate', arguments: { function: dark } }))).toContain('dark=true');
   } finally {
     for (const each of clients)
       await each.close();
     await browser.close();
+  }
+});
+
+it('lets browser_close tear down a restore left waiting on a dialog when browser_handle_dialog is blocked', async () => {
+  const config = await resolveCLIConfig({ browser: 'chromium', headless: true, isolated: true, outputDir: directory, viewportSize: '1280,720', blockedTools: ['browser_handle_dialog'] });
+  const blocked = new Client({ name: 'scan-page-matrix-blocked-dialog-test', version: '1' });
+  await blocked.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
+  try {
+    const navigated = await blocked.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/dialog` } });
+    expect(navigated.isError, text(navigated)).not.toBe(true);
+
+    const scan = await withinMs(blocked.callTool({ name: 'scan_page_matrix', arguments: {
+      reportFile: 'blocked-dialog.json', waitAfterApplyMs: 1000, withRules: ['image-alt'],
+      variants: [{ name: 'baseline' }, { name: 'narrow', viewport: { width: 375, height: 812 } }],
+    } }), 15_000, 'scan_page_matrix');
+    expect(scan.isError).toBe(true);
+    expect(text(scan)).toContain('opened a dialog during variant "narrow"');
+    // The guidance must not send the client to a tool this server rejects.
+    expect(text(scan)).toContain('would be handled by the "browser_handle_dialog" tool, but this server blocks it (blockedTools)');
+    expect(text(scan)).not.toMatch(/answer it with browser_handle_dialog|can be handled by/);
+
+    // Ordinary page changes still wait for the restore, but teardown cancels it.
+    const resize = await withinMs(blocked.callTool({ name: 'browser_resize', arguments: { width: 900, height: 600 } }), 15_000, 'browser_resize');
+    expect(text(resize)).toContain('busy because "scan_page_matrix" requires exclusive access');
+    const closed = await withinMs(blocked.callTool({ name: 'browser_close', arguments: {} }), 15_000, 'browser_close');
+    expect(closed.isError, text(closed)).not.toBe(true);
+
+    const reopened = await blocked.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/` } });
+    expect(reopened.isError, text(reopened)).not.toBe(true);
+    const state = '() => `${innerWidth}x${innerHeight} zoom=${document.documentElement.style.zoom || "none"}`';
+    expect(text(await blocked.callTool({ name: 'browser_evaluate', arguments: { function: state } }))).toContain('1280x720 zoom=none');
+  } finally {
+    await blocked.callTool({ name: 'browser_close', arguments: {} }).catch(() => {});
+    await blocked.close();
   }
 });
