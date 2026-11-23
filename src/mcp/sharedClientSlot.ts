@@ -18,11 +18,14 @@ import { logUnhandledError } from '../utils/log.js';
 
 import type { Client } from '@modelcontextprotocol/client';
 
+const disposedError = () => new Error('The client slot was disposed before the replacement could be published.');
+
 export class SharedClientSlot {
   private _current: Client | undefined;
   private _chain: Promise<unknown> = Promise.resolve();
   private _leases = new Map<Client, { count: number, retired: boolean }>();
   private _closing = new Set<Promise<void>>();
+  private _disposed = false;
 
   acquire(): Client | undefined {
     if (!this._current)
@@ -76,9 +79,26 @@ export class SharedClientSlot {
   // `lease: false`: it keeps no lease on the published client, which is then
   // closed as soon as it is replaced, or once the last `withLease` request on
   // it settles.
+  //
+  // Once dispose() has been called the slot publishes nothing more: a
+  // replacement that has not started is rejected without calling `connect`,
+  // and a candidate that finishes connecting afterwards is closed and
+  // rejected. Clearing (`connect` undefined) then resolves to undefined, as
+  // dispose() clears the slot itself. A backend's owned slot is disposed by
+  // serverClosed(), so a switch still queued then fails instead of starting
+  // a provider nobody would close; the process-wide slot is disposed only by
+  // exit cleanup, after which a switch fails the same way.
   async replace(connect: (() => Promise<Client>) | undefined, options: { lease?: boolean, publish?: (next: Client | undefined) => void } = {}): Promise<Client | undefined> {
     const result = this._chain.then(async () => {
+      if (this._disposed && !connect)
+        return undefined;
+      if (this._disposed)
+        throw disposedError();
       const next = connect ? await connect() : undefined;
+      if (this._disposed && next) {
+        await this._close(next);
+        throw disposedError();
+      }
       const previous = this._current;
       this._current = next;
       if (next)
@@ -100,6 +120,7 @@ export class SharedClientSlot {
   }
 
   async dispose(): Promise<void> {
+    this._disposed = true;
     const result = this._chain.then(async () => {
       const clients = [...this._leases.keys()];
       this._leases.clear();

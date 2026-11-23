@@ -78,8 +78,7 @@ export class VSCodeProxyBackend implements ServerBackend {
       this._currentClientIsDefault = false;
       return;
     }
-    const transport = await this._defaultTransportFactory();
-    await this._setCurrentClient(transport, false, true);
+    await this._setCurrentClient(() => this._connectDefaultClient(), false, true);
   }
 
   async listTools(requestContext?: Partial<Pick<mcpServer.CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]> {
@@ -130,7 +129,7 @@ export class VSCodeProxyBackend implements ServerBackend {
 
   private async _sessionClientForTool(): Promise<Client> {
     if (!this._sessionClient) {
-      const creation = (async () => this._connectClient(await this._defaultTransportFactory()))();
+      const creation = this._connectDefaultClient();
       creation.catch(() => {
         if (this._sessionClient === creation)
           this._sessionClient = undefined;
@@ -175,7 +174,7 @@ export class VSCodeProxyBackend implements ServerBackend {
       if (this._sharedSlot)
         await this._switchSharedClient(this._sharedSlot, undefined);
       else
-        await this._setCurrentClient(await this._defaultTransportFactory(), true, true);
+        await this._setCurrentClient(() => this._connectDefaultClient(), true, true);
       return {
         content: [{ type: 'text', text: '### Result\nSuccessfully disconnected.\n' }],
       };
@@ -216,7 +215,7 @@ export class VSCodeProxyBackend implements ServerBackend {
     if (this._sharedSlot)
       await this._switchSharedClient(this._sharedSlot, () => this._createSwitchTransport(connectionString, lib));
     else
-      await this._setCurrentClient(await this._createSwitchTransport(connectionString, lib), true, false);
+      await this._setCurrentClient(async () => this._connectClient(await this._createSwitchTransport(connectionString, lib)), true, false);
     return {
       content: [{ type: 'text', text: '### Result\nSuccessfully connected.\n' }],
     };
@@ -251,20 +250,31 @@ export class VSCodeProxyBackend implements ServerBackend {
     if (this._closed)
       throw new Error('The connection closed before the switch could run.');
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
+    // A disconnect readies this backend's default provider, handshake
+    // included, before it clears the shared selection: a default that fails
+    // to start fails the switch and leaves every request, existing or new, on
+    // the shared provider. A request closed meanwhile connects no default.
+    const defaultTransport = createTransport ? undefined : await this._defaultTransportFactory();
+    const defaultClient = defaultTransport && !this._closed ? await this._connectClient(defaultTransport) : undefined;
     const shared = await sharedSlot.replace(createTransport ? async () => this._connectClient(await createTransport()) : undefined);
-    const defaultTransport = shared ? undefined : await this._defaultTransportFactory();
     if (this._closed) {
       // serverClosed() ran while the replacement connected: the switch still
       // applies process-wide, but this backend keeps no lease on its
       // replacement and publishes nothing into its disposed owned slot. Its
       // lease on `previousShared`, still the current client, is released by
       // serverClosed() once this settles.
+      await defaultClient?.close().catch(logUnhandledError);
       if (shared)
         await sharedSlot.release(shared);
       return;
     }
-    if (defaultTransport) {
-      await this._setCurrentClient(defaultTransport, false, true);
+    if (defaultClient) {
+      // The owned slot refuses a client it never took if it was disposed in
+      // the meantime; close it here then.
+      await this._setCurrentClient(async () => defaultClient, false, true).catch(async error => {
+        await defaultClient.close().catch(logUnhandledError);
+        throw error;
+      });
     } else if (shared) {
       this._currentClient = shared;
       this._ownsCurrentClient = false;
@@ -291,9 +301,12 @@ export class VSCodeProxyBackend implements ServerBackend {
 
   // The replacement is connected before it is published, and the client it
   // replaces is closed only afterwards: a failed handshake keeps the working
-  // provider, and overlapping switches apply in call order.
-  private async _setCurrentClient(transport: Transport, notifyOnChange: boolean, isDefault = false) {
-    await this._ownedSlot.replace(() => this._connectClient(transport), {
+  // provider, and overlapping switches apply in call order. The transport is
+  // created inside `connect`, in turn: once serverClosed() has disposed the
+  // owned slot, a replacement still queued is neither created nor published,
+  // and one that finishes connecting afterwards is closed.
+  private async _setCurrentClient(connect: () => Promise<Client>, notifyOnChange: boolean, isDefault = false) {
+    await this._ownedSlot.replace(connect, {
       lease: false,
       publish: client => {
         ++this._providerGeneration;
@@ -306,6 +319,10 @@ export class VSCodeProxyBackend implements ServerBackend {
     });
     if (notifyOnChange)
       await this._backendContext?.notifyToolListChanged();
+  }
+
+  private async _connectDefaultClient(): Promise<Client> {
+    return await this._connectClient(await this._defaultTransportFactory());
   }
 
   private async _connectClient(transport: Transport): Promise<Client> {

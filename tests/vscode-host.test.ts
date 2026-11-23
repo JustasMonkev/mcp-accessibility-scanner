@@ -229,6 +229,27 @@ describe('VSCodeProxyBackend', () => {
       expect(defaultInner.closed).toBe(1);
       backend.serverClosed?.();
     });
+
+    it('neither creates nor publishes a replacement once the connection closes', async () => {
+      // The switch used to create the transport before queueing behind the
+      // owned slot, so serverClosed() disposed the slot first and the
+      // replacement was then connected and published into it: the switch
+      // reported success and the new child outlived the connection.
+      const { backend, defaultInner } = await makeBackend();
+      const children: ReturnType<typeof makeInnerBackend>[] = [];
+      vi.spyOn(backend as any, '_createSwitchTransport').mockImplementation(async () => {
+        const inner = makeInnerBackend('tool_child');
+        children.push(inner);
+        return wrapInProcess(inner);
+      });
+
+      const switching = backend.callTool('browser_connect', connectArgs);
+      backend.serverClosed?.();
+
+      await expect(switching).rejects.toThrow('disposed before the replacement could be published');
+      expect(children).toHaveLength(0);
+      await vi.waitFor(() => expect(defaultInner.closed).toBe(1));
+    });
   });
 
   it('serializes the resolved fallback output dir into the spawned provider config', async () => {
@@ -240,12 +261,16 @@ describe('VSCodeProxyBackend', () => {
     const parentFile = await outputFile(config, 'parent.txt');
 
     const backend = new VSCodeProxyBackend(config, vi.fn(async () => ({ id: 'default-transport' } as any)));
-    const setCurrentClient = vi.spyOn(backend as any, '_setCurrentClient').mockResolvedValue(undefined);
+    const createSwitchTransport = vi.spyOn(backend as any, '_createSwitchTransport');
+    vi.spyOn(backend as any, '_connectClient').mockResolvedValue(undefined);
+    vi.spyOn(backend as any, '_setCurrentClient').mockImplementation(async (connect: any) => {
+      await connect();
+    });
 
     await backend.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' });
 
-    expect(setCurrentClient).toHaveBeenCalledTimes(1);
-    const transport = setCurrentClient.mock.calls[0][0] as any;
+    expect(createSwitchTransport).toHaveBeenCalledTimes(1);
+    const transport = await createSwitchTransport.mock.results[0].value;
     const childConfig = JSON.parse(transport._serverParams.args[1]);
     expect(childConfig.outputDir).toBe(path.dirname(parentFile));
     expect(childConfig.server?.authToken).toBeUndefined();
@@ -553,6 +578,64 @@ describe('VSCodeProxyBackend', () => {
       await vi.waitFor(() => expect(defaults.map(inner => inner.closed)).toEqual([1, 1]));
       backend.serverClosed?.();
       await slot.dispose();
+    });
+
+    it.each([
+      ['its transport cannot be created', async () => { throw new Error('default provider failed'); }],
+      ['its handshake fails', async () => ({
+        start: async () => { throw new Error('default provider failed'); },
+        send: async () => {},
+        close: async () => {},
+      })],
+    ])('keeps the shared provider for new requests when a disconnect\'s default provider fails because %s', async (_label, failingDefault) => {
+      // The shared selection used to be cleared before the default was
+      // ready: the disconnect failed, yet the next request already started
+      // on the default provider.
+      const config = await resolveConfig({});
+      const slot = new SharedClientSlot();
+      const defaults: ReturnType<typeof makeInnerBackend>[] = [];
+      let failDefault = false;
+      const defaultTransportFactory = async (): Promise<any> => {
+        if (failDefault)
+          return await failingDefault();
+        const inner = makeInnerBackend('tool_default');
+        defaults.push(inner);
+        return await wrapInProcess(inner);
+      };
+      const child = makeInnerBackend('tool_child');
+      const backendContext = { notifyToolListChanged: vi.fn(async () => undefined) };
+      const clientVersion = { name: 'vitest', version: '1.0.0' };
+      const makeRequestBackend = () => {
+        const backend = new VSCodeProxyBackend(config, defaultTransportFactory, slot);
+        vi.spyOn(backend as any, '_createSwitchTransport').mockImplementation(() => wrapInProcess(child));
+        return backend;
+      };
+
+      const request0 = makeRequestBackend();
+      await request0.initialize(backendContext, clientVersion);
+      expect((await request0.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' })).isError).not.toBe(true);
+      request0.serverClosed?.();
+
+      const request1 = makeRequestBackend();
+      await request1.initialize(backendContext, clientVersion);
+      failDefault = true;
+      await expect(request1.callTool('browser_connect', {})).rejects.toThrow('default provider failed');
+      failDefault = false;
+
+      // The first request after the failure still starts on the shared
+      // provider...
+      const request2 = makeRequestBackend();
+      await request2.initialize(backendContext, clientVersion);
+      expect(((await request2.callTool('tool_child', {})).content?.[0] as any).text).toBe('tool_child');
+      // ...and so does the request whose disconnect failed.
+      expect(((await request1.callTool('tool_child', {})).content?.[0] as any).text).toBe('tool_child');
+      expect(child.closed).toBe(0);
+      expect(defaults.flatMap(inner => inner.calls)).toEqual([]);
+
+      request1.serverClosed?.();
+      request2.serverClosed?.();
+      await slot.dispose();
+      expect(child.closed).toBe(1);
     });
 
     it('does not probe a shared provider while publishing its switch', async () => {
