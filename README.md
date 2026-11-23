@@ -689,7 +689,8 @@ Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) wit
 - Spacing neighbours use the same pointer-target rule as the focused element, so rendered `:disabled` controls are not
   counted as neighbours, and `contenteditable` regions are counted as targets on both sides.
 - The spacing search checks each candidate as it goes and stops at the first crowding neighbour, so DOM order does not
-  change the result. It examines at most 2,000 candidates per focus stop; an undersized target with no crowding
+  change the result. Neighbours inside open shadow roots, nested ones included, are searched too (closed ones cannot
+  be). It examines at most 2,000 candidates and shadow roots per focus stop; an undersized target with no crowding
   neighbour found before that limit is reported as inconclusive (`targetSizeInconclusive` in the JSON report,
   `targetSizeInconclusiveCount` in the structured summary), not as a pass.
 - Target size uses the element's bounding box, so an inline target wrapped over several lines is measured as one
