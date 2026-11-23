@@ -277,8 +277,13 @@ function mergeCdpLaunchLayers(layers: Record<CdpLaunchSource, Partial<CdpLaunch>
       app = { source, command: layer.command, layer };
   }
   if (!app) {
-    if (layers.file)
-      throw new Error('browser.cdpLaunch in the config file needs a command: set browser.cdpLaunch.command, --cdp-launch-command or PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND, or remove browser.cdpLaunch.');
+    // A launch setting without a command anywhere would be dropped before
+    // validation, hiding both the missing command and a mistyped value.
+    const orphaned = cdpLaunchSources.filter(source => layers[source]);
+    if (orphaned.length) {
+      const fields = [...new Set(orphaned.flatMap(source => Object.keys(layers[source] ?? {})))];
+      throw new Error(`browser.cdpLaunch in ${orphaned.map(source => cdpLaunchSourceNames[source]).join(' and ')} needs a command${fields.length ? ` (found ${fields.join(', ')})` : ''}: set browser.cdpLaunch.command, --cdp-launch-command or PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND, or remove the CDP launch settings.`);
+    }
     return undefined;
   }
   const merged: CdpLaunch = { command: app.command };

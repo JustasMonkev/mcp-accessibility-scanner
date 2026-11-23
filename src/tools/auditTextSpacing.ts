@@ -248,20 +248,21 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
 
   const cleanupFailures = await releaseFailedFrames(outcomes);
 
+  const reloadWarning = cleanupFailures.length ? ` The page may still carry the spacing overrides (${cleanupFailures.join(', ')}): reload it.` : '';
   const main = outcomes.find(outcome => outcome.frame === tab.page.mainFrame());
   if (!main?.measurement)
-    throw new Error(`Text spacing could not be measured in the main frame (${main?.error ?? 'frame not found'}); nothing was evaluated.${cleanupFailures.length ? ' The page may still carry the spacing overrides: reload it.' : ''}`);
+    throw new Error(`Text spacing could not be measured in the main frame (${main?.error ?? 'frame not found'}); nothing was evaluated.${reloadWarning}`);
 
   const measured = outcomes.reduce((sum, outcome) => sum + (outcome.measurement?.measured ?? 0), 0);
   const partialFrames = outcomes.flatMap(outcome => outcome.measurement?.stoppedEarly
     ? [{ frameUrl: outcome.frameUrl ?? 'main frame', stoppedBy: outcome.measurement.stoppedEarly }]
     : []);
   if (measured === 0 && partialFrames.length)
-    throw new Error(`Text spacing measurement stopped before any text was measured (${partialFrames.map(entry => `${entry.frameUrl}: ${stoppedByDescription(entry.stoppedBy)}`).join('; ')}), so nothing was evaluated: the page is too large or slow to measure within audit_text_spacing's in-page budgets.`);
+    throw new Error(`Text spacing measurement stopped before any text was measured (${partialFrames.map(entry => `${entry.frameUrl}: ${stoppedByDescription(entry.stoppedBy)}`).join('; ')}), so nothing was evaluated: the page is too large or slow to measure within audit_text_spacing's in-page budgets.${reloadWarning}`);
   if (measured === 0 && outcomes.some(outcome => outcome.measurement?.stale))
-    throw new Error('Every text element was removed from the page while it was being measured (the page re-rendered), so nothing was evaluated. Wait for the page to settle and run audit_text_spacing again.');
+    throw new Error(`Every text element was removed from the page while it was being measured (the page re-rendered), so nothing was evaluated. Wait for the page to settle and run audit_text_spacing again.${reloadWarning}`);
   if (measured === 0)
-    throw new Error('No visible text was found to measure, so nothing was evaluated. Navigate to a page with rendered text (or wait for it to load) and run audit_text_spacing again.');
+    throw new Error(`No visible text was found to measure, so nothing was evaluated. Navigate to a page with rendered text (or wait for it to load) and run audit_text_spacing again.${reloadWarning}`);
 
   const findings = buildTextSpacingFindings(outcomes);
   const countByCheck: Record<TextSpacingCheck, number> = { 'text-clipped': 0, 'text-overlap': 0 };

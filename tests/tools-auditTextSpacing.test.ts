@@ -242,6 +242,23 @@ describe('audit_text_spacing frame budgets and timeouts', () => {
     await vi.advanceTimersByTimeAsync(0);
     await pending;
   });
+
+  it.each([
+    ['the main frame reached its discovery budget', { stoppedEarly: 'node-limit' as const, truncated: 3 }, 'Text spacing measurement stopped before any text was measured (main frame: more than 100000 elements)'],
+    ['the main frame had no text', {}, 'No visible text was found to measure'],
+  ])('keeps the reload warning when %s and a timed-out child frame was not confirmed clean', async (_label, mainResult, message) => {
+    // The no-result errors dropped releaseFailedFrames' verdict, so callers
+    // never learned the child frame might still be styled.
+    vi.useFakeTimers();
+    const setup = harness(() => new Promise(() => undefined), { ...emptyMeasurement, candidates: 3, measured: 0, ...mainResult });
+    const pending = tool.handle(setup.context, tool.schema.inputSchema.parse({}), new Response(setup.context, 'audit_text_spacing', {}));
+    const assertion = expect(pending).rejects.toThrow(message);
+    const warning = expect(pending).rejects.toThrow('The page may still carry the spacing overrides (https://child.example/): reload it.');
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
+    await warning;
+    expect(setup.events).toEqual(['child-remove']);
+  });
 });
 
 const hasBundledChromium = fs.existsSync(chromium.executablePath());

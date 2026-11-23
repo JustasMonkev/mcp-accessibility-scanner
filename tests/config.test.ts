@@ -844,13 +844,24 @@ describe('Config', () => {
         const configFile = await writeConfigFile({ browser: { cdpLaunch: { command: 'file-app' } } });
         await expect(resolveCLIConfig({ config: configFile, cdpLaunchCwd: './cli-cwd' }))
             .rejects.toThrow('browser.cdpLaunch cwd from the CLI would be ignored');
-        // Without a command anywhere, stray CLI/environment settings stay inert.
-        expect((await resolveCLIConfig({ cdpLaunchArgs: ['x'], cdpLaunchPort: 9222 })).browser.cdpLaunch).toBeUndefined();
       });
 
       it('rejects a config-file launch block without any command', async () => {
         const configFile = await writeConfigFile({ browser: { cdpLaunch: { startupTimeoutMs: 1000 } as any } });
         await expect(resolveCLIConfig({ config: configFile })).rejects.toThrow('browser.cdpLaunch in the config file needs a command');
+      });
+
+      it('rejects CLI and environment launch settings without any command instead of dropping them', async () => {
+        // Orphaned CLI/environment settings were dropped before numeric
+        // validation, so an out-of-range value started the server anyway.
+        await expect(resolveCLIConfig({ cdpLaunchStartupTimeout: -1 })).rejects.toThrow('browser.cdpLaunch in the CLI needs a command (found startupTimeoutMs)');
+        await expect(resolveCLIConfig({ cdpLaunchArgs: ['x'], cdpLaunchPort: 9222 })).rejects.toThrow('browser.cdpLaunch in the CLI needs a command (found args, port)');
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_PORT', '9222');
+        await expect(resolveCLIConfig({})).rejects.toThrow('browser.cdpLaunch in the environment needs a command (found port): set browser.cdpLaunch.command, --cdp-launch-command or PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND');
+        // A blank command is no command.
+        await expect(resolveCLIConfig({ cdpLaunchCommand: '', cdpLaunchStartupTimeout: 1000 })).rejects.toThrow('browser.cdpLaunch in the environment and the CLI needs a command (found port, startupTimeoutMs)');
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_PORT', undefined);
+        expect((await resolveCLIConfig({})).browser.cdpLaunch).toBeUndefined();
       });
     });
   });

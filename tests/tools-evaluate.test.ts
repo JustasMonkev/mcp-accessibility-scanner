@@ -253,6 +253,16 @@ describe('browser_evaluate tool', () => {
         const replayed = await new AsyncFunction('page', `return ${code.replace(/;$/, '')}`)(page);
         expect(replayed, `${params.function}\n${code}`).toEqual(expected);
       }
+
+      // Replay must not route the source through the page's eval more often
+      // than the tool does: an extra globalThis.eval was visible to page hooks.
+      const countingEval = '<script>window.evalCount = 0; window.originalEval ??= window.eval; window.eval = function (source) { window.evalCount++; return window.originalEval(source); };</script>';
+      await page.setContent(countingEval);
+      const live = new Response(mockContext, 'browser_evaluate', {});
+      await evaluateTool.handle(mockContext, { function: '() => window.evalCount' }, live);
+      expect(live.result()).toBe('1');
+      await page.setContent(countingEval);
+      expect(await new AsyncFunction('page', `return ${live.code().replace(/;$/, '')}`)(page), live.code()).toBe(1);
     } finally {
       await browser.close();
     }

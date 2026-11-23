@@ -70,6 +70,14 @@ describe('numeric CLI options', () => {
     expect(stderr).toContain(message);
   });
 
+  it.each([
+    [['--cdp-launch-port', '99999', 'list-tools'], 'browser.cdpLaunch in the CLI needs a command (found port)'],
+    [['--cdp-launch-startup-timeout', '-1', 'list-tools'], 'browser.cdpLaunch in the CLI needs a command (found startupTimeoutMs)'],
+  ])('rejects %j without a launch command instead of ignoring it', async (args, message) => {
+    const { stderr } = await collectFailure(args);
+    expect(stderr).toContain(message);
+  });
+
   it('rejects a mistyped environment startup timeout before launching the application', async () => {
     const { stderr } = await collectFailure([], { PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND: 'app', PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT: 'thirty' });
     expect(stderr).toContain('browser.cdpLaunch.startupTimeoutMs');
