@@ -149,6 +149,11 @@ it('reports a dialog opened by a variant and restores the original state once it
   expect(text(scan)).toContain('narrow layout');
   await expect(fs.access(path.join(directory, 'dialog.json'))).rejects.toThrow();
 
+  // The restore is still pending, so a page change now would be overwritten by it.
+  const resize = await withinMs(client.callTool({ name: 'browser_resize', arguments: { width: 900, height: 600 } }), 15_000, 'browser_resize');
+  expect(resize.isError).toBe(true);
+  expect(text(resize)).toContain('busy because "scan_page_matrix" requires exclusive access');
+
   const answered = await withinMs(client.callTool({ name: 'browser_handle_dialog', arguments: { accept: true } }), 15_000, 'browser_handle_dialog');
   expect(answered.isError, text(answered)).not.toBe(true);
   expect(await evaluateUntil(client, state, '1280x720 zoom=none dark=false')).toContain('1280x720 zoom=none dark=false');
@@ -158,6 +163,12 @@ it('reports a dialog opened by a variant and restores the original state once it
     reportFile: 'after-dialog.json', withRules: ['image-alt'], variants: [{ name: 'baseline' }],
   } });
   expect(again.isError, text(again)).not.toBe(true);
+
+  // Once restored, page changes are admitted and survive.
+  const resized = await client.callTool({ name: 'browser_resize', arguments: { width: 900, height: 600 } });
+  expect(resized.isError, text(resized)).not.toBe(true);
+  expect(await evaluateUntil(client, state, '900x600')).toContain('900x600 zoom=none dark=false');
+  await client.callTool({ name: 'browser_resize', arguments: { width: 1280, height: 720 } });
 });
 
 it('rejects an overlapping matrix scan from another client sharing the browser context', async () => {

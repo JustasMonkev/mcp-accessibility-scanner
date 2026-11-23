@@ -2069,6 +2069,52 @@ describe('Context', () => {
       context.beginToolCall('browser_click')();
     });
 
+    it('keeps exclusive access after the call returns until held work settles', async () => {
+      const dialogTool = { schema: { name: 'browser_handle_dialog' }, clearsModalState: 'dialog' } as any;
+      const context = new Context({
+        tools: [],
+        modalStateTools: [dialogTool],
+        config: defaultConfig,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      // A restore left waiting on a dialog must not race later page changes.
+      let finishRestore!: () => void;
+      const restore = new Promise<void>(resolve => finishRestore = resolve);
+      const endScan = context.beginToolCall('scan_page_matrix', true);
+      context.holdExclusiveUntil('scan_page_matrix', restore);
+      endScan();
+
+      expect(() => context.beginToolCall('browser_resize')).toThrow('busy because "scan_page_matrix" requires exclusive access');
+      expect(() => context.beginToolCall('scan_page_matrix', true)).toThrow('busy');
+      context.beginToolCall('browser_handle_dialog')();
+      expect(context.isRunningTool()).toBe(true);
+
+      finishRestore();
+      await restore;
+      await Promise.resolve();
+      context.beginToolCall('browser_resize')();
+      expect(context.isRunningTool()).toBe(false);
+    });
+
+    it('releases a held exclusive access when the held work fails', async () => {
+      const context = new Context({
+        tools: [],
+        config: defaultConfig,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      const failed = Promise.reject(new Error('restore failed'));
+      context.holdExclusiveUntil('scan_page_matrix', failed);
+      expect(() => context.beginToolCall('browser_click')).toThrow('busy');
+      await failed.catch(() => {});
+      await Promise.resolve();
+      context.beginToolCall('browser_click')();
+    });
+
     it('rejects an exclusive call while any call runs', () => {
       const context = new Context({
         tools: [],

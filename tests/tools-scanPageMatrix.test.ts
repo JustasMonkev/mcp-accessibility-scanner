@@ -64,7 +64,7 @@ function createMatrixHarness(outputFile: string) {
     modalStates: vi.fn(() => []),
     on: vi.fn(),
     off: vi.fn(),
-    context: { outputFile: resolveOutputFile },
+    context: { outputFile: resolveOutputFile, holdExclusiveUntil: vi.fn() },
   };
   const context = { currentTabOrDie: vi.fn(() => mockTab), config: {} };
   return { context, mockPage, response: new Response(context as any, 'scan_page_matrix', {}) };
@@ -442,6 +442,7 @@ describe('scan_page_matrix tool', () => {
       off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-matrix.json'),
+        holdExclusiveUntil: vi.fn(),
       },
     };
 
@@ -504,6 +505,7 @@ describe('scan_page_matrix tool', () => {
       off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-matrix.json'),
+        holdExclusiveUntil: vi.fn(),
       },
     };
 
@@ -706,6 +708,7 @@ describe('scan_page_matrix tool', () => {
       off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-custom.json'),
+        holdExclusiveUntil: vi.fn(),
       },
     };
 
@@ -759,6 +762,7 @@ describe('scan_page_matrix tool', () => {
       off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-metadata.json'),
+        holdExclusiveUntil: vi.fn(),
       },
     };
 
@@ -811,6 +815,7 @@ describe('scan_page_matrix tool', () => {
       off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-reload.json'),
+        holdExclusiveUntil: vi.fn(),
       },
     };
 
@@ -857,6 +862,7 @@ describe('scan_page_matrix tool', () => {
       off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-error.json'),
+        holdExclusiveUntil: vi.fn(),
       },
     };
 
@@ -908,6 +914,7 @@ describe('scan_page_matrix tool', () => {
       off: vi.fn(),
       context: {
         outputFile: vi.fn(async (name: string) => `/tmp/${name}`),
+        holdExclusiveUntil: vi.fn(),
       },
     };
 
@@ -955,6 +962,7 @@ describe('scan_page_matrix tool', () => {
       off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-progress.json'),
+        holdExclusiveUntil: vi.fn(),
       },
     };
 

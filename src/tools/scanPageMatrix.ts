@@ -437,6 +437,9 @@ const scanPageMatrix = defineTabTool({
         restored = restore;
       });
     } finally {
+      // After a dialog the restore can outlive this call; until it settles,
+      // other tools could change the page and have their changes overwritten.
+      tab.context.holdExclusiveUntil('scan_page_matrix', restored);
       void restored.catch(logUnhandledError).finally(releasePage);
     }
 

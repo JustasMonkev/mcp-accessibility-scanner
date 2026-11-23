@@ -518,6 +518,20 @@ export class Context {
     });
   }
 
+  /** Keeps a tool's exclusive access after its call returns, until work it left running settles. */
+  holdExclusiveUntil(name: string, work: Promise<unknown>): void {
+    // Registered directly: the call that owns the work is still running and
+    // would itself make an exclusive admission check fail.
+    const hold = { name, exclusive: true };
+    this._runningTools.push(hold);
+    this._scheduleIdleTimeout();
+    void work.catch(() => {}).finally(() => {
+      this._runningTools.splice(this._runningTools.indexOf(hold), 1);
+      this._lastActivityAt = Date.now();
+      this._scheduleIdleTimeout();
+    });
+  }
+
   private _answersDialog(name: string): boolean {
     return this.modalStateTools.some(tool => tool.schema.name === name && tool.clearsModalState === 'dialog');
   }
