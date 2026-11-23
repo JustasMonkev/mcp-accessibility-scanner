@@ -363,6 +363,31 @@ describe('VSCodeProxyBackend', () => {
     backend.serverClosed?.();
   });
 
+  it('rejects a browser_connect request with only unknown fields instead of disconnecting', async () => {
+    // Parsing strips unknown keys, so `{ name: 'extension' }` used to reach
+    // the empty-request branch as `{}` and disconnect the working provider
+    // while reporting success.
+    const defaults: ReturnType<typeof makeInnerBackend>[] = [];
+    const backend = new VSCodeProxyBackend(await resolveConfig({}), async () => {
+      const inner = makeInnerBackend('tool_default');
+      defaults.push(inner);
+      return wrapInProcess(inner);
+    });
+    const context = { notifyToolListChanged: vi.fn(async () => undefined) };
+    await backend.initialize(context, { name: 'vitest', version: '1.0.0' });
+
+    const result = await backend.callTool('browser_connect', { name: 'extension' });
+
+    expect(result.isError).toBe(true);
+    expect((result.content?.[0] as any).text).toContain('`name`');
+    expect(defaults).toHaveLength(1);
+    expect(defaults[0].closed).toBe(0);
+    expect(context.notifyToolListChanged).not.toHaveBeenCalled();
+    const after = await backend.callTool('tool_default', {});
+    expect((after.content?.[0] as any).text).toBe('tool_default');
+    backend.serverClosed?.();
+  });
+
   it('keeps session handles at the host across a browser_connect provider switch', async () => {
     // The switched VS Code provider is a separate server process whose
     // BrowserServerBackend builds its own registry — forwarding handle-routed

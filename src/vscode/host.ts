@@ -101,7 +101,10 @@ export class VSCodeProxyBackend implements ServerBackend {
       const parsed = contextSwitchOptions.safeParse(args ?? {});
       if (!parsed.success)
         throw new Error(`Invalid input for tool "${name}":\n${z.prettifyError(parsed.error)}`);
-      return this._callContextSwitchTool(parsed.data, requestContext);
+      // Parsing strips unknown keys; keep them so a request carrying only
+      // unknown fields is not mistaken for an empty (disconnect) request.
+      const unknownFields = Object.keys(args ?? {}).filter(key => !Object.hasOwn(contextSwitchOptions.shape, key));
+      return this._callContextSwitchTool(parsed.data, unknownFields);
     }
     return await this._withToolClient(name, args, requestContext, client => this._relay.callTool(client, name, args, requestContext));
   }
@@ -146,11 +149,18 @@ export class VSCodeProxyBackend implements ServerBackend {
     void this._sessionClient?.then(client => client.close()).catch(logUnhandledError);
   }
 
-  private async _callContextSwitchTool(params: z.infer<typeof contextSwitchOptions>, _requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
+  private async _callContextSwitchTool(params: z.infer<typeof contextSwitchOptions>, unknownFields: string[]): Promise<CallToolResult> {
     // Only an empty request disconnects. A request naming either field is a
-    // switch and needs both as non-blank strings; anything partial is an
-    // error that keeps the current provider.
+    // switch and needs both as non-blank strings; anything partial, or any
+    // other field in place of both, is an error that keeps the current
+    // provider.
     if (params.connectionString === undefined && params.lib === undefined) {
+      if (unknownFields.length) {
+        return {
+          content: [{ type: 'text', text: `### Result\nInvalid input: unknown field(s) ${unknownFields.map(field => `\`${field}\``).join(', ')}. Pass both \`connectionString\` and \`lib\` to switch providers, or omit all fields to disconnect.\n` }],
+          isError: true,
+        };
+      }
       if (this._sharedSlot)
         await this._switchSharedClient(this._sharedSlot, undefined);
       else
