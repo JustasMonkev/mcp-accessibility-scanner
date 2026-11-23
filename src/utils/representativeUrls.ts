@@ -4,7 +4,10 @@ type TreeNode = {
   children: Map<string, TreeNode>;
   terminal: number[];
   size: number;
+  // Costs are scaled by 2 ** bestDepth, the depth of the node that computed
+  // them, so they stay representable however deep the shared prefix is.
   best: ArrayLike<number>;
+  bestDepth: number;
   parts?: Part[];
   free?: Uint16Array[];
   covered?: Uint16Array[];
@@ -30,7 +33,7 @@ function compareCodeUnits(a: string, b: string): number {
 }
 
 function newNode(depth: number): TreeNode {
-  return { depth, children: new Map(), terminal: [], size: 0, best: [] };
+  return { depth, children: new Map(), terminal: [], size: 0, best: [], bestDepth: depth };
 }
 
 type Part =
@@ -65,14 +68,17 @@ function coveredCount(part: Part): number {
   return part.kind === 'singles' ? part.size : 1;
 }
 
-function partCosts(part: Part, k: number, missCost: number): Float64Array {
+// Costs relative to the parent node, where a miss costs 1. A child's costs are
+// rescaled from its own depth, two to the power of the levels between them.
+function partCosts(part: Part, k: number): Float64Array {
   const costs = new Float64Array(Math.min(k, part.size) + 1);
-  costs[0] = part.size * missCost;
+  costs[0] = part.size;
+  const scale = part.kind === 'child' ? 2 ** (part.child.depth - 1 - part.child.bestDepth) : 0;
   for (let count = 1; count < costs.length; count++) {
     if (part.kind === 'singles')
-      costs[count] = (part.size - count) * missCost;
+      costs[count] = part.size - count;
     else if (part.kind === 'child')
-      costs[count] = part.child.best[count];
+      costs[count] = part.child.best[count] * scale;
   }
   return costs;
 }
@@ -149,12 +155,12 @@ function solveNode(node: TreeNode, k: number, budget: WorkBudget) {
   if (!node.terminal.length && node.children.size === 1 && node.size > 1) {
     const [child] = node.children.values();
     node.best = child.best;
+    node.bestDepth = child.bestDepth;
     return;
   }
   const nodeParts = parts(node);
-  const missCost = 2 ** -node.depth;
   budget.spend(nodeParts.reduce((units, part) => units + Math.min(k, part.size) + 1, 0));
-  const costs = nodeParts.map(part => partCosts(part, k, missCost));
+  const costs = nodeParts.map(part => partCosts(part, k));
   const mergeWork = mergeCells(costs, k);
   budget.spend(mergeWork);
   node.parts = nodeParts;
