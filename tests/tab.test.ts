@@ -1156,6 +1156,21 @@ describe('Tab', () => {
       expect(tab.consoleMessages()).toEqual([]);
       expect(tab.omittedConsoleMessages()).toBe(0);
     });
+
+    it('keeps messages and the omitted count across navigations that are not explicit, like network requests', () => {
+      const tab = new Tab(mockContext, mockPage, onPageClose);
+      for (let index = 0; index < 201; index++)
+        mockPage.emit('console', { type: () => 'log', text: () => `Page A ${index}`, location: () => ({ url: 'a.js', lineNumber: 1 }) });
+      mockPage.emit('request', { url: () => 'https://example.com/a', isNavigationRequest: () => false });
+      // A link click or back navigation commits a new main-frame document without tab.navigate().
+      mockPage.emit('framenavigated', { parentFrame: () => null });
+      mockPage.emit('console', { type: () => 'log', text: () => 'Page B', location: () => ({ url: 'b.js', lineNumber: 1 }) });
+
+      expect(tab.consoleMessages()).toHaveLength(200);
+      expect(tab.consoleMessages().at(-1)?.text).toBe('Page B');
+      expect(tab.omittedConsoleMessages()).toBe(2);
+      expect(tab.requests().size).toBe(1);
+    });
   });
 
   describe('requests', () => {

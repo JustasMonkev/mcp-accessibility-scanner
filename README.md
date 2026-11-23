@@ -1008,7 +1008,7 @@ Sessions that stay idle expire automatically after 30 minutes; the timer is refr
 ### Information & Monitoring Tools
 
 #### `browser_console_messages`
-Returns console messages from the current page. Each tab keeps the most recent 200 messages per page; when older ones were dropped, the result starts with a line saying how many were omitted. Page snapshots likewise show at most the 200 most recent console messages since the previous snapshot, with an omitted count.
+Returns console messages since the last explicit `browser_navigate` call. Like the network request list, this includes messages from pages reached by link clicks, form submits or back navigation in the same tab. Each tab keeps the most recent 200 of these messages; when older ones were dropped, the result starts with a line saying how many were omitted. Page snapshots likewise show at most the 200 most recent console messages since the previous snapshot, with an omitted count.
 Source locations use `url:line` with one-based line numbers, both here and in page snapshot console snippets.
 Large `data:` URL payloads in console messages are truncated to their media type prefix.
 
