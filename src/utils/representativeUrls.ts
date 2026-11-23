@@ -4,10 +4,7 @@ type TreeNode = {
   children: Map<string, TreeNode>;
   terminal: number[];
   size: number;
-  // Costs are scaled by 2 ** bestDepth, the depth of the node that computed
-  // them, so they stay representable however deep the shared prefix is.
-  best: ArrayLike<number>;
-  bestDepth: number;
+  best: Costs;
   parts?: Part[];
   free?: Uint16Array[];
   covered?: Uint16Array[];
@@ -32,8 +29,40 @@ function compareCodeUnits(a: string, b: string): number {
   return a < b ? -1 : 1;
 }
 
+// A miss at depth d costs 2 ** -d. Each cost is kept as value * 2 ** -depth,
+// at the depth of its shallowest miss, so costs below a deep shared prefix
+// keep their relative sizes instead of underflowing to zero. A zero cost has
+// value 0 at depth noMiss.
+type Costs = { value: Float64Array, depth: Int32Array };
+
+const noMiss = 0x7fffffff;
+
+function newCosts(length: number): Costs {
+  return { value: new Float64Array(length), depth: new Int32Array(length).fill(noMiss) };
+}
+
+const unsolved = newCosts(0);
+
+// 2 ** -levels, for rescaling a cost to a shallower depth. Past the smallest
+// double it is 0: a nonzero value is at least 1, so the deeper cost is then
+// far below the precision of the shallower one.
+const halves = Float64Array.from({ length: 1076 }, (_, levels) => 2 ** -levels);
+
+function half(levels: number): number {
+  return levels < halves.length ? halves[levels] : 0;
+}
+
+// Whether the first cost is lower than the second, compared at the shallower depth.
+function lower(firstValue: number, firstDepth: number, secondValue: number, secondDepth: number): boolean {
+  if (firstDepth === secondDepth)
+    return firstValue < secondValue;
+  if (firstDepth < secondDepth)
+    return firstValue < secondValue * half(secondDepth - firstDepth);
+  return firstValue * half(firstDepth - secondDepth) < secondValue;
+}
+
 function newNode(depth: number): TreeNode {
-  return { depth, children: new Map(), terminal: [], size: 0, best: [], bestDepth: depth };
+  return { depth, children: new Map(), terminal: [], size: 0, best: unsolved };
 }
 
 type Part =
@@ -68,45 +97,65 @@ function coveredCount(part: Part): number {
   return part.kind === 'singles' ? part.size : 1;
 }
 
-// Costs relative to the parent node, where a miss costs 1. A child's costs are
-// rescaled from its own depth, two to the power of the levels between them.
-function partCosts(part: Part, k: number): Float64Array {
-  const costs = new Float64Array(Math.min(k, part.size) + 1);
-  costs[0] = part.size;
-  const scale = part.kind === 'child' ? 2 ** (part.child.depth - 1 - part.child.bestDepth) : 0;
-  for (let count = 1; count < costs.length; count++) {
-    if (part.kind === 'singles')
-      costs[count] = part.size - count;
-    else if (part.kind === 'child')
-      costs[count] = part.child.best[count] * scale;
+// The costs of giving each count of URLs to a part of the node at `depth`,
+// where the part's own URLs are missed when it gets none.
+function partCosts(part: Part, k: number, depth: number): Costs {
+  const costs = newCosts(Math.min(k, part.size) + 1);
+  costs.value[0] = part.size;
+  costs.depth[0] = depth;
+  for (let count = 1; count < costs.value.length; count++) {
+    if (part.kind === 'singles' && count < part.size) {
+      costs.value[count] = part.size - count;
+      costs.depth[count] = depth;
+    } else if (part.kind === 'child') {
+      costs.value[count] = part.child.best.value[count];
+      costs.depth[count] = part.child.best.depth[count];
+    }
   }
   return costs;
 }
 
-function mergePart(previous: Float64Array, costs: Float64Array, minimum: number, k: number): { row: Float64Array, choice: Uint16Array } {
-  const last = previous.length - 1;
-  const limit = Math.min(k, last + costs.length - 1);
-  const row = new Float64Array(limit + 1);
+function mergePart(previous: Costs, costs: Costs, minimum: number, k: number): { row: Costs, choice: Uint16Array } {
+  const { value: previousValues, depth: previousDepths } = previous;
+  const { value: partValues, depth: partDepths } = costs;
+  const last = previousValues.length - 1;
+  const limit = Math.min(k, last + partValues.length - 1);
+  const row = newCosts(limit + 1);
   const choice = new Uint16Array(limit + 1);
   for (let total = 0; total <= limit; total++) {
-    let best = Infinity;
+    let bestValue = Infinity;
+    let bestDepth = 0;
     let chosen = 0;
-    const end = Math.min(total, costs.length - 1);
+    const end = Math.min(total, partValues.length - 1);
     for (let count = Math.max(minimum, total - last); count <= end; count++) {
-      const value = previous[total - count] + costs[count];
-      if (value < best) {
-        best = value;
+      // Adds the two costs at the shallower of their depths.
+      let value = previousValues[total - count];
+      let depth = previousDepths[total - count];
+      const partValue = partValues[count];
+      const partDepth = partDepths[count];
+      if (depth === partDepth) {
+        value += partValue;
+      } else if (depth < partDepth) {
+        value += partValue * half(partDepth - depth);
+      } else {
+        value = partValue + value * half(depth - partDepth);
+        depth = partDepth;
+      }
+      if (lower(value, depth, bestValue, bestDepth)) {
+        bestValue = value;
+        bestDepth = depth;
         chosen = count;
       }
     }
-    row[total] = best;
+    row.value[total] = bestValue;
+    row.depth[total] = bestDepth;
     choice[total] = chosen;
   }
   return { row, choice };
 }
 
-function mergeParts(nodeParts: Part[], costs: Float64Array[], k: number, cover: boolean, choices: Uint16Array[]): Float64Array {
-  let previous: Float64Array = new Float64Array(1);
+function mergeParts(nodeParts: Part[], costs: Costs[], k: number, cover: boolean, choices: Uint16Array[]): Costs {
+  let previous = newCosts(1);
   for (let index = 0; index < nodeParts.length; index++) {
     const { row, choice } = mergePart(previous, costs[index], cover ? coveredCount(nodeParts[index]) : 0, k);
     choices.push(choice);
@@ -137,30 +186,29 @@ class WorkBudget {
 
 // The cells mergeParts fills: each part's row holds at most k + 1 totals,
 // each trying at most that part's number of counts.
-function mergeCells(costs: Float64Array[], k: number): number {
+function mergeCells(costs: Costs[], k: number): number {
   let cells = 0;
   let total = 0;
-  for (const partCost of costs) {
-    total += partCost.length - 1;
-    cells += (Math.min(k, total) + 1) * partCost.length;
+  for (const { value } of costs) {
+    total += value.length - 1;
+    cells += (Math.min(k, total) + 1) * value.length;
   }
   return cells;
 }
 
 function solveNode(node: TreeNode, k: number, budget: WorkBudget) {
   if (!node.children.size) {
-    node.best = new Float64Array(Math.min(k, node.size) + 1);
+    node.best = newCosts(Math.min(k, node.size) + 1);
     return;
   }
   if (!node.terminal.length && node.children.size === 1 && node.size > 1) {
     const [child] = node.children.values();
     node.best = child.best;
-    node.bestDepth = child.bestDepth;
     return;
   }
   const nodeParts = parts(node);
   budget.spend(nodeParts.reduce((units, part) => units + Math.min(k, part.size) + 1, 0));
-  const costs = nodeParts.map(part => partCosts(part, k));
+  const costs = nodeParts.map(part => partCosts(part, k, node.depth));
   const mergeWork = mergeCells(costs, k);
   budget.spend(mergeWork);
   node.parts = nodeParts;
@@ -174,7 +222,10 @@ function solveNode(node: TreeNode, k: number, budget: WorkBudget) {
   budget.spend(mergeWork);
   node.covered = [];
   const covered = mergeParts(nodeParts, costs, k, true, node.covered);
-  node.best = free.map((cost, count) => count >= branches ? covered[count] : cost);
+  node.best = {
+    value: free.value.map((cost, count) => count >= branches ? covered.value[count] : cost),
+    depth: free.depth.map((depth, count) => count >= branches ? covered.depth[count] : depth),
+  };
 }
 
 // Children are solved before their parent. The traversal keeps its own stack,

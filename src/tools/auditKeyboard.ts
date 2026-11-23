@@ -144,7 +144,8 @@ function isLikelySkipLink(point: FocusPoint): boolean {
 
 const MIN_TARGET_SIZE_PX = 24;
 
-// Work limit for the in-page spacing search: candidate pointer targets examined per focus stop.
+// Work limit for the in-page spacing search: candidate pointer targets and open shadow
+// roots examined per focus stop.
 const maxTargetCandidates = 2000;
 const maxFocusTextLength = 200;
 
@@ -415,19 +416,31 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
   }
 
   // Checks every candidate as it is examined and stops at the first crowding neighbour,
-  // so the outcome does not depend on DOM order. A search cut short by the work limit
-  // without finding one is inconclusive, never a pass.
+  // so the outcome does not depend on DOM order. Candidates come from the document and
+  // every open shadow root inside it, nested ones included; entering a shadow root counts
+  // against the work limit like a candidate. A search cut short by the work limit without
+  // finding a crowding neighbour is inconclusive, never a pass.
   function measureSpacing(element: Element, rect: DOMRect): { spacing: TargetSpacing; neighbors: Rect[] } {
     const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
     let examined = 0;
-    for (const candidate of document.querySelectorAll<HTMLElement>(pointerTargetSelector)) {
-      if (candidate === element)
-        continue;
-      if (++examined > maxTargetCandidates)
-        return { spacing: 'inconclusive', neighbors: [] };
-      const other = candidate.getBoundingClientRect();
-      if (other.width > 0 && other.height > 0 && crowds(center, other) && !candidate.matches(':disabled'))
-        return { spacing: 'crowded', neighbors: [{ x: other.x, y: other.y, width: other.width, height: other.height }] };
+    const roots: (Document | ShadowRoot)[] = [document];
+    for (let root = roots.pop(); root; root = roots.pop()) {
+      for (const candidate of root.querySelectorAll<HTMLElement>(pointerTargetSelector)) {
+        if (candidate === element)
+          continue;
+        if (++examined > maxTargetCandidates)
+          return { spacing: 'inconclusive', neighbors: [] };
+        const other = candidate.getBoundingClientRect();
+        if (other.width > 0 && other.height > 0 && crowds(center, other) && !candidate.matches(':disabled'))
+          return { spacing: 'crowded', neighbors: [{ x: other.x, y: other.y, width: other.width, height: other.height }] };
+      }
+      for (const host of root.querySelectorAll('*')) {
+        if (!host.shadowRoot)
+          continue;
+        if (++examined > maxTargetCandidates)
+          return { spacing: 'inconclusive', neighbors: [] };
+        roots.push(host.shadowRoot);
+      }
     }
     return { spacing: 'clear', neighbors: [] };
   }
