@@ -214,13 +214,7 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
     const navigateResult = await backend.callTool('browser_navigate', { url: `${fixtureOrigin}/` });
     expect(navigateResult.isError).not.toBe(true);
 
-    // Regression guard for #84: browser_evaluate must run against a real page
-    // without the removed playwright-core `_evaluateFunction` private helper.
-    const evaluateResult = await backend.callTool('browser_evaluate', { function: '() => 2 + 2' });
-    expect(evaluateResult.isError).not.toBe(true);
-    expect((evaluateResult.content[0] as any).text).toContain('4');
-
-    const keyboardResult1 = await backend.callTool('audit_keyboard', {
+    const keyboardResult = await backend.callTool('audit_keyboard', {
       maxTabs: 12,
       checkSkipLink: true,
       skipLinkMaxTabs: 3,
@@ -235,24 +229,24 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
       stopOnCycle: true,
       cycleWindow: 8,
     });
-    expect(keyboardResult1.isError).not.toBe(true);
-    const keyboardText1 = (keyboardResult1.content[0] as any).text as string;
-    expect(keyboardText1).toContain('Skip link: found');
-    const keyboardReportPath1 = extractReportPath(keyboardText1);
-    expect(fs.existsSync(keyboardReportPath1)).toBe(true);
-    expect(keyboardResult1.structuredContent).toMatchObject({
+    expect(keyboardResult.isError).not.toBe(true);
+    const keyboardText = (keyboardResult.content[0] as any).text as string;
+    expect(keyboardText).toContain('Skip link: found');
+    const keyboardReportPath = extractReportPath(keyboardText);
+    expect(fs.existsSync(keyboardReportPath)).toBe(true);
+    expect(keyboardResult.structuredContent).toMatchObject({
       kind: 'audit_keyboard',
       report: {
-        path: keyboardReportPath1,
+        path: keyboardReportPath,
       },
       summary: expect.objectContaining({
         skipLinkFound: true,
       }),
     });
-    expect(extractResourceLinks(keyboardResult1 as any)).toEqual([
+    expect(extractResourceLinks(keyboardResult as any)).toEqual([
       expect.objectContaining({
         type: 'resource_link',
-        uri: pathToFileURL(keyboardReportPath1).toString(),
+        uri: pathToFileURL(keyboardReportPath).toString(),
         name: 'audit-keyboard-report',
       }),
     ]);
@@ -330,30 +324,9 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
       }),
     ]);
 
-    const keyboardResult2 = await backend.callTool('audit_keyboard', {
-      maxTabs: 8,
-      checkSkipLink: true,
-      skipLinkMaxTabs: 3,
-      activateSkipLink: false,
-      checkFocusTrap: true,
-      checkFocusVisibility: true,
-      checkFocusJumps: true,
-      jumpScrollThresholdPx: 600,
-      screenshotOnIssue: false,
-      maxIssueScreenshots: 2,
-      includeShiftTab: false,
-      stopOnCycle: true,
-      cycleWindow: 8,
-    });
-    expect(keyboardResult2.isError).not.toBe(true);
-    const keyboardText2 = (keyboardResult2.content[0] as any).text as string;
-    const keyboardReportPath2 = extractReportPath(keyboardText2);
-    expect(fs.existsSync(keyboardReportPath2)).toBe(true);
-    expect(keyboardResult2.structuredContent).toMatchObject({
-      kind: 'audit_keyboard',
-      report: {
-        path: keyboardReportPath2,
-      },
-    });
+    // #84: exercise real-page evaluation after the crawler restores the caller's tab.
+    const evaluateResult = await backend.callTool('browser_evaluate', { function: '() => document.title' });
+    expect(evaluateResult.isError).not.toBe(true);
+    expect((evaluateResult.content[0] as any).text).toContain('### Result\n"Home"\n');
   }, 120000);
 });

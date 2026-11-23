@@ -10,7 +10,7 @@
 | Unreachable field stops before submit | 0/2 | 2/2 |
 | **Total** | **2/8** | **8/8** |
 
-These are actual Luna-driven MCP executions, not subagent opinions. The review-fixed build also scored **8/8** in a separate single run; the preceding 8/8 build and all earlier runs are retained in the evidence. See [Luna evidence](luna-evidence.md) and [machine-readable run evidence](luna-evidence.json). An intermediate changed build scored **7/8**: Luna first sent an out-of-range timeout, then recovered. The harness still counted that run as failed. That run is retained in [intermediate evidence](luna-interim-evidence.md); the final run was performed after the additional delayed-focus fix, not merely retried to improve the score. This small result is not a reliability estimate for the model on arbitrary tasks.
+The interim build scored **7/8**: the harness counted an out-of-range timeout as a failure even though Luna recovered. The final build included a delayed-focus fix; a separate post-review run also scored **8/8**. The [run summary](luna-evidence.md) and [per-scenario results](luna-evidence.json) include all four builds. These eight attempts per build do not estimate reliability on arbitrary tasks.
 
 ## Measured external results
 

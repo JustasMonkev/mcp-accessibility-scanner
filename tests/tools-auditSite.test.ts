@@ -970,7 +970,6 @@ describe('audit_site tool', () => {
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     const crawledUrls = report.pages.map((page: any) => page.url);
-    expect(crawledUrls).toContain('https://example.com/keep/');
     expect(crawledUrls.filter((url: string) => url === 'https://example.com/keep/')).toHaveLength(1);
     expect(crawledUrls).not.toContain('https://example.com/logout');
     expect(crawledUrls).not.toContain('https://external.example.org/path');

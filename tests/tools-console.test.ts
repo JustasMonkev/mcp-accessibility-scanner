@@ -58,10 +58,6 @@ describe('Console Tools', () => {
   describe('browser_console_messages tool', () => {
     const consoleTool = consoleTools.find(t => t.schema.name === 'browser_console_messages')!;
 
-    it('should exist', () => {
-      expect(consoleTool).toBeDefined();
-    });
-
     it('should have correct schema', () => {
       expect(consoleTool.schema.title).toBe('Get console messages');
       expect(consoleTool.schema.type).toBe('readOnly');

@@ -1246,10 +1246,6 @@ are exercised by `tests/extension-protocol.test.ts` and `tests/vscode-host*.test
 using simulated providers. Live editor and extension sessions require their
 respective host applications.
 
-Tests use Node or Playwright rather than `happy-dom`, and Chrome protocol types are
-defined locally. See the [dependency review](docs/dependency-review-2026-10.md) for
-the removal rationale and validation results.
-
 ### Playwright upgrade gate
 
 The Linux `test` and `webkit-regressions` CI jobs use the official

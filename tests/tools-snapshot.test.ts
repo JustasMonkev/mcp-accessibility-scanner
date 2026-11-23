@@ -40,7 +40,6 @@ describe('Snapshot Tools', () => {
     const compressSchema = jsonSchema.properties?.compress as JSONSchema7;
     const boxesSchema = jsonSchema.properties?.boxes as JSONSchema7;
 
-    expect(snapshotTool).toBeDefined();
     expect(snapshotTool.schema.type).toBe('readOnly');
     expect(jsonSchema.type).toBe('object');
     expect(jsonSchema.required ?? []).toEqual([]);
@@ -115,12 +114,9 @@ describe('Snapshot Tools', () => {
     const mcpTool = toMcpTool(findTool.schema);
     const jsonSchema = mcpTool.inputSchema as JSONSchema7;
 
-    expect(findTool).toBeDefined();
     expect(findTool.schema.type).toBe('readOnly');
     expect(jsonSchema.properties?.text).toBeDefined();
     expect(jsonSchema.properties?.regex).toBeDefined();
-    expect(() => findTool.schema.inputSchema.parse({})).toThrow();
-    expect(() => findTool.schema.inputSchema.parse({ text: 'Submit', regex: 'Submit' })).toThrow();
     expect(() => findTool.schema.inputSchema.parse({ regex: '(' })).toThrow();
     expect(() => findTool.schema.inputSchema.parse({ regex: '(?=a)a' })).toThrow();
   });

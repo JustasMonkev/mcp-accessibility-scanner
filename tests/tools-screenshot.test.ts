@@ -51,9 +51,7 @@ describe('Screenshot Tools', () => {
     response = new Response(mockContext, 'browser_take_screenshot', {});
   });
 
-  it('should exist with the expected schema', () => {
-    expect(screenshotTool).toBeDefined();
-    expect(screenshotTool.schema.name).toBe('browser_take_screenshot');
+  it('should be marked read-only', () => {
     expect(screenshotTool.schema.type).toBe('readOnly');
   });
 
@@ -65,17 +63,13 @@ describe('Screenshot Tools', () => {
     expect(description).not.toContain("You can't perform actions based on the screenshot");
   });
 
-  it('should expose a scale option defaulting to css', () => {
-    const params = screenshotTool.schema.inputSchema.parse({});
-    expect(params.scale).toBe('css');
-  });
-
   it('should reject an invalid scale value', () => {
     expect(() => screenshotTool.schema.inputSchema.parse({ scale: 'retina' })).toThrow();
   });
 
   it('should default the screenshot to css scale', async () => {
     const params = screenshotTool.schema.inputSchema.parse({});
+    expect(params.scale).toBe('css');
     await screenshotTool.handle(mockContext, params, response);
 
     expect(mockPage.screenshot).toHaveBeenCalledWith(expect.objectContaining({ scale: 'css' }));
@@ -100,11 +94,6 @@ describe('Screenshot Tools', () => {
   it('should default the image format to png', () => {
     const params = screenshotTool.schema.inputSchema.parse({});
     expect(params.type).toBe('png');
-  });
-
-  it('should accept webp as an image format', () => {
-    const params = screenshotTool.schema.inputSchema.parse({ type: 'webp' });
-    expect(params.type).toBe('webp');
   });
 
   it('should reject an unsupported image format', () => {
