@@ -227,6 +227,21 @@ describe('selectRepresentativeUrls', () => {
     expect(selectWithStatus([...urls, 'https://example.com/other'], 2)).toEqual({ urls: [`https://example.com/${prefix}/popular/1`, 'https://example.com/other'], complete: true });
   });
 
+  it('compares two sections below equally deep shared prefixes at any depth', () => {
+    for (const length of [10, 1100]) {
+      const prefix = Array.from({ length }, () => 's').join('/');
+      const urls = [
+        ...['x/1', 'y/1'].map(suffix => `https://example.com/a/${prefix}/${suffix}`),
+        ...['x/1', 'x/2', 'y/1', 'y/2', 'y/3'].map(suffix => `https://example.com/b/${prefix}/${suffix}`),
+      ];
+      // The third page covers two more URLs in section b, one more in section a.
+      expect(selectWithStatus(urls, 3), `${length} segments`).toEqual({
+        urls: [`https://example.com/a/${prefix}/x/1`, `https://example.com/b/${prefix}/x/1`, `https://example.com/b/${prefix}/y/1`],
+        complete: true,
+      });
+    }
+  });
+
   it('falls back to listed order and reports an incomplete selection past its work budget', () => {
     const urls = Array.from({ length: 50 }, (_, index) => `https://example.com/section-${index % 5}/page-${index}`);
     expect(selectWithStatus(urls, 5, 100)).toEqual({ urls: urls.slice(0, 5), complete: false });
