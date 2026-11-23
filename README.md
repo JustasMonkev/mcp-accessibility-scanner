@@ -258,7 +258,7 @@ Here's the Claude Desktop configuration:
 
 ### Advanced Configuration
 
-You can pass a configuration file to customize Playwright behavior:
+Set `PLAYWRIGHT_MCP_CONFIG` or pass `--config <path>` to load a JSON configuration file. If both are set, `--config` selects the file:
 
 ```json
 {

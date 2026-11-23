@@ -121,8 +121,8 @@ export async function resolveConfig(config: Config): Promise<FullConfig> {
 }
 
 export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConfig> {
-  const configInFile = await loadConfig(cliOptions.config);
   const envOptions = cliOptionsFromEnv();
+  const configInFile = await loadConfig(cliOptions.config ?? envOptions.config);
   const device = cliOptions.device || envOptions.device;
   if (device && !Object.prototype.hasOwnProperty.call(devices, device))
     throw new Error(`Unknown device "${device}"`);
