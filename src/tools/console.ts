@@ -23,7 +23,7 @@ const console = defineTabTool({
   schema: {
     name: 'browser_console_messages',
     title: 'Get console messages',
-    description: 'Returns the most recent console messages from the current page, with a count of any omitted ones',
+    description: 'Returns the most recent 200 console messages since the last explicit navigation, including messages from pages reached by link clicks or back navigation, with a count of any omitted ones',
     inputSchema: z.object({}),
     type: 'readOnly',
   },

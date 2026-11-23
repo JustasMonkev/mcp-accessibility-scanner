@@ -67,6 +67,10 @@ function frameLabel(frame: Frame): string | null {
   return truncateDataUrls(frame.url()) || 'about:blank';
 }
 
+function stoppedByDescription(stoppedBy: NonNullable<TextSpacingFrameMeasurement['stoppedEarly']>): string {
+  return stoppedBy === 'time-limit' ? 'in-page time budget reached' : `more than ${maxDiscoveryNodes} elements`;
+}
+
 function errorMessage(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).split('\n')[0];
 }
@@ -249,6 +253,11 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
     throw new Error(`Text spacing could not be measured in the main frame (${main?.error ?? 'frame not found'}); nothing was evaluated.${cleanupFailures.length ? ' The page may still carry the spacing overrides: reload it.' : ''}`);
 
   const measured = outcomes.reduce((sum, outcome) => sum + (outcome.measurement?.measured ?? 0), 0);
+  const partialFrames = outcomes.flatMap(outcome => outcome.measurement?.stoppedEarly
+    ? [{ frameUrl: outcome.frameUrl ?? 'main frame', stoppedBy: outcome.measurement.stoppedEarly }]
+    : []);
+  if (measured === 0 && partialFrames.length)
+    throw new Error(`Text spacing measurement stopped before any text was measured (${partialFrames.map(entry => `${entry.frameUrl}: ${stoppedByDescription(entry.stoppedBy)}`).join('; ')}), so nothing was evaluated: the page is too large or slow to measure within audit_text_spacing's in-page budgets.`);
   if (measured === 0 && outcomes.some(outcome => outcome.measurement?.stale))
     throw new Error('Every text element was removed from the page while it was being measured (the page re-rendered), so nothing was evaluated. Wait for the page to settle and run audit_text_spacing again.');
   if (measured === 0)
@@ -272,9 +281,6 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
     overlapLinesTruncated: outcomes.reduce((sum, outcome) => sum + (outcome.measurement?.overlapLinesTruncated ?? 0), 0),
     paragraphsTruncated: outcomes.reduce((sum, outcome) => sum + (outcome.measurement?.paragraphsTruncated ?? 0), 0),
   };
-  const partialFrames = outcomes.flatMap(outcome => outcome.measurement?.stoppedEarly
-    ? [{ frameUrl: outcome.frameUrl ?? 'main frame', stoppedBy: outcome.measurement.stoppedEarly }]
-    : []);
 
   const { path: screenshotPath, error: screenshotError } = params.screenshot
     ? await captureWithOverrides(tab, outcomes, layerName, cleanupFailures)
@@ -339,7 +345,7 @@ async function runTextSpacingAudit(tab: Tab, params: z.output<typeof auditTextSp
   response.addResult([
     `Text spacing overrides (WCAG 1.4.12): line-height ${textSpacingOverrides.lineHeight}, letter-spacing ${textSpacingOverrides.letterSpacingEm}em, word-spacing ${textSpacingOverrides.wordSpacingEm}em, paragraph spacing ${textSpacingOverrides.paragraphSpacingEm}em`,
     `Text elements measured: ${totals.measured}${totals.truncated ? ` (truncated: ${totals.truncated} more visible text elements were not measured${partialFrames.length ? '' : '; raise maxElements'})` : ''}`,
-    ...(partialFrames.length ? [`WARNING: measurement stopped early in ${partialFrames.length} frame(s), so coverage is partial and findings cover only the elements measured:`, ...partialFrames.map(entry => `- ${entry.frameUrl}: ${entry.stoppedBy === 'time-limit' ? 'in-page time budget reached' : `more than ${maxDiscoveryNodes} elements`}`)] : []),
+    ...(partialFrames.length ? [`WARNING: measurement stopped early in ${partialFrames.length} frame(s), so coverage is partial and findings cover only the elements measured:`, ...partialFrames.map(entry => `- ${entry.frameUrl}: ${stoppedByDescription(entry.stoppedBy)}`)] : []),
     ...(totals.paragraphsTruncated ? [`WARNING: paragraph spacing was not verified on ${totals.paragraphsTruncated} paragraph(s) past maxElements.`] : []),
     ...(totals.overlapLinesTruncated ? [`WARNING: ${totals.overlapLinesTruncated} element(s) have more than ${maxOverlapLines} text lines; overlap was checked on their first ${maxOverlapLines} lines only (clipping was checked on every line).`] : []),
     ...(totals.stale ? [`WARNING: ${totals.stale} element(s) were removed from the page while it was being measured and were not evaluated; re-run once the page is stable.`] : []),

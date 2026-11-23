@@ -233,6 +233,15 @@ describe('audit_text_spacing frame budgets and timeouts', () => {
     const report = JSON.parse(setup.written.find(entry => entry.file.endsWith('.json'))!.data);
     expect(report.frames.partial).toEqual([{ frameUrl: 'main frame', stoppedBy: 'time-limit' }]);
   });
+
+  it('reports the time budget instead of an empty page when it ran out before any text was measured', async () => {
+    vi.useFakeTimers();
+    const unmeasured = { ...emptyMeasurement, candidates: 3, measured: 0, truncated: 3 };
+    const setup = harness(async () => unmeasured, { ...unmeasured, stoppedEarly: 'time-limit' });
+    const pending = expect(tool.handle(setup.context, tool.schema.inputSchema.parse({}), new Response(setup.context, 'audit_text_spacing', {}))).rejects.toThrow('Text spacing measurement stopped before any text was measured (main frame: in-page time budget reached), so nothing was evaluated');
+    await vi.advanceTimersByTimeAsync(0);
+    await pending;
+  });
 });
 
 const hasBundledChromium = fs.existsSync(chromium.executablePath());
@@ -260,8 +269,13 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
   it('stops discovery at the node budget and reports partial coverage', async () => {
     const result = await measure(Array.from({ length: 20 }, (_, index) => `<p>Paragraph ${index}</p>`).join(''), 500, { maxNodes: 5 });
     expect(result.stoppedEarly).toBe('node-limit');
-    // html and body use two of the five visits, so three paragraphs are found before discovery ends.
-    expect(result.measured).toBe(3);
+    // html, head and body use three of the five visits, so two paragraphs are found before discovery ends.
+    expect(result.measured).toBe(2);
+  });
+
+  it('counts skipped elements against the node budget and stops traversing them', async () => {
+    const result = await measure(`${'<script></script>'.repeat(20)}<p>After the scripts</p>`, 500, { maxNodes: 10 });
+    expect(result).toMatchObject({ stoppedEarly: 'node-limit', candidates: 0, measured: 0 });
   });
 
   it('stops at the in-page time budget, compares nothing unmeasured, and still removes the overrides', async () => {
@@ -543,6 +557,8 @@ describe.skipIf(!hasBundledChromium)('audit_text_spacing tool end-to-end', () =>
           const url = new URL(route.request().url());
           if (url.origin === fixtureOrigin && url.pathname === '/')
             return route.fulfill({ contentType: 'text/html', body: pageHtml });
+          if (url.origin === fixtureOrigin && url.pathname === '/huge')
+            return route.fulfill({ contentType: 'text/html', body: `<!doctype html><body>${'<span></span>'.repeat(100_001)}<p>Visible text after the budget</p></body>` });
           if (url.origin === fixtureOrigin && url.pathname === '/blank')
             return route.fulfill({ contentType: 'text/html', body: '<!doctype html><body><img alt="" src="data:,"></body>' });
           if (url.origin === 'http://frame.local')
@@ -599,6 +615,16 @@ describe.skipIf(!hasBundledChromium)('audit_text_spacing tool end-to-end', () =>
     const result = await backend.callTool('audit_text_spacing', {});
     expect(result.isError).toBe(true);
     expect((result.content[0] as any).text).toContain('No visible text was found to measure');
+  });
+
+  it('reports the node budget instead of an empty page when it ran out before any text was found', async () => {
+    const { backend } = await startBackend();
+    await backend.callTool('browser_navigate', { url: `${fixtureOrigin}/huge` });
+    const result = await backend.callTool('audit_text_spacing', {});
+    expect(result.isError).toBe(true);
+    const text = (result.content[0] as any).text as string;
+    expect(text).toContain('Text spacing measurement stopped before any text was measured (main frame: more than 100000 elements), so nothing was evaluated');
+    expect(text).not.toContain('No visible text was found');
   });
 
   it('rejects non-integer and out-of-range arguments', async () => {

@@ -66,6 +66,7 @@ describe('Console Tools', () => {
     it('should have correct schema', () => {
       expect(consoleTool.schema.title).toBe('Get console messages');
       expect(consoleTool.schema.type).toBe('readOnly');
+      expect(consoleTool.schema.description).toContain('since the last explicit navigation');
     });
 
     it('should retrieve all console messages', async () => {

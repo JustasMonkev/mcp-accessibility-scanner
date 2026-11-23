@@ -124,17 +124,24 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
   const collect = (root: Document | ShadowRoot) => {
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
       acceptNode: node => {
+        // Every element the walker examines counts against the budgets, rejected ones included,
+        // so a long run of skipped elements cannot traverse past them unbounded.
+        if (!stoppedEarly) {
+          if (++visitedNodes > maxNodes)
+            stoppedEarly = 'node-limit';
+          else if (performance.now() > deadline)
+            stoppedEarly = 'time-limit';
+        }
+        // Once a budget is spent, hand the node back so the loop below ends the traversal.
+        if (stoppedEarly)
+          return NodeFilter.FILTER_ACCEPT;
         const element = node as Element;
         if (element.namespaceURI !== XHTML || skippedTags.has(element.tagName))
           return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
       },
     });
-    for (let node = walker.nextNode(); node && !stoppedEarly; node = walker.nextNode()) {
-      if (++visitedNodes > maxNodes)
-        stoppedEarly = 'node-limit';
-      else if (performance.now() > deadline)
-        stoppedEarly = 'time-limit';
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       if (stoppedEarly)
         return;
       const element = node as HTMLElement;

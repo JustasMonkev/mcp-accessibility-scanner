@@ -58,7 +58,8 @@ const defaultActionTimeoutMs = 5000;
 const defaultNavigationTimeoutMs = 60000;
 const fallbackOperationTimeoutMs = 5000;
 // Requests kept from earlier explicit navigations, requests kept for the
-// current page, and console messages kept per page and between snapshots.
+// current page, and console messages kept since the last explicit navigation
+// and between snapshots.
 // The oldest entries are dropped first and reported as omitted.
 const maxRetainedRequests = 200;
 const maxCurrentPageRequests = 200;
@@ -356,7 +357,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this._consoleMessages;
   }
 
-  /** Console messages from the current page dropped from `consoleMessages()` to keep it bounded. */
+  /** Console messages since the last explicit navigation dropped from `consoleMessages()` to keep it bounded. */
   omittedConsoleMessages(): number {
     return this._omittedConsoleMessages;
   }

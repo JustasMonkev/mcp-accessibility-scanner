@@ -212,6 +212,21 @@ describe('selectRepresentativeUrls', () => {
     expect(selectRepresentativeUrls([deep, 'https://example.com/x', 'https://example.com/y'], 2)).toEqual([deep, 'https://example.com/x']);
   });
 
+  it('ranks branches below a 20,000-segment shared prefix as it does below a short one', () => {
+    const suffixes = ['rare', 'popular/1', 'popular/2', 'popular/3'];
+    const shallow = suffixes.map(suffix => `https://example.com/docs/${suffix}`);
+    expect(selectWithStatus(shallow, 1)).toEqual({ urls: ['https://example.com/docs/popular/1'], complete: true });
+    const prefix = Array.from({ length: 20000 }, (_, index) => `s${index}`).join('/');
+    const deep = suffixes.map(suffix => `https://example.com/${prefix}/${suffix}`);
+    expect(selectWithStatus(deep, 1)).toEqual({ urls: [`https://example.com/${prefix}/popular/1`], complete: true });
+  });
+
+  it('ranks branches below a 20,000-segment path that splits off a short sibling', () => {
+    const prefix = Array.from({ length: 20000 }, (_, index) => `s${index}`).join('/');
+    const urls = ['rare', 'popular/1', 'popular/2', 'popular/3'].map(suffix => `https://example.com/${prefix}/${suffix}`);
+    expect(selectWithStatus([...urls, 'https://example.com/other'], 2)).toEqual({ urls: [`https://example.com/${prefix}/popular/1`, 'https://example.com/other'], complete: true });
+  });
+
   it('falls back to listed order and reports an incomplete selection past its work budget', () => {
     const urls = Array.from({ length: 50 }, (_, index) => `https://example.com/section-${index % 5}/page-${index}`);
     expect(selectWithStatus(urls, 5, 100)).toEqual({ urls: urls.slice(0, 5), complete: false });

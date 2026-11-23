@@ -106,7 +106,9 @@ export function fixtures(modules, { tab, endpoint, output, importMetadata }) {
     tree.size++;
     tree.children.set(key, child);
   }
-  r.solve(tree, 3);
+  // Builds before the work budget take no third argument and ignore it.
+  const unlimited = () => r.WorkBudget ? new r.WorkBudget(Infinity) : undefined;
+  r.solve(tree, 3, unlimited());
   const parts = r.parts(tree);
   cases('representativeUrls', { templateSegments: [urls[0]], newNode: [1], parts: [tree], branchCount: [tree],
     compareCodeUnits: ['docs', 'help'], coveredCount: [parts[1]], partCost: [parts[0], 1, 1], partCosts: [parts[0], 3, 1],
@@ -122,8 +124,16 @@ export function fixtures(modules, { tab, endpoint, output, importMetadata }) {
       r.collect(t, 3, out);
     return out;
   }
-  add('representativeUrls', 'solve', t => r.solve(t, 3), { prepare: () => structuredClone(tree), project: (_, t) => collect(t), limit: 32 });
+  add('representativeUrls', 'solve', t => r.solve(t, 3, unlimited()), { prepare: () => structuredClone(tree), project: (_, t) => collect(t), limit: 32 });
   add('representativeUrls', 'collect', () => collect(tree));
+  if (r.WorkBudget) {
+    const costs = parts.map(part => r.partCosts(part, 3, 1));
+    cases('representativeUrls', { mergeCells: [costs, 3], buildTree: [urls, unlimited()] });
+    add('representativeUrls', 'WorkBudget.constructor', () => new r.WorkBudget(10), { project: budget => budget._remaining });
+    add('representativeUrls', 'WorkBudget.spend', budget => budget.spend(1), { prepare: () => new r.WorkBudget(10), project: (_, budget) => budget._remaining });
+    add('representativeUrls', 'WorkBudgetExceeded', () => new r.WorkBudgetExceeded(), { project: error => error instanceof Error });
+    add('representativeUrls', 'solveNode', t => r.solveNode(t, 3, unlimited()), { prepare: () => structuredClone(tree), project: (_, t) => Array.from(t.best) });
+  }
 
   const redactor = modules.urlRedaction.createUrlRedactor(['token']);
   const result = { content: [{ type: 'text', text: '?token=secret' }], structuredContent: { link: '/a?token=secret' } };
