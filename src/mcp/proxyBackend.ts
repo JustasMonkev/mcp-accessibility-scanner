@@ -47,6 +47,7 @@ export class ProxyBackend implements ServerBackend {
   private _backendContext: ServerBackendContext | undefined;
   private _sharedSelection: SharedProxySelection | undefined;
   private _ownedSlot = new SharedClientSlot();
+  private _transition: Promise<unknown> = Promise.resolve();
   private _relay = new ToolRelay(client => {
     if (this._ownsCurrentClient && this._currentClient === client)
       return this._backendContext?.notifyToolListChanged();
@@ -118,7 +119,18 @@ export class ProxyBackend implements ServerBackend {
     }
   }
 
-  private async _switchSharedClient({ slot, providers }: SharedProxySelection, name: string): Promise<void> {
+  // A shared switch spans two slots: the process-wide one and this backend's
+  // owned one. The whole transition (shared publication, owned clear, owned
+  // publication) runs as one step, one switch at a time, so an owned
+  // replacement still connecting for an earlier switch cannot publish after a
+  // later shared publication and then be closed by its clear.
+  private async _switchSharedClient(selection: SharedProxySelection, name: string): Promise<void> {
+    const result = this._transition.then(() => this._applySharedSwitch(selection, name));
+    this._transition = result.catch(() => {});
+    await result;
+  }
+
+  private async _applySharedSwitch({ slot, providers }: SharedProxySelection, name: string): Promise<void> {
     const provider = providers.find(factory => factory.name === name);
     if (!provider)
       throw new Error('Unknown connection method: ' + name);

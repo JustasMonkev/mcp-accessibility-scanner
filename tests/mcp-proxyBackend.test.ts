@@ -503,6 +503,73 @@ describe('ProxyBackend', () => {
       expect(alternates[0].closed).toBe(1);
     });
 
+    it('applies an alternate switch that overlaps a still-connecting default switch without stranding a closed client', async () => {
+      // The shared publication used to set the current client and then queue
+      // the owned-slot clear behind the owned default replacement still
+      // connecting; that replacement published itself, and the queued clear
+      // then closed it, leaving the backend pointed at a closed client.
+      const alternates: ReturnType<typeof makeInnerBackend>[] = [];
+      const defaults: ReturnType<typeof makeInnerBackend>[] = [];
+      let gate: Promise<void> | undefined;
+      const makeProviders = () => [
+        {
+          name: 'default',
+          description: 'd',
+          connect: async () => {
+            const inner = makeInnerBackend('tool_default');
+            defaults.push(inner);
+            const transport = await wrapInProcess(inner);
+            const pending = gate;
+            if (pending) {
+              const start = transport.start.bind(transport);
+              transport.start = async () => {
+                await pending;
+                await start();
+              };
+            }
+            return transport;
+          },
+        },
+        {
+          name: 'alternate',
+          description: 'a',
+          connect: async () => {
+            const inner = makeInnerBackend('tool_alternate');
+            alternates.push(inner);
+            return wrapInProcess(inner);
+          },
+        },
+      ];
+      const shared: SharedProxySelection = { slot: new SharedClientSlot(), providers: makeProviders() };
+      const backend = new ProxyBackend(makeProviders(), shared);
+      await backend.initialize({ notifyToolListChanged: vi.fn(async () => undefined) }, { name: 'vitest', version: '1.0.0' });
+      expect(defaults).toHaveLength(1);
+
+      let releaseDefault!: () => void;
+      gate = new Promise<void>(resolve => { releaseDefault = resolve; });
+      const toDefault = backend.callTool('browser_connect', { name: 'default' });
+      await vi.waitFor(() => expect(defaults).toHaveLength(2));
+      gate = undefined;
+      const toAlternate = backend.callTool('browser_connect', { name: 'alternate' });
+      // Let the alternate switch get as far as it can before the default
+      // handshake completes.
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      releaseDefault();
+      expect((await toDefault).isError).not.toBe(true);
+      expect((await toAlternate).isError).not.toBe(true);
+
+      // The later switch wins, and the backend serves from a live client.
+      const result = await backend.callTool('tool_alternate', {});
+      expect(result.isError).not.toBe(true);
+      expect((result.content?.[0] as any).text).toBe('tool_alternate');
+      expect(alternates).toHaveLength(1);
+      expect(alternates[0].closed).toBe(0);
+      await vi.waitFor(() => expect(defaults.map(inner => inner.closed)).toEqual([1, 1]));
+      backend.serverClosed?.();
+      await shared.slot.dispose();
+    });
+
     it('keeps the previous shared selection when connecting the new provider fails', async () => {
       const { alternates, backendContext, clientVersion, shared, makeRequestBackend } = makeSharedSetup();
 
