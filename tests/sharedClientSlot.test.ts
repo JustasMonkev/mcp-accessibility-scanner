@@ -65,4 +65,46 @@ describe('SharedClientSlot', () => {
     expect(outgoing.closed).toBe(true);
     expect(outgoing.closeCalls).toBe(1);
   });
+
+  it('refuses to connect or publish a replacement once disposed', async () => {
+    const slot = new SharedClientSlot();
+    const current = { closeCalls: 0, close: async () => { current.closeCalls++; } };
+    await slot.replace(async () => current as unknown as Client);
+    let connects = 0;
+
+    const disposing = slot.dispose();
+    const queued = slot.replace(async () => {
+      connects++;
+      return { close: async () => {} } as unknown as Client;
+    });
+    await disposing;
+
+    await expect(queued).rejects.toThrow('disposed');
+    expect(connects).toBe(0);
+    await expect(slot.replace(undefined)).resolves.toBeUndefined();
+    expect(slot.acquire()).toBeUndefined();
+    expect(current.closeCalls).toBe(1);
+  });
+
+  it('closes a candidate that finishes connecting after dispose() instead of publishing it', async () => {
+    const slot = new SharedClientSlot();
+    const candidate = { closeCalls: 0, close: async () => { candidate.closeCalls++; } };
+    let finishConnect!: () => void;
+    const connected = new Promise<void>(resolve => { finishConnect = resolve; });
+    let published = false;
+
+    const replacing = slot.replace(async () => {
+      await connected;
+      return candidate as unknown as Client;
+    }, { publish: () => { published = true; } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const disposing = slot.dispose();
+    finishConnect();
+
+    await expect(replacing).rejects.toThrow('disposed');
+    await disposing;
+    expect(published).toBe(false);
+    expect(candidate.closeCalls).toBe(1);
+    expect(slot.acquire()).toBeUndefined();
+  });
 });

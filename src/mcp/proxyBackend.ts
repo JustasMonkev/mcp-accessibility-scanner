@@ -68,7 +68,7 @@ export class ProxyBackend implements ServerBackend {
       this._ownsCurrentClient = false;
       return;
     }
-    await this._setCurrentClient(this._mcpProviders[0], false);
+    await this._setCurrentClient(() => this._connectClient(this._mcpProviders[0]), false);
   }
 
   async listTools(requestContext?: Partial<Pick<CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]> {
@@ -128,7 +128,7 @@ export class ProxyBackend implements ServerBackend {
       if (this._sharedSelection)
         await this._switchSharedClient(this._sharedSelection, factory.name);
       else
-        await this._setCurrentClient(factory, true);
+        await this._setCurrentClient(() => this._connectClient(factory), true);
       return {
         content: [{ type: 'text', text: '### Result\nSuccessfully changed connection method.\n' }],
       };
@@ -174,7 +174,7 @@ export class ProxyBackend implements ServerBackend {
       this._ownsCurrentClient = false;
       await this._ownedSlot.replace(undefined);
     } else {
-      await this._setCurrentClient(this._mcpProviders[0], false);
+      await this._setCurrentClient(() => this._connectClient(this._mcpProviders[0]), false);
     }
     if (previousShared)
       await slot.release(previousShared);
@@ -200,9 +200,11 @@ export class ProxyBackend implements ServerBackend {
 
   // The replacement is connected before it is published, and the client it
   // replaces is closed only afterwards: a failed handshake keeps the working
-  // client, and overlapping switches apply in call order.
-  private async _setCurrentClient(factory: MCPProvider, notifyOnChange: boolean) {
-    await this._ownedSlot.replace(() => this._connectClient(factory), {
+  // client, and overlapping switches apply in call order. Once serverClosed()
+  // has disposed the owned slot, a replacement still queued is not connected,
+  // and one that finishes connecting afterwards is closed, not published.
+  private async _setCurrentClient(connect: () => Promise<Client>, notifyOnChange: boolean) {
+    await this._ownedSlot.replace(connect, {
       lease: false,
       publish: client => {
         this._currentClient = client;

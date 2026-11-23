@@ -261,6 +261,26 @@ describe('ProxyBackend', () => {
       expect(defaultInner.closed).toBe(1);
       backend.serverClosed?.();
     });
+
+    it('does not connect a replacement once the connection closes', async () => {
+      const alternates: ReturnType<typeof makeInnerBackend>[] = [];
+      const { backend, defaultInner } = await makeBackend({
+        alternate: async () => {
+          const inner = makeInnerBackend('tool_alternate');
+          alternates.push(inner);
+          return wrapInProcess(inner);
+        },
+      });
+
+      const switching = backend.callTool('browser_connect', { name: 'alternate' });
+      backend.serverClosed?.();
+
+      const result = await switching;
+      expect(result.isError).toBe(true);
+      expect((result.content?.[0] as any).text).toContain('disposed before the replacement could be published');
+      expect(alternates).toHaveLength(0);
+      await vi.waitFor(() => expect(defaultInner.closed).toBe(1));
+    });
   });
 
   it('neither lists tools nor notifies while connecting the first provider', async () => {

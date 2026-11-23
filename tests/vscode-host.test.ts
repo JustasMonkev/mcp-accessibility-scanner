@@ -229,6 +229,27 @@ describe('VSCodeProxyBackend', () => {
       expect(defaultInner.closed).toBe(1);
       backend.serverClosed?.();
     });
+
+    it('neither creates nor publishes a replacement once the connection closes', async () => {
+      // The switch used to create the transport before queueing behind the
+      // owned slot, so serverClosed() disposed the slot first and the
+      // replacement was then connected and published into it: the switch
+      // reported success and the new child outlived the connection.
+      const { backend, defaultInner } = await makeBackend();
+      const children: ReturnType<typeof makeInnerBackend>[] = [];
+      vi.spyOn(backend as any, '_createSwitchTransport').mockImplementation(async () => {
+        const inner = makeInnerBackend('tool_child');
+        children.push(inner);
+        return wrapInProcess(inner);
+      });
+
+      const switching = backend.callTool('browser_connect', connectArgs);
+      backend.serverClosed?.();
+
+      await expect(switching).rejects.toThrow('disposed before the replacement could be published');
+      expect(children).toHaveLength(0);
+      await vi.waitFor(() => expect(defaultInner.closed).toBe(1));
+    });
   });
 
   it('serializes the resolved fallback output dir into the spawned provider config', async () => {
@@ -240,12 +261,16 @@ describe('VSCodeProxyBackend', () => {
     const parentFile = await outputFile(config, 'parent.txt');
 
     const backend = new VSCodeProxyBackend(config, vi.fn(async () => ({ id: 'default-transport' } as any)));
-    const setCurrentClient = vi.spyOn(backend as any, '_setCurrentClient').mockResolvedValue(undefined);
+    const createSwitchTransport = vi.spyOn(backend as any, '_createSwitchTransport');
+    vi.spyOn(backend as any, '_connectClient').mockResolvedValue(undefined);
+    vi.spyOn(backend as any, '_setCurrentClient').mockImplementation(async (connect: any) => {
+      await connect();
+    });
 
     await backend.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' });
 
-    expect(setCurrentClient).toHaveBeenCalledTimes(1);
-    const transport = setCurrentClient.mock.calls[0][0] as any;
+    expect(createSwitchTransport).toHaveBeenCalledTimes(1);
+    const transport = await createSwitchTransport.mock.results[0].value;
     const childConfig = JSON.parse(transport._serverParams.args[1]);
     expect(childConfig.outputDir).toBe(path.dirname(parentFile));
     expect(childConfig.server?.authToken).toBeUndefined();
