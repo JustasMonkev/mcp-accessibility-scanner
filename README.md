@@ -190,6 +190,7 @@ Interactive mode. Type "<tool-name> <json>" to call a tool. Ctrl+D to exit.
 ```
 
 Each line is `<tool-name> <json-arguments>`. Omit the JSON to pass `{}`.
+When input ends (Ctrl+D or the end of piped input), calls still running finish and are printed and saved before shutdown begins. Ctrl+C, SIGINT, SIGTERM and SIGHUP start shutdown right away without waiting for running calls. Either way, closing the browser and saving the session are bounded by a 15-second shutdown limit that starts only when shutdown begins.
 Global browser connection flags still apply here, for example `npx --allow-scripts=re2 mcp-accessibility-scanner --headless interactive`.
 Use `--mobile` or `PLAYWRIGHT_MCP_MOBILE=1` to emulate a generic mobile device (`Pixel 10` for Chromium, `iPhone 17` for WebKit). It cannot be combined with `--device`, CDP attach/launch modes, remote browser endpoints, or `--extension`.
 Device names supplied through `--device` or `PLAYWRIGHT_MCP_DEVICE` must match a Playwright device descriptor; unknown names fail at startup. An explicit `--device` overrides `PLAYWRIGHT_MCP_DEVICE`.
