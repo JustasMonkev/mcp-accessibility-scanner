@@ -15,11 +15,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { BrowserServerBackend } from '../src/browserServerBackend.js';
+import { contextFactory } from '../src/browserContextFactory.js';
 import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
 import { Response } from '../src/response.js';
 import tabsTools from '../src/tools/tabs.js';
-import type { BrowserContextFactory } from '../src/browserContextFactory.js';
+import type { BrowserContextFactory, ContextHandle } from '../src/browserContextFactory.js';
 import { EventEmitter } from 'events';
 
 describe('closePage', () => {
@@ -396,7 +398,8 @@ describe('Context', () => {
         second.isClosed = () => true;
         second.emit('close', second);
       });
-      mockBrowserContext.pages = vi.fn().mockReturnValue([createMockPage(), second]);
+      const first = createMockPage();
+      mockBrowserContext.pages = vi.fn().mockReturnValue([first, second]);
       const freshContext = () => new Context({
         tools: [],
         config: defaultConfig,
@@ -408,10 +411,82 @@ describe('Context', () => {
       const selecting = freshContext();
       await browserTabs.handle(selecting, { action: 'select', index: 1 }, new Response(selecting, 'browser_tabs', {}));
       expect(selecting.currentTab()?.page).toBe(second);
+      expect(mockBrowserContext.newPage).not.toHaveBeenCalled();
 
       const closing = freshContext();
       await browserTabs.handle(closing, { action: 'close', index: 1 }, new Response(closing, 'browser_tabs', {}));
       expect(second.close).toHaveBeenCalled();
+      expect(closing.tabs().map(tab => tab.page)).toEqual([first]);
+      expect(mockBrowserContext.newPage).not.toHaveBeenCalled();
+    });
+
+    it('validates a missing select index without running the factory', async () => {
+      const createContext = vi.fn().mockRejectedValue(new Error('attachment failed'));
+      const backend = new BrowserServerBackend(defaultConfig, { createContext });
+      await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'vitest', version: '1.0.0' });
+
+      const result = await backend.callTool('browser_tabs', { action: 'select' });
+
+      expect(result).toMatchObject({ isError: true, content: [expect.objectContaining({ text: expect.stringContaining('Tab index is required') })] });
+      expect(createContext).not.toHaveBeenCalled();
+    });
+
+    it.each(['select', 'close'])('does not acquire an empty isolated context for a cold %s', async action => {
+      const config = await resolveConfig({ browser: { isolated: true } });
+      const factory = contextFactory(config);
+      const createContext = vi.spyOn(factory, 'createContext').mockResolvedValue({
+        browserContext: mockBrowserContext,
+        close: async () => {},
+      });
+      const backend = new BrowserServerBackend(config, factory);
+      await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'vitest', version: '1.0.0' });
+
+      const result = await backend.callTool('browser_tabs', { action, index: 0 });
+
+      expect(result).toMatchObject({ isError: true, content: [expect.objectContaining({ text: expect.stringContaining('Tab 0 not found') })] });
+      expect(createContext).not.toHaveBeenCalled();
+    });
+
+    it.each(['cancel', 'disconnect', 'browser_close'])('does not close a live page after %s during attachment', async stop => {
+      const { promise: attaching, resolve: attach } = Promise.withResolvers<ContextHandle>();
+      const { promise: started, resolve: start } = Promise.withResolvers<void>();
+      const page = createMockPage();
+      page.close = vi.fn(async () => {
+        page.isClosed = () => true;
+        page.emit('close', page);
+      });
+      page.isClosed = () => false;
+      mockBrowserContext.pages.mockReturnValue([page]);
+      const close = vi.fn().mockResolvedValue(undefined);
+      const backend = new BrowserServerBackend(defaultConfig, {
+        createContext: () => {
+          start();
+          return attaching;
+        },
+      });
+      await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'vitest', version: '1.0.0' });
+      const controller = new AbortController();
+      const closing = backend.callTool('browser_tabs', { action: 'close', index: 0 }, {
+        signal: controller.signal,
+        requestId: 1,
+        sendNotification: async () => {},
+      });
+
+      await started;
+      let releasing: ReturnType<BrowserServerBackend['callTool']> | undefined;
+      if (stop === 'cancel')
+        controller.abort(new Error('test cancelled tab lookup'));
+      else if (stop === 'disconnect')
+        backend.serverClosed();
+      else
+        releasing = backend.callTool('browser_close', {});
+      attach({ browserContext: mockBrowserContext, close });
+
+      expect(await closing).toMatchObject({ isError: true });
+      await releasing;
+      await Context.disposeAll();
+      expect(page.close).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledTimes(1);
     });
   });
 

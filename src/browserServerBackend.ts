@@ -223,7 +223,8 @@ export class BrowserServerBackend implements ServerBackend {
     let endToolCall: (() => void) | undefined;
     try {
       endToolCall = context.beginToolCall(name, tool.exclusive);
-      if (!toolsThatSkipIdleResume.has(name)) {
+      const tabLookup = name === 'browser_tabs' && (parsedArguments.action === 'select' || parsedArguments.action === 'close');
+      if (!toolsThatSkipIdleResume.has(name) && !tabLookup) {
         const idleNotice = await context.resumeAfterIdle();
         if (idleNotice)
           response.addNotice(idleNotice);

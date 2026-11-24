@@ -147,6 +147,7 @@ export type CreateContextOptions = {
 export interface BrowserContextFactory {
   readonly ownsBrowser?: boolean;
   readonly sharedContext?: boolean;
+  readonly createsEmptyContext?: boolean;
   readonly attachNeedsUser?: boolean;
   readonly appliesStorageState?: boolean;
   readonly sessionsUnsupportedReason?: string;
@@ -246,6 +247,7 @@ abstract class BaseContextFactory implements BrowserContextFactory {
 
 class IsolatedContextFactory extends BaseContextFactory {
   readonly ownsBrowser = true;
+  readonly createsEmptyContext = true;
   readonly appliesStorageState = true;
 
   constructor(config: FullConfig) {
@@ -280,6 +282,10 @@ class IsolatedContextFactory extends BaseContextFactory {
 class CdpContextFactory extends BaseContextFactory {
   get sharedContext(): boolean {
     return !this.config.browser.isolated;
+  }
+
+  get createsEmptyContext(): boolean {
+    return this.config.browser.isolated === true;
   }
 
   readonly appliesStorageState = true;
@@ -341,6 +347,7 @@ class CdpContextFactory extends BaseContextFactory {
 
 class RemoteContextFactory extends BaseContextFactory {
   readonly appliesStorageState = true;
+  readonly createsEmptyContext = true;
 
   constructor(config: FullConfig) {
     super('remote', config);
@@ -365,6 +372,10 @@ class RemoteContextFactory extends BaseContextFactory {
 class CdpLaunchContextFactory implements BrowserContextFactory {
   readonly config: FullConfig;
   readonly appliesStorageState = true;
+
+  get createsEmptyContext(): boolean {
+    return this.config.browser.isolated === true;
+  }
 
   private _pinnedPortLaunch: { closing: boolean, exited: Promise<void> } | undefined;
 
