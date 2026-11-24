@@ -33,6 +33,17 @@ const canRun = !!process.env.MCP_TEST_BROWSER_NAME || existsSync(chromium.execut
 const server = http.createServer((request, response) => {
   const url = new URL(request.url || '/', 'http://localhost');
   response.writeHead(200, { 'content-type': 'text/html' });
+  if (url.pathname === '/trapped-editor') {
+    response.end(`<iframe srcdoc="<body id=editor contenteditable><script>
+      document.body.focus();
+      document.onkeydown = event => { if (event.key === 'Tab') event.preventDefault() };
+    </script>"></iframe>`);
+    return;
+  }
+  if (url.pathname === '/empty-document') {
+    response.end('<body></body>');
+    return;
+  }
   if (url.pathname === '/frame-focus') {
     const opaque = url.searchParams.has('opaque') ? ' sandbox=""' : '';
     response.end(`<iframe id="first"${opaque} src="/frame-nested"></iframe><iframe id="second" src="/frame-controls"></iframe><button id="after">After both frames</button>`);
@@ -297,6 +308,23 @@ it.skipIf(!canRun).each(['focus-identity', 'shadow-focus', 'reverse-focus', 'tra
     expect(report.uniqueFingerprints).toBe(fixture === 'reverse-focus' ? 2 : 3);
   }
 );
+
+it.skipIf(!canRun).each(['trapped-editor', 'empty-document'])('checks for escape to the audited document root on %s', async fixture => {
+  directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-root-'));
+  const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory, timeoutSettle: 0 });
+  client = new Client({ name: 'keyboard-root-test', version: '1' });
+  await client.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
+  await ok('browser_navigate', { url: `${origin}/${fixture}` });
+  await ok('audit_keyboard', { maxTabs: 3, reportFile: 'keyboard.json' });
+  const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
+  if (fixture === 'trapped-editor') {
+    expect(report.stops[0].frameFocus).toEqual({ tagName: 'BODY', id: 'editor' });
+    expect(report.focusTrap.step).toBe(1);
+  } else {
+    expect(report.stops.map((stop: { tagName: string }) => stop.tagName)).toEqual(['BODY', 'BODY', 'BODY']);
+    expect(report.focusTrap.detected).toBe(false);
+  }
+});
 
 it.skipIf(!canRun).each([false, true])('follows keyboard traversal through frames when opaque=%s', async opaque => {
   directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-frames-'));

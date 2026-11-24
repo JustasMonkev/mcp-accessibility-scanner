@@ -206,8 +206,7 @@ function focusIssuesOf(stop: FocusStop, options: KeyboardAuditOptions): FocusIss
 }
 
 function isDocumentRoot(point: FocusPoint): boolean {
-  const tag = point.frameFocus?.tagName ?? point.tagName;
-  return tag === 'HTML' || tag === 'BODY';
+  return point.tagName === 'HTML' || point.tagName === 'BODY';
 }
 
 function detectFocusTrap(stops: FocusStop[], before: FocusPoint, stop: FocusStop, cycleWindow: number): string[] | undefined {
