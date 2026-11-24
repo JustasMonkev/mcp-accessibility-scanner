@@ -177,6 +177,29 @@ describe('scan_page_matrix tool', () => {
     expect(mockPage.evaluate).toHaveBeenCalledTimes(2);
   });
 
+  it('stops changing the page once the browser context closes and cancels its claim', async () => {
+    const { context, mockPage, response } = createMatrixHarness('/tmp/canceled-claim.json');
+    const tab = context.currentTabOrDie();
+    const canceled = new AbortController();
+    Object.assign(tab.context, { claimPage: () => ({ release: () => {}, canceled: canceled.signal }) });
+    // The claim is released when the context closes, so another scan may own
+    // the page by the time this one's wait ends.
+    tab.waitForTimeout.mockImplementation(async () => {
+      canceled.abort(new Error('The browser context closed.'));
+    });
+    const scan = vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({
+      variants: [{ name: 'baseline' }, { name: 'mobile', viewport: { width: 375, height: 812 } }],
+    }), response)).rejects.toThrow('The browser context closed.');
+    expect(scan).not.toHaveBeenCalled();
+    // Only the first variant's own changes; neither the next variant nor the restore ran.
+    expect(mockPage.setViewportSize).toHaveBeenCalledTimes(1);
+    expect(mockPage.emulateMedia).toHaveBeenCalledTimes(1);
+    expect(mockPage.evaluate).toHaveBeenCalledTimes(2);
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
   it('reports a dialog that opens while the last progress notification is sent instead of a report', async () => {
     const { context, mockPage, response } = createMatrixHarness('/tmp/late-dialog.json');
     const tab = context.currentTabOrDie();
@@ -199,7 +222,8 @@ describe('scan_page_matrix tool', () => {
 
     const failure = await tool.handle(response.context, tool.schema.inputSchema.parse({ variants: [{ name: 'baseline' }], waitAfterApplyMs: 0 }), response).catch((error: Error) => error);
     expect(String(failure)).toContain('opened a dialog after the last variant was scanned');
-    expect(String(failure)).toContain('restored once it does');
+    expect(String(failure)).toContain('the server will attempt to restore the original viewport, media and zoom once it does, so verify them before continuing');
+    expect(String(failure)).not.toContain('are restored once it does');
     expect(writeFileSpy).not.toHaveBeenCalled();
 
     // The restore keeps running in the background and finishes once the dialog closes.
@@ -207,6 +231,38 @@ describe('scan_page_matrix tool', () => {
     dialogClosed.resolve(undefined);
     await restored;
     expect(mockPage.emulateMedia).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a dialog and starts the restore while a progress notification is stuck', async () => {
+    const { context, mockPage, response } = createMatrixHarness('/tmp/stuck-progress.json');
+    const tab = context.currentTabOrDie();
+    Object.assign(tab.context, { tools: [], config: {}, modalStateTools: [] });
+    const modalStates: unknown[] = [];
+    let openDialog!: (state: unknown) => void;
+    Object.assign(tab, { modalStatesMarkdown: () => renderModalStates(tab.context as any, modalStates as any) });
+    tab.modalStates.mockImplementation(() => modalStates as never[]);
+    tab.on.mockImplementation((_event: string, listener: (state: unknown) => void) => { openDialog = listener; });
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+    // A client that stopped reading leaves the notification waiting for drain.
+    const progress = vi.spyOn(response, 'reportProgress').mockImplementation(() => {
+      setTimeout(() => {
+        const dialog = { type: 'dialog', description: '"alert" dialog with message "stuck"' };
+        modalStates.push(dialog);
+        openDialog(dialog);
+      }, 0);
+      return new Promise<void>(() => {});
+    });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const failure = await Promise.race([
+      tool.handle(response.context, tool.schema.inputSchema.parse({ variants: [{ name: 'baseline' }, { name: 'dark', media: { colorScheme: 'dark' } }], waitAfterApplyMs: 0 }), response).catch((error: Error) => error),
+      new Promise(resolve => timer = setTimeout(() => resolve('still waiting on progress'), 1000)),
+    ]).finally(() => clearTimeout(timer));
+    expect(String(failure)).toContain('opened a dialog during variant "baseline"');
+    expect(progress).toHaveBeenCalledTimes(1);
+    // The restore started as soon as the dialog was reported.
+    expect(mockPage.setViewportSize).toHaveBeenCalledTimes(2);
+    expect(writeFileSpy).not.toHaveBeenCalled();
   });
 
   it('waits for active Axe before restoring the caller tab on cancellation', async () => {

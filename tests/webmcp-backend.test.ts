@@ -240,6 +240,33 @@ describe('WebMCP backend scope and argument contracts', () => {
     h.backend.serverClosed();
   });
 
+  it('rejects a call whose tab changed during discovery instead of recording the new tab\'s page', async () => {
+    const h = backendHarness();
+    const [tool] = await h.backend.listTools();
+    const discovered = h.defaultContext.tab;
+    const other = { ...discovered, page: Object.assign(new EventEmitter(), { frames: () => [], isClosed: () => false }) };
+    let current: typeof discovered = discovered;
+    // currentTabOrDie records the call on the current tab's page.
+    const recorded: unknown[] = [];
+    Object.assign(h.defaultContext.context, {
+      currentTab: () => current,
+      currentTabOrDie: () => { recorded.push(current.page); return current; },
+    });
+    // A non-exclusive browser_tabs select lands while the call's discovery is pending.
+    h.defaultContext.setRead(async () => {
+      current = other;
+      return [{ name: 'echo', description: 'default', inputSchema: { type: 'object', properties: {
+        browserSessionId: { type: 'number' }, _meta: { type: 'string' },
+      }, required: ['browserSessionId', '_meta'] } }];
+    });
+    const result = await h.backend.callTool(tool.name, input, request());
+    assert.equal(result.isError, true);
+    assert.match(text(result), /active tab changed/);
+    assert.equal(h.defaultContext.calls(), 0);
+    assert.deepEqual(recorded, [], 'the call must not record a page its handler does not use');
+    h.backend.serverClosed();
+  });
+
   it('rejects arguments that do not match the advertised schema before page invocation', async () => {
     const h = backendHarness();
     const [tool] = await h.backend.listTools();

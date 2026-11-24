@@ -192,7 +192,7 @@ function dialogInterruption(tab: Tab, phase: DialogPhase): Error {
   const where = typeof phase === 'object' ? `during variant "${phase.variant}"` : dialogPhaseWhere[phase];
   const teardown = tab.context.tools.some(tool => tool.schema.name === 'browser_close') ? ' Closing the browser with browser_close cancels the restore instead.' : '';
   return new Error([
-    `The page opened a dialog ${where} that the matrix scan does not answer, so the scan stopped. The paused page cannot be restored until the dialog closes; the original viewport, media and zoom are restored once it does.${teardown}`,
+    `The page opened a dialog ${where} that the matrix scan does not answer, so the scan stopped. The paused page cannot be restored until the dialog closes; the server will attempt to restore the original viewport, media and zoom once it does, so verify them before continuing.${teardown}`,
     ...tab.modalStatesMarkdown(),
   ].join('\n'));
 }
@@ -242,23 +242,28 @@ type MatrixRun = {
 };
 
 async function scanVariants({ tab, variants, original, params, response, dialog, signal, canceled }: MatrixRun, trackRestore: (restore: Promise<void>) => void): Promise<VariantResult[]> {
-  const scanSignal = signal ? AbortSignal.any([signal, dialog.signal]) : dialog.signal;
+  // A canceled claim may already belong to another scan, so this one stops
+  // changing the page.
+  const scanSignal = AbortSignal.any(signal ? [signal, dialog.signal, canceled] : [dialog.signal, canceled]);
   let inFlight: Promise<unknown> = Promise.resolve();
   const variantResults: VariantResult[] = [];
   const incompleteRuleIdsByVariant: string[][] = [];
   let restoredInCall = false;
   try {
-    for (const variant of variants) {
+    for (const [index, variant] of variants.entries()) {
       const scanning = scanVariant(tab, variant, original, params, scanSignal);
       inFlight = scanning;
       const { result, incompleteRuleIds } = await dialog.guard(scanning, { variant: variant.name });
       variantResults.push(result);
       incompleteRuleIdsByVariant.push(incompleteRuleIds);
-      await response.reportProgress({
+      // A client that stops reading can leave the notification waiting
+      // indefinitely; a dialog opened meanwhile is still reported, and the
+      // restore started, without waiting for it. reportProgress never rejects.
+      await dialog.guard(response.reportProgress({
         progress: variantResults.length,
         total: variants.length,
         message: `Scanned variant ${variantResults.length}/${variants.length}: ${variant.name}`,
-      });
+      }), index === variants.length - 1 ? 'finishing' : { variant: variant.name });
     }
     compareWithBaseline(variantResults, incompleteRuleIdsByVariant);
   } finally {
@@ -274,8 +279,7 @@ async function scanVariants({ tab, variants, original, params, response, dialog,
       restoredInCall = true;
     }
   }
-  // A dialog opened after the last guarded step, for instance while the last
-  // progress notification was sent, left the restore waiting on it.
+  // A dialog opened after the last guarded step left the restore waiting on it.
   if (!restoredInCall)
     throw dialogInterruption(tab, 'finishing');
   return variantResults;

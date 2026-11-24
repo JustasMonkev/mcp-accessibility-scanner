@@ -419,7 +419,7 @@ it('reports a dialog opened while the original state is read, leaving nothing fo
     expect(scan.isError).toBe(true);
     expect(text(scan)).toContain('opened a dialog while the matrix scan was reading its original viewport, media and zoom');
     expect(text(scan)).toContain('media read');
-    expect(text(scan)).not.toContain('restored once it does');
+    expect(text(scan)).not.toContain('attempt to restore');
     await expect(fs.access(path.join(directory, 'capture-dialog.json'))).rejects.toThrow();
 
     const closed = await withinMs(blocked.callTool({ name: 'browser_close', arguments: {} }), 15_000, 'browser_close');

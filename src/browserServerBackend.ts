@@ -29,6 +29,7 @@ import { listWebMCPTools, webMCPSessionId, WebMCPObserver } from './webmcp.js';
 import type { WebMCPToolDefinition } from './webmcp.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
 
+import type { Tab } from './tab.js';
 import type { Tool } from './tools/tool.js';
 import type { BrowserContextFactory } from './browserContextFactory.js';
 import type * as mcpServer from './mcp/server.js';
@@ -170,10 +171,15 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   private async _currentWebMCPTools(context: Context, signal?: AbortSignal, listing = false): Promise<WebMCPToolDefinition[]> {
+    return (await this._discoverWebMCPTools(context, signal, listing)).tools;
+  }
+
+  private async _discoverWebMCPTools(context: Context, signal?: AbortSignal, listing = false): Promise<{ tab: Tab | undefined, tools: WebMCPToolDefinition[] }> {
     const sharedDefault = this._ephemeralDefaultContext && context === this._context && this._browserContextFactory.sharedContext;
     const attach = sharedDefault && !(listing && this._browserContextFactory.attachNeedsUser);
     const tab = context.currentTab() ?? (attach ? await rejectOnAbort(() => context.ensureTab(signal), signal) : undefined);
-    return tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
+    const tools = tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
+    return { tab, tools };
   }
 
   private async _callWebMCP(name: string, rawArguments: ToolArguments, requestContext?: mcpServer.CallToolRequestContext) {
@@ -191,10 +197,16 @@ export class BrowserServerBackend implements ServerBackend {
         const idleNotice = await context.resumeAfterIdle();
         if (idleNotice)
           response.addNotice(idleNotice);
-        const tool = (await this._currentWebMCPTools(context, requestContext?.signal)).find(candidate => candidate.schema.name === name);
+        const { tab, tools } = await this._discoverWebMCPTools(context, requestContext?.signal);
+        const tool = tools.find(candidate => candidate.schema.name === name);
         if (!tool)
           throw new Error('WebMCP tool is stale or unavailable in this scope. List tools again with the same request metadata.');
-        // Runs on the current tab's page; resolving it checks page claims.
+        // The handler runs on the page of the tab it was discovered on. A tab
+        // switch while discovery was pending would leave that page unrecorded,
+        // so another context could claim it; otherwise resolving the current
+        // tab records the call on that page and checks page claims.
+        if (context.currentTab() !== tab)
+          throw new Error('The active tab changed while WebMCP tools were being discovered. List tools again with the same request metadata.');
         context.currentTabOrDie();
         await tool.handle(params, response, requestContext?.signal);
         if (!requestContext?.signal.aborted)
