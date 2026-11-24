@@ -67,10 +67,6 @@ it.each([
 it('preserves a supplied context getter without applying local mobile screen restrictions', async () => {
   const contextGetter = vi.fn(async () => { throw new Error('Context getter must remain lazy'); });
   const server = await createConnection({ browser: { browserName: 'firefox', contextOptions: mobileOptions } }, contextGetter);
-  try {
-    expect(contextGetter).not.toHaveBeenCalled();
-  } finally {
-    await server.close();
-  }
+  await server.close();
   expect(contextGetter).not.toHaveBeenCalled();
 });

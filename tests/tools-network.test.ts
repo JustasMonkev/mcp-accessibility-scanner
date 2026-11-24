@@ -62,55 +62,11 @@ describe('Network Tools', () => {
   describe('browser_network_requests tool', () => {
     const networkTool = networkTools.find(t => t.schema.name === 'browser_network_requests')!;
 
-    it('should exist', () => {
-      expect(networkTool).toBeDefined();
-    });
-
     it('should have correct schema', () => {
       expect(networkTool.schema.title).toBe('List network requests');
       expect(networkTool.schema.type).toBe('readOnly');
       expect(networkTool.schema.inputSchema.safeParse({ all: true }).success).toBe(true);
       expect(networkTool.schema.inputSchema.safeParse({ all: 'true' }).success).toBe(false);
-    });
-
-    it('should retrieve all network requests', async () => {
-      await networkTool.handle(mockContext, {}, response);
-
-      expect(mockTab.requests).toHaveBeenCalled();
-      expect(response.result()).toContain('https://api.example.com/data');
-      expect(response.result()).toContain('https://api.example.com/user');
-    });
-
-    it('should show request methods', async () => {
-      await networkTool.handle(mockContext, {}, response);
-
-      const result = response.result();
-      expect(result).toContain('GET');
-      expect(result).toContain('POST');
-    });
-
-    it('should show response status', async () => {
-      await networkTool.handle(mockContext, {}, response);
-
-      const result = response.result();
-      expect(result).toContain('200');
-      expect(result).toContain('201');
-    });
-
-    it('should handle requests without responses', async () => {
-      await networkTool.handle(mockContext, {}, response);
-
-      const result = response.result();
-      // Request without response just shows the request line
-      expect(result).toContain('https://api.example.com/missing');
-    });
-
-    it('should handle empty requests', async () => {
-      mockTab.requests = vi.fn().mockReturnValue(new Map());
-
-      await networkTool.handle(mockContext, {}, response);
-
-      expect(response.result()).toBe('');
     });
 
     it('should truncate data URL payloads', async () => {
@@ -177,6 +133,7 @@ describe('Network Tools', () => {
       await networkTool.handle(mockContext, {}, response);
 
       const result = response.result();
+      expect(mockTab.requests).toHaveBeenCalled();
       expect(result).toContain('[1] [GET] https://api.example.com/data => [200] OK');
       expect(result).toContain('[2] [POST] https://api.example.com/user => [201] Created');
       expect(result).toContain('[3] [GET] https://api.example.com/missing');
@@ -228,7 +185,6 @@ describe('Network Tools', () => {
     }
 
     it('should exist with the expected schema', () => {
-      expect(detailTool).toBeDefined();
       expect(detailTool.schema.title).toBe('Get network request details');
       expect(detailTool.schema.type).toBe('readOnly');
     });

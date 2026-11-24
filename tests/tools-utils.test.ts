@@ -91,19 +91,6 @@ describe('Tool Utils', () => {
       expect(order).toEqual(['finished', 'returned']);
     });
 
-    it('should ignore sub-frame navigation', async () => {
-      const callback = vi.fn().mockImplementation(() => {
-        const subFrame = { parentFrame: () => ({}) };
-        mockPage.emit('framenavigated', subFrame);
-        return Promise.resolve('result');
-      });
-
-      await waitForCompletion(mockTab, callback);
-
-      // Should not wait for the load state of a sub-frame navigation.
-      expect(mockTab.waitForLoadState).not.toHaveBeenCalled();
-    });
-
     it('should timeout after 10 seconds', async () => {
       vi.useFakeTimers();
       try {

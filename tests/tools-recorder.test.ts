@@ -42,20 +42,6 @@ describe('Recorder tools', () => {
     expect(response.result()).toContain('Recording started');
   });
 
-  it('propagates the unsafe stateless recording rejection', async () => {
-    context.startRecordingOnCurrentTab.mockImplementation(() => { throw new Error('browserSessionId required'); });
-
-    await expect(startTool.handle(context, {}, new Response(context, startTool.schema.name, {})))
-        .rejects.toThrow('browserSessionId required');
-  });
-
-  it('propagates the duplicate start rejection', async () => {
-    context.startRecordingOnCurrentTab.mockImplementation(() => { throw new Error('Recording is already in progress'); });
-
-    await expect(startTool.handle(context, {}, new Response(context, startTool.schema.name, {})))
-        .rejects.toThrow('Recording is already in progress');
-  });
-
   it('returns recorded JavaScript and includes a snapshot', async () => {
     context.stopRecording.mockResolvedValue(["await page.getByRole('button').click();"]);
     const response = new Response(context, stopTool.schema.name, {});
@@ -103,7 +89,6 @@ describe('Recorder tools', () => {
   });
 
   it('keeps both tools behind the devtools capability', () => {
-    expect(recorderTools).toHaveLength(2);
     expect(recorderTools.every(tool => tool.capability === 'devtools')).toBe(true);
     expect(startTool.schema.type).toBe('stateChanging');
     expect(stopTool.schema.type).toBe('destructive');

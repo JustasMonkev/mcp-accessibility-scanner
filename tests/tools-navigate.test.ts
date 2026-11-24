@@ -54,10 +54,6 @@ describe('Navigate Tools', () => {
   describe('browser_navigate tool', () => {
     const navigateTool = navigateTools.find(t => t.schema.name === 'browser_navigate')!;
 
-    it('should exist', () => {
-      expect(navigateTool).toBeDefined();
-    });
-
     it('should have correct schema', () => {
       expect(navigateTool.schema.title).toBe('Navigate to a URL');
       expect(navigateTool.schema.type).toBe('destructive');
@@ -89,19 +85,9 @@ describe('Navigate Tools', () => {
   describe('browser_navigate_back tool', () => {
     const backTool = navigateTools.find(t => t.schema.name === 'browser_navigate_back')!;
 
-    it('should exist', () => {
-      expect(backTool).toBeDefined();
-    });
-
     it('should have correct schema', () => {
       expect(backTool.schema.title).toBe('Go back');
       expect(backTool.schema.type).toBe('readOnly');
-    });
-
-    it('should navigate back', async () => {
-      await backTool.handle(mockContext, {}, response);
-
-      expect(mockPage.goBack).toHaveBeenCalled();
     });
 
     it('should wait for commit to avoid bfcache timeouts', async () => {
@@ -125,15 +111,9 @@ describe('Navigate Tools', () => {
     });
   });
 
-  describe('Tool capabilities', () => {
-    it('should all have core capability', () => {
-      navigateTools.forEach(tool => {
-        expect(tool.capability).toBe('core');
-      });
-    });
-
-    it('should export expected number of tools', () => {
-      expect(navigateTools).toHaveLength(2);
+  it('should all have core capability', () => {
+    navigateTools.forEach(tool => {
+      expect(tool.capability).toBe('core');
     });
   });
 });

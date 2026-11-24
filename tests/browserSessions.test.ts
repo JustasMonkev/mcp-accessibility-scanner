@@ -249,7 +249,6 @@ describe('browser sessions', () => {
     const id = await openSession(backend);
     let caught: Error | undefined;
     await backend.callTool('browser_tabs', { action: 'list', browserSessionId: 'bs_missing' }).catch(error => caught = error);
-    expect(caught).toBeDefined();
     expect(String(caught)).toContain('Unknown browserSessionId "bs_missing"');
     expect(String(caught)).not.toContain(id);
 

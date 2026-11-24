@@ -400,12 +400,7 @@ describe('browserContextFactory', () => {
   });
 
   it('never hands two concurrent --cdp-launch sessions the same endpoint', async () => {
-    // findFreePort()'s probe socket closes before the launched child binds the
-    // port, so the OS can offer the same port to a concurrent session's probe
-    // — both connect loops would then attach to whichever child bound first,
-    // sharing its context and killing the wrong child on cleanup. Simulated by
-    // an OS that offers port 9400 twice: the in-process reservation must make
-    // the second session retry and launch on 9401 instead.
+    // The OS can offer the same port twice between closing the probe and binding the child.
     const probePorts = [9400, 9400, 9401];
     let probeIndex = 0;
     const probeSpy = vi.spyOn(net, 'createServer').mockImplementation((() => {
@@ -459,10 +454,6 @@ describe('browserContextFactory', () => {
   });
 
   it('releases an allocated --cdp-launch port for reuse once its child has bound it', async () => {
-    // The reservation exists only to bridge the probe-to-bind window; once a
-    // session's connect succeeded (or its launch failed), the OS itself keeps
-    // the port from being re-offered while bound, and holding the number
-    // reserved forever would slowly drain the pool on a long-lived server.
     const probePorts = [9400];
     const probeSpy = vi.spyOn(net, 'createServer').mockImplementation((() => ({
       listen: (_port: number, callback: () => void) => callback(),
@@ -488,8 +479,6 @@ describe('browserContextFactory', () => {
 
       const first = await factory.createContext(clientInfo, signal);
       await first.close();
-      // The same port coming back from the OS after the first session is done
-      // must be usable again, not skipped as still-reserved.
       const second = await factory.createContext(clientInfo, signal);
       expect(spawnMock).toHaveBeenCalledTimes(2);
       expect(spawnMock).toHaveBeenLastCalledWith('open', ['--remote-debugging-port=9400'], expect.anything());
@@ -500,12 +489,7 @@ describe('browserContextFactory', () => {
   });
 
   it('rejects a second concurrent context on a pinned --cdp-launch-port instead of cross-attaching', async () => {
-    // The sessionsUnsupportedReason veto covers browser_session_open only;
-    // parallel handshake-free HTTP requests reach the launch path through
-    // their per-request DEFAULT contexts. The second child could never bind
-    // the busy pinned port, so its connect loop would attach to the FIRST
-    // child's endpoint — its "own" context landing in a sibling's
-    // application, its cleanup killing a child that owns nothing.
+    // Handshake-free HTTP requests create default contexts without the browser_session_open guard.
     const browserContext = createMockBrowserContext();
     const browser = createMockBrowser(browserContext);
     const childA = createMockChildProcess();
@@ -526,11 +510,8 @@ describe('browserContextFactory', () => {
     const first = await factory.createContext(clientInfo, signal);
     await expect(factory.createContext(clientInfo, signal))
         .rejects.toThrow(/pinned --cdp-launch-port 9222 already serves a launched application/);
-    // The doomed launch was refused before spawning another child.
     expect(spawnMock).toHaveBeenCalledTimes(1);
 
-    // Once the first context is gone (mock kill emits exit), the pinned port
-    // serves the next context again.
     await first.close();
     expect(childA.kill).toHaveBeenCalledWith('SIGTERM');
     const second = await factory.createContext(clientInfo, signal);
@@ -742,8 +723,6 @@ describe('browserContextFactory', () => {
       const clientInfo = { name: 'vitest', version: '1.0.0' };
       const signal = new AbortController().signal;
 
-      // Two concurrent default contexts: both must succeed instead of one
-      // erroring on the profile lock.
       const [first, second] = await Promise.all([
         factory.createContext(clientInfo, signal),
         factory.createContext(clientInfo, signal),
@@ -755,16 +734,12 @@ describe('browserContextFactory', () => {
       const disposableDir = dirs.find(dir => dir !== stableDir)!;
       expect(disposableDir).toMatch(/-concurrent-[0-9a-f]+$/);
 
-      // Closing the stable holder frees the claim: the next default context
-      // gets the stable profile — and its sign-in state — back.
       const stableHolder = dirs[0] === stableDir ? first : second;
       const disposableHolder = stableHolder === first ? second : first;
       await stableHolder.close();
       const third = await factory.createContext(clientInfo, signal);
       expect(launchedDirs.get(third.browserContext)).toBe(stableDir);
 
-      // The fallback profile is disposable and removed with its context; the
-      // stable profile is durable and never deleted.
       await disposableHolder.close();
       expect(rmSpy).toHaveBeenCalledWith(disposableDir, { recursive: true, force: true });
       await third.close();
@@ -828,12 +803,7 @@ describe('browserContextFactory', () => {
     }
   });
 
-  // _createUserDataDir's mkdir can reject (a transient volume failure) after
-  // the stable-profile claim was set and the CDP port reserved but before the
-  // launch loop's cleanup scope: both used to leak — every later default
-  // context was misclassified as concurrent (disposable profiles, losing the
-  // stable profile's sign-in state, forever) and the reserved port was never
-  // returned to the pool.
+  // Directory creation can fail after the factory reserves both the stable profile and a CDP port.
   it('releases the stable-profile claim and the reserved CDP port when profile-dir creation fails', async () => {
     const profilesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-profiles-'));
     process.env.PWMCP_PROFILES_DIR_FOR_TEST = profilesDir;
@@ -857,9 +827,6 @@ describe('browserContextFactory', () => {
       vi.spyOn(fs.promises, 'mkdir').mockRejectedValueOnce(new Error('EIO: volume unavailable'));
       await expect(factory.createContext(clientInfo, signal)).rejects.toThrow('EIO: volume unavailable');
 
-      // The failed attempt released both: the next default context allocates
-      // the same port again (instead of spinning on a leaked reservation) and
-      // gets the stable profile (instead of a -concurrent- fallback).
       const result = await factory.createContext(clientInfo, signal);
       expect(vi.mocked(playwright.chromium.launchPersistentContext).mock.calls[0][0])
           .toBe(path.join(profilesDir, stableProfileName()));

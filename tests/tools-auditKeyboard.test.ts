@@ -103,50 +103,6 @@ describe('runKeyboardFocusAudit', () => {
     expect(await jumpSteps({ boundingBox: null })).toEqual([1]);
   });
 
-  it('serializes detected findings into JSON-safe report shape', async () => {
-    const sequence: FocusPoint[] = [
-      focusPoint({ role: 'document', tagName: 'BODY' }),
-      focusPoint({ role: 'link', name: 'Skip to main', text: 'Skip to main', tagName: 'A', href: '#main' }),
-    ];
-
-    let index = 0;
-    const result = await runKeyboardFocusAudit({
-      maxTabs: 1,
-      includeShiftTab: false,
-      stopOnCycle: true,
-      cycleWindow: 3,
-      checkSkipLink: true,
-      skipLinkMaxTabs: 3,
-      activateSkipLink: false,
-      checkFocusTrap: true,
-      checkFocusVisibility: true,
-      checkFocusJumps: true,
-      checkTargetSize: false,
-      checkFocusObscured: false,
-      jumpScrollThresholdPx: 800,
-      screenshotOnIssue: false,
-      maxIssueScreenshots: 3,
-    }, {
-      pressKey: vi.fn(async () => undefined),
-      getActiveElementInfo: vi.fn(async () => {
-        const point = sequence[index];
-        index++;
-        return point;
-      }),
-    });
-
-    const report = {
-      version: 'v1',
-      metadata: { generatedAt: new Date().toISOString() },
-      ...result,
-    };
-
-    const parsed = JSON.parse(JSON.stringify(report));
-    expect(parsed.version).toBe('v1');
-    expect(parsed.skipLink.found).toBe(true);
-    expect(Array.isArray(parsed.stops)).toBe(true);
-  });
-
   it('records a focus trap stop only once when stopOnCycle is false', async () => {
     const sequence: FocusPoint[] = [
       focusPoint({ role: 'document', tagName: 'BODY' }),

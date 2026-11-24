@@ -53,10 +53,6 @@ describe('Common Tools', () => {
   describe('browser_close tool', () => {
     const closeTool = commonTools.find(t => t.schema.name === 'browser_close')!;
 
-    it('should exist', () => {
-      expect(closeTool).toBeDefined();
-    });
-
     it('should have correct schema', () => {
       expect(closeTool.schema.title).toBe('Close browser');
       expect(closeTool.schema.type).toBe('readOnly');
@@ -81,10 +77,6 @@ describe('Common Tools', () => {
 
   describe('browser_resize tool', () => {
     const resizeTool = commonTools.find(t => t.schema.name === 'browser_resize')!;
-
-    it('should exist', () => {
-      expect(resizeTool).toBeDefined();
-    });
 
     it('should have correct schema', () => {
       expect(resizeTool.schema.title).toBe('Resize browser window');
