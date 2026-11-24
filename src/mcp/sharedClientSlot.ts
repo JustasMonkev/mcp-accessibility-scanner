@@ -108,10 +108,14 @@ export class SharedClientSlot {
   // whatever the caller moves to instead (a resource of its own, not
   // published here). The clear runs only once `prepare` succeeds, so a failed
   // preparation leaves the current client in place, and a replacement queued
-  // meanwhile waits for this step rather than being cleared by it. A disposed
-  // slot is already clear: `prepare` still runs and its result is returned.
+  // meanwhile waits for this step rather than being cleared by it. Like
+  // replace(), a step that starts once dispose() has been called is rejected
+  // without calling `prepare`; a preparation that finishes after dispose()
+  // returns its result, as dispose() clears the slot itself.
   async clearAfter<T>(prepare: () => Promise<T>): Promise<T> {
     return await this._enqueue(async () => {
+      if (this._disposed)
+        throw disposedError();
       const prepared = await prepare();
       if (!this._disposed)
         await this._swap(undefined, {});

@@ -145,4 +145,26 @@ describe('SharedClientSlot', () => {
     expect(slot.acquire()).toBe(second);
     await slot.dispose();
   });
+  it('rejects a clearAfter() queued behind a replacement without preparing once disposed', async () => {
+    const slot = new SharedClientSlot();
+    let finishConnect!: () => void;
+    const connected = new Promise<void>(resolve => { finishConnect = resolve; });
+    const replacing = slot.replace(async () => {
+      await connected;
+      return { close: async () => {} } as unknown as Client;
+    });
+    let prepares = 0;
+    const clearing = slot.clearAfter(async () => {
+      prepares++;
+      return 'default';
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const disposing = slot.dispose();
+    finishConnect();
+
+    await expect(replacing).rejects.toThrow('disposed');
+    await expect(clearing).rejects.toThrow('disposed');
+    await disposing;
+    expect(prepares).toBe(0);
+  });
 });
