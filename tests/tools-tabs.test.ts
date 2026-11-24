@@ -56,6 +56,7 @@ describe('Tabs Tools', () => {
       selectTab: vi.fn().mockResolvedValue(mockTab2),
       closeTab: vi.fn().mockResolvedValue('https://closed.com'),
       ensureTab: vi.fn().mockResolvedValue(mockTab1),
+      ensureBrowserContext: vi.fn().mockResolvedValue(undefined),
       takeDownloadErrors: vi.fn().mockReturnValue([]),
       config: {
         imageResponses: 'allow',

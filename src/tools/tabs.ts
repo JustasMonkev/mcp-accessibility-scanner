@@ -38,6 +38,7 @@ const browserTabs = defineTool({
   handle: async (context, params, response) => {
     if (params.isolatedContext !== undefined && params.isolatedContext !== 'default')
       throw new Error(`isolatedContext "${params.isolatedContext}" is not supported. Call browser_session_open and pass the returned browserSessionId to browser_tabs and every later browser tool call to use a separate browser context.`);
+    await context.ensureBrowserContext();
     switch (params.action) {
       case 'list':
         await context.ensureTab();

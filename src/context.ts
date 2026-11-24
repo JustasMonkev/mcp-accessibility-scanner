@@ -256,6 +256,10 @@ export class Context {
     }
   }
 
+  async ensureBrowserContext(): Promise<void> {
+    await this._ensureBrowserContext();
+  }
+
   async selectTab(index: number) {
     const tab = this._tabs[index];
     if (!tab)

@@ -18,6 +18,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
 import { Response } from '../src/response.js';
+import tabsTools from '../src/tools/tabs.js';
 import type { BrowserContextFactory } from '../src/browserContextFactory.js';
 import { EventEmitter } from 'events';
 
@@ -382,6 +383,35 @@ describe('Context', () => {
       mockBrowserContext.newPage = vi.fn().mockResolvedValue({});
       await expect(context.newTab()).rejects.toThrow('Failed to register the newly opened tab.');
       expect(context.currentTab()).toBeUndefined();
+    });
+  });
+
+  describe('browser_tabs on a fresh shared context', () => {
+    it('selects and closes pages that existed before any other tool attached', async () => {
+      const browserTabs = tabsTools.find(tool => tool.schema.name === 'browser_tabs')!;
+      const second = createMockPage();
+      second.bringToFront = vi.fn().mockResolvedValue(undefined);
+      second.isClosed = () => false;
+      second.close = vi.fn(async () => {
+        second.isClosed = () => true;
+        second.emit('close', second);
+      });
+      mockBrowserContext.pages = vi.fn().mockReturnValue([createMockPage(), second]);
+      const freshContext = () => new Context({
+        tools: [],
+        config: defaultConfig,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      const selecting = freshContext();
+      await browserTabs.handle(selecting, { action: 'select', index: 1 }, new Response(selecting, 'browser_tabs', {}));
+      expect(selecting.currentTab()?.page).toBe(second);
+
+      const closing = freshContext();
+      await browserTabs.handle(closing, { action: 'close', index: 1 }, new Response(closing, 'browser_tabs', {}));
+      expect(second.close).toHaveBeenCalled();
     });
   });
 
