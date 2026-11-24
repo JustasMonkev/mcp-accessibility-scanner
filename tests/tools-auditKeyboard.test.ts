@@ -530,6 +530,30 @@ describe('runKeyboardFocusAudit', () => {
     expect(checkOff.targetSizeInconclusive).toHaveLength(0);
   });
 
+  it('measures a control clicked through its descendants by their region, not its own box', async () => {
+    const icon = await auditSingleStop(focusPoint({
+      role: 'button', tagName: 'BUTTON', name: 'Icon', isPointerTarget: true,
+      boundingBox: { x: 0, y: 0, width: 40, height: 40 }, targetBox: { x: 0, y: 0, width: 10, height: 10 },
+      targetSpacing: 'crowded', neighborTargets: [{ x: 10, y: 0, width: 16, height: 16 }],
+    }));
+    expect(icon.targetSizeIssues.map(stop => stop.step)).toEqual([1]);
+
+    const roomy = await auditSingleStop(focusPoint({
+      role: 'button', tagName: 'BUTTON', name: 'Icon', isPointerTarget: true,
+      boundingBox: { x: 0, y: 0, width: 16, height: 16 }, targetBox: { x: 0, y: 0, width: 30, height: 30 },
+    }));
+    expect(roomy.targetSizeIssues).toHaveLength(0);
+    expect(roomy.targetSizeInconclusive).toHaveLength(0);
+
+    // A region the work limit cut short is inconclusive even for a roomy own box.
+    const unmeasured = await auditSingleStop(focusPoint({
+      role: 'button', tagName: 'BUTTON', name: 'Icon', isPointerTarget: true,
+      boundingBox: { x: 0, y: 0, width: 40, height: 40 }, targetBox: null, targetSpacing: 'inconclusive',
+    }));
+    expect(unmeasured.targetSizeIssues).toHaveLength(0);
+    expect(unmeasured.targetSizeInconclusive.map(stop => stop.step)).toEqual([1]);
+  });
+
   it('does not apply target size to inline targets or non-target focus stops', async () => {
     const inline = await auditSingleStop(focusPoint({
       role: 'link', tagName: 'A', name: 'terms', isPointerTarget: true, inlineTarget: true,

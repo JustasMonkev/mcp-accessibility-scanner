@@ -28,6 +28,12 @@ export type FocusPoint = {
   href: string | null;
   text: string | null;
   boundingBox: TargetRect | null;
+  /**
+   * Set only for a control that does not take pointer input itself (`pointer-events: none`, hidden) but has
+   * descendants that do: the union box of those descendants, which is the area a click activates the control in.
+   * Null when the descendants could not be measured within the work limit.
+   */
+  targetBox?: TargetRect | null;
   inViewport: boolean;
   hasVisibleIndicator: boolean;
   isPointerTarget: boolean;
@@ -153,8 +159,12 @@ const maxFocusTextLength = 200;
 type TargetSizeVerdict = 'pass' | 'fail' | 'inconclusive';
 
 function targetSizeVerdict(point: FocusPoint): TargetSizeVerdict {
-  const rect = point.boundingBox;
-  if (!point.isPointerTarget || !rect)
+  if (!point.isPointerTarget)
+    return 'pass';
+  if (point.targetBox === null)
+    return 'inconclusive';
+  const rect = point.targetBox ?? point.boundingBox;
+  if (!rect)
     return 'pass';
   if (rect.width >= MIN_TARGET_SIZE_PX && rect.height >= MIN_TARGET_SIZE_PX)
     return 'pass';
@@ -386,22 +396,74 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
     return hasOutline || style.boxShadow !== 'none';
   }
 
-  // SC 2.5.8 targets are regions that accept a pointer action, so hidden (`visibility: hidden`
-  // or `collapse`), `pointer-events: none` and inert elements are not targets. Fully
-  // transparent elements still take clicks and stay targets.
-  function acceptsPointer(element: Element): boolean {
-    const elementStyle = window.getComputedStyle(element);
-    if (elementStyle.visibility !== 'visible' || elementStyle.pointerEvents === 'none')
-      return false;
-    for (let node: Element | null = element; node; node = composedParent(node)) {
-      if (node.hasAttribute('inert'))
-        return false;
-    }
-    return true;
+  // Elements walked per focus stop, shared by the spacing search and the descendant walks of
+  // pointerRegion, so one limit bounds all of the work.
+  let visited = 0;
+
+  // Hit testing skips hidden (`visibility: hidden` or `collapse`) and `pointer-events: none`
+  // boxes. Fully transparent elements still take clicks.
+  function takesHits(style: CSSStyleDeclaration): boolean {
+    return style.visibility === 'visible' && style.pointerEvents !== 'none';
   }
 
-  function isPointerTarget(element: Element, box: DOMRect): boolean {
-    return box.width > 0 && box.height > 0 && element.matches(pointerTargetSelector) && !element.matches(':disabled') && acceptsPointer(element);
+  function isInert(element: Element): boolean {
+    for (let node: Element | null = element; node; node = composedParent(node)) {
+      if (node.hasAttribute('inert'))
+        return true;
+    }
+    return false;
+  }
+
+  // Children in the flat tree: a host's shadow children, a slot's assigned elements (or its
+  // fallback content when nothing is assigned), otherwise the element's children.
+  function flatChildren(element: Element): Element[] {
+    if (element.shadowRoot)
+      return Array.from(element.shadowRoot.children);
+    if (element instanceof HTMLSlotElement && element.assignedNodes().length)
+      return element.assignedElements();
+    return Array.from(element.children);
+  }
+
+  // A control that is not hit itself still activates when a descendant that restores
+  // `pointer-events` or `visibility` is clicked (the click bubbles to it), and only there.
+  // Its target is the union box of those descendants. Every element walked counts against
+  // the visit limit; running out returns 'inconclusive'.
+  function descendantRegion(element: Element): DOMRect | null | 'inconclusive' {
+    let left = Infinity;
+    let top = Infinity;
+    let right = -Infinity;
+    let bottom = -Infinity;
+    const stack = flatChildren(element);
+    for (let node = stack.pop(); node; node = stack.pop()) {
+      if (++visited > maxSpacingVisits)
+        return 'inconclusive';
+      if (node.hasAttribute('inert'))
+        continue;
+      const nodeStyle = window.getComputedStyle(node);
+      if (nodeStyle.display === 'none')
+        continue;
+      const nodeBox = node.getBoundingClientRect();
+      if (takesHits(nodeStyle) && nodeBox.width > 0 && nodeBox.height > 0) {
+        left = Math.min(left, nodeBox.left);
+        top = Math.min(top, nodeBox.top);
+        right = Math.max(right, nodeBox.right);
+        bottom = Math.max(bottom, nodeBox.bottom);
+      }
+      for (const child of flatChildren(node))
+        stack.push(child);
+    }
+    return right > left ? new DOMRect(left, top, right - left, bottom - top) : null;
+  }
+
+  // SC 2.5.8 targets are regions that accept a pointer action: returns the element's own box,
+  // its descendants' region when it is not hit itself, or null for a disabled or inert
+  // control, or one nothing inside takes a pointer action on.
+  function pointerRegion(element: Element, box: DOMRect): DOMRect | null | 'inconclusive' {
+    if (!element.matches(pointerTargetSelector) || element.matches(':disabled') || isInert(element))
+      return null;
+    if (!takesHits(window.getComputedStyle(element)))
+      return descendantRegion(element);
+    return box.width > 0 && box.height > 0 ? box : null;
   }
 
   function sitsInsideSentence(element: Element): boolean {
@@ -434,14 +496,14 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
   // Checks every candidate as it is examined and stops at the first crowding neighbour,
   // so the outcome does not depend on DOM order. Candidates come from the document and
   // every open shadow root inside it, nested ones included, found by one lazy walk per root.
-  // Every element walked counts against the visit limit, and every candidate and entered
-  // shadow root against the candidate limit. A search cut short by either limit without
-  // finding a crowding neighbour is inconclusive, never a pass.
+  // Every element walked (descendant walks of pointerRegion included) counts against the
+  // visit limit, and every candidate and entered shadow root against the candidate limit.
+  // A search cut short by either limit without finding a crowding neighbour is
+  // inconclusive, never a pass.
   function measureSpacing(element: Element, rect: DOMRect): { spacing: TargetSpacing; neighbors: Rect[] } {
     const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
     const inconclusive = { spacing: 'inconclusive' as const, neighbors: [] };
     let examined = 0;
-    let visited = 0;
     const roots: (Document | ShadowRoot)[] = [document];
     for (let root = roots.pop(); root; root = roots.pop()) {
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
@@ -458,8 +520,14 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
           continue;
         if (++examined > maxTargetCandidates)
           return inconclusive;
-        const other = candidate.getBoundingClientRect();
-        if (crowds(center, other) && isPointerTarget(candidate, other))
+        const box = candidate.getBoundingClientRect();
+        // A candidate whose own box is clear can only crowd through descendants outside it.
+        if (!crowds(center, box) && !candidate.firstElementChild && !candidate.shadowRoot)
+          continue;
+        const other = pointerRegion(candidate, box);
+        if (other === 'inconclusive')
+          return inconclusive;
+        if (other && crowds(center, other))
           return { spacing: 'crowded', neighbors: [{ x: other.x, y: other.y, width: other.width, height: other.height }] };
       }
     }
@@ -578,10 +646,15 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
   const style = window.getComputedStyle(focused);
   const text = focused.textContent?.trim().slice(0, maxTextLength) || null;
   const name = approximateAccessibleName(focused, text);
-  const pointerTarget = isPointerTarget(focused, rect);
-  const undersized = rect.width < minTargetSize || rect.height < minTargetSize;
-  const spacing = checkTargetSize && pointerTarget && undersized ? measureSpacing(focused, rect) : null;
-  return {
+  const region = pointerRegion(focused, rect);
+  const pointerTarget = region !== null;
+  const measured = region === 'inconclusive' ? null : region;
+  let spacing: ReturnType<typeof measureSpacing> | null = null;
+  if (checkTargetSize && region === 'inconclusive')
+    spacing = { spacing: 'inconclusive', neighbors: [] };
+  else if (checkTargetSize && measured && (measured.width < minTargetSize || measured.height < minTargetSize))
+    spacing = measureSpacing(focused, measured);
+  const point: FocusPoint = {
     focusIdentity: `${documentId}:${stableIdentityOf(focused)}`,
     role: focused.getAttribute('role') || focused.tagName.toLowerCase(),
     name: name ? name.slice(0, maxTextLength) : null,
@@ -605,6 +678,10 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
     scrollX,
     scrollY,
   };
+  // Only a region measured from descendants differs from the element's own box.
+  if (pointerTarget && region !== rect)
+    point.targetBox = measured && { x: measured.x, y: measured.y, width: measured.width, height: measured.height };
+  return point;
 }
 
 const executionContextGone = /Execution context was destroyed|Cannot find context/;
@@ -709,7 +786,7 @@ function renderKeyboardSummary(result: KeyboardAuditResult, response: Response, 
     ...previewOf(result.focusJumpIssues, stop => `- Step ${stop.step}: deltaY=${stop.scrollDeltaY}, inViewport=${stop.inViewport}`),
     '',
     `Target size below 24x24 CSS px (WCAG 2.2 SC 2.5.8, spacing and inline exceptions applied): ${result.targetSizeIssues.length}`,
-    ...previewOf(result.targetSizeIssues, stop => `- Step ${stop.step}: ${describeElement(stop)} is ${Math.round(stop.boundingBox?.width ?? 0)}x${Math.round(stop.boundingBox?.height ?? 0)} CSS px`.replace(/\s+/g, ' ')),
+    ...previewOf(result.targetSizeIssues, stop => `- Step ${stop.step}: ${describeElement(stop)} is ${Math.round((stop.targetBox ?? stop.boundingBox)?.width ?? 0)}x${Math.round((stop.targetBox ?? stop.boundingBox)?.height ?? 0)} CSS px`.replace(/\s+/g, ' ')),
     ...(result.targetSizeInconclusive.length ? [
       `Target size inconclusive (spacing search hit its limit of ${maxTargetCandidates} candidates or ${maxSpacingVisits} elements): ${result.targetSizeInconclusive.length}`,
       ...previewOf(result.targetSizeInconclusive, stop => `- Step ${stop.step}: ${describeElement(stop)}`.replace(/\s+/g, ' ')),

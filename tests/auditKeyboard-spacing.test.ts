@@ -7,7 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { collectFocusPoint, type FocusPoint } from '../src/tools/auditKeyboard.js';
 
-type Box = { left: number; top: number; width: number; height: number; css?: string; inert?: boolean };
+// `html` is the button's inner markup.
+type Box = { left: number; top: number; width: number; height: number; css?: string; inert?: boolean; html?: string };
 
 // Buttons placed in a root; each entry of `shadows` is a host whose open shadow root holds that tree.
 // `host` styles the shadow host itself, and `spans` adds that many ordinary elements before the buttons.
@@ -50,6 +51,7 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
             button.id = 'focused';
           button.style.cssText = position(place);
           button.inert = !!place.inert;
+          button.innerHTML = place.html ?? '';
           root.append(button);
         }
         for (const shadow of shadows) {
@@ -178,6 +180,96 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
     const keyboardOnly = await measure(styled(focused, 'pointer-events:none'), [neighbor]);
     expect(keyboardOnly.isPointerTarget).toBe(false);
     expect(keyboardOnly.targetSpacing).toBeNull();
+  });
+
+  describe('controls with pointer-events: none and a descendant that restores it', () => {
+    // In Chromium a click on the restored descendant bubbles to and activates the control,
+    // while a click on the rest of the control's box falls through to what is beneath it.
+    const clickable = (css: string) => `<span style="position:absolute;pointer-events:auto;${css}"></span>`;
+    const noneWith = (place: Box, html: string) => ({ ...styled(place, 'pointer-events:none'), html });
+
+    it('still checks the focused control, measured by the clickable descendant', async () => {
+      const neighbor = box(16, 0, 16, 16);
+      const whole = await measure(noneWith(box(0, 0, 16, 16), clickable('left:0;top:0;width:16px;height:16px')), [neighbor]);
+      expect(whole.isPointerTarget).toBe(true);
+      expect(whole.targetBox).toEqual({ x: 0, y: 0, width: 16, height: 16 });
+      expect(whole.targetSpacing).toBe('crowded');
+      expect(whole.neighborTargets).toEqual([{ x: 16, y: 0, width: 16, height: 16 }]);
+      // A roomy control is undersized when only a small icon inside it takes the click.
+      const icon = await measure(noneWith(box(0, 0, 40, 40), clickable('left:0;top:0;width:10px;height:10px')), [box(10, 0, 16, 16)]);
+      expect(icon.isPointerTarget).toBe(true);
+      expect(icon.targetBox).toEqual({ x: 0, y: 0, width: 10, height: 10 });
+      expect(icon.targetSpacing).toBe('crowded');
+      // A clickable descendant that meets the minimum size passes without a spacing search.
+      const roomyChild = await measure(noneWith(box(0, 0, 16, 16), clickable('left:0;top:0;width:30px;height:30px')), [box(30, 0, 16, 16)]);
+      expect(roomyChild.isPointerTarget).toBe(true);
+      expect(roomyChild.targetBox).toEqual({ x: 0, y: 0, width: 30, height: 30 });
+      expect(roomyChild.targetSpacing).toBeNull();
+      // Elements in the control's open shadow root and slotted content are descendants too.
+      const shadowed = await measureTree({ focused: box(0, 0, 16, 16), buttons: [neighbor] }, 2000, 50_000, () => page.evaluate(html => {
+        // Buttons cannot host a shadow root, so a custom control takes the focus instead.
+        document.getElementById('focused')!.remove();
+        const control = document.createElement('div');
+        control.setAttribute('role', 'button');
+        control.tabIndex = 0;
+        control.style.cssText = 'position:absolute;left:0;top:0;width:16px;height:16px;pointer-events:none';
+        control.attachShadow({ mode: 'open' }).innerHTML = '<div><slot></slot></div>';
+        control.innerHTML = html;
+        document.body.append(control);
+        control.focus();
+      }, clickable('left:0;top:0;width:16px;height:16px')));
+      expect(shadowed.targetBox).toEqual({ x: 0, y: 0, width: 16, height: 16 });
+      expect(shadowed.targetSpacing).toBe('crowded');
+    });
+
+    it('counts a neighbour whose clickable descendant is adjacent to the target', async () => {
+      const focused = box(0, 0, 16, 16);
+      const crowded = await measure(focused, [noneWith(box(16, 0, 16, 16), clickable('left:0;top:0;width:16px;height:16px'))]);
+      expect(crowded.targetSpacing).toBe('crowded');
+      expect(crowded.neighborTargets).toEqual([{ x: 16, y: 0, width: 16, height: 16 }]);
+      // The clickable descendant decides, even outside the neighbour's own box.
+      const overflowing = await measure(focused, [noneWith(box(60, 0, 16, 16), clickable('left:-44px;top:0;width:16px;height:16px'))]);
+      expect(overflowing.targetSpacing).toBe('crowded');
+      expect(overflowing.neighborTargets).toEqual([{ x: 16, y: 0, width: 16, height: 16 }]);
+      // A neighbour whose own box is adjacent but whose clickable descendant is far away does not crowd.
+      const far = await measure(focused, [noneWith(box(16, 0, 16, 16), clickable('left:44px;top:0;width:16px;height:16px'))]);
+      expect(far.targetSpacing).toBe('clear');
+    });
+
+    it('still excludes controls with no descendant that takes a pointer action', async () => {
+      const neighbor = box(16, 0, 16, 16);
+      const inert = '<span inert style="position:absolute;left:0;top:0;width:16px;height:16px;pointer-events:auto"></span>';
+      for (const html of [
+        '<span style="position:absolute;left:0;top:0;width:16px;height:16px"></span>',
+        clickable('left:0;top:0;width:0;height:0'),
+        clickable('left:0;top:0;width:16px;height:16px;visibility:hidden'),
+        `<span style="display:none">${clickable('left:0;top:0;width:16px;height:16px')}</span>`,
+        inert,
+      ]) {
+        const keyboardOnly = await measure(noneWith(box(0, 0, 16, 16), html), [neighbor]);
+        expect(keyboardOnly.isPointerTarget, html).toBe(false);
+        expect(keyboardOnly.targetBox, html).toBeUndefined();
+        expect(keyboardOnly.targetSpacing, html).toBeNull();
+        expect((await measure(box(0, 0, 16, 16), [noneWith(neighbor, html)])).targetSpacing, html).toBe('clear');
+      }
+      // A disabled control is not a target even when a descendant takes clicks.
+      const disabled = await measureTree({ focused: box(0, 0, 16, 16), buttons: [noneWith(neighbor, clickable('left:0;top:0;width:16px;height:16px'))] }, 2000, 50_000, () => page.evaluate(() => {
+        document.querySelector<HTMLButtonElement>('button:not(#focused)')!.disabled = true;
+      }));
+      expect(disabled.targetSpacing).toBe('clear');
+    });
+
+    it('reports a descendant walk cut short by the visit limit as inconclusive', async () => {
+      const spans = '<span></span>'.repeat(60) + clickable('left:0;top:0;width:16px;height:16px');
+      const focused = await measureTree({ focused: noneWith(box(0, 0, 40, 40), spans) }, 2000, 50);
+      expect(focused.isPointerTarget).toBe(true);
+      expect(focused.targetBox).toBeNull();
+      expect(focused.targetSpacing).toBe('inconclusive');
+      const neighbor = await measureTree({ focused: box(0, 0, 16, 16), buttons: [noneWith(box(60, 0, 16, 16), spans)] }, 2000, 50);
+      expect(neighbor.targetSpacing).toBe('inconclusive');
+      // Within the limit both are measured.
+      expect((await measureTree({ focused: noneWith(box(0, 0, 40, 40), spans) }, 2000, 100)).targetBox).toEqual({ x: 0, y: 0, width: 16, height: 16 });
+    });
   });
 
   it('bounds the elements it walks, not only the candidates it finds', async () => {
