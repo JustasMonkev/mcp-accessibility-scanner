@@ -324,6 +324,17 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     return best;
   };
 
+  const verticalSpan = (lines: Box[]) => {
+    let top = Infinity;
+    let bottom = -Infinity;
+    const count = Math.min(lines.length, maxOverlapLines);
+    for (let i = 0; i < count; i++) {
+      top = Math.min(top, lines[i].top);
+      bottom = Math.max(bottom, lines[i].bottom);
+    }
+    return { top, bottom };
+  };
+
   const waitForLayout = () => new Promise<void>(resolve => {
     let done = false;
     const finish = () => {
@@ -461,10 +472,10 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     });
 
     const entries = after.flatMap((phase, index) => {
-      const lines = phase?.visibleLines.slice(0, maxOverlapLines);
+      const lines = phase?.visibleLines;
       if (!lines?.length)
         return [];
-      return [{ index, lines, top: Math.min(...lines.map(line => line.top)), bottom: Math.max(...lines.map(line => line.bottom)) }];
+      return [{ index, lines, ...verticalSpan(lines), baseline: verticalSpan(before[index].visibleLines) }];
     }).sort((a, b) => a.top - b.top);
     const overlaps: TextSpacingOverlap[] = [];
     for (let i = 0; i < entries.length; i++) {
@@ -472,7 +483,10 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
       for (let j = i + 1; j < entries.length && entries[j].top < a.bottom; j++) {
         const b = entries[j];
         const box = findOverlap(a.lines, b.lines, 'largest');
-        if (!box || findOverlap(before[a.index].visibleLines, before[b.index].visibleLines, 'first'))
+        if (!box)
+          continue;
+        const couldOverlapBefore = a.baseline.top < b.baseline.bottom && b.baseline.top < a.baseline.bottom;
+        if (couldOverlapBefore && findOverlap(before[a.index].visibleLines, before[b.index].visibleLines, 'first'))
           continue;
         const first = candidates[Math.min(a.index, b.index)];
         const second = candidates[Math.max(a.index, b.index)];
