@@ -14,7 +14,7 @@ import { HtmlPatternGroups } from '../utils/htmlPatterns.js';
 import { logUnhandledError } from '../utils/log.js';
 import { errorMessage } from '../utils/errors.js';
 import { isHttpUrl } from '../utils/httpUrl.js';
-import { extractSitemapUrls } from '../utils/sitemap.js';
+import { extractSitemapPages } from '../utils/sitemap.js';
 import { selectRepresentativeUrls } from '../utils/representativeUrls.js';
 import {
   assertRuleOptionsValid,
@@ -527,26 +527,26 @@ class CrawlFrontier {
     this._queued.add(url);
   }
 
-  enqueueListed(rawUrls: string[], discoveredFrom: string | null, pageSelection: AuditSiteParams['pageSelection']): void {
+  enqueueListed(pages: Pick<CrawlItem, 'url' | 'discoveredFrom'>[], pageSelection: AuditSiteParams['pageSelection']): void {
     if (pageSelection !== 'representative') {
-      for (const url of rawUrls)
+      for (const { url, discoveredFrom } of pages)
         this.enqueue(url, 0, discoveredFrom);
       return;
     }
-    const candidates = new Set<string>();
-    for (const url of rawUrls) {
+    const candidates = new Map<string, string | null>();
+    for (const { url, discoveredFrom } of pages) {
       const admitted = this._admitUnseen(url);
       if (!admitted)
         continue;
       if (candidates.has(admitted))
         this.skippedUrls++;
       else
-        candidates.add(admitted);
+        candidates.set(admitted, discoveredFrom);
     }
-    const selected = selectRepresentativeUrls([...candidates], this._maxPages);
+    const selected = selectRepresentativeUrls([...candidates.keys()], this._maxPages);
     this.skippedUrls += candidates.size - selected.length;
     for (const url of selected)
-      this.enqueue(url, 0, discoveredFrom);
+      this.enqueue(url, 0, candidates.get(url) ?? null);
     this.representativeSelection = { candidates: candidates.size, selected: selected.length };
   }
 
@@ -699,14 +699,14 @@ async function seedFrontier(frontier: CrawlFrontier, scope: CrawlScope, params: 
   signal?.throwIfAborted();
   const startUrl = scope.startUrl;
   if (params.strategy === 'provided') {
-    frontier.enqueueListed(params.urls ?? [], null, params.pageSelection);
+    frontier.enqueueListed((params.urls ?? []).map(url => ({ url, discoveredFrom: null })), params.pageSelection);
     return;
   }
   if (params.strategy === 'sitemap') {
     assertSitemapFetchSupported(context);
     const validateUrl = (input: string, base: URL) => parseSitemapUrl(input, base, scope, context.config);
     const sitemapUrl = validateUrl(params.sitemapUrl ?? new URL('sitemap.xml', startUrl).toString(), startUrl);
-    frontier.enqueueListed(await extractSitemapUrls(sitemapUrl, validateUrl, signal), sitemapUrl, params.pageSelection);
+    frontier.enqueueListed(await extractSitemapPages(sitemapUrl, validateUrl, signal), params.pageSelection);
     return;
   }
   frontier.enqueue(startUrl.toString(), 0, null);

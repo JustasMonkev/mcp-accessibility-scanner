@@ -15,6 +15,7 @@
  */
 
 import { SaxesParser } from '@rubensworks/saxes';
+import { errorMessage } from './errors.js';
 
 const maxRequests = 64;
 const maxBytes = 10 * 1024 * 1024;
@@ -69,57 +70,62 @@ function sitemapParser(url: string, onLocation: (location: string, isIndex: bool
   return parser;
 }
 
-export async function extractSitemapUrls(root: string, validateUrl: ValidateUrl, signal?: AbortSignal): Promise<string[]> {
+export async function extractSitemapPages(root: string, validateUrl: ValidateUrl, signal?: AbortSignal) {
   const timeout = AbortSignal.timeout(15_000);
   const fetchSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   const manifests = new Set([root]);
   const fetched = new Set<string>();
-  const pages: string[] = [];
+  const pages: { url: string, discoveredFrom: string }[] = [];
   let bytes = 0;
 
   // Set iteration visits newly discovered children in insertion order (BFS).
   for (let url of manifests) {
     const chain = new Set<string>();
-    while (!fetched.has(url)) {
-      if (fetched.size >= maxRequests)
-        throw new Error(`Sitemap expansion exceeds the ${maxRequests}-request limit.`);
-      fetched.add(url);
-      chain.add(url);
-      const response = await fetch(url, { redirect: 'manual', credentials: 'omit', signal: fetchSignal });
-      if ([301, 302, 303, 307, 308].includes(response.status)) {
-        await response.body?.cancel();
-        const location = response.headers.get('location');
-        if (!location || chain.size > 20)
-          throw new Error('Sitemap redirect is missing Location or exceeds 20 redirects.');
-        url = validateUrl(location, new URL(url));
-        if (chain.has(url))
-          throw new Error(`Sitemap redirect loop at ${url}.`);
-        continue;
-      }
-      if (!response.ok) {
-        await response.body?.cancel();
-        throw new Error(`Failed to fetch sitemap ${url}: ${response.status} ${response.statusText}`);
-      }
-
-      const base = new URL(url);
-      const parser = sitemapParser(url, (location, isIndex) => {
-        if (isIndex) {
-          manifests.add(validateUrl(location, base));
-          if (manifests.size > maxRequests)
-            throw new Error(`Sitemap expansion exceeds the ${maxRequests}-request limit.`);
-        } else {
-          pages.push(location);
+    try {
+      while (!fetched.has(url)) {
+        if (fetched.size >= maxRequests)
+          throw new Error(`Sitemap expansion exceeds the ${maxRequests}-request limit.`);
+        fetched.add(url);
+        chain.add(url);
+        const response = await fetch(url, { redirect: 'manual', credentials: 'omit', signal: fetchSignal });
+        if ([301, 302, 303, 307, 308].includes(response.status)) {
+          await response.body?.cancel();
+          const location = response.headers.get('location');
+          if (!location || chain.size > 20)
+            throw new Error('Sitemap redirect is missing Location or exceeds 20 redirects.');
+          url = validateUrl(location, new URL(url));
+          if (chain.has(url))
+            throw new Error(`Sitemap redirect loop at ${url}.`);
+          continue;
         }
-      });
-      const decoder = new TextDecoder('utf-8', { fatal: true });
-      for await (const chunk of response.body ?? []) {
-        bytes += chunk.byteLength;
-        if (bytes > maxBytes)
-          throw new Error('Sitemap expansion exceeds the cumulative 10 MiB limit.');
-        parser.write(decoder.decode(chunk, { stream: true }));
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new Error(`Failed to fetch sitemap ${url}: ${response.status} ${response.statusText}`);
+        }
+
+        const base = new URL(url);
+        const parser = sitemapParser(url, (location, isIndex) => {
+          if (isIndex) {
+            manifests.add(validateUrl(location, base));
+            if (manifests.size > maxRequests)
+              throw new Error(`Sitemap expansion exceeds the ${maxRequests}-request limit.`);
+          } else {
+            pages.push({ url: location, discoveredFrom: url });
+          }
+        });
+        const decoder = new TextDecoder('utf-8', { fatal: true });
+        for await (const chunk of response.body ?? []) {
+          bytes += chunk.byteLength;
+          if (bytes > maxBytes)
+            throw new Error('Sitemap expansion exceeds the cumulative 10 MiB limit.');
+          parser.write(decoder.decode(chunk, { stream: true }));
+        }
+        parser.write(decoder.decode()).close();
+        break;
       }
-      parser.write(decoder.decode()).close();
-      break;
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw new Error(`Cannot read sitemap ${url}: ${errorMessage(error)}`, { cause: error });
     }
   }
   return pages;

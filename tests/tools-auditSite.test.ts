@@ -1636,7 +1636,19 @@ describe('audit_site tool', () => {
     expect(crawlTab.navigate.mock.calls.map(([url]: [string]) => url)).toEqual(pages);
     const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
     expect(report.pages.map((page: { url: string }) => page.url)).toEqual(pages);
+    const sources = selected.map(path => base + (path.startsWith('blog/') ? 'maps/blog.xml' : 'maps/pages.xml'));
+    expect(report.pages.map((page: { discoveredFrom: string }) => page.discoveredFrom)).toEqual(sources);
     expect(report.representativeSelection).toEqual(pageSelection === 'representative' ? { candidates: 5, selected: 3 } : null);
+  });
+
+  it('names the child manifest when its fetch fails before sending headers', async () => {
+    const root = 'https://example.com/sitemap.xml';
+    const child = 'https://example.com/child.xml';
+    const { response, fetchMock } = createHarness({});
+    fetchMock.mockResolvedValueOnce(new globalThis.Response(sitemapIndex(child)))
+        .mockRejectedValueOnce(new TypeError('fetch failed'));
+    const params = tool.schema.inputSchema.parse({ strategy: 'sitemap', sitemapUrl: root });
+    await expect(tool.handle(response.context, params, response)).rejects.toThrow(`Cannot read sitemap ${child}: fetch failed`);
   });
 
   it('selects the same representatives from overlapping child maps as from one flat map', async () => {
