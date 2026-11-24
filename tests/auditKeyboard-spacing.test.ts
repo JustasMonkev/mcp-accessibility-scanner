@@ -251,6 +251,65 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
       expect(far.targetSpacing).toBe('clear');
     });
 
+    it('cuts clickable descendants to the overflow clips they sit in', async () => {
+      const noneClipping = (place: Box, css: string, html: string) => ({ ...styled(place, `pointer-events:none;${css}`), html });
+      const icon = clickable('left:0;top:0;width:10px;height:10px');
+      const outside = clickable('left:100px;top:100px;width:30px;height:30px');
+      const neighbor = box(14, 0, 16, 16);
+      // Hit testing in the page under test: only the icon activates the clipping control.
+      const hits = () => page.evaluate(() => [[5, 5], [110, 110]].map(([x, y]) => !!document.elementFromPoint(x, y)?.closest('#focused')));
+
+      for (const css of ['overflow:hidden', 'overflow:clip', 'overflow:auto', 'contain:paint']) {
+        const clipped = await measure(noneClipping(box(0, 0, 40, 40), css, icon + outside), [neighbor]);
+        expect(await hits(), css).toEqual([true, false]);
+        expect(clipped.isPointerTarget, css).toBe(true);
+        expect(clipped.targetBox, css).toEqual({ x: 0, y: 0, width: 10, height: 10 });
+        expect(clipped.targetSpacing, css).toBe('crowded');
+        expect((await measure(noneClipping(box(0, 0, 40, 40), css, icon + outside), [])).targetSpacing, css).toBe('clear');
+      }
+      // An overflow: visible control keeps descendants outside its box.
+      const visible = await measure(noneWith(box(0, 0, 40, 40), icon + outside), [neighbor]);
+      expect(await hits()).toEqual([true, true]);
+      expect(visible.targetBox).toEqual({ x: 0, y: 0, width: 130, height: 130 });
+      expect(visible.targetSpacing).toBeNull();
+      // A partly clipped descendant counts with the part inside the clip.
+      const partial = await measure(noneClipping(box(0, 0, 40, 40), 'overflow:hidden', icon + clickable('left:30px;top:30px;width:30px;height:30px')), []);
+      expect(partial.targetBox).toEqual({ x: 0, y: 0, width: 40, height: 40 });
+      expect(partial.targetSpacing).toBeNull();
+      // Each axis is clipped on its own.
+      const column = await measure(noneClipping(box(0, 0, 40, 40), 'overflow-x:clip', icon + clickable('left:0;top:100px;width:10px;height:30px') + outside), []);
+      expect(column.targetBox).toEqual({ x: 0, y: 0, width: 10, height: 130 });
+      // Clips of the elements between the control and the descendant apply too.
+      const wrapped = await measure(noneWith(box(0, 0, 40, 40), `<span style="position:absolute;left:0;top:0;width:40px;height:40px;overflow:hidden">${icon + outside}</span>`), [neighbor]);
+      expect(await hits()).toEqual([true, false]);
+      expect(wrapped.targetBox).toEqual({ x: 0, y: 0, width: 10, height: 10 });
+      expect(wrapped.targetSpacing).toBe('crowded');
+      // A clip does not reach a positioned descendant whose containing block is outside it.
+      const escaped = await measure(noneWith(box(0, 0, 40, 40), `<div style="width:40px;height:40px;overflow:hidden">${icon + outside}</div>`), [neighbor]);
+      expect(await hits()).toEqual([true, true]);
+      expect(escaped.targetBox).toEqual({ x: 0, y: 0, width: 130, height: 130 });
+      // An <svg> clips its shapes to its viewport.
+      const svgIcon = (shapes: string) => `<svg width="10" height="10" style="position:absolute;left:0;top:0;pointer-events:auto">${shapes}</svg>`;
+      const svg = await measure(noneWith(box(0, 0, 40, 40), svgIcon('<rect width="130" height="130"></rect>')), []);
+      expect(svg.targetBox).toEqual({ x: 0, y: 0, width: 10, height: 10 });
+      expect((await measure(noneWith(box(0, 0, 40, 40), svgIcon('<svg><rect width="130" height="130"></rect></svg>')), [])).targetSpacing).toBe('inconclusive');
+      // A control whose clickable descendants are all clipped away is not a pointer target.
+      const hidden = await measure(noneClipping(box(0, 0, 40, 40), 'overflow:hidden', outside), [neighbor]);
+      expect(hidden.isPointerTarget).toBe(false);
+      expect(hidden.targetSpacing).toBeNull();
+      // Neighbours are cut the same way: a clipped-away descendant next to the target does not crowd it.
+      const reaching = clickable('left:-44px;top:0;width:16px;height:16px');
+      expect((await measure(box(0, 0, 16, 16), [noneWith(box(60, 0, 16, 16), reaching)])).targetSpacing).toBe('crowded');
+      expect((await measure(box(0, 0, 16, 16), [noneClipping(box(60, 0, 16, 16), 'overflow:hidden', reaching)])).targetSpacing).toBe('clear');
+      // Clips the walk cannot place leave the target inconclusive rather than mismeasured.
+      for (const css of ['clip-path:inset(0 30px 30px 0)', 'overflow:hidden;transform:scale(2)']) {
+        const unmeasured = await measure(noneClipping(box(0, 0, 40, 40), css, icon + outside), []);
+        expect(unmeasured.isPointerTarget, css).toBe(true);
+        expect(unmeasured.targetBox, css).toBeNull();
+        expect(unmeasured.targetSpacing, css).toBe('inconclusive');
+      }
+    });
+
     it('still excludes controls with no descendant that takes a pointer action', async () => {
       const neighbor = box(16, 0, 16, 16);
       const inert = '<span inert style="position:absolute;left:0;top:0;width:16px;height:16px;pointer-events:auto"></span>';

@@ -692,8 +692,11 @@ Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) wit
   clicks and are counted. `contenteditable` regions are counted as targets on both sides. A hidden or
   `pointer-events: none` control that has a descendant restoring `visibility`/`pointer-events` (open shadow roots and
   slotted content included) still activates when that descendant is clicked, so it is counted with the union box of
-  those descendants as its target (`targetBox` in the JSON report). Those walks count against the 50,000-element limit
-  below. A control whose descendants could not be walked within it is inconclusive.
+  those descendants as its target (`targetBox` in the JSON report). Each descendant is first cut to the `overflow` and
+  `contain: paint` clips of the control and the elements between them (a positioned descendant only to the clips that
+  contain its containing block). Those walks count against the 50,000-element limit below. A control whose
+  descendants could not be walked within it, or with such a descendant under a clip the walk cannot place
+  (`clip-path`, `clip`, a scaled or rotated clipping box, an `<svg>` nested in another), is inconclusive.
 - The spacing search checks each candidate as it goes and stops at the first crowding neighbour, so DOM order does not
   change the result. Neighbours inside open shadow roots, nested ones included, are searched too (closed ones cannot
   be). Per focus stop it examines at most 2,000 candidates and shadow roots and walks at most 50,000 elements (ordinary
