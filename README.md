@@ -1011,6 +1011,10 @@ Returns the current request list, numbered so a single request can be inspected 
 Large `data:` URL payloads in request URLs are truncated to their media type prefix.
 When there is at least one request, a closing line points at `browser_network_request`.
 
+To poll without repeating earlier traffic, pass the last listed ID as `afterId` (exclusive; start at `0`). Add a positive integer `limit` to page through matching requests in ascending ID order. IDs are assigned when the tab first observes a request, which can be when its response arrives. For example, if `{ "all": true, "limit": 10 }` reports `More requests available. Continue with afterId: 42.`, call again with `{ "all": true, "limit": 10, "afterId": 42 }`. Keep the same tab, session and `all` setting between pages. IDs need not be consecutive or still retained: the next page starts at the first visible ID greater than the cursor, skipping evicted requests.
+
+No continuation notice means the page reached the end of the matching requests at call time. For the next poll, use the last ID returned, or keep your cursor if the list was empty. New requests can then appear, but a later response to an already listed request does not re-emit its ID; use `browser_network_request` to check that request's status.
+
 #### `browser_network_request`
 Returns credential-redacted request/response headers and body metadata for one request from the `browser_network_requests` listing.
 - Parameters: `index` (the request ID shown in either listing). IDs start at 1 for each tab and increase for its lifetime; they are never renumbered or reused after navigation or eviction. Current lists can therefore start above 1 and contain gaps.

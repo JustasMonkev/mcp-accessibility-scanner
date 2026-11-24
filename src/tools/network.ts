@@ -31,14 +31,24 @@ const requests = defineTabTool({
     description: 'Returns network requests since the last explicit navigation, optionally including up to 200 requests from earlier navigations in this tab',
     inputSchema: z.object({
       all: z.boolean().optional().describe('Include up to 200 requests from earlier explicit navigations in this tab'),
+      afterId: z.number().int().min(0).optional().describe('Only list newly assigned request IDs greater than this ID in the same tab (0 starts at the beginning). Updates to older requests are not replayed.'),
+      limit: z.number().int().min(1).optional().describe('Maximum number of matching requests to return in ascending ID order. Continue with the last returned ID as afterId.'),
     }),
     type: 'readOnly',
   },
 
   handle: async (tab, params, response) => {
-    const entries = tab.requests(params.all);
-    for (const [index, request] of entries)
+    const limit = params.limit ?? Infinity;
+    const entries = tab.requests(params.all, params.afterId, limit + 1);
+    let shown = 0;
+    for (const [index, request] of entries) {
       response.addResult(renderRequest(index, request, request.existingResponse()));
+      ++shown;
+      if (shown === limit && entries.size > limit) {
+        response.addResult(`\nMore requests available. Continue with afterId: ${index}.`);
+        break;
+      }
+    }
     if (entries.size)
       response.addResult('\nCall browser_network_request with one of the indexes above to see its headers and body metadata.');
   },

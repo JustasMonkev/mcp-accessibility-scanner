@@ -67,6 +67,20 @@ describe('Network Tools', () => {
       expect(networkTool.schema.type).toBe('readOnly');
       expect(networkTool.schema.inputSchema.safeParse({ all: true }).success).toBe(true);
       expect(networkTool.schema.inputSchema.safeParse({ all: 'true' }).success).toBe(false);
+      expect(networkTool.schema.inputSchema.parse({ afterId: 0, limit: 1 })).toEqual({ afterId: 0, limit: 1 });
+      for (const invalid of [{ afterId: -1 }, { afterId: 1.5 }, { limit: 0 }, { limit: 1.5 }])
+        expect(networkTool.schema.inputSchema.safeParse(invalid).success).toBe(false);
+    });
+
+    it('continues from the last emitted ID without formatting the lookahead request', async () => {
+      const listed = { url: () => 'data:text/plain,private', method: () => 'GET', existingResponse: () => null };
+      mockTab.requests = vi.fn().mockReturnValue(new Map([[9, listed], [17, {}]]));
+      await networkTool.handle(mockContext, { all: true, afterId: 4, limit: 1 }, response);
+
+      expect(response.result()).toContain('[9] [GET] data:text/plain,...');
+      expect(response.result()).not.toContain('private');
+      expect(response.result()).toContain('More requests available. Continue with afterId: 9.');
+      expect(response.result()).not.toContain('[17]');
     });
 
     it('should truncate data URL payloads', async () => {

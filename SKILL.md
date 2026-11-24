@@ -248,7 +248,7 @@ Evaluation results are pretty-printed JSON for JSON-compatible values; other val
 | Tool | Description |
 |------|-------------|
 | `browser_console_messages` | Get all console messages; source locations use one-based line numbers, as in snapshot console snippets |
-| `browser_network_requests` | List requests since explicit navigation with stable tab-local IDs; `{"all": true}` also includes up to 200 earlier requests |
+| `browser_network_requests` | List requests since explicit navigation with stable tab-local IDs; `{"all": true}` also includes up to 200 earlier requests. Poll with `afterId` set to the last listed ID; optionally bound the page with `limit`. |
 | `browser_network_request` | Get credential-redacted headers and body metadata using a retained request ID: `{"index": 3}` |
 
 ### Optional Tools (require `--caps`)
