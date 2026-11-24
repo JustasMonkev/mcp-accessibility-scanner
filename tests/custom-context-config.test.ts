@@ -26,10 +26,6 @@ it.each(['launch', 'context'])('accepts a custom context getter with Firefox cer
     launchOptions: level === 'launch' ? { proxy } : {},
     contextOptions: { clientCertificates, ...(level === 'context' && { proxy }) },
   } }, contextGetter);
-  try {
-    expect(contextGetter).not.toHaveBeenCalled();
-  } finally {
-    await server.close();
-  }
+  await server.close();
   expect(contextGetter).not.toHaveBeenCalled();
 });

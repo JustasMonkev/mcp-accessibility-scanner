@@ -51,7 +51,6 @@ class NodeFileStorage implements IFileStorage {
 }
 
 type LogEntry = {
-  timestamp: number;
   toolCall?: {
     toolName: string;
     toolArgs: Record<string, unknown>;
@@ -60,7 +59,7 @@ type LogEntry = {
     isError?: boolean;
   };
   userAction?: actions.Action;
-  source?: Context;
+  source: Context;
   tab?: Tab;
   browserSessionId?: string;
   code: string;
@@ -132,7 +131,6 @@ export class SessionLog {
 
   logResponse(response: Response, meta?: Record<string, unknown>) {
     const entry: LogEntry = {
-      timestamp: performance.now(),
       toolCall: {
         toolName: response.toolName,
         toolArgs: response.toolArgs,
@@ -150,8 +148,8 @@ export class SessionLog {
   logUserAction(action: actions.Action, tab: Tab, code: string, isUpdate: boolean) {
     code = code.trim();
     const source = tab.context;
-    const lastEntry = this._lastPendingEntryFor(source, tab);
     if (isUpdate) {
+      const lastEntry = this._pendingEntries.findLast(entry => entry.tab === tab);
       if (lastEntry?.userAction?.name === action.name) {
         lastEntry.userAction = action;
         lastEntry.code = code;
@@ -181,12 +179,11 @@ export class SessionLog {
       return;
     }
     if (action.name === 'navigate') {
-      const lastContextEntry = this._lastPendingEntryFor(source);
+      const lastContextEntry = this._pendingEntries.findLast(entry => entry.source === source);
       if (lastContextEntry?.userAction?.name === 'navigate' && lastContextEntry.tab === tab && lastContextEntry.tabSnapshot?.url === action.url)
         return;
     }
     const entry: LogEntry = {
-      timestamp: performance.now(),
       userAction: action,
       source,
       tab,
@@ -202,14 +199,6 @@ export class SessionLog {
       },
     };
     this._appendEntry(entry);
-  }
-
-  private _lastPendingEntryFor(source: Context, tab?: Tab): LogEntry | undefined {
-    for (let i = this._pendingEntries.length - 1; i >= 0; i--) {
-      if (this._pendingEntries[i].source === source && (!tab || this._pendingEntries[i].tab === tab))
-        return this._pendingEntries[i];
-    }
-    return undefined;
   }
 
   /**

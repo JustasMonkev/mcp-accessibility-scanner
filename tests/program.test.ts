@@ -308,6 +308,28 @@ function collectOutput(args: string[], timeoutMs = 3000, environment?: NodeJS.Pr
   });
 }
 
+it.each(['environment', 'flag'])('loads the config file selected by %s for MCP calls', async source => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-config-selection-'));
+  const configFile = path.join(dir, 'config.json');
+  const client = new Client({ name: 'config-selection-test', version: '1' });
+  try {
+    fs.writeFileSync(configFile, JSON.stringify({ capabilities: ['pdf'] }));
+    await client.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: source === 'flag' ? [...cliArgs, '--config', configFile] : cliArgs,
+      env: { PLAYWRIGHT_MCP_CONFIG: source === 'flag' ? path.join(dir, 'missing.json') : configFile },
+    }));
+    expect((await client.listTools()).tools.map(tool => tool.name)).toContain('browser_pdf_save');
+    // Reaching the tool's input validator proves dispatch without launching a browser.
+    const result = await client.callTool({ name: 'browser_pdf_save', arguments: { filename: 42 } });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('Invalid input for tool "browser_pdf_save"') });
+  } finally {
+    await client.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 describe('tool policy CLI options', () => {
   it('advertises both flags and applies additive allow / block precedence', () => {
     expect(runCLI('--help')).toContain('--allowed-tools <tools>');

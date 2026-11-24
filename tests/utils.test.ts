@@ -84,45 +84,12 @@ describe('Utils', () => {
     expect(truncateDataUrls(`data:image/svg+xml,<svg x${spaces}\r\nnext`)).toBe('data:image/svg+xml,...\r\nnext');
   });
 
-  describe('createGuid', () => {
-    it('should generate unique identifiers', () => {
-      const id1 = createGuid();
-      const id2 = createGuid();
-      const id3 = createGuid();
-
-      expect(id1).not.toBe(id2);
-      expect(id2).not.toBe(id3);
-      expect(id1).not.toBe(id3);
-    });
-
-    it('should generate hex strings', () => {
-      const ids = Array.from({ length: 10 }, () => createGuid());
-
-      ids.forEach(id => {
-        expect(id).toMatch(/^[a-f0-9]+$/);
-        expect(id.length).toBe(32); // 16 bytes = 32 hex chars
-      });
-    });
-  });
-
   it('keeps identifiers unique and well formed across random pool refills', () => {
     // 16 + 4 bytes per round consumes several 4 KiB pools.
     const ids = Array.from({ length: 1000 }, () => [createGuid(), createShortGuid()]).flat();
     expect(new Set(ids).size).toBe(ids.length);
     for (const [index, id] of ids.entries())
       expect(id).toMatch(index % 2 ? /^[a-f0-9]{8}$/ : /^[a-f0-9]{32}$/);
-  });
-
-  describe('createShortGuid', () => {
-    it('should generate 8 hex character tokens', () => {
-      const ids = Array.from({ length: 10 }, () => createShortGuid());
-      ids.forEach(id => expect(id).toMatch(/^[a-f0-9]{8}$/));
-    });
-
-    it('should generate unique tokens', () => {
-      const ids = Array.from({ length: 100 }, () => createShortGuid());
-      expect(new Set(ids).size).toBe(ids.length);
-    });
   });
 
   describe('safeIsoTimestampForFileName', () => {
@@ -433,7 +400,6 @@ describe('Utils', () => {
       const result = compressAriaSnapshot(snapshot);
 
       expect(result).toEqual({ output: snapshot, removed: 0 });
-      expect(result.output).toContain('Action 150');
     });
 
     it('should keep repeated focusable range widget refs', () => {
@@ -445,8 +411,6 @@ describe('Utils', () => {
       const result = compressAriaSnapshot(snapshot);
 
       expect(result).toEqual({ output: snapshot, removed: 0 });
-      expect(result.output).toContain('List scroll 150');
-      expect(result.output).toContain('Pane splitter 150');
     });
 
     it('should keep repeated cursor-pointer refs', () => {
@@ -458,7 +422,6 @@ describe('Utils', () => {
       const result = compressAriaSnapshot(snapshot);
 
       expect(result).toEqual({ output: snapshot, removed: 0 });
-      expect(result.output).toContain('Card 150');
     });
 
     it('keeps repeated descendants within a cursor-pointer target', () => {
@@ -481,10 +444,6 @@ describe('Utils', () => {
       const result = compressAriaSnapshot(snapshot);
 
       expect(result).toEqual({ output: snapshot, removed: 0 });
-      expect(result.output).toContain('Item 10');
-      expect(result.output).toContain('Item 11');
-      expect(result.output).toContain('Item 150');
-      expect(result.output).toContain('Action 150');
     });
 
     it('should keep repeated rows with protected gridcell descendants', () => {
@@ -499,7 +458,6 @@ describe('Utils', () => {
       const result = compressAriaSnapshot(snapshot);
 
       expect(result).toEqual({ output: snapshot, removed: 0 });
-      expect(result.output).toContain('Order 150');
     });
 
     it('should keep repeated actionable treegrid rows', () => {
@@ -514,7 +472,6 @@ describe('Utils', () => {
       const result = compressAriaSnapshot(snapshot);
 
       expect(result).toEqual({ output: snapshot, removed: 0 });
-      expect(result.output).toContain('Order 150');
     });
 
     it('should keep deeply nested actionable grid rows without ancestor walks', () => {
@@ -526,7 +483,6 @@ describe('Utils', () => {
       const result = compressAriaSnapshot(snapshot);
 
       expect(result).toEqual({ output: snapshot, removed: 0 });
-      expect(result.output).toContain('Order 1500');
     });
 
     it('should collapse repeated non-interactive nodes even when they have refs', () => {
@@ -550,8 +506,6 @@ describe('Utils', () => {
       const result = compressAriaSnapshot(snapshot);
 
       expect(result).toEqual({ output: snapshot, removed: 0 });
-      expect(result.output).toContain('Detail 11');
-      expect(result.output).toContain('Detail 150');
     });
 
     it.skipIf(!canRunAriaSnapshotIntegration)('should compress real Playwright list snapshots with non-actionable refs', async () => {

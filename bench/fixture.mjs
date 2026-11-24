@@ -15,11 +15,7 @@ function heavyPage() {
   const rows = [];
   for (let index = 0; index < 220; index++) {
     const label = `Item ${index}`;
-    // A mix of named and unnamed controls so axe finds real violations and the
-    // aria snapshot has interactive refs to click.
     const missingAlt = random() < 0.2;
-    // Every fifth button is genuinely unnamed - no label, and an aria-hidden
-    // glyph for its only content - so the scan really does report button-name.
     const unnamed = index % 5 === 0;
     rows.push([
       '<li class="row">',

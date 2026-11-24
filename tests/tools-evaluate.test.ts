@@ -53,9 +53,7 @@ describe('browser_evaluate tool', () => {
     response = new Response(mockContext, 'browser_evaluate', {});
   });
 
-  it('exists with the expected schema', () => {
-    expect(evaluateTool).toBeDefined();
-    expect(evaluateTool.schema.name).toBe('browser_evaluate');
+  it('is available with the core capability', () => {
     expect(evaluateTool.capability).toBe('core');
   });
 
@@ -88,7 +86,6 @@ describe('browser_evaluate tool', () => {
     await evaluateTool.handle(mockContext, { function: '() => ({})' }, response);
 
     expect(response.result()).toBe(JSON.stringify(value, null, 2));
-    expect(JSON.parse(response.result())).toEqual(value);
   });
 
   it.each([

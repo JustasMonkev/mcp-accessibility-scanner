@@ -31,14 +31,8 @@ describe('session log folders', () => {
   });
 
   it('gives sessions created in the same millisecond distinct folders', async () => {
-    // A purely timestamp-based name made two connections arriving in the
-    // same millisecond share a folder: interleaved session.md entries and
-    // overwritten snapshot ordinals.
     const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-a11y-session-folders-'));
     vi.spyOn(Date, 'now').mockReturnValue(1735689600000);
-    // SessionLog.create() announces every session folder with
-    // `console.error('Session: <folder>')`; silence the five copies so the
-    // test output stays clean.
     vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const config = await resolveConfig({ saveSession: true, outputDir });
@@ -54,10 +48,7 @@ describe('session log folders', () => {
   });
 
   it('scopes user-action merging per context and tags session actions with their handle', async () => {
-    // One log is shared by a backend's default context and every explicit
-    // session: an update matched against the globally-last pending entry
-    // merged one context's action into ANOTHER context's same-named one, and
-    // untagged entries made concurrent sessions' actions unattributable.
+    // Default and explicit sessions share one log.
     vi.useFakeTimers();
     try {
       const storage = {
@@ -72,8 +63,6 @@ describe('session log folders', () => {
 
       log.logUserAction({ name: 'fill', text: 'session-1' } as any, sessionTab, `await page.fill('#a', 'session-1');`, false);
       log.logUserAction({ name: 'fill', text: 'default-1' } as any, defaultTab, `await page.fill('#b', 'default-1');`, false);
-      // The session's update must merge into ITS pending action, not into the
-      // default context's more recent same-named one.
       log.logUserAction({ name: 'fill', text: 'session-2' } as any, sessionTab, `await page.fill('#a', 'session-2');`, true);
 
       await vi.advanceTimersByTimeAsync(1000);
@@ -87,7 +76,6 @@ describe('session log folders', () => {
       expect(sessionBlock).toContain(`"browserSessionId": "${label(handle(1))}"`);
       expect(appended).not.toContain(handle(1));
       expect(appended).not.toContain('session-1');
-      // The default context's entry is intact and stays untagged, as before.
       expect(defaultBlock).toContain('"text": "default-1"');
       expect(defaultBlock).not.toContain('browserSessionId');
     } finally {
@@ -245,7 +233,6 @@ describe('session log folders', () => {
         appendFile: vi.fn(async (_filePath: string, value: string) => { content += value; }),
       };
       const log = new SessionLog('/unused', storage);
-      // browser_session_open returns the new handle in its result text.
       log.logResponse({
         context: { options: {} }, toolName: 'browser_session_open', toolArgs: {},
         result: () => `Opened browser session ${handle(3)}.`, isError: () => false, code: () => '', tabSnapshot: () => undefined,
@@ -257,7 +244,6 @@ describe('session log folders', () => {
       const tab = { context: { options: { browserSessionId: handle(3) } }, page: { url: () => 'https://example.com/' } } as any;
       log.logUserAction({ name: 'fill', text: 'H' } as any, tab, "await page.fill('#name', 'H');", false);
       await vi.advanceTimersByTimeAsync(1000);
-      // An update after the flush rewrites the block already on disk.
       log.logUserAction({ name: 'fill', text: 'Hi' } as any, tab, "await page.fill('#name', 'Hi');", true);
       await (log as any)._sessionFileQueue;
 

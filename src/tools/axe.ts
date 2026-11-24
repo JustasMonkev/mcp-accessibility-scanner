@@ -4,7 +4,7 @@ import { z } from 'zod';
 
 import { truncateDataUrls } from '../utils/dataUrl.js';
 
-import type { ElementHandle, Frame, Page } from 'playwright';
+import type { ElementHandle, Frame, JSHandle, Page } from 'playwright';
 
 declare global {
   interface Window {
@@ -153,8 +153,75 @@ const axeReadyNonce = randomUUID();
 
 const axeConfigureSource = `;axe.configure({ allowedOrigins: ['<unsafe_all_origins>'], branding: { application: 'playwright' } });`;
 
-async function injectAxe(frame: Frame, source: string): Promise<void> {
-  await frame.evaluate(source);
+type AxeInstaller = { install: (token: string) => void };
+
+const cachedInstallers = new WeakMap<Frame, JSHandle<AxeInstaller>>();
+const installerVersions = new WeakMap<Frame, number>();
+const watchedPages = new WeakSet<Page>();
+
+// Return `{ install }` instead of bare `install` so Playwright's remote-object
+// description stays tiny instead of serializing the full axe source.
+const installerSource = [
+  '(function install(token) {',
+  axe.source,
+  axeConfigureSource,
+  `window[${JSON.stringify(axeReadyMarker)}] = token;`,
+  'return { install };',
+  '})',
+].join('\n');
+
+function disposeHandle(handle: JSHandle<AxeInstaller> | undefined): void {
+  void handle?.dispose().catch(() => {});
+}
+
+function invalidateInstaller(frame: Frame): void {
+  installerVersions.set(frame, (installerVersions.get(frame) ?? 0) + 1);
+  const existing = cachedInstallers.get(frame);
+  cachedInstallers.delete(frame);
+  disposeHandle(existing);
+}
+
+function watchPageFrames(page: Page): void {
+  if (watchedPages.has(page))
+    return;
+  watchedPages.add(page);
+  page.on('framenavigated', invalidateInstaller);
+  page.on('framedetached', invalidateInstaller);
+}
+
+async function tryReuseInstaller(frame: Frame, token: string): Promise<boolean> {
+  const handle = cachedInstallers.get(frame);
+  if (!handle)
+    return false;
+  try {
+    await frame.evaluate(({ installer, token }) => { installer.install(token); }, { installer: handle, token });
+    return true;
+  } catch (error) {
+    // Probe the handle without running install() so engine errors propagate
+    // while stale post-navigation handles fall back to recompilation.
+    const isHandleAlive = await frame.evaluate(() => true, handle).catch(() => false);
+    if (isHandleAlive)
+      throw error;
+    if (cachedInstallers.get(frame) === handle)
+      invalidateInstaller(frame);
+    return false;
+  }
+}
+
+async function installAxe(frame: Frame, token: string): Promise<void> {
+  if (await tryReuseInstaller(frame, token))
+    return;
+
+  const version = (installerVersions.get(frame) ?? 0) + 1;
+  installerVersions.set(frame, version);
+  const handle = await frame.evaluateHandle<AxeInstaller>(`${installerSource}(${JSON.stringify(token)})`);
+  if (installerVersions.get(frame) !== version || frame.isDetached()) {
+    disposeHandle(handle);
+    return;
+  }
+  const previous = cachedInstallers.get(frame);
+  cachedInstallers.set(frame, handle);
+  disposeHandle(previous);
 }
 
 const axeForNamesGlobal = '__mcpAccessibilityScannerAxe';
@@ -185,7 +252,7 @@ export function frameReadTimeoutMs(frame: Frame): number {
 }
 
 export async function injectAxeForNames(frame: Frame): Promise<boolean> {
-  return injectAxe(frame, axeForNamesSource).then(() => true, () => false);
+  return frame.evaluate(axeForNamesSource).then(() => true, () => false);
 }
 
 export async function withFrameTimeout<T>(work: Promise<T>, fallback: T, timeoutMs = childFrameInjectionTimeoutMs): Promise<T> {
@@ -379,13 +446,13 @@ async function injectAxeIntoFrames(
   include: readonly string[],
   exclude: readonly string[]
 ): Promise<string[]> {
+  watchPageFrames(page);
   const token = `${axe.version}:${axeReadyNonce}:${++axeReadySequence}`;
-  const source = `${axe.source}${axeConfigureSource}window[${JSON.stringify(axeReadyMarker)}]=${JSON.stringify(token)};`;
   const mainFrame = page.mainFrame();
-  await injectAxe(mainFrame, source);
+  await installAxe(mainFrame, token);
   await withConcurrency(
       childFramesOf(page),
-      frame => withFrameTimeout(injectAxe(frame, source), undefined),
+      frame => withFrameTimeout(installAxe(frame, token), undefined),
   );
 
   const stableFrameIds = new Map<Frame, number>();

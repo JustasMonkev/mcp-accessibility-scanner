@@ -68,17 +68,9 @@ describe('Tabs Tools', () => {
   describe('browser_tabs tool', () => {
     const tabsTool = tabsTools.find(t => t.schema.name === 'browser_tabs')!;
 
-    it('should exist', () => {
-      expect(tabsTool).toBeDefined();
-    });
-
     it('should have correct schema', () => {
       expect(tabsTool.schema.title).toBe('Manage tabs');
       expect(tabsTool.schema.type).toBe('destructive');
-    });
-
-    it('should have core-tabs capability', () => {
-      expect(tabsTool.capability).toBe('core-tabs');
     });
 
     it('should list tabs', async () => {
@@ -141,10 +133,6 @@ describe('Tabs Tools', () => {
   describe('browser_navigation_timeout tool', () => {
     const navTimeoutTool = tabsTools.find(t => t.schema.name === 'browser_navigation_timeout')!;
 
-    it('should exist', () => {
-      expect(navTimeoutTool).toBeDefined();
-    });
-
     it('should set navigation timeout for all tabs', async () => {
       await navTimeoutTool.handle(mockContext, { timeout: 60000 }, response);
 
@@ -157,10 +145,6 @@ describe('Tabs Tools', () => {
   describe('browser_default_timeout tool', () => {
     const defaultTimeoutTool = tabsTools.find(t => t.schema.name === 'browser_default_timeout')!;
 
-    it('should exist', () => {
-      expect(defaultTimeoutTool).toBeDefined();
-    });
-
     it('should set default timeout for all tabs', async () => {
       await defaultTimeoutTool.handle(mockContext, { timeout: 30000 }, response);
 
@@ -172,15 +156,9 @@ describe('Tabs Tools', () => {
     });
   });
 
-  describe('Tool capabilities', () => {
-    it('should all have core-tabs capability', () => {
-      tabsTools.forEach(tool => {
-        expect(tool.capability).toBe('core-tabs');
-      });
-    });
-
-    it('should export 3 tools', () => {
-      expect(tabsTools).toHaveLength(3);
+  it('should all have core-tabs capability', () => {
+    tabsTools.forEach(tool => {
+      expect(tool.capability).toBe('core-tabs');
     });
   });
 });

@@ -261,7 +261,7 @@ Here's the Claude Desktop configuration:
 
 ### Advanced Configuration
 
-You can pass a configuration file to customize Playwright behavior:
+Set `PLAYWRIGHT_MCP_CONFIG` or pass `--config <path>` to load a JSON configuration file. If both are set, `--config` selects the file:
 
 ```json
 {
@@ -1267,10 +1267,6 @@ The Windows ARM64 workflow exercises native Chrome in
 are exercised by `tests/extension-protocol.test.ts` and `tests/vscode-host*.test.ts`
 using simulated providers. Live editor and extension sessions require their
 respective host applications.
-
-Tests use Node or Playwright rather than `happy-dom`, and Chrome protocol types are
-defined locally. See the [dependency review](docs/dependency-review-2026-10.md) for
-the removal rationale and validation results.
 
 ### Playwright upgrade gate
 

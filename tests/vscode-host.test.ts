@@ -25,8 +25,6 @@ import { SharedClientSlot } from '../src/mcp/sharedClientSlot.js';
 import { wrapInProcess } from '../src/mcp/server.js';
 import { VSCodeProxyBackend } from '../src/vscode/host.js';
 
-// A minimal browser-context factory, matching the one in
-// browserSessions.test.ts: enough for browser_tabs to run without a browser.
 function makeFakeContextFactory(sessionsUnsupportedReason?: string) {
   const createContext = vi.fn(async (..._args: any[]) => {
     const browserContext: any = new EventEmitter();
@@ -253,10 +251,7 @@ describe('VSCodeProxyBackend', () => {
   });
 
   it('serializes the resolved fallback output dir into the spawned provider config', async () => {
-    // The fallback output dir is memoized on the config OBJECT; the JSON
-    // round-trip into the spawned VS Code provider mints a new object, so an
-    // unmaterialized config gave the child a second temp root and scattered
-    // one run's artifacts across the provider switch.
+    // A JSON round trip loses the fallback directory memoized on the parent config.
     const config = await resolveConfig({ server: { authToken: 'child-argv-secret' } });
     const parentFile = await outputFile(config, 'parent.txt');
 
@@ -275,7 +270,6 @@ describe('VSCodeProxyBackend', () => {
     expect(childConfig.outputDir).toBe(path.dirname(parentFile));
     expect(childConfig.server?.authToken).toBeUndefined();
     expect(JSON.stringify(transport._serverParams.args)).not.toContain('child-argv-secret');
-    // The deserialized child config writes into the parent's directory.
     const childFile = await outputFile(childConfig, 'child.txt');
     expect(path.dirname(childFile)).toBe(path.dirname(parentFile));
   });
@@ -321,8 +315,6 @@ describe('VSCodeProxyBackend', () => {
 
     expect(result.isError).toBe(true);
     expect(String((result.content as any[])[0].text)).toContain('contradict each other');
-    // The working provider was neither closed nor replaced: regular tools
-    // still route to it.
     expect(close).not.toHaveBeenCalled();
     await backend.callTool('scan_page', {});
     expect(callTool).toHaveBeenCalledTimes(1);
@@ -414,12 +406,7 @@ describe('VSCodeProxyBackend', () => {
   });
 
   it('keeps session handles at the host across a browser_connect provider switch', async () => {
-    // The switched VS Code provider is a separate server process whose
-    // BrowserServerBackend builds its own registry — forwarding handle-routed
-    // calls there answered "Unknown browserSessionId" while the session's
-    // context stayed alive in the host until its TTL. Session traffic must
-    // resolve against the host's registry regardless of the selected
-    // provider; only session-less traffic follows the switch.
+    // The switched child has its own session registry; existing handles belong to the host.
     const config = await resolveConfig({});
     const registry = new BrowserSessionRegistry();
     const factory = makeFakeContextFactory();
@@ -448,26 +435,21 @@ describe('VSCodeProxyBackend', () => {
     const switched = await backend.callTool('browser_connect', { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' });
     expect(switched.isError).not.toBe(true);
 
-    // Session-less traffic follows the switch...
     await backend.callTool('browser_tabs', { action: 'list' });
     expect(childCallTool).toHaveBeenCalledWith('browser_tabs', { action: 'list' }, expect.anything());
 
-    // ...while handle-routed calls keep resolving at the host...
     const routed = await backend.callTool('browser_tabs', { action: 'list', browserSessionId: id });
     expect(routed.isError).not.toBe(true);
 
-    // ...opening a new session works despite the child's veto (host-minted)...
     const openedWhileSwitched = await backend.callTool('browser_session_open', {});
     expect(openedWhileSwitched.isError).not.toBe(true);
     const idWhileSwitched = (openedWhileSwitched.structuredContent as any)?.browserSessionId;
     expect(idWhileSwitched).toMatch(/^bs_/);
 
-    // ...and both handles close cleanly instead of "Unknown browserSessionId".
     for (const handle of [id, idWhileSwitched]) {
       const closed = await backend.callTool('browser_session_close', { browserSessionId: handle });
       expect(closed.isError).not.toBe(true);
     }
-    // None of the session traffic leaked into the switched provider.
     expect(childCallTool.mock.calls.every(([name, args]) =>
       name !== 'browser_session_open' && name !== 'browser_session_close' && (args as any)?.browserSessionId === undefined)).toBe(true);
 

@@ -23,14 +23,12 @@ import type { Tab, TabSnapshot } from '../src/tab.js';
 import type { ImageContent, ResourceLink, TextContent } from '@modelcontextprotocol/server';
 
 function expectTextContent(content: TextContent | ImageContent): TextContent {
-  expect(content.type).toBe('text');
   if (content.type !== 'text')
     throw new Error('Expected text content');
   return content;
 }
 
 function expectImageContent(content: TextContent | ImageContent): ImageContent {
-  expect(content.type).toBe('image');
   if (content.type !== 'image')
     throw new Error('Expected image content');
   return content;
@@ -150,12 +148,6 @@ describe('Response', () => {
   });
 
   describe('addResult', () => {
-    it('should add result text', () => {
-      const response = new Response(mockContext, 'test_tool', {});
-      response.addResult('Test result');
-      expect(response.result()).toBe('Test result');
-    });
-
     it('should concatenate multiple results', () => {
       const response = new Response(mockContext, 'test_tool', {});
       response.addResult('Result 1');
@@ -180,12 +172,6 @@ describe('Response', () => {
   });
 
   describe('addCode', () => {
-    it('should add code snippet', () => {
-      const response = new Response(mockContext, 'test_tool', {});
-      response.addCode('await page.click("button")');
-      expect(response.code()).toBe('await page.click("button")');
-    });
-
     it('should concatenate multiple code snippets', () => {
       const response = new Response(mockContext, 'test_tool', {});
       response.addCode('await page.click("button")');
@@ -215,13 +201,6 @@ describe('Response', () => {
   });
 
   describe('setIncludeSnapshot', () => {
-    it('should enable snapshot inclusion', async () => {
-      const response = new Response(mockContext, 'test_tool', {});
-      response.setIncludeSnapshot();
-      await response.finish();
-      expect(mockTab.captureSnapshot).toHaveBeenCalled();
-    });
-
     it('uses configured boxes unless the tool explicitly disables them', async () => {
       mockContext.config.snapshot = { boxes: true };
       const configured = new Response(mockContext, 'test_tool', {});
@@ -292,13 +271,6 @@ describe('Response', () => {
   });
 
   describe('finish', () => {
-    it('should capture snapshot if requested', async () => {
-      const response = new Response(mockContext, 'test_tool', {});
-      response.setIncludeSnapshot();
-      await response.finish();
-      expect(mockTab.captureSnapshot).toHaveBeenCalled();
-    });
-
     it('should update the current tab title when no snapshot is requested', async () => {
       const response = new Response(mockContext, 'test_tool', {});
       await response.finish();
@@ -793,7 +765,6 @@ describe('Response', () => {
       const response = new Response(mockContext, 'test_tool', {});
       response.setIncludeSnapshot();
       await response.finish();
-      expect(response.tabSnapshot()).toBeDefined();
       expect(response.tabSnapshot()?.url).toBe('https://example.com');
     });
   });

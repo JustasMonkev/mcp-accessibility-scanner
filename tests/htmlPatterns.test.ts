@@ -114,10 +114,10 @@ describe('HtmlPatternGroups', () => {
 
   it('gives the same count and samples for every arrival order', () => {
     const nodes = ['<p>aa bb cc</p>', '<p>aa bb dd</p>', '<p>aa ee dd</p>'];
-    const results = permutations(nodes).map(order => group(order));
-    for (const result of results)
-      expect(result).toEqual(results[0]);
-    expect(results[0].count).toBe(2);
+    const [first, ...rest] = permutations(nodes).map(order => group(order));
+    expect(first.count).toBe(2);
+    for (const result of rest)
+      expect(result).toEqual(first);
   });
 
   it('samples one node per pattern before repeating a pattern', () => {

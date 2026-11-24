@@ -92,17 +92,6 @@ describe('Tab', () => {
       expect(mockPage.setDefaultTimeout).toHaveBeenCalledWith(5000);
     });
 
-    it('should listen to console events', () => {
-      const tab = new Tab(mockContext, mockPage, onPageClose);
-      const consoleMessage = {
-        type: () => 'log',
-        text: () => 'Test message',
-        location: () => ({ url: 'test.js', lineNumber: 10 }),
-      };
-      mockPage.emit('console', consoleMessage);
-      expect(tab.consoleMessages()).toHaveLength(1);
-    });
-
     it('reports one-based console source lines', () => {
       const tab = new Tab(mockContext, mockPage, onPageClose);
       mockPage.emit('console', {

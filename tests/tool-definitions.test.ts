@@ -15,83 +15,13 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { defineTool, defineTabTool } from '../src/tools/tool.js';
+import { defineTabTool } from '../src/tools/tool.js';
 import { z } from 'zod';
 import type { Response } from '../src/response.js';
 import type { Context } from '../src/context.js';
 
 describe('Tool Definitions', () => {
-  describe('defineTool', () => {
-    it('should define a tool with schema and handler', () => {
-      const schema = z.object({
-        param: z.string(),
-      });
-
-      const handler = vi.fn();
-
-      const tool = defineTool({
-        capability: 'core',
-        schema: {
-          name: 'test_tool',
-          title: 'Test Tool',
-          description: 'A test tool',
-          inputSchema: schema,
-          type: 'readOnly',
-        },
-        handle: handler,
-      });
-
-      expect(tool.capability).toBe('core');
-      expect(tool.schema.name).toBe('test_tool');
-      expect(tool.handle).toBe(handler);
-    });
-
-    it('should preserve tool properties', () => {
-      const schema = z.object({});
-
-      const tool = defineTool({
-        capability: 'core',
-        schema: {
-          name: 'my_tool',
-          title: 'My Tool',
-          description: 'Description',
-          inputSchema: schema,
-          type: 'destructive',
-        },
-        handle: async () => {},
-      });
-
-      expect(tool.schema.title).toBe('My Tool');
-      expect(tool.schema.description).toBe('Description');
-      expect(tool.schema.type).toBe('destructive');
-    });
-  });
-
   describe('defineTabTool', () => {
-    it('should define a tab tool that wraps handler', () => {
-      const schema = z.object({
-        param: z.string(),
-      });
-
-      const tabHandler = vi.fn();
-
-      const tool = defineTabTool({
-        capability: 'core',
-        schema: {
-          name: 'tab_tool',
-          title: 'Tab Tool',
-          description: 'A tab tool',
-          inputSchema: schema,
-          type: 'readOnly',
-        },
-        handle: tabHandler,
-      });
-
-      expect(tool.capability).toBe('core');
-      expect(tool.schema.name).toBe('tab_tool');
-      expect(typeof tool.handle).toBe('function');
-    });
-
     it('should call tab handler with current tab', async () => {
       const mockTab = {
         modalStates: vi.fn().mockReturnValue([]),

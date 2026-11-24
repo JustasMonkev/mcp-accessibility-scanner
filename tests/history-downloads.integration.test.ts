@@ -378,14 +378,10 @@ it.each([false, true])('saves bytes across relaunches without losing MCP (isolat
     const snapshot = await call(client, 'browser_snapshot');
     const clicked = await client.callTool({ name: 'browser_click', arguments: { element: 'Download file', ref: linkRef(snapshot, 'Download file') } });
     const clickResult = clicked.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
-    let savedContents: string[] = [];
     try {
-      await expect.poll(async () => {
-        const files = await fs.readdir(outputDir);
-        savedContents = await Promise.all(files.filter(file => file.endsWith('.txt')).map(file => fs.readFile(path.join(outputDir, file), 'utf8')));
-        return savedContents.length === 1 && savedContents[0] === downloadBytes.toString();
-      }, { timeout: 10_000 }).toBe(true);
-      expect(savedContents).toEqual([downloadBytes.toString()]);
+      await expect.poll(() => savedFiles(outputDir), { timeout: 10_000 }).toEqual([
+        expect.objectContaining({ bytes: downloadBytes }),
+      ]);
       expect(clicked.isError, clickResult).not.toBe(true);
       const afterSaveResult = await client.callTool({ name: 'browser_snapshot', arguments: {} });
       const afterSave = textOf(afterSaveResult);
@@ -543,7 +539,6 @@ it('relaunches the same persistent profile after the idle release and saves exac
 
   const resumed = await call(client, 'browser_navigate', { url: `${origin}/idle-downloads` });
   expect(resumed).toContain('released after inactivity');
-  // A new browser, not the released one, on the same profile.
   expect(launched).toHaveLength(2);
   const second = launched[1];
   expect(second).not.toBe(first);
@@ -556,16 +551,11 @@ it('relaunches the same persistent profile after the idle release and saves exac
   process.stdout.write(JSON.stringify({ case: 'idle-relaunch', browser: secondBrowser.version() }) + '\n');
   const relaunchedSnapshot = await call(client, 'browser_snapshot');
   const clicked = await client.callTool({ name: 'browser_click', arguments: { element: 'Download second', ref: linkRef(relaunchedSnapshot, 'Download second') } });
-  const bothSaved = [
+  await expect.poll(() => savedFiles(outputDir), { timeout: 10_000 }).toEqual([
     { file: expect.stringMatching(/^first-.*\.txt$/), bytes: idleDownloads[0].bytes },
     { file: expect.stringMatching(/^second-.*\.txt$/), bytes: idleDownloads[1].bytes },
-  ];
-  await expect.poll(async () => {
-    const files = await savedFiles(outputDir);
-    return files.length === 2 && files[1].bytes.equals(idleDownloads[1].bytes);
-  }, { timeout: 10_000 }).toBe(true);
+  ]);
   expect(clicked.isError, textOf(clicked)).not.toBe(true);
-  expect(await savedFiles(outputDir)).toEqual(bothSaved);
   const afterSaveResult = await client.callTool({ name: 'browser_snapshot', arguments: {} });
   const afterSave = textOf(afterSaveResult);
   expect(afterSaveResult.isError, afterSave).not.toBe(true);
