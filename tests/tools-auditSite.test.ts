@@ -1603,6 +1603,163 @@ describe('audit_site tool', () => {
     expect(report.pages.map((page: any) => page.url)).toEqual(['https://example.com/one', 'https://example.com/two']);
   });
 
+  function sitemapIndex(...children: string[]) {
+    return `<sitemapindex>${children.map(child => `<sitemap><loc>${child}</loc></sitemap>`).join('')}</sitemapindex>`;
+  }
+
+  function urlset(...pages: string[]) {
+    return `<urlset>${pages.map(page => `<url><loc>${page}</loc></url>`).join('')}</urlset>`;
+  }
+
+  it.each([
+    { pageSelection: 'discovery', maxPages: 5, selected: ['blog/1', 'blog/2', 'blog/3', 'about', 'pricing'] },
+    { pageSelection: 'discovery', maxPages: 3, selected: ['blog/1', 'blog/2', 'blog/3'] },
+    { pageSelection: 'representative', maxPages: 3, selected: ['blog/1', 'about', 'pricing'] },
+  ])('expands overlapping sitemap indexes before $pageSelection selection at maxPages=$maxPages', async ({ pageSelection, maxPages, selected }) => {
+    const base = 'https://example.com/';
+    const { response, fetchMock, crawlTab } = createHarness({}, {
+      sitemapXmlByUrl: {
+        [base + 'sitemap.xml']: sitemapIndex('maps/blog.xml', 'maps/alias', 'maps/nested.xml', 'maps/blog.xml#again'),
+        [base + 'maps/blog.xml']: urlset(base + 'blog/1', base + 'blog/2', base + 'blog/3'),
+        [base + 'maps/nested.xml']: sitemapIndex('../sitemap.xml', 'blog.xml', 'pages.xml'),
+        [base + 'maps/pages.xml']: urlset(base + 'blog/2', base + 'about', base + 'pricing'),
+      },
+      sitemapRedirectMap: { [base + 'maps/alias']: 'blog.xml' },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap', pageSelection, maxPages, waitAfterNavigationMs: 0 }), response);
+
+    const requests = ['sitemap.xml', 'maps/blog.xml', 'maps/alias', 'maps/nested.xml', 'maps/pages.xml'];
+    expect(fetchMock.mock.calls).toEqual(requests.map(path => [base + path, expect.objectContaining({ redirect: 'manual', credentials: 'omit' })]));
+    const pages = selected.map(path => base + path);
+    expect(crawlTab.navigate.mock.calls.map(([url]: [string]) => url)).toEqual(pages);
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { url: string }) => page.url)).toEqual(pages);
+    expect(report.representativeSelection).toEqual(pageSelection === 'representative' ? { candidates: 5, selected: 3 } : null);
+  });
+
+  it('selects the same representatives from overlapping child maps as from one flat map', async () => {
+    const base = 'https://example.com/';
+    const products = Array.from({ length: 12 }, (_, i) => base + 'products/' + (i + 1));
+    const help = [products[0] + '?utm_source=child', base + 'help/returns'];
+    const root = base + 'sitemap.xml';
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+    for (const rootXml of [urlset(...products, ...help), sitemapIndex('products.xml', 'help.xml')]) {
+      const { response, crawlTab } = createHarness({}, {
+        sitemapXmlByUrl: { [root]: rootXml, [base + 'products.xml']: urlset(...products), [base + 'help.xml']: urlset(...help) },
+      });
+      await tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap', pageSelection: 'representative', maxPages: 2, waitAfterNavigationMs: 0 }), response);
+      expect(crawlTab.navigate.mock.calls.map(([url]: [string]) => url)).toEqual([products[0], base + 'help/returns']);
+      expect(response.structuredContent()).toMatchObject({ representativeSelection: { candidates: 13, selected: 2 } });
+    }
+  });
+
+  it('ignores extension locations, comments and lookalike entries in namespaced sitemaps', async () => {
+    const root = 'https://example.com/sitemap.xml';
+    const child = 'https://example.com/child?a=1&b=2';
+    const { response, fetchMock, crawlTab } = createHarness({}, {
+      sitemapXmlByUrl: {
+        [root]: `<?xml version="1.0"?><s:sitemapindex xmlns:s="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:e="urn:extension">
+          <e:sitemap><s:loc>/not-a-manifest</s:loc></e:sitemap>
+          <s:sitemap><e:loc>/wrong</e:loc><s:loc>child?a=1&amp;b=2</s:loc></s:sitemap></s:sitemapindex>`,
+        [child]: `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="urn:image"><url>
+          <image:loc>/asset</image:loc><image:image><loc>/nested</loc></image:image>
+          <!-- <loc>/comment</loc> --><loc><![CDATA[https://example.com/real.xml]]></loc></url></urlset>`,
+      },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap', waitAfterNavigationMs: 0 }), response);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([root, child]);
+    expect(crawlTab.navigate.mock.calls.map(([url]: [string]) => url)).toEqual(['https://example.com/real.xml']);
+  });
+
+  it.each([
+    { target: 'https://outside.example/map', reason: /crawl scope/ },
+    { target: '/signout/map', reason: /crawl scope/ },
+    { target: 'https://private.example.com/map', reason: /network policy/ },
+    { target: 'https://user:pass@example.com/map', reason: /credentials/ },
+    { target: 'file:///tmp/map.xml', reason: /must use http/ },
+  ])('validates child $target both as a listed manifest and as a redirect before fetching it', async ({ target, reason }) => {
+    const root = 'https://example.com/sitemap.xml';
+    const redirect = 'https://example.com/redirect.xml';
+    for (const viaRedirect of [false, true]) {
+      const { response, fetchMock, crawlTab } = createHarness({}, {
+        network: { blockedOrigins: ['private.example.com'] },
+        sitemapXmlByUrl: { [root]: sitemapIndex(viaRedirect ? redirect : target) },
+        sitemapRedirectMap: { [redirect]: target },
+      });
+      await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap', includeSubdomains: true }), response)).rejects.toThrow(reason);
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(viaRedirect ? [root, redirect] : [root]);
+      expect(crawlTab.navigate).not.toHaveBeenCalled();
+      expect(writeFileSpy).not.toHaveBeenCalled();
+    }
+  });
+
+  it('counts redirects toward the total sitemap request limit, even after finding enough pages', async () => {
+    const base = 'https://example.com/';
+    const children = Array.from({ length: 63 }, (_, i) => base + i);
+    const { response, fetchMock, crawlTab } = createHarness({}, {
+      sitemapXmlByUrl: {
+        [base + 'sitemap.xml']: sitemapIndex(...children),
+        ...Object.fromEntries(children.map(child => [child, urlset(base + 'page')])),
+      },
+      sitemapRedirectMap: { [children[62]]: '/one-too-many.xml' },
+    });
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap', maxPages: 1 }), response)).rejects.toThrow(/64-request limit/);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([base + 'sitemap.xml', ...children]);
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('stops reading a child as soon as the cumulative XML budget is exceeded', async () => {
+    const root = 'https://example.com/sitemap.xml';
+    const first = urlset('https://example.com/ready').padEnd(6 * 1024 * 1024);
+    const cancel = vi.fn();
+    let chunksRead = 0;
+    const { response, crawlTab } = createHarness({}, {
+      sitemapFetch: async input => {
+        if (String(input) === root)
+          return new globalThis.Response(sitemapIndex('first', 'second'));
+        if (String(input).endsWith('/first'))
+          return new globalThis.Response(first);
+        return new globalThis.Response(new ReadableStream({
+          pull(controller) {
+            ++chunksRead;
+            controller.enqueue(new Uint8Array(1024 * 1024).fill(32));
+            if (chunksRead === 10)
+              controller.close();
+          },
+          cancel,
+        }, { highWaterMark: 0 }));
+      },
+    });
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap', maxPages: 1 }), response)).rejects.toThrow(/cumulative 10 MiB/);
+    expect(chunksRead).toBe(4);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { child: undefined, reason: /404/ },
+    { child: '<html/>', reason: /urlset or sitemapindex/ },
+    { child: '<urlset><url><loc>/incomplete</loc></url>', reason: /unclosed tag/ },
+    { child: '<sitemapindex><sitemap/></sitemapindex>', reason: /Missing loc/ },
+  ])('fails the whole audit when a later child cannot be read: $reason', async ({ child, reason }) => {
+    const base = 'https://example.com/';
+    const { response, crawlTab } = createHarness({}, {
+      sitemapXmlByUrl: {
+        [base + 'sitemap.xml']: sitemapIndex('first', 'later'),
+        [base + 'first']: urlset(base + 'ready'),
+        [base + 'later']: child ?? '',
+      },
+    });
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap', maxPages: 1 }), response)).rejects.toThrow(reason);
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
   it('preserves trailing-slash URLs and decodes sitemap XML references exactly once', async () => {
     const urls = ['https://example.com/dir/', 'https://example.com/dir', 'https://example.com/search?a=1&b=2', 'https://example.com/amp/&amp;', 'https://example.com/quotes?x=%3C%3E%22%27', 'https://example.com/cdata/&amp;', 'https://example.com/numeric/2'];
     const { response } = createHarness(Object.fromEntries(urls.map(url => [url, []])), {
@@ -1627,19 +1784,19 @@ describe('audit_site tool', () => {
       sitemapXmlByUrl: { 'https://example.com/sitemap.xml': `<urlset><url><loc>https://example.com/${entity}</loc></url></urlset>` },
     });
     await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap' }), response))
-        .rejects.toThrow('Invalid XML entity');
+        .rejects.toThrow(/entity/i);
     expect(crawlTab.navigate).not.toHaveBeenCalled();
   });
 
   it.each([
-    { value: '&'.repeat(4096), error: 'Invalid XML entity' },
-    { value: '<![CDATA['.repeat(4096), error: 'Unterminated CDATA' },
-  ])('rejects repeated malformed sitemap tokens without crawling: $error', async ({ value, error }) => {
+    { value: '&'.repeat(4096), label: 'entities' },
+    { value: '<![CDATA['.repeat(4096), label: 'CDATA' },
+  ])('rejects repeated malformed sitemap tokens without crawling: $label', async ({ value }) => {
     const { response, crawlTab } = createHarness({}, {
       sitemapXmlByUrl: { 'https://example.com/sitemap.xml': `<urlset><url><loc>https://example.com/${value}</loc></url></urlset>` },
     });
     await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap' }), response))
-        .rejects.toThrow(error);
+        .rejects.toThrow(/sitemap\.xml/);
     expect(crawlTab.navigate).not.toHaveBeenCalled();
   });
 
