@@ -414,43 +414,162 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
     return false;
   }
 
-  // Children in the flat tree: a host's shadow children, a slot's assigned elements (or its
+  // Reads `first` and the siblings after it one at a time, charging each read against the
+  // visit limit, so a parent with many children costs only the ones the walk reaches.
+  type ChildReader = () => Node | null | 'inconclusive';
+  function readSiblings(first: Node | null, step: (node: Node) => Node | null, accept: (node: Node) => boolean): ChildReader {
+    let node = first;
+    return () => {
+      for (; node; node = step(node)) {
+        if (++visited > maxSpacingVisits)
+          return 'inconclusive';
+        if (accept(node)) {
+          const found = node;
+          node = step(node);
+          return found;
+        }
+      }
+      return null;
+    };
+  }
+
+  // Children in the flat tree: a host's shadow children, a slot's assigned nodes (or its
   // fallback content when nothing is assigned), otherwise the element's children.
-  function flatChildren(element: Element): Element[] {
-    if (element.shadowRoot)
-      return Array.from(element.shadowRoot.children);
-    if (element instanceof HTMLSlotElement && element.assignedNodes().length)
-      return element.assignedElements();
-    return Array.from(element.children);
+  function flatChildren(element: Element): ChildReader {
+    const nextElement = (node: Node) => (node as Element).nextElementSibling;
+    const root = element.getRootNode();
+    if (element.shadowRoot || !(element instanceof HTMLSlotElement) || !(root instanceof ShadowRoot))
+      return readSiblings((element.shadowRoot ?? element).firstElementChild, nextElement, () => true);
+    // Assigned nodes, text included, are children of the host.
+    const slot = element;
+    const assigned = readSiblings(root.host.firstChild, node => node.nextSibling, node => (node as Element | Text).assignedSlot === slot);
+    let pending: ReturnType<ChildReader> | undefined = assigned();
+    if (pending === null)
+      return readSiblings(slot.firstElementChild, nextElement, () => true);
+    return () => {
+      const node = pending ?? assigned();
+      pending = undefined;
+      return node;
+    };
+  }
+
+  // The area a descendant's box is cut to. 'unmeasurable' is a clip the walk cannot place:
+  // `clip-path` or `clip`, a scaled or rotated clipping box, or an SVG viewport nested in
+  // another SVG.
+  type Edges = { left: number; top: number; right: number; bottom: number };
+  type Clip = Edges | 'unmeasurable';
+  // The clips on an element's in-flow, absolutely positioned and fixed descendants: a
+  // positioned descendant is cut only by the clipping ancestors that contain its containing block.
+  type Clips = { flow: Clip; absolute: Clip; fixed: Clip };
+
+  function clipOf(style: CSSStyleDeclaration, clips: Clips): Clip {
+    if (style.position === 'absolute')
+      return clips.absolute;
+    return style.position === 'fixed' ? clips.fixed : clips.flow;
+  }
+
+  function intersect(clip: Clip, other: Clip | null): Clip {
+    if (!other)
+      return clip;
+    if (clip === 'unmeasurable' || other === 'unmeasurable')
+      return 'unmeasurable';
+    return {
+      left: Math.max(clip.left, other.left),
+      top: Math.max(clip.top, other.top),
+      right: Math.min(clip.right, other.right),
+      bottom: Math.min(clip.bottom, other.bottom),
+    };
+  }
+
+  // `clip-path` and `clip` cut an element and everything inside it to a shape.
+  function clipsToShape(style: CSSStyleDeclaration): boolean {
+    return style.clipPath !== 'none' || (style.clip !== 'auto' && (style.position === 'absolute' || style.position === 'fixed'));
+  }
+
+  // The clip an element puts on its descendants: its padding box (an outer <svg>'s content
+  // box) on each axis that `overflow` other than `visible`, or `contain: paint`, clips.
+  function overflowClip(element: Element, style: CSSStyleDeclaration, box: DOMRect): Clip | null {
+    const html = element instanceof HTMLElement;
+    // Overflow does not apply to inline boxes or to table rows and columns.
+    if (html && (style.display === 'inline' || /^table-(row|column|header|footer)/.test(style.display)))
+      return null;
+    const paint = /paint|strict|content/.test(style.contain);
+    const clipX = paint || style.overflowX !== 'visible';
+    const clipY = paint || style.overflowY !== 'visible';
+    if (!clipX && !clipY)
+      return null;
+    if (!html && !(element instanceof SVGSVGElement && !element.ownerSVGElement))
+      return 'unmeasurable';
+    // The client box is in the element's own coordinates, so it only places the clip when
+    // the bounding box matches the layout size.
+    const layoutWidth = html ? element.offsetWidth : element.clientLeft + element.clientWidth + Number.parseFloat(style.borderRightWidth);
+    const layoutHeight = html ? element.offsetHeight : element.clientTop + element.clientHeight + Number.parseFloat(style.borderBottomWidth);
+    if (Math.abs(box.width - layoutWidth) > 1 || Math.abs(box.height - layoutHeight) > 1)
+      return 'unmeasurable';
+    const [padLeft, padTop, padRight, padBottom] = html ? [0, 0, 0, 0] : [style.paddingLeft, style.paddingTop, style.paddingRight, style.paddingBottom].map(Number.parseFloat);
+    const left = box.left + element.clientLeft + padLeft;
+    const top = box.top + element.clientTop + padTop;
+    return {
+      left: clipX ? left : -Infinity,
+      top: clipY ? top : -Infinity,
+      right: clipX ? left + element.clientWidth - padLeft - padRight : Infinity,
+      bottom: clipY ? top + element.clientHeight - padTop - padBottom : Infinity,
+    };
+  }
+
+  function clipsInside(element: Element, style: CSSStyleDeclaration, box: DOMRect, outer: Clips): Clips {
+    if (style.display === 'contents')
+      return outer;
+    if (clipsToShape(style))
+      return { flow: 'unmeasurable', absolute: 'unmeasurable', fixed: 'unmeasurable' };
+    const flow = intersect(clipOf(style, outer), overflowClip(element, style, box));
+    const containsFixed = style.transform !== 'none' || style.perspective !== 'none' || style.filter !== 'none'
+      || style.backdropFilter !== 'none' || /paint|layout|strict|content/.test(style.contain)
+      || /transform|perspective|filter/.test(style.willChange) || style.containerType !== 'normal';
+    const containsAbsolute = containsFixed || style.position !== 'static';
+    return { flow, absolute: containsAbsolute ? flow : outer.absolute, fixed: containsFixed ? flow : outer.fixed };
   }
 
   // A control that is not hit itself still activates when a descendant that restores
   // `pointer-events` or `visibility` is clicked (the click bubbles to it), and only there.
-  // Its target is the union box of those descendants. Every element walked counts against
-  // the visit limit; running out returns 'inconclusive'.
-  function descendantRegion(element: Element): DOMRect | null | 'inconclusive' {
+  // Its target is the union box of those descendants, each cut to the clips of the control
+  // and of the elements between. Every element walked counts against the visit limit;
+  // running out, or such a descendant under a clip the walk cannot place, returns 'inconclusive'.
+  function descendantRegion(element: Element, style: CSSStyleDeclaration, box: DOMRect): DOMRect | null | 'inconclusive' {
     let left = Infinity;
     let top = Infinity;
     let right = -Infinity;
     let bottom = -Infinity;
-    const stack = flatChildren(element);
-    for (let node = stack.pop(); node; node = stack.pop()) {
-      if (++visited > maxSpacingVisits)
+    const unclipped = { left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity };
+    // The children still to read at each level of the walk, and the clips they sit in.
+    const stack = [{ children: flatChildren(element), clips: clipsInside(element, style, box, { flow: unclipped, absolute: unclipped, fixed: unclipped }) }];
+    while (stack.length) {
+      const level = stack[stack.length - 1];
+      const node = level.children();
+      if (node === 'inconclusive')
         return 'inconclusive';
-      if (node.hasAttribute('inert'))
+      if (!node) {
+        stack.pop();
+        continue;
+      }
+      if (!(node instanceof Element) || node.hasAttribute('inert'))
         continue;
       const nodeStyle = window.getComputedStyle(node);
       if (nodeStyle.display === 'none')
         continue;
       const nodeBox = node.getBoundingClientRect();
       if (takesHits(nodeStyle) && nodeBox.width > 0 && nodeBox.height > 0) {
-        left = Math.min(left, nodeBox.left);
-        top = Math.min(top, nodeBox.top);
-        right = Math.max(right, nodeBox.right);
-        bottom = Math.max(bottom, nodeBox.bottom);
+        const visible = intersect(clipOf(nodeStyle, level.clips), nodeBox);
+        if (visible === 'unmeasurable' || clipsToShape(nodeStyle))
+          return 'inconclusive';
+        if (visible.right > visible.left && visible.bottom > visible.top) {
+          left = Math.min(left, visible.left);
+          top = Math.min(top, visible.top);
+          right = Math.max(right, visible.right);
+          bottom = Math.max(bottom, visible.bottom);
+        }
       }
-      for (const child of flatChildren(node))
-        stack.push(child);
+      stack.push({ children: flatChildren(node), clips: clipsInside(node, nodeStyle, nodeBox, level.clips) });
     }
     return right > left ? new DOMRect(left, top, right - left, bottom - top) : null;
   }
@@ -461,8 +580,9 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
   function pointerRegion(element: Element, box: DOMRect): DOMRect | null | 'inconclusive' {
     if (!element.matches(pointerTargetSelector) || element.matches(':disabled') || isInert(element))
       return null;
-    if (!takesHits(window.getComputedStyle(element)))
-      return descendantRegion(element);
+    const style = window.getComputedStyle(element);
+    if (!takesHits(style))
+      return descendantRegion(element, style, box);
     return box.width > 0 && box.height > 0 ? box : null;
   }
 

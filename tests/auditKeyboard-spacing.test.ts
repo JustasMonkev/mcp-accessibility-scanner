@@ -220,6 +220,21 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
       }, clickable('left:0;top:0;width:16px;height:16px')));
       expect(shadowed.targetBox).toEqual({ x: 0, y: 0, width: 16, height: 16 });
       expect(shadowed.targetSpacing).toBe('crowded');
+      // A slot's fallback content renders only while nothing, text included, is assigned to it.
+      const slotted = (light: string) => measureTree({ focused: box(0, 0, 16, 16) }, 2000, 50_000, () => page.evaluate(({ light, fallback }) => {
+        document.getElementById('focused')!.remove();
+        const control = document.createElement('div');
+        control.setAttribute('role', 'button');
+        control.tabIndex = 0;
+        control.style.cssText = 'position:absolute;left:0;top:0;width:40px;height:40px;pointer-events:none';
+        control.attachShadow({ mode: 'open' }).innerHTML = `<slot name="other"></slot><slot>${fallback}</slot>`;
+        control.innerHTML = light;
+        document.body.append(control);
+        control.focus();
+      }, { light, fallback: clickable('left:0;top:0;width:10px;height:10px') }));
+      expect((await slotted('<span slot="other"></span>')).targetBox).toEqual({ x: 0, y: 0, width: 10, height: 10 });
+      expect((await slotted('<span slot="other"></span>text')).isPointerTarget).toBe(false);
+      expect((await slotted(`<span slot="other"></span> ${clickable('left:20px;top:0;width:10px;height:10px')}`)).targetBox).toEqual({ x: 20, y: 0, width: 10, height: 10 });
     });
 
     it('counts a neighbour whose clickable descendant is adjacent to the target', async () => {
@@ -234,6 +249,65 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
       // A neighbour whose own box is adjacent but whose clickable descendant is far away does not crowd.
       const far = await measure(focused, [noneWith(box(16, 0, 16, 16), clickable('left:44px;top:0;width:16px;height:16px'))]);
       expect(far.targetSpacing).toBe('clear');
+    });
+
+    it('cuts clickable descendants to the overflow clips they sit in', async () => {
+      const noneClipping = (place: Box, css: string, html: string) => ({ ...styled(place, `pointer-events:none;${css}`), html });
+      const icon = clickable('left:0;top:0;width:10px;height:10px');
+      const outside = clickable('left:100px;top:100px;width:30px;height:30px');
+      const neighbor = box(14, 0, 16, 16);
+      // Hit testing in the page under test: only the icon activates the clipping control.
+      const hits = () => page.evaluate(() => [[5, 5], [110, 110]].map(([x, y]) => !!document.elementFromPoint(x, y)?.closest('#focused')));
+
+      for (const css of ['overflow:hidden', 'overflow:clip', 'overflow:auto', 'contain:paint']) {
+        const clipped = await measure(noneClipping(box(0, 0, 40, 40), css, icon + outside), [neighbor]);
+        expect(await hits(), css).toEqual([true, false]);
+        expect(clipped.isPointerTarget, css).toBe(true);
+        expect(clipped.targetBox, css).toEqual({ x: 0, y: 0, width: 10, height: 10 });
+        expect(clipped.targetSpacing, css).toBe('crowded');
+        expect((await measure(noneClipping(box(0, 0, 40, 40), css, icon + outside), [])).targetSpacing, css).toBe('clear');
+      }
+      // An overflow: visible control keeps descendants outside its box.
+      const visible = await measure(noneWith(box(0, 0, 40, 40), icon + outside), [neighbor]);
+      expect(await hits()).toEqual([true, true]);
+      expect(visible.targetBox).toEqual({ x: 0, y: 0, width: 130, height: 130 });
+      expect(visible.targetSpacing).toBeNull();
+      // A partly clipped descendant counts with the part inside the clip.
+      const partial = await measure(noneClipping(box(0, 0, 40, 40), 'overflow:hidden', icon + clickable('left:30px;top:30px;width:30px;height:30px')), []);
+      expect(partial.targetBox).toEqual({ x: 0, y: 0, width: 40, height: 40 });
+      expect(partial.targetSpacing).toBeNull();
+      // Each axis is clipped on its own.
+      const column = await measure(noneClipping(box(0, 0, 40, 40), 'overflow-x:clip', icon + clickable('left:0;top:100px;width:10px;height:30px') + outside), []);
+      expect(column.targetBox).toEqual({ x: 0, y: 0, width: 10, height: 130 });
+      // Clips of the elements between the control and the descendant apply too.
+      const wrapped = await measure(noneWith(box(0, 0, 40, 40), `<span style="position:absolute;left:0;top:0;width:40px;height:40px;overflow:hidden">${icon + outside}</span>`), [neighbor]);
+      expect(await hits()).toEqual([true, false]);
+      expect(wrapped.targetBox).toEqual({ x: 0, y: 0, width: 10, height: 10 });
+      expect(wrapped.targetSpacing).toBe('crowded');
+      // A clip does not reach a positioned descendant whose containing block is outside it.
+      const escaped = await measure(noneWith(box(0, 0, 40, 40), `<div style="width:40px;height:40px;overflow:hidden">${icon + outside}</div>`), [neighbor]);
+      expect(await hits()).toEqual([true, true]);
+      expect(escaped.targetBox).toEqual({ x: 0, y: 0, width: 130, height: 130 });
+      // An <svg> clips its shapes to its viewport.
+      const svgIcon = (shapes: string) => `<svg width="10" height="10" style="position:absolute;left:0;top:0;pointer-events:auto">${shapes}</svg>`;
+      const svg = await measure(noneWith(box(0, 0, 40, 40), svgIcon('<rect width="130" height="130"></rect>')), []);
+      expect(svg.targetBox).toEqual({ x: 0, y: 0, width: 10, height: 10 });
+      expect((await measure(noneWith(box(0, 0, 40, 40), svgIcon('<svg><rect width="130" height="130"></rect></svg>')), [])).targetSpacing).toBe('inconclusive');
+      // A control whose clickable descendants are all clipped away is not a pointer target.
+      const hidden = await measure(noneClipping(box(0, 0, 40, 40), 'overflow:hidden', outside), [neighbor]);
+      expect(hidden.isPointerTarget).toBe(false);
+      expect(hidden.targetSpacing).toBeNull();
+      // Neighbours are cut the same way: a clipped-away descendant next to the target does not crowd it.
+      const reaching = clickable('left:-44px;top:0;width:16px;height:16px');
+      expect((await measure(box(0, 0, 16, 16), [noneWith(box(60, 0, 16, 16), reaching)])).targetSpacing).toBe('crowded');
+      expect((await measure(box(0, 0, 16, 16), [noneClipping(box(60, 0, 16, 16), 'overflow:hidden', reaching)])).targetSpacing).toBe('clear');
+      // Clips the walk cannot place leave the target inconclusive rather than mismeasured.
+      for (const css of ['clip-path:inset(0 30px 30px 0)', 'overflow:hidden;transform:scale(2)']) {
+        const unmeasured = await measure(noneClipping(box(0, 0, 40, 40), css, icon + outside), []);
+        expect(unmeasured.isPointerTarget, css).toBe(true);
+        expect(unmeasured.targetBox, css).toBeNull();
+        expect(unmeasured.targetSpacing, css).toBe('inconclusive');
+      }
     });
 
     it('still excludes controls with no descendant that takes a pointer action', async () => {
@@ -269,6 +343,74 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
       expect(neighbor.targetSpacing).toBe('inconclusive');
       // Within the limit both are measured.
       expect((await measureTree({ focused: noneWith(box(0, 0, 40, 40), spans) }, 2000, 100)).targetBox).toEqual({ x: 0, y: 0, width: 16, height: 16 });
+    });
+
+    it('reads only the children it visits, however many a control has', async () => {
+      // Each layout replaces the focused button with a pointer-events: none custom control whose
+      // light tree and open shadow root hold this markup, `*` standing for 100,000 spans.
+      const layouts = {
+        children: { light: '*' },
+        nested: { light: '<div>*</div>' },
+        shadow: { shadow: '*' },
+        assigned: { shadow: '<slot></slot>', light: '*' },
+        fallback: { shadow: '<slot>*</slot>' },
+      };
+      const countChildReads = (layout: { light?: string; shadow?: string }) => measureTree({ focused: box(0, 0, 16, 16) }, 2000, 50, () => page.evaluate(({ light = '', shadow }) => {
+        const spans = '<span></span>'.repeat(100_000);
+        document.getElementById('focused')!.remove();
+        const control = document.createElement('div');
+        control.setAttribute('role', 'button');
+        control.tabIndex = 0;
+        control.style.cssText = 'position:absolute;left:0;top:0;width:40px;height:40px;pointer-events:none';
+        if (shadow !== undefined)
+          control.attachShadow({ mode: 'open' }).innerHTML = shadow.replace('*', spans);
+        control.innerHTML = light.replace('*', spans);
+        document.body.append(control);
+        control.focus();
+        // Counts the children the measurement reads through the DOM's child accessors; a child
+        // list counts in full, as reading it hands the caller every child.
+        const state = window as unknown as { childReads: number };
+        state.childReads = 0;
+        const countReads = <T>(proto: object, name: string, reads: (value: T) => number) => {
+          const descriptor = Object.getOwnPropertyDescriptor(proto, name)!;
+          Object.defineProperty(proto, name, { ...descriptor, get() {
+            const value = descriptor.get!.call(this) as T;
+            state.childReads += reads(value);
+            return value;
+          } });
+        };
+        for (const name of ['firstElementChild', 'lastElementChild', 'nextElementSibling', 'previousElementSibling'])
+          countReads(Element.prototype, name, () => 1);
+        for (const name of ['firstElementChild', 'lastElementChild'])
+          countReads(DocumentFragment.prototype, name, () => 1);
+        for (const name of ['firstChild', 'lastChild', 'nextSibling', 'previousSibling'])
+          countReads(Node.prototype, name, () => 1);
+        for (const proto of [Element.prototype, DocumentFragment.prototype])
+          countReads(proto, 'children', (list: HTMLCollection) => list.length);
+        countReads(Node.prototype, 'childNodes', (list: NodeList) => list.length);
+        for (const name of ['assignedNodes', 'assignedElements'] as const) {
+          const original = HTMLSlotElement.prototype[name] as (...args: unknown[]) => Node[];
+          HTMLSlotElement.prototype[name] = function(this: HTMLSlotElement, ...args: unknown[]) {
+            const nodes = original.apply(this, args);
+            state.childReads += nodes.length;
+            return nodes;
+          } as never;
+        }
+      }, layout)).then(async point => ({ point, reads: await page.evaluate(() => (window as unknown as { childReads: number }).childReads) }));
+      try {
+        for (const [layout, markup] of Object.entries(layouts)) {
+          const { point, reads } = await countChildReads(markup);
+          expect(point.isPointerTarget, layout).toBe(true);
+          expect(point.targetSpacing, layout).toBe('inconclusive');
+          // A visit limit of 50 bounds the children read, not the 100,000 a full enumeration reads.
+          expect(reads, layout).toBeLessThanOrEqual(200);
+          await page.close();
+          page = await browser.newPage();
+        }
+      } finally {
+        await page.close();
+        page = await browser.newPage();
+      }
     });
   });
 
