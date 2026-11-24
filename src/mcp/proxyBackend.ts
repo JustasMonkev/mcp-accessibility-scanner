@@ -152,8 +152,7 @@ export class ProxyBackend implements ServerBackend {
   }
 
   private async _applySharedSwitch({ slot, providers }: SharedProxySelection, name: string): Promise<void> {
-    if (this._closed)
-      throw new Error('The connection closed before the switch could run.');
+    this._assertOpen();
     const provider = providers.find(factory => factory.name === name);
     if (!provider)
       throw new Error('Unknown connection method: ' + name);
@@ -165,8 +164,8 @@ export class ProxyBackend implements ServerBackend {
     // every request, existing or new, on the shared provider, and a later
     // switch from another request waits for this one instead of being
     // cleared by it.
-    const defaultClient = toDefault ? await slot.clearAfter(() => this._connectClient(this._mcpProviders[0])) : undefined;
-    const shared = toDefault ? undefined : await slot.replace(() => this._connectClient(provider));
+    const defaultClient = toDefault ? await slot.clearAfter(this._whileOpen(() => this._connectClient(this._mcpProviders[0]))) : undefined;
+    const shared = toDefault ? undefined : await slot.replace(this._whileOpen(() => this._connectClient(provider)));
     if (this._closed) {
       // serverClosed() ran while the replacement connected: the switch still
       // applies process-wide, but this backend keeps no lease on its
@@ -192,6 +191,23 @@ export class ProxyBackend implements ServerBackend {
     }
     if (previousShared)
       await slot.release(previousShared);
+  }
+
+  private _assertOpen(): void {
+    if (this._closed)
+      throw new Error('The connection closed before the switch could run.');
+  }
+
+  // Wraps a process-wide slot step's connect: the step can wait in the
+  // slot's queue behind other requests' switches, so a request closed by the
+  // time it starts connects nothing and the step fails, leaving the shared
+  // selection as it is. A connect already under way when the request closes
+  // carries on.
+  private _whileOpen<T>(connect: () => Promise<T>): () => Promise<T> {
+    return async () => {
+      this._assertOpen();
+      return await connect();
+    };
   }
 
   private _defineContextSwitchTool(): Tool {

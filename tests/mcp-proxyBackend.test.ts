@@ -836,9 +836,16 @@ describe('ProxyBackend', () => {
     describe('closing a request during its switch', () => {
       function makeGatedSetup() {
         const alternates: ReturnType<typeof makeInnerBackend>[] = [];
-        const handshake: { gate?: Promise<void>, entered: number } = { entered: 0 };
+        const handshake: { gate?: Promise<void>, entered: number, defaults: number } = { entered: 0, defaults: 0 };
         const makeProviders = () => [
-          { name: 'default', description: 'd', connect: async () => wrapInProcess(makeInnerBackend('tool_default')) },
+          {
+            name: 'default',
+            description: 'd',
+            connect: async () => {
+              handshake.defaults++;
+              return wrapInProcess(makeInnerBackend('tool_default'));
+            },
+          },
           {
             name: 'alternate',
             description: 'a',
@@ -934,6 +941,67 @@ describe('ProxyBackend', () => {
         request2.serverClosed?.();
         await shared.slot.dispose();
         expect(alternates.map(inner => inner.closed)).toEqual([1, 1]);
+      });
+
+      it('skips a switch queued behind another request\'s switch when its request closes', async () => {
+        // The closed check ran only before the switch joined the process-wide
+        // queue, so a request closed while queued there still connected its
+        // provider and published it.
+        const { alternates, handshake, holdHandshake, backendContext, clientVersion, makeRequestBackend, shared } = makeGatedSetup();
+
+        const request0 = makeRequestBackend();
+        await request0.initialize(backendContext, clientVersion);
+        const request1 = makeRequestBackend();
+        await request1.initialize(backendContext, clientVersion);
+        const releaseHandshake = holdHandshake();
+        const first = request0.callTool('browser_connect', { name: 'alternate' });
+        await vi.waitFor(() => expect(handshake.entered).toBe(1));
+        const queued = request1.callTool('browser_connect', { name: 'alternate' });
+        await new Promise(resolve => setTimeout(resolve, 0));
+        request1.serverClosed?.();
+        releaseHandshake();
+
+        expect((await first).isError).not.toBe(true);
+        const skipped = await queued;
+        expect(skipped.isError).toBe(true);
+        expect((skipped.content?.[0] as any).text).toContain('closed before the switch could run');
+        expect(handshake.entered).toBe(1);
+        expect(alternates).toHaveLength(1);
+
+        request0.serverClosed?.();
+        await shared.slot.dispose();
+        expect(alternates.map(inner => inner.closed)).toEqual([1]);
+      });
+
+      it('keeps the shared selection when a queued switch back to the default belongs to a closed request', async () => {
+        const { alternates, handshake, holdHandshake, backendContext, clientVersion, makeRequestBackend, shared } = makeGatedSetup();
+
+        const request0 = makeRequestBackend();
+        await request0.initialize(backendContext, clientVersion);
+        const request1 = makeRequestBackend();
+        await request1.initialize(backendContext, clientVersion);
+        const defaultsBefore = handshake.defaults;
+        const releaseHandshake = holdHandshake();
+        const first = request0.callTool('browser_connect', { name: 'alternate' });
+        await vi.waitFor(() => expect(handshake.entered).toBe(1));
+        const queued = request1.callTool('browser_connect', { name: 'default' });
+        await new Promise(resolve => setTimeout(resolve, 0));
+        request1.serverClosed?.();
+        releaseHandshake();
+
+        expect((await first).isError).not.toBe(true);
+        expect((await queued).isError).toBe(true);
+        expect(handshake.defaults).toBe(defaultsBefore);
+
+        // request0's alternate selection is still in force for new requests.
+        const request2 = makeRequestBackend();
+        await request2.initialize(backendContext, clientVersion);
+        expect((await request2.listTools()).map(tool => tool.name)).toContain('tool_alternate');
+        expect(alternates[0].closed).toBe(0);
+        request0.serverClosed?.();
+        request2.serverClosed?.();
+        await shared.slot.dispose();
+        expect(alternates.map(inner => inner.closed)).toEqual([1]);
       });
 
       it('skips a switch still queued when its request closes', async () => {
