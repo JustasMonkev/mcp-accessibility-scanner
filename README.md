@@ -429,7 +429,7 @@ Failed download saves are reported as tool errors in the current or next respons
 
 Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. CLI values take precedence over environment and file configuration, including `0`. Empty or whitespace-only numeric timeout environment variables are ignored, preserving file configuration or defaults. The default remains `500` ms. Zero skips the settle delay and briefly allows pending browser events to arrive. The server still waits for observed requests and main-frame navigations, but can return before delayed page updates.
 
-Use `--timeout-idle 300000`, `timeouts.idle`, or `PLAYWRIGHT_MCP_TIMEOUT_IDLE` to release the default browser after five idle minutes. Shared contexts stay open while any client is working; the idle window starts after the last tool call or download finishes. Explicit recordings prevent idle release until `browser_stop_recording` finishes; passive `--save-session` capture does not. Cleanup finalizes traces. The next browser tool call reopens the connection and includes a note to navigate again and refresh element references. Attached CDP, extension, and VS Code browsers are disconnected; their external pages remain open. Close and session-management tools do not relaunch an idle browser. Explicit `browser_session_open` handles keep their separate `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` behavior. Zero disables this feature; blank environment values leave the existing configuration unchanged.
+Use `--timeout-idle 300000`, `timeouts.idle`, or `PLAYWRIGHT_MCP_TIMEOUT_IDLE` to release the default browser after five idle minutes. Shared contexts stay open while any client is working; the idle window starts after the last tool call or download finishes. Explicit recordings prevent idle release until `browser_stop_recording` finishes; passive `--save-session` capture does not. Cleanup finalizes traces. The next browser tool call reopens the connection and includes a note to navigate again and refresh element references. Attached CDP, extension, and VS Code browsers are disconnected; their external pages remain open. Close and session-management tools and `get_scan_findings` do not relaunch an idle browser. Explicit `browser_session_open` handles keep their separate `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` behavior. Zero disables this feature; blank environment values leave the existing configuration unchanged.
 
 The VS Code `browser_connect` tool accepts only `playwright` or `playwright-core` libraries and loopback WebSocket URLs. `connectionString` and `lib` are optional strings; to disconnect, omit them rather than sending `null`, which is rejected as invalid input. Set `PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE=1` to allow remote endpoints, which must use `wss:`. URL userinfo credentials are rejected.
 
@@ -552,7 +552,7 @@ See [WebMCP usage, limits and tests](https://github.com/JustasMonkev/mcp-accessi
 
 The MCP server provides comprehensive browser automation and accessibility scanning tools:
 
-### Core Accessibility Tool
+### Core Accessibility Tools
 
 #### `scan_page`
 Performs a comprehensive accessibility scan on the current page using Axe-core.
@@ -560,7 +560,8 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 **Parameters:**
 - `violationsTag`: Array of WCAG/violation tags to check
 - `includeIncomplete` (default `true`): also report Axe "incomplete" results
-- `maxNodesPerViolation` (default `10`): cap on node details reported per rule; occurrence totals use all deduplicated findings, not the capped sample
+- `retainFindings` (default `false`): keep all deduplicated findings in memory for `get_scan_findings`; the inline sample stays capped
+- `maxNodesPerViolation` (1–50, default `10`): cap on node details reported per rule; occurrence totals use all deduplicated findings, not the capped sample
 - `includeSelectors` / `excludeSelectors`: CSS selectors that scope the scan
 - `withRules` / `disableRules`: Axe rule ids that narrow which rules run
 - `annotateScreenshot` (default `false`): capture an annotated screenshot of the violations
@@ -610,6 +611,21 @@ Axe is installed into every frame of the page before the scan runs. A frame that
 A nested frame is reported when any frame above it went unscanned, even if its own injection succeeded: Axe reaches a nested document only by relaying through the frames above it, so an outer frame without Axe takes everything below it out of the scan.
 
 A frame you scoped out yourself is not reported: with `excludeSelectors: ["iframe.intercom-frame"]` that widget failing to load is the outcome you asked for, not a gap. Scope is resolved through the whole frame chain and across shadow boundaries, so an `includeSelectors` entry naming an ancestor still covers frames nested several levels below it or inside a shadow root, and excluding an outer frame or a shadow host silences everything inside it. Anything the check cannot resolve is reported rather than hidden.
+
+#### `get_scan_findings`
+
+Use this read-only tool to page through the evidence from **one observation**, even after navigating away. It reads memory, not the current page. Start with:
+
+```text
+scan_page {"withRules":["image-alt"],"maxNodesPerViolation":2,"retainFindings":true}
+get_scan_findings {"scanId":"<returned scanId>","ruleId":"image-alt","outcome":"violation","offset":0,"limit":25}
+```
+
+An opted-in scan returns an opaque `scanId` in text and in MCP `structuredContent`, alongside a structured `rules` index of `{ruleId, outcome, count}`. Counts are deduplicated nodes before the inline cap. Outcomes are `violation` and `incomplete`; with `includeIncomplete: false`, incomplete entries are neither indexed nor retained. Passes and inapplicable rules have no retained nodes.
+
+Lookup returns the original Axe `target`, `html`, and `failureSummary` for each node in scan order, subject to configured URL-parameter redaction. Use `nextOffset` for the next request; `null` means finished. The zero-based `offset` defaults to 0 and must not exceed `total`. The integer `limit` defaults to 10 and must be 1–50.
+
+Only the latest **successfully retained** scan in the same browser session is available. A new retained scan replaces it; navigation, ordinary scans, and failed or cancelled scans do not. Closing or expiring the session, or restarting the server, loses the evidence. Pass the same `browserSessionId` if one was used for the scan; stateless HTTP requires an explicit session. Unknown, replaced and foreign scan IDs all return the same unavailable error. No scan report file is written. As with other tools, `--save-session` logs the returned text when enabled, but replaces scan IDs with redacted labels. If the rule index and node records exceed 1 MiB of UTF-8 JSON, the scan still returns its inline results and counts, but `scanId` is `null` with a reason. No partial evidence is retained and any previous retained scan remains available.
 
 ### Audit Tools
 

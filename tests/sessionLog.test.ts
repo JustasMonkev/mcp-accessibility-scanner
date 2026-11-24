@@ -233,6 +233,11 @@ describe('session log folders', () => {
         appendFile: vi.fn(async (_filePath: string, value: string) => { content += value; }),
       };
       const log = new SessionLog('/unused', storage);
+      const scanId = handle(5).replace('bs_', 'scan_');
+      log.logResponse({
+        context: { options: {} }, toolName: 'get_scan_findings', toolArgs: { scanId },
+        result: () => JSON.stringify({ scanId }), isError: () => false, code: () => '', tabSnapshot: () => undefined,
+      } as any);
       log.logResponse({
         context: { options: {} }, toolName: 'browser_session_open', toolArgs: {},
         result: () => `Opened browser session ${handle(3)}.`, isError: () => false, code: () => '', tabSnapshot: () => undefined,
@@ -247,6 +252,8 @@ describe('session log folders', () => {
       log.logUserAction({ name: 'fill', text: 'Hi' } as any, tab, "await page.fill('#name', 'Hi');", true);
       await (log as any)._sessionFileQueue;
 
+      expect(content).not.toContain(scanId);
+      expect(content).toContain('scan_redacted_');
       expect(content).not.toContain(handle(3));
       expect(content).not.toContain(handle(4));
       expect(content).toContain(`Opened browser session ${label(handle(3))}.`);

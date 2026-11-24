@@ -52,6 +52,7 @@ export class Response {
   private _opensFileChooser = false;
   private _requestContext: CallToolRequestContext | undefined;
   private _structuredContent: Record<string, unknown> | undefined;
+  private _stagedResult?: { text: string, content: Record<string, unknown>, publish: () => void };
   private _filesToDeleteOnError = new Set<string>();
 
   readonly toolName: string;
@@ -169,6 +170,11 @@ export class Response {
     this._structuredContent = content;
   }
 
+  // Only expose a handle and publish its backing state when this call can return it.
+  stageResult(text: string, content: Record<string, unknown>, publish: () => void) {
+    this._stagedResult = { text, content, publish };
+  }
+
   structuredContent() {
     return this._structuredContent;
   }
@@ -233,8 +239,15 @@ export class Response {
     return this._tabSnapshot;
   }
 
-  serialize(): Pick<CallToolResult, 'content' | 'structuredContent' | 'isError'> {
+  serialize(beforePublish?: () => void): Pick<CallToolResult, 'content' | 'structuredContent' | 'isError'> {
     this._addDownloadErrors();
+    const staged = this._isError ? undefined : this._stagedResult;
+    this._stagedResult = undefined;
+    if (staged) {
+      this._requestContext?.signal.throwIfAborted();
+      this.addResult(staged.text);
+      this.setStructuredContent(staged.content);
+    }
     const response: string[] = [];
 
     if (this._result.length) {
@@ -274,6 +287,8 @@ ${this.code()}
         content.push({ type: 'image', data: image.data.toString('base64'), mimeType: image.contentType });
     }
 
+    beforePublish?.();
+    staged?.publish();
     return {
       content,
       structuredContent: this._structuredContent,
