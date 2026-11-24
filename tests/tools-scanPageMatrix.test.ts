@@ -177,6 +177,38 @@ describe('scan_page_matrix tool', () => {
     expect(mockPage.evaluate).toHaveBeenCalledTimes(2);
   });
 
+  it('reports a dialog that opens while the last progress notification is sent instead of a report', async () => {
+    const { context, mockPage, response } = createMatrixHarness('/tmp/late-dialog.json');
+    const tab = context.currentTabOrDie();
+    Object.assign(tab.context, { tools: [], config: {}, modalStateTools: [] });
+    const modalStates: unknown[] = [];
+    let openDialog!: (state: unknown) => void;
+    Object.assign(tab, { modalStatesMarkdown: () => renderModalStates(tab.context as any, modalStates as any) });
+    tab.modalStates.mockImplementation(() => modalStates as never[]);
+    tab.on.mockImplementation((_event: string, listener: (state: unknown) => void) => { openDialog = listener; });
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+    // Every variant step is already done; only the notification is unguarded.
+    vi.spyOn(response, 'reportProgress').mockImplementation(async () => {
+      const dialog = { type: 'dialog', description: '"alert" dialog with message "late"' };
+      modalStates.push(dialog);
+      openDialog(dialog);
+    });
+    // The paused page holds the restore's first step.
+    const dialogClosed = Promise.withResolvers<undefined>();
+    mockPage.setViewportSize.mockResolvedValueOnce(undefined).mockReturnValueOnce(dialogClosed.promise);
+
+    const failure = await tool.handle(response.context, tool.schema.inputSchema.parse({ variants: [{ name: 'baseline' }], waitAfterApplyMs: 0 }), response).catch((error: Error) => error);
+    expect(String(failure)).toContain('opened a dialog after the last variant was scanned');
+    expect(String(failure)).toContain('restored once it does');
+    expect(writeFileSpy).not.toHaveBeenCalled();
+
+    // The restore keeps running in the background and finishes once the dialog closes.
+    const restored = tab.context.holdExclusiveUntil.mock.calls[0][1] as Promise<void>;
+    dialogClosed.resolve(undefined);
+    await restored;
+    expect(mockPage.emulateMedia).toHaveBeenCalledTimes(2);
+  });
+
   it('waits for active Axe before restoring the caller tab on cancellation', async () => {
     const { mockPage, response } = createMatrixHarness('/tmp/aborted.json');
     const controller = new AbortController();
