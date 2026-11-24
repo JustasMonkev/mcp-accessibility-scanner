@@ -89,7 +89,7 @@ export class SharedClientSlot {
   // a provider nobody would close; the process-wide slot is disposed only by
   // exit cleanup, after which a switch fails the same way.
   async replace(connect: (() => Promise<Client>) | undefined, options: { lease?: boolean, publish?: (next: Client | undefined) => void } = {}): Promise<Client | undefined> {
-    const result = this._chain.then(async () => {
+    return await this._enqueue(async () => {
       if (this._disposed && !connect)
         return undefined;
       if (this._disposed)
@@ -99,29 +99,52 @@ export class SharedClientSlot {
         await this._close(next);
         throw disposedError();
       }
-      const previous = this._current;
-      this._current = next;
-      if (next)
-        this._leases.set(next, { count: options.lease === false ? 0 : 1, retired: false });
-      options.publish?.(next);
-      if (previous) {
-        const lease = this._leases.get(previous);
-        if (lease && lease.count > 0) {
-          lease.retired = true;
-        } else {
-          this._leases.delete(previous);
-          await previous.close().catch(logUnhandledError);
-        }
-      }
+      await this._swap(next, options);
       return next;
     });
+  }
+
+  // Clears the slot as one serialized step with `prepare`, which readies
+  // whatever the caller moves to instead (a resource of its own, not
+  // published here). The clear runs only once `prepare` succeeds, so a failed
+  // preparation leaves the current client in place, and a replacement queued
+  // meanwhile waits for this step rather than being cleared by it. A disposed
+  // slot is already clear: `prepare` still runs and its result is returned.
+  async clearAfter<T>(prepare: () => Promise<T>): Promise<T> {
+    return await this._enqueue(async () => {
+      const prepared = await prepare();
+      if (!this._disposed)
+        await this._swap(undefined, {});
+      return prepared;
+    });
+  }
+
+  private _enqueue<T>(step: () => Promise<T>): Promise<T> {
+    const result = this._chain.then(step);
     this._chain = result.catch(() => {});
-    return await result;
+    return result;
+  }
+
+  private async _swap(next: Client | undefined, options: { lease?: boolean, publish?: (next: Client | undefined) => void }): Promise<void> {
+    const previous = this._current;
+    this._current = next;
+    if (next)
+      this._leases.set(next, { count: options.lease === false ? 0 : 1, retired: false });
+    options.publish?.(next);
+    if (previous) {
+      const lease = this._leases.get(previous);
+      if (lease && lease.count > 0) {
+        lease.retired = true;
+      } else {
+        this._leases.delete(previous);
+        await previous.close().catch(logUnhandledError);
+      }
+    }
   }
 
   async dispose(): Promise<void> {
     this._disposed = true;
-    const result = this._chain.then(async () => {
+    await this._enqueue(async () => {
       const clients = [...this._leases.keys()];
       this._leases.clear();
       this._current = undefined;
@@ -129,7 +152,5 @@ export class SharedClientSlot {
         void this._close(client);
       await Promise.all([...this._closing]);
     });
-    this._chain = result.catch(() => {});
-    return await result;
   }
 }

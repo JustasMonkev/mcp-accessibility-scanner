@@ -107,4 +107,42 @@ describe('SharedClientSlot', () => {
     expect(candidate.closeCalls).toBe(1);
     expect(slot.acquire()).toBeUndefined();
   });
+
+  it('clears only once clearAfter() preparation succeeds, and runs a replacement queued meanwhile afterwards', async () => {
+    const slot = new SharedClientSlot();
+    const first = { closeCalls: 0, close: async () => { first.closeCalls++; } };
+    await slot.replace(async () => first as unknown as Client, { lease: false });
+
+    // A failed preparation leaves the current client published.
+    await expect(slot.clearAfter(async () => { throw new Error('prepare failed'); })).rejects.toThrow('prepare failed');
+    expect(slot.acquire()).toBe(first);
+    void slot.release(first as unknown as Client);
+    expect(first.closeCalls).toBe(0);
+
+    // A replacement queued while preparation runs waits for the clear, and
+    // is not erased by it.
+    let finishPrepare!: () => void;
+    const prepared = new Promise<void>(resolve => { finishPrepare = resolve; });
+    const clearing = slot.clearAfter(async () => {
+      await prepared;
+      return 'default';
+    });
+    const second = { close: async () => {} };
+    let connects = 0;
+    const replacing = slot.replace(async () => {
+      connects++;
+      return second as unknown as Client;
+    }, { lease: false });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(connects).toBe(0);
+    expect(slot.acquire()).toBe(first);
+    void slot.release(first as unknown as Client);
+
+    finishPrepare();
+    await expect(clearing).resolves.toBe('default');
+    await replacing;
+    expect(first.closeCalls).toBe(1);
+    expect(slot.acquire()).toBe(second);
+    await slot.dispose();
+  });
 });

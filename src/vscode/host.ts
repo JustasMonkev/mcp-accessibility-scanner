@@ -251,12 +251,16 @@ export class VSCodeProxyBackend implements ServerBackend {
       throw new Error('The connection closed before the switch could run.');
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
     // A disconnect readies this backend's default provider, handshake
-    // included, before it clears the shared selection: a default that fails
-    // to start fails the switch and leaves every request, existing or new, on
-    // the shared provider. A request closed meanwhile connects no default.
-    const defaultTransport = createTransport ? undefined : await this._defaultTransportFactory();
-    const defaultClient = defaultTransport && !this._closed ? await this._connectClient(defaultTransport) : undefined;
-    const shared = await sharedSlot.replace(createTransport ? async () => this._connectClient(await createTransport()) : undefined);
+    // included, as the process-wide step that clears the shared selection: a
+    // default that fails to start fails the switch and leaves every request,
+    // existing or new, on the shared provider, and a later switch from another
+    // request waits for this one instead of being cleared by it. A request
+    // closed meanwhile connects no default.
+    const defaultClient = createTransport ? undefined : await sharedSlot.clearAfter(async () => {
+      const defaultTransport = await this._defaultTransportFactory();
+      return this._closed ? undefined : await this._connectClient(defaultTransport);
+    });
+    const shared = createTransport ? await sharedSlot.replace(async () => this._connectClient(await createTransport())) : undefined;
     if (this._closed) {
       // serverClosed() ran while the replacement connected: the switch still
       // applies process-wide, but this backend keeps no lease on its

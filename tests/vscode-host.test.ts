@@ -580,6 +580,86 @@ describe('VSCodeProxyBackend', () => {
       await slot.dispose();
     });
 
+    it('never lets a slow disconnect erase a later request\'s switch', async () => {
+      // The default used to be readied before the disconnect joined the
+      // process-wide queue: while its handshake waited, another request
+      // switched providers and reported success, and the earlier disconnect
+      // then cleared that newer selection. Switches now apply in the order
+      // they enter the queue.
+      const config = await resolveConfig({});
+      const slot = new SharedClientSlot();
+      const defaults: ReturnType<typeof makeInnerBackend>[] = [];
+      let gate: Promise<void> | undefined;
+      const defaultTransportFactory = async () => {
+        const inner = makeInnerBackend('tool_default');
+        defaults.push(inner);
+        const transport = await wrapInProcess(inner);
+        const pending = gate;
+        if (pending) {
+          const start = transport.start.bind(transport);
+          transport.start = async () => {
+            await pending;
+            await start();
+          };
+        }
+        return transport;
+      };
+      const children: ReturnType<typeof makeInnerBackend>[] = [];
+      const backendContext = { notifyToolListChanged: vi.fn(async () => undefined) };
+      const clientVersion = { name: 'vitest', version: '1.0.0' };
+      const makeRequestBackend = () => {
+        const backend = new VSCodeProxyBackend(config, defaultTransportFactory, slot);
+        vi.spyOn(backend as any, '_createSwitchTransport').mockImplementation(async () => {
+          const inner = makeInnerBackend('tool_child');
+          children.push(inner);
+          return await wrapInProcess(inner);
+        });
+        return backend;
+      };
+      const connectArgs = { connectionString: 'ws://127.0.0.1:1234/', lib: 'playwright' };
+
+      const request0 = makeRequestBackend();
+      await request0.initialize(backendContext, clientVersion);
+      expect((await request0.callTool('browser_connect', connectArgs)).isError).not.toBe(true);
+      request0.serverClosed?.();
+
+      const request1 = makeRequestBackend();
+      await request1.initialize(backendContext, clientVersion);
+      const request2 = makeRequestBackend();
+      await request2.initialize(backendContext, clientVersion);
+      const defaultsBefore = defaults.length;
+      let releaseDefault!: () => void;
+      gate = new Promise<void>(resolve => { releaseDefault = resolve; });
+      const disconnecting = request1.callTool('browser_connect', {});
+      await vi.waitFor(() => expect(defaults).toHaveLength(defaultsBefore + 1));
+      gate = undefined;
+      const switching = request2.callTool('browser_connect', connectArgs);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      // The later switch waits its turn behind the default handshake.
+      expect(children).toHaveLength(1);
+
+      releaseDefault();
+      expect((await disconnecting).isError).not.toBe(true);
+      expect((await switching).isError).not.toBe(true);
+
+      // The later selection stands for new requests.
+      const request3 = makeRequestBackend();
+      await request3.initialize(backendContext, clientVersion);
+      expect(((await request3.callTool('tool_child', {})).content?.[0] as any).text).toBe('tool_child');
+      expect(children).toHaveLength(2);
+      expect(children[1].calls).toContain('tool_child');
+      expect(children[1].closed).toBe(0);
+      // request1 serves from the default it disconnected to.
+      expect(((await request1.callTool('tool_default', {})).content?.[0] as any).text).toBe('tool_default');
+
+      request1.serverClosed?.();
+      request2.serverClosed?.();
+      request3.serverClosed?.();
+      await vi.waitFor(() => expect(children[0].closed).toBe(1));
+      await slot.dispose();
+      expect(children.map(inner => inner.closed)).toEqual([1, 1]);
+    });
+
     it.each([
       ['its transport cannot be created', async () => { throw new Error('default provider failed'); }],
       ['its handshake fails', async () => ({

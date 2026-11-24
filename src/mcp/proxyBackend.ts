@@ -160,11 +160,13 @@ export class ProxyBackend implements ServerBackend {
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
     const toDefault = provider === providers[0];
     // Switching back to the default readies this backend's default client,
-    // handshake included, before it clears the shared selection: a default
-    // that fails to start fails the switch and leaves every request, existing
-    // or new, on the shared provider.
-    const defaultClient = toDefault ? await this._connectClient(this._mcpProviders[0]) : undefined;
-    const shared = await slot.replace(toDefault ? undefined : () => this._connectClient(provider));
+    // handshake included, as the process-wide step that clears the shared
+    // selection: a default that fails to start fails the switch and leaves
+    // every request, existing or new, on the shared provider, and a later
+    // switch from another request waits for this one instead of being
+    // cleared by it.
+    const defaultClient = toDefault ? await slot.clearAfter(() => this._connectClient(this._mcpProviders[0])) : undefined;
+    const shared = toDefault ? undefined : await slot.replace(() => this._connectClient(provider));
     if (this._closed) {
       // serverClosed() ran while the replacement connected: the switch still
       // applies process-wide, but this backend keeps no lease on its
