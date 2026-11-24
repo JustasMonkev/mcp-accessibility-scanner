@@ -242,6 +242,22 @@ describe('selectRepresentativeUrls', () => {
     }
   });
 
+  it('keeps a deep miss that is summed with a shallow one', () => {
+    for (const length of [5, 64]) {
+      const prefix = Array.from({ length }, () => 's').join('/');
+      const urls = [
+        ...['a', 'b'].flatMap(section => ['x', 'y'].map(page => `https://example.com/${section}/${prefix}/${page}`)),
+        'https://example.com/c/1',
+        'https://example.com/c/2',
+      ];
+      // Both c URLs share a template; a second page in b would still miss one deep URL.
+      expect(selectWithStatus(urls, 2), `${length} segments`).toEqual({
+        urls: [`https://example.com/a/${prefix}/x`, 'https://example.com/c/1'],
+        complete: true,
+      });
+    }
+  });
+
   it('falls back to listed order and reports an incomplete selection past its work budget', () => {
     const urls = Array.from({ length: 50 }, (_, index) => `https://example.com/section-${index % 5}/page-${index}`);
     expect(selectWithStatus(urls, 5, 100)).toEqual({ urls: urls.slice(0, 5), complete: false });
