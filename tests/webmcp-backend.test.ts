@@ -67,6 +67,8 @@ function contextHarness(label: string) {
   const context = {
     config: {}, currentTab: () => tab, tabs: () => [tab],
     beginToolCall: () => { ++busy; return () => --busy; },
+    runToolCall: (_endToolCall: () => void, work: () => Promise<unknown>) => work(),
+    currentTabOrDie: () => tab,
     beginSessionHold: () => { ++busy; return () => --busy; },
     isRunningTool: () => busy > 0,
     recordingActivityAt: () => undefined, hasPendingDownloads: () => false,

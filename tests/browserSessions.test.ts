@@ -704,6 +704,26 @@ describe('browser sessions', () => {
     expect(created[0].close).toHaveBeenCalled();
   });
 
+  it.each(['browser_session_close', 'the TTL reaper'])('lets %s dispose a session whose only work left is a held restore', async closer => {
+    // A restore waiting on a dialog nothing can answer never settles, and
+    // closing the browser context is what cancels it.
+    vi.useFakeTimers();
+    const { factory, created } = makeFactory();
+    const context = new Context({ tools: [], config: await resolveConfig({}), browserContextFactory: factory, sessionLog: undefined, clientInfo: {}, browserSession: true });
+    await context.ensureTab();
+    context.holdExclusiveUntil('scan_page_matrix', new Promise(() => {}));
+    const registry = new BrowserSessionRegistry(TTL_MS);
+    const id = registry.open(() => context);
+
+    if (closer === 'browser_session_close')
+      await registry.close(id);
+    else
+      await vi.advanceTimersByTimeAsync(TTL_MS + 60_000);
+    await vi.waitFor(() => expect(created[0].close).toHaveBeenCalled());
+    expect(() => registry.resolve(id)).toThrow('Unknown browserSessionId');
+    expect(context.isRunningTool()).toBe(false);
+  });
+
   it('serverClosed disposes every session context and the default one', async () => {
     const { factory, created } = makeFactory();
     const backend = await makeBackend(factory);
