@@ -29,6 +29,7 @@ import { wrapInProcess } from '../src/mcp/server.js';
 
 const resizeWaiters: (() => void)[] = [];
 const darkWaiters: (() => void)[] = [];
+const evaluateWaiters: (() => void)[] = [];
 // The image without alt text is only rendered at narrow widths, so a variant
 // scanned at the wrong viewport changes the finding.
 const server = http.createServer((request, response) => {
@@ -44,6 +45,22 @@ const server = http.createServer((request, response) => {
       wake();
     response.writeHead(204);
     response.end();
+    return;
+  }
+  if (request.url === '/evaluate-started') {
+    for (const wake of evaluateWaiters.splice(0))
+      wake();
+    response.writeHead(204);
+    response.end();
+    return;
+  }
+  // The page alerts the first time anything in its own world reads a media
+  // query, which the scan's capture of the original state is the first to do.
+  if (request.url === '/alert-on-read') {
+    response.writeHead(200, { 'content-type': 'text/html' });
+    response.end(`<!doctype html><html lang="en"><title>Alert on read</title><main><h1>Alert on read</h1></main>
+      <script>const original = window.matchMedia; let alerted = false;
+      window.matchMedia = function (query) { if (!alerted) { alerted = true; alert('media read'); } return original.call(window, query); };</script></html>`);
     return;
   }
   // The image without alt text is only rendered in dark mode, so a dark
@@ -93,6 +110,35 @@ async function evaluateUntil(target: Client, expression: string, expected: strin
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   return last;
+}
+
+// One server, two connections: each gets its own MCP context, but both attach
+// to the browser's existing context and so share its pages.
+async function withSharedBrowser(run: (connect: (name: string) => Promise<Client>) => Promise<void>): Promise<void> {
+  const probe = net.createServer();
+  await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
+  const { port } = probe.address() as net.AddressInfo;
+  await new Promise<void>(resolve => probe.close(() => resolve()));
+  const browser = await chromium.launch({ args: [`--remote-debugging-port=${port}`] });
+  const config = await resolveConfig({ browser: { cdpEndpoint: `http://127.0.0.1:${port}`, cdpTimeout: 5000 }, outputDir: directory });
+  const factory = contextFactory(config);
+  const clients: Client[] = [];
+  try {
+    await run(async name => {
+      const each = new Client({ name, version: '1' });
+      clients.push(each);
+      await each.connect(await wrapInProcess(new BrowserServerBackend(config, factory)));
+      return each;
+    });
+  } finally {
+    for (const each of clients)
+      await each.close();
+    await browser.close();
+  }
+}
+
+function findings(report: { variants: { name: string, nodeCountByRuleId: Record<string, number> }[] }) {
+  return report.variants.map(variant => [variant.name, variant.nodeCountByRuleId]);
 }
 
 beforeAll(async () => {
@@ -190,20 +236,9 @@ it('reports a dialog opened by a variant and restores the original state once it
 });
 
 it('rejects page changes from another client sharing the browser context while a matrix scan holds the page', async () => {
-  const probe = net.createServer();
-  await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
-  const { port } = probe.address() as net.AddressInfo;
-  await new Promise<void>(resolve => probe.close(() => resolve()));
-  const browser = await chromium.launch({ args: [`--remote-debugging-port=${port}`] });
-  const config = await resolveConfig({ browser: { cdpEndpoint: `http://127.0.0.1:${port}`, cdpTimeout: 5000 }, outputDir: directory });
-  // One server, two connections: each gets its own MCP context, but both
-  // attach to the browser's existing context and so share its page.
-  const factory = contextFactory(config);
-  const clients = [new Client({ name: 'matrix-client-a', version: '1' }), new Client({ name: 'matrix-client-b', version: '1' })];
-  try {
-    for (const each of clients)
-      await each.connect(await wrapInProcess(new BrowserServerBackend(config, factory)));
-    const [first, second] = clients;
+  await withSharedBrowser(async connect => {
+    const first = await connect('matrix-client-a');
+    const second = await connect('matrix-client-b');
     const navigated = await first.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/dark-mode` } });
     expect(navigated.isError, text(navigated)).not.toBe(true);
     const attached = await second.callTool({ name: 'browser_tabs', arguments: { action: 'list' } });
@@ -244,11 +279,95 @@ it('rejects page changes from another client sharing the browser context while a
     const emulated = await second.callTool({ name: 'browser_emulate_media', arguments: { colorScheme: 'dark' } });
     expect(emulated.isError, text(emulated)).not.toBe(true);
     expect(text(await second.callTool({ name: 'browser_evaluate', arguments: { function: dark } }))).toContain('dark=true');
-  } finally {
-    for (const each of clients)
-      await each.close();
-    await browser.close();
-  }
+  });
+});
+
+it('refuses a matrix scan while another client\'s call is still running on the shared page', async () => {
+  await withSharedBrowser(async connect => {
+    const first = await connect('matrix-client-a');
+    const second = await connect('matrix-client-b');
+    const navigated = await first.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/dark-mode` } });
+    expect(navigated.isError, text(navigated)).not.toBe(true);
+    await second.callTool({ name: 'browser_tabs', arguments: { action: 'list' } });
+
+    // Running while the scan applies dark mode, this hides the image the dark
+    // variant should report; unanswered it gives up after a few seconds.
+    const evaluateStarted = new Promise<void>(resolve => evaluateWaiters.push(resolve));
+    const waiting = second.callTool({ name: 'browser_evaluate', arguments: { function: `() => new Promise(resolve => {
+      const query = matchMedia('(prefers-color-scheme: dark)');
+      const finish = outcome => { query.removeEventListener('change', onChange); resolve(outcome); };
+      const onChange = () => { if (query.matches) { document.querySelector('img').style.display = 'none'; finish('hid'); } };
+      query.addEventListener('change', onChange);
+      setTimeout(() => finish('gave up'), 3000);
+      fetch('/evaluate-started');
+    })` } });
+    await evaluateStarted;
+
+    const overlapping = await first.callTool({ name: 'scan_page_matrix', arguments: {
+      reportFile: 'shared-overlapping.json', waitAfterApplyMs: 500, withRules: ['image-alt'],
+      variants: [{ name: 'dark', media: { colorScheme: 'dark' } }],
+    } });
+    expect(overlapping.isError, text(overlapping)).toBe(true);
+    expect(text(overlapping)).toContain('busy because "browser_evaluate", started by another client sharing this browser, is still running on this page');
+    await expect(fs.access(path.join(directory, 'shared-overlapping.json'))).rejects.toThrow();
+    expect(text(await waiting)).toContain('gave up');
+
+    // Once the other call finished, the same scan reports the dark-only image.
+    const control = await first.callTool({ name: 'scan_page_matrix', arguments: {
+      reportFile: 'shared-control.json', waitAfterApplyMs: 500, withRules: ['image-alt'],
+      variants: [{ name: 'dark', media: { colorScheme: 'dark' } }],
+    } });
+    expect(control.isError, text(control)).not.toBe(true);
+    expect(findings(JSON.parse(await fs.readFile(path.join(directory, 'shared-control.json'), 'utf8')))).toEqual([['dark', { 'image-alt': 1 }]]);
+  });
+});
+
+it('checks the claim on the page a cold client\'s first navigation and an indexed tab close would use', async () => {
+  await withSharedBrowser(async connect => {
+    const first = await connect('matrix-client-a');
+    const navigated = await first.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/dark-mode` } });
+    expect(navigated.isError, text(navigated)).not.toBe(true);
+    const scanDark = (reportFile: string) => first.callTool({ name: 'scan_page_matrix', arguments: {
+      reportFile, waitAfterApplyMs: 2000, withRules: ['image-alt'],
+      variants: [{ name: 'dark', media: { colorScheme: 'dark' } }],
+    } });
+
+    // The second client has no tab when its first call is admitted; the page
+    // its navigation would replace is the one under the scan.
+    let darkApplied = new Promise<void>(resolve => darkWaiters.push(resolve));
+    let scan = scanDark('cold-first.json');
+    await darkApplied;
+    const second = await connect('matrix-client-b');
+    const replaced = await second.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/` } });
+    expect(replaced.isError, text(replaced)).toBe(true);
+    expect(text(replaced)).toContain('busy because "scan_page_matrix"');
+    let result = await scan;
+    expect(result.isError, text(result)).not.toBe(true);
+    let report = JSON.parse(await fs.readFile(path.join(directory, 'cold-first.json'), 'utf8'));
+    expect(report.metadata.url).toBe(`${origin}/dark-mode`);
+    expect(findings(report)).toEqual([['dark', { 'image-alt': 1 }]]);
+
+    // From its own new tab the second client names the scanned tab by index.
+    const opened = await second.callTool({ name: 'browser_tabs', arguments: { action: 'new' } });
+    expect(opened.isError, text(opened)).not.toBe(true);
+    // A background page renders no media query changes, so bring it forward.
+    const selected = await first.callTool({ name: 'browser_tabs', arguments: { action: 'select', index: 0 } });
+    expect(selected.isError, text(selected)).not.toBe(true);
+    darkApplied = new Promise<void>(resolve => darkWaiters.push(resolve));
+    scan = scanDark('indexed-close.json');
+    await darkApplied;
+    const closed = await second.callTool({ name: 'browser_tabs', arguments: { action: 'close', index: 0 } });
+    expect(closed.isError, text(closed)).toBe(true);
+    expect(text(closed)).toContain('busy because "scan_page_matrix"');
+    result = await scan;
+    expect(result.isError, text(result)).not.toBe(true);
+    report = JSON.parse(await fs.readFile(path.join(directory, 'indexed-close.json'), 'utf8'));
+    expect(findings(report)).toEqual([['dark', { 'image-alt': 1 }]]);
+
+    // Its own tab is not claimed, so it stays usable throughout.
+    const own = await second.callTool({ name: 'browser_tabs', arguments: { action: 'close', index: 1 } });
+    expect(own.isError, text(own)).not.toBe(true);
+  });
 });
 
 it('lets browser_close tear down a restore left waiting on a dialog when browser_handle_dialog is blocked', async () => {
@@ -281,6 +400,60 @@ it('lets browser_close tear down a restore left waiting on a dialog when browser
     expect(text(await blocked.callTool({ name: 'browser_evaluate', arguments: { function: state } }))).toContain('1280x720 zoom=none');
   } finally {
     await blocked.callTool({ name: 'browser_close', arguments: {} }).catch(() => {});
+    await blocked.close();
+  }
+});
+
+it('reports a dialog opened while the original state is read, leaving nothing for browser_close to wait on', async () => {
+  const config = await resolveCLIConfig({ browser: 'chromium', headless: true, isolated: true, outputDir: directory, viewportSize: '1280,720', blockedTools: ['browser_handle_dialog'] });
+  const blocked = new Client({ name: 'scan-page-matrix-capture-dialog-test', version: '1' });
+  await blocked.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
+  try {
+    const navigated = await blocked.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/alert-on-read` } });
+    expect(navigated.isError, text(navigated)).not.toBe(true);
+
+    const scan = await withinMs(blocked.callTool({ name: 'scan_page_matrix', arguments: {
+      reportFile: 'capture-dialog.json', withRules: ['image-alt'],
+      variants: [{ name: 'baseline' }, { name: 'dark', media: { colorScheme: 'dark' } }],
+    } }), 15_000, 'scan_page_matrix');
+    expect(scan.isError).toBe(true);
+    expect(text(scan)).toContain('opened a dialog while the matrix scan was reading its original viewport, media and zoom');
+    expect(text(scan)).toContain('media read');
+    expect(text(scan)).not.toContain('restored once it does');
+    await expect(fs.access(path.join(directory, 'capture-dialog.json'))).rejects.toThrow();
+
+    const closed = await withinMs(blocked.callTool({ name: 'browser_close', arguments: {} }), 15_000, 'browser_close');
+    expect(closed.isError, text(closed)).not.toBe(true);
+  } finally {
+    await blocked.callTool({ name: 'browser_close', arguments: {} }).catch(() => {});
+    await blocked.close();
+  }
+});
+
+it('lets browser_session_close close a session whose restore waits on a dialog nothing can answer', async () => {
+  const config = await resolveCLIConfig({ browser: 'chromium', headless: true, isolated: true, outputDir: directory, viewportSize: '1280,720', blockedTools: ['browser_handle_dialog', 'browser_close'] });
+  const blocked = new Client({ name: 'scan-page-matrix-session-close-test', version: '1' });
+  await blocked.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
+  try {
+    const opened = await blocked.callTool({ name: 'browser_session_open', arguments: {} });
+    expect(opened.isError, text(opened)).not.toBe(true);
+    const browserSessionId = (opened.structuredContent as { browserSessionId: string }).browserSessionId;
+    const navigated = await blocked.callTool({ name: 'browser_navigate', arguments: { url: `${origin}/dialog`, browserSessionId } });
+    expect(navigated.isError, text(navigated)).not.toBe(true);
+
+    const scan = await withinMs(blocked.callTool({ name: 'scan_page_matrix', arguments: {
+      browserSessionId, reportFile: 'session-dialog.json', waitAfterApplyMs: 1000, withRules: ['image-alt'],
+      variants: [{ name: 'baseline' }, { name: 'narrow', viewport: { width: 375, height: 812 } }],
+    } }), 15_000, 'scan_page_matrix');
+    expect(scan.isError).toBe(true);
+    expect(text(scan)).toContain('opened a dialog during variant "narrow"');
+
+    // Only the background restore remains, and closing the session cancels it.
+    const closed = await withinMs(blocked.callTool({ name: 'browser_session_close', arguments: { browserSessionId } }), 15_000, 'browser_session_close');
+    expect(closed.isError, text(closed)).not.toBe(true);
+    const after = await blocked.callTool({ name: 'browser_tabs', arguments: { action: 'list', browserSessionId } });
+    expect(text(after)).toContain('Unknown browserSessionId');
+  } finally {
     await blocked.close();
   }
 });

@@ -186,16 +186,20 @@ export class BrowserServerBackend implements ServerBackend {
     let endToolCall: (() => void) | undefined;
     try {
       endToolCall = context.beginToolCall(name);
-      requestContext?.signal.throwIfAborted();
-      const idleNotice = await context.resumeAfterIdle();
-      if (idleNotice)
-        response.addNotice(idleNotice);
-      const tool = (await this._currentWebMCPTools(context, requestContext?.signal)).find(candidate => candidate.schema.name === name);
-      if (!tool)
-        throw new Error('WebMCP tool is stale or unavailable in this scope. List tools again with the same request metadata.');
-      await tool.handle(params, response, requestContext?.signal);
-      if (!requestContext?.signal.aborted)
-        await response.finish();
+      await context.runToolCall(endToolCall, async () => {
+        requestContext?.signal.throwIfAborted();
+        const idleNotice = await context.resumeAfterIdle();
+        if (idleNotice)
+          response.addNotice(idleNotice);
+        const tool = (await this._currentWebMCPTools(context, requestContext?.signal)).find(candidate => candidate.schema.name === name);
+        if (!tool)
+          throw new Error('WebMCP tool is stale or unavailable in this scope. List tools again with the same request metadata.');
+        // Runs on the current tab's page; resolving it checks page claims.
+        context.currentTabOrDie();
+        await tool.handle(params, response, requestContext?.signal);
+        if (!requestContext?.signal.aborted)
+          await response.finish();
+      });
       const sessionLog = await this._sessionLogFor(context, id);
       sessionLog?.logResponse(response, id === undefined ? undefined : { browserSessionId: id });
     } catch (error) {
@@ -223,13 +227,15 @@ export class BrowserServerBackend implements ServerBackend {
     let endToolCall: (() => void) | undefined;
     try {
       endToolCall = context.beginToolCall(name, tool.exclusive);
-      if (!toolsThatSkipIdleResume.has(name)) {
-        const idleNotice = await context.resumeAfterIdle();
-        if (idleNotice)
-          response.addNotice(idleNotice);
-      }
-      await tool.handle(context, parsedArguments, response, requestContext?.signal);
-      await response.finish();
+      await context.runToolCall(endToolCall, async () => {
+        if (!toolsThatSkipIdleResume.has(name)) {
+          const idleNotice = await context.resumeAfterIdle();
+          if (idleNotice)
+            response.addNotice(idleNotice);
+        }
+        await tool.handle(context, parsedArguments, response, requestContext?.signal);
+        await response.finish();
+      });
       if (name === 'browser_session_close')
         await this._logClosedSession(closingSessionContext, response);
       else

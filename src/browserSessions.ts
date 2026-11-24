@@ -86,7 +86,8 @@ export class BrowserSessionRegistry {
     const entry = this._sessions.get(id);
     if (!entry)
       throw new Error(this._unknownSessionMessage(id));
-    if (entry.context.isRunningTool())
+    // A restore left waiting on a dialog is canceled by disposing the context.
+    if (entry.context.isRunningTool({ ignoreCancelableHolds: true }))
       throw new Error(`Browser session "${id}" still has a tool call running. Wait for it to finish, then retry browser_session_close.`);
     this._sessions.delete(id);
     this._stopReaperIfIdle();
@@ -122,7 +123,7 @@ export class BrowserSessionRegistry {
   private _reap(): void {
     const now = Date.now();
     for (const [id, entry] of this._sessions) {
-      if (entry.context.isRunningTool()) {
+      if (entry.context.isRunningTool({ ignoreCancelableHolds: true })) {
         entry.lastUsedAt = now;
         continue;
       }
