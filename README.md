@@ -651,6 +651,8 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 - Each variant includes `comparisonIncompleteRuleIds` in JSON and structured output: the sorted rule IDs making its comparison uncertain, or `[]` when none do. The text table distinguishes missing-frame coverage from incomplete checks. These safeguards still apply with `includeIncomplete: false`; that option hides detailed findings, not comparison validity.
 - Unrelated incomplete-only rules do not suppress comparisons of confirmed violations. The baseline self-comparison is also unavailable if the same rule has both violating and incomplete nodes.
 - Summary totals and baseline count deltas use all deduplicated violation nodes, while saved node details remain capped by `maxNodesPerViolation`. Changing that cap does not change occurrence totals.
+- A rule can have the same count but different failing locations. The text table counts rules with changed target paths; `changedTargetRuleIds` in structured output names them. In the JSON report, each variant’s `targetChangesFromBaseline` maps those rule IDs to `added` (observed only in this variant) and `removed` (observed only in the baseline). Each has an exact distinct-path `count` and up to `maxNodesPerViolation` example paths in `samples`. The map is `{}` if no paths changed and `null` if the scans cannot be compared.
+- Paths are the selector arrays Axe observed, including frame and shadow boundaries. The path comparison ignores HTML and node order. Selectors do not establish element identity across renders, and a removed path does not establish that a violation was fixed.
 
 **Example flow:**
 ```text
