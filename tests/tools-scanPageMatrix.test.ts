@@ -253,10 +253,11 @@ describe('scan_page_matrix tool', () => {
       return new Promise<void>(() => {});
     });
 
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const failure = await Promise.race([
       tool.handle(response.context, tool.schema.inputSchema.parse({ variants: [{ name: 'baseline' }, { name: 'dark', media: { colorScheme: 'dark' } }], waitAfterApplyMs: 0 }), response).catch((error: Error) => error),
-      new Promise(resolve => setTimeout(() => resolve('still waiting on progress'), 1000)),
-    ]);
+      new Promise(resolve => timer = setTimeout(() => resolve('still waiting on progress'), 1000)),
+    ]).finally(() => clearTimeout(timer));
     expect(String(failure)).toContain('opened a dialog during variant "baseline"');
     expect(progress).toHaveBeenCalledTimes(1);
     // The restore started as soon as the dialog was reported.
