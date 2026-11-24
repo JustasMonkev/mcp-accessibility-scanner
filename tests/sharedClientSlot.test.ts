@@ -167,4 +167,26 @@ describe('SharedClientSlot', () => {
     await disposing;
     expect(prepares).toBe(0);
   });
+
+  it('hands out no lease once dispose() has been called', async () => {
+    const slot = new SharedClientSlot();
+    const current = { closeCalls: 0, close: async () => { current.closeCalls++; } };
+    await slot.replace(async () => current as unknown as Client, { lease: false });
+    let finishConnect!: () => void;
+    const connected = new Promise<void>(resolve => { finishConnect = resolve; });
+    const replacing = slot.replace(async () => {
+      await connected;
+      return { close: async () => {} } as unknown as Client;
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // dispose() is queued behind the replacement; until its cleanup runs
+    // the slot still holds `current`, which that cleanup will close.
+    const disposing = slot.dispose();
+    expect(slot.acquire()).toBeUndefined();
+    finishConnect();
+    await expect(replacing).rejects.toThrow('disposed');
+    await disposing;
+    expect(current.closeCalls).toBe(1);
+  });
 });

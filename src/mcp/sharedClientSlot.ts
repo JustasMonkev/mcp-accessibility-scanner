@@ -27,8 +27,10 @@ export class SharedClientSlot {
   private _closing = new Set<Promise<void>>();
   private _disposed = false;
 
+  // Once dispose() has been called it hands out nothing: its queued cleanup
+  // closes the current client regardless of leases.
   acquire(): Client | undefined {
-    if (!this._current)
+    if (this._disposed || !this._current)
       return undefined;
     const lease = this._leases.get(this._current);
     if (lease)
