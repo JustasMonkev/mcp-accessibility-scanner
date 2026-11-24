@@ -560,7 +560,7 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 **Parameters:**
 - `violationsTag`: Array of WCAG/violation tags to check
 - `includeIncomplete` (default `true`): also report Axe "incomplete" results
-- `retainFindings` (default `false`): keep all deduplicated findings in memory for `get_scan_findings`; the inline sample stays capped
+- `retainFindings` (default `false`): keep all deduplicated findings in memory; the inline sample stays capped. To retrieve those findings later, `get_scan_findings` must also be enabled for the client
 - `maxNodesPerViolation` (1–50, default `10`): cap on node details reported per rule; occurrence totals use all deduplicated findings, not the capped sample
 - `includeSelectors` / `excludeSelectors`: CSS selectors that scope the scan
 - `withRules` / `disableRules`: Axe rule ids that narrow which rules run

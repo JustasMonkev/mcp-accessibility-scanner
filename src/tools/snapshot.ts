@@ -51,7 +51,7 @@ const scanPageSchema = z.object({
       .max(50)
       .default(10)
       .describe('Maximum inline examples per rule. Set retainFindings to page through all observed findings without rescanning.'),
-  retainFindings: z.boolean().optional().describe('Keep all deduplicated violation and visible incomplete nodes in this session for get_scan_findings. Off by default.'),
+  retainFindings: z.boolean().optional().describe('Keep the original deduplicated violation and reported incomplete nodes in this session. Off by default. Later retrieval requires the findings lookup tool to be enabled.'),
   annotateScreenshot: z
       .boolean()
       .default(false)
