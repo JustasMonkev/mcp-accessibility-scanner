@@ -192,7 +192,7 @@ function dialogInterruption(tab: Tab, phase: DialogPhase): Error {
   const where = typeof phase === 'object' ? `during variant "${phase.variant}"` : dialogPhaseWhere[phase];
   const teardown = tab.context.tools.some(tool => tool.schema.name === 'browser_close') ? ' Closing the browser with browser_close cancels the restore instead.' : '';
   return new Error([
-    `The page opened a dialog ${where} that the matrix scan does not answer, so the scan stopped. The paused page cannot be restored until the dialog closes; the original viewport, media and zoom are restored once it does.${teardown}`,
+    `The page opened a dialog ${where} that the matrix scan does not answer, so the scan stopped. The paused page cannot be restored until the dialog closes; the server will attempt to restore the original viewport, media and zoom once it does, so verify them before continuing.${teardown}`,
     ...tab.modalStatesMarkdown(),
   ].join('\n'));
 }

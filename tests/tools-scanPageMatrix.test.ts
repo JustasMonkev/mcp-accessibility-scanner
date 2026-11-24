@@ -199,7 +199,8 @@ describe('scan_page_matrix tool', () => {
 
     const failure = await tool.handle(response.context, tool.schema.inputSchema.parse({ variants: [{ name: 'baseline' }], waitAfterApplyMs: 0 }), response).catch((error: Error) => error);
     expect(String(failure)).toContain('opened a dialog after the last variant was scanned');
-    expect(String(failure)).toContain('restored once it does');
+    expect(String(failure)).toContain('the server will attempt to restore the original viewport, media and zoom once it does, so verify them before continuing');
+    expect(String(failure)).not.toContain('are restored once it does');
     expect(writeFileSpy).not.toHaveBeenCalled();
 
     // The restore keeps running in the background and finishes once the dialog closes.
