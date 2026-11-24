@@ -827,7 +827,11 @@ describe('VSCodeProxyBackend', () => {
         expect(children.map(inner => inner.closed)).toEqual([1, 1]);
       });
 
-      it('neither double-releases nor opens a default provider for a disconnect that settles after its request closed', async () => {
+      it('neither double-releases, opens a default provider nor clears the shared child for a disconnect whose request closed while preparing', async () => {
+        // The disconnect used to resolve with no default client once its
+        // request closed during the default transport's creation, and
+        // clearAfter() took that as success and cleared the shared child
+        // although no default had connected.
         const { slot, children, defaults, handshake, hold, backendContext, clientVersion, makeRequestBackend } = await makeGatedSetup();
 
         const request0 = makeRequestBackend();
@@ -842,18 +846,24 @@ describe('VSCodeProxyBackend', () => {
         await vi.waitFor(() => expect(handshake.defaultEntered).toBe(defaultsBefore + 1));
         request1.serverClosed?.();
         releaseDefault();
-        expect((await disconnecting).isError).not.toBe(true);
+        await expect(disconnecting).rejects.toThrow('closed before the switch could run');
         await new Promise(resolve => setTimeout(resolve, 0));
 
-        // request0's lease keeps the retired child open until it closes.
-        expect(children[0].closed).toBe(0);
+        // The shared child is still selected for new requests, and request0
+        // closing releases its lease without closing it.
+        const request2 = makeRequestBackend();
+        await request2.initialize(backendContext, clientVersion);
+        expect((await request2.callTool('tool_child', {})).isError).not.toBe(true);
+        request2.serverClosed?.();
         expect((await request0.callTool('tool_child', {})).isError).not.toBe(true);
         request0.serverClosed?.();
-        await vi.waitFor(() => expect(children[0].closed).toBe(1));
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(children.map(inner => inner.closed)).toEqual([0]);
 
         // No default provider was connected into the closed request's
         // disposed slot; every one that started was closed.
         await slot.dispose();
+        expect(children.map(inner => inner.closed)).toEqual([1]);
         await vi.waitFor(() => expect(defaults.filter(entry => entry.started).map(entry => entry.inner.closed)).toEqual(defaults.filter(entry => entry.started).map(() => 1)));
         expect(defaults.at(-1)!.started).toBe(false);
       });

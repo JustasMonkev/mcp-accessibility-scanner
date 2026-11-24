@@ -254,10 +254,12 @@ export class VSCodeProxyBackend implements ServerBackend {
     // default that fails to start fails the switch and leaves every request,
     // existing or new, on the shared provider, and a later switch from another
     // request waits for this one instead of being cleared by it. A request
-    // closed meanwhile connects no default.
+    // closed meanwhile connects no default, so the step fails and the shared
+    // selection stays.
     const defaultClient = createTransport ? undefined : await sharedSlot.clearAfter(this._whileOpen(async () => {
       const defaultTransport = await this._defaultTransportFactory();
-      return this._closed ? undefined : await this._connectClient(defaultTransport);
+      this._assertOpen();
+      return await this._connectClient(defaultTransport);
     }));
     const shared = createTransport ? await sharedSlot.replace(this._whileOpen(async () => this._connectClient(await createTransport()))) : undefined;
     if (this._closed) {
