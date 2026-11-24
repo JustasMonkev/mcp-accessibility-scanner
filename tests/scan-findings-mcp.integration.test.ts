@@ -26,7 +26,7 @@ import type { AxeNode } from '../src/tools/axe.js';
 it('pages through all 73 observed nodes after navigation, but never through a foreign or replaced scan ID', async () => {
   const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'retained-findings-'));
   const server = await createConnection({
-    browser: { browserName: 'chromium', isolated: true, launchOptions: { headless: true } },
+    browser: { browserName: 'chromium', isolated: true, launchOptions: { channel: 'chromium', headless: true } },
     outputDir,
     redactUrlParams: ['token'],
   });
@@ -39,11 +39,12 @@ it('pages through all 73 observed nodes after navigation, but never through a fo
     expect(lookup?.inputSchema.properties).toHaveProperty('browserSessionId');
     expect(lookup?.inputSchema.required).toEqual(['scanId', 'ruleId', 'outcome']);
 
-    await call('browser_navigate', { url: 'about:blank' });
+    const navigation = await call('browser_navigate', { url: 'about:blank' });
+    expect(navigation.isError, JSON.stringify(navigation.content)).not.toBe(true);
     const buttons = Array.from({ length: 73 }, (_, i) => `<button id="b${i}" data-url="/?token=test-secret"></button>`);
     // Put the last occurrence inside a frame: annotation cannot mark it, but
     // retention must still preserve its frame-qualified selector.
-    await call('browser_evaluate', { function: `async () => {
+    const fixture = await call('browser_evaluate', { function: `async () => {
       document.body.innerHTML = ${JSON.stringify(buttons.slice(0, -1).join(''))};
       const frame = document.createElement('iframe');
       frame.id = 'embedded';
@@ -52,9 +53,10 @@ it('pages through all 73 observed nodes after navigation, but never through a fo
       document.body.append(frame);
       await loaded;
     }` });
+    expect(fixture.isError, JSON.stringify(fixture.content)).not.toBe(true);
     const scanArgs = { withRules: ['button-name'], maxNodesPerViolation: 2 };
     const scan = await call('scan_page', { ...scanArgs, retainFindings: true, annotateScreenshot: true });
-    expect(scan.isError).not.toBe(true);
+    expect(scan.isError, JSON.stringify(scan.content)).not.toBe(true);
     const scanId = scan.structuredContent?.scanId;
     expect(scan.structuredContent).toEqual({ scanId: expect.any(String), rules: [{ outcome: 'violation', ruleId: 'button-name', count: 73 }] });
     const scanText = scan.content.filter(item => item.type === 'text').map(item => item.text).join('');
