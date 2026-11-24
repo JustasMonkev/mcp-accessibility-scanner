@@ -14,6 +14,7 @@ type TargetRect = { x: number; y: number; width: number; height: number };
 /** @public */
 export type FocusPoint = {
   focusIdentity?: string;
+  frameFocus?: { tagName: string; id: string | null } | null;
   role: string | null;
   name: string | null;
   tagName: string | null;
@@ -205,12 +206,15 @@ function focusIssuesOf(stop: FocusStop, options: KeyboardAuditOptions): FocusIss
 }
 
 function isDocumentRoot(point: FocusPoint): boolean {
-  return point.tagName === 'HTML' || point.tagName === 'BODY';
+  const tag = point.frameFocus?.tagName ?? point.tagName;
+  return tag === 'HTML' || tag === 'BODY';
 }
 
 function detectFocusTrap(stops: FocusStop[], before: FocusPoint, stop: FocusStop, cycleWindow: number): string[] | undefined {
-  const sameDirectionStart = stops.findLastIndex(previous => previous.key !== stop.key) + 1;
-  const recentStops = stops.slice(Math.max(sameDirectionStart, stops.length - cycleWindow + 1));
+  if (stop.frameFocus === null || before.frameFocus === null)
+    return undefined;
+  const sequenceStart = stops.findLastIndex(previous => previous.key !== stop.key || previous.frameFocus === null) + 1;
+  const recentStops = stops.slice(Math.max(sequenceStart, stops.length - cycleWindow + 1));
   const foundRepeat = buildFingerprint(before) === stop.fingerprint || recentStops.some(previous => previous.fingerprint === stop.fingerprint);
   const escapedToDocument = recentStops.some(isDocumentRoot) || isDocumentRoot(stop);
   if (!foundRepeat || escapedToDocument)
@@ -277,7 +281,8 @@ export async function runKeyboardFocusAudit(
       scrollDeltaY: after.scrollY - before.scrollY,
       issues: [],
     };
-    uniqueFingerprints.add(stop.fingerprint);
+    if (stop.frameFocus !== null)
+      uniqueFingerprints.add(stop.fingerprint);
 
     for (const issue of focusIssuesOf(stop, options))
       await recordIssue(stop, issue);
@@ -338,8 +343,8 @@ function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize,
   const pointerTargetSelector = 'a[href], button, input:not([type="hidden"]), select, textarea, summary, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex^="-"]), [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"]';
   type Rect = { x: number; y: number; width: number; height: number };
 
-  function deepActiveElement(): Element | null {
-    let active = document.activeElement;
+  function deepActiveElement(doc: Document): Element | null {
+    let active = doc.activeElement;
     while (active?.shadowRoot?.activeElement)
       active = active.shadowRoot.activeElement;
     return active;
@@ -505,7 +510,7 @@ function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize,
     return { sampled: samples.length, blocked, blockedBy };
   }
 
-  const focused = deepActiveElement();
+  const focused = deepActiveElement(document);
   const scrollX = window.scrollX;
   const scrollY = window.scrollY;
   if (!focused) {
@@ -528,6 +533,12 @@ function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize,
     };
   }
 
+  let inner: Element | null = focused;
+  while (inner && (inner.localName === 'iframe' || inner.localName === 'frame') && 'contentDocument' in inner) {
+    const child: Document | null = (inner as HTMLIFrameElement).contentDocument;
+    inner = child && deepActiveElement(child);
+  }
+
   const rect = focused.getBoundingClientRect();
   const style = window.getComputedStyle(focused);
   const text = focused.textContent?.trim().slice(0, maxTextLength) || null;
@@ -535,7 +546,8 @@ function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize,
   const pointerTarget = isPointerTarget(focused, rect);
   const undersized = rect.width < minTargetSize || rect.height < minTargetSize;
   return {
-    focusIdentity: `${documentId}:${stableIdentityOf(focused)}`,
+    focusIdentity: `${documentId}:${stableIdentityOf(inner ?? focused)}`,
+    ...(inner !== focused && { frameFocus: inner && { tagName: inner.tagName, id: inner.id || null } }),
     role: focused.getAttribute('role') || focused.tagName.toLowerCase(),
     name: name ? name.slice(0, maxTextLength) : null,
     tagName: focused.tagName,
@@ -651,6 +663,8 @@ function renderKeyboardSummary(result: KeyboardAuditResult, response: Response, 
     : 'not found';
   return [
     `Unique focus stops: ${result.uniqueFingerprints}`,
+    ...(result.stops.some(stop => stop.frameFocus !== undefined) ? ['Frame stops: visual checks measure the outer frame, not the focused control inside it.'] : []),
+    ...(result.stops.some(stop => stop.frameFocus === null) ? ['The audit could not inspect focus inside a frame. Those steps are excluded from unique-stop counts and cycle detection.'] : []),
     `Skip link: ${skipLinkResult}`,
     `No visible focus indicator: ${result.focusVisibilityIssues.length}`,
     ...previewOf(result.focusVisibilityIssues, stop => `- Step ${stop.step} (${stop.key}): ${describeElement(stop)}`.trim()),
@@ -693,6 +707,7 @@ const auditKeyboardSchema = z.object({
 function keyboardAuditSummary(result: KeyboardAuditResult) {
   return {
     uniqueFocusStops: result.uniqueFingerprints,
+    unobservableFrameSteps: result.stops.filter(stop => stop.frameFocus === null).length,
     skipLinkFound: result.skipLink.found,
     skipLinkStep: result.skipLink.step,
     skipLinkActivated: result.skipLink.activated,

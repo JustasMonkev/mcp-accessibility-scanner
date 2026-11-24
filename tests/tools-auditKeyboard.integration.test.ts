@@ -33,6 +33,20 @@ const canRun = !!process.env.MCP_TEST_BROWSER_NAME || existsSync(chromium.execut
 const server = http.createServer((request, response) => {
   const url = new URL(request.url || '/', 'http://localhost');
   response.writeHead(200, { 'content-type': 'text/html' });
+  if (url.pathname === '/frame-focus') {
+    const opaque = url.searchParams.has('opaque') ? ' sandbox=""' : '';
+    response.end(`<iframe id="first"${opaque} src="/frame-nested"></iframe><iframe id="second" src="/frame-controls"></iframe><button id="after">After both frames</button>`);
+    return;
+  }
+  if (url.pathname === '/frame-nested' || url.pathname === '/trapped-frame') {
+    const source = url.pathname === '/trapped-frame' ? '/trapped-focus' : '/frame-controls';
+    response.end(`<iframe src="${source}"></iframe>`);
+    return;
+  }
+  if (url.pathname === '/frame-controls') {
+    response.end('<button id="save">Save</button><button id="next">Next</button>');
+    return;
+  }
   if (url.pathname === '/focus-identity') {
     response.end(`<button tabindex="0">Save</button><button tabindex="0">Save</button><button tabindex="0">Last</button>`);
     return;
@@ -248,7 +262,7 @@ it.skipIf(!canRun)('reports only the stop whose focus style draws no ring', asyn
   expect(report.focusVisibilityIssues.map((stop: { id: string }) => stop.id)).toEqual(['bare']);
 });
 
-it.skipIf(!canRun).each(['focus-identity', 'shadow-focus', 'reverse-focus', 'trapped-focus'])(
+it.skipIf(!canRun).each(['focus-identity', 'shadow-focus', 'reverse-focus', 'trapped-focus', 'trapped-frame'])(
   'distinguishes actual traps from %s traversal', async fixture => {
     directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-identity-'));
     const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory, timeoutSettle: 0 });
@@ -266,10 +280,13 @@ it.skipIf(!canRun).each(['focus-identity', 'shadow-focus', 'reverse-focus', 'tra
       reportFile: 'keyboard.json',
     });
     const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
-    if (fixture === 'trapped-focus') {
+    if (fixture === 'trapped-focus' || fixture === 'trapped-frame') {
       expect(report.focusTrap.detected).toBe(true);
       expect(report.focusTrap.step).toBe(1);
-      expect(report.stops[0].name).toBe('After');
+      if (fixture === 'trapped-frame')
+        expect(report.stops[0].frameFocus).toEqual({ tagName: 'BUTTON', id: 'trapped' });
+      else
+        expect(report.stops[0].name).toBe('After');
       return;
     }
     expect(report.focusTrap.detected).toBe(false);
@@ -280,6 +297,28 @@ it.skipIf(!canRun).each(['focus-identity', 'shadow-focus', 'reverse-focus', 'tra
     expect(report.uniqueFingerprints).toBe(fixture === 'reverse-focus' ? 2 : 3);
   }
 );
+
+it.skipIf(!canRun).each([false, true])('follows keyboard traversal through frames when opaque=%s', async opaque => {
+  directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-frames-'));
+  const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory, timeoutSettle: 0 });
+  client = new Client({ name: 'keyboard-frame-test', version: '1' });
+  await client.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
+  await ok('browser_navigate', { url: `${origin}/frame-focus${opaque ? '?opaque' : ''}` });
+  const text = await ok('audit_keyboard', { maxTabs: 5, reportFile: 'keyboard.json' });
+  const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
+  expect(report.focusTrap.detected).toBe(false);
+  expect(report.stops.map((stop: { id: string }) => stop.id)).toEqual(['first', 'first', 'second', 'second', 'after']);
+  expect(report.stops[2].frameFocus).toEqual({ tagName: 'BUTTON', id: 'save' });
+  expect(report.stops[3].frameFocus).toEqual({ tagName: 'BUTTON', id: 'next' });
+  if (opaque) {
+    expect(report.stops[0].frameFocus).toBeNull();
+    expect(text).toContain('could not inspect focus inside a frame');
+  } else {
+    expect(report.stops[0].frameFocus).toEqual(report.stops[2].frameFocus);
+    expect(report.stops[0].fingerprint).not.toBe(report.stops[2].fingerprint);
+  }
+  expect(report.uniqueFingerprints).toBe(opaque ? 3 : 5);
+});
 
 it.skipIf(!canRun).each([false, true])('checks shadow-tree paint ownership when covered=%s', async covered => {
   directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-obscuration-'));
