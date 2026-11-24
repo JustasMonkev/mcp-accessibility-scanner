@@ -233,6 +233,37 @@ describe('scan_page_matrix tool', () => {
     expect(mockPage.emulateMedia).toHaveBeenCalledTimes(2);
   });
 
+  it('reports a dialog and starts the restore while a progress notification is stuck', async () => {
+    const { context, mockPage, response } = createMatrixHarness('/tmp/stuck-progress.json');
+    const tab = context.currentTabOrDie();
+    Object.assign(tab.context, { tools: [], config: {}, modalStateTools: [] });
+    const modalStates: unknown[] = [];
+    let openDialog!: (state: unknown) => void;
+    Object.assign(tab, { modalStatesMarkdown: () => renderModalStates(tab.context as any, modalStates as any) });
+    tab.modalStates.mockImplementation(() => modalStates as never[]);
+    tab.on.mockImplementation((_event: string, listener: (state: unknown) => void) => { openDialog = listener; });
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+    // A client that stopped reading leaves the notification waiting for drain.
+    const progress = vi.spyOn(response, 'reportProgress').mockImplementation(() => {
+      setTimeout(() => {
+        const dialog = { type: 'dialog', description: '"alert" dialog with message "stuck"' };
+        modalStates.push(dialog);
+        openDialog(dialog);
+      }, 0);
+      return new Promise<void>(() => {});
+    });
+
+    const failure = await Promise.race([
+      tool.handle(response.context, tool.schema.inputSchema.parse({ variants: [{ name: 'baseline' }, { name: 'dark', media: { colorScheme: 'dark' } }], waitAfterApplyMs: 0 }), response).catch((error: Error) => error),
+      new Promise(resolve => setTimeout(() => resolve('still waiting on progress'), 1000)),
+    ]);
+    expect(String(failure)).toContain('opened a dialog during variant "baseline"');
+    expect(progress).toHaveBeenCalledTimes(1);
+    // The restore started as soon as the dialog was reported.
+    expect(mockPage.setViewportSize).toHaveBeenCalledTimes(2);
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
   it('waits for active Axe before restoring the caller tab on cancellation', async () => {
     const { mockPage, response } = createMatrixHarness('/tmp/aborted.json');
     const controller = new AbortController();

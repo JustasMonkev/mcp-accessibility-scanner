@@ -250,17 +250,20 @@ async function scanVariants({ tab, variants, original, params, response, dialog,
   const incompleteRuleIdsByVariant: string[][] = [];
   let restoredInCall = false;
   try {
-    for (const variant of variants) {
+    for (const [index, variant] of variants.entries()) {
       const scanning = scanVariant(tab, variant, original, params, scanSignal);
       inFlight = scanning;
       const { result, incompleteRuleIds } = await dialog.guard(scanning, { variant: variant.name });
       variantResults.push(result);
       incompleteRuleIdsByVariant.push(incompleteRuleIds);
-      await response.reportProgress({
+      // A client that stops reading can leave the notification waiting
+      // indefinitely; a dialog opened meanwhile is still reported, and the
+      // restore started, without waiting for it. reportProgress never rejects.
+      await dialog.guard(response.reportProgress({
         progress: variantResults.length,
         total: variants.length,
         message: `Scanned variant ${variantResults.length}/${variants.length}: ${variant.name}`,
-      });
+      }), index === variants.length - 1 ? 'finishing' : { variant: variant.name });
     }
     compareWithBaseline(variantResults, incompleteRuleIdsByVariant);
   } finally {
@@ -276,8 +279,7 @@ async function scanVariants({ tab, variants, original, params, response, dialog,
       restoredInCall = true;
     }
   }
-  // A dialog opened after the last guarded step, for instance while the last
-  // progress notification was sent, left the restore waiting on it.
+  // A dialog opened after the last guarded step left the restore waiting on it.
   if (!restoredInCall)
     throw dialogInterruption(tab, 'finishing');
   return variantResults;
