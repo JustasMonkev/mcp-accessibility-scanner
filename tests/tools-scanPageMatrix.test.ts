@@ -177,6 +177,29 @@ describe('scan_page_matrix tool', () => {
     expect(mockPage.evaluate).toHaveBeenCalledTimes(2);
   });
 
+  it('stops changing the page once the browser context closes and cancels its claim', async () => {
+    const { context, mockPage, response } = createMatrixHarness('/tmp/canceled-claim.json');
+    const tab = context.currentTabOrDie();
+    const canceled = new AbortController();
+    Object.assign(tab.context, { claimPage: () => ({ release: () => {}, canceled: canceled.signal }) });
+    // The claim is released when the context closes, so another scan may own
+    // the page by the time this one's wait ends.
+    tab.waitForTimeout.mockImplementation(async () => {
+      canceled.abort(new Error('The browser context closed.'));
+    });
+    const scan = vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({
+      variants: [{ name: 'baseline' }, { name: 'mobile', viewport: { width: 375, height: 812 } }],
+    }), response)).rejects.toThrow('The browser context closed.');
+    expect(scan).not.toHaveBeenCalled();
+    // Only the first variant's own changes; neither the next variant nor the restore ran.
+    expect(mockPage.setViewportSize).toHaveBeenCalledTimes(1);
+    expect(mockPage.emulateMedia).toHaveBeenCalledTimes(1);
+    expect(mockPage.evaluate).toHaveBeenCalledTimes(2);
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
   it('reports a dialog that opens while the last progress notification is sent instead of a report', async () => {
     const { context, mockPage, response } = createMatrixHarness('/tmp/late-dialog.json');
     const tab = context.currentTabOrDie();

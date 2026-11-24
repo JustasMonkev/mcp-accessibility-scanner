@@ -242,7 +242,9 @@ type MatrixRun = {
 };
 
 async function scanVariants({ tab, variants, original, params, response, dialog, signal, canceled }: MatrixRun, trackRestore: (restore: Promise<void>) => void): Promise<VariantResult[]> {
-  const scanSignal = signal ? AbortSignal.any([signal, dialog.signal]) : dialog.signal;
+  // A canceled claim may already belong to another scan, so this one stops
+  // changing the page.
+  const scanSignal = AbortSignal.any(signal ? [signal, dialog.signal, canceled] : [dialog.signal, canceled]);
   let inFlight: Promise<unknown> = Promise.resolve();
   const variantResults: VariantResult[] = [];
   const incompleteRuleIdsByVariant: string[][] = [];
