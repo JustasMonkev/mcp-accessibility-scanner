@@ -220,6 +220,21 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
       }, clickable('left:0;top:0;width:16px;height:16px')));
       expect(shadowed.targetBox).toEqual({ x: 0, y: 0, width: 16, height: 16 });
       expect(shadowed.targetSpacing).toBe('crowded');
+      // A slot's fallback content renders only while nothing, text included, is assigned to it.
+      const slotted = (light: string) => measureTree({ focused: box(0, 0, 16, 16) }, 2000, 50_000, () => page.evaluate(({ light, fallback }) => {
+        document.getElementById('focused')!.remove();
+        const control = document.createElement('div');
+        control.setAttribute('role', 'button');
+        control.tabIndex = 0;
+        control.style.cssText = 'position:absolute;left:0;top:0;width:40px;height:40px;pointer-events:none';
+        control.attachShadow({ mode: 'open' }).innerHTML = `<slot name="other"></slot><slot>${fallback}</slot>`;
+        control.innerHTML = light;
+        document.body.append(control);
+        control.focus();
+      }, { light, fallback: clickable('left:0;top:0;width:10px;height:10px') }));
+      expect((await slotted('<span slot="other"></span>')).targetBox).toEqual({ x: 0, y: 0, width: 10, height: 10 });
+      expect((await slotted('<span slot="other"></span>text')).isPointerTarget).toBe(false);
+      expect((await slotted(`<span slot="other"></span> ${clickable('left:20px;top:0;width:10px;height:10px')}`)).targetBox).toEqual({ x: 20, y: 0, width: 10, height: 10 });
     });
 
     it('counts a neighbour whose clickable descendant is adjacent to the target', async () => {
@@ -269,6 +284,74 @@ describe('audit_keyboard SC 2.5.8 spacing measurement', () => {
       expect(neighbor.targetSpacing).toBe('inconclusive');
       // Within the limit both are measured.
       expect((await measureTree({ focused: noneWith(box(0, 0, 40, 40), spans) }, 2000, 100)).targetBox).toEqual({ x: 0, y: 0, width: 16, height: 16 });
+    });
+
+    it('reads only the children it visits, however many a control has', async () => {
+      // Each layout replaces the focused button with a pointer-events: none custom control whose
+      // light tree and open shadow root hold this markup, `*` standing for 100,000 spans.
+      const layouts = {
+        children: { light: '*' },
+        nested: { light: '<div>*</div>' },
+        shadow: { shadow: '*' },
+        assigned: { shadow: '<slot></slot>', light: '*' },
+        fallback: { shadow: '<slot>*</slot>' },
+      };
+      const countChildReads = (layout: { light?: string; shadow?: string }) => measureTree({ focused: box(0, 0, 16, 16) }, 2000, 50, () => page.evaluate(({ light = '', shadow }) => {
+        const spans = '<span></span>'.repeat(100_000);
+        document.getElementById('focused')!.remove();
+        const control = document.createElement('div');
+        control.setAttribute('role', 'button');
+        control.tabIndex = 0;
+        control.style.cssText = 'position:absolute;left:0;top:0;width:40px;height:40px;pointer-events:none';
+        if (shadow !== undefined)
+          control.attachShadow({ mode: 'open' }).innerHTML = shadow.replace('*', spans);
+        control.innerHTML = light.replace('*', spans);
+        document.body.append(control);
+        control.focus();
+        // Counts the children the measurement reads through the DOM's child accessors; a child
+        // list counts in full, as reading it hands the caller every child.
+        const state = window as unknown as { childReads: number };
+        state.childReads = 0;
+        const countReads = <T>(proto: object, name: string, reads: (value: T) => number) => {
+          const descriptor = Object.getOwnPropertyDescriptor(proto, name)!;
+          Object.defineProperty(proto, name, { ...descriptor, get() {
+            const value = descriptor.get!.call(this) as T;
+            state.childReads += reads(value);
+            return value;
+          } });
+        };
+        for (const name of ['firstElementChild', 'lastElementChild', 'nextElementSibling', 'previousElementSibling'])
+          countReads(Element.prototype, name, () => 1);
+        for (const name of ['firstElementChild', 'lastElementChild'])
+          countReads(DocumentFragment.prototype, name, () => 1);
+        for (const name of ['firstChild', 'lastChild', 'nextSibling', 'previousSibling'])
+          countReads(Node.prototype, name, () => 1);
+        for (const proto of [Element.prototype, DocumentFragment.prototype])
+          countReads(proto, 'children', (list: HTMLCollection) => list.length);
+        countReads(Node.prototype, 'childNodes', (list: NodeList) => list.length);
+        for (const name of ['assignedNodes', 'assignedElements'] as const) {
+          const original = HTMLSlotElement.prototype[name] as (...args: unknown[]) => Node[];
+          HTMLSlotElement.prototype[name] = function(this: HTMLSlotElement, ...args: unknown[]) {
+            const nodes = original.apply(this, args);
+            state.childReads += nodes.length;
+            return nodes;
+          } as never;
+        }
+      }, layout)).then(async point => ({ point, reads: await page.evaluate(() => (window as unknown as { childReads: number }).childReads) }));
+      try {
+        for (const [layout, markup] of Object.entries(layouts)) {
+          const { point, reads } = await countChildReads(markup);
+          expect(point.isPointerTarget, layout).toBe(true);
+          expect(point.targetSpacing, layout).toBe('inconclusive');
+          // A visit limit of 50 bounds the children read, not the 100,000 a full enumeration reads.
+          expect(reads, layout).toBeLessThanOrEqual(200);
+          await page.close();
+          page = await browser.newPage();
+        }
+      } finally {
+        await page.close();
+        page = await browser.newPage();
+      }
     });
   });
 

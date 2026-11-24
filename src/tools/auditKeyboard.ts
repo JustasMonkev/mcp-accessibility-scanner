@@ -414,14 +414,43 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
     return false;
   }
 
-  // Children in the flat tree: a host's shadow children, a slot's assigned elements (or its
+  // Reads `first` and the siblings after it one at a time, charging each read against the
+  // visit limit, so a parent with many children costs only the ones the walk reaches.
+  type ChildReader = () => Node | null | 'inconclusive';
+  function readSiblings(first: Node | null, step: (node: Node) => Node | null, accept: (node: Node) => boolean): ChildReader {
+    let node = first;
+    return () => {
+      for (; node; node = step(node)) {
+        if (++visited > maxSpacingVisits)
+          return 'inconclusive';
+        if (accept(node)) {
+          const found = node;
+          node = step(node);
+          return found;
+        }
+      }
+      return null;
+    };
+  }
+
+  // Children in the flat tree: a host's shadow children, a slot's assigned nodes (or its
   // fallback content when nothing is assigned), otherwise the element's children.
-  function flatChildren(element: Element): Element[] {
-    if (element.shadowRoot)
-      return Array.from(element.shadowRoot.children);
-    if (element instanceof HTMLSlotElement && element.assignedNodes().length)
-      return element.assignedElements();
-    return Array.from(element.children);
+  function flatChildren(element: Element): ChildReader {
+    const nextElement = (node: Node) => (node as Element).nextElementSibling;
+    const root = element.getRootNode();
+    if (element.shadowRoot || !(element instanceof HTMLSlotElement) || !(root instanceof ShadowRoot))
+      return readSiblings((element.shadowRoot ?? element).firstElementChild, nextElement, () => true);
+    // Assigned nodes, text included, are children of the host.
+    const slot = element;
+    const assigned = readSiblings(root.host.firstChild, node => node.nextSibling, node => (node as Element | Text).assignedSlot === slot);
+    let pending: ReturnType<ChildReader> | undefined = assigned();
+    if (pending === null)
+      return readSiblings(slot.firstElementChild, nextElement, () => true);
+    return () => {
+      const node = pending ?? assigned();
+      pending = undefined;
+      return node;
+    };
   }
 
   // A control that is not hit itself still activates when a descendant that restores
@@ -433,11 +462,17 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
     let top = Infinity;
     let right = -Infinity;
     let bottom = -Infinity;
-    const stack = flatChildren(element);
-    for (let node = stack.pop(); node; node = stack.pop()) {
-      if (++visited > maxSpacingVisits)
+    // The children still to read at each level of the walk.
+    const stack = [flatChildren(element)];
+    while (stack.length) {
+      const node = stack[stack.length - 1]();
+      if (node === 'inconclusive')
         return 'inconclusive';
-      if (node.hasAttribute('inert'))
+      if (!node) {
+        stack.pop();
+        continue;
+      }
+      if (!(node instanceof Element) || node.hasAttribute('inert'))
         continue;
       const nodeStyle = window.getComputedStyle(node);
       if (nodeStyle.display === 'none')
@@ -449,8 +484,7 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
         right = Math.max(right, nodeBox.right);
         bottom = Math.max(bottom, nodeBox.bottom);
       }
-      for (const child of flatChildren(node))
-        stack.push(child);
+      stack.push(flatChildren(node));
     }
     return right > left ? new DOMRect(left, top, right - left, bottom - top) : null;
   }
