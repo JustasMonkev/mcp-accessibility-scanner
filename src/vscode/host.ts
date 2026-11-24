@@ -247,8 +247,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   private async _applySharedSwitch(sharedSlot: SharedClientSlot, createTransport: (() => Promise<Transport>) | undefined): Promise<void> {
-    if (this._closed)
-      throw new Error('The connection closed before the switch could run.');
+    this._assertOpen();
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
     // A disconnect readies this backend's default provider, handshake
     // included, as the process-wide step that clears the shared selection: a
@@ -256,11 +255,11 @@ export class VSCodeProxyBackend implements ServerBackend {
     // existing or new, on the shared provider, and a later switch from another
     // request waits for this one instead of being cleared by it. A request
     // closed meanwhile connects no default.
-    const defaultClient = createTransport ? undefined : await sharedSlot.clearAfter(async () => {
+    const defaultClient = createTransport ? undefined : await sharedSlot.clearAfter(this._whileOpen(async () => {
       const defaultTransport = await this._defaultTransportFactory();
       return this._closed ? undefined : await this._connectClient(defaultTransport);
-    });
-    const shared = createTransport ? await sharedSlot.replace(async () => this._connectClient(await createTransport())) : undefined;
+    }));
+    const shared = createTransport ? await sharedSlot.replace(this._whileOpen(async () => this._connectClient(await createTransport()))) : undefined;
     if (this._closed) {
       // serverClosed() ran while the replacement connected: the switch still
       // applies process-wide, but this backend keeps no lease on its
@@ -287,6 +286,23 @@ export class VSCodeProxyBackend implements ServerBackend {
     }
     if (previousShared)
       await sharedSlot.release(previousShared);
+  }
+
+  private _assertOpen(): void {
+    if (this._closed)
+      throw new Error('The connection closed before the switch could run.');
+  }
+
+  // Wraps a process-wide slot step's connect: the step can wait in the
+  // slot's queue behind other requests' switches, so a request closed by the
+  // time it starts creates no transport and the step fails, leaving the
+  // shared selection as it is. A connect already under way when the request
+  // closes carries on.
+  private _whileOpen<T>(connect: () => Promise<T>): () => Promise<T> {
+    return async () => {
+      this._assertOpen();
+      return await connect();
+    };
   }
 
   private _defineContextSwitchTool(): Tool {

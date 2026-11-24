@@ -858,6 +858,34 @@ describe('VSCodeProxyBackend', () => {
         expect(defaults.at(-1)!.started).toBe(false);
       });
 
+      it('skips a switch queued behind another request\'s switch when its request closes', async () => {
+        // The closed check ran only before the switch joined the process-wide
+        // queue, so a request closed while queued there still created its
+        // child transport and published the child.
+        const { slot, children, handshake, hold, backendContext, clientVersion, makeRequestBackend } = await makeGatedSetup();
+
+        const request0 = makeRequestBackend();
+        await request0.initialize(backendContext, clientVersion);
+        const request1 = makeRequestBackend();
+        await request1.initialize(backendContext, clientVersion);
+        const releaseHandshake = hold('childGate');
+        const first = request0.callTool('browser_connect', connectArgs);
+        await vi.waitFor(() => expect(handshake.childEntered).toBe(1));
+        const queued = request1.callTool('browser_connect', connectArgs);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        request1.serverClosed?.();
+        releaseHandshake();
+
+        expect((await first).isError).not.toBe(true);
+        await expect(queued).rejects.toThrow('closed before the switch could run');
+        expect(handshake.childEntered).toBe(1);
+        expect(children).toHaveLength(1);
+
+        request0.serverClosed?.();
+        await slot.dispose();
+        expect(children.map(inner => inner.closed)).toEqual([1]);
+      });
+
       it('skips a switch still queued when its request closes', async () => {
         const { slot, children, handshake, hold, backendContext, clientVersion, makeRequestBackend } = await makeGatedSetup();
 
