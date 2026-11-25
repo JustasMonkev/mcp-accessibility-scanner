@@ -19,7 +19,7 @@ const KEEP_N = 10;
 
 const KEEP_REF_ALL = /\[ref=[^\]]+\]/g;
 const HAS_REF = /\[ref=[^\]]+\]/;
-const ROLE_PREFIX_RE = /^\s*-\s*([a-z][a-z0-9-]*)\b/i;
+const ROLE_PREFIX_RE = /^\s*-\s*['"]?([a-z][a-z0-9-]*)\b/i;
 const PROTECTED_LINE_ROLES = new Set([
   'alert',
   'banner',
@@ -102,6 +102,8 @@ type SnapshotLine = {
   text: string;
   indent: number;
   parentIndex: number;
+  role: string | undefined;
+  shape: number;
   group: CompressionGroup | undefined;
   protectedLine: boolean;
   protectedSubtree: boolean;
@@ -133,12 +135,13 @@ export function compressAriaSnapshot(yaml: string): CompressResult {
   if (!crowded)
     return { output: yaml, removed: 0 };
 
+  assignSubtreeShapes(lines);
   const groups = new Map<string, CompressionGroup>();
   let maxCount = 0;
   for (const line of lines) {
     if (!isCandidate(line) || candidates[line.parentIndex + 1] <= FIRE_THRESHOLD)
       continue;
-    const key = `${line.parentIndex}:${line.indent}:${signature(line.text)}`;
+    const key = `${line.parentIndex}:${line.indent}:${line.shape}:${signature(line.text)}`;
     let group = groups.get(key);
     if (!group) {
       group = { total: 0, seen: 0 };
@@ -247,7 +250,7 @@ function parseSnapshotLines(yaml: string): SnapshotLine[] {
     if (!blank)
       stack.push(lines.length);
     lines.push({
-      text, indent, parentIndex, protectedSubtree, group: undefined,
+      text, indent, parentIndex, role, shape: 0, protectedSubtree, group: undefined,
       protectedLine: shouldKeepLine(role, hasRef),
       containsProtectedSubtree: protectedSubtree,
       underRowContainer: !!parent?.underRowContainer || isRowContainerRole(role),
@@ -260,6 +263,26 @@ function parseSnapshotLines(yaml: string): SnapshotLine[] {
       lines[line.parentIndex].containsProtectedSubtree = true;
   }
   return lines;
+}
+
+function assignSubtreeShapes(lines: SnapshotLine[]): void {
+  const ids = new Map<string, number>();
+  const children = new Map<number, number[]>();
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index];
+    if (line.indent === line.text.length)
+      continue;
+    const key = `${line.role ?? ''}:${children.get(index)?.join(',') ?? ''}`;
+    line.shape = ids.get(key) ?? ids.size + 1;
+    ids.set(key, line.shape);
+    if (line.parentIndex !== -1) {
+      const siblings = children.get(line.parentIndex);
+      if (siblings)
+        siblings.push(line.shape);
+      else
+        children.set(line.parentIndex, [line.shape]);
+    }
+  }
 }
 
 function isCandidate(line: SnapshotLine): boolean {

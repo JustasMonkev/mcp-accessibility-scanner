@@ -341,4 +341,103 @@ describe('session log folders', () => {
       vi.useRealTimers();
     }
   });
+
+  describe('write batching', () => {
+    const response = (n: number, ariaSnapshot = `- text: page ${n}`) => ({
+      context: { options: {} }, toolName: 'browser_snapshot', toolArgs: { n },
+      result: () => `result ${n}`, isError: () => false, code: () => '',
+      tabSnapshot: () => ({ url: 'https://example.com/', title: '', ariaSnapshot, modalStates: [], consoleMessages: [], downloads: [] }),
+    } as any);
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('writes a batch within the maximum age under continuous traffic', async () => {
+      // Each entry restarted a one-second debounce, so 24 responses 250ms apart
+      // produced no write at all for six seconds.
+      vi.useFakeTimers();
+      const storage = {
+        readFile: vi.fn(async () => ''),
+        writeFile: vi.fn(async () => {}),
+        appendFile: vi.fn(async () => {}),
+      };
+      const log = new SessionLog('/unused', storage);
+      let firstWriteAt: number | undefined;
+      for (let i = 0; i < 24; i++) {
+        log.logResponse(response(i));
+        await vi.advanceTimersByTimeAsync(250);
+        if (firstWriteAt === undefined && storage.appendFile.mock.calls.length)
+          firstWriteAt = (i + 1) * 250;
+      }
+      expect(firstWriteAt).toBeLessThanOrEqual(2000);
+      expect(storage.appendFile.mock.calls.length).toBeGreaterThanOrEqual(3);
+      await vi.advanceTimersByTimeAsync(1000);
+      const written = storage.appendFile.mock.calls.map(([, content]) => content).join('');
+      expect(written.match(/### Tool call: browser_snapshot/g)).toHaveLength(24);
+      expect(storage.writeFile).toHaveBeenCalledTimes(24);
+    });
+
+    it('writes a full batch without waiting for the debounce', async () => {
+      vi.useFakeTimers();
+      const storage = {
+        readFile: vi.fn(async () => ''),
+        writeFile: vi.fn(async () => {}),
+        appendFile: vi.fn(async () => {}),
+      };
+      const log = new SessionLog('/unused', storage);
+      for (let i = 0; i < 50; i++)
+        log.logResponse(response(i));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(storage.appendFile).toHaveBeenCalledTimes(1);
+      expect(storage.appendFile.mock.calls[0][1].match(/### Tool call/g)).toHaveLength(50);
+    });
+
+    it('persists the final call and its snapshot when shutdown flushes right after it', async () => {
+      // Shutdown exited before the debounced batch, and before snapshot writes
+      // that were never awaited, reached disk.
+      const folder = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-a11y-session-flush-'));
+      try {
+        const slowly = <T>(write: () => Promise<T>) => new Promise<T>((resolve, reject) => setTimeout(() => write().then(resolve, reject), 50));
+        const storage = {
+          readFile: (file: string) => fs.promises.readFile(file, 'utf-8'),
+          writeFile: (file: string, content: string) => slowly(() => fs.promises.writeFile(file, content)),
+          appendFile: (file: string, content: string) => slowly(() => fs.promises.appendFile(file, content)),
+        };
+        const log = new SessionLog(folder, storage);
+        log.logResponse(response(1, '- text: final snapshot'));
+        await SessionLog.flushAll();
+        expect(await fs.promises.readFile(path.join(folder, 'session.md'), 'utf-8')).toContain('### Tool call: browser_snapshot');
+        expect(await fs.promises.readFile(path.join(folder, '001.snapshot.yml'), 'utf-8')).toBe('- text: final snapshot');
+        // Nothing is left for a later flush.
+        await expect(SessionLog.flushAll()).resolves.toBeUndefined();
+      } finally {
+        await fs.promises.rm(folder, { recursive: true, force: true });
+      }
+    });
+
+    it('persists an entry appended while shutdown waits for an earlier write', async () => {
+      // flush() wrote the pending batch once and then only awaited in-flight
+      // writes, so an entry logged during that wait stayed pending behind its
+      // debounce and flushAll() resolved without it.
+      const appended: string[] = [];
+      const storage = {
+        readFile: vi.fn(async () => ''),
+        writeFile: vi.fn(async () => {}),
+        appendFile: vi.fn(async (_file: string, content: string) => {
+          if (!appended.length)
+            log.logResponse(response(2));
+          await new Promise(resolve => setTimeout(resolve, 20));
+          appended.push(content);
+        }),
+      };
+      const log = new SessionLog('/unused', storage);
+      log.logResponse(response(1));
+      await SessionLog.flushAll();
+      const written = appended.join('');
+      expect(written).toContain('result 1');
+      expect(written).toContain('result 2');
+      expect(storage.writeFile).toHaveBeenCalledTimes(2);
+    });
+  });
 });

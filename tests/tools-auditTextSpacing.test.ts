@@ -21,7 +21,7 @@ import {
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { resolveConfig } from '../src/config.js';
 
-const emptyMeasurement: TextSpacingFrameMeasurement = { candidates: 1, measured: 1, truncated: 0, stale: 0, overlapLinesTruncated: 0, clipped: [], overlaps: [], blocked: [] };
+const emptyMeasurement: TextSpacingFrameMeasurement = { candidates: 1, measured: 1, truncated: 0, stoppedEarly: null, paragraphsTruncated: 0, stale: 0, overlapLinesTruncated: 0, clipped: [], overlaps: [], blocked: [] };
 
 describe('buildTextSpacingFindings', () => {
   it('names the clipping box and tailors the fix to how it clips', () => {
@@ -151,6 +151,116 @@ describe('audit_text_spacing screenshot failure handling', () => {
   });
 });
 
+describe('audit_text_spacing frame budgets and timeouts', () => {
+  const tool = auditTextSpacingTools.find(entry => entry.schema.name === 'audit_text_spacing')!;
+  const measurement: TextSpacingFrameMeasurement = { ...emptyMeasurement, candidates: 2, measured: 2 };
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function harness(childMeasure: () => Promise<TextSpacingFrameMeasurement>, mainMeasurement = measurement) {
+    const events: string[] = [];
+    const frameOf = (isMain: boolean, measure: () => Promise<TextSpacingFrameMeasurement>): any => ({
+      parentFrame: () => isMain ? null : {},
+      url: () => isMain ? 'https://example.com/' : 'https://child.example/',
+      isDetached: () => false,
+      evaluate: vi.fn(async (fn: unknown) => {
+        if (fn === measureTextSpacing)
+          return measure();
+        if (fn === removeTextSpacing) {
+          events.push(isMain ? 'main-remove' : 'child-remove');
+          return 1;
+        }
+        throw new Error('unexpected evaluate');
+      }),
+    });
+    const main = frameOf(true, async () => mainMeasurement);
+    const child = frameOf(false, childMeasure);
+    const page = { frames: () => [main, child], mainFrame: () => main, url: () => 'https://example.com/', screenshot: vi.fn() };
+    const tab: any = { page, modalStates: () => [], context: { outputFile: async (name: string) => `/tmp/${name}` } };
+    const context: any = { currentTabOrDie: () => tab, config: {} };
+    const written: { file: string; data: string }[] = [];
+    vi.spyOn(fs.promises, 'writeFile').mockImplementation(async (file: any, data: any) => {
+      written.push({ file: String(file), data: String(data) });
+    });
+    return { context, events, main, child, written };
+  }
+
+  async function run(context: any, advanceMs: number) {
+    const response = new Response(context, 'audit_text_spacing', {});
+    const pending = tool.handle(context, tool.schema.inputSchema.parse({}), response);
+    await vi.advanceTimersByTimeAsync(advanceMs);
+    await pending;
+    return response;
+  }
+
+  it('waits for a timed-out frame evaluation to end before stripping its overrides', async () => {
+    vi.useFakeTimers();
+    let events: string[] = [];
+    const setup = harness(() => new Promise(resolve => setTimeout(() => {
+      events.push('child-measure-ended');
+      resolve(measurement);
+    }, 6_000)));
+    events = setup.events;
+    const response = await run(setup.context, 10_000);
+    expect(events).toEqual(['child-measure-ended', 'child-remove']);
+    expect(response.result()).toContain('https://child.example/: timed out after 5000ms');
+    expect(response.result()).not.toContain('could not be removed');
+  });
+
+  it('reports cleanup as unconfirmed when a timed-out evaluation never ends', async () => {
+    vi.useFakeTimers();
+    const setup = harness(() => new Promise(() => undefined));
+    const response = await run(setup.context, 10_000);
+    expect(setup.events).toEqual(['child-remove']);
+    expect(response.result()).toContain('WARNING: the spacing overrides could not be removed from https://child.example/; reload the page before further testing.');
+  });
+
+  it('passes the in-page budgets and surfaces partial coverage', async () => {
+    vi.useFakeTimers();
+    const setup = harness(async () => measurement, { ...measurement, truncated: 5, stoppedEarly: 'time-limit', paragraphsTruncated: 2 });
+    const response = await run(setup.context, 0);
+    const argsOf = (frame: any) => frame.evaluate.mock.calls.find(([fn]: [unknown]) => fn === measureTextSpacing)[1];
+    expect(argsOf(setup.main)).toMatchObject({ maxNodes: 100_000, timeBudgetMs: 10_000 });
+    expect(argsOf(setup.child)).toMatchObject({ maxNodes: 100_000, timeBudgetMs: 3_000 });
+    const text = response.result();
+    expect(text).toContain('Text elements measured: 4 (truncated: 5 more visible text elements were not measured)');
+    expect(text).toContain('WARNING: measurement stopped early in 1 frame(s), so coverage is partial and findings cover only the elements measured:\n- main frame: in-page time budget reached');
+    expect(text).toContain('WARNING: paragraph spacing was not verified on 2 paragraph(s) past maxElements.');
+    expect((response.structuredContent() as any).summary).toMatchObject({ framesPartial: 1, paragraphsTruncated: 2 });
+    const report = JSON.parse(setup.written.find(entry => entry.file.endsWith('.json'))!.data);
+    expect(report.frames.partial).toEqual([{ frameUrl: 'main frame', stoppedBy: 'time-limit' }]);
+  });
+
+  it('reports the time budget instead of an empty page when it ran out before any text was measured', async () => {
+    vi.useFakeTimers();
+    const unmeasured = { ...emptyMeasurement, candidates: 3, measured: 0, truncated: 3 };
+    const setup = harness(async () => unmeasured, { ...unmeasured, stoppedEarly: 'time-limit' });
+    const pending = expect(tool.handle(setup.context, tool.schema.inputSchema.parse({}), new Response(setup.context, 'audit_text_spacing', {}))).rejects.toThrow('Text spacing measurement stopped before any text was measured (main frame: in-page time budget reached), so nothing was evaluated');
+    await vi.advanceTimersByTimeAsync(0);
+    await pending;
+  });
+
+  it.each([
+    ['the main frame reached its discovery budget', { stoppedEarly: 'node-limit' as const, truncated: 3 }, 'Text spacing measurement stopped before any text was measured (main frame: more than 100000 elements)'],
+    ['the main frame had no text', {}, 'No visible text was found to measure'],
+  ])('keeps the reload warning when %s and a timed-out child frame was not confirmed clean', async (_label, mainResult, message) => {
+    // The no-result errors dropped releaseFailedFrames' verdict, so callers
+    // never learned the child frame might still be styled.
+    vi.useFakeTimers();
+    const setup = harness(() => new Promise(() => undefined), { ...emptyMeasurement, candidates: 3, measured: 0, ...mainResult });
+    const pending = tool.handle(setup.context, tool.schema.inputSchema.parse({}), new Response(setup.context, 'audit_text_spacing', {}));
+    const assertion = expect(pending).rejects.toThrow(message);
+    const warning = expect(pending).rejects.toThrow('The page may still carry the spacing overrides (https://child.example/): reload it.');
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
+    await warning;
+    expect(setup.events).toEqual(['child-remove']);
+  });
+});
+
 const hasBundledChromium = fs.existsSync(chromium.executablePath());
 
 describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => {
@@ -167,11 +277,34 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
     await page?.close();
   });
 
-  async function measure(html: string, maxElements = 500, maxOverlapLines = 200) {
+  async function measure(html: string, maxElements = 500, options: { maxOverlapLines?: number; maxNodes?: number; timeBudgetMs?: number } = {}) {
     page = await browser.newPage({ viewport: { width: 800, height: 600 } });
     await page.setContent(`<!doctype html><html><body style="font: 16px/1.2 sans-serif; margin: 8px">${html}</body></html>`);
-    return page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements, maxOverlapLines, overrides: textSpacingOverrides });
+    return page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements, maxOverlapLines: 200, maxNodes: 100_000, timeBudgetMs: 10_000, ...options, overrides: textSpacingOverrides });
   }
+
+  it('stops discovery at the node budget and reports partial coverage', async () => {
+    const result = await measure(Array.from({ length: 20 }, (_, index) => `<p>Paragraph ${index}</p>`).join(''), 500, { maxNodes: 5 });
+    expect(result.stoppedEarly).toBe('node-limit');
+    // html, head and body use three of the five visits, so two paragraphs are found before discovery ends.
+    expect(result.measured).toBe(2);
+  });
+
+  it('counts skipped elements against the node budget and stops traversing them', async () => {
+    const result = await measure(`${'<script></script>'.repeat(20)}<p>After the scripts</p>`, 500, { maxNodes: 10 });
+    expect(result).toMatchObject({ stoppedEarly: 'node-limit', candidates: 0, measured: 0 });
+  });
+
+  it('stops at the in-page time budget, compares nothing unmeasured, and still removes the overrides', async () => {
+    const result = await measure('<p id="p">Some text</p>', 500, { timeBudgetMs: 0 });
+    expect(result).toMatchObject({ stoppedEarly: 'time-limit', measured: 0, clipped: [], overlaps: [] });
+    expect(await page.evaluate(() => document.adoptedStyleSheets.length)).toBe(0);
+  });
+
+  it('caps verified paragraphs at maxElements and counts the rest', async () => {
+    const result = await measure(Array.from({ length: 5 }, () => '<p><span>Child text</span></p>').join(''), 2);
+    expect(result).toMatchObject({ stoppedEarly: null, paragraphsTruncated: 3, truncated: 3 });
+  });
 
   it('reports nothing for content that reflows with the spacing', async () => {
     const result = await measure(`
@@ -228,7 +361,7 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
       <span class="lower" id="short-first">XX<br>XXXXXXXXXXXXXXXXXXXX</span>
       <span class="lower" id="moves-closer" style="left: calc(240px - 8lh)">x<br>x</span>
       <span class="upper" id="wide">XXXXXXXXXX<br>XXXXXXXXXX<br>XXXXXXXXXX</span>
-      <span class="upper" id="moves-in" style="left: calc(1500px - 50lh)">xx<br>yyyy<br>zzzz</span>`, 500, maxLines);
+      <span class="upper" id="moves-in" style="left: calc(1500px - 50lh)">xx<br>yyyy<br>zzzz</span>`, 500, { maxOverlapLines: maxLines });
     // At 30px line-height both peers have moved to x=0. Their text rectangles
     // are wholly inside the wider labels, so they give font-independent expected coordinates.
     await page.evaluate(applyTextSpacing, { layerName: textSpacingLayerPrefix + 'expected', overrides: textSpacingOverrides });
@@ -259,9 +392,8 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
     // At 20px line-height the peer is at y=4000 (line 201); at 30px it is at y=0.
     expect(result.overlaps).toEqual([expect.objectContaining({ selector: '#lines', otherSelector: '#peer' })]);
     expect(result.overlapLinesTruncated).toBe(1);
-    const uncapped = await page.evaluate(measureTextSpacing, { layerName: textSpacingLayerPrefix + 'control', maxElements: 500, maxOverlapLines: 201, overrides: textSpacingOverrides });
-    expect(uncapped.overlaps).toEqual([]);
-    expect(uncapped.overlapLinesTruncated).toBe(0);
+    const uncapped = await page.evaluate(measureTextSpacing, { layerName: textSpacingLayerPrefix + 'control', maxElements: 500, maxOverlapLines: 201, maxNodes: 100_000, timeBudgetMs: 10_000, overrides: textSpacingOverrides });
+    expect(uncapped).toMatchObject({ candidates: 2, measured: 2, stoppedEarly: null, overlaps: [], overlapLinesTruncated: 0 });
   });
 
   it('flags paragraph spacing that pushes text out of a fixed-height box', async () => {
@@ -286,7 +418,7 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
     await page.evaluate(() => {
       document.getElementById('host')!.attachShadow({ mode: 'open' }).innerHTML = '<div class="box" style="height: 18px; width: 300px; overflow: hidden"><span>Shadow text fits on one line</span></div>';
     });
-    const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxOverlapLines: 200, overrides: textSpacingOverrides });
+    const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxOverlapLines: 200, maxNodes: 100_000, timeBudgetMs: 10_000, overrides: textSpacingOverrides });
     expect(result.clipped).toEqual([expect.objectContaining({
       selector: '#host >>> div > span',
       clippedBy: expect.objectContaining({ selector: '#host >>> div' }),
@@ -309,7 +441,7 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
       body: '<!doctype html><body><div id="card" style="height: 40px; width: 200px; overflow: hidden"><p style="margin: 0">A card with two lines of text that fits now.</p></div></body>',
     }));
     await page.goto('http://csp.local/');
-    const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxOverlapLines: 200, overrides: textSpacingOverrides });
+    const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxOverlapLines: 200, maxNodes: 100_000, timeBudgetMs: 10_000, overrides: textSpacingOverrides });
     expect(result.blocked).toEqual([]);
     // The inline style attribute above is itself blocked by the CSP, so the card has no height limit.
     expect(result.measured).toBe(1);
@@ -389,7 +521,7 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
     // Whether a content-visibility: auto box is on screen is decided at the next rendering update;
     // until then its contents are skipped. A loaded page is past that point.
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxOverlapLines: 200, overrides: textSpacingOverrides });
+    const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxOverlapLines: 200, maxNodes: 100_000, timeBudgetMs: 10_000, overrides: textSpacingOverrides });
     expect(result.clipped).toEqual([expect.objectContaining({ selector: '#label', clippedBy: expect.objectContaining({ selector: '#wrap' }) })]);
   });
 
@@ -409,7 +541,7 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
       page = await browser.newPage({ viewport: { width: 800, height: 600 } });
       await page.setContent(`<!doctype html><body style="font: 16px/1.2 sans-serif"><div style="${containment}; overflow: auto; width: 300px; height: 40px"><p style="margin: 0">First line of text<br>Second line of text</p></div></body>`);
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-      const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxOverlapLines: 200, overrides: textSpacingOverrides });
+      const result = await page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements: 50, maxOverlapLines: 200, maxNodes: 100_000, timeBudgetMs: 10_000, overrides: textSpacingOverrides });
       expect(result.measured, containment).toBe(1);
       expect(result.clipped, containment).toEqual([]);
       await page.close();
@@ -487,6 +619,8 @@ describe.skipIf(!hasBundledChromium)('audit_text_spacing tool end-to-end', () =>
           const url = new URL(route.request().url());
           if (url.origin === fixtureOrigin && url.pathname === '/')
             return route.fulfill({ contentType: 'text/html', body: pageHtml });
+          if (url.origin === fixtureOrigin && url.pathname === '/huge')
+            return route.fulfill({ contentType: 'text/html', body: `<!doctype html><body>${'<span></span>'.repeat(100_001)}<p>Visible text after the budget</p></body>` });
           if (url.origin === fixtureOrigin && url.pathname === '/blank')
             return route.fulfill({ contentType: 'text/html', body: '<!doctype html><body><img alt="" src="data:,"></body>' });
           if (url.origin === 'http://frame.local')
@@ -543,6 +677,16 @@ describe.skipIf(!hasBundledChromium)('audit_text_spacing tool end-to-end', () =>
     const result = await backend.callTool('audit_text_spacing', {});
     expect(result.isError).toBe(true);
     expect((result.content[0] as any).text).toContain('No visible text was found to measure');
+  });
+
+  it('reports the node budget instead of an empty page when it ran out before any text was found', async () => {
+    const { backend } = await startBackend();
+    await backend.callTool('browser_navigate', { url: `${fixtureOrigin}/huge` });
+    const result = await backend.callTool('audit_text_spacing', {});
+    expect(result.isError).toBe(true);
+    const text = (result.content[0] as any).text as string;
+    expect(text).toContain('Text spacing measurement stopped before any text was measured (main frame: more than 100000 elements), so nothing was evaluated');
+    expect(text).not.toContain('No visible text was found');
   });
 
   it('rejects non-integer and out-of-range arguments', async () => {

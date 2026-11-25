@@ -57,6 +57,8 @@ export type TextSpacingFrameMeasurement = {
   candidates: number;
   measured: number;
   truncated: number;
+  stoppedEarly: 'node-limit' | 'time-limit' | null;
+  paragraphsTruncated: number;
   stale: number;
   overlapLinesTruncated: number;
   clipped: TextSpacingClip[];
@@ -68,11 +70,16 @@ export type TextSpacingMeasureArgs = {
   layerName: string;
   maxElements: number;
   maxOverlapLines: number;
+  maxNodes: number;
+  timeBudgetMs: number;
   overrides: typeof textSpacingOverrides;
 };
 
 export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<TextSpacingFrameMeasurement> {
-  const { layerName, maxElements, maxOverlapLines, overrides } = args;
+  const { layerName, maxElements, maxOverlapLines, maxNodes, timeBudgetMs, overrides } = args;
+  const deadline = performance.now() + timeBudgetMs;
+  let stoppedEarly: TextSpacingFrameMeasurement['stoppedEarly'] = null;
+  let visitedNodes = 0;
   const XHTML = 'http://www.w3.org/1999/xhtml';
   const skippedTags = new Set([
     'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA', 'SELECT', 'OPTION', 'OPTGROUP', 'DATALIST',
@@ -86,6 +93,7 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
   const candidates: HTMLElement[] = [];
   const paragraphs: HTMLElement[] = [];
   let candidateCount = 0;
+  let paragraphsTruncated = 0;
   const composedParent = (element: Element): Element | null => {
     if (element.assignedSlot)
       return element.assignedSlot;
@@ -116,6 +124,17 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
   const collect = (root: Document | ShadowRoot) => {
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
       acceptNode: node => {
+        // Every element the walker examines counts against the budgets, rejected ones included,
+        // so a long run of skipped elements cannot traverse past them unbounded.
+        if (!stoppedEarly) {
+          if (++visitedNodes > maxNodes)
+            stoppedEarly = 'node-limit';
+          else if (performance.now() > deadline)
+            stoppedEarly = 'time-limit';
+        }
+        // Once a budget is spent, hand the node back so the loop below ends the traversal.
+        if (stoppedEarly)
+          return NodeFilter.FILTER_ACCEPT;
         const element = node as Element;
         if (element.namespaceURI !== XHTML || skippedTags.has(element.tagName))
           return NodeFilter.FILTER_REJECT;
@@ -123,9 +142,15 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
       },
     });
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (stoppedEarly)
+        return;
       const element = node as HTMLElement;
-      if (element.localName === 'p' && isVisible(element))
-        paragraphs.push(element);
+      if (element.localName === 'p' && isVisible(element)) {
+        if (paragraphs.length < maxElements)
+          paragraphs.push(element);
+        else
+          paragraphsTruncated++;
+      }
       if (hasOwnText(element) && isVisible(element)) {
         candidateCount++;
         if (candidates.length < maxElements)
@@ -348,7 +373,15 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
   });
 
   startPhase();
-  const before = candidates.map(element => measurePhase(element));
+  const before: Phase[] = [];
+  for (const element of candidates) {
+    if (performance.now() > deadline) {
+      stoppedEarly = 'time-limit';
+      candidates.length = before.length;
+      break;
+    }
+    before.push(measurePhase(element));
+  }
 
   const sheet = new CSSStyleSheet();
   sheet.replaceSync(`@layer ${layerName} {
@@ -504,6 +537,8 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
       candidates: candidateCount,
       measured: candidates.length - stale,
       truncated: candidateCount - candidates.length,
+      stoppedEarly,
+      paragraphsTruncated,
       stale,
       overlapLinesTruncated: candidates.filter((_, index) => before[index].visibleLines.length > maxOverlapLines || (after[index]?.visibleLines.length ?? 0) > maxOverlapLines).length,
       clipped,

@@ -24,6 +24,7 @@ import { BrowserSessionRegistry, browserSessionTtlMs } from '../src/browserSessi
 import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
 import { SessionLog } from '../src/sessionLog.js';
+import { allTools } from '../src/tools.js';
 
 import type { CallToolResult } from '@modelcontextprotocol/server';
 
@@ -254,6 +255,30 @@ describe('browser sessions', () => {
 
     await expect(backend.callTool('browser_tabs', { action: 'list', browserSessionId: 42 as any }))
         .rejects.toThrow(/Invalid browserSessionId/);
+  });
+
+  it('consumes browserSessionId before a strict tool schema validates the remaining arguments', async () => {
+    const { factory } = makeFactory();
+    const backend = await makeBackend(factory);
+    const id = await openSession(backend);
+    const tool = allTools.find(candidate => candidate.schema.name === 'audit_keyboard_operation')!;
+    const handle = vi.spyOn(tool, 'handle').mockImplementation(async (_context, _params, response) => {
+      response.addResult('reached');
+    });
+    try {
+      const steps = [{ key: 'Tab', expect: [{ selector: '#toggle', focused: true }] }];
+      const routed = await backend.callTool('audit_keyboard_operation', { browserSessionId: id, steps });
+      expect(routed.isError).not.toBe(true);
+      expect(handle).toHaveBeenCalledTimes(1);
+      expect(handle.mock.calls[0][0]).toBe(backend['_sessionRegistry']!.resolve(id));
+      expect(handle.mock.calls[0][1]).not.toHaveProperty('browserSessionId');
+
+      await expect(backend.callTool('audit_keyboard_operation', { browserSessionId: id, steps, unexpectedField: true }))
+          .rejects.toThrow('Unrecognized key: "unexpectedField"');
+      expect(handle).toHaveBeenCalledTimes(1);
+    } finally {
+      handle.mockRestore();
+    }
   });
 
   it('closing an unknown handle is a tool error without disclosing the open sessions', async () => {
@@ -676,6 +701,26 @@ describe('browser sessions', () => {
     const closed = await backend.callTool('browser_session_close', { browserSessionId: id });
     expect(closed.isError).not.toBe(true);
     expect(created[0].close).toHaveBeenCalled();
+  });
+
+  it.each(['browser_session_close', 'the TTL reaper'])('lets %s dispose a session whose only work left is a held restore', async closer => {
+    // A restore waiting on a dialog nothing can answer never settles, and
+    // closing the browser context is what cancels it.
+    vi.useFakeTimers();
+    const { factory, created } = makeFactory();
+    const context = new Context({ tools: [], config: await resolveConfig({}), browserContextFactory: factory, sessionLog: undefined, clientInfo: {}, browserSession: true });
+    await context.ensureTab();
+    context.holdExclusiveUntil('scan_page_matrix', new Promise(() => {}));
+    const registry = new BrowserSessionRegistry(TTL_MS);
+    const id = registry.open(() => context);
+
+    if (closer === 'browser_session_close')
+      await registry.close(id);
+    else
+      await vi.advanceTimersByTimeAsync(TTL_MS + 60_000);
+    await vi.waitFor(() => expect(created[0].close).toHaveBeenCalled());
+    expect(() => registry.resolve(id)).toThrow('Unknown browserSessionId');
+    expect(context.isRunningTool()).toBe(false);
   });
 
   it('serverClosed disposes every session context and the default one', async () => {

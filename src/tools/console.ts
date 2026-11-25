@@ -23,11 +23,14 @@ const console = defineTabTool({
   schema: {
     name: 'browser_console_messages',
     title: 'Get console messages',
-    description: 'Returns all console messages',
+    description: 'Returns the most recent 200 console messages since the last explicit navigation, including messages from pages reached by link clicks or back navigation, with a count of any omitted ones',
     inputSchema: z.object({}),
     type: 'readOnly',
   },
   handle: async (tab, params, response) => {
+    const omitted = tab.omittedConsoleMessages();
+    if (omitted)
+      response.addResult(`${omitted} earlier console ${omitted === 1 ? 'message was' : 'messages were'} omitted; only the most recent ${tab.consoleMessages().length} are kept.`);
     for (const message of tab.consoleMessages())
       response.addResult(formatConsoleMessage(message));
   },

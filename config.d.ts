@@ -100,6 +100,12 @@ export type Config = {
 
     /**
      * Launch a Chromium-based desktop app with CDP enabled and attach to it.
+     * Across the config file, environment and CLI, `command`, `args`, `cwd`
+     * and `env` come together from the highest-precedence layer that sets a
+     * command; `port` and `startupTimeoutMs` merge field by field, so a config
+     * file may set only those (without `command`) for a command given on the
+     * CLI or in the environment. Any launch setting, in any layer, fails
+     * startup when no layer sets a command.
      */
     cdpLaunch?: {
       command: string;

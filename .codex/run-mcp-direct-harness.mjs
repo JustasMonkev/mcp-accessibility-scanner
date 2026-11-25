@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -631,6 +632,7 @@ const tests = [
 
   test('scan_page_matrix', async () => {
     await navigate('<title>Matrix</title><img src="x"><h1>Matrix</h1>');
+    await callTool('browser_resize', { width: 1280, height: 720 });
     const result = await callTool('scan_page_matrix', {
       variants: [
         { name: 'baseline' },
@@ -641,7 +643,14 @@ const tests = [
       waitAfterApplyMs: 50,
       reloadBetweenVariants: true,
     });
-    assertText(result, /JSON report:|variants/i);
+    assert.deepEqual(
+      result.structuredContent?.variants?.map(v => v?.name),
+      ['baseline', 'mobile'],
+    );
+    const viewport = await callTool('browser_evaluate', {
+      function: '() => window.innerWidth + "x" + window.innerHeight',
+    });
+    assertText(viewport, /^"1280x720"$/m);
   }),
 
   test('audit_keyboard', async () => {

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import auditSiteTools from '../src/tools/auditSite.js';
 import { Response } from '../src/response.js';
 import * as axe from '../src/tools/axe.js';
+import * as representativeUrls from '../src/utils/representativeUrls.js';
 
 function createViolation(id: string, html: string, target: string[] = ['#target']) {
   return {
@@ -907,6 +908,45 @@ describe('audit_site tool', () => {
     expect(byUrl.get('https://example.com/behind-the-gate')?.discoveredFrom).toBe('https://example.com/gate');
   });
 
+  it('skips a download without reading or scanning the document it left in the tab', async () => {
+    const { context, response, crawlTab } = createHarness({
+      'https://example.com/': ['https://example.com/export.csv', 'https://example.com/about'],
+    });
+    const navigate = crawlTab.navigate.getMockImplementation();
+    // A confirmed download leaves the previous document in place.
+    crawlTab.navigate.mockImplementation(async (url: string) => url.endsWith('.csv') ? 'download' : navigate(url));
+    const scan = vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) =>
+      createAxeResult(page.url(), [createViolation('image-alt', `<img src="${page.url()}">`)]));
+
+    await tool.handle(context as any, {
+      strategy: 'links',
+      maxPages: 5,
+      maxDepth: 2,
+      sameOriginOnly: true,
+      includeSubdomains: false,
+      excludePathPatterns: [],
+      ignoreQueryParams: [],
+      violationsTag: ['wcag2aa'],
+      includeIncomplete: false,
+      maxNodesPerViolation: 10,
+      waitAfterNavigationMs: 0,
+      concurrency: 1,
+    } as any, response);
+
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages.map((page: any) => [page.url, page.status])).toEqual([
+      ['https://example.com/', 'scanned'],
+      ['https://example.com/export.csv', 'skipped'],
+      ['https://example.com/about', 'scanned'],
+    ]);
+    expect(report.pages[1]).toMatchObject({ error: null, title: '', summary: null, violations: [] });
+    expect(report.pages[1].skipReason).toContain('download');
+    expect(report.summary.totals).toMatchObject({ scannedPages: 2, erroredPages: 0, skippedUrls: 1 });
+    expect(report.summary.violations[0].pagesAffected).toEqual(['https://example.com/', 'https://example.com/about']);
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(crawlTab.page.evaluate).toHaveBeenCalledTimes(2);
+  });
+
   it('respects BFS maxPages and maxDepth limits', async () => {
     const { context, response, crawlTab } = createHarness({
       'https://example.com/': ['https://example.com/one', 'https://example.com/two', 'https://example.com/three'],
@@ -1081,12 +1121,29 @@ describe('audit_site tool', () => {
       'https://example.com/about',
       'https://example.com/pricing',
     ]);
-    expect(report.representativeSelection).toEqual({ candidates: 8, selected: 3 });
+    expect(report.representativeSelection).toEqual({ candidates: 8, selected: 3, complete: true });
     expect(report.metadata.options.pageSelection).toBe('representative');
     // 5 unselected blog posts, the duplicate listing and the external URL.
     expect(report.summary.totals.skippedUrls).toBe(7);
     expect(response.structuredContent()).toMatchObject({ representativeSelection: { candidates: 8, selected: 3 } });
     expect(response.result()).toContain('Representative selection: queued 3 of 8 listed URLs');
+  });
+
+  it('warns and reports an incomplete representative selection that fell back to listed order', async () => {
+    const listed = Array.from({ length: 6 }, (_, index) => `https://example.com/section-${index}/page`);
+    const { response } = createHarness({});
+    const select = vi.spyOn(representativeUrls, 'selectRepresentativeUrls').mockImplementation((urls, k) => ({ urls: urls.slice(0, k), complete: false }));
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'provided', urls: listed, maxPages: 2, pageSelection: 'representative', waitAfterNavigationMs: 0 }), response);
+
+    expect(select).toHaveBeenCalledOnce();
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { url: string }) => page.url)).toEqual(listed.slice(0, 2));
+    expect(report.representativeSelection).toEqual({ candidates: 6, selected: 2, complete: false });
+    expect(response.structuredContent()).toMatchObject({ representativeSelection: { complete: false } });
+    expect(response.result()).toContain('WARNING: representative selection exceeded its work budget for 6 listed URLs, so the first 2 in listed order were queued');
+    expect(response.result()).not.toContain('Representative selection: queued');
   });
 
   it('keeps listed order and reports no selection in discovery mode', async () => {
@@ -1663,7 +1720,7 @@ describe('audit_site tool', () => {
     expect(report.pages.map((page: { url: string }) => page.url)).toEqual(pages);
     const sources = selected.map(path => base + (path.startsWith('blog/') ? 'maps/blog.xml' : 'maps/pages.xml'));
     expect(report.pages.map((page: { discoveredFrom: string }) => page.discoveredFrom)).toEqual(sources);
-    expect(report.representativeSelection).toEqual(pageSelection === 'representative' ? { candidates: 5, selected: 3 } : null);
+    expect(report.representativeSelection).toEqual(pageSelection === 'representative' ? { candidates: 5, selected: 3, complete: true } : null);
   });
 
   it('names the child manifest when its fetch fails before sending headers', async () => {
