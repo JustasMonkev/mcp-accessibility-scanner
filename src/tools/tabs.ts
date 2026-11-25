@@ -30,17 +30,17 @@ const browserTabs = defineTool({
     description: 'List, create, close, or select a browser tab.',
     inputSchema: z.object({
       action: z.enum(['list', 'new', 'close', 'select']).describe('Operation to perform'),
-      index: z.number().optional().describe('Tab index, used for close/select. If omitted for close, current tab is closed.'),
+      index: z.int().nonnegative().optional().describe('Zero-based tab index. Required for select, or to close a tab when the session has no current tab.'),
       isolatedContext: z.string().optional().describe('Accepted only for upstream @playwright/mcp compatibility. Only "default" (or omitting it) is supported; for a separate browser context use browser_session_open and pass its browserSessionId.'),
     }),
     type: 'destructive',
   },
-  handle: async (context, params, response) => {
+  handle: async (context, params, response, signal) => {
     if (params.isolatedContext !== undefined && params.isolatedContext !== 'default')
       throw new Error(`isolatedContext "${params.isolatedContext}" is not supported. Call browser_session_open and pass the returned browserSessionId to browser_tabs and every later browser tool call to use a separate browser context.`);
     switch (params.action) {
       case 'list':
-        await context.ensureTab();
+        await context.ensureTab(signal);
         response.setIncludeTabs();
         return;
       case 'new':
@@ -48,15 +48,13 @@ const browserTabs = defineTool({
         response.setIncludeTabs();
         return;
       case 'close':
-        await context.closeTab(params.index);
+      case 'select': {
+        const idleNotice = await context.manageExistingTab(params.action, params.index, signal);
+        if (idleNotice)
+          response.addNotice(idleNotice);
         response.setIncludeSnapshot();
         return;
-      case 'select':
-        if (params.index === undefined)
-          throw new Error('Tab index is required');
-        await context.selectTab(params.index);
-        response.setIncludeSnapshot();
-        return;
+      }
     }
   },
 });
@@ -73,7 +71,7 @@ const navigationTimeout = defineTool({
     type: 'destructive',
   },
   handle: async (context, params, response) => {
-    for (const tab of context.tabs())
+    for (const tab of context.useTabs())
       tab.page.setDefaultNavigationTimeout(params.timeout);
 
     response.addResult(`Navigation timeout set to ${params.timeout}ms for all tabs.`);
@@ -93,7 +91,7 @@ const defaultTimeout = defineTool({
     type: 'destructive',
   },
   handle: async (context, params, response) => {
-    for (const tab of context.tabs())
+    for (const tab of context.useTabs())
       tab.setDefaultTimeout(params.timeout);
 
     response.addResult(`Default timeout set to ${params.timeout}ms for all tabs.`);

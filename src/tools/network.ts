@@ -31,18 +31,31 @@ const requests = defineTabTool({
     description: 'Returns the most recent 200 network requests since the last explicit navigation, optionally including up to 200 requests from earlier navigations in this tab',
     inputSchema: z.object({
       all: z.boolean().optional().describe('Include up to 200 requests from earlier explicit navigations in this tab'),
+      afterId: z.number().int().min(0).optional().describe('Only list newly assigned request IDs greater than this ID in the same tab (0 starts at the beginning). Updates to older requests are not replayed.'),
+      limit: z.number().int().min(1).optional().describe('Maximum number of matching requests to return in ascending ID order. Continue with the last returned ID as afterId.'),
     }),
     type: 'readOnly',
   },
 
   handle: async (tab, params, response) => {
-    const entries = tab.requests(params.all);
-    const omitted = tab.omittedRequests(params.all);
+    const limit = params.limit ?? Infinity;
+    const entries = tab.requests(params.all, params.afterId, limit + 1);
+    const hasMore = entries.size > limit;
+    const shown: [number, Request][] = [];
+    for (const entry of entries) {
+      if (shown.length === limit)
+        break;
+      shown.push(entry);
+    }
+    const lastShownId = hasMore ? shown.at(-1)?.[0] : undefined;
+    const omitted = tab.omittedRequests(params.all, params.afterId, lastShownId);
     if (omitted)
       response.addResult(`${omitted} earlier ${omitted === 1 ? 'request was' : 'requests were'} omitted to keep this tab's history bounded.`);
-    for (const [index, request] of entries)
+    for (const [index, request] of shown)
       response.addResult(renderRequest(index, request, request.existingResponse()));
-    if (entries.size)
+    if (hasMore && lastShownId !== undefined)
+      response.addResult(`\nMore requests available. Continue with afterId: ${lastShownId}.`);
+    if (shown.length)
       response.addResult('\nCall browser_network_request with one of the indexes above to see its headers and body metadata.');
   },
 });

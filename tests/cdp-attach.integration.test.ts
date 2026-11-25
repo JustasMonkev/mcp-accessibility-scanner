@@ -91,6 +91,50 @@ async function listTabsThroughMcp(config: FullConfig) {
   return { result, text };
 }
 
+it('requires an explicit index to close a tab from a fresh CDP backend', async () => {
+  const port = await freePort();
+  browsers.push(await chromium.launch({ args: [`--remote-debugging-port=${port}`] }));
+  const endpoint = `http://127.0.0.1:${port}`;
+  const setup = await chromium.connectOverCDP(endpoint);
+  try {
+    const context = setup.contexts()[0];
+    await (await context.newPage()).goto(`${origin}/first`);
+    await (await context.newPage()).goto(`${origin}/second`);
+  } finally {
+    await setup.close();
+  }
+  const config = await resolveConfig({ browser: { cdpEndpoint: endpoint }, timeouts: { settle: 0 } });
+  const factory = contextFactory(config);
+  const freshBackend = async () => {
+    const backend = new BrowserServerBackend(config, factory, undefined, { ephemeralDefaultContext: true });
+    backends.push(backend);
+    await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'vitest', version: '1.0.0' });
+    return backend;
+  };
+  const before = await listTabs(endpoint);
+  expect(before.map(tab => tab.url)).toEqual([`${origin}/first`, `${origin}/second`]);
+  const selecting = await freshBackend();
+  const selected = await selecting.callTool('browser_tabs', { action: 'select', index: 1 });
+  expect(selected.isError).not.toBe(true);
+  const selectedText = selected.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+  const selectedUrl = selectedText.match(/^- 1: \(current\) \[.*] \((.+)\)$/m)?.[1];
+  expect(before.map(tab => tab.url)).toContain(selectedUrl);
+  expect(selectedText).toContain(`Page URL: ${selectedUrl}`);
+
+  const closing = await freshBackend();
+  const result = await closing.callTool('browser_tabs', { action: 'close' });
+  expect(await listTabs(endpoint)).toEqual(before);
+  expect(result).toMatchObject({ isError: true, content: [expect.objectContaining({ text: expect.stringContaining('Tab index is required') })] });
+
+  expect((await closing.callTool('browser_tabs', { action: 'close', index: 1 })).isError).not.toBe(true);
+  const survivors = await listTabs(endpoint);
+  expect(survivors).toHaveLength(1);
+  expect(before).toContainEqual(survivors[0]);
+
+  expect((await selecting.callTool('browser_tabs', { action: 'close' })).isError).not.toBe(true);
+  expect(await listTabs(endpoint)).toEqual([]);
+});
+
 describe('CDP attach with a tab without a renderer (#244)', () => {
   it('attaches over CDP and omits crashed tabs', async () => {
     const { endpoint, tabs } = await launchWithCrashedTab();

@@ -43,6 +43,7 @@ export type Tool<Input extends ToolInputSchema = ToolInputSchema> = {
   schema: ToolSchema<Input>;
   clearsModalState?: ModalState['type'];
   exclusive?: boolean;
+  browserless?: boolean;
   handle: (context: Context, params: z.output<Input>, response: Response, signal?: AbortSignal) => Promise<void>;
 };
 

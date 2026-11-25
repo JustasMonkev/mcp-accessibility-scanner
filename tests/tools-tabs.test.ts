@@ -52,9 +52,9 @@ describe('Tabs Tools', () => {
     mockContext = {
       currentTabOrDie: () => mockTab1,
       tabs: () => [mockTab1, mockTab2],
+      useTabs: vi.fn(() => [mockTab1, mockTab2]),
       newTab: vi.fn().mockResolvedValue(mockTab2),
-      selectTab: vi.fn().mockResolvedValue(mockTab2),
-      closeTab: vi.fn().mockResolvedValue('https://closed.com'),
+      manageExistingTab: vi.fn().mockResolvedValue(undefined),
       ensureTab: vi.fn().mockResolvedValue(mockTab1),
       takeDownloadErrors: vi.fn().mockReturnValue([]),
       config: {
@@ -108,25 +108,23 @@ describe('Tabs Tools', () => {
     it('should select tab by index', async () => {
       await tabsTool.handle(mockContext, { action: 'select', index: 1 }, response);
 
-      expect(mockContext.selectTab).toHaveBeenCalledWith(1);
+      expect(mockContext.manageExistingTab).toHaveBeenCalledWith('select', 1, undefined);
     });
 
-    it('should throw error when selecting without index', async () => {
-      await expect(
-          tabsTool.handle(mockContext, { action: 'select' }, response)
-      ).rejects.toThrow('Tab index is required');
+    it.each([-1, 0.5])('rejects an invalid tab index (%s)', index => {
+      expect(tabsTool.schema.inputSchema.safeParse({ action: 'select', index }).success).toBe(false);
     });
 
     it('should close tab by index', async () => {
       await tabsTool.handle(mockContext, { action: 'close', index: 1 }, response);
 
-      expect(mockContext.closeTab).toHaveBeenCalledWith(1);
+      expect(mockContext.manageExistingTab).toHaveBeenCalledWith('close', 1, undefined);
     });
 
     it('should close current tab when no index provided', async () => {
       await tabsTool.handle(mockContext, { action: 'close' }, response);
 
-      expect(mockContext.closeTab).toHaveBeenCalledWith(undefined);
+      expect(mockContext.manageExistingTab).toHaveBeenCalledWith('close', undefined, undefined);
     });
   });
 

@@ -15,12 +15,16 @@ import {
   runAxeScan,
   summarizeAxeViolations,
   unscannedFrameLines,
+  type AxeNode,
   type AxeViolation,
 } from './axe.js';
 
 import type { Tab } from '../tab.js';
 import type { Response } from '../response.js';
 import { logUnhandledError } from '../utils/log.js';
+
+type TargetDifference = { count: number, samples: AxeNode['target'][] };
+type RuleTargetChanges = Record<string, { added: TargetDifference, removed: TargetDifference }>;
 
 type VariantResult = {
   name: string;
@@ -40,6 +44,7 @@ type VariantResult = {
   unscannedFrames: string[];
   nodeCountByRuleId: Record<string, number>;
   comparisonIncompleteRuleIds: string[];
+  targetChangesFromBaseline: RuleTargetChanges | null;
   diffFromBaseline: {
     newViolationIds: string[];
     resolvedViolationIds: string[];
@@ -147,6 +152,11 @@ function computeDiffFromBaseline(
 type Variant = z.output<typeof variantSchema>;
 type ScanPageMatrixParams = z.output<typeof scanPageMatrixSchema>;
 type PageState = { viewport: { width: number, height: number } | null, zoom: string, media: MediaState };
+type VariantScan = {
+  result: VariantResult;
+  incompleteRuleIds: string[];
+  targetKeysByRule: Map<string, Set<string>>;
+};
 
 async function capturePageState(page: playwright.Page): Promise<PageState> {
   const viewport = page.viewportSize();
@@ -247,15 +257,16 @@ async function scanVariants({ tab, variants, original, params, response, dialog,
   const scanSignal = AbortSignal.any(signal ? [signal, dialog.signal, canceled] : [dialog.signal, canceled]);
   let inFlight: Promise<unknown> = Promise.resolve();
   const variantResults: VariantResult[] = [];
-  const incompleteRuleIdsByVariant: string[][] = [];
+  let baseline: VariantScan | undefined;
   let restoredInCall = false;
   try {
     for (const [index, variant] of variants.entries()) {
       const scanning = scanVariant(tab, variant, original, params, scanSignal);
       inFlight = scanning;
-      const { result, incompleteRuleIds } = await dialog.guard(scanning, { variant: variant.name });
-      variantResults.push(result);
-      incompleteRuleIdsByVariant.push(incompleteRuleIds);
+      const scan = await dialog.guard(scanning, { variant: variant.name });
+      baseline ??= scan;
+      compareWithBaseline(baseline, scan, params.maxNodesPerViolation);
+      variantResults.push(scan.result);
       // A client that stops reading can leave the notification waiting
       // indefinitely; a dialog opened meanwhile is still reported, and the
       // restore started, without waiting for it. reportProgress never rejects.
@@ -265,7 +276,6 @@ async function scanVariants({ tab, variants, original, params, response, dialog,
         message: `Scanned variant ${variantResults.length}/${variants.length}: ${variant.name}`,
       }), index === variants.length - 1 ? 'finishing' : { variant: variant.name });
     }
-    compareWithBaseline(variantResults, incompleteRuleIdsByVariant);
   } finally {
     // An interrupted variant unwinds at its next step once the dialog closes;
     // restoring only after that keeps it from reapplying variant state. While
@@ -285,7 +295,7 @@ async function scanVariants({ tab, variants, original, params, response, dialog,
   return variantResults;
 }
 
-async function scanVariant(tab: Tab, variant: Variant, original: PageState, params: ScanPageMatrixParams, signal?: AbortSignal): Promise<{ result: VariantResult, incompleteRuleIds: string[] }> {
+async function scanVariant(tab: Tab, variant: Variant, original: PageState, params: ScanPageMatrixParams, signal?: AbortSignal): Promise<VariantScan> {
   signal?.throwIfAborted();
   const viewport = variant.viewport ?? original.viewport;
   if (viewport)
@@ -306,6 +316,10 @@ async function scanVariant(tab: Tab, variant: Variant, original: PageState, para
   const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
   const summary = summarizeAxeViolations(violations.deduped);
   return {
+    // JSON preserves frame and shadow boundaries; HTML belongs to node counts, not path identity.
+    targetKeysByRule: new Map(violations.deduped.map(({ id, nodes }) => [
+      id, new Set(nodes.map(node => JSON.stringify(node.target))),
+    ])),
     incompleteRuleIds: axeResult.incomplete.map(result => result.id),
     result: {
       name: variant.name,
@@ -322,24 +336,44 @@ async function scanVariant(tab: Tab, variant: Variant, original: PageState, para
         : [],
       nodeCountByRuleId: summary.byRuleId,
       comparisonIncompleteRuleIds: [],
+      targetChangesFromBaseline: null,
       diffFromBaseline: null,
     },
   };
 }
 
-function compareWithBaseline(variantResults: VariantResult[], incompleteRuleIdsByVariant: string[][]): void {
-  const baseline = variantResults[0];
-  const baselineCounts = baseline?.nodeCountByRuleId ?? {};
-  for (const [index, result] of variantResults.entries()) {
-    const violatedRuleIds = new Set([...Object.keys(baselineCounts), ...Object.keys(result.nodeCountByRuleId)]);
-    result.comparisonIncompleteRuleIds = [...new Set([
-      ...incompleteRuleIdsByVariant[0],
-      ...incompleteRuleIdsByVariant[index],
-    ])].filter(id => violatedRuleIds.has(id)).sort();
-    const comparable = !result.unscannedFrames.length && !baseline?.unscannedFrames.length && !result.comparisonIncompleteRuleIds.length;
-    result.diffFromBaseline = comparable
-      ? computeDiffFromBaseline(baselineCounts, result.nodeCountByRuleId)
-      : null;
+function targetDifference(keys: Set<string> | undefined, other: Set<string> | undefined, sampleLimit: number): TargetDifference {
+  const samples: AxeNode['target'][] = [];
+  let count = 0;
+  for (const key of keys ?? []) {
+    if (other?.has(key))
+      continue;
+    ++count;
+    if (samples.length < sampleLimit)
+      samples.push(JSON.parse(key) as AxeNode['target']);
+  }
+  return { count, samples };
+}
+
+function compareWithBaseline(baseline: VariantScan, variant: VariantScan, sampleLimit: number): void {
+  const { result } = variant;
+  const violatedRuleIds = new Set([...baseline.targetKeysByRule.keys(), ...variant.targetKeysByRule.keys()]);
+  result.comparisonIncompleteRuleIds = [...new Set([...baseline.incompleteRuleIds, ...variant.incompleteRuleIds])]
+      .filter(id => violatedRuleIds.has(id)).sort();
+  if (result.unscannedFrames.length || baseline.result.unscannedFrames.length || result.comparisonIncompleteRuleIds.length)
+    return;
+
+  result.diffFromBaseline = computeDiffFromBaseline(baseline.result.nodeCountByRuleId, result.nodeCountByRuleId);
+  result.targetChangesFromBaseline = {};
+  if (variant === baseline)
+    return;
+  for (const id of violatedRuleIds) {
+    const baselineKeys = baseline.targetKeysByRule.get(id);
+    const variantKeys = variant.targetKeysByRule.get(id);
+    const added = targetDifference(variantKeys, baselineKeys, sampleLimit);
+    const removed = targetDifference(baselineKeys, variantKeys, sampleLimit);
+    if (added.count || removed.count)
+      result.targetChangesFromBaseline[id] = { added, removed };
   }
 }
 
@@ -357,8 +391,8 @@ function renderMatrixTable(variantResults: VariantResult[], includeIncomplete: b
           ],
         }
     ),
-    'Variant | Violations | Nodes | Incomplete | Top new vs baseline',
-    '--- | --- | --- | --- | ---',
+    'Variant | Violations | Nodes | Incomplete | Top new vs baseline | Rules with changed target paths',
+    '--- | --- | --- | --- | --- | ---',
     ...variantResults.map(result => {
       const notComparableReasons: string[] = [];
       if (result.unscannedFrames.length || baselineMissedFrames)
@@ -369,7 +403,8 @@ function renderMatrixTable(variantResults: VariantResult[], includeIncomplete: b
         ? result.diffFromBaseline.newViolationIds.slice(0, 5).join(', ') || '-'
         : `n/a (${notComparableReasons.join('; ')})`;
       const incomplete = includeIncomplete ? String(result.incomplete.length) : '-';
-      return `${result.name} | ${result.summary.totalRules} | ${result.summary.totalNodes} | ${incomplete} | ${topNew}`;
+      const changedTargets = result.targetChangesFromBaseline ? Object.keys(result.targetChangesFromBaseline).length : 'n/a';
+      return `${result.name} | ${result.summary.totalRules} | ${result.summary.totalNodes} | ${incomplete} | ${topNew} | ${changedTargets}`;
     }),
     '',
     `JSON report: ${reportPath}`,
@@ -418,6 +453,7 @@ function matrixStructuredContent(report: ReturnType<typeof buildMatrixReport>, r
       newViolationIds: result.diffFromBaseline?.newViolationIds ?? null,
       resolvedViolationIds: result.diffFromBaseline?.resolvedViolationIds ?? null,
       changedRuleIds: result.diffFromBaseline ? Object.keys(result.diffFromBaseline.changedCounts) : null,
+      changedTargetRuleIds: result.targetChangesFromBaseline ? Object.keys(result.targetChangesFromBaseline).sort() : null,
       reportUri: reportResource.uri,
     })),
   };

@@ -98,7 +98,23 @@ it('disconnects an idle CDP client while preserving the external page and reconn
     await disconnected.promise;
     expect(page.isClosed()).toBe(false);
     expect(await page.title()).toBe('External page');
-    const resumed = await backend.callTool('browser_snapshot', {});
+    const ambiguousClose = await backend.callTool('browser_tabs', { action: 'close' });
+    expect(ambiguousClose.isError).toBe(true);
+    expect(page.isClosed()).toBe(false);
+
+    const missingSelect = await backend.callTool('browser_tabs', { action: 'select', index: 99 });
+    expect(missingSelect.isError).toBe(true);
+    expect(page.isClosed()).toBe(false);
+
+    const missingClose = await backend.callTool('browser_tabs', { action: 'close', index: 99 });
+    expect(missingClose.isError).toBe(true);
+    expect(page.isClosed()).toBe(false);
+
+    const ambiguousCloseAfterMissing = await backend.callTool('browser_tabs', { action: 'close' });
+    expect(ambiguousCloseAfterMissing.isError).toBe(true);
+    expect(page.isClosed()).toBe(false);
+
+    const resumed = await backend.callTool('browser_tabs', { action: 'select', index: 0 });
     expect(resumed.isError).not.toBe(true);
     expect(resumed.content).toContainEqual(expect.objectContaining({ type: 'text', text: expect.stringContaining('Still here') }));
     expect(resumed.content).toContainEqual(expect.objectContaining({ type: 'text', text: expect.stringContaining('released after inactivity') }));

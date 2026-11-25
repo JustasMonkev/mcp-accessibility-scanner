@@ -784,6 +784,7 @@ describe('VSCodeProxyBackend', () => {
         const request2 = makeRequestBackend();
         await request2.initialize(backendContext, clientVersion);
         expect((await request2.callTool('tool_child', {})).isError).not.toBe(true);
+        expect(children[0].calls).toEqual(['tool_child']);
         expect((await request2.callTool('browser_connect', {})).isError).not.toBe(true);
         await vi.waitFor(() => expect(children[0].closed).toBe(1));
         request2.serverClosed?.();
@@ -820,6 +821,8 @@ describe('VSCodeProxyBackend', () => {
         expect(children[1].closed).toBe(0);
         const request2 = makeRequestBackend();
         await request2.initialize(backendContext, clientVersion);
+        expect((await request2.callTool('tool_child', {})).isError).not.toBe(true);
+        expect(children[1].calls).toEqual(['tool_child']);
         expect((await request2.callTool('browser_connect', {})).isError).not.toBe(true);
         await vi.waitFor(() => expect(children[1].closed).toBe(1));
         request2.serverClosed?.();
@@ -854,8 +857,10 @@ describe('VSCodeProxyBackend', () => {
         const request2 = makeRequestBackend();
         await request2.initialize(backendContext, clientVersion);
         expect((await request2.callTool('tool_child', {})).isError).not.toBe(true);
+        expect(children[0].calls).toEqual(['tool_child']);
         request2.serverClosed?.();
         expect((await request0.callTool('tool_child', {})).isError).not.toBe(true);
+        expect(children[0].calls).toEqual(['tool_child', 'tool_child']);
         request0.serverClosed?.();
         await new Promise(resolve => setTimeout(resolve, 0));
         expect(children.map(inner => inner.closed)).toEqual([0]);
@@ -917,6 +922,8 @@ describe('VSCodeProxyBackend', () => {
         // it is left behind.
         const request2 = makeRequestBackend();
         await request2.initialize(backendContext, clientVersion);
+        expect((await request2.callTool('tool_child', {})).isError).not.toBe(true);
+        expect(children[0].calls).toEqual(['tool_child']);
         expect((await request2.callTool('browser_connect', {})).isError).not.toBe(true);
         await vi.waitFor(() => expect(children[0].closed).toBe(1));
         request2.serverClosed?.();

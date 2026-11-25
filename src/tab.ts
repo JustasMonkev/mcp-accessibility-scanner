@@ -57,6 +57,7 @@ class StaleAriaSnapshotError extends Error {}
 const defaultActionTimeoutMs = 5000;
 const defaultNavigationTimeoutMs = 60000;
 const fallbackOperationTimeoutMs = 5000;
+const pageDefaultTimeouts = new WeakMap<playwright.Page, number>();
 // Requests kept from earlier explicit navigations, requests kept for the
 // current page, and console messages kept since the last explicit navigation
 // and between snapshots.
@@ -96,7 +97,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   private _onPageClose: (tab: Tab) => void;
   private _modalStates: ModalState[] = [];
   private _downloads: TabSnapshot['downloads'] = [];
-  private _defaultTimeout: number;
   private _lastAriaSnapshot: string | undefined;
   private _ariaSnapshotGeneration = 0;
   private _pageGeneration = 0;
@@ -108,7 +108,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this.context = context;
     this.page = page;
     this._onPageClose = onPageClose;
-    this._defaultTimeout = context.config.timeouts.defaultTimeout ?? defaultActionTimeoutMs;
     const listen = (event: string, listener: (...args: any[]) => void) => {
       page.on(event as any, listener);
       this._pageListeners.push({ event, listener });
@@ -136,8 +135,12 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     listen('download', download => {
       this.context.trackPendingDownload(this._downloadStarted(download), download.suggestedFilename());
     });
-    page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? defaultNavigationTimeoutMs);
-    page.setDefaultTimeout(this._defaultTimeout);
+    if (!pageDefaultTimeouts.has(page)) {
+      const defaultTimeout = context.config.timeouts.defaultTimeout ?? defaultActionTimeoutMs;
+      page.setDefaultNavigationTimeout(context.config.timeouts.navigationTimeout ?? defaultNavigationTimeoutMs);
+      page.setDefaultTimeout(defaultTimeout);
+      pageDefaultTimeouts.set(page, defaultTimeout);
+    }
   }
 
   dispose() {
@@ -245,6 +248,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   private _onClose() {
+    pageDefaultTimeouts.delete(this.page);
     this._requests.clear();
     this._clearCollectedArtifacts();
     this._onPageClose(this);
@@ -269,12 +273,13 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   }
 
   setDefaultTimeout(timeout: number) {
-    this._defaultTimeout = timeout;
     this.page.setDefaultTimeout(timeout);
+    pageDefaultTimeouts.set(this.page, timeout);
   }
 
   operationTimeout(): number {
-    return this._defaultTimeout > 0 ? this._defaultTimeout : fallbackOperationTimeoutMs;
+    const defaultTimeout = pageDefaultTimeouts.get(this.page) ?? defaultActionTimeoutMs;
+    return defaultTimeout > 0 ? defaultTimeout : fallbackOperationTimeoutMs;
   }
 
   isCurrentTab(): boolean {
@@ -362,14 +367,39 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this._omittedConsoleMessages;
   }
 
-  requests(all = false): Map<number, Request> {
-    return all ? this._requests : new Map([...this._requests].filter(([id]) => id > this._navigationRequestId));
+  requests(all = false, afterId = 0, limit = Infinity): Map<number, Request> {
+    if (all && !afterId && limit === Infinity)
+      return this._requests;
+    const entries = new Map<number, Request>();
+    if (!this._requests.size || afterId >= this._nextRequestId || limit <= 0)
+      return entries;
+    const first = Math.max(afterId + 1, all ? 1 : this._navigationRequestId + 1);
+    // Iterate retained entries rather than ID ranges: prior-navigation and
+    // current-window evictions can leave arbitrarily large gaps between IDs.
+    for (const [id, request] of this._requests) {
+      if (id < first)
+        continue;
+      entries.set(id, request);
+      if (entries.size >= limit)
+        break;
+    }
+    return entries;
   }
 
-  /** Requests issued in this tab, or since the last explicit navigation, that `requests(all)` no longer retains. */
-  omittedRequests(all = false): number {
-    const issued = all ? this._nextRequestId : this._nextRequestId - this._navigationRequestId;
-    return issued - this.requests(all).size;
+  /** Requests in `requests(all, afterId)` (up to `throughId`, if bounded) that were issued in this tab but are no longer retained. */
+  omittedRequests(all = false, afterId = 0, throughId?: number): number {
+    const first = Math.max(afterId + 1, all ? 1 : this._navigationRequestId + 1);
+    const last = Math.min(throughId ?? this._nextRequestId, this._nextRequestId);
+    if (first > last)
+      return 0;
+    let retained = 0;
+    for (const id of this._requests.keys()) {
+      if (id > last)
+        break;
+      if (id >= first)
+        ++retained;
+    }
+    return last - first + 1 - retained;
   }
 
   request(id: number): Request | undefined {

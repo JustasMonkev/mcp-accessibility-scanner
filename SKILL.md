@@ -98,6 +98,14 @@ Scan the current page for accessibility violations using Axe.
 
 The scan injects Axe into the frames that are already open and runs it there; it no longer opens a helper page, which is what used to fail on Electron CDP targets with `Target.createTarget: Not supported`. If a scan still fails on such a target, keep using the CLI session, select the live app tab with `browser_tabs`, and run Axe through `browser_evaluate` by injecting the local `node_modules/axe-core/axe.min.js` bundle.
 
+### get_scan_findings
+
+For evidence beyond the inline examples, run `scan_page` with `retainFindings: true`. Use its `scanId` and a rule/outcome from its index (same browser session). Follow `nextOffset` until null; changing the page does not change the retained findings.
+
+```json
+{"scanId":"<returned scanId>","ruleId":"image-alt","outcome":"violation","offset":0,"limit":25}
+```
+
 ### audit_site
 
 Crawl and aggregate accessibility violations across multiple pages. Writes a JSON report.
@@ -248,7 +256,7 @@ Evaluation results are pretty-printed JSON for JSON-compatible values; other val
 | Tool | Description |
 |------|-------------|
 | `browser_console_messages` | Get all console messages; source locations use one-based line numbers, as in snapshot console snippets |
-| `browser_network_requests` | List requests since explicit navigation with stable tab-local IDs; `{"all": true}` also includes up to 200 earlier requests |
+| `browser_network_requests` | List requests since explicit navigation with stable tab-local IDs; `{"all": true}` also includes up to 200 earlier requests. Poll with `afterId` set to the last listed ID; optionally bound the page with `limit`. |
 | `browser_network_request` | Get credential-redacted headers and body metadata using a retained request ID: `{"index": 3}` |
 
 ### Optional Tools (require `--caps`)

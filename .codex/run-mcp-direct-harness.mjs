@@ -298,6 +298,15 @@ const tests = [
     assertText(result, /two/);
   }),
 
+  test('get_scan_findings', async () => {
+    await navigate('<button id="original"></button>');
+    const scan = await callTool('scan_page', { retainFindings: true, withRules: ['button-name'] });
+    await navigate('<title>Different page</title>');
+    const result = await callTool('get_scan_findings', { scanId: scan.structuredContent?.scanId, ruleId: 'button-name', outcome: 'violation' });
+    if (result.structuredContent?.nodes[0]?.target[0] !== '#original' || result.structuredContent?.nextOffset !== null)
+      throw new Error('Expected the originally observed button and the end of the retained findings');
+  }),
+
   test('scan_page', async () => {
     // The background-image heading makes axe report color-contrast as
     // "incomplete" rather than pass/fail, exercising the needs-review path.

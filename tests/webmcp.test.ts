@@ -461,6 +461,20 @@ describe('WebMCP discovery and identity', () => {
     assert.equal((await listWebMCPTools(h.tab)).length, 3);
   });
 
+  it('keeps only tools owned by the frame when Chromium reports the owner as source', async () => {
+    const h = harness();
+    const own = h.frames[0].sandbox.window;
+    // Chromium 160+ aggregates same-origin frames and names the owner `source`.
+    h.setRegistrations([{ ...registration(), source: own }, { ...registration(), source: {} }, { ...registration('foreign'), source: {} }]);
+    const [tool, ...rest] = await listWebMCPTools(h.tab);
+    assert.equal(rest.length, 0);
+    assert.deepEqual(baseNames([tool]), ['webmcp_echo']);
+    const r = response();
+    await tool.handle({ value: 'ok' }, r.value);
+    assert.deepEqual(r.errors, []);
+    assert.equal(h.calls(), 1);
+  });
+
   it('omits only the registration whose accessors throw', async () => {
     const hostile = Object.defineProperty({ description: 'hostile', inputSchema: { type: 'object' } }, 'name', { get() { throw new Error('x'.repeat(1_000_000)); } });
     const hostileWindow = Object.defineProperty({ name: 'windowed', inputSchema: { type: 'object' } }, 'window', { get() { throw new Error('window'); } });

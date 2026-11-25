@@ -22,12 +22,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { chromium } from 'playwright';
 import type { Browser } from 'playwright';
 import type { JSONSchema7 } from 'json-schema';
+import { getScanFindings } from '../src/tools/scanFindings.js';
 import snapshotTools from '../src/tools/snapshot.js';
 import { toMcpTool } from '../src/mcp/tool.js';
 import * as axe from '../src/tools/axe.js';
 import { Tab } from '../src/tab.js';
 import { Response } from '../src/response.js';
 import { outputFile, resolveConfig } from '../src/config.js';
+import type { CallToolRequestContext } from '../src/mcp/server.js';
 import type { Context } from '../src/context.js';
 
 describe('Snapshot Tools', () => {
@@ -666,6 +668,78 @@ describe('Snapshot Tools', () => {
       // An untruncated rule must not carry the notice.
       expect(text()).toContain('Violation rule: label');
       expect(text()).not.toContain('showing 1 of 1');
+    });
+
+    it.each(['cancel', 'finish error', 'serialize error'])('does not publish a staged scan after %s, or roll back a concurrent success', async failure => {
+      vi.spyOn(axe, 'runAxeScan').mockResolvedValue(scanResult([scanRule('image-alt', 1)]));
+      const errors: string[] = [];
+      // SAFETY: no browser is accessed beyond the mocked Axe scan.
+      const context = { ...scanHarness().context, currentTab: () => undefined, config: {}, takeDownloadErrors: () => errors.splice(0) } as unknown as Context;
+      const args = scanPageTool.schema.inputSchema.parse({ retainFindings: true });
+      const controller = new AbortController();
+      const pending = new Response(context, 'scan_page', args, { signal: controller.signal } as CallToolRequestContext);
+      await scanPageTool.handle(context, args, pending, controller.signal);
+
+      const success = new Response(context, 'scan_page', args);
+      await scanPageTool.handle(context, args, success);
+      await success.finish();
+      const scanId = success.serialize().structuredContent!.scanId as string;
+      if (failure === 'finish error')
+        errors.push('Could not save download');
+      await pending.finish();
+      if (failure === 'serialize error')
+        errors.push('Could not save download');
+      if (failure === 'cancel') {
+        controller.abort();
+        expect(() => pending.serialize()).toThrow();
+      } else {
+        const failed = pending.serialize();
+        expect(failed.isError).toBe(true);
+        expect(failed.structuredContent).toBeUndefined();
+        expect(pending.result()).not.toContain('Retained scan:');
+      }
+      const page = new Response(context, 'get_scan_findings', {});
+      await getScanFindings.handle(context, { scanId, ruleId: 'image-alt', outcome: 'violation' }, page);
+      expect(page.structuredContent()?.nodes).toEqual(scanRule('image-alt', 1).nodes);
+    });
+
+    it('retains deduplicated outcomes separately and excludes hidden evidence from the byte budget and lookup', async () => {
+      const violation = scanRule('color-contrast', 1);
+      const incomplete = scanRule('color-contrast', 1);
+      incomplete.nodes[0].failureSummary = 'needs review';
+      violation.nodes.push({ ...violation.nodes[0], failureSummary: 'duplicate' });
+      vi.spyOn(axe, 'runAxeScan').mockResolvedValue(scanResult([violation], [incomplete]));
+      // SAFETY: scan_page only reads the current tab; the lookup needs only context identity.
+      const context = { ...scanHarness().context, config: {}, takeDownloadErrors: () => [] } as unknown as Context;
+      const scan = async (includeIncomplete: boolean) => {
+        const args = scanPageTool.schema.inputSchema.parse({ retainFindings: true, includeIncomplete });
+        const response = new Response(context, 'scan_page', args);
+        await scanPageTool.handle(context, args, response);
+        response.serialize();
+        return response;
+      };
+      const lookup = async (scanId: string, outcome: 'violation' | 'incomplete') => {
+        const args = getScanFindings.schema.inputSchema.parse({ scanId, ruleId: 'color-contrast', outcome });
+        const response = new Response(context, 'get_scan_findings', args);
+        await getScanFindings.handle(context, args, response);
+        return response.structuredContent();
+      };
+      const firstId = (await scan(true)).structuredContent()!.scanId as string;
+      expect((await lookup(firstId, 'violation'))?.nodes).toEqual([violation.nodes[0]]);
+      expect((await lookup(firstId, 'incomplete'))?.nodes).toEqual(incomplete.nodes);
+
+      // Multibyte UTF-8 puts this below one million JS code units but above 1 MiB.
+      incomplete.nodes[0].html = '雪'.repeat(350_000);
+      const visibleOnly = await scan(false);
+      const scanId = visibleOnly.structuredContent()!.scanId as string;
+      expect(visibleOnly.structuredContent()).toEqual({ scanId: expect.any(String), rules: [{ outcome: 'violation', ruleId: 'color-contrast', count: 1 }] });
+      expect(visibleOnly.result()).not.toContain('needs review');
+      await expect(lookup(scanId, 'incomplete')).rejects.toThrow('No retained findings');
+
+      const oversized = await scan(true);
+      expect(oversized.structuredContent()).toMatchObject({ scanId: null, reason: expect.stringContaining('1 MiB') });
+      expect(oversized.result()).toContain('no nodes from this scan were retained');
+      expect((await lookup(scanId, 'violation'))?.nodes).toEqual([violation.nodes[0]]);
     });
 
     it('separates incomplete results from violations and honours includeIncomplete', async () => {

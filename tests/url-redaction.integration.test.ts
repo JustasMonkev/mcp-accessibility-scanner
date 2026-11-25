@@ -65,9 +65,10 @@ it.each([false, true])('renders URL parameters through real MCP without changing
 
     const network = await client.callTool({ name: 'browser_network_requests', arguments: {} });
     const networkText = JSON.stringify(network);
+    const networkPage = await client.callTool({ name: 'browser_network_requests', arguments: { afterId: 0, limit: 1 } });
     const index = Number(networkText.match(/\[(\d+)\] \[GET\] http:\/\/redaction\.test\/start\?/)![1]);
     const details = JSON.stringify(await client.callTool({ name: 'browser_network_request', arguments: { index } }));
-    for (const text of [networkText, details]) {
+    for (const text of [networkText, JSON.stringify(networkPage), details]) {
       if (enabled) {
         expect(text).not.toContain('synthetic-query-secret');
         expect(text).toContain('/start?code=REDACTED&');

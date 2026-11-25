@@ -24,6 +24,7 @@ import { wrapInProcess } from '../src/mcp/server.js';
 
 it('retains bounded request history with stable IDs across real MCP navigation, tabs, and sessions', async () => {
   const heldResponse = Promise.withResolvers<http.ServerResponse>();
+  const stylesheet = Promise.withResolvers<http.ServerResponse>();
   const server = http.createServer((request, response) => {
     if (request.url === '/preexisting') {
       heldResponse.resolve(response);
@@ -31,6 +32,10 @@ it('retains bounded request history with stable IDs across real MCP navigation, 
     }
     if (request.url === '/abort') {
       response.destroy();
+      return;
+    }
+    if (request.url === '/app.css') {
+      stylesheet.resolve(response);
       return;
     }
     if (request.url?.startsWith('/api/')) {
@@ -73,7 +78,7 @@ it('retains bounded request history with stable IDs across real MCP navigation, 
         return text;
       };
       const requestId = (listing: string, url: string) => {
-        const line = listing.split('\n').find(line => line.includes(`[GET] ${url} =>`));
+        const line = listing.split('\n').find(line => line.split(' => ')[0].endsWith(`[GET] ${url}`));
         const id = line?.match(/^\[(\d+)\]/)?.[1];
         if (!id)
           throw new Error(`Missing request ${url} in ${listing}`);
@@ -85,7 +90,7 @@ it('retains bounded request history with stable IDs across real MCP navigation, 
       pendingResponse.writeHead(402, { 'content-type': 'text/html' });
       pendingResponse.end('<link rel="icon" href="data:,"><h1>Preexisting navigation</h1>');
       await existingPage.waitForURL(`${origin}/preexisting`);
-      const preexisting = await call('browser_network_requests');
+      const preexisting = await call('browser_network_requests', { afterId: 0, limit: 1 });
       const preexistingId = requestId(preexisting, `${origin}/preexisting`);
       expect(preexisting).toContain(`${origin}/preexisting => [402] Payment Required`);
       expect(await call('browser_network_request', { index: preexistingId })).toContain(`[402] Payment Required`);
@@ -100,6 +105,9 @@ it('retains bounded request history with stable IDs across real MCP navigation, 
       await call('browser_navigate', { url: `${origin}/second` });
       const current = await call('browser_network_requests');
       expect(current).not.toContain('/first');
+      const currentPage = await call('browser_network_requests', { afterId: preexistingId, limit: 1 });
+      expect(requestId(currentPage, `${origin}/second`)).toBe(requestId(current, `${origin}/second`));
+      expect(currentPage).not.toContain('/first');
       const all = await call('browser_network_requests', { all: true });
       expect(requestId(all, `${origin}/api/first`)).toBe(firstId);
       expect(all).toContain(`${origin}/second`);
@@ -108,8 +116,50 @@ it('retains bounded request history with stable IDs across real MCP navigation, 
       expect(previous).toContain('#### Request headers');
 
       await call('browser_evaluate', { function: 'async () => { await Promise.all(Array.from({ length: 201 }, (_, i) => fetch(`/api/bulk-${i}`))); await fetch("/abort").catch(() => {}); }' });
+      const checkpoint = requestId(await call('browser_network_requests'), `${origin}/abort`);
+      await Promise.all([
+        existingPage.waitForRequest(`${origin}/app.css`),
+        existingPage.evaluate(() => {
+          const link = document.createElement('link');
+          link.rel = 'stylesheet';
+          link.href = '/app.css';
+          document.head.append(link);
+        }),
+      ]);
+      const cssResponse = await stylesheet.promise;
+      const pending = await call('browser_network_requests', { afterId: checkpoint });
+      const cssId = requestId(pending, `${origin}/app.css`);
+      expect(pending).not.toContain(' => ');
+      cssResponse.writeHead(200, { 'content-type': 'text/css' }).end('body {}');
+      await expect.poll(() => call('browser_network_request', { index: cssId })).toContain('[200] OK');
+      expect(await call('browser_network_requests', { afterId: cssId })).toBe('');
+      await call('browser_evaluate', { function: 'async () => { await fetch("/api/new"); }' });
+      const full = await call('browser_network_requests');
+      const delta = await call('browser_network_requests', { afterId: checkpoint, limit: 2 });
+      const rows = (listing: string) => listing.split('\n').filter(line => /^\[\d+\]/.test(line));
+      expect(rows(full)).toHaveLength(200);
+      expect(full).toMatch(/^6 earlier requests were omitted to keep this tab's history bounded\.$/m);
+      expect(rows(delta)).toEqual(rows(full).slice(-2));
+      expect(delta).not.toContain('More requests available');
+      expect(delta).not.toContain('omitted');
+      expect(Buffer.byteLength(delta)).toBeLessThan(Buffer.byteLength(full) / 10);
+      const page = await call('browser_network_requests', { afterId: checkpoint, limit: 1 });
+      const continuation = page.match(/Continue with afterId: (\d+)\./)?.[1];
+      expect(continuation).toBe(String(cssId));
+      const last = await call('browser_network_requests', { afterId: Number(continuation), limit: 1 });
+      expect([...rows(page), ...rows(last)]).toEqual(rows(delta));
+      expect(last).not.toContain('More requests available');
+      expect(await call('browser_network_requests', { afterId: requestId(last, `${origin}/api/new`) })).toBe('');
+
       await call('browser_navigate', { url: `${origin}/third` });
+      const thirdPage = await call('browser_network_requests');
+      expect(thirdPage).toContain(`${origin}/third`);
+      expect(thirdPage).not.toContain('omitted');
       const retained = await call('browser_network_requests', { all: true });
+      const afterEviction = await call('browser_network_requests', { all: true, afterId: firstId, limit: 2 });
+      expect(rows(afterEviction)).toEqual(rows(retained).slice(0, 2));
+      expect(afterEviction).toMatch(/^6 earlier requests were omitted to keep this tab's history bounded\.$/m);
+      expect(retained).toMatch(/^9 earlier requests were omitted to keep this tab's history bounded\.$/m);
       expect(retained).not.toContain('/first');
       expect(retained.match(/^\[\d+\]/gm)?.length).toBeLessThanOrEqual(202);
       const thirdId = requestId(retained, `${origin}/third`);
@@ -152,4 +202,4 @@ it('retains bounded request history with stable IDs across real MCP navigation, 
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
-}, 30000);
+}, 60000);

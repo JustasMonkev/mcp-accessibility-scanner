@@ -571,7 +571,7 @@ export function unscannedFrameLines(
   ];
 }
 
-export function dedupeAxeNodes(nodes: AxeNode[]): AxeNode[] {
+function dedupeAxeNodes(nodes: AxeNode[]): AxeNode[] {
   const seen = new Set<string>();
   return nodes.filter(node => {
     const key = `${JSON.stringify(node.target ?? [])}|${node.html ?? ''}`;
