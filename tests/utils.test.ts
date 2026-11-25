@@ -394,6 +394,21 @@ describe('Utils', () => {
       expect(result.output).not.toContain('Item 150');
     });
 
+    it('keeps rare nested role shapes when collapsing repeated card headers', () => {
+      const card = (roles: string[]) => ['- article:', ...roles.map(role => `  - ${role}`)].join('\n');
+      const title = '\'heading "Title: headline"\'';
+      const detail = '\'paragraph "Description: detail"\'';
+      const ordinary = card([title, detail]);
+      const alert = card([title, '\'status "Payment: pending"\'']);
+      const reversed = card([detail, title]);
+      const nested = '- article:\n  - heading "Title":\n    - paragraph: Description';
+      const snapshot = [...Array<string>(120).fill(ordinary), alert, reversed, nested].join('\n');
+
+      const result = compressAriaSnapshot(snapshot);
+      expect(result.output).toContain([alert, reversed, nested].join('\n'));
+      expect(result.removed).toBe(110 * 3);
+    });
+
     it('should keep repeated interactive ARIA nodes', () => {
       const snapshot = Array.from({ length: 150 }, (_, index) => `- button "Action ${index + 1}" [ref=e${index + 1}]`).join('\n');
 
@@ -542,8 +557,9 @@ describe('Utils', () => {
         `<p>Summary ${index + 1}</p>`,
         '</article>',
       ].join('')).join('');
-      const { snapshot, result } = await compressHtml(`<main>${cards}</main>`);
+      const { snapshot, result } = await compressHtml(`<main>${cards}<article><h2>Order</h2><p role="status">Payment pending</p></article></main>`);
 
+      expect(result.output).toContain('Payment pending');
       expect(snapshot).toContain('Title 150');
       expect(result.removed).toBeGreaterThan(0);
       expect(result.output).toContain('Title 10');

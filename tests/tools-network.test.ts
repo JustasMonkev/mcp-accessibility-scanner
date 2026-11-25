@@ -44,6 +44,7 @@ describe('Network Tools', () => {
 
     mockTab = {
       requests: vi.fn().mockReturnValue(indexedRequests(mockRequests)),
+      omittedRequests: vi.fn().mockReturnValue(0),
       request(id: number) {
         return this.requests(true).get(id);
       },
@@ -152,6 +153,42 @@ describe('Network Tools', () => {
       expect(result).toContain('[2] [POST] https://api.example.com/user => [201] Created');
       expect(result).toContain('[3] [GET] https://api.example.com/missing');
       expect(result).toContain('browser_network_request');
+    });
+
+    it('reports how many earlier requests the bounded history omitted', async () => {
+      mockTab.omittedRequests = vi.fn((all?: boolean) => all ? 70 : 60);
+
+      await networkTool.handle(mockContext, {}, response);
+      expect(response.result().split('\n')[0]).toBe('60 earlier requests were omitted to keep this tab\'s history bounded.');
+      expect(response.result()).toContain('[1] [GET] https://api.example.com/data => [200] OK');
+
+      const all = new Response(mockContext, 'test_tool', {});
+      await networkTool.handle(mockContext, { all: true }, all);
+      expect(all.result().split('\n')[0]).toBe('70 earlier requests were omitted to keep this tab\'s history bounded.');
+    });
+
+    it('scopes the omission notice to the paged cursor range and returns empty when caught up', async () => {
+      const req4 = { url: () => 'https://api.example.com/a', method: () => 'GET', existingResponse: () => null };
+      const req305 = { url: () => 'https://api.example.com/b', method: () => 'GET', existingResponse: () => null };
+      const req306 = { url: () => 'https://api.example.com/c', method: () => 'GET', existingResponse: () => null };
+      mockTab.requests = vi.fn().mockReturnValue(new Map([[4, req4], [305, req305], [306, req306]]));
+      const omittedRequests = vi.fn().mockReturnValue(300);
+      mockTab.omittedRequests = omittedRequests;
+
+      await networkTool.handle(mockContext, { all: true, afterId: 3, limit: 2 }, response);
+
+      expect(omittedRequests).toHaveBeenCalledWith(true, 3, 305);
+      expect(response.result().split('\n')[0]).toBe('300 earlier requests were omitted to keep this tab\'s history bounded.');
+      expect(response.result()).toContain('[4] [GET] https://api.example.com/a');
+      expect(response.result()).toContain('[305] [GET] https://api.example.com/b');
+      expect(response.result()).toContain('More requests available. Continue with afterId: 305.');
+      expect(response.result()).not.toContain('[306]');
+
+      const caughtUp = new Response(mockContext, 'test_tool', {});
+      mockTab.requests = vi.fn().mockReturnValue(new Map());
+      omittedRequests.mockReturnValue(0);
+      await networkTool.handle(mockContext, { all: true, afterId: 306 }, caughtUp);
+      expect(caughtUp.result()).toBe('');
     });
 
     it('should not advertise the detail tool when there are no requests', async () => {

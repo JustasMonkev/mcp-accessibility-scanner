@@ -19,8 +19,8 @@ import { inspect } from 'util';
 import { z } from 'zod';
 
 import { defineTabTool } from './tool.js';
-import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
+import { quote } from '../utils/codegen.js';
 import { isFunctionSource } from '../utils/jsSource.js';
 
 const evaluateSchema = z.object({
@@ -50,10 +50,16 @@ const evaluate = defineTabTool({
     const locator = params.ref && params.element ? await tab.refLocator({ ref: params.ref, element: params.element }) : undefined;
     const source = toFunctionSource(params.function, !!locator);
     const target = locator ? `page.${await generateLocator(locator)}` : 'page';
-    response.addCode(`await ${target}.evaluate(${javascript.quote(source)});`);
+    const expression = asBrowserExpression(source);
+    // Replay hands Playwright the same function the tool does: one whose
+    // toString() is the source, so the browser evaluates and calls it exactly
+    // as in the live call. A Node function literal would run parts of the
+    // source, such as `.bind(document)`, outside the browser, and an in-page
+    // eval wrapper would add an eval call the page can observe.
+    response.addCode(`await ${target}.evaluate(Object.assign(() => {}, { toString: () => ${quote(expression)} }));`);
 
     await tab.waitForCompletion(async () => {
-      const func = functionSerializingAs(source);
+      const func = functionSerializingAs(expression);
       const result = locator ? await locator.evaluate(func) : await tab.page.evaluate(func);
       response.addResult(formatEvaluationResult(result));
     });
@@ -94,6 +100,12 @@ function hasJSONContents(value: object, parents: readonly object[]): boolean {
 
   return isPlainContainer && !isCircular
     && Object.values(value).every(child => canFormatAsJSON(child, childParents));
+}
+
+// Playwright parses a function's source as `(source)` before evaluating it, so a
+// trailing line comment would swallow that `)`. Close the group on its own line.
+function asBrowserExpression(source: string): string {
+  return `(${source}\n)`;
 }
 
 function functionSerializingAs(source: string): () => void {

@@ -71,7 +71,7 @@ const navigationTimeout = defineTool({
     type: 'destructive',
   },
   handle: async (context, params, response) => {
-    for (const tab of context.tabs())
+    for (const tab of context.useTabs())
       tab.page.setDefaultNavigationTimeout(params.timeout);
 
     response.addResult(`Navigation timeout set to ${params.timeout}ms for all tabs.`);
@@ -91,7 +91,7 @@ const defaultTimeout = defineTool({
     type: 'destructive',
   },
   handle: async (context, params, response) => {
-    for (const tab of context.tabs())
+    for (const tab of context.useTabs())
       tab.setDefaultTimeout(params.timeout);
 
     response.addResult(`Default timeout set to ${params.timeout}ms for all tabs.`);

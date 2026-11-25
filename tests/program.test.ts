@@ -60,6 +60,194 @@ describe('restricted external provider switches', () => {
   });
 });
 
+describe('numeric CLI options', () => {
+  it.each([
+    [['--cdp-launch-command', 'app', '--cdp-launch-startup-timeout', '30s'], 'browser.cdpLaunch.startupTimeoutMs (--cdp-launch-startup-timeout, PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT) must be an integer from 1 to 2147483647; got NaN.'],
+    [['--port', 'abc'], 'server.port (--port, PLAYWRIGHT_MCP_PORT) must be an integer from 0 to 65535; got NaN.'],
+    [['--timeout-settle', '1.5'], 'timeouts.settle (--timeout-settle, PLAYWRIGHT_MCP_TIMEOUT_SETTLE) must be an integer from 0 to 2147483647; got 1.5.'],
+  ])('rejects %j at startup instead of truncating or ignoring it', async (args, message) => {
+    const { stderr } = await collectFailure(args);
+    expect(stderr).toContain(message);
+  });
+
+  it.each([
+    [['--cdp-launch-port', '99999', 'list-tools'], 'browser.cdpLaunch in the CLI needs a command (found port)'],
+    [['--cdp-launch-startup-timeout', '-1', 'list-tools'], 'browser.cdpLaunch in the CLI needs a command (found startupTimeoutMs)'],
+  ])('rejects %j without a launch command instead of ignoring it', async (args, message) => {
+    const { stderr } = await collectFailure(args);
+    expect(stderr).toContain(message);
+  });
+
+  it('rejects a mistyped environment startup timeout before launching the application', async () => {
+    const { stderr } = await collectFailure([], { PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND: 'app', PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT: 'thirty' });
+    expect(stderr).toContain('browser.cdpLaunch.startupTimeoutMs');
+    expect(stderr).toContain('got NaN.');
+  });
+});
+
+describe('missing CDP launch application', () => {
+  it.each([
+    ['an automatically allocated port', []],
+    ['a pinned port', ['--cdp-launch-port', '9']],
+  ])('fails the tool call and keeps the server alive on %s', async (_label, portArgs) => {
+    // An async spawn ENOENT without an 'error' listener terminated the server.
+    const client = new Client({ name: 'missing-cdp-launch-test', version: '1' });
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [...cliArgs, '--cdp-launch-command', path.join(os.tmpdir(), 'mcp-a11y-missing-app-does-not-exist'), '--cdp-launch-startup-timeout', '60000', ...portArgs],
+      stderr: 'pipe',
+    });
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({ name: 'browser_navigate', arguments: { url: 'about:blank' } });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toMatch(/Failed to start CDP launch command .*mcp-a11y-missing-app-does-not-exist.*ENOENT/);
+      expect((await client.listTools()).tools.map(tool => tool.name)).toContain('browser_navigate');
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe('interactive session recording', () => {
+  it('persists a call that is still running when stdin ends', async () => {
+    // Ctrl+D (or piped input ending) exited before the in-flight call was
+    // logged and before the debounced batch reached disk.
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-interactive-session-'));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(process.execPath, [...cliArgs, '--isolated', '--save-session', '--output-dir', outputDir, 'interactive'], { stdio: ['pipe', 'ignore', 'ignore'] });
+        const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('interactive CLI did not exit')); }, 20_000);
+        child.on('error', reject);
+        child.on('exit', () => { clearTimeout(timer); resolve(); });
+        child.stdin.end('browser_session_open {}\n');
+      });
+      const [sessionFolder] = fs.readdirSync(outputDir);
+      expect(sessionFolder).toMatch(/^session-/);
+      expect(fs.readFileSync(path.join(outputDir, sessionFolder, 'session.md'), 'utf-8')).toContain('### Tool call: browser_session_open');
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  // Starts the REPL, navigates, and resolves once the navigation printed.
+  // Bundled Chromium, not the default branded Chrome: CI installs only the
+  // former. A failed navigation rejects at once with the CLI's output instead
+  // of leaving the test to time out.
+  async function startNavigatedRepl(outputDir: string, env: NodeJS.ProcessEnv = {}) {
+    const child = spawn(process.execPath, [...cliArgs, '--browser', 'chromium', '--headless', '--isolated', '--save-session', '--output-dir', outputDir, 'interactive'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, ...env },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => { stdout += String(chunk); });
+    child.stderr.on('data', chunk => { stderr += String(chunk); });
+    const exited = new Promise<number>((resolve, reject) => {
+      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('interactive CLI did not exit')); }, 30_000);
+      child.on('error', reject);
+      child.on('exit', () => { clearTimeout(timer); resolve(Date.now()); });
+    });
+    child.stdin.write('browser_navigate {"url":"data:text/html,<p>ready</p>"}\n');
+    await new Promise<void>((resolve, reject) => {
+      const fail = (reason: string) => {
+        child.kill('SIGKILL');
+        reject(new Error(`${reason}\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}`));
+      };
+      const check = () => {
+        if (stdout.includes('Page URL'))
+          resolve();
+        else if (/^Error:/m.test(stdout) || /^Error:/m.test(stderr))
+          fail('navigation failed');
+      };
+      child.stdout.on('data', check);
+      child.stderr.on('data', check);
+      void exited.then(() => fail('exited before navigating'), reject);
+    });
+    return { child, exited, stdout: () => stdout };
+  }
+
+  const sessionText = (outputDir: string) => {
+    const [sessionFolder] = fs.readdirSync(outputDir);
+    return fs.readFileSync(path.join(outputDir, sessionFolder, 'session.md'), 'utf-8');
+  };
+
+  it('finishes a call longer than the shutdown watchdog when stdin ends', async () => {
+    // The watchdog started at end of input while shutdown still awaited the
+    // running call, so the process exited before printing or logging it.
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-interactive-eof-'));
+    try {
+      const repl = await startNavigatedRepl(outputDir, { PWMCP_EXIT_WATCHDOG_MS_FOR_TEST: '1000' });
+      repl.child.stdin.end('browser_wait_for {"time":3}\n');
+      await repl.exited;
+      expect(repl.stdout()).toContain('Waited for 3 seconds');
+      expect(sessionText(outputDir)).toContain('### Tool call: browser_wait_for');
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  }, 40_000);
+
+  it('delivers a large result to a slow stdout reader before exiting at end of input', async () => {
+    // End of input waited for console.log to be called, not for the pipe to
+    // take the data, so process.exit(0) dropped what was still buffered.
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-interactive-backpressure-'));
+    try {
+      const repl = await startNavigatedRepl(outputDir);
+      const closed = new Promise(resolve => repl.child.on('close', resolve));
+      repl.child.stdout.pause();
+      const evaluate = { function: '() => "x".repeat(1_500_000) + ["TAIL", "MARKER"].join("-")' };
+      repl.child.stdin.end(`browser_evaluate ${JSON.stringify(evaluate)}\n`);
+      // Read nothing until well after the process would have exited unflushed.
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([repl.exited, new Promise(resolve => { timer = setTimeout(resolve, 5_000); })]);
+      clearTimeout(timer);
+      repl.child.stdout.resume();
+      await repl.exited;
+      await closed;
+      // A boolean keeps a failure from printing the 1.5 MB output.
+      expect(repl.stdout().includes('TAIL-MARKER"'), `got ${repl.stdout().length} characters without the marker`).toBe(true);
+      expect(repl.child.exitCode).toBe(0);
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  }, 40_000);
+
+  it('starts shutdown on SIGTERM without waiting for a running call', async () => {
+    // SIGTERM waited for the running call, so the watchdog ended the process
+    // before contexts were disposed and the session log was flushed.
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-interactive-sigterm-'));
+    try {
+      const repl = await startNavigatedRepl(outputDir);
+      repl.child.stdin.write('browser_wait_for {"time":20}\n');
+      await new Promise(resolve => setTimeout(resolve, 300));
+      const signaledAt = Date.now();
+      repl.child.kill('SIGTERM');
+      expect(await repl.exited - signaledAt).toBeLessThan(8_000);
+      expect(repl.stdout()).not.toContain('Waited for 20 seconds');
+      expect(sessionText(outputDir)).toContain('### Tool call: browser_navigate');
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  }, 40_000);
+});
+
+describe('exit output flushing', () => {
+  it('exits cleanly on SIGTERM when the stdout reader is already gone', async () => {
+    // Flushing stdout at exit must not turn a closed pipe (EPIPE) into a crash.
+    const child = spawn(process.execPath, [...cliArgs, '--host', '127.0.0.1', '--port', '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.destroy();
+    let stderr = '';
+    const exitCode = new Promise<number | null>(resolve => child.on('exit', resolve));
+    await new Promise<void>(resolve => child.stderr.on('data', chunk => {
+      stderr += String(chunk);
+      if (stderr.includes('Listening on'))
+        resolve();
+    }));
+    child.kill('SIGTERM');
+    expect(await exitCode, stderr).toBe(0);
+  });
+});
+
 describe('direct MCP harness install coverage', () => {
   it.each([
     { args: ['--only', 'browser_install'], summary: 'Skipped: 1' },

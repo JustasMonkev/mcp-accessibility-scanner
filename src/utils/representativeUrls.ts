@@ -4,7 +4,7 @@ type TreeNode = {
   children: Map<string, TreeNode>;
   terminal: number[];
   size: number;
-  best: ArrayLike<number>;
+  best: Costs;
   parts?: Part[];
   free?: Uint16Array[];
   covered?: Uint16Array[];
@@ -32,8 +32,21 @@ function compareCodeUnits(a: string, b: string): number {
   return a < b ? -1 : 1;
 }
 
+// A miss at depth d costs 2 ** -d. A node's costs are kept exactly, as whole
+// multiples of 2 ** -scale, where scale is the deepest depth its subtree
+// charges a miss at, so a deep miss still counts beside a shallow one. A row
+// holds doubles while its largest cost fits in 53 bits and BigInts otherwise.
+type Row = Float64Array | bigint[];
+type Costs = { scale: number, values: Row };
+
+function newCosts(length: number, scale: number): Costs {
+  return { scale, values: new Float64Array(length) };
+}
+
+const unsolved = newCosts(0, 0);
+
 function newNode(depth: number): TreeNode {
-  return { depth, children: new Map(), terminal: [], size: 0, best: [] };
+  return { depth, children: new Map(), terminal: [], size: 0, best: unsolved };
 }
 
 type Part =
@@ -68,21 +81,24 @@ function coveredCount(part: Part): number {
   return part.kind === 'singles' ? part.size : 1;
 }
 
-function partCosts(part: Part, k: number, depth: number): Float64Array {
-  const costs = new Float64Array(Math.min(k, part.size) + 1);
-  // Express each fork's costs in its own distance unit, even far below the root.
-  costs[0] = part.size;
-  const childUnit = part.kind === 'child' ? 2 ** (depth - part.child.depth) : 0;
-  for (let count = 1; count < costs.length; count++) {
-    if (part.kind === 'singles')
-      costs[count] = part.size - count;
-    else if (part.kind === 'child')
-      costs[count] = part.child.best[count] * childUnit;
+// The costs, in units of 2 ** -scale, of giving each count of URLs to a part
+// of the node at `depth`, where the part's own URLs are missed when it gets none.
+function partCosts(part: Part, k: number, depth: number, scale: number, wide: boolean): Row {
+  const length = Math.min(k, part.size) + 1;
+  const best = part.kind === 'child' ? part.child.best : undefined;
+  const missed = (count: number) => part.kind === 'singles' || !count ? part.size - count : 0;
+  if (!wide) {
+    const unit = 2 ** (scale - depth);
+    const lift = best ? 2 ** (scale - best.scale) : 0;
+    return Float64Array.from({ length }, (_, count) => best && count ? Number(best.values[count]) * lift : missed(count) * unit);
   }
-  return costs;
+  const unit = BigInt(scale - depth);
+  const lift = BigInt(best ? scale - best.scale : 0);
+  return Array.from({ length }, (_, count) => best && count ? BigInt(best.values[count]) << lift : BigInt(missed(count)) << unit);
 }
 
-function mergePart(previous: Float64Array, costs: Float64Array, minimum: number, k: number): { row: Float64Array, choice: Uint16Array } {
+// Totals the previous parts cannot reach cost Infinity.
+function mergeDoubles(previous: Float64Array, costs: Float64Array, minimum: number, k: number): { row: Float64Array, choice: Uint16Array } {
   const last = previous.length - 1;
   const limit = Math.min(k, last + costs.length - 1);
   const row = new Float64Array(limit + 1);
@@ -92,9 +108,9 @@ function mergePart(previous: Float64Array, costs: Float64Array, minimum: number,
     let chosen = 0;
     const end = Math.min(total, costs.length - 1);
     for (let count = Math.max(minimum, total - last); count <= end; count++) {
-      const value = previous[total - count] + costs[count];
-      if (value < best) {
-        best = value;
+      const cost = previous[total - count] + costs[count];
+      if (cost < best) {
+        best = cost;
         chosen = count;
       }
     }
@@ -104,8 +120,42 @@ function mergePart(previous: Float64Array, costs: Float64Array, minimum: number,
   return { row, choice };
 }
 
-function mergeParts(nodeParts: Part[], costs: Float64Array[], k: number, cover: boolean, choices: Uint16Array[]): Float64Array {
-  let previous: Float64Array = new Float64Array(1);
+// Totals the previous parts cannot reach cost -1.
+function mergeBigInts(previous: bigint[], costs: bigint[], minimum: number, k: number): { row: bigint[], choice: Uint16Array } {
+  const last = previous.length - 1;
+  const limit = Math.min(k, last + costs.length - 1);
+  const row = new Array<bigint>(limit + 1);
+  const choice = new Uint16Array(limit + 1);
+  for (let total = 0; total <= limit; total++) {
+    let best = -1n;
+    let chosen = 0;
+    const end = Math.min(total, costs.length - 1);
+    for (let count = Math.max(minimum, total - last); count <= end; count++) {
+      const before = previous[total - count];
+      if (before < 0n)
+        continue;
+      const cost = before + costs[count];
+      if (best < 0n || cost < best) {
+        best = cost;
+        chosen = count;
+      }
+    }
+    row[total] = best;
+    choice[total] = chosen;
+  }
+  return { row, choice };
+}
+
+function mergePart(previous: Row, costs: Row, minimum: number, k: number): { row: Row, choice: Uint16Array } {
+  if (previous instanceof Float64Array && costs instanceof Float64Array)
+    return mergeDoubles(previous, costs, minimum, k);
+  if (Array.isArray(previous) && Array.isArray(costs))
+    return mergeBigInts(previous, costs, minimum, k);
+  throw new Error('Representative URL cost rows of one node must share a width.');
+}
+
+function mergeParts(nodeParts: Part[], costs: Row[], k: number, cover: boolean, choices: Uint16Array[]): Row {
+  let previous: Row = Array.isArray(costs[0]) ? [0n] : new Float64Array(1);
   for (let index = 0; index < nodeParts.length; index++) {
     const { row, choice } = mergePart(previous, costs[index], cover ? coveredCount(nodeParts[index]) : 0, k);
     choices.push(choice);
@@ -114,21 +164,49 @@ function mergeParts(nodeParts: Part[], costs: Float64Array[], k: number, cover: 
   return previous;
 }
 
-function solve(node: TreeNode, k: number) {
-  if (!node.children.size) {
-    node.best = new Float64Array(Math.min(k, node.size) + 1);
-    return;
+// The free row's costs below `from` URLs, then the covered row's.
+function joinRows(free: Row, covered: Row, from: number): Row {
+  if (free instanceof Float64Array && covered instanceof Float64Array)
+    return free.map((cost, count) => count < from ? cost : covered[count]);
+  return Array.from<number | bigint, bigint>(free, (cost, count) => BigInt(count < from ? cost : covered[count]));
+}
+
+// Bounds the selection work (trie segments plus dynamic-programming cells),
+// which grows with how many URLs are listed, how deep they go and maxPages.
+const defaultWorkBudget = 200_000_000;
+
+class WorkBudgetExceeded extends Error {}
+
+class WorkBudget {
+  private _remaining: number;
+
+  constructor(units: number) {
+    this._remaining = units;
   }
-  // A path with thousands of segments need not consume thousands of stack frames.
-  // Only forks and terminals affect selection; retain their original depth for costs.
-  for (const [segment, start] of node.children) {
-    let child = start;
-    while (!child.terminal.length && child.children.size === 1)
-      [child] = child.children.values();
-    if (child !== start)
-      node.children.set(segment, child);
-    if (child.size > 1)
-      solve(child, k);
+
+  spend(units: number): void {
+    this._remaining -= units;
+    if (this._remaining < 0)
+      throw new WorkBudgetExceeded();
+  }
+}
+
+// The cells mergeParts fills: each part's row holds at most k + 1 totals,
+// each trying at most that part's number of counts.
+function mergeCells(costs: Row[], k: number): number {
+  let cells = 0;
+  let total = 0;
+  for (const { length } of costs) {
+    total += length - 1;
+    cells += (Math.min(k, total) + 1) * length;
+  }
+  return cells;
+}
+
+function solveNode(node: TreeNode, k: number, budget: WorkBudget) {
+  if (!node.children.size) {
+    node.best = newCosts(Math.min(k, node.size) + 1, node.depth);
+    return;
   }
   if (!node.terminal.length && node.children.size === 1 && node.size > 1) {
     const [child] = node.children.values();
@@ -136,59 +214,86 @@ function solve(node: TreeNode, k: number) {
     return;
   }
   const nodeParts = parts(node);
-  const costs = nodeParts.map(part => partCosts(part, k, node.depth));
+  const scale = nodeParts.reduce((deepest, part) => part.kind === 'child' ? Math.max(deepest, part.child.best.scale) : deepest, node.depth);
+  // No cost exceeds missing every URL here. BigInt cells are charged by their 64-bit words.
+  const bits = scale - node.depth + Math.log2(node.size) + 1;
+  const wide = bits > 53;
+  const words = wide ? Math.ceil(bits / 64) : 1;
+  budget.spend(nodeParts.reduce((units, part) => units + Math.min(k, part.size) + 1, 0) * words);
+  const costs = nodeParts.map(part => partCosts(part, k, node.depth, scale, wide));
+  const mergeWork = mergeCells(costs, k) * words;
+  budget.spend(mergeWork);
   node.parts = nodeParts;
   node.free = [];
   const free = mergeParts(nodeParts, costs, k, false, node.free);
   const branches = branchCount(node);
   if (branches > k) {
-    node.best = free;
+    node.best = { scale, values: free };
     return;
   }
+  budget.spend(mergeWork);
   node.covered = [];
   const covered = mergeParts(nodeParts, costs, k, true, node.covered);
-  node.best = free.map((cost, count) => count >= branches ? covered[count] : cost);
+  node.best = { scale, values: joinRows(free, covered, branches) };
 }
 
-function collect(node: TreeNode, count: number, selected: number[]) {
-  if (!node.children.size) {
-    for (let index = 0; index < count; index++)
-      selected.push(node.terminal[index]);
-    return;
+// Children are solved before their parent. The traversal keeps its own stack,
+// since the tree is as deep as the longest listed URL.
+function solve(root: TreeNode, k: number, budget: WorkBudget) {
+  const preorder: TreeNode[] = [];
+  const pending = [root];
+  for (let node = pending.pop(); node; node = pending.pop()) {
+    preorder.push(node);
+    for (const child of node.children.values()) {
+      if (child.size > 1)
+        pending.push(child);
+    }
   }
-  if (!node.terminal.length && node.children.size === 1) {
-    const [child] = node.children.values();
-    collect(child, count, selected);
-    return;
-  }
-  const nodeParts = node.parts;
-  const choices = count >= branchCount(node) ? node.covered : node.free;
-  if (!nodeParts || !choices)
-    throw new Error('Representative URL tree was not prepared before collecting.');
-  let remaining = count;
-  for (let index = nodeParts.length - 1; index >= 0; index--) {
-    const given = choices[index][remaining];
-    remaining -= given;
-    if (!given)
+  for (let index = preorder.length - 1; index >= 0; index--)
+    solveNode(preorder[index], k, budget);
+}
+
+function collect(root: TreeNode, k: number, selected: number[]) {
+  const pending: { node: TreeNode, count: number }[] = [{ node: root, count: k }];
+  for (let task = pending.pop(); task; task = pending.pop()) {
+    let { node } = task;
+    const { count } = task;
+    while (node.children.size === 1 && !node.terminal.length)
+      [node] = node.children.values();
+    if (!node.children.size) {
+      for (let index = 0; index < count; index++)
+        selected.push(node.terminal[index]);
       continue;
-    const part = nodeParts[index];
-    if (part.kind === 'terminal')
-      selected.push(...part.urls.slice(0, given));
-    else if (part.kind === 'singles')
-      part.children.slice(0, given).forEach(child => collect(child, 1, selected));
-    else
-      collect(part.child, given, selected);
+    }
+    const nodeParts = node.parts;
+    const choices = count >= branchCount(node) ? node.covered : node.free;
+    if (!nodeParts || !choices)
+      throw new Error('Representative URL tree was not prepared before collecting.');
+    let remaining = count;
+    for (let index = nodeParts.length - 1; index >= 0; index--) {
+      const given = choices[index][remaining];
+      remaining -= given;
+      if (!given)
+        continue;
+      const part = nodeParts[index];
+      if (part.kind === 'terminal')
+        selected.push(...part.urls.slice(0, given));
+      else if (part.kind === 'singles')
+        pending.push(...part.children.slice(0, given).map(child => ({ node: child, count: 1 })));
+      else
+        pending.push({ node: part.child, count: given });
+    }
   }
 }
 
-export function selectRepresentativeUrls(urls: readonly string[], k: number): string[] {
-  if (urls.length <= k)
-    return [...urls];
+function buildTree(urls: readonly string[], budget: WorkBudget): TreeNode {
   const root = newNode(0);
   urls.forEach((url, index) => {
+    const segments = templateSegments(url);
+    budget.spend(segments.length + 1);
     let node = root;
     node.size++;
-    for (const segment of templateSegments(url)) {
+    for (const segment of segments) {
       let child = node.children.get(segment);
       if (!child) {
         child = newNode(node.depth + 1);
@@ -199,8 +304,26 @@ export function selectRepresentativeUrls(urls: readonly string[], k: number): st
     }
     node.terminal.push(index);
   });
-  solve(root, k);
+  return root;
+}
+
+/**
+ * `complete` is false when the selection would exceed its work budget; the
+ * first `k` URLs in listed order are returned instead.
+ */
+export function selectRepresentativeUrls(urls: readonly string[], k: number, workBudget = defaultWorkBudget): { urls: string[], complete: boolean } {
+  if (urls.length <= k)
+    return { urls: [...urls], complete: true };
   const selected: number[] = [];
-  collect(root, k, selected);
-  return selected.sort((first, second) => first - second).map(index => urls[index]);
+  try {
+    const budget = new WorkBudget(workBudget);
+    const root = buildTree(urls, budget);
+    solve(root, k, budget);
+    collect(root, k, selected);
+  } catch (error) {
+    if (!(error instanceof WorkBudgetExceeded))
+      throw error;
+    return { urls: urls.slice(0, k), complete: false };
+  }
+  return { urls: selected.sort((first, second) => first - second).map(index => urls[index]), complete: true };
 }

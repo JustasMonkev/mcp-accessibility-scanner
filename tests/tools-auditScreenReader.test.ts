@@ -26,7 +26,7 @@ function node(overrides: Partial<ScreenReaderNode>): ScreenReaderNode {
     visibleText: null,
     href: null,
     accessibleName: null,
-    nameMeasured: false,
+    nameMeasured: true,
     rect: null,
     direction: 'ltr',
     positionFixed: false,
@@ -119,6 +119,21 @@ describe('analyzeScreenReader accessible names', () => {
   it('flags controls and images with no accessible name', () => {
     expect(checks([node({ role: 'textbox', ref: 'e1' })])).toEqual(['missing-accessible-name']);
     expect(checks([node({ role: 'img', ref: 'e1' })])).toEqual(['missing-accessible-name']);
+  });
+
+  it('reports an unmeasured nameless control as inconclusive, not missing', () => {
+    const result = analyzeScreenReader([
+      node({ role: 'button', ref: 'e1', selector: 'button#empty' }),
+      node({ role: 'button', ref: 'e2', selector: 'button#unmeasured', nameMeasured: false }),
+      node({ role: 'link', ref: 'e3', selector: 'a#unmeasured', nameMeasured: false }),
+      node({ role: 'button', ref: 'e4', name: 'Click here', nameMeasured: false }),
+    ], { checkNames: true, checkReadingOrder: false, maxFindingsPerCheck: 1 });
+    expect(result.findings.map(finding => [finding.check, finding.ref])).toEqual([
+      ['missing-accessible-name', 'e1'],
+      ['uninformative-accessible-name', 'e4'],
+    ]);
+    expect(result.countByCheck['missing-accessible-name']).toBe(1);
+    expect(result.inconclusiveNames).toEqual({ count: 2, elements: [{ ref: 'e2', role: 'button', selector: 'button#unmeasured' }] });
   });
 
   it('ignores aria-hidden elements, which the snapshot still lists', () => {
@@ -1258,7 +1273,30 @@ describe('audit_screen_reader tool measurement', () => {
     const result = await run(harness, 50);
     expect(harness.installs.count).toBe(1);
     expect(result).toContain('WARNING: accessible names could not be measured for 2 of these');
-    expect(result).toContain('missing-accessible-name | 2');
+    expect(result).toContain('missing-accessible-name | 0');
+    expect(result).toContain('Missing name inconclusive (no snapshot name, accessible name not measured; not counted as missing-accessible-name): 2');
+    expect(result).not.toContain('No screen-reader-level issues detected');
+  });
+
+  it('counts a measured empty name as missing and an unmeasured one as inconclusive in the same run', async () => {
+    const harness = createToolHarness({
+      snapshot: snapshotOf([{ role: 'button', ref: 'b1' }, { role: 'button', ref: 'b2' }]),
+      factsFor: ref => ref === 'b2' ? { nameMeasured: false, selector: 'button#unmeasured' } : { selector: 'button#empty' },
+    });
+    const response = new Response(harness.context, 'audit_screen_reader', {});
+    await tool.handle(harness.context, { checkNames: true, checkReadingOrder: true, maxElements: 50, maxFindingsPerCheck: 20 }, response);
+
+    const text = response.result();
+    expect(text).toContain('WARNING: accessible names could not be measured for 1 of these');
+    expect(text).toContain('missing-accessible-name | 1');
+    expect(text).toContain('Missing name inconclusive (no snapshot name, accessible name not measured; not counted as missing-accessible-name): 1');
+    expect(text).toContain('- button button#unmeasured Ref: b2');
+    const structured = response.structuredContent() as any;
+    expect(structured.findings.map((finding: { check: string; ref: string }) => [finding.check, finding.ref])).toEqual([['missing-accessible-name', 'b1']]);
+    expect(structured.inconclusiveNames).toEqual({ count: 1, elements: [{ ref: 'b2', role: 'button', selector: 'button#unmeasured' }] });
+    const report = JSON.parse(vi.mocked(fs.promises.writeFile).mock.calls[0][1] as string);
+    expect(report.inconclusiveNames).toEqual(structured.inconclusiveNames);
+    expect(report.countByCheck['missing-accessible-name']).toBe(1);
   });
 
   it('does not ask a frame that refused the axe copy to measure names', async () => {

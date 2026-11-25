@@ -19,4 +19,20 @@ services:
       - "127.0.0.1:8931:8931"
     volumes:
       - ./output:/app/output
+    healthcheck:
+      # Healthy once the MCP HTTP endpoint answers a JSON-RPC ping with 200.
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          const req = require('http').request({ host: '127.0.0.1', port: 8931, path: '/mcp', method: 'POST', timeout: 4000,
+          headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' } },
+          res => { res.resume(); process.exit(res.statusCode === 200 ? 0 : 1); });
+          req.on('timeout', () => req.destroy()); req.on('error', () => process.exit(1));
+          req.end(JSON.stringify({ jsonrpc: '2.0', id: 'healthcheck', method: 'ping' }));
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     restart: unless-stopped
