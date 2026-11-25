@@ -860,7 +860,7 @@ Capture accessibility snapshot of the current page (better than screenshot for a
 Large `data:` URL payloads in snapshot output are truncated to their media type prefix.
 AI snapshots mark a visually present subtree excluded from accessibility queries with `[aria-hidden]` on its boundary element. Descendants are not marked again.
 - Parameters: `compress` (optional boolean, default false), `boxes` (optional boolean; overrides `snapshot.boxes` for this call)
-  - When `compress` is true, repeated non-interactive ARIA snapshot nodes are collapsed in the rendered response when a repeated structural pattern appears more than 100 times. The first 10 examples of each collapsed pattern are kept.
+  - When `compress` is true, repeated non-interactive ARIA snapshot nodes are collapsed in the rendered response when a repeated structural pattern appears more than 100 times. The first 10 examples of each collapsed pattern are kept. Siblings with different nested role sequences are separate patterns: a late card with a status where the others have a paragraph is not hidden by their count. This is a structural sample, not a lossless copy of names or text.
   - Use `browser_evaluate()` to retrieve the full uncompressed list when needed.
   - When `boxes` is true, each element includes `[box=x,y,width,height]` in viewport-relative CSS pixels.
 

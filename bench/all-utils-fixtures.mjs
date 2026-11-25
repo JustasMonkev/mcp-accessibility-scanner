@@ -26,6 +26,7 @@ export function fixtures(modules, { tab, endpoint, output, importMetadata }) {
   const line = '  - gridcell "Item 123" [ref=e2]';
   cases('ariaCompression', {
     compressAriaSnapshot: [snapshot], hasCrowdedParent: [snapshot], isCandidate: [aria.parseSnapshotLines(line)[0]],
+    assignSubtreeShapes: [aria.parseSnapshotLines(snapshot)],
     signature: [line], roleOf: [line], shouldKeepLine: ['gridcell', true, false],
     shouldKeepSubtree: ['button'], shouldKeepRefProtectedDescendants: ['gridcell', true],
     shouldKeepCursorPointerRef: [true, true], isRowContainerRole: ['grid'], indentOf: [line],
