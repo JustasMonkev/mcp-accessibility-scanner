@@ -2,6 +2,7 @@ import { rejectOnAbort } from '../utils/timeout.js';
 import { z } from 'zod';
 import type * as playwright from 'playwright';
 import { defineTabTool } from './tool.js';
+import type { ModalState } from './tool.js';
 import { reserveReportPath, writeJsonReport } from './report.js';
 import type { JsonReportResource } from './report.js';
 import {
@@ -19,6 +20,8 @@ import {
 } from './axe.js';
 
 import type { Tab } from '../tab.js';
+import type { Response } from '../response.js';
+import { logUnhandledError } from '../utils/log.js';
 
 type TargetDifference = { count: number, samples: AxeNode['target'][] };
 type RuleTargetChanges = Record<string, { added: TargetDifference, removed: TargetDifference }>;
@@ -167,11 +170,129 @@ async function setZoom(page: playwright.Page, zoom: string): Promise<void> {
   }, zoom);
 }
 
-async function restorePageState(page: playwright.Page, original: PageState): Promise<void> {
+// A canceled restore stops at its next step, so a page left to other clients
+// is not reset once a dialog that paused it closes.
+async function restorePageState(page: playwright.Page, original: PageState, canceled: AbortSignal): Promise<void> {
+  canceled.throwIfAborted();
   if (original.viewport)
     await page.setViewportSize(original.viewport);
+  canceled.throwIfAborted();
   await page.emulateMedia(original.media);
+  canceled.throwIfAborted();
   await setZoom(page, original.zoom);
+}
+
+// Where a dialog interrupted the scan. Before any variant was applied there
+// is nothing to restore.
+type DialogPhase = { variant: string } | 'capture' | 'finishing' | 'restore';
+const dialogPhaseWhere = {
+  finishing: 'after the last variant was scanned',
+  restore: 'while the original state was being restored',
+};
+
+// The modal-state guidance names the tool that answers the dialog, or says
+// this server blocks it; context.tools leaves out blocked tools.
+function dialogInterruption(tab: Tab, phase: DialogPhase): Error {
+  if (phase === 'capture') {
+    return new Error([
+      'The page opened a dialog while the matrix scan was reading its original viewport, media and zoom, so the scan stopped before applying any variant; the page was not changed.',
+      ...tab.modalStatesMarkdown(),
+    ].join('\n'));
+  }
+  const where = typeof phase === 'object' ? `during variant "${phase.variant}"` : dialogPhaseWhere[phase];
+  const teardown = tab.context.tools.some(tool => tool.schema.name === 'browser_close') ? ' Closing the browser with browser_close cancels the restore instead.' : '';
+  return new Error([
+    `The page opened a dialog ${where} that the matrix scan does not answer, so the scan stopped. The paused page cannot be restored until the dialog closes; the server will attempt to restore the original viewport, media and zoom once it does, so verify them before continuing.${teardown}`,
+    ...tab.modalStatesMarkdown(),
+  ].join('\n'));
+}
+
+// A dialog pauses the page, so every page command issued after it waits.
+function watchForDialog(tab: Tab) {
+  const controller = new AbortController();
+  const { promise: opened, resolve: open } = Promise.withResolvers<void>();
+  let dialog: ModalState | undefined;
+  const onModalState = (state: ModalState) => {
+    if (state.type !== 'dialog' || dialog)
+      return;
+    dialog = state;
+    controller.abort(new Error('A dialog interrupted the matrix scan.'));
+    open();
+  };
+  tab.on('modalState', onModalState);
+  const present = tab.modalStates().find(state => state.type === 'dialog');
+  if (present)
+    onModalState(present);
+  return {
+    signal: controller.signal,
+    guard: async <T>(work: Promise<T>, phase: DialogPhase): Promise<T> => {
+      // Work can also fail because the dialog aborted it; report the dialog either way.
+      const outcome = await Promise.race([work.then(value => ({ value })), opened]).catch((error: unknown) => {
+        if (!dialog)
+          throw error;
+      });
+      if (dialog)
+        throw dialogInterruption(tab, phase);
+      return (outcome as { value: T }).value;
+    },
+    dispose: () => tab.off('modalState', onModalState),
+  };
+}
+
+type MatrixRun = {
+  tab: Tab;
+  variants: Variant[];
+  original: PageState;
+  params: ScanPageMatrixParams;
+  response: Response;
+  dialog: ReturnType<typeof watchForDialog>;
+  signal?: AbortSignal;
+  // Aborted when the browser context closes while the page is still claimed.
+  canceled: AbortSignal;
+};
+
+async function scanVariants({ tab, variants, original, params, response, dialog, signal, canceled }: MatrixRun, trackRestore: (restore: Promise<void>) => void): Promise<VariantResult[]> {
+  // A canceled claim may already belong to another scan, so this one stops
+  // changing the page.
+  const scanSignal = AbortSignal.any(signal ? [signal, dialog.signal, canceled] : [dialog.signal, canceled]);
+  let inFlight: Promise<unknown> = Promise.resolve();
+  const variantResults: VariantResult[] = [];
+  let baseline: VariantScan | undefined;
+  let restoredInCall = false;
+  try {
+    for (const [index, variant] of variants.entries()) {
+      const scanning = scanVariant(tab, variant, original, params, scanSignal);
+      inFlight = scanning;
+      const scan = await dialog.guard(scanning, { variant: variant.name });
+      baseline ??= scan;
+      compareWithBaseline(baseline, scan, params.maxNodesPerViolation);
+      variantResults.push(scan.result);
+      // A client that stops reading can leave the notification waiting
+      // indefinitely; a dialog opened meanwhile is still reported, and the
+      // restore started, without waiting for it. reportProgress never rejects.
+      await dialog.guard(response.reportProgress({
+        progress: variantResults.length,
+        total: variants.length,
+        message: `Scanned variant ${variantResults.length}/${variants.length}: ${variant.name}`,
+      }), index === variants.length - 1 ? 'finishing' : { variant: variant.name });
+    }
+  } finally {
+    // An interrupted variant unwinds at its next step once the dialog closes;
+    // restoring only after that keeps it from reapplying variant state. While
+    // a dialog stays open the restore finishes in the background, still
+    // holding the page claim, so the call can report the dialog now. Closing
+    // the browser context cancels it.
+    const restore = inFlight.catch(() => {}).then(() => restorePageState(tab.page, original, canceled));
+    trackRestore(restore);
+    if (!dialog.signal.aborted) {
+      await dialog.guard(restore, 'restore');
+      restoredInCall = true;
+    }
+  }
+  // A dialog opened after the last guarded step left the restore waiting on it.
+  if (!restoredInCall)
+    throw dialogInterruption(tab, 'finishing');
+  return variantResults;
 }
 
 async function scanVariant(tab: Tab, variant: Variant, original: PageState, params: ScanPageMatrixParams, signal?: AbortSignal): Promise<VariantScan> {
@@ -347,6 +468,10 @@ const scanPageMatrix = defineTabTool({
     inputSchema: scanPageMatrixSchema,
     type: 'destructive',
   },
+  // Each call captures and restores viewport, media and zoom; an overlapping
+  // call in the same context would scan the other's variant or restore its
+  // temporary state as the final one.
+  exclusive: true,
 
   handle: async (tab, params, response, signal) => {
     signal?.throwIfAborted();
@@ -354,28 +479,32 @@ const scanPageMatrix = defineTabTool({
 
     const reportPath = await reserveReportPath(tab.context, response, params.reportFile, 'scan-matrix');
     const variants = params.variants ?? defaultVariants;
-    const original = await capturePageState(tab.page);
-
-    if (!original.viewport && variants.some(variant => variant.viewport))
-      throw new Error('Viewport variants require a configured viewport (for example --viewport-size=1280,720). Native viewport sizing cannot be restored; use variants without viewport changes on this tab.');
-    signal?.throwIfAborted();
-
-    const variantResults: VariantResult[] = [];
-    let baseline: VariantScan | undefined;
+    // Claimed before capturing, so an overlapping scan cannot record another
+    // scan's variant as the original state, and other clients sharing the
+    // page cannot change it under this scan.
+    const claim = tab.context.claimPage('scan_page_matrix', tab.page);
+    // Watched before the first page read: a dialog opened by that read pauses
+    // it, and nothing would report it.
+    const dialog = watchForDialog(tab);
+    let restored: Promise<void> = Promise.resolve();
+    let variantResults: VariantResult[];
     try {
-      for (const variant of variants) {
-        const scan = await scanVariant(tab, variant, original, params, signal);
-        baseline ??= scan;
-        compareWithBaseline(baseline, scan, params.maxNodesPerViolation);
-        variantResults.push(scan.result);
-        await response.reportProgress({
-          progress: variantResults.length,
-          total: variants.length,
-          message: `Scanned variant ${variantResults.length}/${variants.length}: ${variant.name}`,
-        });
-      }
+      const original = await dialog.guard(capturePageState(tab.page), 'capture');
+      if (!original.viewport && variants.some(variant => variant.viewport))
+        throw new Error('Viewport variants require a configured viewport (for example --viewport-size=1280,720). Native viewport sizing cannot be restored; use variants without viewport changes on this tab.');
+      signal?.throwIfAborted();
+      variantResults = await scanVariants({ tab, variants, original, params, response, dialog, signal, canceled: claim.canceled }, restore => {
+        restored = restore;
+      });
     } finally {
-      await restorePageState(tab.page, original);
+      dialog.dispose();
+      // After a dialog the restore can outlive this call; until it settles,
+      // other tools could change the page and have their changes overwritten.
+      tab.context.holdExclusiveUntil('scan_page_matrix', restored);
+      void restored.catch(error => {
+        if (!claim.canceled.aborted)
+          logUnhandledError(error);
+      }).finally(claim.release);
     }
 
     signal?.throwIfAborted();

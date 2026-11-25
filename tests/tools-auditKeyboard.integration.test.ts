@@ -302,7 +302,7 @@ it.skipIf(!canRun).each([false, true])('checks shadow-tree paint ownership when 
   expect(report.focusObscuredIssues.map((stop: { id: string }) => stop.id)).toEqual(covered ? ['target'] : []);
 });
 
-it.skipIf(!canRun)('keeps the target-spacing verdict independent of the neighbor sample order', async () => {
+it.skipIf(!canRun)('keeps the target-spacing verdict and witness independent of neighbor order', async () => {
   directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-spacing-'));
   const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory, timeoutSettle: 0 });
   client = new Client({ name: 'keyboard-spacing-test', version: '1' });
@@ -329,7 +329,8 @@ it.skipIf(!canRun)('keeps the target-spacing verdict independent of the neighbor
     expect(report.targetSizeIssues).toHaveLength(expected);
     expect(text).toContain(`spacing and inline exceptions applied): ${expected}`);
     const sample = report.stops[0].neighborTargets;
-    expect(sample.length).toBeLessThanOrEqual(32);
+    expect(report.stops[0].targetSpacing).toBe(expected ? 'crowded' : 'clear');
+    expect(sample).toHaveLength(expected);
     if (expected) {
       const witness = label === 'late-large' ? { x: 115, y: 95 } : { x: 120, y: 100 };
       expect(sample).toContainEqual(expect.objectContaining(witness));

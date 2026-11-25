@@ -689,6 +689,26 @@ describe('Response', () => {
       expect(textContent.text).toContain('Test message');
     });
 
+    it('says how many console messages since the last snapshot were omitted', async () => {
+      mockTab.captureSnapshot = vi.fn().mockResolvedValue({
+        url: 'https://example.com',
+        title: 'Example Page',
+        ariaSnapshot: '',
+        modalStates: [],
+        consoleMessages: [
+          { type: 'log', text: 'Test message', toString: () => '[LOG] Test message' }
+        ],
+        omittedConsoleMessages: 5,
+        downloads: [],
+      });
+
+      const response = new Response(mockContext, 'test_tool', {});
+      response.setIncludeSnapshot();
+      await response.finish();
+      const textContent = expectTextContent(response.serialize().content[0]);
+      expect(textContent.text).toContain('### New console messages\n- 5 earlier console messages omitted\n- [LOG] Test message');
+    });
+
     it('should include downloads in snapshot', async () => {
       mockTab.captureSnapshot = vi.fn().mockResolvedValue({
         url: 'https://example.com',

@@ -36,6 +36,7 @@ function focusPoint(overrides: Partial<FocusPoint>): FocusPoint {
     isPointerTarget: false,
     inlineTarget: false,
     neighborTargets: [],
+    targetSpacing: null,
     obstruction: null,
     scrollX: 0,
     scrollY: 0,
@@ -227,7 +228,7 @@ describe('audit_keyboard tool', () => {
       focusPoint({ role: 'document', tagName: 'BODY' }),
       focusPoint({
         role: 'link', tagName: 'A', name: 'Tiny link', isPointerTarget: true,
-        boundingBox: { x: 0, y: 0, width: 12, height: 12 },
+        boundingBox: { x: 0, y: 0, width: 12, height: 12 }, targetSpacing: 'crowded',
         neighborTargets: [{ x: 14, y: 0, width: 12, height: 12 }],
       }),
       focusPoint({
@@ -280,13 +281,13 @@ describe('audit_keyboard tool', () => {
       // Inline-level link inside a sentence: crowded, but exempt.
       focusPoint({
         role: 'link', tagName: 'A', name: 'Inline block terms', isPointerTarget: true, inlineTarget: true,
-        boundingBox: { x: 0, y: 340, width: 12, height: 18 },
+        boundingBox: { x: 0, y: 340, width: 12, height: 18 }, targetSpacing: 'crowded',
         neighborTargets: [{ x: 16, y: 340, width: 12, height: 18 }],
       }),
       // Only neighbour is a disabled button, which measurement no longer collects.
       focusPoint({
         role: 'link', tagName: 'A', name: 'Isolated link', isPointerTarget: true,
-        boundingBox: { x: 0, y: 400, width: 18, height: 18 },
+        boundingBox: { x: 0, y: 400, width: 18, height: 18 }, targetSpacing: 'clear',
       }),
       // Transparent click-catcher: hit-tested but paints nothing.
       focusPoint({
@@ -338,7 +339,7 @@ describe('audit_keyboard tool', () => {
       // 12x12 editable region is a real target-size failure.
       focusPoint({
         role: 'div', tagName: 'DIV', name: 'Tiny editor', isPointerTarget: true,
-        boundingBox: { x: 450, y: 20, width: 12, height: 12 },
+        boundingBox: { x: 450, y: 20, width: 12, height: 12 }, targetSpacing: 'crowded',
         neighborTargets: [{ x: 464, y: 20, width: 40, height: 30 }],
       }),
       focusPoint({
