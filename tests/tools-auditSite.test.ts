@@ -1089,6 +1089,22 @@ describe('audit_site tool', () => {
     expect(response.result()).toContain('Representative selection: queued 3 of 8 listed URLs');
   });
 
+  it('actually scans both decoded query-key branches in a two-page budget', async () => {
+    const urls = [
+      'https://example.com/items/10?filter=tag%3Dred',
+      'https://example.com/items/20?filter=tag%3Dred',
+      'https://example.com/items/30?filter%3Dtag=red',
+    ];
+    const { response } = createHarness({});
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+    await tool.handle(response.context, tool.schema.inputSchema.parse({
+      strategy: 'provided', pageSelection: 'representative', urls, maxPages: 2, concurrency: 1,
+    }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { url: string }) => page.url)).toEqual([urls[0], urls[2]]);
+  });
+
   it('keeps listed order and reports no selection in discovery mode', async () => {
     const urls = ['https://example.com/blog/a', 'https://example.com/blog/b', 'https://example.com/blog/c', 'https://example.com/about'];
     const { response } = createHarness({});
