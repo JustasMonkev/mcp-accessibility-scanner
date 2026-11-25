@@ -36,6 +36,7 @@ import screenshot from './tools/screenshot.js';
 import wait from './tools/wait.js';
 import verify from './tools/verify.js';
 import auditSite from './tools/auditSite.js';
+import { getScanFindings } from './tools/scanFindings.js';
 import scanPageMatrix from './tools/scanPageMatrix.js';
 import auditKeyboard from './tools/auditKeyboard.js';
 import auditScreenReader from './tools/auditScreenReader.js';
@@ -68,6 +69,7 @@ export const allTools: Tool<any>[] = [
   ...wait,
   ...verify,
   ...auditSite,
+  getScanFindings,
   ...scanPageMatrix,
   ...auditKeyboard,
   ...auditScreenReader,
@@ -136,6 +138,8 @@ export function serverInstructions(policy: ToolPolicy): string {
     parts.push(`${canNavigate ? 'Then use' : 'Use'} ${listFormat.format(audits)}.`);
     parts.push('Results are returned as markdown with axe-core rule ids, impact levels, failure summaries and remediation links.');
   }
+  if (usable('scan_page') && usable('get_scan_findings'))
+    parts.push('For all nodes from one observation, set retainFindings on `scan_page` and page through `get_scan_findings`.');
   if (interaction.length)
     parts.push(`Regular browser interaction tools (${interaction.join(', ')}) are also available for navigating to the state you want to audit.`);
   if (usable('browser_session_open')) {

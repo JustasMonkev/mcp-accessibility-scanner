@@ -22,7 +22,8 @@ import { defineTabTool, defineTool } from './tool.js';
 import * as javascript from '../utils/codegen.js';
 import { generateLocator } from './utils.js';
 import { prepareUploadFiles } from './files.js';
-import { axeRuleSchemaShape, axeScanOptions, axeScopeSchemaShape, axeTagValues, dedupeAxeNodes, defaultAxeTags, prepareAxeResults, runAxeScan, unscannedFrameLines } from './axe.js';
+import { axeRuleSchemaShape, axeScanOptions, axeScopeSchemaShape, axeTagValues, defaultAxeTags, prepareAxeResults, runAxeScan, unscannedFrameLines } from './axe.js';
+import { stageScanFindings } from './scanFindings.js';
 import { truncateDataUrls } from '../utils/dataUrl.js';
 import { safeIsoTimestampForFileName } from '../utils/fileUtils.js';
 
@@ -49,7 +50,8 @@ const scanPageSchema = z.object({
       .min(1)
       .max(50)
       .default(10)
-      .describe('Maximum nodes reported per rule. Raise it when you need every occurrence of a rule rather than a sample.'),
+      .describe('Maximum inline examples per rule. Set retainFindings to page through all observed findings without rescanning.'),
+  retainFindings: z.boolean().optional().describe('Keep the original deduplicated violation and reported incomplete nodes in this session. Off by default. Later retrieval requires the findings lookup tool to be enabled.'),
   annotateScreenshot: z
       .boolean()
       .default(false)
@@ -89,8 +91,10 @@ const scanPage = defineTool({
     const tab = context.currentTabOrDie();
     const results = await runAxeScan(tab.page, axeScanOptions(params));
 
+    const violations = prepareAxeResults(results.violations, params.maxNodesPerViolation);
+    const incomplete = params.includeIncomplete ? prepareAxeResults(results.incomplete, params.maxNodesPerViolation) : undefined;
     const annotationLines = params.annotateScreenshot
-      ? await annotateAndScreenshot(tab, results.violations, response)
+      ? await annotateAndScreenshot(tab, violations.deduped, response)
       : [];
 
     const incompleteCount = params.includeIncomplete ? `Incomplete: ${results.incomplete.length}, ` : '';
@@ -102,15 +106,17 @@ const scanPage = defineTool({
       ...annotationLines,
     ].join('\n'));
 
-    for (const line of renderAxeRules(prepareAxeResults(results.violations, params.maxNodesPerViolation), violationRuleStyle))
+    for (const line of renderAxeRules(violations, violationRuleStyle, params.retainFindings))
       response.addResult(line);
 
-    if (params.includeIncomplete && results.incomplete.length) {
-      const incomplete = prepareAxeResults(results.incomplete, params.maxNodesPerViolation);
+    if (incomplete?.trimmed.length) {
       response.addResult(`\nIncomplete (needs review — Axe could not decide, verify these on the page): ${incomplete.trimmed.length} rule(s)`);
-      for (const line of renderAxeRules(incomplete, incompleteRuleStyle))
+      for (const line of renderAxeRules(incomplete, incompleteRuleStyle, params.retainFindings))
         response.addResult(line);
     }
+
+    if (params.retainFindings)
+      stageScanFindings(response, violations.deduped, incomplete?.deduped ?? []);
   },
 });
 
@@ -118,18 +124,18 @@ type AxeRuleStyle = { kind: string, nodesLabel: string, showTags: boolean };
 const violationRuleStyle: AxeRuleStyle = { kind: 'Violation', nodesLabel: 'Violations', showTags: true };
 const incompleteRuleStyle: AxeRuleStyle = { kind: 'Incomplete', nodesLabel: 'Nodes', showTags: false };
 
-function renderAxeRules(rules: ReturnType<typeof prepareAxeResults>, { kind, nodesLabel, showTags }: AxeRuleStyle): string[] {
+function renderAxeRules(rules: ReturnType<typeof prepareAxeResults>, { kind, nodesLabel, showTags }: AxeRuleStyle, retainFindings = false): string[] {
   return rules.trimmed.map((rule, index) => [
     '',
     `${kind} rule: ${rule.id} (${rule.impact ?? 'unknown'}) — ${rule.help}`,
     `Help: ${rule.helpUrl}`,
     ...(showTags ? [`Tags : ${rule.tags}`] : []),
-    `${nodesLabel}${nodeCountSuffix(rule.nodes.length, rules.deduped[index].nodes.length)}: ${JSON.stringify(rule.nodes, null, 2)}`,
+    `${nodesLabel}${nodeCountSuffix(rule.nodes.length, rules.deduped[index].nodes.length, retainFindings)}: ${JSON.stringify(rule.nodes, null, 2)}`,
   ].join('\n'));
 }
 
-function nodeCountSuffix(shown: number, total: number): string {
-  return shown < total ? ` (showing ${shown} of ${total} nodes, raise maxNodesPerViolation for the rest)` : '';
+function nodeCountSuffix(shown: number, total: number, retainFindings: boolean): string {
+  return shown < total ? ` (showing ${shown} of ${total} nodes${retainFindings ? '' : ', raise maxNodesPerViolation for the rest'})` : '';
 }
 
 type AnnotationMark = { path: string[], labels: string[] };
@@ -150,7 +156,7 @@ function buildAnnotationPlan(violations: AxeViolation[]) {
   let unreachableNodes = 0;
   let queuedNodes = 0;
   for (const violation of violations) {
-    for (const node of dedupeAxeNodes(violation.nodes)) {
+    for (const node of violation.nodes) {
       totalNodes++;
       const path = shadowPathOf(node.target ?? []);
       if (!path) {

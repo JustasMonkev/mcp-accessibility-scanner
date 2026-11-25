@@ -21,6 +21,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { BrowserServerBackend } from '../src/browserServerBackend.js';
+import { Context } from '../src/context.js';
 import { BrowserSessionRegistry } from '../src/browserSessions.js';
 import { resolveConfig } from '../src/config.js';
 import { allTools } from '../src/tools.js';
@@ -85,6 +86,37 @@ describe('BrowserServerBackend.callTool', () => {
     await expect(backend.callTool('browser_find', { text: 'Target', maxResults }))
         .rejects.toThrow(/Invalid input for tool "browser_find"/);
     expect(handle).not.toHaveBeenCalled();
+  });
+
+  it.each([{ offset: -1 }, { offset: 0.5 }, { limit: 0 }, { limit: 51 }, { limit: 1.5 }, { outcome: 'pass' }, { ruleId: ' ' }])('rejects invalid findings lookup %j before dispatch', async invalid => {
+    const backend = new BrowserServerBackend(await resolveConfig({}), unusedFactory);
+    await expect(backend.callTool('get_scan_findings', { scanId: 'unknown', ruleId: 'image-alt', outcome: 'violation', ...invalid }))
+        .rejects.toThrow('Invalid input');
+  });
+
+  it('rejects retention on a stateless default context rather than returning an immediately expired ID', async () => {
+    const backend = new BrowserServerBackend(await resolveConfig({}), unusedFactory, undefined, { ephemeralDefaultContext: true });
+    await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'vitest', version: '1' });
+    try {
+      await expect(backend.callTool('scan_page', { retainFindings: true })).rejects.toThrow('explicit browserSessionId');
+    } finally {
+      backend.serverClosed();
+    }
+  });
+
+  it('does not wake an idle browser or inspect its tab for a findings lookup', async () => {
+    const backend = new BrowserServerBackend(await resolveConfig({}), unusedFactory);
+    await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'vitest', version: '1' });
+    const resume = vi.spyOn(Context.prototype, 'resumeAfterIdle');
+    const tab = vi.spyOn(Context.prototype, 'currentTab');
+    try {
+      const result = await backend.callTool('get_scan_findings', { scanId: 'unknown', ruleId: 'image-alt', outcome: 'violation' });
+      expect(result.isError).toBe(true);
+      expect(resume).not.toHaveBeenCalled();
+      expect(tab).not.toHaveBeenCalled();
+    } finally {
+      backend.serverClosed();
+    }
   });
 
   it('removes reserved output files when a tool fails', async () => {

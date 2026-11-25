@@ -54,6 +54,7 @@
 		"@modelcontextprotocol/client": "2.3.1",
 		"@modelcontextprotocol/node": "2.1.2",
 		"@modelcontextprotocol/server": "2.4.0",
+		"@rubensworks/saxes": "6.0.1",
 		"axe-core": "4.14.0",
 		"commander": "15.0.0",
 		"debug": "4.4.3",

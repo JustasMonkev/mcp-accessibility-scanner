@@ -301,34 +301,38 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
     return text.length > 80 ? `${text.slice(0, 77)}...` : text;
   };
 
-  const overlapPairs = (phases: (Phase | null)[]): Map<string, Box> => {
-    const entries = phases.flatMap((phase, index) => {
-      const lines = phase?.visibleLines.slice(0, maxOverlapLines);
-      if (!lines?.length)
-        return [];
-      return [{ index, lines, top: Math.min(...lines.map(line => line.top)), bottom: Math.max(...lines.map(line => line.bottom)) }];
-    }).sort((a, b) => a.top - b.top);
-    const pairs = new Map<string, Box>();
-    for (let i = 0; i < entries.length; i++) {
-      for (let j = i + 1; j < entries.length && entries[j].top < entries[i].bottom; j++) {
-        let best: Box | null = null;
-        for (const a of entries[i].lines) {
-          for (const b of entries[j].lines) {
-            const box = { left: Math.max(a.left, b.left), top: Math.max(a.top, b.top), right: Math.min(a.right, b.right), bottom: Math.min(a.bottom, b.bottom) };
-            const width = box.right - box.left;
-            const height = box.bottom - box.top;
-            const minLineHeight = Math.min(a.bottom - a.top, b.bottom - b.top);
-            if (width >= 2 && height >= Math.max(1, minLineHeight * 0.3) && (!best || area(box) > area(best)))
-              best = box;
-          }
-        }
-        if (best) {
-          const [first, second] = entries[i].index < entries[j].index ? [entries[i].index, entries[j].index] : [entries[j].index, entries[i].index];
-          pairs.set(`${first}:${second}`, best);
+  const findOverlap = (left: Box[], right: Box[], match: 'first' | 'largest'): Box | null => {
+    let best: Box | null = null;
+    const leftCount = Math.min(left.length, maxOverlapLines);
+    const rightCount = Math.min(right.length, maxOverlapLines);
+    for (let i = 0; i < leftCount; i++) {
+      const a = left[i];
+      for (let j = 0; j < rightCount; j++) {
+        const b = right[j];
+        const box = { left: Math.max(a.left, b.left), top: Math.max(a.top, b.top), right: Math.min(a.right, b.right), bottom: Math.min(a.bottom, b.bottom) };
+        const width = box.right - box.left;
+        const height = box.bottom - box.top;
+        const minLineHeight = Math.min(a.bottom - a.top, b.bottom - b.top);
+        if (width >= 2 && height >= Math.max(1, minLineHeight * 0.3)) {
+          if (match === 'first')
+            return box;
+          if (!best || area(box) > area(best))
+            best = box;
         }
       }
     }
-    return pairs;
+    return best;
+  };
+
+  const verticalSpan = (lines: Box[]) => {
+    let top = Infinity;
+    let bottom = -Infinity;
+    const count = Math.min(lines.length, maxOverlapLines);
+    for (let i = 0; i < count; i++) {
+      top = Math.min(top, lines[i].top);
+      bottom = Math.max(bottom, lines[i].bottom);
+    }
+    return { top, bottom };
   };
 
   const waitForLayout = () => new Promise<void>(resolve => {
@@ -467,19 +471,33 @@ export async function measureTextSpacing(args: TextSpacingMeasureArgs): Promise<
       });
     });
 
-    const baselineOverlaps = overlapPairs(before);
+    const entries = after.flatMap((phase, index) => {
+      const lines = phase?.visibleLines;
+      if (!lines?.length)
+        return [];
+      return [{ index, lines, ...verticalSpan(lines), baseline: verticalSpan(before[index].visibleLines) }];
+    }).sort((a, b) => a.top - b.top);
     const overlaps: TextSpacingOverlap[] = [];
-    for (const [key, box] of overlapPairs(after)) {
-      if (baselineOverlaps.has(key))
-        continue;
-      const [first, second] = key.split(':').map(Number);
-      overlaps.push({
-        selector: selectorFor(candidates[first]),
-        text: textSample(candidates[first]),
-        otherSelector: selectorFor(candidates[second]),
-        otherText: textSample(candidates[second]),
-        overlap: union([box]),
-      });
+    for (let i = 0; i < entries.length; i++) {
+      const a = entries[i];
+      for (let j = i + 1; j < entries.length && entries[j].top < a.bottom; j++) {
+        const b = entries[j];
+        const box = findOverlap(a.lines, b.lines, 'largest');
+        if (!box)
+          continue;
+        const couldOverlapBefore = a.baseline.top < b.baseline.bottom && b.baseline.top < a.baseline.bottom;
+        if (couldOverlapBefore && findOverlap(before[a.index].visibleLines, before[b.index].visibleLines, 'first'))
+          continue;
+        const first = candidates[Math.min(a.index, b.index)];
+        const second = candidates[Math.max(a.index, b.index)];
+        overlaps.push({
+          selector: selectorFor(first),
+          text: textSample(first),
+          otherSelector: selectorFor(second),
+          otherText: textSample(second),
+          overlap: union([box]),
+        });
+      }
     }
 
     return {

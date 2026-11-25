@@ -217,23 +217,28 @@ export class BrowserServerBackend implements ServerBackend {
     const routedSessionId = this._routedSessionId(name, rawArguments);
     const parsedArguments = parseToolArguments(tool, rawArguments);
     const context = this._contextFor(routedSessionId);
+    if (this._ephemeralDefaultContext && routedSessionId === undefined && name === 'scan_page' && parsedArguments.retainFindings)
+      throw new Error('Stateless requests need an explicit browserSessionId to retain findings between calls.');
     const responseArguments = routedSessionId !== undefined ? { browserSessionId: routedSessionId, ...parsedArguments } : parsedArguments;
     const closingSessionContext = name === 'browser_session_close' ? this._sessionContextOrUndefined(parsedArguments.browserSessionId) : undefined;
-    const response = new Response(context, name, responseArguments, requestContext, context.currentTab()?.modalStates());
+    const response = new Response(context, name, responseArguments, requestContext, tool.browserless ? undefined : context.currentTab()?.modalStates());
+    let sessionLog: SessionLog | undefined;
     let endToolCall: (() => void) | undefined;
     try {
       endToolCall = context.beginToolCall(name, tool.exclusive);
-      if (!toolsThatSkipIdleResume.has(name)) {
+      const tabLookup = name === 'browser_tabs' && (parsedArguments.action === 'select' || parsedArguments.action === 'close');
+      if (!tool.browserless && !toolsThatSkipIdleResume.has(name) && !tabLookup) {
         const idleNotice = await context.resumeAfterIdle();
         if (idleNotice)
           response.addNotice(idleNotice);
       }
       await tool.handle(context, parsedArguments, response, requestContext?.signal);
-      await response.finish();
+      if (!tool.browserless)
+        await response.finish();
       if (name === 'browser_session_close')
         await this._logClosedSession(closingSessionContext, response);
       else
-        (await this._sessionLogFor(context, routedSessionId))?.logResponse(response);
+        sessionLog = await this._sessionLogFor(context, routedSessionId);
     } catch (error) {
       await response.cleanupFilesOnError().catch(logUnhandledError);
       response.addError(String(error));
@@ -242,8 +247,9 @@ export class BrowserServerBackend implements ServerBackend {
       if (routedSessionId !== undefined)
         this._sessionRegistry?.touch(routedSessionId);
     }
-    void this._webmcpObserver?.refresh();
-    return response.serialize();
+    if (!tool.browserless)
+      void this._webmcpObserver?.refresh();
+    return response.serialize(() => sessionLog?.logResponse(response));
   }
 
   private _sessionLogFor(context: Context, browserSessionId: string | undefined): Promise<SessionLog | undefined> {

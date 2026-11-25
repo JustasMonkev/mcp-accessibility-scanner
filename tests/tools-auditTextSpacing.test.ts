@@ -167,10 +167,10 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
     await page?.close();
   });
 
-  async function measure(html: string, maxElements = 500) {
+  async function measure(html: string, maxElements = 500, maxOverlapLines = 200) {
     page = await browser.newPage({ viewport: { width: 800, height: 600 } });
     await page.setContent(`<!doctype html><html><body style="font: 16px/1.2 sans-serif; margin: 8px">${html}</body></html>`);
-    return page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements, maxOverlapLines: 200, overrides: textSpacingOverrides });
+    return page.evaluate(measureTextSpacing, { layerName: `${textSpacingLayerPrefix}test`, maxElements, maxOverlapLines, overrides: textSpacingOverrides });
   }
 
   it('reports nothing for content that reflows with the spacing', async () => {
@@ -216,6 +216,52 @@ describe.skipIf(!hasBundledChromium)('measureTextSpacing in a real page', () => 
         <span id="over" style="position: absolute; left: 10px">overlapping</span>
       </div>`);
     expect(result.overlaps).toEqual([expect.objectContaining({ selector: '#left', otherSelector: '#right', text: 'Left label text', otherText: 'Right' })]);
+  });
+
+  it.each([1, 2, 3])('uses the first %i visible lines in both phases, retaining sweep order and the first largest box', async maxLines => {
+    const result = await measure(`
+      <style>
+        span { position: absolute; font: 20px/1 monospace; white-space: pre; left: 0; }
+        .lower { top: 160px; }
+        .upper { top: 0; }
+      </style>
+      <span class="lower" id="short-first">XX<br>XXXXXXXXXXXXXXXXXXXX</span>
+      <span class="lower" id="moves-closer" style="left: calc(240px - 8lh)">x<br>x</span>
+      <span class="upper" id="wide">XXXXXXXXXX<br>XXXXXXXXXX<br>XXXXXXXXXX</span>
+      <span class="upper" id="moves-in" style="left: calc(1500px - 50lh)">xx<br>yyyy<br>zzzz</span>`, 500, maxLines);
+    // At 30px line-height both peers have moved to x=0. Their text rectangles
+    // are wholly inside the wider labels, so they give font-independent expected coordinates.
+    await page.evaluate(applyTextSpacing, { layerName: textSpacingLayerPrefix + 'expected', overrides: textSpacingOverrides });
+    const boxes = await page.evaluate(cap => {
+      const rect = (id: string, line: number) => {
+        const range = document.createRange();
+        range.selectNodeContents(document.getElementById(id)!.childNodes[line * 2]);
+        const { x, y, width, height } = range.getBoundingClientRect();
+        const round = (n: number) => Math.round(n * 10) / 10;
+        return { x: round(x), y: round(y), width: round(width), height: round(height) };
+      };
+      return { upper: rect('moves-in', cap === 1 ? 0 : 1), lower: rect('moves-closer', 0) };
+    }, maxLines);
+    const expected = [{ selector: '#wide', otherSelector: '#moves-in', overlap: boxes.upper }];
+    // The lower pair already overlapped on line two, but not on line one.
+    if (maxLines === 1)
+      expected.push({ selector: '#short-first', otherSelector: '#moves-closer', overlap: boxes.lower });
+    expect(result.overlaps.map(({ selector, otherSelector, overlap }) => ({ selector, otherSelector, overlap }))).toEqual(expected);
+    expect(result.overlapLinesTruncated).toBe([4, 2, 0][maxLines - 1]);
+  });
+
+  it('does not suppress a new overlap because baseline line 201 intersected', async () => {
+    const lines = Array<string>(201).fill('wide label').join('<br>');
+    const result = await measure(`
+      <style>span { position: absolute; left: 0; font: 20px/1 monospace; white-space: pre; }</style>
+      <span id="lines" style="top: 0">${lines}</span>
+      <span id="peer" style="top: calc(12000px - 400lh)">peer</span>`);
+    // At 20px line-height the peer is at y=4000 (line 201); at 30px it is at y=0.
+    expect(result.overlaps).toEqual([expect.objectContaining({ selector: '#lines', otherSelector: '#peer' })]);
+    expect(result.overlapLinesTruncated).toBe(1);
+    const uncapped = await page.evaluate(measureTextSpacing, { layerName: textSpacingLayerPrefix + 'control', maxElements: 500, maxOverlapLines: 201, overrides: textSpacingOverrides });
+    expect(uncapped.overlaps).toEqual([]);
+    expect(uncapped.overlapLinesTruncated).toBe(0);
   });
 
   it('flags paragraph spacing that pushes text out of a fixed-height box', async () => {

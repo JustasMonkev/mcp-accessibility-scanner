@@ -5,7 +5,7 @@ import { chromium } from 'playwright';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { assertRuleOptionsValid, axeRuleSchemaShape, axeTagValues, defaultAxeTags, dedupeAxeNodes, prepareAxeResults, runAxeScan, summarizeAxeViolations, trimAxeResults } from '../src/tools/axe.js';
+import { assertRuleOptionsValid, axeRuleSchemaShape, axeTagValues, defaultAxeTags, prepareAxeResults, runAxeScan, summarizeAxeViolations, trimAxeResults } from '../src/tools/axe.js';
 
 // The scan drives the page itself: axe-core is injected into every frame, then
 // run in the main one. The fake page records what the run was asked to do, and
@@ -167,7 +167,7 @@ describe('axe helpers', () => {
 
   it('dedupes nodes by target and html', () => {
     const nodes = [node('#a', '<a>'), node('#a', '<a>'), node('#a', '<b>'), node('#b', '<a>')];
-    expect(dedupeAxeNodes(nodes)).toHaveLength(3);
+    expect(prepareAxeResults([violation('rule', nodes)], 1).deduped[0].nodes).toEqual([nodes[0], nodes[2], nodes[3]]);
   });
 
   it('trims node lists per violation and normalizes missing fields', () => {

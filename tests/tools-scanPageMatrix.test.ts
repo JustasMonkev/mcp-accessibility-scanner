@@ -304,6 +304,50 @@ describe('scan_page_matrix tool', () => {
     expect(response.result()).toContain('mobile | 2 | 6 | 0 | label');
   });
 
+  it('compares distinct, structured target paths beyond the node detail cap, independently of HTML and order', async () => {
+    const common = ['#always'];
+    // Each pair would collide if the frame/shadow path were flattened.
+    const inShadow: axe.AxeNode['target'] = ['#frame', ['#host', 'img']];
+    const inFrames = ['#frame', '#host', 'img'];
+    const baselinePaths = [common, inShadow, ['#before'], ['#before']];
+    const mobilePaths = [common, inFrames, ['#after'], ['#after']];
+    const makeScan = (paths: axe.AxeNode['target'][], htmlPrefix: string) => {
+      const scan = createAxeResult('https://example.com/page', ['image-alt']);
+      scan.violations[0].nodes = paths.map((target, index) => ({
+        target, html: `<img data-state="${htmlPrefix}-${index}">`, failureSummary: null,
+      }));
+      return scan;
+    };
+    const scan = vi.spyOn(axe, 'runAxeScan')
+        .mockResolvedValueOnce(makeScan(baselinePaths, 'desktop'))
+        .mockResolvedValueOnce(makeScan(mobilePaths, 'mobile'))
+        .mockResolvedValueOnce(makeScan([...baselinePaths].reverse(), 'reordered'));
+    const { response } = createMatrixHarness('/tmp/scan-target-changes.json');
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({
+      variants: [{ name: 'baseline' }, { name: 'mobile' }, { name: 'reordered' }],
+      maxNodesPerViolation: 1,
+      waitAfterApplyMs: 0,
+    }), response);
+
+    const { variants } = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(scan).toHaveBeenCalledTimes(3);
+    for (const variant of variants) {
+      expect(variant.summary.totalNodes).toBe(4);
+      expect(variant.diffFromBaseline).toEqual({ newViolationIds: [], resolvedViolationIds: [], changedCounts: {} });
+    }
+    expect(variants[1].violations[0].nodes.map((node: axe.AxeNode) => node.target)).toEqual([common]);
+    expect(variants[0].targetChangesFromBaseline).toEqual({});
+    expect(variants[1].targetChangesFromBaseline).toEqual({
+      'image-alt': { added: { count: 2, samples: [inFrames] }, removed: { count: 2, samples: [inShadow] } },
+    });
+    expect(variants[2].targetChangesFromBaseline).toEqual({});
+    expect(response.structuredContent()).toMatchObject({ variants: [
+      { changedTargetRuleIds: [] }, { changedRuleIds: [], changedTargetRuleIds: ['image-alt'] }, { changedTargetRuleIds: [] },
+    ] });
+    expect(response.result()).toContain('mobile | 1 | 4 | 0 | - | 1');
+  });
+
   it.each([
     { name: 'resolution', baselineViolations: ['image-alt'], baselineIncomplete: [], variantViolations: [], variantIncomplete: ['image-alt'] },
     { name: 'introduction', baselineViolations: [], baselineIncomplete: ['image-alt'], variantViolations: ['image-alt'], variantIncomplete: [] },
@@ -326,6 +370,7 @@ describe('scan_page_matrix tool', () => {
     const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
     expect(report.version).toBe('v2');
     expect(report.variants[1].diffFromBaseline).toBeNull();
+    expect(report.variants[1].targetChangesFromBaseline).toBeNull();
     expect(report.variants[1].comparisonIncompleteRuleIds).toEqual(['image-alt']);
     expect(report.variants[0].comparisonIncompleteRuleIds).toEqual(
         testCase.baselineViolations.length && testCase.baselineIncomplete.length ? ['image-alt'] : []
@@ -341,7 +386,7 @@ describe('scan_page_matrix tool', () => {
       variants: [{}, {
         totalIncomplete: null,
         comparisonIncompleteRuleIds: ['image-alt'],
-        newViolationIds: null, resolvedViolationIds: null, changedRuleIds: null,
+        newViolationIds: null, resolvedViolationIds: null, changedRuleIds: null, changedTargetRuleIds: null,
       }],
     });
     expect(response.result()).toContain('n/a (incomplete checks: image-alt)');
@@ -389,6 +434,10 @@ describe('scan_page_matrix tool', () => {
     expect(report.variants[1].diffFromBaseline).toEqual({
       newViolationIds: ['label'], resolvedViolationIds: ['image-alt'],
       changedCounts: { 'image-alt': { baseline: 1, variant: 0 }, 'label': { baseline: 0, variant: 1 } },
+    });
+    expect(report.variants[1].targetChangesFromBaseline).toEqual({
+      'image-alt': { added: { count: 0, samples: [] }, removed: { count: 1, samples: [['#target']] } },
+      'label': { added: { count: 1, samples: [['#target']] }, removed: { count: 0, samples: [] } },
     });
     expect(response.structuredContent()).toMatchObject({ variants: [{ comparisonIncompleteRuleIds: [] }, { comparisonIncompleteRuleIds: [] }] });
   });
@@ -588,6 +637,7 @@ describe('scan_page_matrix tool', () => {
     expect(report.variants[0].diffFromBaseline).not.toBeNull();
     // "label" is absent from the variant only because a frame went unscanned.
     expect(report.variants[1].diffFromBaseline).toBeNull();
+    expect(report.variants[1].targetChangesFromBaseline).toBeNull();
 
     const structured = response.structuredContent() as any;
     expect(structured.version).toBe('v2');
@@ -595,7 +645,8 @@ describe('scan_page_matrix tool', () => {
     expect(structured.variants[1].resolvedViolationIds).toBeNull();
     expect(structured.variants[1].newViolationIds).toBeNull();
     expect(structured.variants[1].changedRuleIds).toBeNull();
-    expect(response.result()).toContain('n/a (coverage differs)');
+    expect(structured.variants[1].changedTargetRuleIds).toBeNull();
+    expect(response.result()).toContain('n/a (coverage differs) | n/a');
   });
 
   it('reports no delta on a complete variant when the baseline is the incomplete one', async () => {
@@ -621,6 +672,8 @@ describe('scan_page_matrix tool', () => {
 
     const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
     // Neither row is comparable: the baseline is the one with the gap.
+    expect(report.variants[0].targetChangesFromBaseline).toBeNull();
+    expect(report.variants[1].targetChangesFromBaseline).toBeNull();
     expect(report.variants[0].diffFromBaseline).toBeNull();
     expect(report.variants[1].diffFromBaseline).toBeNull();
     expect(report.variants[1].unscannedFrames).toEqual([]);

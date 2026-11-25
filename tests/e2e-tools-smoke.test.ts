@@ -44,6 +44,11 @@ const homeHtml = `<!doctype html>
       button:focus {
         outline: 2px solid #005fcc;
       }
+      #mobile-search { display: none; }
+      @media (max-width: 600px) {
+        #mobile-search { display: inline-block; }
+        #desktop-search { display: none; }
+      }
     </style>
   </head>
   <body>
@@ -54,6 +59,9 @@ const homeHtml = `<!doctype html>
     <main id="main">
       <input aria-label="Search" />
       <button type="button">Open menu</button>
+      <button id="settings"><span aria-hidden="true">⚙</span></button>
+      <button id="desktop-search"><span aria-hidden="true">⌕</span></button>
+      <button id="mobile-search"><span aria-hidden="true">⌕</span></button>
     </main>
   </body>
 </html>`;
@@ -256,8 +264,8 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
         { name: 'baseline' },
         { name: 'mobile', viewport: { width: 390, height: 844 } },
       ],
-      violationsTag: ['wcag2aa'],
-      maxNodesPerViolation: 5,
+      withRules: ['button-name'],
+      maxNodesPerViolation: 1,
       waitAfterApplyMs: 50,
       reloadBetweenVariants: true,
     });
@@ -267,6 +275,17 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
     const matrixReport = JSON.parse(await fs.promises.readFile(matrixReportPath, 'utf-8'));
     expect(matrixReport.variants).toHaveLength(2);
     expect(matrixReport.variants[0].name).toBe('baseline');
+    for (const row of matrixReport.variants) {
+      expect(row.nodeCountByRuleId).toEqual({ 'button-name': 2 });
+      expect(row.violations[0].nodes.map((node: { target: string[] }) => node.target)).toEqual([['#settings']]);
+      expect(row.diffFromBaseline.changedCounts).toEqual({});
+    }
+    expect(matrixReport.variants[1].targetChangesFromBaseline).toEqual({
+      'button-name': {
+        added: { count: 1, samples: [['#mobile-search']] },
+        removed: { count: 1, samples: [['#desktop-search']] },
+      },
+    });
     expect(matrixResult.structuredContent).toMatchObject({
       kind: 'scan_page_matrix',
       report: {
@@ -275,7 +294,7 @@ describe.skipIf(!canRunE2E)('E2E smoke: accessibility tools', () => {
       baselineVariant: 'baseline',
       variants: [
         expect.objectContaining({ name: 'baseline' }),
-        expect.objectContaining({ name: 'mobile' }),
+        expect.objectContaining({ name: 'mobile', changedRuleIds: [], changedTargetRuleIds: ['button-name'] }),
       ],
     });
     expect(extractResourceLinks(matrixResult as any)).toEqual([

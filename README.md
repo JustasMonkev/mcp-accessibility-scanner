@@ -429,7 +429,7 @@ Failed download saves are reported as tool errors in the current or next respons
 
 Use `--timeout-settle` or `PLAYWRIGHT_MCP_TIMEOUT_SETTLE` to override the post-action settle delay. CLI values take precedence over environment and file configuration, including `0`. Empty or whitespace-only numeric timeout environment variables are ignored, preserving file configuration or defaults. The default remains `500` ms. Zero skips the settle delay and briefly allows pending browser events to arrive. The server still waits for observed requests and main-frame navigations, but can return before delayed page updates.
 
-Use `--timeout-idle 300000`, `timeouts.idle`, or `PLAYWRIGHT_MCP_TIMEOUT_IDLE` to release the default browser after five idle minutes. Shared contexts stay open while any client is working; the idle window starts after the last tool call or download finishes. Explicit recordings prevent idle release until `browser_stop_recording` finishes; passive `--save-session` capture does not. Cleanup finalizes traces. The next browser tool call reopens the connection and includes a note to navigate again and refresh element references. Attached CDP, extension, and VS Code browsers are disconnected; their external pages remain open. Close and session-management tools do not relaunch an idle browser. Explicit `browser_session_open` handles keep their separate `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` behavior. Zero disables this feature; blank environment values leave the existing configuration unchanged.
+Use `--timeout-idle 300000`, `timeouts.idle`, or `PLAYWRIGHT_MCP_TIMEOUT_IDLE` to release the default browser after five idle minutes. Shared contexts stay open while any client is working; the idle window starts after the last tool call or download finishes. Explicit recordings prevent idle release until `browser_stop_recording` finishes; passive `--save-session` capture does not. Cleanup finalizes traces. The next browser tool call reopens the connection and includes a note to navigate again and refresh element references. Attached CDP, extension, and VS Code browsers are disconnected; their external pages remain open. Close and session-management tools and `get_scan_findings` do not relaunch an idle browser. Explicit `browser_session_open` handles keep their separate `PLAYWRIGHT_MCP_BROWSER_SESSION_TTL_MS` behavior. Zero disables this feature; blank environment values leave the existing configuration unchanged.
 
 The VS Code `browser_connect` tool accepts only `playwright` or `playwright-core` libraries and loopback WebSocket URLs. `connectionString` and `lib` are optional strings; to disconnect, omit them rather than sending `null`, which is rejected as invalid input. Set `PLAYWRIGHT_MCP_VSCODE_ALLOW_REMOTE=1` to allow remote endpoints, which must use `wss:`. URL userinfo credentials are rejected.
 
@@ -552,7 +552,7 @@ See [WebMCP usage, limits and tests](https://github.com/JustasMonkev/mcp-accessi
 
 The MCP server provides comprehensive browser automation and accessibility scanning tools:
 
-### Core Accessibility Tool
+### Core Accessibility Tools
 
 #### `scan_page`
 Performs a comprehensive accessibility scan on the current page using Axe-core.
@@ -560,7 +560,8 @@ Performs a comprehensive accessibility scan on the current page using Axe-core.
 **Parameters:**
 - `violationsTag`: Array of WCAG/violation tags to check
 - `includeIncomplete` (default `true`): also report Axe "incomplete" results
-- `maxNodesPerViolation` (default `10`): cap on node details reported per rule; occurrence totals use all deduplicated findings, not the capped sample
+- `retainFindings` (default `false`): keep all deduplicated findings in memory; the inline sample stays capped. To retrieve those findings later, `get_scan_findings` must also be enabled for the client
+- `maxNodesPerViolation` (1–50, default `10`): cap on node details reported per rule; occurrence totals use all deduplicated findings, not the capped sample
 - `includeSelectors` / `excludeSelectors`: CSS selectors that scope the scan
 - `withRules` / `disableRules`: Axe rule ids that narrow which rules run
 - `annotateScreenshot` (default `false`): capture an annotated screenshot of the violations
@@ -611,6 +612,21 @@ A nested frame is reported when any frame above it went unscanned, even if its o
 
 A frame you scoped out yourself is not reported: with `excludeSelectors: ["iframe.intercom-frame"]` that widget failing to load is the outcome you asked for, not a gap. Scope is resolved through the whole frame chain and across shadow boundaries, so an `includeSelectors` entry naming an ancestor still covers frames nested several levels below it or inside a shadow root, and excluding an outer frame or a shadow host silences everything inside it. Anything the check cannot resolve is reported rather than hidden.
 
+#### `get_scan_findings`
+
+Use this read-only tool to page through the evidence from **one observation**, even after navigating away. It reads memory, not the current page. Start with:
+
+```text
+scan_page {"withRules":["image-alt"],"maxNodesPerViolation":2,"retainFindings":true}
+get_scan_findings {"scanId":"<returned scanId>","ruleId":"image-alt","outcome":"violation","offset":0,"limit":25}
+```
+
+An opted-in scan returns an opaque `scanId` in text and in MCP `structuredContent`, alongside a structured `rules` index of `{ruleId, outcome, count}`. Counts are deduplicated nodes before the inline cap. Outcomes are `violation` and `incomplete`; with `includeIncomplete: false`, incomplete entries are neither indexed nor retained. Passes and inapplicable rules have no retained nodes.
+
+Lookup returns the original Axe `target`, `html`, and `failureSummary` for each node in scan order, subject to configured URL-parameter redaction. Use `nextOffset` for the next request; `null` means finished. The zero-based `offset` defaults to 0 and must not exceed `total`. The integer `limit` defaults to 10 and must be 1–50.
+
+Only the latest **successfully retained** scan in the same browser session is available. A new retained scan replaces it; navigation, ordinary scans, and failed or cancelled scans do not. Closing or expiring the session, or restarting the server, loses the evidence. Pass the same `browserSessionId` if one was used for the scan; stateless HTTP requires an explicit session. Unknown, replaced and foreign scan IDs all return the same unavailable error. No scan report file is written. As with other tools, `--save-session` logs the returned text when enabled, but replaces scan IDs with redacted labels. If the rule index and node records exceed 1 MiB of UTF-8 JSON, the scan still returns its inline results and counts, but `scanId` is `null` with a reason. No partial evidence is retained and any previous retained scan remains available.
+
 ### Audit Tools
 
 #### `audit_site`
@@ -618,7 +634,8 @@ Crawls and scans multiple internal pages, then aggregates violations across the 
 - Default strategy: link-based BFS from the current URL
 - Audits up to `concurrency` pages at once (default `4`, max `8`), each in its own temporary tab, so page loads, settle waits and Axe runs overlap. This makes a crawl about 2-2.4x faster on a 4-core machine (benchmark crawl caps of 6 and 12 pages). Links each page discovers are queued in the order pages were visited, not the order they finished, so the pages scanned, their order, depth and `discoveredFrom`, and the aggregated findings are the same as with `concurrency: 1`. Use `concurrency: 1` when pages depend on `sessionStorage` written by earlier crawled pages, since each tab has its own, or when you want a lost session cookie pinned on exactly one page.
 - Supports `links`, `nav`, `sitemap`, and `provided` URL strategies. Trailing slashes are preserved; sitemap locations decode XML entities while preserving literal CDATA content.
-- Sitemap URLs and every redirect must pass the server network policy and crawl scope. Fetches run on the MCP host, use HTTP(S) without browser cookies or auth headers, and have a 15-second total timeout, 20-redirect cap, and 10 MiB response limit. Browser proxy settings, `browser.remoteEndpoint`, `browser.cdpEndpoint` (including loopback endpoints, which may tunnel to remote browsers), `--extension`, switched `browser_connect` providers, and custom contexts from `createConnection(config, contextGetter)` are rejected for this strategy; use `provided` URLs in these modes. Sitemap TLS certificates must be valid even when browser HTTPS errors are ignored.
+- The `sitemap` strategy accepts a flat `urlset` or a `sitemapindex`. It expands nested indexes breadth-first in listed order and fetches each distinct manifest URL once. Only page entries from the URL sets participate in `maxPages` and `pageSelection`; child manifests and extension locations (such as images) do not. Each selected page’s `discoveredFrom` identifies the first URL set that listed it, after manifest redirects.
+- The root sitemap, every child, and every redirect must pass the server network policy, crawl origin and path exclusions. Fetches run on the MCP host over HTTP(S) without browser cookies or auth headers. Expansion shares a 15-second timeout, 64 HTTP requests (including redirects), and 10 MiB of XML across all manifests, with at most 20 redirects per chain. An unreadable manifest or exceeded limit fails the audit before any page is scanned; no partial report is written. Browser proxy settings, `browser.remoteEndpoint`, `browser.cdpEndpoint` (including loopback endpoints, which may tunnel to remote browsers), `--extension`, switched `browser_connect` providers, and custom contexts from `createConnection(config, contextGetter)` are rejected for this strategy; use `provided` URLs in these modes. Sitemap TLS certificates must be valid even when browser HTTPS errors are ignored.
 - Always writes a JSON report (default filename: `audit-site-{timestamp}-{token}.json`). Per-page `summary.totalNodes`, `byImpact`, and `byRuleId` count all deduplicated violation nodes; `maxNodesPerViolation` only limits the saved node details.
 - `pageSelection` decides which listed URLs fill `maxPages` when a `sitemap` or `provided` list is longer than the budget. `discovery` (default) takes them in listed order. `representative` builds a tree of the listed URLs by host, path segment, and then query parameter. Numeric, UUID, and long hex segments and values are masked, so `/products/1` and `/products/2` (or `?id=1` and `?id=2`) share a template, while `?page=home` and `?page=checkout` do not. URLs that share a template are treated as interchangeable. Fragment routing and client-side state cannot be told apart.
   - **Coverage rule:** when the pages allotted to a group of URLs (a host, a path prefix, or a query level) are at least the number of its branches, every branch gets a page. With `maxPages` at least the number of top-level sections, every section is scanned.
@@ -651,6 +668,8 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 - Each variant includes `comparisonIncompleteRuleIds` in JSON and structured output: the sorted rule IDs making its comparison uncertain, or `[]` when none do. The text table distinguishes missing-frame coverage from incomplete checks. These safeguards still apply with `includeIncomplete: false`; that option hides detailed findings, not comparison validity.
 - Unrelated incomplete-only rules do not suppress comparisons of confirmed violations. The baseline self-comparison is also unavailable if the same rule has both violating and incomplete nodes.
 - Summary totals and baseline count deltas use all deduplicated violation nodes, while saved node details remain capped by `maxNodesPerViolation`. Changing that cap does not change occurrence totals.
+- A rule can have the same count but different failing locations. The text table counts rules with changed target paths; `changedTargetRuleIds` in structured output names them. In the JSON report, each variant’s `targetChangesFromBaseline` maps those rule IDs to `added` (observed only in this variant) and `removed` (observed only in the baseline). Each has an exact distinct-path `count` and up to `maxNodesPerViolation` example paths in `samples`. The map is `{}` if no paths changed and `null` if the scans cannot be compared.
+- Paths are the selector arrays Axe observed, including frame and shadow boundaries. The path comparison ignores HTML and node order. Selectors do not establish element identity across renders, and a removed path does not establish that a violation was fixed.
 
 **Example flow:**
 ```text
@@ -965,7 +984,8 @@ Emulate CSS media features on the current page without resetting omitted feature
 
 #### `browser_tabs`
 Manage browser tabs in one tool.
-- Parameters: `action` (`list`, `new`, `close`, `select`), optional `index` (for `close` and `select`), and optional `isolatedContext` (upstream `@playwright/mcp` compatibility).
+- Parameters: `action` (`list`, `new`, `close`, `select`), zero-based `index` (required for `select`; for `close`, omit it only if this browser session already has a current tab), and optional `isolatedContext` (upstream `@playwright/mcp` compatibility).
+- Indexed `select` and `close` can attach to existing tabs without opening a new one. On a fresh stateless connection without a persistent browser session, pass the index explicitly: a previous request’s selection is not carried over.
 - Only `"default"` (or omitting `isolatedContext`) is accepted; other names are rejected rather than ignored. For a separate browser context, use [Browser Session Tools](#browser-session-tools): call `browser_session_open` and pass the returned `browserSessionId`.
 - If the browser context closes during tab creation, the request fails. Late-created pages receive bounded close attempts that verify whether the target closed; an unresponsive target cannot hold shutdown indefinitely.
 
@@ -1007,6 +1027,10 @@ Large `data:` URL payloads in console messages are truncated to their media type
 Returns the current request list, numbered so a single request can be inspected with `browser_network_request`. Set `all: true` to include up to 200 retained requests from earlier explicit `browser_navigate` calls, alongside all current requests.
 Large `data:` URL payloads in request URLs are truncated to their media type prefix.
 When there is at least one request, a closing line points at `browser_network_request`.
+
+To poll without repeating earlier traffic, pass the last listed ID as `afterId` (exclusive; start at `0`). Add a positive integer `limit` to page through matching requests in ascending ID order. IDs are assigned when the tab first observes a request, which can be when its response arrives. For example, if `{ "all": true, "limit": 10 }` reports `More requests available. Continue with afterId: 42.`, call again with `{ "all": true, "limit": 10, "afterId": 42 }`. Keep the same tab, session and `all` setting between pages. IDs need not be consecutive or still retained: the next page starts at the first visible ID greater than the cursor, skipping evicted requests.
+
+No continuation notice means the page reached the end of the matching requests at call time. For the next poll, use the last ID returned, or keep your cursor if the list was empty. New requests can then appear, but a later response to an already listed request does not re-emit its ID; use `browser_network_request` to check that request's status.
 
 #### `browser_network_request`
 Returns credential-redacted request/response headers and body metadata for one request from the `browser_network_requests` listing.

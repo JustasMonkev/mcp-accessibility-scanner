@@ -66,10 +66,10 @@ type LogEntry = {
   tabSnapshot?: TabSnapshot;
 };
 
-const sessionHandlePattern = /\bbs_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+const sessionHandlePattern = /\b(bs|scan)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 
 function redactSessionHandles(text: string): string {
-  return text.replace(sessionHandlePattern, handle => `bs_redacted_${createHash('sha256').update(handle).digest('hex').slice(0, 8)}`);
+  return text.replace(sessionHandlePattern, (handle, prefix: string) => `${prefix}_redacted_${createHash('sha256').update(handle).digest('hex').slice(0, 8)}`);
 }
 
 function renderUserAction(action: actions.Action, browserSessionId: string | undefined, code: string): string[] {

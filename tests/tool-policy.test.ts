@@ -97,14 +97,14 @@ describe('server instructions follow the tool policy', () => {
       + '`scan_page_matrix` to compare the current page across viewport, color-scheme, reduced-motion and zoom variants, `audit_keyboard` to check keyboard navigation, focus visibility and skip links, '
       + '`audit_screen_reader` to check accessible name quality and reading order, `audit_text_spacing` to check that text survives the WCAG 1.4.12 text spacing overrides '
       + 'without being clipped or overlapping, `audit_keyboard_operation` to exercise caller-defined keyboard steps and check their outcomes, and `audit_form_validation` to check caller-defined form errors and feedback after validation. Results are returned as markdown with axe-core rule ids, impact levels, '
-      + 'failure summaries and remediation links. Regular browser interaction tools (click, type, snapshot, screenshot, tabs) are also available for navigating to '
+      + 'failure summaries and remediation links. For all nodes from one observation, set retainFindings on `scan_page` and page through `get_scan_findings`. Regular browser interaction tools (click, type, snapshot, screenshot, tabs) are also available for navigating to '
       + 'the state you want to audit. To work with several separate browsers at once, `browser_session_open` returns a browserSessionId that the non-session browser '
       + 'tools accept as an optional argument; omit it to use the default session, and close extra sessions with `browser_session_close` when done. Modes that share '
       + 'one live browser context (non-isolated CDP attach, extension) reject browser_session_open instead of handing out a session that is not separate.');
     expect(serverInstructions({ blockedTools: [] })).toBe(serverInstructions({}));
   });
 
-  it.each(['browser_navigate', 'scan_page', 'audit_site', 'scan_page_matrix', 'audit_keyboard', 'audit_screen_reader', 'audit_text_spacing', 'audit_keyboard_operation', 'audit_form_validation', 'browser_session_open', 'browser_session_close'])(
+  it.each(['browser_navigate', 'scan_page', 'get_scan_findings', 'audit_site', 'scan_page_matrix', 'audit_keyboard', 'audit_screen_reader', 'audit_text_spacing', 'audit_keyboard_operation', 'audit_form_validation', 'browser_session_open', 'browser_session_close'])(
       'never names %s once it is blocked', async name => {
         const config = await resolveConfig({ blockedTools: [name] });
         const text = serverInstructions(config);

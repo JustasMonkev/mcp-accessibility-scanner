@@ -334,8 +334,21 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     return this._consoleMessages;
   }
 
-  requests(all = false): Map<number, Request> {
-    return all ? this._requests : new Map([...this._requests].filter(([id]) => id > this._navigationRequestId));
+  requests(all = false, afterId = 0, limit = Infinity): Map<number, Request> {
+    if (all && !afterId && limit === Infinity)
+      return this._requests;
+    const entries = new Map<number, Request>();
+    // Seek by stable ID so a poll near the end need not scan earlier traffic.
+    const oldest = this._requests.keys().next().value;
+    if (oldest === undefined)
+      return entries;
+    const first = Math.max(oldest, afterId + 1, all ? 1 : this._navigationRequestId + 1);
+    for (let id = first; id <= this._nextRequestId && entries.size < limit; ++id) {
+      const request = this._requests.get(id);
+      if (request)
+        entries.set(id, request);
+    }
+    return entries;
   }
 
   request(id: number): Request | undefined {

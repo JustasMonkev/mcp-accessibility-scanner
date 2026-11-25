@@ -14,6 +14,7 @@ import { HtmlPatternGroups } from '../utils/htmlPatterns.js';
 import { logUnhandledError } from '../utils/log.js';
 import { errorMessage } from '../utils/errors.js';
 import { isHttpUrl } from '../utils/httpUrl.js';
+import { extractSitemapPages } from '../utils/sitemap.js';
 import { selectRepresentativeUrls } from '../utils/representativeUrls.js';
 import {
   assertRuleOptionsValid,
@@ -217,11 +218,6 @@ function inferStartUrlFromProvidedUrls(urls: string[] | undefined): string | und
   return undefined;
 }
 
-function isExcludedByPath(candidate: URL, excludePatterns: RE2[]): boolean {
-  const value = `${candidate.pathname}${candidate.search}`;
-  return excludePatterns.some(pattern => pattern.test(value));
-}
-
 function normalizeUrl(rawUrl: string, baseUrl: URL, ignoredParams: Set<string>): URL | null {
   let url: URL;
   try {
@@ -288,95 +284,6 @@ async function readPage(page: Page, linkSelector: string): Promise<{ title: stri
 const allLinksSelector = 'a[href]';
 const navLinksSelector = 'nav a[href], header a[href], [role="navigation"] a[href]';
 
-const namedXmlEntities: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
-
-function invalidSitemapEntityError(): Error {
-  return new Error('Invalid XML entity in sitemap location.');
-}
-
-function isXmlCharacter(code: number): boolean {
-  return code === 9 || code === 10 || code === 13
-    || (code >= 0x20 && code <= 0xD7FF)
-    || (code >= 0xE000 && code <= 0xFFFD)
-    || (code >= 0x10000 && code <= 0x10FFFF);
-}
-
-function decodeXmlEntity(entity: string): string {
-  if (Object.hasOwn(namedXmlEntities, entity))
-    return namedXmlEntities[entity];
-  if (!/^#(?:[0-9]+|x[0-9a-fA-F]+)$/.test(entity))
-    throw invalidSitemapEntityError();
-  const code = entity.startsWith('#x') ? Number.parseInt(entity.slice(2), 16) : Number(entity.slice(1));
-  if (!isXmlCharacter(code))
-    throw invalidSitemapEntityError();
-  return String.fromCodePoint(code);
-}
-
-function decodeSitemapLocation(value: string): string {
-  const tokens = /<!\[CDATA\[|&([^&;]*);?/g;
-  const parts: string[] = [];
-  let copied = 0;
-  for (let token = tokens.exec(value); token; token = tokens.exec(value)) {
-    parts.push(value.slice(copied, token.index));
-    if (token[0] === '<![CDATA[') {
-      const end = value.indexOf(']]>', tokens.lastIndex);
-      if (end === -1)
-        throw new Error('Unterminated CDATA in sitemap location.');
-      parts.push(value.slice(tokens.lastIndex, end));
-      tokens.lastIndex = end + 3;
-    } else {
-      if (!token[0].endsWith(';'))
-        throw invalidSitemapEntityError();
-      parts.push(decodeXmlEntity(token[1]));
-    }
-    copied = tokens.lastIndex;
-  }
-  parts.push(value.slice(copied));
-  return parts.join('');
-}
-
-const maxSitemapBytes = 10 * 1024 * 1024;
-
-async function readSitemapBody(response: globalThis.Response): Promise<string> {
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for await (const chunk of response.body ?? []) {
-    size += chunk.length;
-    if (size > maxSitemapBytes)
-      throw new Error('Sitemap exceeds the 10 MiB limit.');
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-async function extractSitemapUrls(sitemapUrl: string, validateUrl: (input: string, base: URL) => string, signal?: AbortSignal): Promise<string[]> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
-  try {
-    for (let redirects = 0; ; redirects++) {
-      const response = await fetch(sitemapUrl, { redirect: 'manual', signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal, credentials: 'omit' });
-      if ([301, 302, 303, 307, 308].includes(response.status)) {
-        await response.body?.cancel();
-        const location = response.headers.get('location');
-        if (!location || redirects >= 20)
-          throw new Error('Sitemap redirect is missing Location or exceeds 20 redirects.');
-        sitemapUrl = validateUrl(location, new URL(sitemapUrl));
-        continue;
-      }
-      if (!response.ok) {
-        await response.body?.cancel();
-        throw new Error(`Failed to fetch sitemap ${sitemapUrl}: ${response.status} ${response.statusText}`);
-      }
-      const xmlText = await readSitemapBody(response);
-      return xmlText.matchAll(/<loc>([\s\S]*?)<\/loc>/gi)
-          .map(match => decodeSitemapLocation(match[1]).trim()).filter(Boolean).toArray();
-    }
-  } finally {
-    clearTimeout(timer);
-    controller.abort();
-  }
-}
-
 function parseSitemapUrl(input: string, base: URL, scope: CrawlScope, config: FullConfig): string {
   let url: URL;
   try {
@@ -388,12 +295,13 @@ function parseSitemapUrl(input: string, base: URL, scope: CrawlScope, config: Fu
     throw new Error(`Sitemap URL must use http:// or https://. Received "${input}".`);
   if (url.username || url.password)
     throw new Error('Sitemap URL must not contain credentials.');
-  if (!scope.allowsOrigin(url))
+  if (!scope.allowsOrigin(url) || scope.excludesPath(url))
     throw new Error(`Sitemap URL "${input}" is outside the allowed crawl scope (start origin ${scope.startUrl.origin}).`);
   const matches = (origin: string) => coreBundle.iso.urlMatches(undefined, url.href, `*://${origin}/**`);
   if (config.network.blockedOrigins?.some(matches) ||
       (config.network.allowedOrigins?.length && !config.network.allowedOrigins.some(matches)))
     throw new Error(`Sitemap URL "${input}" is blocked by the server network policy.`);
+  url.hash = '';
   return url.href;
 }
 
@@ -580,9 +488,14 @@ class CrawlScope {
     return isAllowedByOrigin(candidate, this.startUrl, this._params.sameOriginOnly, this._params.includeSubdomains);
   }
 
+  excludesPath(candidate: URL): boolean {
+    const path = candidate.pathname + candidate.search;
+    return this._excludePatterns.some(pattern => pattern.test(path));
+  }
+
   admit(rawUrl: string): string | null {
     const normalizedUrl = normalizeUrl(rawUrl, this.startUrl, this._ignoredParams);
-    if (!normalizedUrl || !this.allowsOrigin(normalizedUrl) || isExcludedByPath(normalizedUrl, this._excludePatterns))
+    if (!normalizedUrl || !this.allowsOrigin(normalizedUrl) || this.excludesPath(normalizedUrl))
       return null;
     return normalizedUrl.toString();
   }
@@ -614,26 +527,26 @@ class CrawlFrontier {
     this._queued.add(url);
   }
 
-  enqueueListed(rawUrls: string[], discoveredFrom: string | null, pageSelection: AuditSiteParams['pageSelection']): void {
+  enqueueListed(pages: Pick<CrawlItem, 'url' | 'discoveredFrom'>[], pageSelection: AuditSiteParams['pageSelection']): void {
     if (pageSelection !== 'representative') {
-      for (const url of rawUrls)
+      for (const { url, discoveredFrom } of pages)
         this.enqueue(url, 0, discoveredFrom);
       return;
     }
-    const candidates = new Set<string>();
-    for (const url of rawUrls) {
+    const candidates = new Map<string, string | null>();
+    for (const { url, discoveredFrom } of pages) {
       const admitted = this._admitUnseen(url);
       if (!admitted)
         continue;
       if (candidates.has(admitted))
         this.skippedUrls++;
       else
-        candidates.add(admitted);
+        candidates.set(admitted, discoveredFrom);
     }
-    const selected = selectRepresentativeUrls([...candidates], this._maxPages);
+    const selected = selectRepresentativeUrls([...candidates.keys()], this._maxPages);
     this.skippedUrls += candidates.size - selected.length;
     for (const url of selected)
-      this.enqueue(url, 0, discoveredFrom);
+      this.enqueue(url, 0, candidates.get(url) ?? null);
     this.representativeSelection = { candidates: candidates.size, selected: selected.length };
   }
 
@@ -786,14 +699,14 @@ async function seedFrontier(frontier: CrawlFrontier, scope: CrawlScope, params: 
   signal?.throwIfAborted();
   const startUrl = scope.startUrl;
   if (params.strategy === 'provided') {
-    frontier.enqueueListed(params.urls ?? [], null, params.pageSelection);
+    frontier.enqueueListed((params.urls ?? []).map(url => ({ url, discoveredFrom: null })), params.pageSelection);
     return;
   }
   if (params.strategy === 'sitemap') {
     assertSitemapFetchSupported(context);
     const validateUrl = (input: string, base: URL) => parseSitemapUrl(input, base, scope, context.config);
     const sitemapUrl = validateUrl(params.sitemapUrl ?? new URL('sitemap.xml', startUrl).toString(), startUrl);
-    frontier.enqueueListed(await extractSitemapUrls(sitemapUrl, validateUrl, signal), sitemapUrl, params.pageSelection);
+    frontier.enqueueListed(await extractSitemapPages(sitemapUrl, validateUrl, signal), params.pageSelection);
     return;
   }
   frontier.enqueue(startUrl.toString(), 0, null);

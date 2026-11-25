@@ -25,7 +25,7 @@ import { assertNetworkPolicySupported, ensureNetworkPolicyRoutes } from './netwo
 import { truncateDataUrls } from './utils/dataUrl.js';
 import { truncateWithMarker } from './utils/fileUtils.js';
 import { InputRecorder, recorderBufferMs } from './inputRecorder.js';
-import { rejectAfterTimeout, settleWithin } from './utils/timeout.js';
+import { rejectAfterTimeout, rejectOnAbort, settleWithin } from './utils/timeout.js';
 
 import type { FullConfig } from './config.js';
 import type { Tool } from './tools/tool.js';
@@ -35,6 +35,7 @@ import type { SessionLog } from './sessionLog.js';
 import type { RecordedAction, Recording, RecordingTarget } from './inputRecorder.js';
 
 const recorderControlTools = new Set(['browser_start_recording', 'browser_stop_recording']);
+const idleResumeNotice = 'The browser connection was released after inactivity and has been reopened. Use browser_navigate to navigate again if needed; previous element references are no longer valid.';
 const pageCloseTimeoutMs = 5_000;
 const pendingDownloadDrainTimeoutMs = 30_000;
 const maxRetainedDownloadErrors = 20;
@@ -254,6 +255,38 @@ export class Context {
     } finally {
       this._openingPages.delete(opening);
     }
+  }
+
+  async manageExistingTab(action: 'select' | 'close', index: number | undefined, signal?: AbortSignal): Promise<string | undefined> {
+    const actionSignal = signal ? AbortSignal.any([signal, this._abortController.signal]) : this._abortController.signal;
+    actionSignal.throwIfAborted();
+    if (index === undefined) {
+      if (action === 'select')
+        throw new Error('Tab index is required');
+      if (!this._browserContextPromise || !this._currentTab)
+        throw new Error('Tab index is required when this session has no current tab. List tabs first or specify an index.');
+      await this.closeTab(undefined);
+      return;
+    }
+    if (!this._browserContextPromise && this._browserContextFactory.createsEmptyContext)
+      throw new Error(`Tab ${index} not found`);
+
+    const idleClosing = this._idleClosePromise;
+    if (idleClosing)
+      await rejectOnAbort(() => idleClosing, actionSignal);
+    actionSignal.throwIfAborted();
+    const attaching = this._ensureBrowserContext();
+    await rejectOnAbort(() => attaching, actionSignal);
+    actionSignal.throwIfAborted();
+    if (this._browserContextPromise !== attaching)
+      throw new Error('The browser context closed during tab lookup.');
+    if (idleClosing === this._idleClosePromise)
+      this._idleClosePromise = undefined;
+    if (action === 'select')
+      await this.selectTab(index);
+    else
+      await this.closeTab(index);
+    return idleClosing ? idleResumeNotice : undefined;
   }
 
   async selectTab(index: number) {
@@ -531,7 +564,7 @@ export class Context {
     await this._idleClosePromise;
     await this._ensureBrowserContext();
     this._idleClosePromise = undefined;
-    return 'The browser connection was released after inactivity and has been reopened. Use browser_navigate to navigate again if needed; previous element references are no longer valid.';
+    return idleResumeNotice;
   }
 
   private _scheduleIdleTimeout() {

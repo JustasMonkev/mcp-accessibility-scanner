@@ -1130,6 +1130,7 @@ describe('Tab', () => {
       mockPage.emit('response', { request: () => requests[0] });
       expect(tab.requests(true).size).toBe(200);
       expect(tab.requests(true).has(1)).toBe(false);
+      expect(tab.requests(true, 201).size).toBe(0);
       const response = { request: () => requests[200] };
       mockPage.emit('response', response);
       expect(tab.requests().size).toBe(0);
