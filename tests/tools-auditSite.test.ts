@@ -1627,6 +1627,30 @@ describe('audit_site tool', () => {
     return `<urlset>${pages.map(page => `<url><loc>${page}</loc></url>`).join('')}</urlset>`;
   }
 
+  it('scans distinct slash templates and keeps their first listing manifest', async () => {
+    const base = 'https://example.com/';
+    const first = base + 'first.xml';
+    const next = base + 'next.xml';
+    const urls = ['items/1', 'items/2', 'items//3', 'items/4/'].map(path => base + path);
+    const { response } = createHarness({}, {
+      sitemapXmlByUrl: {
+        [base + 'sitemap.xml']: sitemapIndex(first, next),
+        [first]: urlset(urls[0], urls[1], urls[2] + '#first'),
+        [next]: urlset(urls[2] + '#again', urls[3]),
+      },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+    await tool.handle(response.context, tool.schema.inputSchema.parse({
+      strategy: 'sitemap', pageSelection: 'representative', maxPages: 3, waitAfterNavigationMs: 0,
+    }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { url: string, discoveredFrom: string }) => [page.url, page.discoveredFrom])).toEqual([
+      [urls[0], first], [urls[2], first], [urls[3], next],
+    ]);
+    expect(report.representativeSelection).toEqual({ candidates: 4, selected: 3 });
+  });
+
   it.each([
     { pageSelection: 'discovery', maxPages: 5, selected: ['blog/1', 'blog/2', 'blog/3', 'about', 'pricing'] },
     { pageSelection: 'discovery', maxPages: 3, selected: ['blog/1', 'blog/2', 'blog/3'] },

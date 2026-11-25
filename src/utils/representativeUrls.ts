@@ -14,7 +14,8 @@ const idSegment = /^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 
 function templateSegments(url: string): string[] {
   const parsed = new URL(url);
-  const path = parsed.pathname.split('/').filter(Boolean).map(segment => idSegment.test(segment) ? '' : segment);
+  // A slash cannot be a literal segment, even when the encoded path contains %2F.
+  const path = parsed.pathname === '/' ? [] : parsed.pathname.slice(1).split('/').map(segment => idSegment.test(segment) ? '/' : segment);
   if (!parsed.search)
     return [parsed.host, ...path];
   const entries = [...parsed.searchParams].sort(([a], [b]) => compareCodeUnits(a, b));
@@ -67,14 +68,16 @@ function coveredCount(part: Part): number {
   return part.kind === 'singles' ? part.size : 1;
 }
 
-function partCosts(part: Part, k: number, missCost: number): Float64Array {
+function partCosts(part: Part, k: number, depth: number): Float64Array {
   const costs = new Float64Array(Math.min(k, part.size) + 1);
-  costs[0] = part.size * missCost;
+  // Express each fork's costs in its own distance unit, even far below the root.
+  costs[0] = part.size;
+  const childUnit = part.kind === 'child' ? 2 ** (depth - part.child.depth) : 0;
   for (let count = 1; count < costs.length; count++) {
     if (part.kind === 'singles')
-      costs[count] = (part.size - count) * missCost;
+      costs[count] = part.size - count;
     else if (part.kind === 'child')
-      costs[count] = part.child.best[count];
+      costs[count] = part.child.best[count] * childUnit;
   }
   return costs;
 }
@@ -116,7 +119,14 @@ function solve(node: TreeNode, k: number) {
     node.best = new Float64Array(Math.min(k, node.size) + 1);
     return;
   }
-  for (const child of node.children.values()) {
+  // A path with thousands of segments need not consume thousands of stack frames.
+  // Only forks and terminals affect selection; retain their original depth for costs.
+  for (const [segment, start] of node.children) {
+    let child = start;
+    while (!child.terminal.length && child.children.size === 1)
+      [child] = child.children.values();
+    if (child !== start)
+      node.children.set(segment, child);
     if (child.size > 1)
       solve(child, k);
   }
@@ -126,8 +136,7 @@ function solve(node: TreeNode, k: number) {
     return;
   }
   const nodeParts = parts(node);
-  const missCost = 2 ** -node.depth;
-  const costs = nodeParts.map(part => partCosts(part, k, missCost));
+  const costs = nodeParts.map(part => partCosts(part, k, node.depth));
   node.parts = nodeParts;
   node.free = [];
   const free = mergeParts(nodeParts, costs, k, false, node.free);
