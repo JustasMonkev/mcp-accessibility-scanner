@@ -697,7 +697,8 @@ Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) wit
   to the containing block) are evaluated. The *user agent control*, *essential*, and *equivalent* exceptions cannot be
   detected from the DOM, so a target relying on one of them is still reported and needs manual triage.
 - Spacing neighbours use the same pointer-target rule as the focused element, so rendered `:disabled` controls are not
-  counted as neighbours, and `contenteditable` regions are counted as targets on both sides.
+  counted as neighbours, and `contenteditable` regions are counted as targets on both sides. At most 32 nearby
+  rectangles are saved per stop. If the spacing check fails, that sample includes a neighbour that explains why.
 - Target size uses the element's bounding box, so an inline target wrapped over several lines is measured as one
   union box rather than per line, and a target whose visible area is cut down by an `overflow` or `clip-path` ancestor
   is measured at its full unclipped size.

@@ -402,6 +402,17 @@ function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize,
   function nearbyPointerTargets(element: Element, rect: DOMRect): Rect[] {
     const neighbors: Rect[] = [];
     const reach = 2 * minTargetSize;
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    // Mirror the report's spacing test here so an oversized sample never crosses the browser boundary.
+    function intersectsSpacing(box: Rect): boolean {
+      const dx = Math.max(box.x - centerX, centerX - box.x - box.width, 0);
+      const dy = Math.max(box.y - centerY, centerY - box.y - box.height, 0);
+      if (Math.hypot(dx, dy) < minTargetSize / 2)
+        return true;
+      const undersized = box.width < minTargetSize || box.height < minTargetSize;
+      return undersized && Math.hypot(box.x + box.width / 2 - centerX, box.y + box.height / 2 - centerY) < minTargetSize;
+    }
     for (const candidate of document.querySelectorAll<HTMLElement>(pointerTargetSelector)) {
       if (candidate === element)
         continue;
@@ -414,9 +425,20 @@ function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize,
         || other.top > rect.bottom + reach;
       if (outOfRange || candidate.matches(':disabled'))
         continue;
-      neighbors.push({ x: other.x, y: other.y, width: other.width, height: other.height });
-      if (neighbors.length >= maxNeighborTargets)
+      const box = { x: other.x, y: other.y, width: other.width, height: other.height };
+      if (neighbors.length < maxNeighborTargets) {
+        neighbors.push(box);
+        if (neighbors.length === maxNeighborTargets && neighbors.some(intersectsSpacing))
+          break;
+        continue;
+      }
+
+      // A full diagnostic sample is not proof that the remaining targets are clear.
+      // Keep a later intersection in the last slot so the reported rectangles explain the finding.
+      if (intersectsSpacing(box)) {
+        neighbors[maxNeighborTargets - 1] = box;
         break;
+      }
     }
     return neighbors;
   }
