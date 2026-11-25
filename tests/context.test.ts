@@ -2145,10 +2145,251 @@ describe('Context', () => {
       });
 
       const endExclusive = context.beginToolCall('exclusive_tool', true);
-      expect(() => context.beginToolCall('browser_click')).toThrow('Tool "browser_click" is busy because an interactive audit is running in this browser context.');
-      expect(() => context.beginToolCall('other_exclusive_tool', true)).toThrow('Tool "other_exclusive_tool" is busy because interactive audits require exclusive access to this browser context.');
+      expect(() => context.beginToolCall('browser_click')).toThrow('Tool "browser_click" is busy because "exclusive_tool" requires exclusive access to this browser context.');
+      expect(() => context.beginToolCall('other_exclusive_tool', true)).toThrow('Tool "other_exclusive_tool" is busy because it requires exclusive access to this browser context and other tool calls are running.');
       endExclusive();
       context.beginToolCall('browser_click')();
+    });
+
+    it('admits only the dialog tool while an exclusive call runs', () => {
+      const dialogTool = { schema: { name: 'browser_handle_dialog' }, clearsModalState: 'dialog' } as any;
+      const fileTool = { schema: { name: 'browser_file_upload' }, clearsModalState: 'fileChooser' } as any;
+      const context = new Context({
+        tools: [],
+        modalStateTools: [dialogTool, fileTool],
+        config: defaultConfig,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      // A dialog opened during the exclusive call pauses the page; refusing
+      // the tool that answers it would leave the call waiting forever.
+      const endExclusive = context.beginToolCall('scan_page_matrix', true);
+      const endDialog = context.beginToolCall('browser_handle_dialog');
+      expect(() => context.beginToolCall('browser_file_upload')).toThrow('busy because "scan_page_matrix" requires exclusive access');
+      expect(() => context.beginToolCall('browser_click')).toThrow('busy because "scan_page_matrix" requires exclusive access');
+      endDialog();
+      endExclusive();
+      context.beginToolCall('browser_click')();
+    });
+
+    it('keeps exclusive access after the call returns until held work settles', async () => {
+      const dialogTool = { schema: { name: 'browser_handle_dialog' }, clearsModalState: 'dialog' } as any;
+      const context = new Context({
+        tools: [],
+        modalStateTools: [dialogTool],
+        config: defaultConfig,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+
+      // A restore left waiting on a dialog must not race later page changes.
+      let finishRestore!: () => void;
+      const restore = new Promise<void>(resolve => finishRestore = resolve);
+      const endScan = context.beginToolCall('scan_page_matrix', true);
+      context.holdExclusiveUntil('scan_page_matrix', restore);
+      endScan();
+
+      expect(() => context.beginToolCall('browser_resize')).toThrow('busy because "scan_page_matrix" requires exclusive access');
+      expect(() => context.beginToolCall('scan_page_matrix', true)).toThrow('busy');
+      context.beginToolCall('browser_handle_dialog')();
+      expect(context.isRunningTool()).toBe(true);
+
+      finishRestore();
+      await restore;
+      await Promise.resolve();
+      context.beginToolCall('browser_resize')();
+      expect(context.isRunningTool()).toBe(false);
+    });
+
+    it('releases a held exclusive access when the held work fails', async () => {
+      const context = new Context({
+        tools: [],
+        config: defaultConfig,
+        browserContextFactory: mockBrowserContextFactory,
+        sessionLog: undefined,
+        clientInfo: {},
+      });
+      const failed = Promise.reject(new Error('restore failed'));
+      context.holdExclusiveUntil('scan_page_matrix', failed);
+      expect(() => context.beginToolCall('browser_click')).toThrow('busy');
+      await failed.catch(() => {});
+      await Promise.resolve();
+      context.beginToolCall('browser_click')();
+    });
+
+    it('rejects another context\'s call on the page it resolves while a scan claims it, except answering a dialog', async () => {
+      const dialogTool = { schema: { name: 'browser_handle_dialog' }, clearsModalState: 'dialog' } as any;
+      const page = createMockPage();
+      page.bringToFront = vi.fn().mockResolvedValue(undefined);
+      mockBrowserContext.pages.mockReturnValue([page]);
+      const createContext = () => new Context({ tools: [], modalStateTools: [dialogTool], config: defaultConfig, browserContextFactory: mockBrowserContextFactory, sessionLog: undefined, clientInfo: {} });
+      const owner = createContext();
+      const other = createContext();
+      await owner.ensureTab();
+      await other.ensureTab();
+      const inCall = <T>(context: Context, name: string, work: () => Promise<T>) => {
+        const end = context.beginToolCall(name);
+        return context.runToolCall(end, work).finally(end);
+      };
+
+      // Each context admits its own calls, so only the page claim keeps a
+      // second client from changing what the owner's scan measures.
+      const claim = owner.claimPage('scan_page_matrix', page);
+      await expect(inCall(other, 'browser_emulate_media', async () => other.currentTabOrDie())).rejects.toThrow('Tool "browser_emulate_media" is busy because "scan_page_matrix", started by another client sharing this browser, requires exclusive access to this page');
+      await expect(inCall(other, 'browser_tabs', () => other.selectTab(0))).rejects.toThrow('busy');
+      await expect(inCall(other, 'browser_tabs', () => other.closeTab(0))).rejects.toThrow('busy');
+      expect(page.bringToFront).not.toHaveBeenCalled();
+      expect(() => other.claimPage('scan_page_matrix', page)).toThrow('busy');
+      await inCall(other, 'browser_handle_dialog', async () => other.currentTabOrDie());
+      // Admission does not guess the page: teardown and calls that never
+      // resolve the claimed page are admitted.
+      other.beginToolCall('browser_close')();
+      other.beginToolCall('browser_emulate_media')();
+      await inCall(owner, 'browser_click', async () => owner.currentTabOrDie());
+
+      claim.release();
+      await inCall(other, 'browser_emulate_media', async () => other.currentTabOrDie());
+      other.claimPage('scan_page_matrix', page).release();
+    });
+
+    it('rejects a cold context\'s first call that attaches to a claimed page', async () => {
+      const page = createMockPage();
+      mockBrowserContext.pages.mockReturnValue([page]);
+      const createContext = () => new Context({ tools: [], config: defaultConfig, browserContextFactory: mockBrowserContextFactory, sessionLog: undefined, clientInfo: {} });
+      const owner = createContext();
+      await owner.ensureTab();
+      const claim = owner.claimPage('scan_page_matrix', page);
+
+      // The newcomer has no current tab when admitted; the page it attaches
+      // to is only known once ensureTab resolves it.
+      const newcomer = createContext();
+      const end = newcomer.beginToolCall('browser_navigate');
+      await expect(newcomer.runToolCall(end, () => newcomer.ensureTab()).finally(end)).rejects.toThrow('busy because "scan_page_matrix"');
+      claim.release();
+    });
+
+    it('rejects timeout updates when any shared tab is claimed without mutating earlier tabs', async () => {
+      const [{ default: tabsTools }, { Response }] = await Promise.all([
+        import('../src/tools/tabs.js'),
+        import('../src/response.js'),
+      ]);
+      const navTimeoutTool = tabsTools.find(t => t.schema.name === 'browser_navigation_timeout')!;
+      const defaultTimeoutTool = tabsTools.find(t => t.schema.name === 'browser_default_timeout')!;
+      const unclaimedPage = createMockPage();
+      const claimedPage = createMockPage();
+      mockBrowserContext.pages.mockReturnValue([unclaimedPage, claimedPage]);
+      const createContext = () => new Context({ tools: [], config: defaultConfig, browserContextFactory: mockBrowserContextFactory, sessionLog: undefined, clientInfo: {} });
+      const owner = createContext();
+      const other = createContext();
+      await owner.ensureTab();
+      await other.ensureTab();
+      unclaimedPage.setDefaultNavigationTimeout = vi.fn();
+      unclaimedPage.setDefaultTimeout = vi.fn();
+      claimedPage.setDefaultNavigationTimeout = vi.fn();
+      claimedPage.setDefaultTimeout = vi.fn();
+      const inCall = <T>(context: Context, name: string, work: () => Promise<T>) => {
+        const end = context.beginToolCall(name);
+        return context.runToolCall(end, work).finally(end);
+      };
+
+      const claim = owner.claimPage('scan_page_matrix', claimedPage);
+      expect(other.tabs().map(tab => tab.page)).toEqual([unclaimedPage, claimedPage]);
+      await expect(inCall(other, 'browser_navigation_timeout', async () => {
+        await navTimeoutTool.handle(other, { timeout: 65000 }, new Response(other, 'browser_navigation_timeout', { timeout: 65000 }));
+      })).rejects.toThrow('Tool "browser_navigation_timeout" is busy because "scan_page_matrix", started by another client sharing this browser, requires exclusive access to this page');
+      await expect(inCall(other, 'browser_default_timeout', async () => {
+        await defaultTimeoutTool.handle(other, { timeout: 65000 }, new Response(other, 'browser_default_timeout', { timeout: 65000 }));
+      })).rejects.toThrow('Tool "browser_default_timeout" is busy because "scan_page_matrix", started by another client sharing this browser, requires exclusive access to this page');
+      expect(unclaimedPage.setDefaultNavigationTimeout).not.toHaveBeenCalled();
+      expect(claimedPage.setDefaultNavigationTimeout).not.toHaveBeenCalled();
+      expect(unclaimedPage.setDefaultTimeout).not.toHaveBeenCalled();
+      expect(claimedPage.setDefaultTimeout).not.toHaveBeenCalled();
+      await inCall(other, 'browser_emulate_media', async () => other.currentTabOrDie());
+
+      claim.release();
+      await inCall(other, 'browser_navigation_timeout', async () => {
+        await navTimeoutTool.handle(other, { timeout: 65000 }, new Response(other, 'browser_navigation_timeout', { timeout: 65000 }));
+      });
+      await inCall(other, 'browser_default_timeout', async () => {
+        await defaultTimeoutTool.handle(other, { timeout: 65000 }, new Response(other, 'browser_default_timeout', { timeout: 65000 }));
+      });
+      expect(unclaimedPage.setDefaultNavigationTimeout).toHaveBeenCalledWith(65000);
+      expect(claimedPage.setDefaultNavigationTimeout).toHaveBeenCalledWith(65000);
+      expect(unclaimedPage.setDefaultTimeout).toHaveBeenCalledWith(65000);
+      expect(claimedPage.setDefaultTimeout).toHaveBeenCalledWith(65000);
+    });
+
+    it('refuses a page claim while another call is using that page, until it ends', async () => {
+      const page = createMockPage();
+      const otherPage = createMockPage();
+      mockBrowserContext.pages.mockReturnValue([page, otherPage]);
+      const createContext = () => new Context({ tools: [], config: defaultConfig, browserContextFactory: mockBrowserContextFactory, sessionLog: undefined, clientInfo: {} });
+      const owner = createContext();
+      const other = createContext();
+      await owner.ensureTab();
+      await other.ensureTab();
+
+      // A call already running on the page could change it under the scan.
+      const endEvaluate = other.beginToolCall('browser_evaluate');
+      await other.runToolCall(endEvaluate, async () => other.currentTabOrDie());
+      const endScan = owner.beginToolCall('scan_page_matrix', true);
+      await expect(owner.runToolCall(endScan, async () => {
+        owner.currentTabOrDie();
+        owner.claimPage('scan_page_matrix', page);
+      })).rejects.toThrow('Tool "scan_page_matrix" is busy because "browser_evaluate", started by another client sharing this browser, is still running on this page');
+      // A page the running call has not resolved can be claimed.
+      owner.claimPage('scan_page_matrix', otherPage).release();
+      endEvaluate();
+      // The scan's own use of the page does not block its claim.
+      await owner.runToolCall(endScan, async () => {
+        owner.currentTabOrDie();
+        owner.claimPage('scan_page_matrix', page).release();
+      });
+      endScan();
+    });
+
+    it('does not count a cancelable held restore as a running call when asked to ignore it', () => {
+      const context = new Context({ tools: [], config: defaultConfig, browserContextFactory: mockBrowserContextFactory, sessionLog: undefined, clientInfo: {} });
+      context.holdExclusiveUntil('scan_page_matrix', new Promise(() => {}));
+      expect(context.isRunningTool()).toBe(true);
+      expect(context.isRunningTool({ ignoreCancelableHolds: true })).toBe(false);
+      const endCall = context.beginToolCall('browser_close');
+      expect(context.isRunningTool({ ignoreCancelableHolds: true })).toBe(true);
+      endCall();
+    });
+
+    it('admits teardown past held work, and closing the browser context drops the hold and page claim', async () => {
+      const page = createMockPage();
+      mockBrowserContext.pages.mockReturnValue([page]);
+      const createContext = () => new Context({ tools: [], config: defaultConfig, browserContextFactory: mockBrowserContextFactory, sessionLog: undefined, clientInfo: {} });
+      const owner = createContext();
+      const other = createContext();
+      await owner.ensureTab();
+      await other.ensureTab();
+
+      const endScan = owner.beginToolCall('scan_page_matrix', true);
+      expect(() => owner.beginToolCall('browser_close')).toThrow('busy');
+      const claim = owner.claimPage('scan_page_matrix', page);
+      // A restore waiting on a dialog nobody can answer never settles.
+      owner.holdExclusiveUntil('scan_page_matrix', new Promise(() => {}));
+      endScan();
+      expect(() => owner.beginToolCall('browser_resize')).toThrow('busy because "scan_page_matrix" requires exclusive access');
+
+      const endClose = owner.beginToolCall('browser_close');
+      await owner.closeBrowserContext();
+      endClose();
+      expect(claim.canceled.aborted).toBe(true);
+      expect(owner.isRunningTool()).toBe(false);
+      owner.beginToolCall('browser_resize')();
+      other.beginToolCall('browser_emulate_media')();
+      // A late release must not drop a newer claim on the same page.
+      const newer = other.claimPage('scan_page_matrix', page);
+      claim.release();
+      expect(() => owner.claimPage('scan_page_matrix', page)).toThrow('busy');
+      newer.release();
     });
 
     it('rejects an exclusive call while any call runs', () => {
@@ -2161,7 +2402,7 @@ describe('Context', () => {
       });
 
       const endClick = context.beginToolCall('browser_click');
-      expect(() => context.beginToolCall('exclusive_tool', true)).toThrow('Tool "exclusive_tool" is busy because interactive audits require exclusive access to this browser context.');
+      expect(() => context.beginToolCall('exclusive_tool', true)).toThrow('Tool "exclusive_tool" is busy because it requires exclusive access to this browser context and other tool calls are running.');
       context.beginToolCall('browser_snapshot')();
       endClick();
       context.beginToolCall('exclusive_tool', true)();

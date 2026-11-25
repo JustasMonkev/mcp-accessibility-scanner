@@ -2,6 +2,7 @@ import fs from 'fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import scanPageMatrixTools from '../src/tools/scanPageMatrix.js';
 import { Response } from '../src/response.js';
+import { renderModalStates } from '../src/tab.js';
 import * as axe from '../src/tools/axe.js';
 
 // The page's media emulation as an unconfigured browser reports it. Variants
@@ -15,6 +16,11 @@ const defaultMedia = {
 };
 
 // What the single setup evaluate returns: the page's zoom and media state.
+// The page claim the tool takes through its context; never canceled here.
+function claimPage() {
+  return { release: () => {}, canceled: new AbortController().signal };
+}
+
 function pageState(zoom = '', media: Record<string, unknown> = {}) {
   return { zoom, media: { ...defaultMedia, ...media } };
 }
@@ -62,7 +68,9 @@ function createMatrixHarness(outputFile: string) {
     page: mockPage,
     waitForTimeout: vi.fn(async () => undefined),
     modalStates: vi.fn(() => []),
-    context: { outputFile: resolveOutputFile },
+    on: vi.fn(),
+    off: vi.fn(),
+    context: { outputFile: resolveOutputFile, holdExclusiveUntil: vi.fn(), claimPage },
   };
   const context = { currentTabOrDie: vi.fn(() => mockTab), config: {} };
   return { context, mockPage, response: new Response(context as any, 'scan_page_matrix', {}) };
@@ -121,6 +129,139 @@ describe('scan_page_matrix tool', () => {
     expect(mockPage.setViewportSize).not.toHaveBeenCalled();
     expect(mockPage.emulateMedia).not.toHaveBeenCalled();
     expect(scan).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('names a blocked dialog tool and skips the rest of a dialog-delayed restore once the browser context closes', async () => {
+    const { context, mockPage, response } = createMatrixHarness('/tmp/dialog.json');
+    const tab = context.currentTabOrDie();
+    const canceled = new AbortController();
+    const dialogTool = { schema: { name: 'browser_handle_dialog' }, clearsModalState: 'dialog' };
+    const closeTool = { schema: { name: 'browser_close' } };
+    Object.assign(tab.context, {
+      // As filteredTools leaves it: the blocked dialog tool is not exposed.
+      tools: [closeTool],
+      config: { blockedTools: ['browser_handle_dialog'] },
+      modalStateTools: [dialogTool],
+      claimPage: () => ({ release: () => {}, canceled: canceled.signal }),
+    });
+    const modalStates: unknown[] = [];
+    let openDialog!: (state: unknown) => void;
+    Object.assign(tab, { modalStatesMarkdown: () => renderModalStates(tab.context as any, modalStates as any) });
+    tab.modalStates.mockImplementation(() => modalStates as never[]);
+    tab.on.mockImplementation((_event: string, listener: (state: unknown) => void) => { openDialog = listener; });
+    // The dialog pauses the page during the variant's wait; the restore's
+    // first step then waits for it to close.
+    tab.waitForTimeout.mockImplementation(() => {
+      const dialog = { type: 'dialog', description: '"alert" dialog with message "narrow layout"' };
+      modalStates.push(dialog);
+      openDialog(dialog);
+      return new Promise(() => {});
+    });
+    const dialogClosed = Promise.withResolvers<undefined>();
+    mockPage.setViewportSize.mockResolvedValueOnce(undefined).mockReturnValueOnce(dialogClosed.promise);
+
+    const failure = await tool.handle(response.context, tool.schema.inputSchema.parse({ variants: [{ name: 'narrow' }] }), response).catch((error: Error) => error);
+    expect(String(failure)).toContain('opened a dialog during variant "narrow"');
+    expect(String(failure)).toContain('- ["alert" dialog with message "narrow layout"]: would be handled by the "browser_handle_dialog" tool, but this server blocks it (blockedTools)');
+    expect(String(failure)).toContain('browser_close cancels the restore');
+    expect(String(failure)).not.toContain('answer it with');
+    expect(mockPage.setViewportSize).toHaveBeenCalledTimes(2);
+
+    canceled.abort(new Error('The browser context closed.'));
+    dialogClosed.resolve(undefined);
+    const restored = tab.context.holdExclusiveUntil.mock.calls[0][1] as Promise<void>;
+    await expect(restored).rejects.toThrow('The browser context closed.');
+    // Only the variant's own media and zoom were applied; the restore stopped.
+    expect(mockPage.emulateMedia).toHaveBeenCalledTimes(1);
+    expect(mockPage.evaluate).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops changing the page once the browser context closes and cancels its claim', async () => {
+    const { context, mockPage, response } = createMatrixHarness('/tmp/canceled-claim.json');
+    const tab = context.currentTabOrDie();
+    const canceled = new AbortController();
+    Object.assign(tab.context, { claimPage: () => ({ release: () => {}, canceled: canceled.signal }) });
+    // The claim is released when the context closes, so another scan may own
+    // the page by the time this one's wait ends.
+    tab.waitForTimeout.mockImplementation(async () => {
+      canceled.abort(new Error('The browser context closed.'));
+    });
+    const scan = vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({
+      variants: [{ name: 'baseline' }, { name: 'mobile', viewport: { width: 375, height: 812 } }],
+    }), response)).rejects.toThrow('The browser context closed.');
+    expect(scan).not.toHaveBeenCalled();
+    // Only the first variant's own changes; neither the next variant nor the restore ran.
+    expect(mockPage.setViewportSize).toHaveBeenCalledTimes(1);
+    expect(mockPage.emulateMedia).toHaveBeenCalledTimes(1);
+    expect(mockPage.evaluate).toHaveBeenCalledTimes(2);
+    expect(writeFileSpy).not.toHaveBeenCalled();
+  });
+
+  it('reports a dialog that opens while the last progress notification is sent instead of a report', async () => {
+    const { context, mockPage, response } = createMatrixHarness('/tmp/late-dialog.json');
+    const tab = context.currentTabOrDie();
+    Object.assign(tab.context, { tools: [], config: {}, modalStateTools: [] });
+    const modalStates: unknown[] = [];
+    let openDialog!: (state: unknown) => void;
+    Object.assign(tab, { modalStatesMarkdown: () => renderModalStates(tab.context as any, modalStates as any) });
+    tab.modalStates.mockImplementation(() => modalStates as never[]);
+    tab.on.mockImplementation((_event: string, listener: (state: unknown) => void) => { openDialog = listener; });
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+    // Every variant step is already done; only the notification is unguarded.
+    vi.spyOn(response, 'reportProgress').mockImplementation(async () => {
+      const dialog = { type: 'dialog', description: '"alert" dialog with message "late"' };
+      modalStates.push(dialog);
+      openDialog(dialog);
+    });
+    // The paused page holds the restore's first step.
+    const dialogClosed = Promise.withResolvers<undefined>();
+    mockPage.setViewportSize.mockResolvedValueOnce(undefined).mockReturnValueOnce(dialogClosed.promise);
+
+    const failure = await tool.handle(response.context, tool.schema.inputSchema.parse({ variants: [{ name: 'baseline' }], waitAfterApplyMs: 0 }), response).catch((error: Error) => error);
+    expect(String(failure)).toContain('opened a dialog after the last variant was scanned');
+    expect(String(failure)).toContain('the server will attempt to restore the original viewport, media and zoom once it does, so verify them before continuing');
+    expect(String(failure)).not.toContain('are restored once it does');
+    expect(writeFileSpy).not.toHaveBeenCalled();
+
+    // The restore keeps running in the background and finishes once the dialog closes.
+    const restored = tab.context.holdExclusiveUntil.mock.calls[0][1] as Promise<void>;
+    dialogClosed.resolve(undefined);
+    await restored;
+    expect(mockPage.emulateMedia).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a dialog and starts the restore while a progress notification is stuck', async () => {
+    const { context, mockPage, response } = createMatrixHarness('/tmp/stuck-progress.json');
+    const tab = context.currentTabOrDie();
+    Object.assign(tab.context, { tools: [], config: {}, modalStateTools: [] });
+    const modalStates: unknown[] = [];
+    let openDialog!: (state: unknown) => void;
+    Object.assign(tab, { modalStatesMarkdown: () => renderModalStates(tab.context as any, modalStates as any) });
+    tab.modalStates.mockImplementation(() => modalStates as never[]);
+    tab.on.mockImplementation((_event: string, listener: (state: unknown) => void) => { openDialog = listener; });
+    vi.spyOn(axe, 'runAxeScan').mockResolvedValue(createAxeResult('https://example.com/page', []));
+    // A client that stopped reading leaves the notification waiting for drain.
+    const progress = vi.spyOn(response, 'reportProgress').mockImplementation(() => {
+      setTimeout(() => {
+        const dialog = { type: 'dialog', description: '"alert" dialog with message "stuck"' };
+        modalStates.push(dialog);
+        openDialog(dialog);
+      }, 0);
+      return new Promise<void>(() => {});
+    });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const failure = await Promise.race([
+      tool.handle(response.context, tool.schema.inputSchema.parse({ variants: [{ name: 'baseline' }, { name: 'dark', media: { colorScheme: 'dark' } }], waitAfterApplyMs: 0 }), response).catch((error: Error) => error),
+      new Promise(resolve => timer = setTimeout(() => resolve('still waiting on progress'), 1000)),
+    ]).finally(() => clearTimeout(timer));
+    expect(String(failure)).toContain('opened a dialog during variant "baseline"');
+    expect(progress).toHaveBeenCalledTimes(1);
+    // The restore started as soon as the dialog was reported.
+    expect(mockPage.setViewportSize).toHaveBeenCalledTimes(2);
     expect(writeFileSpy).not.toHaveBeenCalled();
   });
 
@@ -485,8 +626,12 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-matrix.json'),
+        holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -545,8 +690,12 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-matrix.json'),
+        holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -749,8 +898,12 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-custom.json'),
+        holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -800,8 +953,12 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-metadata.json'),
+        holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -850,8 +1007,12 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-reload.json'),
+        holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -894,8 +1055,12 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-error.json'),
+        holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -943,8 +1108,12 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async (name: string) => `/tmp/${name}`),
+        holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 
@@ -988,8 +1157,12 @@ describe('scan_page_matrix tool', () => {
       page: mockPage,
       waitForTimeout: vi.fn(async () => undefined),
       modalStates: vi.fn(() => []),
+      on: vi.fn(),
+      off: vi.fn(),
       context: {
         outputFile: vi.fn(async () => '/tmp/scan-progress.json'),
+        holdExclusiveUntil: vi.fn(),
+        claimPage,
       },
     };
 

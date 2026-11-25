@@ -52,6 +52,7 @@ describe('Tabs Tools', () => {
     mockContext = {
       currentTabOrDie: () => mockTab1,
       tabs: () => [mockTab1, mockTab2],
+      useTabs: vi.fn(() => [mockTab1, mockTab2]),
       newTab: vi.fn().mockResolvedValue(mockTab2),
       manageExistingTab: vi.fn().mockResolvedValue(undefined),
       ensureTab: vi.fn().mockResolvedValue(mockTab1),

@@ -26,7 +26,7 @@ import { BrowserServerBackend } from '../src/browserServerBackend.js';
 import { BrowserSessionRegistry } from '../src/browserSessions.js';
 import { resolveConfig } from '../src/config.js';
 import { Context } from '../src/context.js';
-import { httpAddressToString, installHttpTransport, startHttpServer } from '../src/mcp/http.js';
+import { httpAddressToString, installHttpTransport, legacySessionIdleTimeoutMs, startHttpServer } from '../src/mcp/http.js';
 
 import type { ServerBackendFactory } from '../src/mcp/server.js';
 
@@ -885,6 +885,128 @@ describe('mcp http transport hardening', () => {
       });
       expect(afterDelete.statusCode).toBe(404);
       expect(afterDelete.body).toBe('Session not found');
+    });
+
+    // A client that initializes, lists tools and disappears without DELETE
+    // never starts the heartbeat (it waits for a tool call and the optional
+    // event stream), so idle legacy sessions need their own expiry.
+    describe('idle expiry', () => {
+      async function startTrackedServer() {
+        const backends = { created: 0, closed: 0 };
+        const { port } = await startServer({
+          ...probeFactory,
+          create: () => {
+            backends.created++;
+            return { ...probeFactory.create(), serverClosed: () => backends.closed++ };
+          },
+        });
+        return { port, backends };
+      }
+
+      async function settle() {
+        for (let i = 0; i < 5; i++)
+          await new Promise(resolve => setImmediate(resolve));
+      }
+
+      async function post(port: number, sessionId: string, message: unknown) {
+        const response = await sendRequest(port, {
+          method: 'POST', sessionId, accept: 'application/json, text/event-stream', body: JSON.stringify(message),
+        });
+        await settle();
+        return response;
+      }
+
+      async function initializeAndList(port: number) {
+        const init = await initializeSession(port);
+        const sessionId = init.headers['mcp-session-id'];
+        if (typeof sessionId !== 'string')
+          throw new Error('Expected an initialized session');
+        expect((await post(port, sessionId, { jsonrpc: '2.0', method: 'notifications/initialized' })).statusCode).toBe(202);
+        const listed = await post(port, sessionId, { jsonrpc: '2.0', id: 2, method: 'tools/list' });
+        expect(listed.statusCode).toBe(200);
+        expect(listed.body).toContain('probe');
+        return sessionId;
+      }
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it('expires a session that initialized and listed tools, then disappeared without DELETE', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        const { port, backends } = await startTrackedServer();
+        const sessionId = await initializeAndList(port);
+        expect(backends.closed).toBe(0);
+
+        await vi.advanceTimersByTimeAsync(legacySessionIdleTimeoutMs - 1);
+        expect(backends.closed).toBe(0);
+        await vi.advanceTimersByTimeAsync(1);
+        await settle();
+        expect(backends.closed).toBe(1);
+
+        vi.useRealTimers();
+        const afterExpiry = await sendRequest(port, {
+          method: 'POST', sessionId, accept: 'application/json, text/event-stream',
+          body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' }),
+        });
+        expect(afterExpiry.statusCode).toBe(404);
+        expect(afterExpiry.body).toBe('Session not found');
+      });
+
+      it('restarts the idle window on activity and holds the session while its event stream is open', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        const { port, backends } = await startTrackedServer();
+        const sessionId = await initializeAndList(port);
+
+        await vi.advanceTimersByTimeAsync(legacySessionIdleTimeoutMs - 1000);
+        expect((await post(port, sessionId, { jsonrpc: '2.0', id: 3, method: 'ping' })).statusCode).toBe(200);
+        await vi.advanceTimersByTimeAsync(legacySessionIdleTimeoutMs - 1000);
+        expect(backends.closed).toBe(0);
+
+        const stream = await new Promise<{ statusCode: number, close: () => void }>((resolve, reject) => {
+          const req = http.request({
+            host: '127.0.0.1', port, path: '/mcp', method: 'GET',
+            headers: { 'host': `127.0.0.1:${port}`, 'mcp-session-id': sessionId, 'accept': 'text/event-stream' },
+          }, res => resolve({ statusCode: res.statusCode ?? 0, close: () => req.destroy() }));
+          req.on('error', reject);
+          req.end();
+        });
+        expect(stream.statusCode).toBe(200);
+        await settle();
+        await vi.advanceTimersByTimeAsync(legacySessionIdleTimeoutMs * 2);
+        expect(backends.closed).toBe(0);
+
+        // Once the client is gone the idle window starts from its disconnect.
+        stream.close();
+        await settle();
+        await vi.advanceTimersByTimeAsync(legacySessionIdleTimeoutMs - 1);
+        expect(backends.closed).toBe(0);
+        await vi.advanceTimersByTimeAsync(1);
+        await settle();
+        expect(backends.closed).toBe(1);
+      });
+
+      it('stops the idle timer once the client terminates the session', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        const { port, backends } = await startTrackedServer();
+        const sessionId = await initializeAndList(port);
+
+        const close = vi.spyOn(NodeStreamableHTTPServerTransport.prototype, 'close');
+        try {
+          const deleted = await sendRequest(port, { method: 'DELETE', sessionId });
+          expect(deleted.statusCode).toBe(200);
+          await settle();
+          expect(backends.closed).toBe(1);
+          const closesAfterDelete = close.mock.calls.length;
+
+          await vi.advanceTimersByTimeAsync(legacySessionIdleTimeoutMs * 2);
+          await settle();
+          expect(close.mock.calls.length).toBe(closesAfterDelete);
+          expect(backends.closed).toBe(1);
+        } finally {
+          close.mockRestore();
+        }
+      });
     });
   });
 

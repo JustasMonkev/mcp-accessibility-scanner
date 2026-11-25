@@ -98,33 +98,8 @@ export function fixtures(modules, { tab, endpoint, output, importMetadata }) {
   add('htmlPatterns', 'HtmlPatternGroups._prune', g => g._prune(), { prepare: populated, project: (_, g) => g.summarize(2), limit: 16 });
   add('htmlPatterns', 'HtmlPatternGroups.summarize', g => g.summarize(3), { prepare: populated, limit: 16 });
 
-  const r = modules.representativeUrls;
-  const tree = r.newNode(0);
-  for (const [index, key] of ['a', 'a', 'b', 'c', 'd'].entries()) {
-    const child = tree.children.get(key) ?? r.newNode(1);
-    child.terminal.push(index);
-    child.size++;
-    tree.size++;
-    tree.children.set(key, child);
-  }
-  r.solve(tree, 3);
-  const parts = r.parts(tree);
-  cases('representativeUrls', { templateSegments: [urls[0]], newNode: [1], parts: [tree], branchCount: [tree],
-    compareCodeUnits: ['docs', 'help'], coveredCount: [parts[1]], partCost: [parts[0], 1, 1], partCosts: [parts[0], 3, 1],
-    mergePart: [[0, 0], parts[1], 0, 3, 1],
-    mergeParts: [tree, parts, 3, false], selectRepresentativeUrls: [urls, 12] });
-  // Private DP storage differs across builds. Validate the allocation and selected URL indices.
-  add('representativeUrls', 'parts', () => r.parts(tree), { project: list => list.map(p => [p.kind, p.size]) });
-  function collect(t) {
-    const out = [];
-    if (r.collect.length === 4)
-      r.collect(t, 3, 3, out);
-    else
-      r.collect(t, 3, out);
-    return out;
-  }
-  add('representativeUrls', 'solve', t => r.solve(t, 3), { prepare: () => structuredClone(tree), project: (_, t) => collect(t), limit: 32 });
-  add('representativeUrls', 'collect', () => collect(tree));
+  representativeUrlsFixtures(modules.representativeUrls, (name, run, options) => add('representativeUrls', name, run, options),
+    inputs => cases('representativeUrls', inputs));
 
   const redactor = modules.urlRedaction.createUrlRedactor(['token']);
   const result = { content: [{ type: 'text', text: '?token=secret' }], structuredContent: { link: '/a?token=secret' } };
@@ -169,4 +144,81 @@ export function fixtures(modules, { tab, endpoint, output, importMetadata }) {
   add('tools/utils', 'generateLocator', () => u.generateLocator(tab.page.getByRole('button', { name: 'Save' })), { async: true, limit: 1 });
   add('tools/utils', 'callOnPageNoTrace', () => u.callOnPageNoTrace(tab.page, p => p.title()), { async: true, limit: 1 });
   return rows;
+}
+
+// The selection's internals changed shape across the published revisions, so
+// each build gets the fixtures its own signatures take:
+// - partCost builds (9ec0e20, a2dfea9) price one count at a time, merge number[]
+//   rows and pass the node to mergeParts;
+// - partCosts builds (da84370) merge Float64Array rows of absolute costs and take
+//   the node's miss cost;
+// - exact builds keep rows in units of 2 ** -scale and take the node depth and scale.
+// Rows are projected to absolute costs so every build compares alike.
+export function representativeUrlsFixtures(r, add, cases) {
+  const tree = r.newNode(0);
+  for (const [index, key] of ['a', 'a', 'b', 'c', 'd'].entries()) {
+    const child = tree.children.get(key) ?? r.newNode(1);
+    child.terminal.push(index);
+    child.size++;
+    tree.size++;
+    tree.children.set(key, child);
+  }
+  // Builds before the work budget take no third argument and ignore it.
+  const unlimited = () => r.WorkBudget ? new r.WorkBudget(Infinity) : undefined;
+  r.solve(tree, 3, unlimited());
+  const parts = r.parts(tree);
+  const exact = Boolean(r.mergeDoubles);
+  const scale = exact ? tree.best.scale : 0;
+  const rowValues = row => Array.from(row, value => Number(value) * 2 ** -scale);
+  const costValues = costs => costs.values ? Array.from(costs.values, value => Number(value) * 2 ** -costs.scale) : Array.from(costs);
+  cases({ templateSegments: [urls[0]], parts: [tree], branchCount: [tree], compareCodeUnits: ['docs', 'help'], coveredCount: [parts[1]] });
+  // Builds differ in the cost fields they add; compare the fields every build sets.
+  add('newNode', () => r.newNode(1), { project: ({ depth, children, terminal, size }) => ({ depth, children, terminal, size }) });
+  const merged = { project: ({ row, choice }) => [rowValues(row), Array.from(choice)] };
+  const partCosts = (part, wide = false) => exact ? r.partCosts(part, 3, 0, scale, wide) : r.partCosts(part, 3, 1);
+  if (r.partCost) {
+    cases({ partCost: [parts[0], 1, 1] });
+    add('mergePart', () => r.mergePart([0], parts[1], 0, 3, 1), merged);
+    add('mergeParts', () => r.mergeParts(tree, parts, 3, false), { project: rowValues });
+  } else {
+    const rows = parts.map(part => partCosts(part));
+    add('partCosts', () => partCosts(parts[1]), { project: rowValues });
+    add('mergePart', () => r.mergePart(new Float64Array(1), rows[1], 0, 3), merged);
+    add('mergeParts', () => r.mergeParts(parts, rows, 3, false, []), { project: rowValues });
+  }
+  if (exact) {
+    const rows = parts.map(part => partCosts(part));
+    const wide = parts.map(part => partCosts(part, true));
+    add('mergeDoubles', () => r.mergeDoubles(new Float64Array(1), rows[1], 0, 3), merged);
+    add('mergeBigInts', () => r.mergeBigInts([0n], wide[1], 0, 3), merged);
+    const free = r.mergeParts(parts, rows, 3, false, []);
+    const covered = r.mergeParts(parts, rows, 3, true, []);
+    add('joinRows', () => r.joinRows(free, covered, 2), { project: rowValues });
+    add('newCosts', () => r.newCosts(3, 1), { project: costValues });
+    cases({ mergeCells: [rows, 3] });
+  }
+  // Builds since the work budget also report whether the selection is complete.
+  add('selectRepresentativeUrls', () => r.selectRepresentativeUrls(urls, 12), {
+    project: result => Array.isArray(result) ? result : (assert.equal(result.complete, true), result.urls),
+  });
+  // Private DP storage differs across builds. Validate the allocation and selected URL indices.
+  add('parts', () => r.parts(tree), { project: list => list.map(p => [p.kind, p.size]) });
+  function collect(t) {
+    const out = [];
+    if (r.collect.length === 4)
+      r.collect(t, 3, 3, out);
+    else
+      r.collect(t, 3, out);
+    // Recursive builds collect depth first, stack-based ones in another order.
+    return out.sort((first, second) => first - second);
+  }
+  add('solve', t => r.solve(t, 3, unlimited()), { prepare: () => structuredClone(tree), project: (_, t) => collect(t), limit: 32 });
+  add('collect', () => collect(tree));
+  if (r.WorkBudget) {
+    cases({ buildTree: [urls, unlimited()] });
+    add('WorkBudget.constructor', () => new r.WorkBudget(10), { project: budget => budget._remaining });
+    add('WorkBudget.spend', budget => budget.spend(1), { prepare: () => new r.WorkBudget(10), project: (_, budget) => budget._remaining });
+    add('WorkBudgetExceeded', () => new r.WorkBudgetExceeded(), { project: error => error instanceof Error });
+    add('solveNode', t => r.solveNode(t, 3, unlimited()), { prepare: () => structuredClone(tree), project: (_, t) => costValues(t.best) });
+  }
 }

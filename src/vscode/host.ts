@@ -56,6 +56,9 @@ export class VSCodeProxyBackend implements ServerBackend {
   private _backendContext: ServerBackendContext | undefined;
   private _listedClient: Client | undefined;
   private _providerGeneration = 0;
+  private _ownedSlot = new SharedClientSlot();
+  private _transition: Promise<unknown> = Promise.resolve();
+  private _closed = false;
   private _relay = new ToolRelay(client => {
     if (!this._sharedSlot && this._listedClient === client)
       return this._backendContext?.notifyToolListChanged();
@@ -75,19 +78,20 @@ export class VSCodeProxyBackend implements ServerBackend {
       this._currentClientIsDefault = false;
       return;
     }
-    const transport = await this._defaultTransportFactory();
-    await this._setCurrentClient(transport, false, true);
+    await this._setCurrentClient(() => this._connectDefaultClient(), false, true);
   }
 
   async listTools(requestContext?: Partial<Pick<mcpServer.CallToolRequestContext, 'signal' | '_meta'>>): Promise<Tool[]> {
     const providerClient = this._currentClient;
     const generation = this._providerGeneration;
-    const client = await this._clientForTool('webmcp_', undefined, requestContext);
-    const tools = await this._relay.listTools(client, requestContext);
-    const currentProvider = generation === this._providerGeneration && client === this._currentClient;
-    const activeHostSession = client !== providerClient && !this._currentClientIsDefault;
-    if (currentProvider || activeHostSession)
-      this._listedClient = client;
+    const tools = await this._withToolClient('webmcp_', undefined, requestContext, async client => {
+      const tools = await this._relay.listTools(client, requestContext);
+      const currentProvider = generation === this._providerGeneration && client === this._currentClient;
+      const activeHostSession = client !== providerClient && !this._currentClientIsDefault;
+      if (currentProvider || activeHostSession)
+        this._listedClient = client;
+      return tools;
+    });
     return [...tools, this._contextSwitchTool].filter(tool => !isToolBlocked(this._config, tool.name));
   }
 
@@ -97,23 +101,35 @@ export class VSCodeProxyBackend implements ServerBackend {
       const parsed = contextSwitchOptions.safeParse(args ?? {});
       if (!parsed.success)
         throw new Error(`Invalid input for tool "${name}":\n${z.prettifyError(parsed.error)}`);
-      return this._callContextSwitchTool(parsed.data, requestContext);
+      // Parsing strips unknown keys; keep them so a request carrying only
+      // unknown fields is not mistaken for an empty (disconnect) request.
+      const unknownFields = Object.keys(args ?? {}).filter(key => !Object.hasOwn(contextSwitchOptions.shape, key));
+      return this._callContextSwitchTool(parsed.data, unknownFields);
     }
-    const client = await this._clientForTool(name, args, requestContext);
-    return await this._relay.callTool(client, name, args, requestContext);
+    return await this._withToolClient(name, args, requestContext, client => this._relay.callTool(client, name, args, requestContext));
   }
 
-  private async _clientForTool(name: string, args: CallToolRequest['params']['arguments'], requestContext?: Pick<mcpServer.CallToolRequestContext, '_meta'>): Promise<Client> {
+  // Runs `use` against the client that serves `name`. A provider client is
+  // leased for the duration, so a switch that publishes a replacement while
+  // the request is still awaiting it closes it only once `use` settles. The
+  // lease is taken in the same tick that reads the current provider.
+  private async _withToolClient<T>(name: string, args: CallToolRequest['params']['arguments'], requestContext: Pick<mcpServer.CallToolRequestContext, '_meta'> | undefined, use: (client: Client) => Promise<T>): Promise<T> {
     const sessionTraffic = name.startsWith('webmcp_')
       ? requestContext?._meta?.browserSessionId !== undefined
       : name === 'browser_session_open' || name === 'browser_session_close' || typeof args?.browserSessionId === 'string';
     if (!sessionTraffic || this._currentClientIsDefault) {
-      if (!this._currentClient)
+      const client = this._currentClient;
+      if (!client)
         throw new Error('Initialize the VS Code backend before running tools.');
-      return this._currentClient;
+      const slot = this._ownsCurrentClient ? this._ownedSlot : this._sharedSlot;
+      return await (slot ? slot.withLease(client, () => use(client)) : use(client));
     }
+    return await use(await this._sessionClientForTool());
+  }
+
+  private async _sessionClientForTool(): Promise<Client> {
     if (!this._sessionClient) {
-      const creation = (async () => this._connectClient(await this._defaultTransportFactory()))();
+      const creation = this._connectDefaultClient();
       creation.catch(() => {
         if (this._sessionClient === creation)
           this._sessionClient = undefined;
@@ -124,24 +140,49 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 
   serverClosed?(): void {
+    if (this._closed)
+      return;
+    this._closed = true;
     this._relay.close();
     this._backendContext = undefined;
     this._listedClient = undefined;
-    if (this._ownsCurrentClient)
-      void this._currentClient?.close().catch(logUnhandledError);
-    else if (this._currentClient)
-      void this._sharedSlot?.release(this._currentClient);
+    void this._ownedSlot.dispose().catch(logUnhandledError);
+    // The shared lease is released once, after any in-progress switch
+    // settles: that switch may still release the client it replaces, or move
+    // this backend onto the client it publishes.
+    const released = this._transition.then(async () => {
+      if (!this._ownsCurrentClient && this._currentClient)
+        await this._sharedSlot?.release(this._currentClient);
+    });
+    this._transition = released.catch(() => {});
+    void released.catch(logUnhandledError);
     void this._sessionClient?.then(client => client.close()).catch(logUnhandledError);
   }
 
-  private async _callContextSwitchTool(params: z.infer<typeof contextSwitchOptions>, _requestContext?: mcpServer.CallToolRequestContext): Promise<CallToolResult> {
-    if (!params.connectionString || !params.lib) {
+  private async _callContextSwitchTool(params: z.infer<typeof contextSwitchOptions>, unknownFields: string[]): Promise<CallToolResult> {
+    // Only an empty request disconnects. A request naming either field is a
+    // switch and needs both as non-blank strings; anything partial, or any
+    // other field in place of both, is an error that keeps the current
+    // provider.
+    if (params.connectionString === undefined && params.lib === undefined) {
+      if (unknownFields.length) {
+        return {
+          content: [{ type: 'text', text: `### Result\nInvalid input: unknown field(s) ${unknownFields.map(field => `\`${field}\``).join(', ')}. Pass both \`connectionString\` and \`lib\` to switch providers, or omit all fields to disconnect.\n` }],
+          isError: true,
+        };
+      }
       if (this._sharedSlot)
         await this._switchSharedClient(this._sharedSlot, undefined);
       else
-        await this._setCurrentClient(await this._defaultTransportFactory(), true, true);
+        await this._setCurrentClient(() => this._connectDefaultClient(), true, true);
       return {
         content: [{ type: 'text', text: '### Result\nSuccessfully disconnected.\n' }],
+      };
+    }
+    if (!params.connectionString?.trim() || !params.lib?.trim()) {
+      return {
+        content: [{ type: 'text', text: '### Result\nInvalid input: switching providers needs both `connectionString` and `lib` as non-blank strings. Omit both to disconnect.\n' }],
+        isError: true,
       };
     }
 
@@ -174,7 +215,7 @@ export class VSCodeProxyBackend implements ServerBackend {
     if (this._sharedSlot)
       await this._switchSharedClient(this._sharedSlot, () => this._createSwitchTransport(connectionString, lib));
     else
-      await this._setCurrentClient(await this._createSwitchTransport(connectionString, lib), true, false);
+      await this._setCurrentClient(async () => this._connectClient(await this._createSwitchTransport(connectionString, lib)), true, false);
     return {
       content: [{ type: 'text', text: '### Result\nSuccessfully connected.\n' }],
     };
@@ -194,22 +235,76 @@ export class VSCodeProxyBackend implements ServerBackend {
     });
   }
 
+  // A shared switch spans two slots: the process-wide one and this backend's
+  // owned one. The whole transition (shared publication, owned clear, owned
+  // publication) runs as one step, one switch at a time, so an owned
+  // replacement still connecting for an earlier switch cannot publish after a
+  // later shared publication and then be closed by its clear.
   private async _switchSharedClient(sharedSlot: SharedClientSlot, createTransport: (() => Promise<Transport>) | undefined): Promise<void> {
-    const previousOwned = this._ownsCurrentClient ? this._currentClient : undefined;
+    const result = this._transition.then(() => this._applySharedSwitch(sharedSlot, createTransport));
+    this._transition = result.catch(() => {});
+    await result;
+  }
+
+  private async _applySharedSwitch(sharedSlot: SharedClientSlot, createTransport: (() => Promise<Transport>) | undefined): Promise<void> {
+    this._assertOpen();
     const previousShared = this._ownsCurrentClient ? undefined : this._currentClient;
-    const shared = await sharedSlot.replace(createTransport ? async () => this._connectClient(await createTransport()) : undefined);
-    if (shared) {
+    // A disconnect readies this backend's default provider, handshake
+    // included, as the process-wide step that clears the shared selection: a
+    // default that fails to start fails the switch and leaves every request,
+    // existing or new, on the shared provider, and a later switch from another
+    // request waits for this one instead of being cleared by it. A request
+    // closed meanwhile connects no default, so the step fails and the shared
+    // selection stays.
+    const defaultClient = createTransport ? undefined : await sharedSlot.clearAfter(this._whileOpen(async () => {
+      const defaultTransport = await this._defaultTransportFactory();
+      this._assertOpen();
+      return await this._connectClient(defaultTransport);
+    }));
+    const shared = createTransport ? await sharedSlot.replace(this._whileOpen(async () => this._connectClient(await createTransport()))) : undefined;
+    if (this._closed) {
+      // serverClosed() ran while the replacement connected: the switch still
+      // applies process-wide, but this backend keeps no lease on its
+      // replacement and publishes nothing into its disposed owned slot. Its
+      // lease on `previousShared`, still the current client, is released by
+      // serverClosed() once this settles.
+      await defaultClient?.close().catch(logUnhandledError);
+      if (shared)
+        await sharedSlot.release(shared);
+      return;
+    }
+    if (defaultClient) {
+      // The owned slot refuses a client it never took if it was disposed in
+      // the meantime; close it here then.
+      await this._setCurrentClient(async () => defaultClient, false, true).catch(async error => {
+        await defaultClient.close().catch(logUnhandledError);
+        throw error;
+      });
+    } else if (shared) {
       this._currentClient = shared;
       this._ownsCurrentClient = false;
       this._currentClientIsDefault = false;
-    } else {
-      this._currentClient = await this._connectClient(await this._defaultTransportFactory());
-      this._ownsCurrentClient = true;
-      this._currentClientIsDefault = true;
+      await this._ownedSlot.replace(undefined);
     }
     if (previousShared)
       await sharedSlot.release(previousShared);
-    await previousOwned?.close().catch(logUnhandledError);
+  }
+
+  private _assertOpen(): void {
+    if (this._closed)
+      throw new Error('The connection closed before the switch could run.');
+  }
+
+  // Wraps a process-wide slot step's connect: the step can wait in the
+  // slot's queue behind other requests' switches, so a request closed by the
+  // time it starts creates no transport and the step fails, leaving the
+  // shared selection as it is. A connect already under way when the request
+  // closes carries on.
+  private _whileOpen<T>(connect: () => Promise<T>): () => Promise<T> {
+    return async () => {
+      this._assertOpen();
+      return await connect();
+    };
   }
 
   private _defineContextSwitchTool(): Tool {
@@ -226,22 +321,30 @@ export class VSCodeProxyBackend implements ServerBackend {
     };
   }
 
-  private async _setCurrentClient(transport: Transport, notifyOnChange: boolean, isDefault = false) {
-    ++this._providerGeneration;
-    if (this._listedClient === this._currentClient)
-      this._listedClient = undefined;
-    await this._currentClient?.close();
-    this._currentClient = undefined;
-    this._currentClientIsDefault = false;
-
-    const client = await this._connectClient(transport);
-    this._currentClient = client;
-    this._ownsCurrentClient = true;
-    this._currentClientIsDefault = isDefault;
-    if (isDefault)
-      this._listedClient = undefined;
+  // The replacement is connected before it is published, and the client it
+  // replaces is closed only afterwards: a failed handshake keeps the working
+  // provider, and overlapping switches apply in call order. The transport is
+  // created inside `connect`, in turn: once serverClosed() has disposed the
+  // owned slot, a replacement still queued is neither created nor published,
+  // and one that finishes connecting afterwards is closed.
+  private async _setCurrentClient(connect: () => Promise<Client>, notifyOnChange: boolean, isDefault = false) {
+    await this._ownedSlot.replace(connect, {
+      lease: false,
+      publish: client => {
+        ++this._providerGeneration;
+        if (isDefault || this._listedClient === this._currentClient)
+          this._listedClient = undefined;
+        this._currentClient = client;
+        this._ownsCurrentClient = true;
+        this._currentClientIsDefault = isDefault;
+      },
+    });
     if (notifyOnChange)
       await this._backendContext?.notifyToolListChanged();
+  }
+
+  private async _connectDefaultClient(): Promise<Client> {
+    return await this._connectClient(await this._defaultTransportFactory());
   }
 
   private async _connectClient(transport: Transport): Promise<Client> {

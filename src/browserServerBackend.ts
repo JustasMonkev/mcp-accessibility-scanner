@@ -29,6 +29,7 @@ import { listWebMCPTools, webMCPSessionId, WebMCPObserver } from './webmcp.js';
 import type { WebMCPToolDefinition } from './webmcp.js';
 import { truncateDataUrls } from './utils/dataUrl.js';
 
+import type { Tab } from './tab.js';
 import type { Tool } from './tools/tool.js';
 import type { BrowserContextFactory } from './browserContextFactory.js';
 import type * as mcpServer from './mcp/server.js';
@@ -170,10 +171,15 @@ export class BrowserServerBackend implements ServerBackend {
   }
 
   private async _currentWebMCPTools(context: Context, signal?: AbortSignal, listing = false): Promise<WebMCPToolDefinition[]> {
+    return (await this._discoverWebMCPTools(context, signal, listing)).tools;
+  }
+
+  private async _discoverWebMCPTools(context: Context, signal?: AbortSignal, listing = false): Promise<{ tab: Tab | undefined, tools: WebMCPToolDefinition[] }> {
     const sharedDefault = this._ephemeralDefaultContext && context === this._context && this._browserContextFactory.sharedContext;
     const attach = sharedDefault && !(listing && this._browserContextFactory.attachNeedsUser);
     const tab = context.currentTab() ?? (attach ? await rejectOnAbort(() => context.ensureTab(signal), signal) : undefined);
-    return tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
+    const tools = tab ? await listWebMCPTools(tab, sharedDefault ? this._browserContextFactory : context, new Set(this._toolsByName.keys()), signal) : [];
+    return { tab, tools };
   }
 
   private async _callWebMCP(name: string, rawArguments: ToolArguments, requestContext?: mcpServer.CallToolRequestContext) {
@@ -186,16 +192,26 @@ export class BrowserServerBackend implements ServerBackend {
     let endToolCall: (() => void) | undefined;
     try {
       endToolCall = context.beginToolCall(name);
-      requestContext?.signal.throwIfAborted();
-      const idleNotice = await context.resumeAfterIdle();
-      if (idleNotice)
-        response.addNotice(idleNotice);
-      const tool = (await this._currentWebMCPTools(context, requestContext?.signal)).find(candidate => candidate.schema.name === name);
-      if (!tool)
-        throw new Error('WebMCP tool is stale or unavailable in this scope. List tools again with the same request metadata.');
-      await tool.handle(params, response, requestContext?.signal);
-      if (!requestContext?.signal.aborted)
-        await response.finish();
+      await context.runToolCall(endToolCall, async () => {
+        requestContext?.signal.throwIfAborted();
+        const idleNotice = await context.resumeAfterIdle();
+        if (idleNotice)
+          response.addNotice(idleNotice);
+        const { tab, tools } = await this._discoverWebMCPTools(context, requestContext?.signal);
+        const tool = tools.find(candidate => candidate.schema.name === name);
+        if (!tool)
+          throw new Error('WebMCP tool is stale or unavailable in this scope. List tools again with the same request metadata.');
+        // The handler runs on the page of the tab it was discovered on. A tab
+        // switch while discovery was pending would leave that page unrecorded,
+        // so another context could claim it; otherwise resolving the current
+        // tab records the call on that page and checks page claims.
+        if (context.currentTab() !== tab)
+          throw new Error('The active tab changed while WebMCP tools were being discovered. List tools again with the same request metadata.');
+        context.currentTabOrDie();
+        await tool.handle(params, response, requestContext?.signal);
+        if (!requestContext?.signal.aborted)
+          await response.finish();
+      });
       const sessionLog = await this._sessionLogFor(context, id);
       sessionLog?.logResponse(response, id === undefined ? undefined : { browserSessionId: id });
     } catch (error) {
@@ -214,8 +230,8 @@ export class BrowserServerBackend implements ServerBackend {
     const tool = this._toolsByName.get(name);
     if (!tool)
       return this._callWebMCP(name, rawArguments, requestContext);
-    const routedSessionId = this._routedSessionId(name, rawArguments);
-    const parsedArguments = parseToolArguments(tool, rawArguments);
+    const { routedSessionId, toolArguments } = this._routeToolArguments(name, rawArguments);
+    const parsedArguments = parseToolArguments(tool, toolArguments);
     const context = this._contextFor(routedSessionId);
     if (this._ephemeralDefaultContext && routedSessionId === undefined && name === 'scan_page' && parsedArguments.retainFindings)
       throw new Error('Stateless requests need an explicit browserSessionId to retain findings between calls.');
@@ -226,15 +242,17 @@ export class BrowserServerBackend implements ServerBackend {
     let endToolCall: (() => void) | undefined;
     try {
       endToolCall = context.beginToolCall(name, tool.exclusive);
-      const tabLookup = name === 'browser_tabs' && (parsedArguments.action === 'select' || parsedArguments.action === 'close');
-      if (!tool.browserless && !toolsThatSkipIdleResume.has(name) && !tabLookup) {
-        const idleNotice = await context.resumeAfterIdle();
-        if (idleNotice)
-          response.addNotice(idleNotice);
-      }
-      await tool.handle(context, parsedArguments, response, requestContext?.signal);
-      if (!tool.browserless)
-        await response.finish();
+      await context.runToolCall(endToolCall, async () => {
+        const tabLookup = name === 'browser_tabs' && (parsedArguments.action === 'select' || parsedArguments.action === 'close');
+        if (!tool.browserless && !toolsThatSkipIdleResume.has(name) && !tabLookup) {
+          const idleNotice = await context.resumeAfterIdle();
+          if (idleNotice)
+            response.addNotice(idleNotice);
+        }
+        await tool.handle(context, parsedArguments, response, requestContext?.signal);
+        if (!tool.browserless)
+          await response.finish();
+      });
       if (name === 'browser_session_close')
         await this._logClosedSession(closingSessionContext, response);
       else
@@ -277,15 +295,22 @@ export class BrowserServerBackend implements ServerBackend {
     }
   }
 
-  private _routedSessionId(name: string, rawArguments: ToolArguments): string | undefined {
-    if (sessionManagementTools.has(name))
-      return undefined;
-    const id = rawArguments?.browserSessionId;
+  // browserSessionId is a routing argument the server adds to every
+  // non-session tool's advertised schema; the tool's own input schema never
+  // declares it (strict schemas would reject it), so it is validated here once
+  // and removed before the tool sees its arguments.
+  private _routeToolArguments(name: string, rawArguments: ToolArguments): {
+    routedSessionId: string | undefined;
+    toolArguments: ToolArguments;
+  } {
+    if (sessionManagementTools.has(name) || !rawArguments || !('browserSessionId' in rawArguments))
+      return { routedSessionId: undefined, toolArguments: rawArguments };
+    const { browserSessionId: id, ...toolArguments } = rawArguments;
     if (id === undefined)
-      return undefined;
+      return { routedSessionId: undefined, toolArguments };
     if (typeof id !== 'string')
       throw new Error('Invalid browserSessionId: expected a string handle returned by browser_session_open.');
-    return id;
+    return { routedSessionId: id, toolArguments };
   }
 
   serverClosed() {

@@ -76,7 +76,13 @@ it('disconnects an idle CDP client while preserving the external page and reconn
   try {
     const page = external.pages()[0];
     await page.setContent('<title>External page</title><button>Still here</button>');
-    const port = (await fs.readFile(path.join(directory, 'DevToolsActivePort'), 'utf8')).split('\n')[0];
+    // The browser may not have written its port yet, so read until one is there.
+    let port = '';
+    await expect.poll(async () => {
+      port = await fs.readFile(path.join(directory, 'DevToolsActivePort'), 'utf8')
+          .then(text => text.split('\n')[0].trim(), () => '');
+      return /^\d+$/.test(port);
+    }, { timeout: 10_000 }).toBe(true);
     const config = await resolveConfig({ browser: { cdpEndpoint: `http://127.0.0.1:${port}` }, timeouts: { idle: 50, settle: 0 } });
     const factory = contextFactory(config);
     const backend = new BrowserServerBackend(config, {
@@ -94,6 +100,18 @@ it('disconnects an idle CDP client while preserving the external page and reconn
     expect(await page.title()).toBe('External page');
     const ambiguousClose = await backend.callTool('browser_tabs', { action: 'close' });
     expect(ambiguousClose.isError).toBe(true);
+    expect(page.isClosed()).toBe(false);
+
+    const missingSelect = await backend.callTool('browser_tabs', { action: 'select', index: 99 });
+    expect(missingSelect.isError).toBe(true);
+    expect(page.isClosed()).toBe(false);
+
+    const missingClose = await backend.callTool('browser_tabs', { action: 'close', index: 99 });
+    expect(missingClose.isError).toBe(true);
+    expect(page.isClosed()).toBe(false);
+
+    const ambiguousCloseAfterMissing = await backend.callTool('browser_tabs', { action: 'close' });
+    expect(ambiguousCloseAfterMissing.isError).toBe(true);
     expect(page.isClosed()).toBe(false);
 
     const resumed = await backend.callTool('browser_tabs', { action: 'select', index: 0 });

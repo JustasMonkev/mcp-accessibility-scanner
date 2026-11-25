@@ -139,6 +139,41 @@ it('accepts text and editing steps through the MCP schema', async () => {
   expect(result.structuredContent).toMatchObject({ status: 'passed' });
 });
 
+it('routes a strict-schema audit into a named browser session and still rejects unknown fields', async () => {
+  // The advertised schema of every non-session tool carries browserSessionId,
+  // but audit_keyboard_operation's own input schema is strict: the routing
+  // argument must be consumed before the tool validates its fields.
+  const catalog = await client.listTools();
+  const advertised = catalog.tools.find(tool => tool.name === 'audit_keyboard_operation');
+  expect(advertised?.inputSchema.properties).toHaveProperty('browserSessionId');
+  const opened = await client.callTool({ name: 'browser_session_open', arguments: {} });
+  const browserSessionId = opened.structuredContent?.browserSessionId;
+  expect(typeof browserSessionId).toBe('string');
+  try {
+    await client.callTool({ name: 'browser_navigate', arguments: { url, browserSessionId } });
+    const steps = [
+      { key: 'Tab', expect: [{ selector: '#toggle', focused: true }] },
+      { key: 'Enter', expect: [{ selector: '#toggle', expanded: true }] },
+    ];
+    const routed = await client.callTool({ name: 'audit_keyboard_operation', arguments: { browserSessionId, steps } });
+    expect(routed.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).not.toContain('Unrecognized key');
+    expect(routed.isError).not.toBe(true);
+    expect(routed.structuredContent).toMatchObject({ kind: 'audit_keyboard_operation', status: 'passed' });
+
+    // The audit ran in the named session, not the default one.
+    const sessionState = await client.callTool({ name: 'browser_evaluate', arguments: {
+      browserSessionId, function: '() => document.querySelector("#toggle").getAttribute("aria-expanded")',
+    } });
+    expect(sessionState.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('true');
+
+    const unknown = await client.callTool({ name: 'audit_keyboard_operation', arguments: { browserSessionId, steps, unexpectedField: true } });
+    expect(unknown.isError).toBe(true);
+    expect(unknown.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('Unrecognized key: "unexpectedField"');
+  } finally {
+    await client.callTool({ name: 'browser_session_close', arguments: { browserSessionId } });
+  }
+});
+
 it('admits interactive audits exclusively per browser context and releases admission after cancellation', async () => {
   await client.callTool({ name: 'browser_navigate', arguments: { url } });
   const opened = await client.callTool({ name: 'browser_session_open', arguments: {} });
@@ -157,7 +192,7 @@ it('admits interactive audits exclusively per browser context and releases admis
     function: '() => document.querySelector("#toggle").click()',
   } });
   expect(competingMutation.isError).toBe(true);
-  expect(competingMutation.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('busy because an interactive audit is running');
+  expect(competingMutation.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('busy because "audit_keyboard_operation" requires exclusive access');
 
   const independentContext = await client.callTool({ name: 'browser_evaluate', arguments: {
     browserSessionId,
@@ -189,7 +224,7 @@ it('admits interactive audits exclusively per browser context and releases admis
       expectedFeedback: [{ selector: '#error', kind: 'error' }],
     } });
     expect(overlappingAudit.isError).toBe(true);
-    expect(overlappingAudit.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('interactive audits require exclusive access');
+    expect(overlappingAudit.content.filter(item => item.type === 'text').map(item => item.text).join('\n')).toContain('requires exclusive access to this browser context and other tool calls are running');
   } finally {
     const release = await client.callTool({ name: 'browser_evaluate', arguments: {
       function: '() => { window.releaseOrdinaryEvaluation?.(); delete window.releaseOrdinaryEvaluation; return "ordinary evaluation released"; }',

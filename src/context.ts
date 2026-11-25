@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import type * as playwright from 'playwright';
 
 import { logUnhandledError, testDebug } from './utils/log.js';
@@ -35,6 +37,10 @@ import type { SessionLog } from './sessionLog.js';
 import type { RecordedAction, Recording, RecordingTarget } from './inputRecorder.js';
 
 const recorderControlTools = new Set(['browser_start_recording', 'browser_stop_recording']);
+// Closing a browser context cancels work an exclusive call left running, so
+// these stay admitted while that work holds the context. They resolve no
+// page, so another client's page claim does not stop them either.
+const teardownTools = new Set(['browser_close', 'browser_session_close']);
 const idleResumeNotice = 'The browser connection was released after inactivity and has been reopened. Use browser_navigate to navigate again if needed; previous element references are no longer valid.';
 const pageCloseTimeoutMs = 5_000;
 const pendingDownloadDrainTimeoutMs = 30_000;
@@ -79,6 +85,15 @@ function contextClosedWhileOpeningTabError(): Error {
   return new Error('The browser context closed while a tab was being opened.');
 }
 
+function pageClaimedError(name: string, claim: PageClaim): Error {
+  return new Error(`Tool "${name}" is busy because "${claim.name}", started by another client sharing this browser, requires exclusive access to this page until it finishes and restores the page.`);
+}
+
+function pageInUseError(name: string, call: RunningTool, claimant: Context): Error {
+  const owner = call.context === claimant ? '' : ', started by another client sharing this browser,';
+  return new Error(`Tool "${name}" is busy because "${call.name}"${owner} is still running on this page, and "${name}" requires exclusive access to it. Retry once that call finishes.`);
+}
+
 function releaseOnce(release: () => void): () => void {
   let released = false;
   return () => {
@@ -90,6 +105,20 @@ function releaseOnce(release: () => void): () => void {
 }
 
 const liveContexts = new Set<Context>();
+
+type RunningTool = { name: string, exclusive: boolean, context: Context, held?: boolean, pages: Set<playwright.Page> };
+type PageClaim = { name: string, context: Context, canceled: AbortController };
+
+// A page's viewport, media and zoom are shared by every MCP context attached
+// to its browser context (separate clients on a non-isolated connection), so
+// per-context admission alone cannot keep them from changing a claimed page.
+// Admission cannot tell which page a call will use, so both the claim and the
+// calls using a page are checked where a call resolves the page it acts on.
+const pageClaims = new WeakMap<playwright.Page, PageClaim>();
+const pageCalls = new WeakMap<playwright.Page, Set<RunningTool>>();
+// The tool call whose handler is running, so the pages it resolves are
+// attributed to it.
+const activeToolCall = new AsyncLocalStorage<RunningTool>();
 
 type TraceHub = { users: number, ready: Promise<unknown> };
 const traceHubs = new WeakMap<playwright.BrowserContext, TraceHub>();
@@ -170,7 +199,9 @@ export class Context {
   private _clientInfo: ClientInfo;
 
   private _closeBrowserContextPromise: Promise<void> | undefined;
-  private _runningTools: { name: string; exclusive: boolean }[] = [];
+  private _runningTools: RunningTool[] = [];
+  private _callsByRelease = new WeakMap<() => void, RunningTool>();
+  private _pageClaims = new Map<playwright.Page, PageClaim>();
   private _sessionHolds = 0;
   private _lastToolCallEndedAt = -Infinity;
   private _pendingDownloads = new Set<Promise<unknown>>();
@@ -219,6 +250,10 @@ export class Context {
     return this._tabs;
   }
 
+  useTabs(): Tab[] {
+    return this._tabs.map(tab => this._useTab(tab));
+  }
+
   currentTab(): Tab | undefined {
     return this._currentTab;
   }
@@ -230,7 +265,28 @@ export class Context {
   currentTabOrDie(): Tab {
     if (!this._currentTab)
       throw new Error('No open pages available. Use the "browser_navigate" tool to navigate to a page first.');
-    return this._currentTab;
+    return this._useTab(this._currentTab);
+  }
+
+  /**
+   * Records that the running tool call acts on `tab`'s page, so a matrix scan
+   * cannot claim it meanwhile, and rejects the call when another context's
+   * scan has claimed it. Outside a tool call this only returns the tab.
+   */
+  private _useTab(tab: Tab): Tab {
+    const call = activeToolCall.getStore();
+    if (call?.context !== this || !this._runningTools.includes(call))
+      return tab;
+    const claim = pageClaims.get(tab.page);
+    // An open dialog pauses the claimed page until it is answered.
+    if (claim && claim.context !== this && !this._answersDialog(call.name))
+      throw pageClaimedError(call.name, claim);
+    let calls = pageCalls.get(tab.page);
+    if (!calls)
+      pageCalls.set(tab.page, calls = new Set());
+    calls.add(call);
+    call.pages.add(tab.page);
+    return tab;
   }
 
   async newTab(): Promise<Tab> {
@@ -246,7 +302,7 @@ export class Context {
       const tab = this.tabForPage(page);
       if (!tab)
         throw new Error('Failed to register the newly opened tab.');
-      this._currentTab = tab;
+      this._currentTab = this._useTab(tab);
       return tab;
     });
     this._openingPages.add(opening);
@@ -263,7 +319,7 @@ export class Context {
     if (index === undefined) {
       if (action === 'select')
         throw new Error('Tab index is required');
-      if (!this._browserContextPromise || !this._currentTab)
+      if (!this._browserContextPromise || !this._currentTab || this._idleClosePromise)
         throw new Error('Tab index is required when this session has no current tab. List tabs first or specify an index.');
       await this.closeTab(undefined);
       return;
@@ -280,12 +336,12 @@ export class Context {
     actionSignal.throwIfAborted();
     if (this._browserContextPromise !== attaching)
       throw new Error('The browser context closed during tab lookup.');
-    if (idleClosing === this._idleClosePromise)
-      this._idleClosePromise = undefined;
     if (action === 'select')
       await this.selectTab(index);
     else
       await this.closeTab(index);
+    if (idleClosing === this._idleClosePromise)
+      this._idleClosePromise = undefined;
     return idleClosing ? idleResumeNotice : undefined;
   }
 
@@ -293,6 +349,7 @@ export class Context {
     const tab = this._tabs[index];
     if (!tab)
       throw new Error(`Tab ${index} not found`);
+    this._useTab(tab);
     await tab.page.bringToFront();
     this._currentTab = tab;
     return tab;
@@ -420,6 +477,7 @@ export class Context {
     const tab = index === undefined ? this._currentTab : this._tabs[index];
     if (!tab)
       throw new Error(`Tab ${index} not found`);
+    this._useTab(tab);
     const url = tab.page.url();
     await closePage(tab.page, tab.operationTimeout());
     return url;
@@ -477,8 +535,13 @@ export class Context {
     void this.closeBrowserContext();
   }
 
-  isRunningTool() {
-    return this._runningTools.length > 0 || this._sessionHolds > 0;
+  /**
+   * With `ignoreCancelableHolds`, work held past its call (a restore waiting
+   * on a dialog) does not count: closing the browser context cancels it.
+   */
+  isRunningTool(options?: { ignoreCancelableHolds?: boolean }) {
+    const calls = options?.ignoreCancelableHolds ? this._runningTools.filter(call => !call.held) : this._runningTools;
+    return calls.length > 0 || this._sessionHolds > 0;
   }
 
   isRunningToolForRecording(buffered: boolean): boolean {
@@ -533,19 +596,85 @@ export class Context {
 
   beginToolCall(name: string, exclusive = false): () => void {
     if (exclusive && this._runningTools.length > 0)
-      throw new Error(`Tool "${name}" is busy because interactive audits require exclusive access to this browser context.`);
-    if (this._runningTools.at(-1)?.exclusive)
-      throw new Error(`Tool "${name}" is busy because an interactive audit is running in this browser context.`);
-    const call = { name, exclusive };
+      throw new Error(`Tool "${name}" is busy because it requires exclusive access to this browser context and other tool calls are running.`);
+    const exclusiveCall = this._runningTools.find(call => call.exclusive);
+    // An open dialog pauses the page, so the exclusive call cannot progress
+    // until it is answered; the dialog tool only answers it.
+    if (exclusiveCall && !this._answersDialog(name) && !(exclusiveCall.held && teardownTools.has(name)))
+      throw new Error(`Tool "${name}" is busy because "${exclusiveCall.name}" requires exclusive access to this browser context.`);
+    const call: RunningTool = { name, exclusive, context: this, pages: new Set() };
     this._runningTools.push(call);
     this._scheduleIdleTimeout();
-    return releaseOnce(() => {
+    const release = releaseOnce(() => {
       this._runningTools.splice(this._runningTools.indexOf(call), 1);
+      for (const page of call.pages)
+        pageCalls.get(page)?.delete(call);
+      call.pages.clear();
       if (!recorderControlTools.has(name))
         this._lastToolCallEndedAt = Date.now();
       this._lastActivityAt = Date.now();
       this._scheduleIdleTimeout();
     });
+    this._callsByRelease.set(release, call);
+    return release;
+  }
+
+  /**
+   * Runs the handler of the call `endToolCall` admitted, so the pages it
+   * resolves through this context are checked against, and block, page claims.
+   */
+  runToolCall<T>(endToolCall: () => void, work: () => Promise<T>): Promise<T> {
+    const call = this._callsByRelease.get(endToolCall);
+    return call ? activeToolCall.run(call, work) : work();
+  }
+
+  /**
+   * Keeps a tool's exclusive access after its call returns, until work it left
+   * running settles or the browser context closes.
+   */
+  holdExclusiveUntil(name: string, work: Promise<unknown>): void {
+    // Registered directly: the call that owns the work is still running and
+    // would itself make an exclusive admission check fail.
+    const hold: RunningTool = { name, exclusive: true, context: this, held: true, pages: new Set() };
+    this._runningTools.push(hold);
+    this._scheduleIdleTimeout();
+    void work.catch(() => {}).finally(() => {
+      const index = this._runningTools.indexOf(hold);
+      if (index !== -1)
+        this._runningTools.splice(index, 1);
+      this._lastActivityAt = Date.now();
+      this._scheduleIdleTimeout();
+    });
+  }
+
+  /**
+   * Claims a page for an exclusive call, so calls from other MCP contexts
+   * sharing it are rejected until the claim is released or this context's
+   * browser context closes, which aborts `canceled`. Refused while another
+   * call, in any context, is still using the page.
+   */
+  claimPage(name: string, page: playwright.Page): { release: () => void, canceled: AbortSignal } {
+    const existing = pageClaims.get(page);
+    if (existing)
+      throw pageClaimedError(name, existing);
+    const self = activeToolCall.getStore();
+    const busy = [...pageCalls.get(page) ?? []].find(call => call !== self);
+    if (busy)
+      throw pageInUseError(name, busy, this);
+    const claim: PageClaim = { name, context: this, canceled: new AbortController() };
+    pageClaims.set(page, claim);
+    this._pageClaims.set(page, claim);
+    const release = releaseOnce(() => {
+      if (pageClaims.get(page) === claim)
+        pageClaims.delete(page);
+      if (this._pageClaims.get(page) === claim)
+        this._pageClaims.delete(page);
+    });
+    return { release, canceled: claim.canceled.signal };
+  }
+
+  private _answersDialog(name: string): boolean {
+    return this.modalStateTools.some(tool => tool.schema.name === name && tool.clearsModalState === 'dialog');
   }
 
   beginSessionHold(): () => void {
@@ -630,6 +759,15 @@ export class Context {
   }
 
   private _detachFromBrowserContext() {
+    // Work held past its call cannot finish on a closed context; dropping it
+    // keeps this context usable and other contexts' pages unclaimed.
+    this._runningTools = this._runningTools.filter(call => !call.held);
+    for (const [page, claim] of this._pageClaims) {
+      claim.canceled.abort(new Error('The browser context closed.'));
+      if (pageClaims.get(page) === claim)
+        pageClaims.delete(page);
+    }
+    this._pageClaims.clear();
     if (this._idleGroup) {
       this._idleGroup.contexts.delete(this);
       this._scheduleIdleTimeout();
