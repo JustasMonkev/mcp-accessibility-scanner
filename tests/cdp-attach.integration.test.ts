@@ -116,7 +116,10 @@ it('requires an explicit index to close a tab from a fresh CDP backend', async (
   const selecting = await freshBackend();
   const selected = await selecting.callTool('browser_tabs', { action: 'select', index: 1 });
   expect(selected.isError).not.toBe(true);
-  expect(selected.content).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining(`Page URL: ${origin}/second`) })]));
+  const selectedText = selected.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+  const selectedUrl = selectedText.match(/^- 1: \(current\) \[.*] \((.+)\)$/m)?.[1];
+  expect(before.map(tab => tab.url)).toContain(selectedUrl);
+  expect(selectedText).toContain(`Page URL: ${selectedUrl}`);
 
   const closing = await freshBackend();
   const result = await closing.callTool('browser_tabs', { action: 'close' });

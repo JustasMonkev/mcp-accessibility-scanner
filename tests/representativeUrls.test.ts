@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { selectRepresentativeUrls } from '../src/utils/representativeUrls.js';
+import { selectRepresentativeUrls as selectWithStatus } from '../src/utils/representativeUrls.js';
+
+function selectRepresentativeUrls(urls: readonly string[], k: number): string[] {
+  const { urls: selected, complete } = selectWithStatus(urls, k);
+  expect(complete).toBe(true);
+  return selected;
+}
 
 // The objective and coverage rule, written out independently. The distance is
 // 0 for a shared template, otherwise 2^-(number of leading segments in common).
@@ -197,6 +203,67 @@ describe('selectRepresentativeUrls', () => {
     const startedAt = performance.now();
     expect(selectRepresentativeUrls(urls, 200)).toEqual(urls.slice(0, 200));
     expect(performance.now() - startedAt).toBeLessThan(5000);
+  });
+
+  it('walks a 20,000-segment URL path without exhausting the stack', () => {
+    const deep = `https://example.com/${Array.from({ length: 20000 }, (_, index) => `s${index}`).join('/')}`;
+    const urls = [`${deep}/a`, `${deep}/b`, `${deep}/c`, 'https://example.com/other'];
+    expect(selectRepresentativeUrls(urls, 2)).toEqual([`${deep}/a`, 'https://example.com/other']);
+    expect(selectRepresentativeUrls([deep, 'https://example.com/x', 'https://example.com/y'], 2)).toEqual([deep, 'https://example.com/x']);
+  });
+
+  it('ranks branches below a 20,000-segment shared prefix as it does below a short one', () => {
+    const suffixes = ['rare', 'popular/1', 'popular/2', 'popular/3'];
+    const shallow = suffixes.map(suffix => `https://example.com/docs/${suffix}`);
+    expect(selectWithStatus(shallow, 1)).toEqual({ urls: ['https://example.com/docs/popular/1'], complete: true });
+    const prefix = Array.from({ length: 20000 }, (_, index) => `s${index}`).join('/');
+    const deep = suffixes.map(suffix => `https://example.com/${prefix}/${suffix}`);
+    expect(selectWithStatus(deep, 1)).toEqual({ urls: [`https://example.com/${prefix}/popular/1`], complete: true });
+  });
+
+  it('ranks branches below a 20,000-segment path that splits off a short sibling', () => {
+    const prefix = Array.from({ length: 20000 }, (_, index) => `s${index}`).join('/');
+    const urls = ['rare', 'popular/1', 'popular/2', 'popular/3'].map(suffix => `https://example.com/${prefix}/${suffix}`);
+    expect(selectWithStatus([...urls, 'https://example.com/other'], 2)).toEqual({ urls: [`https://example.com/${prefix}/popular/1`, 'https://example.com/other'], complete: true });
+  });
+
+  it('compares two sections below equally deep shared prefixes at any depth', () => {
+    for (const length of [10, 1100]) {
+      const prefix = Array.from({ length }, () => 's').join('/');
+      const urls = [
+        ...['x/1', 'y/1'].map(suffix => `https://example.com/a/${prefix}/${suffix}`),
+        ...['x/1', 'x/2', 'y/1', 'y/2', 'y/3'].map(suffix => `https://example.com/b/${prefix}/${suffix}`),
+      ];
+      // The third page covers two more URLs in section b, one more in section a.
+      expect(selectWithStatus(urls, 3), `${length} segments`).toEqual({
+        urls: [`https://example.com/a/${prefix}/x/1`, `https://example.com/b/${prefix}/x/1`, `https://example.com/b/${prefix}/y/1`],
+        complete: true,
+      });
+    }
+  });
+
+  it('keeps a deep miss that is summed with a shallow one', () => {
+    for (const length of [5, 64]) {
+      const prefix = Array.from({ length }, () => 's').join('/');
+      const urls = [
+        ...['a', 'b'].flatMap(section => ['x', 'y'].map(page => `https://example.com/${section}/${prefix}/${page}`)),
+        'https://example.com/c/1',
+        'https://example.com/c/2',
+      ];
+      // Both c URLs share a template; a second page in b would still miss one deep URL.
+      expect(selectWithStatus(urls, 2), `${length} segments`).toEqual({
+        urls: [`https://example.com/a/${prefix}/x`, 'https://example.com/c/1'],
+        complete: true,
+      });
+    }
+  });
+
+  it('falls back to listed order and reports an incomplete selection past its work budget', () => {
+    const urls = Array.from({ length: 50 }, (_, index) => `https://example.com/section-${index % 5}/page-${index}`);
+    expect(selectWithStatus(urls, 5, 100)).toEqual({ urls: urls.slice(0, 5), complete: false });
+    const within = selectWithStatus(urls, 5);
+    expect(within.complete).toBe(true);
+    expect(new Set(within.urls.map(url => url.split('/')[3])).size).toBe(5);
   });
 
   it('handles a large list within the maximum budget quickly', () => {

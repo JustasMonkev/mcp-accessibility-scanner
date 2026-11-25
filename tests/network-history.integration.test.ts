@@ -137,10 +137,11 @@ it('retains bounded request history with stable IDs across real MCP navigation, 
       const full = await call('browser_network_requests');
       const delta = await call('browser_network_requests', { afterId: checkpoint, limit: 2 });
       const rows = (listing: string) => listing.split('\n').filter(line => /^\[\d+\]/.test(line));
-      expect(rows(full)).toHaveLength(206);
+      expect(rows(full)).toHaveLength(200);
+      expect(full).toMatch(/^6 earlier requests were omitted to keep this tab's history bounded\.$/m);
       expect(rows(delta)).toEqual(rows(full).slice(-2));
       expect(delta).not.toContain('More requests available');
-      // Real MCP text on this fixture: 12,220 bytes for 206 rows vs. 219 for the two new rows.
+      expect(delta).not.toContain('omitted');
       expect(Buffer.byteLength(delta)).toBeLessThan(Buffer.byteLength(full) / 10);
       const page = await call('browser_network_requests', { afterId: checkpoint, limit: 1 });
       const continuation = page.match(/Continue with afterId: (\d+)\./)?.[1];
@@ -151,9 +152,14 @@ it('retains bounded request history with stable IDs across real MCP navigation, 
       expect(await call('browser_network_requests', { afterId: requestId(last, `${origin}/api/new`) })).toBe('');
 
       await call('browser_navigate', { url: `${origin}/third` });
+      const thirdPage = await call('browser_network_requests');
+      expect(thirdPage).toContain(`${origin}/third`);
+      expect(thirdPage).not.toContain('omitted');
       const retained = await call('browser_network_requests', { all: true });
       const afterEviction = await call('browser_network_requests', { all: true, afterId: firstId, limit: 2 });
       expect(rows(afterEviction)).toEqual(rows(retained).slice(0, 2));
+      expect(afterEviction).toMatch(/^6 earlier requests were omitted to keep this tab's history bounded\.$/m);
+      expect(retained).toMatch(/^9 earlier requests were omitted to keep this tab's history bounded\.$/m);
       expect(retained).not.toContain('/first');
       expect(retained.match(/^\[\d+\]/gm)?.length).toBeLessThanOrEqual(202);
       const thirdId = requestId(retained, `${origin}/third`);

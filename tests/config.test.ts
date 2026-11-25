@@ -752,6 +752,120 @@ describe('Config', () => {
     });
   });
 
+  describe('numeric settings', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
+    const settings = [
+      { name: 'browser.cdpLaunch.startupTimeoutMs', env: 'PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT', cli: 'cdpLaunchStartupTimeout', file: (value: unknown) => ({ browser: { cdpLaunch: { command: 'app', startupTimeoutMs: value } } }), invalid: [0, -1, 1.5, 2147483648] },
+      { name: 'browser.cdpLaunch.port', env: 'PLAYWRIGHT_MCP_CDP_LAUNCH_PORT', cli: 'cdpLaunchPort', file: (value: unknown) => ({ browser: { cdpLaunch: { command: 'app', port: value } } }), invalid: [0, -1, 9222.5, 65536] },
+      { name: 'browser.cdpTimeout', env: 'PLAYWRIGHT_MCP_CDP_TIMEOUT', cli: 'cdpTimeout', file: (value: unknown) => ({ browser: { cdpTimeout: value } }), invalid: [-1, 1.5, 2147483648] },
+      { name: 'server.port', env: 'PLAYWRIGHT_MCP_PORT', cli: 'port', file: (value: unknown) => ({ server: { port: value } }), invalid: [-1, 80.5, 65536] },
+      { name: 'timeouts.navigationTimeout', env: 'PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT', cli: 'navigationTimeout', file: (value: unknown) => ({ timeouts: { navigationTimeout: value } }), invalid: [-1, 1.5, 2147483648] },
+      { name: 'timeouts.defaultTimeout', env: 'PLAYWRIGHT_MCP_DEFAULT_TIMEOUT', cli: 'defaultTimeout', file: (value: unknown) => ({ timeouts: { defaultTimeout: value } }), invalid: [-1, 1.5, 2147483648] },
+      { name: 'timeouts.settle', env: 'PLAYWRIGHT_MCP_TIMEOUT_SETTLE', cli: 'timeoutSettle', file: (value: unknown) => ({ timeouts: { settle: value } }), invalid: [-1, 1.5, 2147483648] },
+    ] as const;
+
+    it.each(settings)('rejects a mistyped $name from the environment, CLI, or config file before launching anything', async ({ name, env, cli, file, invalid }) => {
+      // A non-numeric environment value became NaN; a NaN CDP launch deadline
+      // never expired, so the attach loop retried forever.
+      // cdpLaunch settings apply with the command from the same layer.
+      const launch = { cdpLaunchCommand: 'app' };
+      vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND', 'app');
+      vi.stubEnv(env, '30s');
+      await expect(resolveCLIConfig({})).rejects.toThrow(`${name} (`);
+      await expect(resolveCLIConfig({})).rejects.toThrow('must be an integer from');
+      vi.stubEnv(env, '');
+      vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND', '');
+      await expect(resolveCLIConfig({ ...launch, [cli]: NaN })).rejects.toThrow(/must be an integer from \d+ to \d+; got NaN\./);
+      await expect(resolveCLIConfig({ config: await writeConfigFile(file('30000') as Config) })).rejects.toThrow(`got "30000"`);
+      for (const value of [...invalid, Infinity])
+        await expect(resolveConfig(file(value) as Config)).rejects.toThrow(`${name} (`);
+    });
+
+    it.each(settings)('rejects an explicit JSON null for $name instead of treating it as omitted', async ({ name, file }) => {
+      // server.port: null started an HTTP listener on an ephemeral port, and
+      // cdpLaunch.port: null allocated a port whose reservation was never released.
+      await expect(resolveCLIConfig({ config: await writeConfigFile(file(null) as Config) })).rejects.toThrow(`${name} (`);
+      await expect(resolveConfig(file(null) as Config)).rejects.toThrow(/; got null\. Omit the setting to use its default\./);
+    });
+
+    it('keeps valid values, explicit zeros where documented, and defaults', async () => {
+      vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND', 'app');
+      vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT', '45000');
+      vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_PORT', '9222');
+      vi.stubEnv('PLAYWRIGHT_MCP_CDP_TIMEOUT', '0');
+      vi.stubEnv('PLAYWRIGHT_MCP_PORT', '0');
+      const config = await resolveCLIConfig({ timeoutSettle: 0, navigationTimeout: 0 });
+      expect(config.browser.cdpLaunch).toMatchObject({ startupTimeoutMs: 45000, port: 9222 });
+      expect(config.browser.cdpTimeout).toBe(0);
+      expect(config.server.port).toBe(0);
+      expect(config.timeouts).toMatchObject({ settle: 0, navigationTimeout: 0, defaultTimeout: 5000 });
+      // Explicitly blank environment values keep the defaults.
+      vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT', ' ');
+      expect((await resolveCLIConfig({})).browser.cdpLaunch?.startupTimeoutMs).toBeUndefined();
+    });
+
+    describe('CDP launch settings across layers', () => {
+      beforeEach(() => {
+        for (const name of Object.keys(process.env)) {
+          if (name.startsWith('PLAYWRIGHT_MCP_'))
+            vi.stubEnv(name, undefined);
+        }
+      });
+
+      it('validates a startup timeout from the environment against a CLI command', async () => {
+        // The CLI launch object replaced the environment's wholesale, so a
+        // mistyped environment timeout was dropped instead of rejected.
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT', '30s');
+        await expect(resolveCLIConfig({ cdpLaunchCommand: 'app' })).rejects.toThrow('browser.cdpLaunch.startupTimeoutMs (');
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_PORT', '0');
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT', undefined);
+        await expect(resolveCLIConfig({ cdpLaunchCommand: 'app' })).rejects.toThrow('browser.cdpLaunch.port (');
+      });
+
+      it('applies valid port and timeout from other layers with field-level precedence', async () => {
+        const configFile = await writeConfigFile({ browser: { cdpLaunch: { command: 'file-app', args: ['--file-arg'], port: 9001, startupTimeoutMs: 1000 } } });
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT', '2000');
+        expect((await resolveCLIConfig({ config: configFile, cdpLaunchCommand: 'cli-app' })).browser.cdpLaunch)
+            .toEqual({ command: 'cli-app', port: 9001, startupTimeoutMs: 2000 });
+        expect((await resolveCLIConfig({ config: configFile, cdpLaunchStartupTimeout: 3000 })).browser.cdpLaunch)
+            .toEqual({ command: 'file-app', args: ['--file-arg'], port: 9001, startupTimeoutMs: 3000 });
+        // A settings-only file applies to a command from the environment.
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND', 'env-app');
+        const settingsFile = await writeConfigFile({ browser: { cdpLaunch: { port: 9002 } as any } });
+        expect((await resolveCLIConfig({ config: settingsFile })).browser.cdpLaunch).toEqual({ command: 'env-app', port: 9002, startupTimeoutMs: 2000 });
+      });
+
+      it('rejects launch arguments that would be separated from their command', async () => {
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_ARGS', '--remote-debugging-port={port}');
+        await expect(resolveCLIConfig({ cdpLaunchCommand: 'cli-app' }))
+            .rejects.toThrow('browser.cdpLaunch args from the environment would be ignored');
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_ARGS', undefined);
+        const configFile = await writeConfigFile({ browser: { cdpLaunch: { command: 'file-app' } } });
+        await expect(resolveCLIConfig({ config: configFile, cdpLaunchCwd: './cli-cwd' }))
+            .rejects.toThrow('browser.cdpLaunch cwd from the CLI would be ignored');
+      });
+
+      it('rejects a config-file launch block without any command', async () => {
+        const configFile = await writeConfigFile({ browser: { cdpLaunch: { startupTimeoutMs: 1000 } as any } });
+        await expect(resolveCLIConfig({ config: configFile })).rejects.toThrow('browser.cdpLaunch in the config file needs a command');
+      });
+
+      it('rejects CLI and environment launch settings without any command instead of dropping them', async () => {
+        // Orphaned CLI/environment settings were dropped before numeric
+        // validation, so an out-of-range value started the server anyway.
+        await expect(resolveCLIConfig({ cdpLaunchStartupTimeout: -1 })).rejects.toThrow('browser.cdpLaunch in the CLI needs a command (found startupTimeoutMs)');
+        await expect(resolveCLIConfig({ cdpLaunchArgs: ['x'], cdpLaunchPort: 9222 })).rejects.toThrow('browser.cdpLaunch in the CLI needs a command (found args, port)');
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_PORT', '9222');
+        await expect(resolveCLIConfig({})).rejects.toThrow('browser.cdpLaunch in the environment needs a command (found port): set browser.cdpLaunch.command, --cdp-launch-command or PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND');
+        // A blank command is no command.
+        await expect(resolveCLIConfig({ cdpLaunchCommand: '', cdpLaunchStartupTimeout: 1000 })).rejects.toThrow('browser.cdpLaunch in the environment and the CLI needs a command (found port, startupTimeoutMs)');
+        vi.stubEnv('PLAYWRIGHT_MCP_CDP_LAUNCH_PORT', undefined);
+        expect((await resolveCLIConfig({})).browser.cdpLaunch).toBeUndefined();
+      });
+    });
+  });
+
   describe('snapshot boxes', () => {
     const saved = process.env.PLAYWRIGHT_MCP_SNAPSHOT_BOXES;
 

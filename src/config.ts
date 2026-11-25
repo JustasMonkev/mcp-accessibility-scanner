@@ -130,7 +130,8 @@ export async function resolveCLIConfig(cliOptions: CLIOptions): Promise<FullConf
   const noTabGroup = envToBoolean(process.env.PLAYWRIGHT_MCP_NO_TAB_GROUP);
   if (noTabGroup !== undefined)
     envOverrides.tabGroup = !noTabGroup;
-  const layers: ConfigLayers = { file: configInFile, env: envOverrides, cli: configFromCLIOptions(cliOptions) };
+  const cdpLaunch = mergeCdpLaunchLayers({ file: configInFile.browser?.cdpLaunch, env: cdpLaunchFromCLI(envOptions), cli: cdpLaunchFromCLI(cliOptions) });
+  const layers: ConfigLayers = { file: configInFile, env: envOverrides, cli: configFromCLIOptions(cliOptions), cdpLaunch };
   const options: OptionLayers = { env: envOptions, cli: cliOptions };
   return validateResolvedConfig(applyMobileConfig(mergeConfigLayers(layers), layers, options));
 }
@@ -146,6 +147,7 @@ async function validateResolvedConfig(config: FullConfig): Promise<FullConfig> {
   parseFilePaths(config.filePaths);
   applyProxyToClientCertificates(config);
   validateIdleTimeout(config.timeouts.idle);
+  validateNumericSettings(config);
   config.browser.allowedUploadDirs = await resolveUploadDirs(config.browser.allowedUploadDirs);
   if (config.outputDir !== undefined && config.outputDir !== null && !String(config.outputDir).trim())
     throw new Error('outputDir must not be blank: provide a directory path, or omit the option to use a temp directory.');
@@ -183,6 +185,33 @@ function validateIdleTimeout(idle: number): void {
     throw new Error(`timeouts.idle must be an integer from 0 to ${maxTimerDelayMs} milliseconds. Use 0 to disable idle shutdown.`);
 }
 
+const maxPort = 65_535;
+
+// CLI, environment and config-file numbers all arrive here after the merge: a
+// mistyped value (parseInt/Number of non-numeric text is NaN, a JSON string
+// stays a string) must fail startup instead of silently disabling a deadline.
+function validateNumericSettings(config: FullConfig): void {
+  const { browser, server, timeouts } = config;
+  validateIntegerSetting('browser.cdpTimeout (--cdp-timeout, PLAYWRIGHT_MCP_CDP_TIMEOUT)', browser.cdpTimeout, 0, maxTimerDelayMs, ' Use 0 to disable the CDP connect timeout.');
+  validateIntegerSetting('browser.cdpLaunch.startupTimeoutMs (--cdp-launch-startup-timeout, PLAYWRIGHT_MCP_CDP_LAUNCH_STARTUP_TIMEOUT)', browser.cdpLaunch?.startupTimeoutMs, 1, maxTimerDelayMs);
+  validateIntegerSetting('browser.cdpLaunch.port (--cdp-launch-port, PLAYWRIGHT_MCP_CDP_LAUNCH_PORT)', browser.cdpLaunch?.port, 1, maxPort);
+  validateIntegerSetting('server.port (--port, PLAYWRIGHT_MCP_PORT)', server.port, 0, maxPort);
+  validateIntegerSetting('timeouts.navigationTimeout (--navigation-timeout, PLAYWRIGHT_MCP_NAVIGATION_TIMEOUT)', timeouts.navigationTimeout, 0, maxTimerDelayMs);
+  validateIntegerSetting('timeouts.defaultTimeout (--default-timeout, PLAYWRIGHT_MCP_DEFAULT_TIMEOUT)', timeouts.defaultTimeout, 0, maxTimerDelayMs);
+  validateIntegerSetting('timeouts.settle (--timeout-settle, PLAYWRIGHT_MCP_TIMEOUT_SETTLE)', timeouts.settle, 0, maxTimerDelayMs);
+}
+
+function validateIntegerSetting(name: string, value: unknown, min: number, max: number, hint = ''): void {
+  if (value === undefined)
+    return;
+  // JSON null is not "omitted": a null port reached transport selection and
+  // port allocation as if it were set. Omit the key to use the default.
+  if (value === null)
+    throw new Error(`${name} must be an integer from ${min} to ${max}; got null. Omit the setting to use its default.`);
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max)
+    throw new Error(`${name} must be an integer from ${min} to ${max}; got ${typeof value === 'number' ? String(value) : JSON.stringify(value)}.${hint}`);
+}
+
 async function resolveUploadDirs(uploadDirs: string[] | undefined): Promise<string[] | undefined> {
   if (uploadDirs === undefined)
     return undefined;
@@ -211,7 +240,7 @@ function applyDefaultChromiumSandbox(config: FullConfig): void {
 }
 
 type MobileSource = 'env' | 'cli';
-type ConfigLayers = { file: Config, env: Config, cli: Config };
+type ConfigLayers = { file: Config, env: Config, cli: Config, cdpLaunch: CdpLaunch | undefined };
 type OptionLayers = { env: CLIOptions, cli: CLIOptions };
 
 function mergeConfigLayers(layers: ConfigLayers, mobile?: { override: Config, source: MobileSource }): FullConfig {
@@ -221,7 +250,62 @@ function mergeConfigLayers(layers: ConfigLayers, mobile?: { override: Config, so
       result = mergeConfig(result, mobile.override);
     result = mergeConfig(result, layers[source]);
   }
+  if (layers.cdpLaunch)
+    result.browser.cdpLaunch = layers.cdpLaunch;
+  else
+    delete result.browser.cdpLaunch;
   return result;
+}
+
+type CdpLaunch = NonNullable<BrowserUserConfig['cdpLaunch']>;
+type CdpLaunchSource = 'file' | 'env' | 'cli';
+const cdpLaunchSources: CdpLaunchSource[] = ['file', 'env', 'cli'];
+const cdpLaunchSourceNames: Record<CdpLaunchSource, string> = { file: 'the config file', env: 'the environment', cli: 'the CLI' };
+const appSpecificCdpLaunchFields = ['args', 'cwd', 'env'] as const;
+
+// The launched application (command, args, cwd, env) comes whole from the
+// highest-precedence layer that names a command: arguments and a working
+// directory written for one application are never mixed into another's.
+// port and startupTimeoutMs are generic launch settings and merge field by
+// field (CLI > environment > config file), so they apply with a command set
+// in any layer. JSON null is kept so validation can reject it.
+function mergeCdpLaunchLayers(layers: Record<CdpLaunchSource, Partial<CdpLaunch> | undefined>): CdpLaunch | undefined {
+  let app: { source: CdpLaunchSource, command: string, layer: Partial<CdpLaunch> } | undefined;
+  for (const source of cdpLaunchSources) {
+    const layer = layers[source];
+    if (layer?.command !== undefined)
+      app = { source, command: layer.command, layer };
+  }
+  if (!app) {
+    // A launch setting without a command anywhere would be dropped before
+    // validation, hiding both the missing command and a mistyped value.
+    const orphaned = cdpLaunchSources.filter(source => layers[source]);
+    if (orphaned.length) {
+      const fields = [...new Set(orphaned.flatMap(source => Object.keys(layers[source] ?? {})))];
+      throw new Error(`browser.cdpLaunch in ${orphaned.map(source => cdpLaunchSourceNames[source]).join(' and ')} needs a command${fields.length ? ` (found ${fields.join(', ')})` : ''}: set browser.cdpLaunch.command, --cdp-launch-command or PLAYWRIGHT_MCP_CDP_LAUNCH_COMMAND, or remove the CDP launch settings.`);
+    }
+    return undefined;
+  }
+  const merged: CdpLaunch = { command: app.command };
+  if (app.layer.args !== undefined)
+    merged.args = app.layer.args;
+  if (app.layer.cwd !== undefined)
+    merged.cwd = app.layer.cwd;
+  if (app.layer.env !== undefined)
+    merged.env = app.layer.env;
+  for (const source of cdpLaunchSources) {
+    const layer = layers[source];
+    if (!layer)
+      continue;
+    const orphaned = layer.command === undefined ? appSpecificCdpLaunchFields.filter(field => layer[field] !== undefined) : [];
+    if (orphaned.length)
+      throw new Error(`browser.cdpLaunch ${orphaned.join(', ')} from ${cdpLaunchSourceNames[source]} would be ignored: they apply only with the command from the same layer, and ${cdpLaunchSourceNames[app.source]} sets the command. Set the command alongside them, or remove them.`);
+    if (layer.port !== undefined)
+      merged.port = layer.port;
+    if (layer.startupTimeoutMs !== undefined)
+      merged.startupTimeoutMs = layer.startupTimeoutMs;
+  }
+  return merged;
 }
 
 function mobileSourceOf(options: OptionLayers): MobileSource | undefined {
@@ -300,16 +384,15 @@ function contextOptionsFromCLI(cliOptions: CLIOptions): BrowserContextOptions {
   return contextOptions;
 }
 
-function cdpLaunchFromCLI(cliOptions: CLIOptions): NonNullable<Config['browser']>['cdpLaunch'] {
-  if (!cliOptions.cdpLaunchCommand)
-    return undefined;
-  return {
-    command: cliOptions.cdpLaunchCommand,
+function cdpLaunchFromCLI(cliOptions: CLIOptions): Partial<CdpLaunch> | undefined {
+  const launch = pickDefined<Partial<CdpLaunch>>({
+    command: cliOptions.cdpLaunchCommand || undefined,
     args: cliOptions.cdpLaunchArgs,
     cwd: cliOptions.cdpLaunchCwd,
     port: cliOptions.cdpLaunchPort,
     startupTimeoutMs: cliOptions.cdpLaunchStartupTimeout,
-  };
+  });
+  return Object.keys(launch).length ? launch : undefined;
 }
 
 function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = false): Config {
@@ -328,7 +411,6 @@ function configFromCLIOptions(cliOptions: CLIOptions, sandboxTrueIsExplicit = fa
       allowedUploadDirs: cliOptions.allowedUploadDirs,
       launchOptions: launchOptionsFromCLI(cliOptions, channel, sandboxTrueIsExplicit),
       contextOptions: contextOptionsFromCLI(cliOptions),
-      cdpLaunch: cdpLaunchFromCLI(cliOptions),
       cdpEndpoint: cliOptions.cdpEndpoint,
       cdpHeaders: parseCdpHeaders(cliOptions.cdpHeader),
       cdpTimeout: cliOptions.cdpTimeout,
@@ -545,9 +627,9 @@ function mergeConfig(base: FullConfig, overrides: Config): FullConfig {
       ...pickDefined(overrides.server),
     },
     timeouts: {
-      navigationTimeout: overrides.timeouts?.navigationTimeout ?? base.timeouts.navigationTimeout,
-      defaultTimeout: overrides.timeouts?.defaultTimeout ?? base.timeouts.defaultTimeout,
-      settle: overrides.timeouts?.settle ?? base.timeouts.settle,
+      navigationTimeout: overrides.timeouts?.navigationTimeout !== undefined ? overrides.timeouts.navigationTimeout : base.timeouts.navigationTimeout,
+      defaultTimeout: overrides.timeouts?.defaultTimeout !== undefined ? overrides.timeouts.defaultTimeout : base.timeouts.defaultTimeout,
+      settle: overrides.timeouts?.settle !== undefined ? overrides.timeouts.settle : base.timeouts.settle,
       idle: overrides.timeouts?.idle !== undefined ? overrides.timeouts.idle : base.timeouts.idle,
     },
   } as FullConfig;

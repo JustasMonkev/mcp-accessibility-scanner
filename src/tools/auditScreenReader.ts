@@ -40,10 +40,18 @@ type ScreenReaderFinding = {
   fix: string;
 };
 
+type InconclusiveName = { ref: string; role: string; selector: string | null };
+
 type ScreenReaderAuditResult = {
   findings: ScreenReaderFinding[];
   countByCheck: Record<ScreenReaderCheck, number>;
   truncatedChecks: ScreenReaderCheck[];
+  /**
+   * Controls with no name in the snapshot whose accessible name could not be measured:
+   * a name carried by their children cannot be ruled out, so they are not counted as missing.
+   * `elements` lists at most `maxFindingsPerCheck` of them; `count` is the full number.
+   */
+  inconclusiveNames: { count: number; elements: InconclusiveName[] };
 };
 
 type ScreenReaderAuditOptions = {
@@ -233,7 +241,7 @@ function hasNamedControlAncestor(nodes: ScreenReaderNode[], index: number): bool
   return false;
 }
 
-function checkAccessibleNames(nodes: ScreenReaderNode[], push: (finding: ScreenReaderFinding) => void) {
+function checkAccessibleNames(nodes: ScreenReaderNode[], push: (finding: ScreenReaderFinding) => void, pushInconclusive: (element: InconclusiveName) => void) {
   for (const [index, node] of nodes.entries()) {
     if (!node.ref || node.ariaHidden)
       continue;
@@ -247,6 +255,10 @@ function checkAccessibleNames(nodes: ScreenReaderNode[], push: (finding: ScreenR
 
     const isImage = node.role === 'img' || node.role === 'image';
     if (!name && namedRoles.has(node.role) && !(isImage && hasNamedControlAncestor(nodes, index))) {
+      if (!node.nameMeasured) {
+        pushInconclusive({ ref: node.ref, role: node.role, selector: node.selector });
+        continue;
+      }
       push({
         ...base,
         check: 'missing-accessible-name',
@@ -426,8 +438,14 @@ export function analyzeScreenReader(
       findings.push(finding);
   };
 
+  const inconclusiveNames: ScreenReaderAuditResult['inconclusiveNames'] = { count: 0, elements: [] };
+  const pushInconclusive = (element: InconclusiveName) => {
+    if (++inconclusiveNames.count <= options.maxFindingsPerCheck)
+      inconclusiveNames.elements.push(element);
+  };
+
   if (options.checkNames) {
-    checkAccessibleNames(nodes, push);
+    checkAccessibleNames(nodes, push, pushInconclusive);
     checkDuplicateNames(nodes, push);
   }
   if (options.checkReadingOrder)
@@ -435,7 +453,7 @@ export function analyzeScreenReader(
 
   const truncatedChecks = (Object.keys(countByCheck) as ScreenReaderCheck[])
       .filter(check => countByCheck[check] > options.maxFindingsPerCheck);
-  return { findings, countByCheck, truncatedChecks };
+  return { findings, countByCheck, truncatedChecks, inconclusiveNames };
 }
 
 const auditScreenReaderSchema = z.object({
@@ -495,6 +513,7 @@ const auditScreenReader = defineTabTool({
       totalFindings,
       truncatedChecks: result.truncatedChecks,
       findings: result.findings,
+      inconclusiveNames: result.inconclusiveNames,
     };
 
     const reportResource = await writeJsonReport(response, reportPath, report, {
@@ -519,6 +538,7 @@ const auditScreenReader = defineTabTool({
         truncatedChecks: result.truncatedChecks,
       },
       findings: result.findings,
+      inconclusiveNames: result.inconclusiveNames,
       reportUri: reportResource.uri,
     });
 
@@ -578,7 +598,11 @@ function renderScreenReaderSummary(result: ScreenReaderAuditResult, measurement:
       ? [`WARNING: ${unresolvedElements} of these went stale before measurement (the page re-rendered mid-audit, or their frame stopped answering) and were not evaluated; findings may be incomplete. Re-run once the page is stable.`]
       : []),
     ...(unmeasuredNames > 0
-      ? [`WARNING: accessible names could not be measured for ${unmeasuredNames} of these (axe-core could not be installed or run in their frame); a control named only through its children may be reported there as missing a name.`]
+      ? [`WARNING: accessible names could not be measured for ${unmeasuredNames} of these (axe-core could not be installed or run in their frame); name findings there rely on the snapshot alone.`]
+      : []),
+    ...(result.inconclusiveNames.count > 0
+      ? [`Missing name inconclusive (no snapshot name, accessible name not measured; not counted as missing-accessible-name): ${result.inconclusiveNames.count}${result.inconclusiveNames.count > result.inconclusiveNames.elements.length ? ` (showing ${result.inconclusiveNames.elements.length})` : ''}`,
+        ...result.inconclusiveNames.elements.map(element => `- ${element.role} ${element.selector ?? ''} Ref: ${element.ref}`.replace(/\s+/g, ' '))]
       : []),
     `Findings: ${totalFindings}`,
     'Check | Findings',
@@ -588,7 +612,7 @@ function renderScreenReaderSummary(result: ScreenReaderAuditResult, measurement:
       ? ['', `Showing at most ${maxFindingsPerCheck} findings per check; truncated: ${result.truncatedChecks.join(', ')}`]
       : []),
     '',
-    ...(findingLines.length ? findingLines : ['- No screen-reader-level issues detected.']),
+    ...(findingLines.length ? findingLines : [result.inconclusiveNames.count ? '- No findings, but the names listed as inconclusive above were not evaluated.' : '- No screen-reader-level issues detected.']),
     '',
     `JSON report: ${reportPath}`,
   ].join('\n');

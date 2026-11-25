@@ -20,6 +20,13 @@ if [[ "${version_output}" != Version* ]]; then
   exit 1
 fi
 
+echo "[docker-smoke] Verifying the stdio-default image declares no HTTP healthcheck"
+image_healthcheck="$(docker image inspect -f '{{json .Config.Healthcheck}}' "$IMAGE_TAG")"
+if [[ "$image_healthcheck" != "null" ]]; then
+  echo "[docker-smoke] The image must not probe HTTP by default (stdio opens no listener): $image_healthcheck"
+  exit 1
+fi
+
 echo "[docker-smoke] Verifying non-root user and nested init startup"
 test "$(docker run --rm --entrypoint id "$IMAGE_TAG" -un)" = mcp
 docker run --rm --init "$IMAGE_TAG" --version >/dev/null
@@ -34,8 +41,23 @@ fi
 echo "[docker-smoke] Verifying Chromium launch inside container"
 docker run --rm --entrypoint node "${IMAGE_TAG}" --input-type=module -e "import { chromium } from 'playwright-core'; const browser = await chromium.launch({ headless: true, chromiumSandbox: false }); await browser.close(); console.log('chromium-ok');"
 
+echo "[docker-smoke] Reading the HTTP healthcheck from docker-compose.yaml"
+health_cmd_script="$(cat <<'NODE'
+let input = '';
+process.stdin.on('data', chunk => input += chunk).on('end', () => {
+  const [form, ...args] = JSON.parse(input).services['mcp-accessibility-scanner'].healthcheck.test;
+  if (form !== 'CMD')
+    throw new Error(`Expected an exec-form CMD healthcheck, got ${form}`);
+  console.log(args.map(arg => `'${arg.replaceAll("'", "'\\''")}'`).join(' '));
+});
+NODE
+)"
+health_cmd="$(docker compose -f docker-compose.yaml config --format json | node -e "$health_cmd_script")"
+
 echo "[docker-smoke] Starting MCP server container on localhost:${PORT}"
-docker run -d --name "${CONTAINER_NAME}" -p "${PORT}:8931" "${IMAGE_TAG}" --host 0.0.0.0 --port 8931 --browser chromium --no-sandbox --isolated --output-dir /app/output >/dev/null
+docker run -d --name "${CONTAINER_NAME}" -p "${PORT}:8931" \
+  --health-cmd "$health_cmd" --health-interval 2s --health-timeout 5s --health-retries 3 --health-start-period 10s \
+  "${IMAGE_TAG}" --host 0.0.0.0 --port 8931 --browser chromium --no-sandbox --isolated --output-dir /app/output >/dev/null
 
 ready=0
 for _ in $(seq 1 20); do
@@ -51,6 +73,19 @@ if [[ "${ready}" != "1" ]]; then
   echo "[docker-smoke] MCP endpoint did not become ready on localhost:${PORT} (HTTP ${http_code})"
   cat /tmp/mcp-docker-smoke-response.txt || true
   docker logs "${CONTAINER_NAME}" || true
+  exit 1
+fi
+
+echo "[docker-smoke] Waiting for Docker to report the HTTP container healthy"
+health_status=''
+for _ in $(seq 1 30); do
+  health_status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$CONTAINER_NAME")"
+  [[ "$health_status" == healthy || "$health_status" == unhealthy ]] && break
+  sleep 2
+done
+if [[ "$health_status" != healthy ]]; then
+  echo "[docker-smoke] Expected Docker health 'healthy', got '${health_status:-none}'"
+  docker inspect -f '{{json .State.Health}}' "$CONTAINER_NAME" || true
   exit 1
 fi
 
