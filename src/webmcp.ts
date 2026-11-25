@@ -42,7 +42,7 @@ const pendingDiscovery = new WeakMap<playwright.Frame, Promise<string>>();
 const pendingInvocations = new Map<string, Promise<string>>();
 const compiledSchemas = new Map<string, StandardSchemaWithJSON<Record<string, unknown>, Record<string, unknown>> | undefined>();
 
-type PageTool = { name: string, title?: string, description?: string, inputSchema?: unknown, window?: Window };
+type PageTool = { name: string, title?: string, description?: string, inputSchema?: unknown, source?: Window | null, window?: Window };
 type ModelContext = {
   getTools?: () => Promise<PageTool[]>;
   executeTool?: (tool: PageTool, input: unknown) => Promise<unknown>;
@@ -228,7 +228,7 @@ async function collectInPage(budget: DiscoveryBudget, isSupportedInputSchema: (s
       try {
         const tool = registered[index];
         const name = tool?.name;
-        if (!tool || typeof name !== 'string' || !name || name.length > 256 || ('window' in tool && tool.window !== window))
+        if (!tool || typeof name !== 'string' || !name || name.length > 256 || ('source' in tool ? tool.source !== window : 'window' in tool && tool.window !== window))
           continue;
         candidates.push({ tool, name });
         counts.set(name, (counts.get(name) ?? 0) + 1);
@@ -374,7 +374,7 @@ async function callInPage(params: { name: string, inputJson: string, timeOrigin:
     const tools = await modelContext.getTools();
     const matches = Array.isArray(tools) ? tools.filter(candidate => {
       try {
-        return candidate?.name === params.name && (!('window' in candidate) || candidate.window === window);
+        return candidate?.name === params.name && ('source' in candidate ? candidate.source === window : !('window' in candidate) || candidate.window === window);
       } catch {
         return false;
       }
