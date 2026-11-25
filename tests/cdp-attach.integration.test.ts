@@ -82,8 +82,8 @@ async function listTabs(endpoint: string) {
   return targets.filter(target => target.type === 'page').map(({ url, title }) => ({ url, title })).sort((a, b) => a.url.localeCompare(b.url));
 }
 
-async function listTabsThroughMcp(config: FullConfig) {
-  const backend = new BrowserServerBackend(config, contextFactory(config));
+async function listTabsThroughMcp(config: FullConfig, factory = contextFactory(config)) {
+  const backend = new BrowserServerBackend(config, factory);
   backends.push(backend);
   await backend.initialize({ notifyToolListChanged: async () => {} }, { name: 'vitest', version: '1.0.0' });
   const result = await backend.callTool('browser_tabs', { action: 'list' });
@@ -113,10 +113,13 @@ it('requires an explicit index to close a tab from a fresh CDP backend', async (
   };
   const before = await listTabs(endpoint);
   expect(before.map(tab => tab.url)).toEqual([`${origin}/first`, `${origin}/second`]);
+  const { text: listing } = await listTabsThroughMcp(config, factory);
+  const indexedUrl = /^- 1:.* \(([^)]+)\)$/m.exec(listing)?.[1];
+  expect(before.map(tab => tab.url)).toContain(indexedUrl);
   const selecting = await freshBackend();
   const selected = await selecting.callTool('browser_tabs', { action: 'select', index: 1 });
   expect(selected.isError).not.toBe(true);
-  expect(selected.content).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining(`Page URL: ${origin}/second`) })]));
+  expect(selected.content).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining(`Page URL: ${indexedUrl}`) })]));
 
   const closing = await freshBackend();
   const result = await closing.callTool('browser_tabs', { action: 'close' });
@@ -125,8 +128,7 @@ it('requires an explicit index to close a tab from a fresh CDP backend', async (
 
   expect((await closing.callTool('browser_tabs', { action: 'close', index: 1 })).isError).not.toBe(true);
   const survivors = await listTabs(endpoint);
-  expect(survivors).toHaveLength(1);
-  expect(before).toContainEqual(survivors[0]);
+  expect(survivors).toEqual(before.filter(tab => tab.url !== indexedUrl));
 
   expect((await selecting.callTool('browser_tabs', { action: 'close' })).isError).not.toBe(true);
   expect(await listTabs(endpoint)).toEqual([]);
