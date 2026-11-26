@@ -1,6 +1,5 @@
 import { rejectOnAbort } from '../utils/timeout.js';
 import RE2 from 're2';
-import coreBundle from 'playwright-core/lib/coreBundle';
 import type { Page, Request, Response } from 'playwright';
 import type { FullConfig } from '../config.js';
 import { z } from 'zod';
@@ -14,6 +13,7 @@ import { HtmlPatternGroups } from '../utils/htmlPatterns.js';
 import { logUnhandledError } from '../utils/log.js';
 import { errorMessage } from '../utils/errors.js';
 import { isHttpUrl } from '../utils/httpUrl.js';
+import { isUrlAllowedByOriginPolicy } from '../utils/originPolicy.js';
 import { extractSitemapPages } from '../utils/sitemap.js';
 import { selectRepresentativeUrls } from '../utils/representativeUrls.js';
 import {
@@ -298,9 +298,7 @@ function parseSitemapUrl(input: string, base: URL, scope: CrawlScope, config: Fu
     throw new Error('Sitemap URL must not contain credentials.');
   if (!scope.allowsOrigin(url) || scope.excludesPath(url))
     throw new Error(`Sitemap URL "${input}" is outside the allowed crawl scope (start origin ${scope.startUrl.origin}).`);
-  const matches = (origin: string) => coreBundle.iso.urlMatches(undefined, url.href, `*://${origin}/**`);
-  if (config.network.blockedOrigins?.some(matches) ||
-      (config.network.allowedOrigins?.length && !config.network.allowedOrigins.some(matches)))
+  if (!isUrlAllowedByOriginPolicy(config.network, url.href))
     throw new Error(`Sitemap URL "${input}" is blocked by the server network policy.`);
   url.hash = '';
   return url.href;

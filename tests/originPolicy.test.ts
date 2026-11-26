@@ -1,0 +1,81 @@
+/**
+ * Copyright (c) Microsoft Corporation.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { describe, expect, it } from 'vitest';
+import { isUrlAllowedByOriginPolicy } from '../src/utils/originPolicy.js';
+
+describe('isUrlAllowedByOriginPolicy', () => {
+  it.each([
+    'http://evil.com/',
+    'https://evil.com/path?q=1',
+    'http://evil.com:8080/',
+    'https://evil.com:8443/x',
+    'http://evil.com./',
+    'http://evil.com../',
+    'http://evil.com.:8080/',
+    'ws://evil.com:9000/socket',
+    'wss://evil.com./socket',
+  ])('a portless blocklist entry blocks %s', url => {
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['evil.com'] }, url)).toBe(false);
+  });
+
+  it.each([
+    ['http://evil.com:8080/', false],
+    ['http://evil.com.:8080/', false],
+    ['http://evil.com/', true],
+    ['http://evil.com:9090/', true],
+  ] as const)('a blocklist entry with a port blocks only that port: %s -> allowed=%s', (url, allowed) => {
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['evil.com:8080'] }, url)).toBe(allowed);
+  });
+
+  it.each([
+    ['http://sub.evil.com./', ['*.evil.com']],
+    ['http://sub.evil.com:3000/', ['*.evil.com']],
+  ] as const)('wildcard blocklist entries cover trailing-dot and nondefault-port hosts: %s', (url, blockedOrigins) => {
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: [...blockedOrigins] }, url)).toBe(false);
+  });
+
+  it('does not block unrelated or lookalike hosts', () => {
+    const policy = { blockedOrigins: ['evil.com'] };
+    for (const url of ['http://notevil.com/', 'http://evil.com.example/', 'http://sub.evil.com/', 'http://example.com/?next=http://evil.com/'])
+      expect(isUrlAllowedByOriginPolicy(policy, url), url).toBe(true);
+  });
+
+  it('keeps exact-port allowlist semantics and accepts the trailing-dot spelling of an allowed host', () => {
+    const policy = { allowedOrigins: ['example.com', 'localhost:3000'] };
+    expect(isUrlAllowedByOriginPolicy(policy, 'https://example.com/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy(policy, 'https://example.com./')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy(policy, 'https://example.com:8443/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy(policy, 'http://localhost:3000/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy(policy, 'http://localhost.:3000/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy(policy, 'http://localhost:3001/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy(policy, 'https://evil.com/')).toBe(false);
+  });
+
+  it('lets the blocklist win over the allowlist on any port', () => {
+    const policy = { allowedOrigins: ['*.example', 'tracker.example:8080'], blockedOrigins: ['tracker.example'] };
+    expect(isUrlAllowedByOriginPolicy(policy, 'https://app.example/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy(policy, 'http://tracker.example:8080/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy(policy, 'http://tracker.example./')).toBe(false);
+  });
+
+  it('allows everything without a policy and keeps unparsable URLs to raw matching', () => {
+    expect(isUrlAllowedByOriginPolicy(undefined, 'http://evil.com/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({}, 'http://evil.com:8080/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['evil.com'] }, 'not a url')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['example.com'] }, 'not a url')).toBe(false);
+  });
+});

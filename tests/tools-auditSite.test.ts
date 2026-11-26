@@ -1747,6 +1747,7 @@ describe('audit_site tool', () => {
     { target: 'https://outside.example/map', reason: /crawl scope/ },
     { target: '/signout/map', reason: /crawl scope/ },
     { target: 'https://private.example.com/map', reason: /network policy/ },
+    { target: 'https://private.example.com:8443/map', reason: /network policy/ },
     { target: 'https://user:pass@example.com/map', reason: /credentials/ },
     { target: 'file:///tmp/map.xml', reason: /must use http/ },
   ])('validates child $target both as a listed manifest and as a redirect before fetching it', async ({ target, reason }) => {
@@ -1763,6 +1764,21 @@ describe('audit_site tool', () => {
       expect(crawlTab.navigate).not.toHaveBeenCalled();
       expect(writeFileSpy).not.toHaveBeenCalled();
     }
+  });
+
+  it.each([
+    'https://private.example.com:8443/map',
+    'https://private.example.com./map',
+    'https://private.example.com.:8443/map',
+  ])('applies a portless blocklist entry to sitemap child %s outside same-origin scope', async target => {
+    const root = 'https://example.com/sitemap.xml';
+    const { response, fetchMock, crawlTab } = createHarness({}, {
+      network: { blockedOrigins: ['private.example.com'] },
+      sitemapXmlByUrl: { [root]: sitemapIndex(target) },
+    });
+    await expect(tool.handle(response.context, tool.schema.inputSchema.parse({ strategy: 'sitemap', sameOriginOnly: false }), response)).rejects.toThrow(/network policy/);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([root]);
+    expect(crawlTab.navigate).not.toHaveBeenCalled();
   });
 
   it('counts redirects toward the total sitemap request limit, even after finding enough pages', async () => {

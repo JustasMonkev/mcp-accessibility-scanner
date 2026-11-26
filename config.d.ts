@@ -191,6 +191,7 @@ export type Config = {
 
     /**
      * Host patterns to block, including HTTP redirect destinations; takes precedence over allowedOrigins.
+     * An entry without a port blocks the host on every port; trailing-dot hosts (`example.com.`) also match.
      * Same connection and worker-WebSocket limitations as allowedOrigins.
      */
     blockedOrigins?: string[];
