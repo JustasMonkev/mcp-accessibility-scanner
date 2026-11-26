@@ -48,6 +48,36 @@ describe('isUrlAllowedByOriginPolicy', () => {
     expect(isUrlAllowedByOriginPolicy({ blockedOrigins: [...blockedOrigins] }, url)).toBe(false);
   });
 
+  it.each([
+    'http://evil.com./',
+    'http://evil.com/',
+    'http://evil.com.:8080/',
+    'http://evil.com:8080/',
+  ])('a trailing-dot blocklist entry blocks its host on every port: %s', url => {
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['evil.com.'] }, url)).toBe(false);
+  });
+
+  it('a trailing-dot blocklist entry with a port blocks only that port', () => {
+    const policy = { blockedOrigins: ['evil.com.:8080'] };
+    expect(isUrlAllowedByOriginPolicy(policy, 'http://evil.com:8080/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy(policy, 'http://evil.com.:8080/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy(policy, 'http://evil.com:9090/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['evil.com:8080'] }, 'http://evil.com:9090/')).toBe(true);
+  });
+
+  it('lets a trailing-dot blocklist entry win over a port-scoped allowlist entry', () => {
+    const policy = { allowedOrigins: ['evil.com:8080'], blockedOrigins: ['evil.com.'] };
+    expect(isUrlAllowedByOriginPolicy(policy, 'http://evil.com.:8080/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy(policy, 'http://evil.com:8080/')).toBe(false);
+  });
+
+  it('treats a trailing-dot allowlist entry as its host without widening wildcard-only entries', () => {
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['example.com.'] }, 'https://example.com/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['example.com.:8443'] }, 'https://example.com:8443/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['example.com.'] }, 'https://example.com:8443/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['*.'] }, 'https://example.com/')).toBe(false);
+  });
+
   it('does not block unrelated or lookalike hosts', () => {
     const policy = { blockedOrigins: ['evil.com'] };
     for (const url of ['http://notevil.com/', 'http://evil.com.example/', 'http://sub.evil.com/', 'http://example.com/?next=http://evil.com/'])

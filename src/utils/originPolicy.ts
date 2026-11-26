@@ -18,8 +18,21 @@ import coreBundle from 'playwright-core/lib/coreBundle';
 
 type OriginPolicy = { allowedOrigins?: string[], blockedOrigins?: string[] };
 
-function matchesOrigin(url: string, origin: string): boolean {
+function matchesPattern(url: string, origin: string): boolean {
   return coreBundle.iso.urlMatches(undefined, url, `*://${origin}/**`);
+}
+
+// Entries get the same trailing-dot treatment as URLs, so `evil.com.` and
+// `evil.com.:8080` name the same hosts as `evil.com` and `evil.com:8080`.
+// A host made only of wildcards and dots (`*.`) is left as written.
+function withoutTrailingDotEntry(origin: string): string {
+  const stripped = origin.replace(/\.+(?=(?::\d+)?$)/, '');
+  return /[^*.]/.test(stripped.replace(/:\d+$/, '')) ? stripped : origin;
+}
+
+function matchesOrigin(url: string, origin: string): boolean {
+  const normalized = withoutTrailingDotEntry(origin);
+  return matchesPattern(url, origin) || (normalized !== origin && matchesPattern(url, normalized));
 }
 
 // `example.com.` is the fully qualified spelling of `example.com`, and Chromium
