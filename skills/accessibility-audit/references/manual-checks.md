@@ -15,7 +15,7 @@ Axe, together with this server's heuristic audits, gives evidence for only some 
 
 ## Operable
 
-- **2.1.1 Keyboard**: whether every piece of functionality works by keyboard. `audit_keyboard` checks reachability, and `audit_keyboard_operation` checks only the scenarios you script.
+- **2.1.1 Keyboard**: whether every piece of functionality works by keyboard. `audit_keyboard` checks reachability, and `audit_keyboard_operation` checks only the scenarios you script. Neither tool, nor Axe, flags a click handler on an element that cannot take focus, such as `<div onclick>` posing as a button. Look in `browser_snapshot` for controls that look clickable but are missing from the tab order.
 - **2.2.x Enough time**: session timeouts, and whether moving, auto-updating or carousel content can be paused, stopped or hidden.
 - **2.3.1 Three flashes**: content that flashes.
 - **2.4.4 / 2.4.9 Link purpose**: whether link text makes sense in its context or on its own.
