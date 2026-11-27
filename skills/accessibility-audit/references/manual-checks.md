@@ -22,7 +22,7 @@ Axe, together with this server's heuristic audits, gives evidence for only some 
 - **2.4.5 Multiple ways**: whether pages can be found in more than one way (navigation, search, sitemap).
 - **2.4.6 Headings and labels**: whether headings and labels *describe* their content. `audit_screen_reader` flags only generic names.
 - **2.5.1 Pointer gestures**: multipoint or path-based gestures (pinch, swipe, drawing a path) that have no single-pointer alternative.
-- **2.5.2 Pointer cancellation**: whether single-pointer actions avoid firing on the down event. The action must run on the up event and be abortable (by moving off the target before release) or undoable, or the up event must reverse what the down event did. Firing on the down event is allowed only when that is essential, such as a piano key.
+- **2.5.2 Pointer cancellation**: for each action a single pointer triggers, at least one of these must hold: the down event does not run the action; the action completes on the up event and can be aborted before release (for example by moving off the target) or undone afterwards; the up event reverses whatever the down event did; or completing on the down event is essential, such as a piano key.
 - **2.5.7 Dragging movements**: whether every drag action has a single-pointer alternative.
 
 ## Understandable
