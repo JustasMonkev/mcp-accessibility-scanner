@@ -16,6 +16,7 @@ Before you run anything, settle these. Ask the user only when the request does n
 - **Target**: one page, one flow (sign in, checkout, a form), or a site crawl.
 - **Standard**: the default Axe tags cover WCAG 2.0, 2.1 and 2.2 at A, AA and AAA, plus Section 508. Most requests mean WCAG 2.2 AA. To report against that, pass `violationsTag: ["wcag2a","wcag2aa","wcag21a","wcag21aa","wcag22a","wcag22aa"]`.
 - **State**: pages behind a sign-in, a cookie banner or a modal need to be put into the right state with the browser tools before scanning.
+- **Session**: on a stateless connection (MCP 2026-07-28 over HTTP, with no `initialize` session), each request runs in a fresh default browser, so a page you navigate to is gone by the next call. Call `browser_session_open` first and pass its `browserSessionId` to every browser tool call in the audit. If it is rejected (modes that share one live browser, such as `--extension` or CDP attach), keep using the default session, but `retainFindings` is unavailable there: rely on the inline findings and say in the report when a rule was cut off at `maxNodesPerViolation`. A stateful connection can use the default session as it is.
 
 ## 2. Single page
 
@@ -23,7 +24,7 @@ Before you run anything, settle these. Ask the user only when the request does n
 2. `scan_page`. This is the Axe scan, and its result is the core of the report.
    - Keep `includeIncomplete` on. "Incomplete" results are checks Axe could not decide, such as contrast over an image. Inspect each one yourself with `browser_snapshot` or `browser_take_screenshot` before you report it.
    - Use `excludeSelectors` for third-party widgets the user does not own, such as chat bubbles or ad iframes. Say in the report what you excluded.
-   - When a rule has more nodes than `maxNodesPerViolation`, set `retainFindings: true`. Then page through `get_scan_findings` (follow `nextOffset` until it is `null`) rather than scanning again.
+   - Only `maxNodesPerViolation` nodes per rule (10 by default) are shown inline. When the report needs every affected node, set `retainFindings: true` on this first scan. Then page through `get_scan_findings` with the returned `scanId` (follow `nextOffset` until it is `null`). Retention cannot be switched on afterwards: if a scan without it was cut off, scan again with `retainFindings: true`.
    - Set `annotateScreenshot: true` when the user wants a visual. It costs a full-page screenshot.
 3. `audit_keyboard` covers what Axe cannot: tab order, visible focus, focus traps, skip links, focus obscured (WCAG 2.4.11) and target size (WCAG 2.5.8).
 4. `audit_screen_reader` checks accessible name quality and whether reading order matches the visual layout.

@@ -59,6 +59,8 @@ describe.skipIf(process.platform === 'win32')('POSIX CLI shutdown', () => {
     await fs.mkdir(cacheDir, { recursive: true });
     buildDir = await fs.mkdtemp(path.join(cacheDir, 'shutdown-'));
     await Promise.all(['cli.js', 'package.json'].map(file => fs.copyFile(path.join(rootDir, file), path.join(buildDir, file))));
+    // The server serves the packaged skills/ folder next to lib/ and refuses to start without it.
+    await fs.cp(path.join(rootDir, 'skills'), path.join(buildDir, 'skills'), { recursive: true });
     execFileSync(process.execPath, [path.join(rootDir, 'node_modules/typescript/bin/tsc'), '--project', path.join(rootDir, 'tsconfig.json'), '--outDir', path.join(buildDir, 'lib')]);
   });
 
