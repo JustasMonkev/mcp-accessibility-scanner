@@ -19,6 +19,7 @@ import { BrowserServerBackend } from './browserServerBackend.js';
 import { resolveConfig } from './config.js';
 import { contextFactory } from './browserContextFactory.js';
 import * as mcpServer from './mcp/server.js';
+import { loadBundledSkills } from './skills.js';
 import { serverInstructions } from './tools.js';
 import { packageJSON } from './utils/package.js';
 
@@ -33,7 +34,7 @@ export async function createConnection(userConfig: Config = {}, contextGetter?: 
   const config = await resolveConfig(userConfig);
   assertNetworkPolicySupported(config, !contextGetter);
   const factory = contextGetter ? new SimpleBrowserContextFactory(contextGetter) : contextFactory(config);
-  return mcpServer.createServer('Playwright', packageJSON.version, new BrowserServerBackend(config, factory), false, { title: 'Accessibility Scanner', instructions: serverInstructions(config), redactUrlParams: config.redactUrlParams });
+  return mcpServer.createServer('Playwright', packageJSON.version, new BrowserServerBackend(config, factory), false, { title: 'Accessibility Scanner', instructions: serverInstructions(config), redactUrlParams: config.redactUrlParams, skills: await loadBundledSkills() });
 }
 
 class SimpleBrowserContextFactory implements BrowserContextFactory {

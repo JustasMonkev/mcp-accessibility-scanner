@@ -538,6 +538,22 @@ If a session cookie disappears anyway, `audit_site` says so instead of reporting
 
 The check compares which cookies the crawled URLs carry, not their values, so a rotating CSRF token never reads as a lost session. A cookie the browser deleted at its own stated expiry is ignored for the same reason — Cloudflare's `__cf_bm` lives 30 minutes and would otherwise warn on any longer crawl. Beyond that no attempt is made to tell an authentication cookie from any other: nothing in a cookie marks it as one, so any cookie the crawl started with and later lost is reported. Monitoring does not stop at the first loss — each cookie is reported once, at the URL where it vanished, so an analytics cookie expiring early cannot mask the session cookie being dropped later. URLs discovered mid-crawl join the cookie tracking before they are visited, so a session cookie scoped to a path below the start URL (say `/app`) is watched too.
 
+## Skills over MCP
+
+The server also publishes [Agent Skills](https://agentskills.io/specification) alongside its tools, using the MCP skills extension (`io.modelcontextprotocol/skills`, SEP-2640). A client that supports skills, such as Claude or Claude Code, loads a skill only when the task needs it. The skill teaches the client the audit workflow, so you don't have to spell it out in every prompt.
+
+| Skill | What it covers |
+|-------|----------------|
+| `accessibility-audit` | How to scope, run and report a WCAG audit with this server's tools: single pages, interactive flows and whole sites. Includes a reference list of the success criteria automation cannot check, for the report's "not covered" section. |
+
+The skills are served in every server mode (stdio and HTTP, standalone, `--extension`, `--connect-tool` and `--vscode`) and by `createConnection`. The server declares the extension, with `directoryRead`, next to `tools` and `resources`, and answers:
+
+- `skills/list` and `skills/get`, with a SHA-256 digest of every file;
+- `resources/read` for `skill://accessibility-audit/SKILL.md` and its supporting files;
+- `resources/directory/read` to browse a skill's folder.
+
+`SKILL.md` also appears in `resources/list`, so clients without skills support can still read it as an ordinary resource. The skill sources are in the [`skills/`](skills/) folder of the package. The root `SKILL.md` is different: it is a separate skill for driving the CLI's `interactive` REPL, and it is not served over MCP.
+
 ## Available Tools
 
 ### Page-registered WebMCP tools

@@ -22,7 +22,8 @@
 		"lib/**/*",
 		"README.md",
 		"LICENSE",
-		"NOTICE.md"
+		"NOTICE.md",
+		"skills/**/*"
 	],
 	"scripts": {
 		"build": "tsc --project tsconfig.json",
