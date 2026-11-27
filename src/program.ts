@@ -27,6 +27,7 @@ import { toolNameList } from './mcp/toolPolicy.js';
 import { SharedClientSlot } from './mcp/sharedClientSlot.js';
 import { BrowserServerBackend } from './browserServerBackend.js';
 import { SessionLog } from './sessionLog.js';
+import { loadBundledSkills } from './skills.js';
 import { BrowserSessionRegistry } from './browserSessions.js';
 import { assertNetworkPolicySupported } from './networkPolicy.js';
 import { ExtensionContextFactory } from './extension/extensionContextFactory.js';
@@ -76,7 +77,7 @@ async function resolveProgramContext(options: Record<string, unknown>, extension
 function browserBackendFactory(
   config: FullConfig,
   browserContextFactory: BrowserContextFactory,
-  names: Pick<mcpServer.ServerBackendFactory, 'name' | 'title' | 'nameInConfig'>
+  names: Pick<mcpServer.ServerBackendFactory, 'name' | 'title' | 'nameInConfig' | 'skills'>
 ): mcpServer.ServerBackendFactory {
   const sessionRegistry = new BrowserSessionRegistry();
   return {
@@ -179,12 +180,13 @@ configureBaseProgram()
           name: 'Playwright w/ extension',
           title: 'Accessibility Scanner (browser extension)',
           nameInConfig: 'playwright-extension',
+          skills: await loadBundledSkills(),
         }), config.server);
         return;
       }
 
       if (options.vscode) {
-        await runVSCodeTools(config, cleanup => exitCleanups.push(cleanup));
+        await runVSCodeTools(config, cleanup => exitCleanups.push(cleanup), await loadBundledSkills());
         return;
       }
 
@@ -215,6 +217,7 @@ configureBaseProgram()
           nameInConfig: 'playwright-switch',
           version: packageJSON.version,
           redactUrlParams: config.redactUrlParams,
+          skills: await loadBundledSkills(),
           create: () => new ProxyBackend(makeProviders(false), undefined, config),
           createStateless: () => new ProxyBackend(makeProviders(true), sharedSelection, config),
         };
@@ -226,6 +229,7 @@ configureBaseProgram()
         name: 'Playwright',
         title: 'Accessibility Scanner',
         nameInConfig: 'playwright',
+        skills: await loadBundledSkills(),
       }), config.server);
     });
 

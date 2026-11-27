@@ -16,14 +16,15 @@
 
 import debug from 'debug';
 
-import { ProtocolError, ProtocolErrorCode, Server } from '@modelcontextprotocol/server';
+import { McpServer, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { httpAddressToString, installHttpTransport, startHttpServer } from './http.js';
 import { InProcessTransport } from './inProcessTransport.js';
 import { createUrlRedactor, redactToolResult } from '../utils/urlRedaction.js';
 import { logUnhandledError } from '../utils/log.js';
 
-import type { CacheHint, Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
+import type { CacheHint, Server, Tool, CallToolResult, CallToolRequest, RequestId, RequestMeta, ServerNotification, Transport } from '@modelcontextprotocol/server';
+import type { SkillsExtension } from '@modelcontextprotocol/server/ext/skills';
 import { printToStderr } from '../utils/terminal.js';
 export type { Server } from '@modelcontextprotocol/server';
 export type { Tool, CallToolResult, CallToolRequest } from '@modelcontextprotocol/server';
@@ -54,6 +55,9 @@ type ServerMetadata = {
   instructions?: string;
   redactUrlParams?: readonly string[];
   toolListCacheHint?: CacheHint;
+  // Agent Skills to serve over MCP (`io.modelcontextprotocol/skills`): adds
+  // `skills/list`, `skills/get` and `skill://` resources next to the tools.
+  skills?: SkillsExtension;
 };
 
 export type ServerBackendFactory = ServerMetadata & {
@@ -78,15 +82,21 @@ type ServerOptions = ServerMetadata & { heartbeatReady?: Promise<void> };
 
 export function createServer(name: string, version: string, backend: ServerBackend, runHeartbeat: boolean, options?: ServerOptions): Server {
   const redactSecrets = createUrlRedactor(options?.redactUrlParams);
-  const server = new Server({ name, version, title: options?.title }, {
-    capabilities: {
-      tools: {
-        listChanged: true,
-      },
-    },
+  // McpServer only to host the skills extension's resource template; tools stay
+  // on the low-level handlers below. Declaring `tools` in the constructor
+  // options would install McpServer's own tools/* handlers, so register the
+  // capability on the inner Server instead.
+  const mcp = new McpServer({ name, version, title: options?.title }, {
     instructions: options?.instructions,
     cacheHints: !backend.dynamicToolList && options?.toolListCacheHint ? { 'tools/list': options.toolListCacheHint } : undefined,
   });
+  const server = mcp.server;
+  server.registerCapabilities({
+    tools: {
+      listChanged: true,
+    },
+  });
+  options?.skills?.attach(mcp);
   const ensureInitialized = backendInitializer(server, backend);
 
   server.setRequestHandler('tools/list', async (_request, ctx) => {

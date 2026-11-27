@@ -27,6 +27,7 @@ WORKDIR /app
 COPY --from=build /app/package*.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/lib ./lib
+COPY --from=build /app/skills ./skills
 COPY --from=build /app/cli.js ./cli.js
 COPY --from=build /app/index.js ./index.js
 COPY --from=build /app/index.d.ts ./index.d.ts

@@ -36,6 +36,7 @@ import { vscodeProfileConflictRemedy } from './browserContextFactory.js';
 import { assertNetworkPolicySupported } from '../networkPolicy.js';
 import { validateBrowserConnectConnectionString, validateBrowserConnectLib } from './validation.js';
 import type { Transport } from '@modelcontextprotocol/client';
+import type { SkillsExtension } from '@modelcontextprotocol/server/ext/skills';
 import type { ClientVersion, ServerBackend, ServerBackendContext, Tool, CallToolResult, CallToolRequest } from '../mcp/server.js';
 
 const contextSwitchOptions = z.object({
@@ -359,7 +360,7 @@ export class VSCodeProxyBackend implements ServerBackend {
   }
 }
 
-export async function runVSCodeTools(config: FullConfig, registerExitCleanup?: (cleanup: () => Promise<void>) => void) {
+export async function runVSCodeTools(config: FullConfig, registerExitCleanup?: (cleanup: () => Promise<void>) => void, skills?: SkillsExtension) {
   const browserContextFactory = contextFactory(config);
   const sessionRegistry = new BrowserSessionRegistry();
   const sharedSlot = new SharedClientSlot();
@@ -373,6 +374,7 @@ export async function runVSCodeTools(config: FullConfig, registerExitCleanup?: (
     nameInConfig: 'playwright-vscode',
     version: packageJSON.version,
     redactUrlParams: config.redactUrlParams,
+    skills,
     create: () => createBackend(false),
     createStateless: () => createBackend(true, sharedSlot),
   };
