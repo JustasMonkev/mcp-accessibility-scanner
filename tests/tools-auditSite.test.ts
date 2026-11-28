@@ -1183,6 +1183,31 @@ describe('audit_site tool', () => {
     })]);
   });
 
+  it('reports page witnesses for distinct observed violation rules, not just the busiest pages', async () => {
+    const urls = ['/a', '/copy', '/single', '/c', '/clean', '/error'].map(path => `https://example.com${path}`);
+    const { response } = createHarness({}, { navigationFailsFor: url => url === urls[5] });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => {
+      const url = page.url();
+      const rules = [
+        ['image-alt', 'label', 'link-name'], ['image-alt', 'label', 'link-name'],
+        ['button-name'], ['label', 'button-name', 'document-title'], [],
+      ][urls.indexOf(url)];
+      return createAxeResult(url, rules.map(rule => createViolation(rule, '<div>')), [createViolation('contrast-review', '<span>')]);
+    });
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({
+      strategy: 'provided', urls, concurrency: 1, waitAfterNavigationMs: 0,
+    }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    const witnesses = [
+      { url: urls[0], newRuleIds: ['image-alt', 'label', 'link-name'] },
+      { url: urls[3], newRuleIds: ['button-name', 'document-title'] },
+    ];
+    expect(report.summary.violationWitnessPages).toEqual(witnesses);
+    expect(response.structuredContent()).toMatchObject({ violationWitnessPages: witnesses });
+  });
+
   it.each([1, 2, 10])('keeps full deduplicated counts when node details are capped at %i', async maxNodesPerViolation => {
     const { response } = createHarness({ 'https://example.com/': [] });
     const imageNodes = ['first', 'second', 'third'].map(id => createViolation('image-alt', `<img id="${id}">`, [`#${id}`]).nodes[0]);
