@@ -14,12 +14,15 @@ const idSegment = /^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 
 function templateSegments(url: string): string[] {
   const parsed = new URL(url);
-  const mask = (value: string) => idSegment.test(value) ? ':id' : value;
-  const path = parsed.pathname.split('/').filter(Boolean).map(mask);
+  // A slash cannot be a literal segment, even when the encoded path contains %2F.
+  const path = parsed.pathname === '/' ? [] : parsed.pathname.slice(1).split('/').map(segment => idSegment.test(segment) ? '/' : segment);
   if (!parsed.search)
     return [parsed.host, ...path];
   const entries = [...parsed.searchParams].sort(([a], [b]) => compareCodeUnits(a, b));
-  const query = entries.map(([key, value]) => `?${key}=${mask(value)}`);
+  const query = entries.map(([key, value]) => {
+    const name = `?${encodeURIComponent(key)}`;
+    return idSegment.test(value) ? name : `${name}=${value}`;
+  });
   return [parsed.host, ...path, ...query];
 }
 
