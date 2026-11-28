@@ -94,6 +94,16 @@ describe('runKeyboardFocusAudit', () => {
     expect(result.focusJumpIssues.map(stop => stop.step)).toEqual([3]);
   });
 
+  it.each(['BODY', 'HTML'])('keeps a document fallback on %s in the report and checks it for jumps', async tagName => {
+    const point = { ...focusPoint({ tagName, hasVisibleIndicator: false, inViewport: false }), documentFallback: true };
+    const result = await auditSingleStop(point, { checkFocusVisibility: true, checkFocusJumps: true });
+
+    expect(result.stops).toHaveLength(1);
+    expect(result.stops[0].issues).toEqual(['focus-jump-or-not-visible']);
+    expect(result.stops[0]).not.toHaveProperty('documentFallback');
+    expect(result.focusVisibilityIssues).toEqual([]);
+  });
+
   it('flags focus jumps past the scroll threshold and stops outside the viewport', async () => {
     const jumpSteps = async (point: Partial<FocusPoint>) =>
       (await auditSingleStop(focusPoint(point), { checkFocusJumps: true })).focusJumpIssues.map(stop => stop.step);
