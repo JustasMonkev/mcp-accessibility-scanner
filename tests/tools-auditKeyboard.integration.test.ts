@@ -301,3 +301,39 @@ it.skipIf(!canRun).each([false, true])('checks shadow-tree paint ownership when 
   expect(report.stops.map((stop: { id: string }) => stop.id)).toEqual(['target']);
   expect(report.focusObscuredIssues.map((stop: { id: string }) => stop.id)).toEqual(covered ? ['target'] : []);
 });
+
+it.skipIf(!canRun)('keeps the target-spacing verdict and witness independent of neighbor order', async () => {
+  directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-spacing-'));
+  const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory, timeoutSettle: 0 });
+  client = new Client({ name: 'keyboard-spacing-test', version: '1' });
+  await client.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
+
+  const decoys = [56, 66, 136, 146].map(top => Array.from({ length: 10 }, (_, col) =>
+    `<button style="left:${55 + col * 10}px;top:${top}px"></button>`).join('')).join('');
+  const smallNeighbor = '<button style="left:120px;top:100px"></button>';
+  const largeNeighbor = '<button style="left:115px;top:95px;width:40px;height:24px"></button>';
+  const tangentNeighbor = '<button style="left:124px;top:100px"></button>';
+  const diagonalNeighbor = '<button style="left:118px;top:118px"></button>';
+  for (const [label, neighbors, expected] of [
+    ['late-small', decoys + smallNeighbor, 1], ['early-small', smallNeighbor + decoys, 1],
+    ['late-large', decoys + largeNeighbor, 1], ['tangent', decoys + tangentNeighbor, 0],
+    ['diagonal-clear', decoys + diagonalNeighbor, 0],
+  ] as const) {
+    const html = `<style>button {position:absolute;width:10px;height:10px;padding:0;border:0}</style>
+      <button id="focus" tabindex="1" style="left:100px;top:100px"></button>${neighbors}`;
+    await ok('browser_navigate', { url: `data:text/html,${encodeURIComponent(html)}` });
+    const reportFile = `${label}.json`;
+    const text = await ok('audit_keyboard', { maxTabs: 1, reportFile });
+    const report = JSON.parse(await fs.promises.readFile(path.join(directory, reportFile), 'utf8'));
+    expect(report.stops[0].id).toBe('focus');
+    expect(report.targetSizeIssues).toHaveLength(expected);
+    expect(text).toContain(`spacing and inline exceptions applied): ${expected}`);
+    const sample = report.stops[0].neighborTargets;
+    expect(report.stops[0].targetSpacing).toBe(expected ? 'crowded' : 'clear');
+    expect(sample).toHaveLength(expected);
+    if (expected) {
+      const witness = label === 'late-large' ? { x: 115, y: 95 } : { x: 120, y: 100 };
+      expect(sample).toContainEqual(expect.objectContaining(witness));
+    }
+  }
+});
