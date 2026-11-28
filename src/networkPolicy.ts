@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import coreBundle from 'playwright-core/lib/coreBundle';
+import { isUrlAllowedByOriginPolicy } from './utils/originPolicy.js';
 import type { Browser, BrowserContext, CDPSession } from 'playwright';
 import type { FullConfig } from './config.js';
 
@@ -33,8 +33,7 @@ function hasNetworkPolicy(config: FullConfig): boolean {
 }
 
 function isAllowed(config: FullConfig, url: string): boolean {
-  const matches = (origin: string) => coreBundle.iso.urlMatches(undefined, url, `*://${origin}/**`);
-  return !config.network.blockedOrigins?.some(matches) && (!config.network.allowedOrigins?.length || config.network.allowedOrigins.some(matches));
+  return isUrlAllowedByOriginPolicy(config.network, url);
 }
 
 export function ensureNetworkPolicyRoutes(config: FullConfig, context: BrowserContext): Promise<void> {
