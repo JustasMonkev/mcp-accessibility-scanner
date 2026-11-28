@@ -332,7 +332,7 @@ it.skipIf(!canRun)('keeps the target-spacing verdict and witness independent of 
     expect(report.stops[0].targetSpacing).toBe(expected ? 'crowded' : 'clear');
     expect(sample).toHaveLength(expected);
     if (expected) {
-      const witness = label === 'late-large' ? { x: 115, y: 95 } : { x: 120, y: 100 };
+      const witness = label === 'late-large' ? { x: 115, y: 95, width: 40, height: 24 } : { x: 120, y: 100, width: 10, height: 10 };
       expect(sample).toContainEqual(expect.objectContaining(witness));
     }
   }
