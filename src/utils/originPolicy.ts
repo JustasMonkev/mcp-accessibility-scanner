@@ -17,33 +17,29 @@
 import coreBundle from 'playwright-core/lib/coreBundle';
 
 type OriginPolicy = { allowedOrigins?: string[], blockedOrigins?: string[] };
+type Side = 'allow' | 'block';
+
+const defaultPorts: Record<string, string> = { 'http:': '80', 'https:': '443', 'ws:': '80', 'wss:': '443' };
 
 function matchesPattern(url: string, origin: string): boolean {
   return coreBundle.iso.urlMatches(undefined, url, `*://${origin}/**`);
 }
 
-// Entries get the same trailing-dot treatment as URLs, so `evil.com.` and
+// One terminal dot is the DNS root label, so `example.com.` names
+// `example.com`; Chromium keeps it in request URLs. More dots are empty labels:
+// the allowlist leaves those spellings as written, while the blocklist strips
+// every terminal dot so a malformed spelling cannot slip past it.
+function trimTerminalDots(host: string, side: Side): string {
+  return side === 'allow' ? host.replace(/(?<!\.)\.$/, '') : host.replace(/\.+$/, '');
+}
+
+// Entries get the same treatment as request hosts, so `evil.com.` and
 // `evil.com.:8080` name the same hosts as `evil.com` and `evil.com:8080`.
 // A host made only of wildcards and dots (`*.`) is left as written.
-function withoutTrailingDotEntry(origin: string): string {
-  const stripped = origin.replace(/\.+(?=(?::\d+)?$)/, '');
-  return /[^*.]/.test(stripped.replace(/:\d+$/, '')) ? stripped : origin;
-}
-
-function matchesOrigin(url: string, origin: string): boolean {
-  const normalized = withoutTrailingDotEntry(origin);
-  return matchesPattern(url, origin) || (normalized !== origin && matchesPattern(url, normalized));
-}
-
-// `example.com.` is the fully qualified spelling of `example.com`, and Chromium
-// keeps the trailing dot in request URLs, so match the host without it as well.
-function withoutTrailingDot(url: URL): URL | undefined {
-  const hostname = url.hostname.replace(/\.+$/, '');
-  if (!hostname || hostname === url.hostname)
-    return;
-  const stripped = new URL(url.href);
-  stripped.hostname = hostname;
-  return stripped;
+function normalizedEntry(origin: string, side: Side): string {
+  const port = /:\d+$/.exec(origin)?.[0] ?? '';
+  const trimmed = trimTerminalDots(origin.slice(0, origin.length - port.length), side);
+  return /[^*.]/.test(trimmed) ? trimmed + port : origin;
 }
 
 function parse(url: string): URL | undefined {
@@ -54,22 +50,40 @@ function parse(url: string): URL | undefined {
   }
 }
 
+// URL serialization drops a scheme's default port, so `https://example.com:443/`
+// arrives as `https://example.com/`. Spell the effective port out so an entry
+// such as `example.com:443` matches it. A blocklist candidate without any port
+// lets a portless entry block its host on every port.
+function candidates(url: string, side: Side): string[] {
+  const parsed = parse(url);
+  if (!parsed?.hostname)
+    return [url];
+  const base = `${parsed.protocol}//${trimTerminalDots(parsed.hostname, side) || parsed.hostname}`;
+  const effectivePort = parsed.port || defaultPorts[parsed.protocol];
+  const result = [url];
+  if (effectivePort)
+    result.push(`${base}:${effectivePort}/`);
+  if (side === 'block' || !parsed.port)
+    result.push(`${base}/`);
+  return result;
+}
+
+function matches(url: string, origins: string[], side: Side): boolean {
+  const urls = candidates(url, side);
+  return origins.some(origin => {
+    const normalized = normalizedEntry(origin, side);
+    return urls.some(candidate => matchesPattern(candidate, origin) || (normalized !== origin && matchesPattern(candidate, normalized)));
+  });
+}
+
 /**
- * Allowlist entries keep their exact-port semantics (`example.com` allows only
- * the default port). A blocklist entry without a port blocks its host on every
- * port, so a nondefault port or a trailing-dot host cannot slip past it.
+ * Entries match a request's effective port, so `example.com:443` covers
+ * `https://example.com/`. Allowlist entries without a port allow only the
+ * scheme's default port. A blocklist entry without a port blocks its host on
+ * every port, so a nondefault port or a trailing-dot host cannot slip past it.
  */
 export function isUrlAllowedByOriginPolicy(policy: OriginPolicy | undefined, url: string): boolean {
-  const parsed = parse(url);
-  const canonical = parsed && withoutTrailingDot(parsed);
-  const allowCandidates = canonical ? [url, canonical.href] : [url];
-  const blockCandidates = [...allowCandidates];
-  const portless = canonical ?? (parsed ? new URL(parsed.href) : undefined);
-  if (portless?.port) {
-    portless.port = '';
-    blockCandidates.push(portless.href);
-  }
-  if (policy?.blockedOrigins?.some(origin => blockCandidates.some(candidate => matchesOrigin(candidate, origin))))
+  if (policy?.blockedOrigins?.length && matches(url, policy.blockedOrigins, 'block'))
     return false;
-  return !policy?.allowedOrigins?.length || policy.allowedOrigins.some(origin => allowCandidates.some(candidate => matchesOrigin(candidate, origin)));
+  return !policy?.allowedOrigins?.length || matches(url, policy.allowedOrigins, 'allow');
 }

@@ -78,6 +78,35 @@ describe('isUrlAllowedByOriginPolicy', () => {
     expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['*.'] }, 'https://example.com/')).toBe(false);
   });
 
+  it.each([
+    ['https://example.com/', 'example.com:443', true],
+    ['https://example.com:443/', 'example.com:443', true],
+    ['wss://example.com/socket', 'example.com:443', true],
+    ['http://example.com/', 'example.com:80', true],
+    ['http://example.com./', 'example.com:80', true],
+    ['http://example.com/', 'example.com:443', false],
+    ['https://example.com:8443/', 'example.com:443', false],
+  ] as const)('an entry with an explicit port matches the effective port: %s with %s -> %s', (url, entry, matched) => {
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: [entry] }, url)).toBe(!matched);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: [entry] }, url)).toBe(matched);
+  });
+
+  it('keeps a portless allowlist entry to the default port even when it is spelled out', () => {
+    const policy = { allowedOrigins: ['example.com'] };
+    expect(isUrlAllowedByOriginPolicy(policy, 'https://example.com:443/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy(policy, 'http://example.com:443/')).toBe(false);
+  });
+
+  it('normalizes only the single root dot on the allow side, and every terminal dot on the block side', () => {
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['example.com..'] }, 'https://example.com/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['example.com..:8443'] }, 'https://example.com:8443/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['example.com'] }, 'https://example.com../')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['example.com'] }, 'https://example.com./')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['evil.com..'] }, 'http://evil.com/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['evil.com'] }, 'http://evil.com...:8080/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['evil.com'], blockedOrigins: ['evil.com..'] }, 'http://evil.com/')).toBe(false);
+  });
+
   it('does not block unrelated or lookalike hosts', () => {
     const policy = { blockedOrigins: ['evil.com'] };
     for (const url of ['http://notevil.com/', 'http://evil.com.example/', 'http://sub.evil.com/', 'http://example.com/?next=http://evil.com/'])
