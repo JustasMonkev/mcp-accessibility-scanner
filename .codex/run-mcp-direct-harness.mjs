@@ -525,6 +525,20 @@ const tests = [
     });
     assertText(result, /JSON report:|scanned/i);
 
+    const routes = ['1?a=b%3Dc', '2?a=b%3Dc', '3?a%3Db=c', ':id?a=b%3Dc', '/4?a=b%3Dc', '5/?a=b%3Dc']
+        .map(route => '/routes/' + route);
+    const expectedRoutes = [routes[0], ...routes.slice(2)];
+    const beforeSelection = state.fixtureRequests.length;
+    const representative = await callTool('audit_site', {
+      ...auditSiteDefaults,
+      urls: routes.map(route => state.fixtureOrigin + route),
+      pageSelection: 'representative',
+      maxPages: 5,
+      concurrency: 1,
+    });
+    assert.deepEqual(representative.structuredContent.representativeSelection, { candidates: 6, selected: 5, complete: true });
+    assert.deepEqual(state.fixtureRequests.slice(beforeSelection).filter(route => route.startsWith('/routes/')), expectedRoutes);
+
     // Link discovery must not hang off the scan succeeding: the gate page fails
     // its scoped scan, and the child is reachable only through it.
     const throughErroredPage = await callTool('audit_site', {
@@ -1152,6 +1166,11 @@ async function verifyCoverage(testCases, toolNames) {
 function startFixtureServer() {
   const server = http.createServer((request, response) => {
     state.fixtureRequests.push(request.url);
+    if (request.url?.startsWith('/routes/')) {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html lang="en"><title>Route</title><main>Route</main></html>');
+      return;
+    }
     if (request.url === '/audit-site') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end('<!doctype html><html><head><title>AuditSite</title></head><body><img src="x"><h1>Audit Site</h1></body></html>');

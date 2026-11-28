@@ -1144,6 +1144,22 @@ describe('audit_site tool', () => {
     expect(response.result()).toContain('Representative selection: queued 3 of 8 listed URLs');
   });
 
+  it('actually scans both decoded query-key branches in a two-page budget', async () => {
+    const urls = [
+      'https://example.com/items/10?filter=tag%3Dred',
+      'https://example.com/items/20?filter=tag%3Dred',
+      'https://example.com/items/30?filter%3Dtag=red',
+    ];
+    const { response } = createHarness({});
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+    await tool.handle(response.context, tool.schema.inputSchema.parse({
+      strategy: 'provided', pageSelection: 'representative', urls, maxPages: 2, concurrency: 1,
+    }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { url: string }) => page.url)).toEqual([urls[0], urls[2]]);
+  });
+
   it('warns and reports an incomplete representative selection that fell back to listed order', async () => {
     const listed = Array.from({ length: 6 }, (_, index) => `https://example.com/section-${index}/page`);
     const { response } = createHarness({});
@@ -1708,6 +1724,30 @@ describe('audit_site tool', () => {
   function urlset(...pages: string[]) {
     return `<urlset>${pages.map(page => `<url><loc>${page}</loc></url>`).join('')}</urlset>`;
   }
+
+  it('scans distinct slash templates and keeps their first listing manifest', async () => {
+    const base = 'https://example.com/';
+    const first = base + 'first.xml';
+    const next = base + 'next.xml';
+    const urls = ['items/1', 'items/2', 'items//3', 'items/4/'].map(path => base + path);
+    const { response } = createHarness({}, {
+      sitemapXmlByUrl: {
+        [base + 'sitemap.xml']: sitemapIndex(first, next),
+        [first]: urlset(urls[0], urls[1], urls[2] + '#first'),
+        [next]: urlset(urls[2] + '#again', urls[3]),
+      },
+    });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page => createAxeResult(page.url(), []));
+    await tool.handle(response.context, tool.schema.inputSchema.parse({
+      strategy: 'sitemap', pageSelection: 'representative', maxPages: 3, waitAfterNavigationMs: 0,
+    }), response);
+
+    const report = JSON.parse(String(writeFileSpy.mock.calls[0][1]));
+    expect(report.pages.map((page: { url: string, discoveredFrom: string }) => [page.url, page.discoveredFrom])).toEqual([
+      [urls[0], first], [urls[2], first], [urls[3], next],
+    ]);
+    expect(report.representativeSelection).toEqual({ candidates: 4, selected: 3, complete: true });
+  });
 
   it.each([
     { pageSelection: 'discovery', maxPages: 5, selected: ['blog/1', 'blog/2', 'blog/3', 'about', 'pricing'] },
