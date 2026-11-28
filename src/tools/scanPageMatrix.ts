@@ -28,6 +28,7 @@ type RuleTargetChanges = Record<string, { added: TargetDifference, removed: Targ
 
 type VariantResult = {
   name: string;
+  url: string;
   applied: {
     viewport: { width: number; height: number } | null;
     media: {
@@ -323,6 +324,7 @@ async function scanVariant(tab: Tab, variant: Variant, original: PageState, para
     incompleteRuleIds: axeResult.incomplete.map(result => result.id),
     result: {
       name: variant.name,
+      url: axeResult.url,
       applied: {
         viewport: variant.viewport ?? null,
         media,
@@ -360,7 +362,7 @@ function compareWithBaseline(baseline: VariantScan, variant: VariantScan, sample
   const violatedRuleIds = new Set([...baseline.targetKeysByRule.keys(), ...variant.targetKeysByRule.keys()]);
   result.comparisonIncompleteRuleIds = [...new Set([...baseline.incompleteRuleIds, ...variant.incompleteRuleIds])]
       .filter(id => violatedRuleIds.has(id)).sort();
-  if (result.unscannedFrames.length || baseline.result.unscannedFrames.length || result.comparisonIncompleteRuleIds.length)
+  if (result.url !== baseline.result.url || result.unscannedFrames.length || baseline.result.unscannedFrames.length || result.comparisonIncompleteRuleIds.length)
     return;
 
   result.diffFromBaseline = computeDiffFromBaseline(baseline.result.nodeCountByRuleId, result.nodeCountByRuleId);
@@ -395,6 +397,8 @@ function renderMatrixTable(variantResults: VariantResult[], includeIncomplete: b
     '--- | --- | --- | --- | --- | ---',
     ...variantResults.map(result => {
       const notComparableReasons: string[] = [];
+      if (result.url !== variantResults[0].url)
+        notComparableReasons.push('page URL differs from baseline');
       if (result.unscannedFrames.length || baselineMissedFrames)
         notComparableReasons.push('coverage differs');
       if (result.comparisonIncompleteRuleIds.length)
@@ -411,12 +415,13 @@ function renderMatrixTable(variantResults: VariantResult[], includeIncomplete: b
   ].join('\n');
 }
 
-function buildMatrixReport(url: string, variantResults: VariantResult[], params: ScanPageMatrixParams) {
+function buildMatrixReport(variantResults: VariantResult[], params: ScanPageMatrixParams) {
+  const baseline = variantResults[0];
   return {
     version: 'v2',
     metadata: {
-      url,
-      baselineVariant: variantResults[0]?.name ?? 'baseline',
+      url: baseline.url,
+      baselineVariant: baseline.name,
       options: {
         violationsTag: params.violationsTag,
         includeIncomplete: params.includeIncomplete,
@@ -430,7 +435,7 @@ function buildMatrixReport(url: string, variantResults: VariantResult[], params:
       },
       generatedAt: new Date().toISOString(),
     },
-    variants: variantResults,
+    variants: variantResults.map(({ url, ...result }) => ({ ...result, differentPageUrl: url === baseline.url ? null : url })),
   };
 }
 
@@ -445,6 +450,7 @@ function matrixStructuredContent(report: ReturnType<typeof buildMatrixReport>, r
     baselineVariant: report.metadata.baselineVariant,
     variants: report.variants.map(result => ({
       name: result.name,
+      differentPageUrl: result.differentPageUrl,
       totalViolations: result.summary.totalRules,
       totalNodes: result.summary.totalNodes,
       totalIncomplete: includeIncomplete ? result.incomplete.length : null,
@@ -508,7 +514,7 @@ const scanPageMatrix = defineTabTool({
     }
 
     signal?.throwIfAborted();
-    const report = buildMatrixReport(tab.page.url(), variantResults, params);
+    const report = buildMatrixReport(variantResults, params);
     response.deleteFileOnError(reportPath);
     const reportResource = await writeJsonReport(response, reportPath, report, {
       name: 'scan-page-matrix-report',
