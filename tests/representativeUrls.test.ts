@@ -11,9 +11,10 @@ function selectRepresentativeUrls(urls: readonly string[], k: number): string[] 
 // 0 for a shared template, otherwise 2^-(number of leading segments in common).
 function segments(url: string): string[] {
   const parsed = new URL(url);
-  const mask = (value: string) => /^\d+$/.test(value) ? ':id' : value;
-  const query = [...parsed.searchParams.entries()].sort().map(([key, value]) => `?${key}=${mask(value)}`);
-  return [parsed.host, ...parsed.pathname.split('/').filter(Boolean).map(mask), ...query];
+  const mask = (value: string) => /^\d+$/.test(value) ? null : value;
+  const query = [...parsed.searchParams.entries()].sort().map(([key, value]) => JSON.stringify([key, mask(value)]));
+  const path = parsed.pathname === '/' ? [] : parsed.pathname.split('/').slice(1).map(segment => JSON.stringify(mask(segment)));
+  return [parsed.host, ...path, ...query];
 }
 
 function distance(first: string, second: string): number {
@@ -115,6 +116,21 @@ describe('selectRepresentativeUrls', () => {
     ]);
   });
 
+  it.each([
+    ['/items/1', '/items/2', '/items/:id'],
+    ['/items/1', '/items/2', '/items//3'],
+    ['/items/1', '/items/2', '/items/3/'],
+    ['/items/1', '/items/2', '/items/'],
+    ['/1', '/2', '//'],
+    ['/items?ref=1', '/items?ref=2', '/items?ref=:id'],
+    ['/items?ref=1', '/items?ref=2', '/items?ref='],
+    ['/items/1?a%3Db=c', '/items/2?a%3Db=c', '/items/3?a%253Db=c'],
+    ['/items/1?a=b%3Dc', '/items/2?a=b%3Dc', '/items/3?a%3Db=c'],
+  ])('covers distinct templates even when their display strings coincide (%s)', (...routes) => {
+    const urls = routes.map(route => `https://example.com${route}`);
+    expect(selectRepresentativeUrls(urls, 2)).toEqual([urls[0], urls[2]]);
+  });
+
   it('separates hosts before paths', () => {
     const urls = [
       'https://example.com/a',
@@ -123,6 +139,13 @@ describe('selectRepresentativeUrls', () => {
       'https://blog.example.com/a',
     ];
     expect(selectRepresentativeUrls(urls, 2)).toContain('https://blog.example.com/a');
+  });
+
+  it('counts a long chain of empty segments against the work budget', () => {
+    const base = 'https://example.com' + '/'.repeat(10000);
+    const urls = ['about', '1', '2'].map(route => base + route);
+    expect(selectWithStatus(urls, 1)).toEqual({ urls: [urls[1]], complete: true });
+    expect(selectWithStatus(urls, 1, 30000)).toEqual({ urls: [urls[0]], complete: false });
   });
 
   it('covers every section the budget can reach, even against populous ones', () => {
@@ -175,7 +198,7 @@ describe('selectRepresentativeUrls', () => {
 
   it('finds the optimal selection under the coverage rule', () => {
     const random = seededRandom(7);
-    const words = ['a', 'b', 'c', '1', '2'];
+    const words = ['', ':id', 'a', 'b', 'c', '1', '2'];
     for (let round = 0; round < 200; round++) {
       const urls = new Set<string>();
       const size = 2 + Math.floor(random() * 8);
