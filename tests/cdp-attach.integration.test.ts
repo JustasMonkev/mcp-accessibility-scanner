@@ -128,8 +128,7 @@ it('requires an explicit index to close a tab from a fresh CDP backend', async (
 
   expect((await closing.callTool('browser_tabs', { action: 'close', index: 1 })).isError).not.toBe(true);
   const survivors = await listTabs(endpoint);
-  expect(survivors).toHaveLength(1);
-  expect(before).toContainEqual(survivors[0]);
+  expect(survivors).toEqual(before.filter(tab => tab.url !== selectedUrl));
 
   expect((await selecting.callTool('browser_tabs', { action: 'close' })).isError).not.toBe(true);
   expect(await listTabs(endpoint)).toEqual([]);
