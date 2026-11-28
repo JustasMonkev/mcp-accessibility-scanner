@@ -75,6 +75,7 @@ type SummaryViolation = {
 };
 
 type SummaryReport = {
+  violationWitnessPages: { url: string, newRuleIds: string[] }[];
   totals: {
     scannedPages: number;
     erroredPages: number;
@@ -383,6 +384,26 @@ function sortScannedPagesByViolations(pages: PageReport[]): PageReport[] {
   return pages
       .filter(page => page.status === 'scanned')
       .sort((first, second) => (second.summary?.totalRules ?? 0) - (first.summary?.totalRules ?? 0));
+}
+
+function selectViolationWitnesses(pages: PageReport[]): SummaryReport['violationWitnessPages'] {
+  const candidates = pages.values().filter(page => page.status === 'scanned').map(page => ({
+    url: page.url,
+    remaining: new Set(page.violations.map(violation => violation.id)),
+  })).toArray();
+  const witnesses: SummaryReport['violationWitnessPages'] = [];
+  while (candidates.length) {
+    const best = candidates.reduce((first, next) => next.remaining.size > first.remaining.size ? next : first);
+    if (!best.remaining.size)
+      break;
+    const newRuleIds = [...best.remaining].sort();
+    witnesses.push({ url: best.url, newRuleIds });
+    for (const candidate of candidates) {
+      for (const id of newRuleIds)
+        candidate.remaining.delete(id);
+    }
+  }
+  return witnesses;
 }
 
 function summarizeTopPages(sortedScannedPages: PageReport[], count: number): string[] {
@@ -867,6 +888,7 @@ function siteStructuredContent(report: ReturnType<typeof buildSiteReport>, repor
       url: page.url,
       unscannedFrames: page.unscannedFrames,
     })),
+    violationWitnessPages: report.summary.violationWitnessPages,
     topViolations: topSummaryEntries(report.summary.violations),
     topIncomplete: topSummaryEntries(report.summary.incomplete),
     topPages: scannedPagesByViolations
@@ -1184,6 +1206,7 @@ const auditSite = defineTabTool({
     const pagesWithUnscannedFrames = pages.filter(page => page.unscannedFrames.length);
     const scannedPagesByViolations = sortScannedPagesByViolations(pages);
     const summary: SummaryReport = {
+      violationWitnessPages: selectViolationWitnesses(pages),
       totals: {
         scannedPages: scannedPagesByViolations.length,
         erroredPages: crawl.erroredPages,
