@@ -73,6 +73,17 @@ const server = http.createServer((request, response) => {
       <script>matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => { if (event.matches) fetch('/dark-applied'); });</script></html>`);
     return;
   }
+  if (request.url === '/checkout') {
+    response.writeHead(200, { 'content-type': 'text/html' });
+    response.end(`<!doctype html><html lang="en"><title>Checkout</title><main><button></button></main>
+      <script>if (innerWidth < 500) {
+        history.replaceState(null, '', '/mobile-help');
+        document.querySelector('main').textContent = 'Please use desktop checkout.';
+      } else if (innerWidth < 850) {
+        document.querySelector('button').textContent = 'Pay';
+      }</script></html>`);
+    return;
+  }
   if (request.url === '/dialog') {
     response.writeHead(200, { 'content-type': 'text/html' });
     response.end(`<!doctype html><html lang="en"><title>Dialog</title><main><h1>Dialog</h1></main>
@@ -456,4 +467,30 @@ it('lets browser_session_close close a session whose restore waits on a dialog n
   } finally {
     await blocked.close();
   }
+});
+
+it('does not report resolved violations when the mobile layout navigates to a different URL', async () => {
+  const checkout = `${origin}/checkout`;
+  const mobileHelp = `${origin}/mobile-help`;
+  const nav = await client.callTool({ name: 'browser_navigate', arguments: { url: checkout } });
+  expect(nav.isError, text(nav)).not.toBe(true);
+  const scan = await client.callTool({ name: 'scan_page_matrix', arguments: {
+    reportFile: 'checkout.json', withRules: ['button-name'], reloadBetweenVariants: true, waitAfterApplyMs: 0,
+    variants: [
+      { name: 'desktop' }, { name: 'tablet', viewport: { width: 768, height: 720 } }, { name: 'mobile', viewport: { width: 375, height: 812 } },
+    ],
+  } });
+  expect(scan.isError, text(scan)).not.toBe(true);
+  const report = JSON.parse(await fs.readFile(path.join(directory, 'checkout.json'), 'utf8'));
+  expect(findings(report)).toEqual([['desktop', { 'button-name': 1 }], ['tablet', {}], ['mobile', {}]]);
+  expect(report.variants[2].diffFromBaseline).toBeNull();
+  expect(report.variants[2].targetChangesFromBaseline).toBeNull();
+  expect(report.metadata.url).toBe(checkout);
+  expect(report.variants.map((variant: { differentPageUrl: string | null }) => variant.differentPageUrl)).toEqual([null, null, mobileHelp]);
+  expect(scan.structuredContent).toMatchObject({ page: { url: checkout }, variants: [
+    { differentPageUrl: null, resolvedViolationIds: [] },
+    { differentPageUrl: null, resolvedViolationIds: ['button-name'] },
+    { differentPageUrl: mobileHelp, newViolationIds: null, resolvedViolationIds: null, changedRuleIds: null, changedTargetRuleIds: null },
+  ] });
+  expect(text(scan)).toContain('n/a (page URL differs from baseline)');
 });
