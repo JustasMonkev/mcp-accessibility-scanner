@@ -185,8 +185,9 @@ export type Config = {
     /**
      * Host patterns to allow for locally launched Chromium HTTP(S) requests and page WebSockets.
      * Default is to allow all; blockedOrigins takes precedence. Worker WebSockets are not filtered.
-     * An entry without a port allows only the scheme's default port; an entry with a port matches the
-     * request's effective port, including a default port (`example.com:443` matches `https://example.com/`).
+     * Host patterns match only the request hostname. An entry without a port allows only the scheme's default
+     * port; an entry with a port matches the request's effective port by numeric value, including a default
+     * port (`example.com:443` matches `https://example.com/`).
      * One trailing dot (`example.com.`) names the same host; several trailing dots do not.
      * Nonempty restrictions reject Firefox/WebKit and external or custom-context connections.
      */

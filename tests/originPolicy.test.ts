@@ -107,6 +107,59 @@ describe('isUrlAllowedByOriginPolicy', () => {
     expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['evil.com'], blockedOrigins: ['evil.com..'] }, 'http://evil.com/')).toBe(false);
   });
 
+  it.each([
+    ['example.c*', 'https://example.com:8443/'],
+    ['example.*', 'http://example.com:8080/'],
+    ['example.com*', 'http://example.com:8080/'],
+    ['*.example.com', 'https://a.example.com:8443/'],
+  ] as const)('a portless allowlist host pattern %s cannot absorb the port of %s', (entry, url) => {
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: [entry] }, url)).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: [entry] }, url.replace(/:\d+\//, '/'))).toBe(true);
+  });
+
+  it('applies host wildcards to the hostname and the configured port separately', () => {
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['*.example.com:8443'] }, 'https://a.example.com:8443/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['*.example.com:8443'] }, 'https://a.example.com/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['*.example.com'] }, 'https://a.example.com:8443/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['example.c*:8443'] }, 'https://example.com:8443/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['example.c*:8443'] }, 'https://example.com/')).toBe(true);
+  });
+
+  it.each([
+    ['example.com:0443', 'https://example.com/', true],
+    ['example.com:00443', 'wss://example.com/socket', true],
+    ['example.com:080', 'http://example.com/', true],
+    ['example.com:08080', 'http://example.com:8080/', true],
+    ['example.com:08080', 'http://example.com:9090/', false],
+    ['example.com:0443', 'http://example.com/', false],
+  ] as const)('compares a zero-padded entry port by value: %s with %s -> %s', (entry, url, matched) => {
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: [entry] }, url)).toBe(!matched);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: [entry] }, url)).toBe(matched);
+  });
+
+  it('matches a dotted wildcard entry against the literal hostname on any port', () => {
+    for (const url of ['http://foo./', 'http://foo.:8080/', 'http://a.b.:9000/'])
+      expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['*.'] }, url), url).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['*.'] }, 'http://foo/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['*.'] }, 'http://foo:8080/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['*.'] }, 'http://foo./')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['*.'] }, 'http://foo/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['*.'] }, 'http://foo.:8080/')).toBe(false);
+  });
+
+  it('keeps whole-URL glob matching for entries whose port is not numeric', () => {
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['example.com:*'] }, 'http://example.com:8080/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['example.com:*'] }, 'http://example.com:8080/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['[::1]'] }, 'http://[::1]:8080/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['[::1]:8080'] }, 'http://[::1]:8080/')).toBe(true);
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['evil.com'] }, 'blob:http://evil.com/uuid')).toBe(false);
+  });
+
+  it('matches the hostname even when the request URL carries credentials', () => {
+    expect(isUrlAllowedByOriginPolicy({ blockedOrigins: ['evil.com'] }, 'http://user:pass@evil.com:8080/')).toBe(false);
+    expect(isUrlAllowedByOriginPolicy({ allowedOrigins: ['example.com'] }, 'http://example.com@evil.com/')).toBe(false);
+  });
+
   it('does not block unrelated or lookalike hosts', () => {
     const policy = { blockedOrigins: ['evil.com'] };
     for (const url of ['http://notevil.com/', 'http://evil.com.example/', 'http://sub.evil.com/', 'http://example.com/?next=http://evil.com/'])

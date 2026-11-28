@@ -18,11 +18,18 @@ import coreBundle from 'playwright-core/lib/coreBundle';
 
 type OriginPolicy = { allowedOrigins?: string[], blockedOrigins?: string[] };
 type Side = 'allow' | 'block';
+type Entry = { host: string, port?: string };
 
 const defaultPorts: Record<string, string> = { 'http:': '80', 'https:': '443', 'ws:': '80', 'wss:': '443' };
 
-function matchesPattern(url: string, origin: string): boolean {
+function matchesUrlGlob(url: string, origin: string): boolean {
   return coreBundle.iso.urlMatches(undefined, url, `*://${origin}/**`);
+}
+
+// The candidate carries no port, so a wildcard in the host pattern (Playwright
+// compiles `*` to `[^/]*`) can only match hostname characters, never a port.
+function matchesHost(hostname: string, pattern: string): boolean {
+  return matchesUrlGlob(`http://${hostname}/`, pattern);
 }
 
 // One terminal dot is the DNS root label, so `example.com.` names
@@ -33,13 +40,29 @@ function trimTerminalDots(host: string, side: Side): string {
   return side === 'allow' ? host.replace(/(?<!\.)\.$/, '') : host.replace(/\.+$/, '');
 }
 
-// Entries get the same treatment as request hosts, so `evil.com.` and
-// `evil.com.:8080` name the same hosts as `evil.com` and `evil.com:8080`.
-// A host made only of wildcards and dots (`*.`) is left as written.
-function normalizedEntry(origin: string, side: Side): string {
-  const port = /:\d+$/.exec(origin)?.[0] ?? '';
-  const trimmed = trimTerminalDots(origin.slice(0, origin.length - port.length), side);
-  return /[^*.]/.test(trimmed) ? trimmed + port : origin;
+function requestHosts(hostname: string, side: Side): string[] {
+  const trimmed = trimTerminalDots(hostname, side);
+  return trimmed && trimmed !== hostname ? [hostname, trimmed] : [hostname];
+}
+
+// Entries get the same dot treatment as request hosts, so `evil.com.` names the
+// same host as `evil.com`. The literal spelling is always tried too, and a host
+// made only of wildcards and dots (`*.`) is never trimmed into a bare `*`.
+function entryHosts(host: string, side: Side): string[] {
+  const trimmed = trimTerminalDots(host, side);
+  return /[^*.]/.test(trimmed) && trimmed !== host ? [host, trimmed] : [host];
+}
+
+// `host` or `host:port`, with the port compared by numeric value so `:0443`
+// means 443. An entry whose host part still contains a colon outside IPv6
+// brackets (such as `example.com:*`) is not of that form and keeps whole-URL
+// glob matching.
+function parseEntry(origin: string): Entry | undefined {
+  const port = /:(\d+)$/.exec(origin);
+  const host = port ? origin.slice(0, port.index) : origin;
+  if (host.replace(/\[[^\]]*\]/g, '').includes(':'))
+    return;
+  return { host, port: port ? String(Number(port[1])) : undefined };
 }
 
 function parse(url: string): URL | undefined {
@@ -50,34 +73,28 @@ function parse(url: string): URL | undefined {
   }
 }
 
-// URL serialization drops a scheme's default port, so `https://example.com:443/`
-// arrives as `https://example.com/`. Spell the effective port out so an entry
-// such as `example.com:443` matches it. A blocklist candidate without any port
-// lets a portless entry block its host on every port.
-function candidates(url: string, side: Side): string[] {
+function matches(url: string, origins: string[], side: Side): boolean {
   const parsed = parse(url);
   if (!parsed?.hostname)
-    return [url];
-  const base = `${parsed.protocol}//${trimTerminalDots(parsed.hostname, side) || parsed.hostname}`;
+    return origins.some(origin => matchesUrlGlob(url, origin));
+  const hosts = requestHosts(parsed.hostname, side);
+  // URL serialization drops a scheme's default port, so `https://example.com:443/`
+  // arrives with an empty `port`; compare against the effective port instead.
   const effectivePort = parsed.port || defaultPorts[parsed.protocol];
-  const result = [url];
-  if (effectivePort)
-    result.push(`${base}:${effectivePort}/`);
-  if (side === 'block' || !parsed.port)
-    result.push(`${base}/`);
-  return result;
-}
-
-function matches(url: string, origins: string[], side: Side): boolean {
-  const urls = candidates(url, side);
   return origins.some(origin => {
-    const normalized = normalizedEntry(origin, side);
-    return urls.some(candidate => matchesPattern(candidate, origin) || (normalized !== origin && matchesPattern(candidate, normalized)));
+    const entry = parseEntry(origin);
+    if (!entry)
+      return matchesUrlGlob(url, origin);
+    // A portless allowlist entry allows only the default port; a portless
+    // blocklist entry blocks every port.
+    const portMatches = entry.port !== undefined ? entry.port === effectivePort : side === 'block' || !parsed.port;
+    return portMatches && entryHosts(entry.host, side).some(pattern => hosts.some(host => matchesHost(host, pattern)));
   });
 }
 
 /**
- * Entries match a request's effective port, so `example.com:443` covers
+ * Host patterns match only the request hostname, and an entry's port is
+ * compared with the request's effective port, so `example.com:443` covers
  * `https://example.com/`. Allowlist entries without a port allow only the
  * scheme's default port. A blocklist entry without a port blocks its host on
  * every port, so a nondefault port or a trailing-dot host cannot slip past it.
