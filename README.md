@@ -709,6 +709,7 @@ Runs Axe scans on the same page across viewport/media/zoom variants and compares
 #### `audit_keyboard`
 Audits real keyboard focus behavior by pressing Tab (and optional Shift+Tab) with practical heuristics.
 - Checks skip links, focus visibility, focus jumps, and possible focus traps
+- Tabbing past the last control can return focus to the document. The report keeps that stop in the trace but does not flag a missing ring when no element has focus. This also applies to XHTML and standalone SVG. An explicitly focused `<body>` or `<html>` still gets checked.
 - On pages with synchronous focus changes, pass `settleAfterKeyMs: 0` to sample each stop immediately after the keypress and observed page activity. The default uses the server settle timeout (500 ms). Keep it for focus handlers, timers or animations that update the UI after a keypress.
 - Focus stops distinguish individual DOM elements, including controls in open shadow roots. Alternating Tab/Shift+Tab does not count an intentional return as a cycle; a keypress that cannot move focus can still indicate a trap.
 - Restores the original URL after cross-document skip-link navigation. It uses Back for a single observed history-entry increase, verifies the restored URL, and otherwise replaces the current entry with the original URL. Fragment jumps, same-document history changes, and same-URL reloads do not consume an earlier history entry. When forward history was truncated or an entry was replaced, restoration can reload the audited page rather than recover its previous document state.

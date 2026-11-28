@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" tabindex="-1">
+  <head>
+    <meta charset="utf-8" />
+    <title>Keyboard focus at the document boundary</title>
+    <style>
+      html, body, #bare:focus { outline: none; box-shadow: none; }
+      #ringed:focus { outline: 3px solid blue; }
+    </style>
+  </head>
+  <body tabindex="-1">
+    <button id="bare" tabindex="0">Missing ring</button>
+    <button id="ringed" tabindex="0">Visible ring</button>
+    <script>
+      // Without a destination, Tab past the second button normally.
+      // ?focus=body and ?focus=html send that same Tab to an explicit focus target.
+      const params = new URLSearchParams(location.search);
+      const destination = params.get('focus');
+      if (destination === 'body' || destination === 'html') {
+        document.getElementById('ringed').addEventListener('keydown', event => {
+          if (event.key !== 'Tab' || event.shiftKey)
+            return;
+          event.preventDefault();
+          const target = document.querySelector(destination);
+          target.focus();
+          if (params.has('removeTabindex'))
+            target.removeAttribute('tabindex');
+        });
+      }
+    </script>
+  </body>
+</html>
