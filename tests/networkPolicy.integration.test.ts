@@ -310,3 +310,34 @@ it.each(['allowlist', 'blocklist'] as const)('enforces %s when attaching to load
     await browser.close();
   }
 });
+
+it.each([
+  ['a nondefault port', (port: string) => `http://blocked.test:${port}/port`],
+  ['a trailing-dot host', (port: string) => `http://blocked.test.:${port}/dot`],
+])('blocks a portless blocklist entry reached through %s', async (_label, target) => {
+  browser = await chromium.launch({ args: ['--host-resolver-rules=MAP blocked.test 127.0.0.1, MAP blocked.test. 127.0.0.1'] });
+  const context = await browser.newContext();
+  try {
+    const url = target(new URL(blocked).port);
+    // Without a policy the mapped host reaches the blocked server, so the
+    // assertions below fail for the policy and not for name resolution.
+    const control = await context.newPage();
+    hits.length = 0;
+    await control.goto(url);
+    await control.close();
+    expect(hits).toHaveLength(1);
+
+    await ensureNetworkPolicyRoutes(await resolveConfig({ network: { blockedOrigins: ['blocked.test'] } }), context);
+    const page = await context.newPage();
+    await page.goto(allowed);
+    hits.length = 0;
+    const fetched = await page.evaluate(url => fetch(url, { mode: 'no-cors' }).then(() => true, () => false), url);
+    const navigation = await page.goto(url).then(() => undefined, (error: Error) => error.message);
+    expect(fetched).toBe(false);
+    expect(navigation).toContain('ERR_BLOCKED_BY_CLIENT');
+    expect(hits).toEqual([]);
+  } finally {
+    await context.close();
+    await browser.close();
+  }
+});
