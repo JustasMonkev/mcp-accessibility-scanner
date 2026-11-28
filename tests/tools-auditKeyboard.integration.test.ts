@@ -75,8 +75,7 @@ const server = http.createServer((request, response) => {
     return;
   }
   if (url.pathname === '/focus-ring') {
-    response.end(`<style>#bare:focus { outline: none; box-shadow: none } #ringed:focus { outline: 2px solid blue }</style>
-      <button id="bare">Bare</button><button id="ringed">Ringed</button>`);
+    fs.createReadStream(new URL('./fixtures/keyboard-focus-root.html', import.meta.url)).pipe(response);
     return;
   }
   if (url.pathname === '/labelledby') {
@@ -227,16 +226,19 @@ it.skipIf(!canRun)('applies the audit key delay when focus handlers update async
   expect(report.stops[0].name).toBe('Ready');
 });
 
-it.skipIf(!canRun)('reports only the stop whose focus style draws no ring', async () => {
+it.skipIf(!canRun).each([
+  { query: '', root: 'BODY', missing: [1] },
+  { query: '?focus=body', root: 'BODY', missing: [1, 3] },
+  { query: '?focus=html', root: 'HTML', missing: [1, 3] },
+])('classifies focus indicators after Tab on /focus-ring$query', async ({ query, root, missing }) => {
   directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audit-keyboard-focus-ring-'));
   const config = await resolveCLIConfig({ browser, headless: true, isolated: true, outputDir: directory, timeoutSettle: 0 });
   client = new Client({ name: 'keyboard-focus-ring-test', version: '1' });
   await client.connect(await wrapInProcess(new BrowserServerBackend(config, contextFactory(config))));
-  await ok('browser_navigate', { url: `${origin}/focus-ring` });
-  await ok('audit_keyboard', {
-    maxTabs: 2,
+  await ok('browser_navigate', { url: `${origin}/focus-ring${query}` });
+  const summary = await ok('audit_keyboard', {
+    maxTabs: 3,
     checkSkipLink: false,
-    checkFocusTrap: false,
     checkFocusVisibility: true,
     checkFocusJumps: false,
     checkTargetSize: false,
@@ -244,8 +246,14 @@ it.skipIf(!canRun)('reports only the stop whose focus style draws no ring', asyn
     reportFile: 'keyboard.json',
   });
   const report = JSON.parse(await fs.promises.readFile(path.join(directory, 'keyboard.json'), 'utf8'));
-  expect(report.stops.map((stop: { id: string }) => stop.id)).toEqual(['bare', 'ringed']);
-  expect(report.focusVisibilityIssues.map((stop: { id: string }) => stop.id)).toEqual(['bare']);
+  expect(report.stops).toMatchObject([
+    { id: 'bare', issues: ['no-visible-focus-indicator'] },
+    { id: 'ringed', issues: [] },
+    { tagName: root, hasVisibleIndicator: false, issues: query ? ['no-visible-focus-indicator'] : [] },
+  ]);
+  expect(report.focusVisibilityIssues.map((stop: { step: number }) => stop.step)).toEqual(missing);
+  expect(summary).toContain(`No visible focus indicator: ${missing.length}`);
+  expect(report.focusTrap.detected).toBe(false);
 });
 
 it.skipIf(!canRun).each(['focus-identity', 'shadow-focus', 'reverse-focus', 'trapped-focus'])(

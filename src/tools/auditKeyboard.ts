@@ -47,6 +47,9 @@ export type FocusPoint = {
   scrollY: number;
 };
 
+// Browser evidence used for classification, omitted from report stops.
+type FocusObservation = FocusPoint & { hasElementFocus?: boolean };
+
 type FocusStop = FocusPoint & {
   step: number;
   key: 'Tab' | 'Shift+Tab';
@@ -77,7 +80,7 @@ export type KeyboardAuditOptions = {
 
 type KeyboardAuditCallbacks = {
   pressKey: (key: PressableKey) => Promise<void>;
-  getActiveElementInfo: () => Promise<FocusPoint>;
+  getActiveElementInfo: () => Promise<FocusObservation>;
   onStep?: (stop: FocusStop) => Promise<void>;
   getCurrentUrl?: () => Promise<string>;
   activateSkipLink?: () => Promise<boolean>;
@@ -194,9 +197,10 @@ function didUrlHashChange(urlBefore: string | null, urlAfter: string | null): bo
 
 type FocusIssue = { name: string, screenshotLabel: string };
 
-function focusIssuesOf(stop: FocusStop, options: KeyboardAuditOptions): FocusIssue[] {
+function focusIssuesOf(stop: FocusStop, options: KeyboardAuditOptions, hasElementFocus: boolean | undefined): FocusIssue[] {
   const issues: FocusIssue[] = [];
-  if (options.checkFocusVisibility && !stop.hasVisibleIndicator)
+  const isDocumentFallback = isDocumentRoot(stop) && hasElementFocus === false;
+  if (options.checkFocusVisibility && !isDocumentFallback && !stop.hasVisibleIndicator)
     issues.push({ name: 'no-visible-focus-indicator', screenshotLabel: 'focus-visibility' });
   if (options.checkFocusJumps) {
     const hasLargeJump = Math.abs(stop.scrollDeltaY) > options.jumpScrollThresholdPx;
@@ -272,7 +276,7 @@ export async function runKeyboardFocusAudit(
     const key: FocusStop['key'] = options.includeShiftTab && step % 2 === 0 ? 'Shift+Tab' : 'Tab';
     const before = lastKnownPoint ?? await callbacks.getActiveElementInfo();
     await callbacks.pressKey(key);
-    const after = await callbacks.getActiveElementInfo();
+    const { hasElementFocus, ...after } = await callbacks.getActiveElementInfo();
     lastKnownPoint = after;
 
     const stop: FocusStop = {
@@ -286,7 +290,7 @@ export async function runKeyboardFocusAudit(
     };
     uniqueFingerprints.add(stop.fingerprint);
 
-    for (const issue of focusIssuesOf(stop, options))
+    for (const issue of focusIssuesOf(stop, options, hasElementFocus))
       await recordIssue(stop, issue);
 
     if (options.checkSkipLink && !skipLink.found && step <= options.skipLinkMaxTabs && isLikelySkipLink(stop)) {
@@ -348,7 +352,7 @@ export type CollectFocusPointArgs = {
  * Runs inside the page through `page.evaluate`, so it must stay self-contained.
  * @public
  */
-export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize, maxTargetCandidates, maxSpacingVisits, maxTextLength, focusState, documentId }: CollectFocusPointArgs): FocusPoint {
+export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTargetSize, maxTargetCandidates, maxSpacingVisits, maxTextLength, focusState, documentId }: CollectFocusPointArgs): FocusObservation {
   const pointerTargetSelector = 'a[href], button, input:not([type="hidden"]), select, textarea, summary, [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex^="-"]), [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"]';
   type Rect = { x: number; y: number; width: number; height: number };
 
@@ -774,7 +778,10 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
     spacing = { spacing: 'inconclusive', neighbors: [] };
   else if (checkTargetSize && measured && (measured.width < minTargetSize || measured.height < minTargetSize))
     spacing = measureSpacing(focused, measured);
-  const point: FocusPoint = {
+  // Firefox can focus <html tabindex="-1"> without making it match :focus.
+  const focusableDocumentElement = focused === document.documentElement
+    && (focused.hasAttribute('tabindex') || document.documentElement.isContentEditable);
+  const point: FocusObservation = {
     focusIdentity: `${documentId}:${stableIdentityOf(focused)}`,
     role: focused.getAttribute('role') || focused.tagName.toLowerCase(),
     name: name ? name.slice(0, maxTextLength) : null,
@@ -790,6 +797,7 @@ export function collectFocusPoint({ checkTargetSize, checkFocusObscured, minTarg
     } : null,
     inViewport: isInViewport(rect),
     hasVisibleIndicator: hasFocusRing(style),
+    hasElementFocus: focusableDocumentElement || focused.matches(':focus'),
     isPointerTarget: pointerTarget,
     inlineTarget: pointerTarget && style.display.startsWith('inline') && sitsInsideSentence(focused),
     neighborTargets: spacing?.neighbors ?? [],
@@ -831,7 +839,7 @@ function createFocusReader(tab: Tab, options: Pick<KeyboardAuditOptions, 'checkT
   });
 
   return {
-    read: async (): Promise<FocusPoint> => {
+    read: async (): Promise<FocusObservation> => {
       const reused = !!focusState;
       const state = await ensureFocusState();
       try {
