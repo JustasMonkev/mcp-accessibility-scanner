@@ -775,6 +775,21 @@ describe('audit_site tool', () => {
     ]);
   });
 
+  it('keeps the requested route and the measured document after a redirect', async () => {
+    const startUrl = 'https://example.com/';
+    const requested = startUrl + 'old-checkout';
+    const landing = startUrl + 'checkout';
+    const { response } = createHarness({ [startUrl]: [requested], [landing]: [] }, { redirectMap: { [requested]: landing } });
+    vi.spyOn(axe, 'runAxeScan').mockImplementation(async page =>
+      createAxeResult(page.url(), page.url() === landing ? [createViolation('button-name', '#pay')] : []));
+
+    await tool.handle(response.context, tool.schema.inputSchema.parse({ maxPages: 2, waitAfterNavigationMs: 0 }), response);
+    const report = JSON.parse(writeFileSpy.mock.calls[0][1] as string);
+    expect(report.pages).toMatchObject([{ url: startUrl, auditedUrl: startUrl }, { url: requested, auditedUrl: landing }]);
+    expect(response.structuredContent()!.topPages).toMatchObject([{ url: requested, auditedUrl: landing, totalViolations: 1 }, { url: startUrl, auditedUrl: startUrl }]);
+    expect(report.summary.violations[0].pagesAffected).toEqual([requested]);
+  });
+
   it('says nothing about frames when every page was scanned in full', async () => {
     const { context, response } = createHarness({ 'https://example.com/': [] });
     vi.spyOn(axe, 'runAxeScan').mockImplementation(async (page: any) => createAxeResult(page.url(), []));
@@ -1247,6 +1262,7 @@ describe('audit_site tool', () => {
     expect(report.pages[1].error).toContain('https://example.com/redirect');
     expect(report.pages[1].error).toContain(reachedUrl);
     expect(report.pages[1].summary).toBeNull();
+    expect(report.pages[1].auditedUrl).toBeNull();
     expect(report.summary.totals).toMatchObject({ scannedPages: 2, erroredPages: 1 });
     expect(response.structuredContent()!.totals).toMatchObject({ scannedPages: 2, erroredPages: 1 });
     expect(scannedUrls).toEqual(['https://example.com/', 'https://example.com/after']);
