@@ -293,18 +293,24 @@ function collectFailure(args: string[], environment?: NodeJS.ProcessEnv): Promis
   });
 }
 
-function collectOutput(args: string[], timeoutMs = 3000, environment?: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
-  return new Promise(resolve => {
-    const child = spawn(process.execPath, [...cliArgs, ...args], { stdio: 'pipe', env: environment ? { ...process.env, ...environment } : undefined });
+function collectOutput(args: string[], timeoutMs = 3000, options?: { env: NodeJS.ProcessEnv, untilStderr: string }): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [...cliArgs, ...args], {
+      stdio: 'pipe',
+      env: options ? { ...process.env, ...options.env } : undefined,
+      timeout: timeoutMs,
+      killSignal: options ? 'SIGKILL' : 'SIGTERM',
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
-    child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
-    setTimeout(() => {
-      child.kill('SIGTERM');
-      resolve({ stdout, stderr });
-    }, timeoutMs);
-    child.on('close', () => resolve({ stdout, stderr }));
+    child.stderr.on('data', (data: Buffer) => {
+      stderr += data.toString();
+      if (options && !child.killed && stderr.includes(options.untilStderr))
+        child.kill('SIGTERM');
+    });
+    child.once('error', reject);
+    child.once('close', () => resolve({ stdout, stderr }));
   });
 }
 
@@ -470,7 +476,10 @@ describe('CLI command dispatch contract', () => {
 
   it('prints usable auth setup without exposing the configured token', async () => {
     const secret = 'startup-secret-do-not-print';
-    const { stderr } = await collectOutput(['--port', '0'], 3000, { PLAYWRIGHT_MCP_AUTH_TOKEN: secret });
+    const { stderr } = await collectOutput(['--port', '0'], 25_000, {
+      env: { PLAYWRIGHT_MCP_AUTH_TOKEN: secret },
+      untilStderr: 'Listening on',
+    });
 
     expect(stderr).toContain('Listening on');
     expect(stderr).not.toContain(secret);
