@@ -41,6 +41,7 @@ type PageScanStatus = 'scanned' | 'error' | 'skipped';
 
 type PageReport = {
   url: string;
+  auditedUrl: string | null;
   title: string;
   depth: number;
   discoveredFrom: string | null;
@@ -747,6 +748,7 @@ function linkSelectorFor(params: AuditSiteParams, depth: number): string {
 function newPageReport(item: CrawlItem): PageReport {
   return {
     url: item.url,
+    auditedUrl: null,
     title: '',
     depth: item.depth,
     discoveredFrom: item.discoveredFrom,
@@ -792,16 +794,15 @@ async function scanCrawledPage({ tab, item, report, dialogWatch }: PageVisit, sc
   const axeResult = await rejectOnAbort(() => dialogWatch.guard(runAxeScan(tab.page, axeScanOptions(params))), signal);
   signal?.throwIfAborted();
   const violations = prepareAxeResults(axeResult.violations, params.maxNodesPerViolation);
-  report.status = 'scanned';
   report.unscannedFrames = axeResult.unscannedFrames;
   report.violations = violations.trimmed;
   report.summary = summarizeAxeViolations(violations.deduped);
 
-  if (!params.includeIncomplete)
-    return { violations: violations.deduped, incomplete: null };
-  const incomplete = prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation);
-  report.incomplete = incomplete.trimmed;
-  return { violations: violations.deduped, incomplete: incomplete.deduped };
+  const incomplete = params.includeIncomplete ? prepareAxeResults(axeResult.incomplete, params.maxNodesPerViolation) : null;
+  report.incomplete = incomplete?.trimmed ?? [];
+  report.status = 'scanned';
+  report.auditedUrl = axeResult.url;
+  return { violations: violations.deduped, incomplete: incomplete?.deduped ?? null };
 }
 
 async function closeTabIfOpen(context: Tab['context'], tab: Tab | undefined): Promise<void> {
@@ -894,6 +895,7 @@ function siteStructuredContent(report: ReturnType<typeof buildSiteReport>, repor
         .slice(0, 5)
         .map(page => ({
           url: page.url,
+          auditedUrl: page.auditedUrl,
           title: page.title,
           totalViolations: page.summary?.totalRules ?? 0,
           totalNodes: page.summary?.totalNodes ?? 0,
